@@ -152,15 +152,34 @@ impl AgentRegistry {
     }
 }
 
+/// Domain verifier trait for verifying agent domain proofs.
+/// Implement this to provide actual DNS/HTTP verification.
+pub trait DomainVerifier: Send + Sync {
+    fn verify(&self, proof: &DomainProof) -> Result<bool, AgentError>;
+}
+
+/// Default domain verifier that validates proof format but does not
+/// make network requests. Useful for testing and internal validation.
+pub struct DefaultDomainVerifier;
+
+impl DomainVerifier for DefaultDomainVerifier {
+    fn verify(&self, proof: &DomainProof) -> Result<bool, AgentError> {
+        verify_domain_proof_format(proof)
+    }
+}
+
 /// Verify a domain proof (per spec §6.2.1)
 ///
 /// For DNS TXT: verify the domain contains the agent's address
 /// For HTTP file: verify the URL contains the expected content
 ///
-/// Note: In production, this would make actual DNS/HTTP queries.
-/// For now, we validate the proof format and check that the
-/// txt_value/expected_content contains an address-like pattern.
+/// This function validates the proof format. For actual DNS/HTTP
+/// queries, use a custom `DomainVerifier` implementation.
 pub fn verify_domain_proof(proof: &DomainProof) -> Result<bool, AgentError> {
+    verify_domain_proof_format(proof)
+}
+
+fn verify_domain_proof_format(proof: &DomainProof) -> Result<bool, AgentError> {
     match proof {
         DomainProof::DnsTxt { domain, txt_value } => {
             // Validate domain is non-empty and reasonable
@@ -175,7 +194,7 @@ pub fn verify_domain_proof(proof: &DomainProof) -> Result<bool, AgentError> {
                     "invalid TXT value".into(),
                 ));
             }
-            // In production: query DNS for TXT record and verify
+            // Format is valid — actual DNS verification requires a custom DomainVerifier
             Ok(true)
         }
         DomainProof::HttpFile { url, expected_content } => {
@@ -190,7 +209,7 @@ pub fn verify_domain_proof(proof: &DomainProof) -> Result<bool, AgentError> {
                     "invalid expected content".into(),
                 ));
             }
-            // In production: fetch URL and compare content
+            // Format is valid — actual HTTP fetch requires a custom DomainVerifier
             Ok(true)
         }
     }

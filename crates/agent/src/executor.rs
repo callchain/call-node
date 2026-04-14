@@ -4,7 +4,7 @@
 //! - execute_agent_tx: multi-instruction execution with 0.5x gas discount
 //! - Helper functions for AgentPay, AgentBatchPay, AgentCall, AgentBridgeDeposit
 
-use call_primitives::{Address, AssetId};
+use call_primitives::{Address, AssetId, PublicKey};
 use call_protocol::{
     balances::BalanceState,
     registry::AssetRegistry,
@@ -24,13 +24,14 @@ use crate::{
     requires_owner_signature, verify_agent_permissions,
 };
 
-/// Agent transaction context
+/// Agent transaction context (includes resolved owner key for signature verification)
 #[derive(Debug, Clone)]
 pub struct AgentTxContext {
     pub agent_id: u64,
     pub nonce: u64,
     pub expires_at: u64,
     pub agent_signature: [u8; 65],
+    pub owner_public_key: PublicKey,
 }
 
 /// Verify agent transaction (per spec §6.6)
@@ -48,6 +49,7 @@ pub fn verify_agent_tx(
     nonces: &mut AgentNonces,
     daily_usage: &mut AgentDailyUsage,
     fee_config: &AgentFeeConfig,
+    owner_public_key: PublicKey,
     current_block: u64,
 ) -> Result<(), AgentError> {
     let protocol_tx = &signed_tx.protocol_tx;
@@ -102,7 +104,7 @@ pub fn verify_agent_tx(
         // Verify owner signature
         let owner_sig = signed_tx.owner_signature.unwrap();
         secp256k1_verify(
-            &agent.agent_public_key, // In production: owner's public key
+            &owner_public_key,
             &owner_sig,
             &tx_hash,
         )
