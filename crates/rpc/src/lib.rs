@@ -1,0 +1,1 @@
+//! call-rpc — stub

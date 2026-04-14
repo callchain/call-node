@@ -1,0 +1,1 @@
+//! call-shielded — stub
