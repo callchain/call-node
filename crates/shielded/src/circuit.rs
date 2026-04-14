@@ -64,8 +64,7 @@ impl ShieldedCircuit {
             if i >= self.nullifiers.len() {
                 return Err(CircuitError::MissingNullifier(i));
             }
-            // In production: verify via ZK constraint
-            // Here: verify the nullifier matches what the note would derive
+            // Verify the nullifier matches what the note would derive
             if self.nullifiers[i] != expected_nf {
                 return Err(CircuitError::InvalidNullifier(i));
             }

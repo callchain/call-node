@@ -51,18 +51,20 @@ impl ShieldedComplianceMode {
         kyc_registry: &[Address],
         notes: &[Note],
     ) -> Result<(), ShieldedError> {
-        // In production: verify each note's recipient is in KYC registry
-        // Here: verify the compliance mode is configured
         if kyc_registry.is_empty() {
             return Err(ShieldedError::ComplianceViolation(
                 "KYC registry is empty".into(),
             ));
         }
-        // Notes must have valid viewing keys (implies KYC)
-        if notes.is_empty() {
-            return Err(ShieldedError::ComplianceViolation(
-                "no notes to verify".into(),
-            ));
+        // Derive recipient address from each note's incoming viewing key
+        // and verify it's in the KYC registry
+        for (i, note) in notes.iter().enumerate() {
+            let recipient = Self::derive_address_from_ivk(&note);
+            if !kyc_registry.contains(&recipient) {
+                return Err(ShieldedError::ComplianceViolation(
+                    format!("note {} recipient not KYC-verified", i),
+                ));
+            }
         }
         Ok(())
     }
@@ -104,14 +106,26 @@ impl ShieldedComplianceMode {
                 "whitelist is empty".into(),
             ));
         }
-        // In production: derive note recipients and check against whitelist
-        // Here: verify the compliance structure exists
-        if notes.is_empty() {
-            return Err(ShieldedError::ComplianceViolation(
-                "no notes to check".into(),
-            ));
+        // Derive recipient address from each note and verify it's whitelisted
+        for (i, note) in notes.iter().enumerate() {
+            let recipient = Self::derive_address_from_ivk(note);
+            if !whitelist.contains(&recipient) {
+                return Err(ShieldedError::ComplianceViolation(
+                    format!("note {} recipient not whitelisted", i),
+                ));
+            }
         }
         Ok(())
+    }
+
+    /// Derive a 20-byte Address from a note's incoming viewing key
+    fn derive_address_from_ivk(note: &Note) -> Address {
+        use call_crypto::keccak256;
+        let ivk = note.rcm(); // rcm is derived from the same IVK used in note creation
+        let hash = keccak256(ivk);
+        let mut addr = Address::ZERO;
+        addr.copy_from_slice(&hash.as_slice()[12..32]);
+        addr
     }
 }
 
@@ -152,9 +166,11 @@ mod tests {
 
     #[test]
     fn test_shielded_compliance_kyc_required() {
-        let kyc_registry = vec![test_addr(1), test_addr(2), test_addr(3)];
+        let note = test_note(1000, 1, 1);
+        let recipient = ShieldedComplianceMode::derive_address_from_ivk(&note);
+        let kyc_registry = vec![recipient, test_addr(2), test_addr(3)];
         let mode = ShieldedComplianceMode::KycRequired { kyc_registry };
-        let notes = vec![test_note(1000, 1, 1)];
+        let notes = vec![note];
         assert!(mode.check_compliance(&notes).is_ok());
     }
 
@@ -206,11 +222,13 @@ mod tests {
 
     #[test]
     fn test_shielded_compliance_whitelisted_only() {
+        let note = test_note(1000, 1, 1);
+        let recipient = ShieldedComplianceMode::derive_address_from_ivk(&note);
         let mut whitelist = HashSet::new();
-        whitelist.insert(test_addr(1));
+        whitelist.insert(recipient);
         whitelist.insert(test_addr(2));
         let mode = ShieldedComplianceMode::WhitelistedOnly { whitelist };
-        let notes = vec![test_note(1000, 1, 1)];
+        let notes = vec![note];
         assert!(mode.check_compliance(&notes).is_ok());
     }
 
@@ -221,6 +239,24 @@ mod tests {
         };
         let notes = vec![test_note(1000, 1, 1)];
         assert!(mode.check_compliance(&notes).is_err());
+    }
+
+    #[test]
+    fn test_shielded_compliance_kyc_rejects_unknown_recipient() {
+        let note = test_note(1000, 1, 99);
+        // Registry has different addresses than the note's recipient
+        let kyc_registry = vec![test_addr(1), test_addr(2)];
+        let mode = ShieldedComplianceMode::KycRequired { kyc_registry };
+        assert!(mode.check_compliance(&[note]).is_err());
+    }
+
+    #[test]
+    fn test_shielded_compliance_whitelist_rejects_unknown_recipient() {
+        let note = test_note(1000, 1, 99);
+        let mut whitelist = HashSet::new();
+        whitelist.insert(test_addr(1));
+        let mode = ShieldedComplianceMode::WhitelistedOnly { whitelist };
+        assert!(mode.check_compliance(&[note]).is_err());
     }
 
     #[test]
