@@ -71,6 +71,7 @@ call-network = { path = "crates/network" }
 call-transaction-pool = { path = "crates/transaction-pool" }
 call-payload-types = { path = "crates/payload-types" }
 call-payload-builder = { path = "crates/payload-builder" }
+call-chainspec = { path = "crates/chainspec" }
 
 # Commonware
 commonware-consensus = "2026.3.0"

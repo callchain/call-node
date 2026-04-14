@@ -752,6 +752,19 @@ dependencies = [
 [[package]]
 name = "call-chainspec"
 version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "call-bridge",
+ "call-consensus",
+ "call-crypto",
+ "call-evm",
+ "call-primitives",
+ "call-protocol",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "call-consensus"
