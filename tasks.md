@@ -6,7 +6,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P0: Foundation (No dependencies, must be done first)
 
-### [ ] T0.1 — Primitives Crate (`crates/primitives`)
+### [x] T0.1 — Primitives Crate (`crates/primitives`)
 
 **Files**: `crates/primitives/src/lib.rs`, `crates/primitives/Cargo.toml`
 
@@ -32,7 +32,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T0.2 — Crypto Crate (`crates/crypto`)
+### [x] T0.2 — Crypto Crate (`crates/crypto`)
 
 **Files**: `crates/crypto/src/lib.rs`, `crates/crypto/src/secp256k1.rs`, `crates/crypto/src/ed25519.rs`, `crates/crypto/src/hash.rs`, `crates/crypto/Cargo.toml`
 
@@ -54,7 +54,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T0.3 — Serialization Crate (`crates/serialization`)
+### [x] T0.3 — Serialization Crate (`crates/serialization`)
 
 **Files**: `crates/serialization/src/lib.rs`, `crates/serialization/src/rlp.rs`, `crates/serialization/src/json.rs`, `crates/serialization/Cargo.toml`
 
@@ -77,7 +77,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T0.4 — Storage Crate (`crates/storage`)
+### [x] T0.4 — Storage Crate (`crates/storage`)
 
 **Files**: `crates/storage/src/lib.rs`, `crates/storage/src/tables.rs`, `crates/storage/src/db.rs`, `crates/storage/src/prune.rs`, `crates/storage/Cargo.toml`
 

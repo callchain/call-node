@@ -57,7 +57,8 @@ dead_code = "warn"
 
 [workspace.dependencies]
 # Internal crates (defined in this workspace)
-# TODO: Add path dependencies as crates are created
+call-primitives = { path = "crates/primitives" }
+call-serialization = { path = "crates/serialization" }
 
 # Commonware
 commonware-consensus = "2026.3.0"
