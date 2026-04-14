@@ -9,3 +9,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+call-primitives.workspace = true
+call-protocol.workspace = true
+call-bridge.workspace = true
+call-consensus.workspace = true
+call-network.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
