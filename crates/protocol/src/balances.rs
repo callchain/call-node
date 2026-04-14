@@ -124,6 +124,11 @@ impl ProtocolBalances {
         self.balances.insert((asset_id, address), new);
         Ok(())
     }
+
+    /// Iterate over all balance entries
+    pub fn iter(&self) -> impl Iterator<Item = (&(AssetId, Address), &Balance)> {
+        self.balances.iter()
+    }
 }
 
 // ── Allowance operations ──────────────────────────────────────────────

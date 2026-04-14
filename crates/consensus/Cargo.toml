@@ -9,3 +9,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+call-primitives.workspace = true
+call-protocol.workspace = true
+call-bridge.workspace = true
+call-crypto.workspace = true
+# commonware-consensus integration deferred to P7 (network layer)
+# These deps compile successfully on current Rust version:
+commonware-cryptography.workspace = true
+commonware-codec.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+rand.workspace = true
+tracing.workspace = true
