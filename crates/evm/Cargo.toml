@@ -9,3 +9,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+call-primitives.workspace = true
+call-protocol.workspace = true
+call-precompiles.workspace = true
+revm = { workspace = true, features = ["std"] }
+alloy-primitives.workspace = true
+
+[dev-dependencies]

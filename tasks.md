@@ -397,7 +397,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P2: EVM Layer
 
-### [ ] T2.1 — EVM Crate (`crates/evm`)
+### [x] T2.1 — EVM Crate (`crates/evm`)
 
 **Files**: `crates/evm/src/lib.rs`, `crates/evm/src/executor.rs`, `crates/evm/src/state.rs`, `crates/evm/Cargo.toml`
 
@@ -419,7 +419,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T2.2 — ERC-20 Template Contract (`crates/evm/src/contracts/erc20_template.sol`)
+### [x] T2.2 — ERC-20 Template Contract (`crates/evm/src/contracts/erc20_template.sol`)
 
 **Implement** (per spec §4.2):
 - Solidity `AssetToken` contract with:
@@ -435,7 +435,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T2.3 — Precompiles (`crates/precompiles`)
+### [x] T2.3 — Precompiles (`crates/precompiles`)
 
 **Files**: `crates/precompiles/src/lib.rs`, `crates/precompiles/src/oracle.rs`, `crates/precompiles/src/bridge.rs`, `crates/precompiles/Cargo.toml`
 

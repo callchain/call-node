@@ -9,3 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+call-primitives.workspace = true
+call-protocol.workspace = true
+alloy-primitives.workspace = true
+
+[dev-dependencies]

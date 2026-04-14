@@ -61,6 +61,8 @@ call-primitives = { path = "crates/primitives" }
 call-serialization = { path = "crates/serialization" }
 call-crypto = { path = "crates/crypto" }
 call-storage = { path = "crates/storage" }
+call-protocol = { path = "crates/protocol" }
+call-precompiles = { path = "crates/precompiles" }
 
 # Commonware
 commonware-consensus = "2026.3.0"
