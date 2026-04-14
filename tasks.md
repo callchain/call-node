@@ -581,7 +581,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P5: Shielded Pool
 
-### [ ] T5.1 — Shielded Crate (`crates/shielded`)
+### [x] T5.1 — Shielded Crate (`crates/shielded`)
 
 **Files**: `crates/shielded/src/lib.rs`, `crates/shielded/src/merkle.rs`, `crates/shielded/src/notes.rs`, `crates/shielded/src/nullifiers.rs`, `crates/shielded/src/circuit.rs`, `crates/shielded/src/prover.rs`, `crates/shielded/src/compliance.rs`, `crates/shielded/Cargo.toml`
 
@@ -616,6 +616,15 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 - `test_shielded_compliance_issuer_auditable()`
 - `test_zk_proof_verification_mock()`
 - `test_per_block_shielded_limit()`
+
+**Tests (53 total)**:
+- merkle: 7 tests (insert, depth limit, proof verification for 1/2/3/16 leaves, deterministic, empty)
+- notes: 6 tests (creation, commitment, nullifier, encryption/decryption, wrong key)
+- nullifiers: 5 tests (insert/check, double-spend, bitset compression, no false negatives, clear)
+- circuit: 7 tests (nullifier, merkle path, spending rights, value conservation, range, asset mismatch, all constraints)
+- prover: 8 tests (mock generate/verify, Groth16 generate/verify/key-sizes, constraint violation, bad proof rejection)
+- compliance: 10 tests (unrestricted, KYC required/empty, issuer auditable/invalid-issuer/zero-key, whitelist/empty, audit record, equality)
+- lib: 10 tests (viewing key gen/balance, zk proof mock/empty/dup-nullifiers, shielded balance, transfer conservation, state process, per-block limit, note commitment/nullifier)
 
 ---
 
