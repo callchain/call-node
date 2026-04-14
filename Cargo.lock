@@ -157,6 +157,19 @@ dependencies = [
 [[package]]
 name = "call-protocol"
 version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "call-crypto",
+ "call-primitives",
+ "call-serialization",
+ "call-storage",
+ "hex",
+ "hex-literal",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "call-rpc"

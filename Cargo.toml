@@ -59,6 +59,8 @@ dead_code = "warn"
 # Internal crates (defined in this workspace)
 call-primitives = { path = "crates/primitives" }
 call-serialization = { path = "crates/serialization" }
+call-crypto = { path = "crates/crypto" }
+call-storage = { path = "crates/storage" }
 
 # Commonware
 commonware-consensus = "2026.3.0"

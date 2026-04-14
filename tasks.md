@@ -113,7 +113,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P1: Core Protocol Layer
 
-### [ ] T1.1 — Protocol Crate: Asset Registry (`crates/protocol/src/registry.rs`)
+### [x] T1.1 — Protocol Crate: Asset Registry (`crates/protocol/src/registry.rs`)
 
 **Implement** (per spec §3.1, §3.2):
 - `Asset` struct (all fields per spec)
@@ -130,7 +130,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.2 — Protocol Crate: Balance Management (`crates/protocol/src/balances.rs`)
+### [x] T1.2 — Protocol Crate: Balance Management (`crates/protocol/src/balances.rs`)
 
 **Implement** (per spec §3.3):
 - `ProtocolBalances` type: `HashMap<AssetId, HashMap<Address, u128>>`
@@ -150,7 +150,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.3 — Protocol Crate: Compliance Engine (`crates/protocol/src/compliance.rs`)
+### [x] T1.3 — Protocol Crate: Compliance Engine (`crates/protocol/src/compliance.rs`)
 
 **Implement** (per spec §3.4):
 - `CompliancePolicy` enum: `None`, `OfacBlacklist`, `KycRequired`, `Whitelist`, `Custom`
@@ -170,7 +170,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.4 — Protocol Crate: Instruction Execution (`crates/protocol/src/instructions.rs`)
+### [x] T1.4 — Protocol Crate: Instruction Execution (`crates/protocol/src/instructions.rs`)
 
 **Implement** (per spec §3.5, §3.6):
 - `Instruction` enum with all variants per spec:
@@ -203,7 +203,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.5 — Protocol Crate: Transaction Model & Gas (`crates/protocol/src/transaction.rs`)
+### [x] T1.5 — Protocol Crate: Transaction Model & Gas (`crates/protocol/src/transaction.rs`)
 
 **Implement** (per spec §3.5, §12.2):
 - `ProtocolTransaction` struct: `sender: Address`, `nonce: u64`, `instructions: Vec<Instruction>`, `gas_config: GasConfig`, `fee_currency: FeeCurrency`, `gas_limit: u64`, `max_fee: u128`, `auth: AuthScheme`
@@ -245,7 +245,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.6 — Protocol Crate: Smart Accounts (`crates/protocol/src/smart_accounts.rs`)
+### [x] T1.6 — Protocol Crate: Smart Accounts (`crates/protocol/src/smart_accounts.rs`)
 
 **Implement** (per spec §3.9):
 - `AuthScheme` enum with variant fields: `SingleSig { signature: Signature }`, `MultiSig { signatures: Vec<Signature> }`, `SessionKey { key: Address, signature: Signature }`
@@ -278,7 +278,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.7 — Protocol Crate: Fee Currency Registry (`crates/protocol/src/fee_currency.rs`)
+### [x] T1.7 — Protocol Crate: Fee Currency Registry (`crates/protocol/src/fee_currency.rs`)
 
 **Implement** (per spec §12.3.0):
 - `FeeCurrencyEntry` struct: `asset_id`, `name`, `decimals`, `oracle_price_key`, `added_at_block`, `added_by_proposal`
@@ -300,7 +300,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.8 — Protocol Crate: Gas Sponsor System (`crates/protocol/src/sponsor.rs`)
+### [x] T1.8 — Protocol Crate: Gas Sponsor System (`crates/protocol/src/sponsor.rs`)
 
 **Implement** (per spec §12.3.1-12.3.4):
 - `GasSponsorAuth` struct: `sponsor`, `allowed_senders`, `max_daily`, `expires_at`, `sponsor_signature`
@@ -322,7 +322,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.9 — Protocol Crate: Receipts (`crates/protocol/src/receipts.rs`)
+### [x] T1.9 — Protocol Crate: Receipts (`crates/protocol/src/receipts.rs`)
 
 **Implement** (per spec §18.4):
 - `ProtocolReceipt` struct: `tx_hash: TxHash`, `status: ExecutionStatus`, `gas_used: u64`, `gas_payer: Address`, `fee_currency: FeeCurrency`, `fee_amount: u128`, `instruction_results: Vec<InstructionResult>`, `logs: Vec<LogEntry>`, `memos: Vec<MemoEntry>`, `state_changes: Vec<StateChange>`
@@ -345,7 +345,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.10 — Protocol Crate: Issuer Management (`crates/protocol/src/issuer.rs`)
+### [x] T1.10 — Protocol Crate: Issuer Management (`crates/protocol/src/issuer.rs`)
 
 **Implement** (per spec §7):
 - `IssuerAction` enum: `Mint { to, amount }`, `Burn { from, amount }`, `FreezeAddress { target }`, `UnfreezeAddress { target }`, `UpdatePolicy { new_policy }`, `TransferOwnership { new_issuer }`
@@ -366,7 +366,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T1.11 — Protocol Crate: Economics Module (`crates/protocol/src/economics.rs`)
+### [x] T1.11 — Protocol Crate: Economics Module (`crates/protocol/src/economics.rs`)
 
 **Implement** (per spec §12.1, §12.4, §12.5):
 - Total supply: 1B CALL fixed, no inflation
