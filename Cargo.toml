@@ -66,6 +66,8 @@ call-protocol = { path = "crates/protocol" }
 call-precompiles = { path = "crates/precompiles" }
 call-evm = { path = "crates/evm" }
 call-bridge = { path = "crates/bridge" }
+call-consensus = { path = "crates/consensus" }
+call-network = { path = "crates/network" }
 
 # Commonware
 commonware-consensus = "2026.3.0"
