@@ -818,10 +818,25 @@ version = "0.1.0"
 [[package]]
 name = "call-payload-builder"
 version = "0.1.0"
+dependencies = [
+ "call-bridge",
+ "call-consensus",
+ "call-crypto",
+ "call-payload-types",
+ "call-primitives",
+ "call-protocol",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "call-payload-types"
 version = "0.1.0"
+dependencies = [
+ "call-primitives",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "call-precompiles"
