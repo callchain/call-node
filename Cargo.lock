@@ -713,6 +713,7 @@ dependencies = [
  "alloy-primitives",
  "call-primitives",
  "call-protocol",
+ "revm-precompile",
 ]
 
 [[package]]

@@ -12,5 +12,6 @@ workspace = true
 call-primitives.workspace = true
 call-protocol.workspace = true
 alloy-primitives.workspace = true
+revm-precompile.workspace = true
 
 [dev-dependencies]
