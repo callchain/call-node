@@ -655,6 +655,15 @@ dependencies = [
 [[package]]
 name = "call-agent"
 version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "call-bridge",
+ "call-crypto",
+ "call-evm",
+ "call-primitives",
+ "call-protocol",
+ "thiserror",
+]
 
 [[package]]
 name = "call-bridge"
