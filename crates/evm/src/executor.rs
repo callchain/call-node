@@ -204,6 +204,37 @@ impl EvmExecutor {
 
         self.execute_tx(tx, state)
     }
+
+    /// Helper: EVM call for bridge burn operations
+    pub fn evm_call_bridge_burn(
+        &self,
+        caller: Address,
+        contract: Address,
+        state: &mut EvmState,
+        amount: U256,
+    ) -> Result<EvmExecutionResult, EvmError> {
+        // keccak256("bridgeBurn(uint256)")[:4]
+        let selector: FixedBytes<4> = FixedBytes::from_slice(
+            &keccak256("bridgeBurn(uint256)")[..4],
+        );
+        let mut data = Vec::new();
+        data.extend_from_slice(&selector[..]);
+        // ABI-encode uint256
+        data.extend_from_slice(&amount.to_be_bytes::<32>());
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: state.get_nonce(&caller),
+            gas_limit: 500_000,
+            gas_price: 10,
+            to: Some(contract),
+            value: U256::ZERO,
+            data: Bytes::from(data),
+            chain_id: self.chain_id,
+        };
+
+        self.execute_tx(tx, state)
+    }
 }
 
 // ── Transaction Validation ────────────────────────────────────────────

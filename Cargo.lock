@@ -657,6 +657,19 @@ name = "call-agent"
 version = "0.1.0"
 
 [[package]]
+name = "call-bridge"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "call-crypto",
+ "call-evm",
+ "call-precompiles",
+ "call-primitives",
+ "call-protocol",
+ "thiserror",
+]
+
+[[package]]
 name = "call-chainspec"
 version = "0.1.0"
 

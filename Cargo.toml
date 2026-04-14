@@ -17,6 +17,7 @@ members = [
     "crates/payload-builder",
     "crates/payload-types",
     "crates/precompiles",
+    "crates/bridge",
     "xtask",
 ]
 resolver = "2"
@@ -63,6 +64,8 @@ call-crypto = { path = "crates/crypto" }
 call-storage = { path = "crates/storage" }
 call-protocol = { path = "crates/protocol" }
 call-precompiles = { path = "crates/precompiles" }
+call-evm = { path = "crates/evm" }
+call-bridge = { path = "crates/bridge" }
 
 # Commonware
 commonware-consensus = "2026.3.0"
