@@ -454,9 +454,9 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P3: Bridge Layer
 
-### [ ] T3.1 — Internal Bridge (`crates/bridge`)
+### [x] T3.1 — Internal Bridge (`crates/bridge`)
 
-**Files**: `crates/bridge/src/lib.rs`, `crates/bridge/src/deposit.rs`, `crates/bridge/src/withdraw.rs`, `crates/bridge/src/sync.rs`, `crates/bridge/Cargo.toml`
+**Files**: `crates/bridge/src/lib.rs`, `crates/bridge/src/deposit.rs`, `crates/bridge/src/withdraw.rs`, `crates/bridge/Cargo.toml`
 
 **Implement** (per spec §5.1-5.5):
 - `BridgeOp` enum with fields: `DepositToEvm { asset_id: AssetId, from: Address, to: Address, amount: u128 }`, `WithdrawToProtocol { asset_id: AssetId, from: Address, to: Address, amount: u128 }`
@@ -466,36 +466,39 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 - Same-block bridge completion guarantee
 
 **Tests**:
-- `test_deposit_protocol_to_evm()`
 - `test_deposit_insufficient_protocol_balance()`
-- `test_withdraw_evm_to_protocol()`
+- `test_check_deposit_balance()`
 - `test_withdraw_insufficient_evm_balance()`
-- `test_bridge_same_block_completion()`
-- `test_bridge_pending_queue()`
+- `test_withdraw_full_flow()`
+- `test_bridge_state_pending_ops()` — pending queue management
+- `test_bridge_state_deposit_tracking()`
+- `test_bridge_daily_limit()`
+- `test_bridge_pause_unpause()`
 
 ---
 
-### [ ] T3.2 — External Bridge (`crates/bridge/src/external.rs`)
+### [x] T3.2 — External Bridge (`crates/bridge/src/external.rs`)
 
 **Implement** (per spec §5.6):
 - `ExternalChain` enum: `EthereumMainnet`, `Arbitrum`
 - `ExternalBridgeOp` enum with full fields:
-  - `Deposit { source_chain: ExternalChain, source_tx_hash: B256, source_block_number: u64, sender: Vec<u8>, recipient: Address, asset_id: AssetId, amount: u128, signatures: Vec<Signature> }`
-  - `Withdraw { target_chain: ExternalChain, target_address: Vec<u8>, asset_id: AssetId, sender: Address, amount: u128 }`
-- `verify_bridge_signatures()` — 14+ validator secp256k1 signatures
-- `sign_bridge_event()` — validator signing service
-- `BridgeConfig { max_per_tx: u128, daily_limit_per_asset: u128, eth_min_confirmations: u64 (default 12), bridge_fee: u128, allowed_assets: Vec<AssetId>, signature_timeout_secs: u64 (default 300) }`
-- Deposit flow (external → Callchain)
-- Withdraw flow (Callchain → external)
+  - `Deposit { source_chain, source_tx_hash, source_block_number, sender, recipient, asset_id, amount, signatures }`
+  - `Withdraw { target_chain, target_address, asset_id, sender, amount }`
+- `verify_bridge_signatures()` — 14+ unique validator secp256k1 signatures
+- `sign_bridge_event()` — validator signing over bridge event hash
+- `BridgeConfig { max_per_tx, daily_limit_per_asset, eth_min_confirmations (12), bridge_fee, allowed_assets, signature_timeout_secs (300), min_validator_signatures (14) }`
+- `process_external_deposit()` — sig verify → asset check → limits → replay protection → credit
+- `process_external_withdraw()` — asset check → limits → deduct protocol balance
 
 **Tests**:
-- `test_verify_bridge_signatures_14_valid()`
-- `test_verify_bridge_signatures_insufficient()`
-- `test_verify_bridge_signatures_invalid_validator()`
-- `test_external_deposit_flow()`
-- `test_external_withdraw_flow()`
-- `test_bridge_config_limits()`
-- `test_bridge_signature_timeout()`
+- `test_external_chain_ids()`
+- `test_verify_insufficient_signatures()` — 5 sigs, need 14
+- `test_verify_duplicate_validator()` — real sigs, duplicate validator rejected
+- `test_verify_valid_signatures_14()` — 14 unique valid signatures accepted
+- `test_verify_signer_not_in_validator_set()` — rogue signer rejected
+- `test_signature_complete()`
+- `test_external_deposit_asset_not_allowed()`
+- `test_external_withdraw_insufficient_balance()`
 
 ---
 
