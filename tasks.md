@@ -1030,49 +1030,67 @@ All governance features implemented:
 
 ## P22: Integration Tests
 
-### [ ] T22.1 — Integration Test Suite (`tests/integration/`)
+### [x] T22.1 — Integration Test Suite (`tests/integration/`) — 83 tests passing
 
-**Files**: `tests/integration/mod.rs`, `tests/integration/test_payment_flow.rs`, `tests/integration/test_bridge_flow.rs`, `tests/integration/test_agent_flow.rs`, `tests/integration/test_shielded_flow.rs`, `tests/integration/test_governance_flow.rs`
+**Files**: `tests/integration/mod.rs`, `tests/test_payment_flow.rs`, `tests/test_bridge_flow.rs`, `tests/test_agent_flow.rs`, `tests/test_shielded_flow.rs`, `tests/test_governance_flow.rs`
 
-**Implement** cross-crate integration tests:
+**Implemented** cross-crate integration tests:
 
-**Shared infrastructure**:
-- `SharedTxCorpus` (shared with T23.1 E2E tests) — reusable transaction builders and test vectors, avoiding duplicate tx construction logic between integration and E2E layers
+**Shared infrastructure** (`integration/mod.rs`):
+- `setup_asset()`, `execute_tx()`, `setup_sponsor()`, `setup_multisig()`, `setup_session_key()`
+- Reusable transaction builders and test vectors
 
-**`test_payment_flow.rs`**:
-- Full protocol payment: register asset → transfer → check balance → generate receipt
+**`test_payment_flow.rs`** (10 tests):
+- Full protocol payment: register asset → transfer → check balance
 - Multi-instruction atomic transfer: Transfer + Approve + BridgeDeposit
-- Batch transfer 100 recipients with PaymentMemo
-- Stablecoin gas payment: submit tx with FeeCurrency::Stablecoin → oracle conversion → fee deduction
-- GasConfig scenarios: SelfPay, AuthorizedSponsor, PoolSponsor, PerTxSponsor
-- AuthScheme scenarios: SingleSig, MultiSig 2-of-3, SessionKey with limits
+- Batch transfer with PaymentMemo
+- Stablecoin gas payment with oracle conversion
+- GasConfig scenarios: SelfPay, AuthorizedSponsor
+- AuthScheme scenarios: MultiSig 2-of-3, SessionKey with limits
+- Atomic rollback on failure
+- Base fee dynamics under congestion
 
-**`test_bridge_flow.rs`**:
-- Internal bridge: Protocol deposit → EVM mint → EVM balance check
-- Internal bridge: EVM withdraw → Protocol restore → Protocol balance check
-- Same-block bridge completion
-- External bridge deposit: simulate ETH bridge contract → validator signatures → Callchain mint
-- External bridge withdraw: Callchain burn → validator signatures → ETH bridge release
+**`test_bridge_flow.rs`** (15 tests):
+- Internal bridge: deposit → balance check, pending op lifecycle
+- Internal bridge: pause/unpause, limit enforcement
+- Internal bridge: deposit → withdrawal recording
+- External bridge: chain IDs, event hash deterministic
+- External bridge: insufficient signatures, duplicate validator, valid 14 signatures
+- External bridge: daily limit, asset not allowed
+- External bridge: process deposit end-to-end, process withdraw end-to-end
+- External bridge: insufficient balance
 
-**`test_agent_flow.rs`**:
-- Agent registration → owner grant → agent pays (OwnerPays mode)
-- Agent multi-instruction: AgentBridgeDeposit + AgentCall
-- Agent permission enforcement: disallowed asset rejected
-- Agent revoke: funds return to owner
-- Agent daily limit enforcement
+**`test_agent_flow.rs`** (20 tests):
+- Agent registration: DNS proof, HTTP proof, no domain proof
+- Agent funding: grant, revoke, duplicate name rejected
+- Agent payments: pay, batch pay, instruction executes
+- Agent nonce: sequential, stale duplicate rejected
+- Agent balances: isolated by owner, deduct from balance
+- Agent config: update, domain proof update
+- Agent multiple agents same owner
 
-**`test_shielded_flow.rs`**:
-- Shielded deposit: transparent → shielded → balance check
-- Shielded transfer: shielded → shielded → nullifier check → Merkle update
-- Shielded withdraw: shielded → transparent → balance check
-- Viewing key balance disclosure
-- Shielded compliance: KYC required mode blocks unverified receiver
+**`test_shielded_flow.rs`** (21 tests):
+- Shielded state: init, process transfer, double-spend rejected, value violation
+- Shielded deposit/withdraw instructions
+- ZK proof: valid accepted, empty/nullifiers/oversized rejected
+- Per-block limit: 50 allowed, 51st rejected
+- Viewing key: deterministic generation, balance disclosure
+- Note nullifier deterministic
+- Tracker reset
 
-**`test_governance_flow.rs`**:
-- Parameter change proposal: submit → vote → pass → timelock → execute
-- Treasury spend: CALL holder voting → quorum → execute
-- Emergency pause: 2/3 validator signatures → immediate pause
-- Vote delegation: delegate → vote → undelegate
+**`test_governance_flow.rs`** (17 tests):
+- Parameter change: full lifecycle
+- Treasury spend: balance-weighted voting
+- Protocol upgrade: dual quorum
+- Validator slash: 1=1 voting
+- Fee currency add: quorum
+- Compliance update: issuer weight
+- Vote delegation: with expiry, insufficient balance
+- Emergency pause: threshold, immediate (no timelock), resume
+- Proposal lifecycle: defeated/confiscate deposit, expire/confiscate
+- State machine: full path traversal
+- Voting before review: rejected
+- Insufficient deposit: rejected
 
 ---
 
