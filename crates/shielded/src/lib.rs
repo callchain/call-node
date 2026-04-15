@@ -14,6 +14,9 @@ mod circuit;
 mod prover;
 mod compliance;
 
+#[cfg(feature = "real-prover")]
+pub mod poseidon;
+
 pub use merkle::*;
 pub use notes::*;
 pub use nullifiers::*;

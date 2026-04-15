@@ -17,3 +17,32 @@ thiserror.workspace = true
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
+
+# ZK proving (arkworks + BN254) — gated behind `real-prover` feature
+# Note: ark 0.4 required for poseidon-ark-no-std compatibility
+ark-std = { version = "0.4", optional = true }
+ark-ff = { version = "0.4", optional = true }
+ark-ec = { version = "0.4", optional = true }
+ark-groth16 = { version = "0.4", optional = true }
+ark-r1cs-std = { version = "0.4", optional = true }
+ark-bn254 = { version = "0.4", optional = true }
+ark-relations = { version = "0.4", optional = true }
+ark-serialize = { version = "0.4", optional = true }
+# Poseidon hash for BN254 (uses ark 0.4)
+poseidon-ark-no-std = { version = "0.0.1", optional = true }
+ark-crypto-primitives = { version = "0.4", features = ["crh", "merkle_tree", "sponge"], optional = true }
+
+[features]
+default = []
+real-prover = [
+    "ark-std",
+    "ark-ff",
+    "ark-ec",
+    "ark-groth16",
+    "ark-r1cs-std",
+    "ark-bn254",
+    "ark-relations",
+    "ark-serialize",
+    "poseidon-ark-no-std",
+    "ark-crypto-primitives",
+]
