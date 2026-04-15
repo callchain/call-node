@@ -113,13 +113,13 @@ impl BlockHeader {
 // ── System Transaction ────────────────────────────────────────────────
 
 /// System transaction for validator reward distribution and fee settlement
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemTx {
     pub kind: SystemTxKind,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemTxKind {
     /// Distribute fees to validator
     ValidatorReward {
@@ -140,7 +140,7 @@ pub type EvmTx = Vec<u8>;
 // ── Block ─────────────────────────────────────────────────────────────
 
 /// Full block structure (per spec §2.4)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub protocol_txs: Vec<ProtocolTransaction>,

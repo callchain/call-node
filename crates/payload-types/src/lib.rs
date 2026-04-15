@@ -5,6 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 
+// ── Re-exports ────────────────────────────────────────────────────────
+
+/// Re-export `FeeParams` from the protocol layer for fee calculation.
+pub use call_protocol::FeeParams;
+
+/// Re-export `PruneConfig` from the storage layer for pruning configuration.
+pub use call_storage::PruneConfig;
+
 // ── Block Limits (per spec §13.5.1) ──────────────────────────────────
 
 /// Per-block limits enforced by the payload builder
@@ -43,7 +51,7 @@ impl Default for BlockLimits {
 // ── Payload Attributes ───────────────────────────────────────────────
 
 /// Attributes for building a payload from the mempool
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayloadAttributes {
     /// Block height
     pub height: u64,
@@ -147,5 +155,42 @@ mod tests {
         let parsed: BlockLimits = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.max_transactions, limits.max_transactions);
         assert_eq!(parsed.max_evm_gas_per_block, limits.max_evm_gas_per_block);
+    }
+
+    #[test]
+    fn test_fee_params_defaults() {
+        let params = FeeParams::default();
+        assert_eq!(params.target_gas_per_block, 10_000_000);
+        assert_eq!(params.max_gas_per_block, 20_000_000);
+        assert_eq!(params.initial_base_fee, 10);
+        assert_eq!(params.min_base_fee, 1);
+    }
+
+    #[test]
+    fn test_prune_config_reexport() {
+        let config = PruneConfig::default();
+        assert_eq!(config.snapshot_interval, 100_000);
+        assert_eq!(config.snapshot_keep, 3);
+        assert_eq!(config.prune_interval, 10_000);
+        assert_eq!(config.keep_recent, 50_000);
+        assert_eq!(config.keep_block_body, 100_000);
+        assert_eq!(config.keep_receipt, 1_000_000);
+    }
+
+    #[test]
+    fn test_payload_attributes_serialization() {
+        let attrs = PayloadAttributes::new(
+            42,
+            BlockHash::repeat_byte(0xAB),
+            1_000_000,
+            7,
+        );
+        let json = serde_json::to_string(&attrs).unwrap();
+        let parsed: PayloadAttributes = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.height, 42);
+        assert_eq!(parsed.parent_hash, BlockHash::repeat_byte(0xAB));
+        assert_eq!(parsed.timestamp_millis, 1_000_000);
+        assert_eq!(parsed.proposer, 7);
+        assert_eq!(parsed.limits.max_transactions, 10_000);
     }
 }

@@ -14,5 +14,6 @@ call-protocol.workspace = true
 call-bridge.workspace = true
 call-consensus.workspace = true
 call-network.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

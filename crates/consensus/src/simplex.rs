@@ -8,7 +8,7 @@ use crate::proposer::{
     select_proposer, select_proposer_subset, verify_proposer_in_subset, ConsensusParams,
 };
 use crate::validator::{ConsensusError, ValidatorStateManager};
-use call_primitives::ValidatorId;
+use call_primitives::{Address, ValidatorId};
 use tracing::{info, warn};
 
 /// Simplex BFT consensus driver for Callchain.
@@ -51,6 +51,28 @@ impl SimplexConsensus {
     /// Get the validator state manager.
     pub fn validators(&self) -> &ValidatorStateManager {
         &self.validators
+    }
+
+    /// Stake a new validator.
+    pub fn stake_validator(
+        &mut self,
+        address: Address,
+        pubkey: [u8; 32],
+        amount: u128,
+    ) -> Result<u32, ConsensusError> {
+        self.validators.stake(address, pubkey, amount)
+    }
+
+    /// Refresh the proposer subset from the current validator set.
+    pub fn refresh_proposer_subset(&mut self) {
+        let active = self.validators.get_active_validators();
+        self.proposer_subset =
+            select_proposer_subset(&active, self.current_round, self.params.subset_size);
+        info!(
+            round = self.current_round,
+            subset_size = self.proposer_subset.len(),
+            "refreshed proposer subset"
+        );
     }
 
     /// Get the current block height.

@@ -1,6 +1,6 @@
 //! Core handler trait and RPC state management.
 
-use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult};
+use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams};
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
 use call_consensus::ValidatorStateManager;
@@ -28,6 +28,7 @@ pub struct RpcState {
     pub shielded_state: RwLock<ShieldedState>,
     pub receipts: RwLock<HashMap<TxHash, ProtocolReceipt>>,
     pub current_block: RwLock<u64>,
+    pub fee_params: RwLock<FeeParams>,
     pub mempool: Arc<RwLock<Mempool>>,
     pub chain_id: u64,
 }
@@ -59,6 +60,7 @@ impl RpcState {
             shielded_state: RwLock::new(shielded_state),
             receipts: RwLock::new(HashMap::new()),
             current_block: RwLock::new(0),
+            fee_params: RwLock::new(FeeParams::default()),
             mempool,
             chain_id,
         }

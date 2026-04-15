@@ -11,6 +11,9 @@ pub mod sponsor;
 pub mod receipts;
 pub mod issuer;
 pub mod economics;
+pub mod governance;
+
+pub use governance::*;
 
 pub use registry::*;
 pub use balances::*;

@@ -174,8 +174,8 @@ impl Mempool {
             self.protocol_pool.evict_lowest();
         }
 
-        // Serialize tx as raw bytes (placeholder)
-        let data = vec![0u8; 100]; // placeholder
+        // Serialize tx as raw bytes
+        let data = serde_json::to_vec(&tx).map_err(|e| MempoolError::Generic(e.to_string()))?;
 
         let entry = MempoolEntry::new(
             hash,

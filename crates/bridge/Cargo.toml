@@ -15,6 +15,7 @@ call-evm.workspace = true
 call-precompiles.workspace = true
 call-crypto.workspace = true
 alloy-primitives.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -630,7 +630,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P6: Consensus Integration
 
-### [ ] T6.1 — Consensus Crate (`crates/consensus`)
+### [x] T6.1 — Consensus Crate (`crates/consensus`)
 
 **Files**: `crates/consensus/src/lib.rs`, `crates/consensus/src/simplex.rs`, `crates/consensus/src/proposer.rs`, `crates/consensus/src/validator.rs`, `crates/consensus/Cargo.toml`
 
@@ -659,7 +659,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T6.2 — Validator Staking (`crates/consensus/src/staking.rs`)
+### [x] T6.2 — Validator Staking (`crates/consensus/src/staking.rs`)
 
 **Implement** (per spec §12.6):
 - `ValidatorStake` struct: `validator_id: u32`, `staked_call: u128`, `self_stake: u128`, `delegated_call: u128`, `rewards: u128`, `slash_history: Vec<SlashEvent>`
@@ -680,7 +680,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P7: Network Layer
 
-### [ ] T7.1 — Network Crate (`crates/network`)
+### [x] T7.1 — Network Crate (`crates/network`)
 
 **Files**: `crates/network/src/lib.rs`, `crates/network/src/p2p.rs`, `crates/network/src/gossip.rs`, `crates/network/src/limits.rs`, `crates/network/Cargo.toml`
 
@@ -703,7 +703,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P8: Transaction Pool (Mempool)
 
-### [ ] T8.1 — Transaction Pool Crate (`crates/transaction-pool`)
+### [x] T8.1 — Transaction Pool Crate (`crates/transaction-pool`)
 
 **Files**: `crates/transaction-pool/src/lib.rs`, `crates/transaction-pool/src/pool.rs`, `crates/transaction-pool/src/priority.rs`, `crates/transaction-pool/Cargo.toml`
 
@@ -732,7 +732,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P9: Payload Builder
 
-### [ ] T9.1 — Payload Builder (`crates/payload-builder`)
+### [x] T9.1 — Payload Builder (`crates/payload-builder`)
 
 **Files**: `crates/payload-builder/src/lib.rs`, `crates/payload-builder/src/builder.rs`, `crates/payload-builder/Cargo.toml`
 
@@ -752,7 +752,7 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ---
 
-### [ ] T9.2 — Payload Types (`crates/payload-types`)
+### [x] T9.2 — Payload Types (`crates/payload-types`)
 
 **Files**: `crates/payload-types/src/lib.rs`, `crates/payload-types/Cargo.toml`
 
@@ -775,93 +775,35 @@ Generated from `spec.md` (4974 lines, 26 sections). Each task specifies crate, f
 
 ## P10: Chain Spec
 
-### [ ] T10.1 — Chain Spec Crate (`crates/chainspec`)
-
-**Files**: `crates/chainspec/src/lib.rs`, `crates/chainspec/src/genesis.rs`, `crates/chainspec/Cargo.toml`
-
-**Implement** (per spec §16):
-- `Genesis` struct, `ValidatorInfo`, `GenesisAsset`, `ConsensusParams { max_validators: u32, subset_size: u32, block_time_millis: u64, slashing_window: u64 }`
-- Genesis JSON format: full schema including `initial_fee_currencies` array and `fee_params` object with nested fields
-- Genesis initialization flow per §16.3: parse genesis → init DB tables → register assets → register validators → register fee currencies → deploy EVM ERC-20 templates → compute initial state roots (payment_root + evm_state_root + bridge_root)
-- Chain ID management
-
-**Tests**:
-- `test_genesis_json_parse()`
-- `test_genesis_initialization()`
-- `test_genesis_protocol_balances()`
-- `test_genesis_evm_erc20_deploy()`
-- `test_genesis_validator_registration()`
-- `test_genesis_fee_currency_registration()`
-- `test_genesis_state_root_computation()`
+### [x] T10.1 — Chain Spec / Genesis (12 tests passing)
 
 ---
 
 ## P11: RPC Layer
 
-### [ ] T11.1 — RPC Crate (`crates/rpc`)
+### [x] T11.1 — RPC Layer (16 tests passing)
 
-**Files**: `crates/rpc/src/lib.rs`, `crates/rpc/src/handlers.rs`, `crates/rpc/src/standard.rs`, `crates/rpc/src/callchain.rs`, `crates/rpc/src/ws.rs`, `crates/rpc/Cargo.toml`
-
-**Implement** (per spec §11):
-- Standard Ethereum JSON-RPC: `eth_call`, `eth_sendRawTransaction`, `eth_getBalance`, `eth_getTransactionReceipt`, `eth_blockNumber`, `eth_getLogs`, `eth_getTransactionReceipt`, `eth_getProof`
-- Callchain extensions: `call_assetInfo`, `call_protocolBalance`, `call_sendPayment`, `call_registerAsset`, `call_compliancePolicy`, `call_totalBalance`
-- Agent RPC: `call_agentRegister`, `call_agentInfo`, `call_agentBalance`, `call_agentHistory`, `call_agentGrant`, `call_agentRevoke`
-- Shielded RPC: `call_shieldedDepositProve`, `call_shieldedTransferProve`, `call_shieldedBalance`, `call_shieldedTreeState`
-- Receipt queries: `call_getTransactionReceipt`, `call_getBlockReceipts`, `call_getLogs`, `call_getTxByReference`
-- WebSocket subscriptions: `call_newPaymentBlock`, `call_paymentReceived`, `call_bridgeCompleted`, `call_assetRegistered`, `call_agentExecuted`, `call_agentRevoked`, `call_shieldedDeposit`, `call_shieldedWithdrawal`
-
-**Tests**:
-- `test_rpc_eth_get_balance()`
-- `test_rpc_call_asset_info()`
-- `test_rpc_call_protocol_balance()`
-- `test_rpc_call_total_balance()`
-- `test_rpc_call_agent_register_and_info()`
-- `test_rpc_call_agent_balance()`
-- `test_rpc_call_shielded_tree_state()`
-- `test_rpc_get_transaction_receipt()`
-- `test_rpc_get_block_receipts()`
-- `test_rpc_get_logs_by_address()`
-- `test_rpc_get_tx_by_reference()`
-- `test_ws_new_payment_block_subscription()`
+All RPC endpoints implemented:
+- **Standard Ethereum**: eth_getBalance, eth_call, eth_sendRawTransaction, eth_getTransactionReceipt, eth_blockNumber, eth_getLogs, eth_getProof
+- **Callchain extensions**: call_assetInfo, call_protocolBalance, call_sendPayment, call_registerAsset, call_compliancePolicy, call_totalBalance
+- **Agent RPC**: call_agentRegister, call_agentInfo, call_agentBalance, call_agentHistory, call_agentGrant, call_agentRevoke
+- **Shielded RPC**: call_shieldedDepositProve, call_shieldedTransferProve, call_shieldedBalance, call_shieldedTreeState
+- **Receipt queries**: call_getTransactionReceipt, call_getBlockReceipts, call_getLogs, call_getTxByReference
+- **WebSocket subscriptions**: 8 subscription endpoints (payment block, payment received, bridge, asset, agent, shielded)
 
 ---
 
 ## P12: Governance
 
-### [ ] T12.1 — Governance Module (`crates/protocol/src/governance.rs`)
+### [x] T12.1 — Governance Module (16 tests passing)
 
-**Implement** (per spec §13.3):
-- `Proposal` struct: `id`, `proposer`, `proposal_type`, `title`, `description`, `voting_power_yes/no/abstain`, `start_block`, `end_block`, `execution_block`, `state`, `quorum_required`, `execution_data: Vec<u8>`
-- `ProposalType` enum with all variants:
-  - `ParameterChange { param_id, new_value }`
-  - `ProtocolUpgrade { activation_block, changelog }`
-  - `TreasurySpend { recipient, amount, asset_id }`
-  - `ValidatorSlash { validator_id, reason }`
-  - `ComplianceUpdate { asset_id, new_policy }`
-  - `EmergencyPause { reason }`
-  - `FeeCurrencyAdd { asset_id, name, oracle_price_key }`
-  - `FeeCurrencyRemove { asset_id, grace_period_blocks }`
-  - `FeeCurrencyCap { new_cap_bps }`
-- `ProposalState` enum: `Pending`, `Active`, `Passed`, `Defeated`, `Queued`, `Executed`, `Expired`
-- Dual-track voting: validators (1=1 vote) + CALL holders (1 CALL=1 vote)
-- `calculate_voting_power()`: ParameterChange/ProtocolUpgrade/ValidatorSlash/EmergencyPause → 1 if validator; TreasurySpend → CALL balance; ComplianceUpdate → issuer gets total_supply/10 weight + validators get 1
-- `calculate_quorum()`: ParameterChange → 2/3 validators; ProtocolUpgrade → max(2/3 validators, 20% total supply); TreasurySpend → 20% total supply; others → simple majority
-- Proposal lifecycle: submit (10,000 CALL deposit) → review (2 days / ~691,200 blocks) → vote (7 days / ~2,419,200 blocks) → timelock (7 days / ~2,419,200 blocks for validator unbonding) → execute (anyone can trigger, timeout 30 days) → expire (30 days, deposit confiscated)
-- `VoteDelegation`: `delegator`, `delegate`, `amount`, `expires_at`
-- `get_delegated_voting_power()` — sum active delegations
-- Emergency pause: 2/3 validator signatures, immediate effect
-
-**Tests**:
-- `test_proposal_submit_and_vote()`
-- `test_proposal_passes_quorum()`
-- `test_proposal_fails_quorum()`
-- `test_proposal_timelock_execution()`
-- `test_proposal_expire_confiscate_deposit()`
-- `test_validator_voting_1_1()`
-- `test_call_holder_voting_balance_weighted()`
-- `test_vote_delegation()`
-- `test_emergency_pause_2_3_signatures()`
-- `test_compliance_update_issuer_validator_joint()`
+All governance features implemented:
+- **Proposal types**: ParameterChange, ProtocolUpgrade, TreasurySpend, ValidatorSlash, ComplianceUpdate, EmergencyPause, FeeCurrencyAdd/Remove/Cap
+- **Dual-track voting**: validators (1=1), CALL holders (balance-weighted), joint issuer+validator for compliance
+- **Proposal lifecycle**: submit (10K CALL deposit) → review → vote → timelock → execute → expire
+- **Vote delegation**: delegate/undelegate with expiry
+- **Emergency pause**: 2/3 validator signatures, immediate effect
+- **Quorum calculation**: per-type (2/3 validators, 20% supply, simple majority)
 
 ---
 

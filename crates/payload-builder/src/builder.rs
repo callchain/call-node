@@ -13,6 +13,7 @@ use call_protocol::instructions::{Instruction, InstructionResult};
 use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::{ProtocolTransaction, FeeParams};
 use call_payload_types::{BlockLimits, PayloadAttributes};
+use call_transaction_pool::MempoolSelection;
 use tracing::info;
 
 // ── Payload Builder Error ────────────────────────────────────────────
@@ -257,6 +258,42 @@ impl PayloadBuilder {
             execution_result: result,
             tx_count: total_count,
         })
+    }
+
+    /// Build a payload from mempool selection directly.
+    ///
+    /// Same as [`build`](Self::build) but takes a `MempoolSelection`
+    /// instead of separate vectors. Deserializes protocol transactions
+    /// from their mempool entry data.
+    pub fn build_from_mempool(
+        &self,
+        attrs: &PayloadAttributes,
+        selection: MempoolSelection,
+        balances: &mut BalanceState,
+        registry: &AssetRegistry,
+        compliance: &ComplianceEngine,
+        bridge_state: &mut BridgeStateManager,
+        evm_state_root: Hash,
+    ) -> Result<BuiltPayload, BuilderError> {
+        let protocol_txs: Vec<ProtocolTransaction> = selection
+            .protocol_txs
+            .into_iter()
+            .filter_map(|e| serde_json::from_slice(&e.data).ok())
+            .collect();
+
+        let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
+
+        self.build(
+            attrs,
+            protocol_txs,
+            evm_txs,
+            selection.bridge_ops,
+            balances,
+            registry,
+            compliance,
+            bridge_state,
+            evm_state_root,
+        )
     }
 }
 
@@ -548,5 +585,117 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_payload_build_from_mempool() {
+        let fee_params = FeeParams::default();
+        let builder = PayloadBuilder::new(fee_params);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+
+        // Create mempool entries with serialized protocol txs
+        let tx1 = make_test_tx(0);
+        let tx2 = make_test_tx(1);
+        let protocol_data: Vec<call_transaction_pool::MempoolEntry> = vec![tx1.clone(), tx2.clone()]
+            .into_iter()
+            .map(|tx| call_transaction_pool::MempoolEntry {
+                data: serde_json::to_vec(&tx).unwrap(),
+                hash: call_primitives::TxHash::ZERO,
+                sender: tx.sender,
+                nonce: tx.nonce,
+                score: 1_000_000,
+                kind: call_transaction_pool::PoolKind::Protocol,
+                entered_at: std::time::Instant::now(),
+                entered_at_block: 0,
+            })
+            .collect();
+
+        let selection = MempoolSelection {
+            protocol_txs: protocol_data,
+            evm_txs: vec![call_transaction_pool::MempoolEntry {
+                data: vec![0u8; 100],
+                hash: call_primitives::TxHash::ZERO,
+                sender: test_addr(1),
+                nonce: 0,
+                score: 1_000_000,
+                kind: call_transaction_pool::PoolKind::Evm,
+                entered_at: std::time::Instant::now(),
+                entered_at_block: 0,
+            }],
+            bridge_ops: vec![],
+        };
+
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        let registry = AssetRegistry::new();
+        let compliance = ComplianceEngine::new();
+        let mut bridge_state = BridgeStateManager::default();
+
+        let payload = builder.build_from_mempool(
+            &attrs,
+            selection,
+            &mut balances,
+            &registry,
+            &compliance,
+            &mut bridge_state,
+            Hash::ZERO,
+        ).unwrap();
+
+        assert_eq!(payload.block.header.height, 1);
+        assert_eq!(payload.block.protocol_txs.len(), 2);
+        assert_eq!(payload.block.evm_txs.len(), 1);
+    }
+
+    #[test]
+    fn test_payload_skips_tx_exceeding_instruction_limit() {
+        let fee_params = FeeParams::default();
+        let limits = BlockLimits {
+            max_instructions_per_tx: 5,
+            max_transactions: 10,
+            ..Default::default()
+        };
+        let builder = PayloadBuilder::with_limits(fee_params, limits);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+
+        // First tx exceeds instruction limit (6 > 5)
+        let tx_over = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 0,
+            instructions: (0..6).map(|_| Instruction::Transfer {
+                asset_id: 1,
+                to: test_addr(2),
+                amount: 100,
+                memo: None,
+            }).collect(),
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_ok = make_test_tx(1);
+
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        let registry = AssetRegistry::new();
+        let compliance = ComplianceEngine::new();
+        let mut bridge_state = BridgeStateManager::default();
+
+        let payload = builder.build(
+            &attrs,
+            vec![tx_over, tx_ok],
+            vec![],
+            vec![],
+            &mut balances,
+            &registry,
+            &compliance,
+            &mut bridge_state,
+            Hash::ZERO,
+        ).unwrap();
+
+        // Only the valid tx should be included
+        assert_eq!(payload.block.protocol_txs.len(), 1);
     }
 }

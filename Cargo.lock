@@ -915,6 +915,7 @@ dependencies = [
  "call-precompiles",
  "call-primitives",
  "call-protocol",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -1009,13 +1010,16 @@ dependencies = [
  "call-consensus",
  "call-crypto",
  "call-evm",
+ "call-network",
  "call-primitives",
  "call-protocol",
  "call-rpc",
  "call-shielded",
+ "call-storage",
  "call-transaction-pool",
  "clap",
  "jsonrpsee",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
@@ -1031,6 +1035,8 @@ dependencies = [
  "call-payload-types",
  "call-primitives",
  "call-protocol",
+ "call-transaction-pool",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -1040,6 +1046,8 @@ name = "call-payload-types"
 version = "0.1.0"
 dependencies = [
  "call-primitives",
+ "call-protocol",
+ "call-storage",
  "serde",
  "serde_json",
 ]
@@ -1077,6 +1085,7 @@ dependencies = [
  "hex",
  "hex-literal",
  "serde",
+ "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -1151,6 +1160,7 @@ dependencies = [
  "call-network",
  "call-primitives",
  "call-protocol",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -4265,6 +4275,16 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

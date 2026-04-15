@@ -46,7 +46,7 @@ pub enum BridgeError {
 }
 
 /// Bridge operation types (per spec §5.1)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum BridgeOp {
     DepositToEvm {
         asset_id: AssetId,

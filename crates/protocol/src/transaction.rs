@@ -10,16 +10,64 @@ use std::collections::HashSet;
 
 // ── Transaction model ─────────────────────────────────────────────────
 
+/// Serialization helper for [u8; 65] signatures
+mod sig_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(sig: &[u8; 65], serializer: S) -> Result<S::Ok, S::Error> {
+        sig.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 65], D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        bytes.try_into().map_err(|_| serde::de::Error::custom("expected 65 bytes"))
+    }
+}
+
+/// Serialization helper for Vec<[u8; 65]>
+mod sig_vec_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(sigs: &[[u8; 65]], serializer: S) -> Result<S::Ok, S::Error> {
+        // Flatten Vec<[u8; 65]> into Vec<u8> (65 bytes per signature)
+        let flat: Vec<u8> = sigs.iter().flat_map(|s| s.iter().copied()).collect();
+        serializer.serialize_bytes(&flat)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<[u8; 65]>, D::Error> {
+        let flat = Vec::<u8>::deserialize(deserializer)?;
+        if flat.len() % 65 != 0 {
+            return Err(serde::de::Error::custom("signature data not multiple of 65"));
+        }
+        let count = flat.len() / 65;
+        let mut sigs = Vec::with_capacity(count);
+        for chunk in flat.chunks_exact(65) {
+            sigs.push(chunk.try_into().map_err(|_| serde::de::Error::custom("chunk size mismatch"))?);
+        }
+        Ok(sigs)
+    }
+}
+
 /// Authentication scheme (defined here, used by smart_accounts too)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AuthScheme {
-    SingleSig { signature: [u8; 65] },
-    MultiSig { signatures: Vec<[u8; 65]> },
-    SessionKey { key: Address, signature: [u8; 65] },
+    SingleSig {
+        #[serde(with = "sig_serde")]
+        signature: [u8; 65],
+    },
+    MultiSig {
+        #[serde(with = "sig_vec_serde")]
+        signatures: Vec<[u8; 65]>,
+    },
+    SessionKey {
+        key: Address,
+        #[serde(with = "sig_serde")]
+        signature: [u8; 65],
+    },
 }
 
 /// Gas payment configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum GasConfig {
     SelfPay,
     AuthorizedSponsor,
@@ -28,7 +76,7 @@ pub enum GasConfig {
 }
 
 /// A protocol transaction (per spec §3.5)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProtocolTransaction {
     pub sender: Address,
     pub nonce: u64,

@@ -11,7 +11,7 @@ use crate::{ProtocolError, ProtocolResult};
 // ── Instruction types ─────────────────────────────────────────────────
 
 /// Protocol instruction variants (per spec §3.5)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Instruction {
     Transfer {
         asset_id: AssetId,
@@ -92,7 +92,7 @@ pub enum Instruction {
 }
 
 /// Payment memo with size limits per spec §3.5
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PaymentMemo {
     pub message: String,           // max 256 bytes
     pub reference: Option<String>, // max 128 bytes
@@ -129,7 +129,7 @@ impl PaymentMemo {
 }
 
 /// Single payment entry for batch transfers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaymentEntry {
     pub to: Address,
     pub amount: Balance,
@@ -137,7 +137,7 @@ pub struct PaymentEntry {
 }
 
 /// Agent payment instruction
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentPayment {
     pub agent_id: u64,
     pub asset_id: AssetId,
@@ -146,7 +146,7 @@ pub struct AgentPayment {
 }
 
 /// Compliance status for UpdateCompliance instruction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ComplianceStatus {
     Clear,
     UnderReview,
@@ -298,7 +298,7 @@ pub fn execute_instruction(
 }
 
 /// Result of executing a single instruction
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum InstructionResult {
     Success,
     Reverted { reason: String },
