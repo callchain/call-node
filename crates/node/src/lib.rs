@@ -6,6 +6,9 @@
 pub mod cli;
 pub mod config;
 pub mod boot;
+pub mod telemetry;
+pub mod light_client;
+pub mod logging;
 
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,

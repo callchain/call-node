@@ -85,7 +85,7 @@ impl IncrementalMerkleTree {
         self.proof_for_index(self.count - 1)
     }
 
-    fn proof_for_index(&self, idx: usize) -> Vec<(Hash, bool)> {
+    pub fn proof_for_index(&self, idx: usize) -> Vec<(Hash, bool)> {
         let mut proof = Vec::with_capacity(self.depth);
         let mut current_idx = idx;
 
