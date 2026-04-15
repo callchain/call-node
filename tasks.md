@@ -980,25 +980,16 @@ All governance features implemented:
 
 ## P20: State Expiration
 
-### [ ] T20.1 — State Expiration Module (`crates/storage/src/expiration.rs`)
+### [x] T20.1 — State Expiration Module (`crates/storage/src/expiration.rs`) — 6 tests passing
 
-**Implement** (per spec §22):
-- Protocol layer: no state expiration — protocol balances, bridge state, agent registrations never expire
-- EVM layer: EIP-161 empty account cleanup — accounts with nonce=0, balance=0, code_hash=empty auto-cleared after transaction
-- EVM storage slot zero-value optimization — zero slots not written to disk
-- State expiration vs prune relationship (§22.4):
-  - State expiration decides "what data no longer has meaning" (protocol semantics)
-  - Prune decides "what data no longer needs to be stored locally" (storage implementation)
-  - Current balances never expire but historical intermediate states can be pruned
-  - Nullifiers never expire (anti-double-spend required)
-  - Agent registrations never expire (unless Revoke)
-- Per-data-type expiration table implementation (§22.4):
-  - Protocol balances: never expire, historical versions pruned
-  - Shielded nullifiers: never expire
-  - Agent registrations: never expire (unless Revoke)
-  - EVM empty accounts: EIP-161 auto-clear
-  - Historical transaction traces: pruned after keep_recent
-  - Block bodies: pruned after keep_block_body
+**Implemented** (per spec §22):
+- Protocol layer: no state expiration — balances, nullifiers, agent registrations never expire
+- EVM layer: `EvmAccountState` with EIP-161 empty account cleanup (`nonce=0 && balance=0 && code_hash=empty`)
+- EVM storage slot zero-value optimization via `set_evm_storage_slot()`
+- `ExpirationPolicy` with `StateType` enum tracking expiration vs prune semantics
+- Per-data-type expiration table: balances never expire (historical prunable), nullifiers never expire/prune, agent registrations never expire/prune, EVM accounts EIP-161 cleanup, traces prunable
+- `cleanup_empty_evm_accounts()` returns removed addresses after transaction
+- `prune_old_traces()` only affects historical data, never current state
 
 **Tests**:
 - `test_protocol_balance_never_expires()`

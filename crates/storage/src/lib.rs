@@ -4,10 +4,12 @@
 //! supports our Rust toolchain. All types, tables, and prune logic are defined.
 
 mod db;
+mod expiration;
 mod prune;
 mod tables;
 
 pub use db::*;
+pub use expiration::*;
 pub use prune::*;
 pub use tables::*;
 
