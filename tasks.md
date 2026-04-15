@@ -959,14 +959,16 @@ All governance features implemented:
 
 ## P19: Fork & Upgrade
 
-### [ ] T19.1 — Fork Management (`crates/consensus/src/fork.rs`)
+### [x] T19.1 — Fork Management (`crates/consensus/src/fork.rs`) — 4 tests passing
 
-**Implement** (per spec §19):
-- `ProtocolVersion` struct
-- Height-activated upgrades
-- Governance proposal trigger + timelock
-- Version check on block processing
-- Emergency rollback via 2/3 validator signatures
+**Implemented** (per spec §19):
+- `UpgradeEntry`, `EmergencyRollback`, `ForkManager`, `EmergencyRollbackResult` structs
+- Height-activated upgrades via `schedule_upgrade()` and `check_upgrades_at_height()`
+- Governance proposal trigger with timelock: `schedule_governance_upgrade()` enforces minimum `timelock_blocks` (default 1000, min 100)
+- Version check on block processing: `validate_block_version()` rejects mismatched versions
+- Emergency rollback via 2/3 validator signatures: `submit_rollback_signature()` with Ed25519 verification, dedup, quorum check (`ceil(2n/3)`)
+- `ProtocolVersion` already defined in `call_primitives`, reused here
+- `rollback_quorum()` computes proper ceil(2n/3) quorum
 
 **Tests**:
 - `test_height_activated_upgrade()`

@@ -21,3 +21,4 @@ thiserror.workspace = true
 serde.workspace = true
 rand.workspace = true
 tracing.workspace = true
+ed25519-dalek = "2"

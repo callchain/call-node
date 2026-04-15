@@ -946,6 +946,7 @@ dependencies = [
  "call-protocol",
  "commonware-codec",
  "commonware-cryptography",
+ "ed25519-dalek",
  "rand 0.8.5",
  "serde",
  "thiserror 2.0.18",
