@@ -1,81 +1,41 @@
-//! calld — Callchain node binary.
+//! calld — Callchain node binary (per spec §21).
+//!
+//! Boot sequence: parse config → init logging → open DB → load genesis →
+//! init P2P → connect seeds → init consensus → start RPC → sync/participate.
 
-use call_node::CallNode;
-use call_network::CommonwareConfig;
-use call_rpc::RpcConfig;
+use call_node::boot::boot_node;
+use call_node::cli::CliArgs;
+use call_node::config::NodeConfig;
 use clap::Parser;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-
-#[derive(Parser, Debug)]
-#[command(name = "calld", version, about = "Callchain Node")]
-struct Args {
-    /// HTTP RPC listen address
-    #[arg(long, default_value = "127.0.0.1:8545")]
-    http_addr: SocketAddr,
-
-    /// WebSocket RPC listen address
-    #[arg(long, default_value = "127.0.0.1:8546")]
-    ws_addr: SocketAddr,
-
-    /// Data directory for block storage
-    #[arg(long, default_value = ".call-data")]
-    data_dir: PathBuf,
-
-    /// P2P listen address
-    #[arg(long, default_value = "127.0.0.1:51235")]
-    p2p_listen_addr: SocketAddr,
-
-    /// Bootstrap peers to connect to (format: "peer_id@address", comma-separated)
-    #[arg(long)]
-    p2p_bootstrap_peers: Option<String>,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("call_node=info".parse()?)
-                .add_directive("call_rpc=info".parse()?)
-                .add_directive("call_protocol=info".parse()?)
-                .add_directive("call_evm=info".parse()?)
-                .add_directive("call_network=info".parse()?)
-                .add_directive("call_consensus=info".parse()?),
-        )
-        .init();
+    let args = CliArgs::parse();
 
-    let args = Args::parse();
-
-    let rpc_config = RpcConfig {
-        http_addr: args.http_addr,
-        ws_addr: args.ws_addr,
-        max_connections: 100,
+    // Load config: TOML file (if provided) → merge CLI overrides
+    let config = match &args.config {
+        Some(config_path) => {
+            let base = NodeConfig::from_file(config_path)?;
+            base.merge_from_cli(&args)
+        }
+        None => NodeConfig::default().merge_from_cli(&args),
     };
+    config.validate()?;
+
+    // Init logging (per config)
+    init_logging(&config);
 
     tracing::info!("Starting Callchain node...");
-    tracing::info!("HTTP RPC: {}", rpc_config.http_addr);
-    tracing::info!("WebSocket: {}", rpc_config.ws_addr);
+    tracing::info!("  Mode:      {:?}", config.mode);
+    tracing::info!("  HTTP RPC:  {}", config.rpc.http_addr);
+    tracing::info!("  WS RPC:    {}", config.rpc.ws_addr);
+    tracing::info!("  P2P:       {}", config.p2p.listen_addr);
+    tracing::info!("  Metrics:   {}", config.metrics.addr);
+    tracing::info!("  Data dir:  {:?}", config.storage.data_dir);
+    tracing::info!("  Log level: {}", config.logging.level);
 
-    let mut node = CallNode::new(args.data_dir.clone())?;
-    node.start_rpc(rpc_config).await?;
-
-    // Start P2P network (optional — only if bootstrap peers provided)
-    if args.p2p_bootstrap_peers.is_some() {
-        let p2p_config = CommonwareConfig {
-            listen_addr: args.p2p_listen_addr,
-            bootstrap_peers: parse_bootstrap_peers(&args.p2p_bootstrap_peers),
-            max_message_size: 10 * 1024 * 1024,
-            allow_private_ips: true,
-            namespace: b"callchain".to_vec(),
-        };
-        node.start_network(p2p_config).await?;
-        tracing::info!("P2P network started on {}", args.p2p_listen_addr);
-    }
-
-    // Start consensus block production loop
-    let _consensus_handle = node.start_consensus_loop();
-    tracing::info!("Consensus loop started");
+    // Boot sequence
+    let mut node = boot_node(&config).await?;
 
     tracing::info!("Callchain node running. Press Ctrl+C to stop.");
 
@@ -89,22 +49,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn parse_bootstrap_peers(peers: &Option<String>) -> Vec<(String, SocketAddr)> {
-    peers
-        .as_ref()
-        .map(|s| {
-            s.split(',')
-                .filter_map(|entry| {
-                    let parts: Vec<&str> = entry.split('@').collect();
-                    if parts.len() == 2 {
-                        let peer_id = parts[0].to_string();
-                        if let Ok(addr) = parts[1].parse::<SocketAddr>() {
-                            return Some((peer_id, addr));
-                        }
-                    }
-                    None
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// Initialize logging based on config (per spec §21.3)
+fn init_logging(config: &NodeConfig) {
+    let level = &config.logging.level;
+    let filter = match level.as_str() {
+        "trace" => "trace",
+        "debug" => "debug",
+        "info" => "info",
+        "warn" => "warn",
+        "error" => "error",
+        _ => "info",
+    };
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(filter.parse().unwrap()),
+        );
+
+    match config.logging.format.as_str() {
+        "json" => subscriber.json().init(),
+        _ => subscriber.init(),
+    }
 }

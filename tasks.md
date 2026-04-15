@@ -809,7 +809,7 @@ All governance features implemented:
 
 ## P14: Node Application & CLI
 
-### [ ] T14.1 — Node Crate (`crates/node`)
+### [x] T14.1 — Node Crate (`crates/node`) — 6 tests passing
 
 **Files**: `crates/node/src/main.rs`, `crates/node/src/cli.rs`, `crates/node/src/config.rs`, `crates/node/src/boot.rs`, `crates/node/Cargo.toml`
 

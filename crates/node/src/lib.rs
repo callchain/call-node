@@ -3,6 +3,10 @@
 //! Minimal node that initializes all state components,
 //! starts an HTTP RPC server, runs consensus, and processes transactions.
 
+pub mod cli;
+pub mod config;
+pub mod boot;
+
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
 };
