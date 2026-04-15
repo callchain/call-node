@@ -16,8 +16,14 @@ mod compliance;
 
 #[cfg(feature = "real-prover")]
 pub mod poseidon;
+#[cfg(feature = "real-prover")]
+mod merkle_poseidon;
+#[cfg(feature = "real-prover")]
+pub mod circuit_deposit;
 
 pub use merkle::*;
+#[cfg(feature = "real-prover")]
+pub use merkle_poseidon::*;
 pub use notes::*;
 pub use nullifiers::*;
 pub use circuit::*;
