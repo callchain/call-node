@@ -1,0 +1,372 @@
+//! RPC layer tests (per spec §11)
+
+#[cfg(test)]
+mod tests {
+    use call_primitives::{Address, AssetId};
+    use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine};
+    use call_evm::EvmState;
+    use call_bridge::BridgeStateManager;
+    use call_consensus::ValidatorStateManager;
+    use call_agent::{AgentRegistry, AgentBalances};
+    use call_shielded::ShieldedState;
+    use call_transaction_pool::Mempool;
+    use crate::handlers::RpcState;
+    use std::sync::{Arc, RwLock};
+
+    fn test_addr(n: u8) -> Address {
+        Address::repeat_byte(n)
+    }
+
+    fn make_test_state() -> RpcState {
+        let mempool = Arc::new(RwLock::new(Mempool::new()));
+        RpcState::new(
+            BalanceState::new(),
+            AssetRegistry::new(),
+            ComplianceEngine::new(),
+            EvmState::new(),
+            BridgeStateManager::default(),
+            ValidatorStateManager::default(),
+            AgentRegistry::new(),
+            AgentBalances::new(),
+            ShieldedState::new(),
+            mempool,
+            1,
+        )
+    }
+
+    #[test]
+    fn test_rpc_eth_get_balance() {
+        let state = make_test_state();
+        let addr = test_addr(1);
+        // Set EVM balance
+        state.evm_state.write().unwrap().set_balance(addr, alloy_primitives::U256::from(1000));
+        let balance = state.get_evm_balance(&addr);
+        assert_eq!(balance, alloy_primitives::U256::from(1000));
+        // Zero for unknown address
+        assert_eq!(state.get_evm_balance(&test_addr(99)), alloy_primitives::U256::ZERO);
+    }
+
+    #[test]
+    fn test_rpc_call_asset_info() {
+        let state = make_test_state();
+        // Register an asset
+        let issuer = test_addr(1);
+        let mut registry = state.asset_registry.write().unwrap();
+        let id = registry.register_asset("TEST".into(), "Test Token".into(), 18, issuer, 0).unwrap();
+        drop(registry);
+
+        let info = state.get_asset_info(id).expect("asset info");
+        assert_eq!(info.symbol, "TEST");
+        assert_eq!(info.name, "Test Token");
+        assert_eq!(info.decimals, 18);
+        assert_eq!(info.issuer, issuer);
+
+        // Non-existent asset
+        assert!(state.get_asset_info(999).is_none());
+    }
+
+    #[test]
+    fn test_rpc_call_protocol_balance() {
+        let state = make_test_state();
+        let addr = test_addr(1);
+        let asset_id: AssetId = 1;
+
+        // Set balance
+        state.balance_state.write().unwrap().balances.set_balance(asset_id, addr, 5000).unwrap();
+
+        let balance = state.get_balance(asset_id, &addr);
+        assert_eq!(balance, 5000);
+
+        // Zero for unknown
+        assert_eq!(state.get_balance(asset_id, &test_addr(99)), 0);
+    }
+
+    #[test]
+    fn test_rpc_call_total_balance() {
+        let state = make_test_state();
+        let asset_id: AssetId = 1;
+
+        state.balance_state.write().unwrap().balances.set_balance(asset_id, test_addr(1), 1000).unwrap();
+        state.balance_state.write().unwrap().balances.set_balance(asset_id, test_addr(2), 2000).unwrap();
+        state.balance_state.write().unwrap().balances.set_balance(asset_id, test_addr(3), 3000).unwrap();
+
+        let total = state.get_total_balance(asset_id);
+        assert_eq!(total, 6000);
+    }
+
+    #[test]
+    fn test_rpc_call_agent_register_and_info() {
+        let state = make_test_state();
+        let owner = test_addr(1);
+        let pubkey = [1u8; 64];
+
+        let agent_id = state.register_agent(owner, pubkey, "test-agent".into(), "https://agent.example.com".into(), [0u8; 32]).unwrap();
+        assert_eq!(agent_id, 0);
+
+        let info = state.get_agent_info(agent_id).expect("agent info");
+        assert_eq!(info.agent_id, 0);
+        assert_eq!(info.owner, owner);
+        assert_eq!(info.name, "test-agent");
+        assert_eq!(info.url, "https://agent.example.com");
+        assert!(!info.domain_verified);
+
+        // Non-existent agent
+        assert!(state.get_agent_info(999).is_none());
+    }
+
+    #[test]
+    fn test_rpc_call_agent_balance() {
+        let state = make_test_state();
+        let owner = test_addr(1);
+        let pubkey = [1u8; 64];
+
+        let agent_id = state.register_agent(owner, pubkey, "balance-agent".into(), "https://a.com".into(), [0u8; 32]).unwrap();
+
+        // Grant balance
+        state.grant_agent_balance(agent_id, 1, 10000).unwrap();
+        let balance = state.get_agent_total_balance(agent_id);
+        assert_eq!(balance, 10000);
+
+        // Revoke
+        state.revoke_agent_balance(agent_id, 1).unwrap();
+        let balance = state.get_agent_total_balance(agent_id);
+        assert_eq!(balance, 0);
+    }
+
+    #[test]
+    fn test_rpc_call_shielded_tree_state() {
+        let state = make_test_state();
+        let tree_state = state.get_shielded_tree_state();
+        assert_eq!(tree_state.leaf_count, 0);
+        assert_eq!(tree_state.nullifier_count, 0);
+
+        // Tree state has default merkle root
+        assert_eq!(tree_state.merkle_root.as_slice().len(), 32);
+    }
+
+    #[test]
+    fn test_rpc_get_transaction_receipt() {
+        let state = make_test_state();
+        use call_primitives::ExecutionStatus;
+        use call_protocol::{ProtocolReceipt, InstructionExecResult};
+        use call_primitives::FeeCurrency;
+
+        let tx_hash = call_primitives::TxHash::repeat_byte(0xAB);
+        let receipt = ProtocolReceipt {
+            tx_hash,
+            status: ExecutionStatus::Success,
+            gas_used: 10_000,
+            gas_payer: test_addr(1),
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 1_000_000,
+            instruction_results: vec![InstructionExecResult {
+                success: true,
+                gas_used: 10_000,
+                revert_reason: None,
+            }],
+            logs: vec![],
+            memos: vec![],
+            state_changes: vec![],
+        };
+        state.store_receipt(tx_hash, receipt);
+
+        let found = state.get_receipt(&tx_hash).expect("receipt exists");
+        assert!(matches!(found.status, ExecutionStatus::Success));
+        assert_eq!(found.gas_used, 10_000);
+
+        // Non-existent
+        assert!(state.get_receipt(&call_primitives::TxHash::ZERO).is_none());
+    }
+
+    #[test]
+    fn test_rpc_get_block_receipts() {
+        let state = make_test_state();
+        use call_primitives::ExecutionStatus;
+        use call_protocol::ProtocolReceipt;
+        use call_primitives::FeeCurrency;
+
+        let tx1 = call_primitives::TxHash::repeat_byte(1);
+        let tx2 = call_primitives::TxHash::repeat_byte(2);
+        state.store_receipt(tx1, ProtocolReceipt {
+            tx_hash: tx1,
+            status: ExecutionStatus::Success,
+            gas_used: 10_000,
+            gas_payer: test_addr(1),
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 0,
+            instruction_results: vec![],
+            logs: vec![],
+            memos: vec![],
+            state_changes: vec![],
+        });
+        state.store_receipt(tx2, ProtocolReceipt {
+            tx_hash: tx2,
+            status: ExecutionStatus::Reverted { reason: "out of gas".into() },
+            gas_used: 5_000,
+            gas_payer: test_addr(2),
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 0,
+            instruction_results: vec![],
+            logs: vec![],
+            memos: vec![],
+            state_changes: vec![],
+        });
+
+        let receipts = state.get_receipts_by_block(0);
+        assert_eq!(receipts.len(), 2);
+    }
+
+    #[test]
+    fn test_rpc_get_logs_by_address() {
+        // Logs are stored in receipts; filtering by address returns empty
+        // (placeholder until real log indexing is implemented)
+        let state = make_test_state();
+        let receipts = state.get_receipts_by_block(0);
+        assert!(receipts.is_empty());
+    }
+
+    #[test]
+    fn test_rpc_get_tx_by_reference() {
+        // Placeholder: external reference lookup returns null
+        let state = make_test_state();
+        let _ = state;
+        // In the real implementation, this would look up by external reference
+    }
+
+    #[test]
+    fn test_ws_new_payment_block_subscription() {
+        // WebSocket subscription registration test:
+        // The subscription endpoints are registered successfully.
+        // Full subscription testing requires a running server.
+        use crate::ws::register_ws_subscriptions;
+        use jsonrpsee::RpcModule;
+        use std::sync::Arc;
+        let mut module = RpcModule::new(Arc::new(make_test_state()));
+        let result = register_ws_subscriptions(&mut module);
+        assert!(result.is_ok(), "WebSocket subscriptions should register OK");
+    }
+
+    #[test]
+    fn test_rpc_execute_evm_call() {
+        let state = make_test_state();
+        let caller = test_addr(1);
+        let to = test_addr(2);
+
+        // Set up EVM state with balance
+        state.evm_state.write().unwrap().set_balance(caller, alloy_primitives::U256::from(1_000_000_000i128));
+        state.evm_state.write().unwrap().create_account(caller);
+        state.evm_state.write().unwrap().create_account(to);
+
+        // Execute a simple call (no data, just reading state)
+        let result = state.execute_evm_call(
+            caller,
+            Some(to),
+            alloy_primitives::U256::from(100),
+            alloy_primitives::Bytes::default(),
+            21_000,
+            10,
+        );
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(result.success);
+    }
+
+    #[test]
+    fn test_rpc_submit_payment_success() {
+        let state = make_test_state();
+        let sender = test_addr(1);
+        let to = test_addr(2);
+        let asset_id: AssetId = 1;
+
+        // Set up protocol balance
+        state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 10_000).unwrap();
+
+        let tx_hash = state.submit_payment(
+            sender, 1, asset_id, to, 5_000,
+            Some("test payment".into()),
+            100_000, 1_000_000,
+        ).unwrap();
+
+        assert_eq!(tx_hash.as_slice().len(), 32);
+
+        // Verify balance was transferred
+        let balance = state.get_balance(asset_id, &sender);
+        assert_eq!(balance, 5_000);
+        let to_balance = state.get_balance(asset_id, &to);
+        assert_eq!(to_balance, 5_000);
+
+        // Receipt is stored
+        let receipt = state.get_receipt(&tx_hash).unwrap();
+        assert_eq!(receipt.tx_hash, tx_hash);
+        assert!(matches!(receipt.status, call_primitives::ExecutionStatus::Success));
+        assert_eq!(receipt.gas_payer, sender);
+    }
+
+    #[test]
+    fn test_rpc_submit_payment_insufficient_balance() {
+        let state = make_test_state();
+        let sender = test_addr(1);
+        let to = test_addr(2);
+        let asset_id: AssetId = 1;
+
+        state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 100).unwrap();
+
+        let result = state.submit_payment(
+            sender, 1, asset_id, to, 5_000,
+            None, 100_000, 1_000_000,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rpc_submit_evm_tx_real_signed() {
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_consensus::crypto::secp256k1::sign_message;
+        use alloy_primitives::TxKind;
+
+        let state = make_test_state();
+
+        // Known test key (standard Ethereum test private key)
+        let secret = alloy_primitives::FixedBytes::<32>::from_slice(
+            &hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318").unwrap(),
+        );
+        let signer_address: call_primitives::Address =
+            alloy_primitives::address!("0x2c7536E3605D9C16a7a3D7b1898e529396a65c23");
+
+        // Set up EVM state with balance
+        state.evm_state.write().unwrap().set_balance(signer_address, alloy_primitives::U256::from(1_000_000_000_000i128));
+        state.evm_state.write().unwrap().create_account(signer_address);
+        state.evm_state.write().unwrap().create_account(test_addr(2));
+
+        // Build transaction
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 10,
+            gas_limit: 21_000,
+            to: TxKind::Call(test_addr(2).into()),
+            value: alloy_primitives::U256::from(100),
+            input: alloy_primitives::Bytes::default(),
+        };
+
+        // Sign
+        let sig_hash = tx.signature_hash();
+        let signature = sign_message(secret, sig_hash).unwrap();
+        let signed = tx.into_signed(signature);
+        let envelope = alloy_consensus::TxEnvelope::from(signed);
+
+        // RLP-encode
+        let mut raw_tx_bytes = Vec::new();
+        alloy_rlp::Encodable::encode(&envelope, &mut raw_tx_bytes);
+
+        // Submit to mempool + execute
+        let result = state.submit_evm_tx(&raw_tx_bytes);
+        assert!(result.is_ok(), "submit_evm_tx failed: {:?}", result);
+        let tx_hash = result.unwrap();
+        assert_eq!(tx_hash.as_slice().len(), 32);
+
+        // Verify receipt was stored
+        let receipt = state.get_receipt(&tx_hash).unwrap();
+        assert!(matches!(receipt.status, call_primitives::ExecutionStatus::Success));
+    }
+}

@@ -9,3 +9,23 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+call-primitives.workspace = true
+call-protocol.workspace = true
+call-evm.workspace = true
+call-bridge.workspace = true
+call-consensus.workspace = true
+call-agent.workspace = true
+call-shielded.workspace = true
+call-crypto.workspace = true
+call-transaction-pool.workspace = true
+call-chainspec.workspace = true
+alloy-consensus.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jsonrpsee.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+hex = "0.4"

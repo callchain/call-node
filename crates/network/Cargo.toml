@@ -12,12 +12,16 @@ workspace = true
 call-primitives.workspace = true
 call-consensus.workspace = true
 call-protocol.workspace = true
-# commonware-p2p integration requires Rust 1.90+ (Duration::from_hours)
-# Actual runtime wiring deferred to P14 (Node App) with updated toolchain
 commonware-cryptography.workspace = true
+commonware-p2p.workspace = true
+commonware-runtime.workspace = true
+commonware-codec.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 alloy-rlp.workspace = true
+rand.workspace = true
+hex.workspace = true
+commonware-utils.workspace = true

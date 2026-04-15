@@ -72,6 +72,9 @@ call-transaction-pool = { path = "crates/transaction-pool" }
 call-payload-types = { path = "crates/payload-types" }
 call-payload-builder = { path = "crates/payload-builder" }
 call-chainspec = { path = "crates/chainspec" }
+call-agent = { path = "crates/agent" }
+call-shielded = { path = "crates/shielded" }
+call-rpc = { path = "crates/rpc" }
 
 # Commonware
 commonware-consensus = "2026.3.0"
@@ -79,6 +82,7 @@ commonware-cryptography = "2026.3.0"
 commonware-p2p = "2026.3.0"
 commonware-runtime = "2026.3.0"
 commonware-codec = "2026.3.0"
+commonware-utils = "2026.4.0"
 
 # Reth (locked to specific commit for compatibility)
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
@@ -116,7 +120,7 @@ reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 
 # Alloy ecosystem
 alloy = { version = "1.8.2", default-features = false }
-alloy-consensus = { version = "1.8.2", default-features = false }
+alloy-consensus = { version = "1.8.2", default-features = false, features = ["k256"] }
 alloy-eips = { version = "1.8.2", default-features = false }
 alloy-primitives = { version = "1.5.7", default-features = false }
 alloy-rlp = { version = "0.3.13", default-features = false }
@@ -169,6 +173,8 @@ jsonrpsee = { version = "0.24", features = ["server"] }
 # Build
 vergen = "9"
 vergen-git2 = "1"
+
+hex = "0.4"
 
 # Testing
 test-case = "3"

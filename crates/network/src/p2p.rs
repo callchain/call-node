@@ -1,12 +1,21 @@
 //! T7.1 — P2P Network Layer (per spec §8)
 //!
 //! Message types, network traits, and state sync interfaces.
-//! Actual commonware-p2p runtime wiring deferred to P14 (Node App)
-//! due to Rust toolchain requirement (needs 1.90+ for Duration::from_hours).
 
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use call_primitives::{BlockHash, TxHash};
+use commonware_codec::extensions::DecodeExt;
+use commonware_p2p::{Address, AddressableManager, Blocker, PeerSetUpdate, Provider, Receiver, Recipients, Sender};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
+use commonware_cryptography::ed25519;
+use commonware_cryptography::Signer;
+use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
+use commonware_runtime::{IoBuf, Metrics, Quota, Runner, Spawner};
+use commonware_utils::ordered::Map;
 
 // ── P2P Message Types (per spec §8.1, §9.1) ──────────────────────────
 
@@ -104,7 +113,7 @@ pub struct Handshake {
 /// Abstract network interface.
 ///
 /// This trait defines the contract for P2P communication.
-/// The actual implementation uses commonware-p2p at runtime (P14).
+/// At runtime, `CommonwareNetwork` provides a real commonware-p2p implementation.
 #[async_trait::async_trait]
 pub trait Network: Send + Sync + 'static {
     /// Send a message to all connected peers
@@ -162,7 +171,6 @@ pub enum NetworkEvent {
 // ── CRC32 Helper ─────────────────────────────────────────────────────
 
 fn crc32_fast(data: &[u8]) -> u32 {
-    // Simple CRC32 using the standard polynomial (0xEDB88320)
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
         crc ^= byte as u32;
@@ -177,9 +185,444 @@ fn crc32_fast(data: &[u8]) -> u32 {
     !crc
 }
 
-// ── Re-export NetworkError ───────────────────────────────────────────
+// ── Network Error ────────────────────────────────────────────────────
 
 pub use crate::limits::NetworkError;
+
+// ── Wire Protocol ────────────────────────────────────────────────────
+
+/// First byte of each message encodes the channel ID for multiplexing.
+const CHANNEL_PREFIX_LEN: usize = 1;
+
+fn encode_with_channel(channel: u64, payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(CHANNEL_PREFIX_LEN + payload.len());
+    buf.push(channel as u8);
+    buf.extend_from_slice(payload);
+    buf
+}
+
+fn decode_with_channel(data: &[u8]) -> Option<(u64, &[u8])> {
+    if data.is_empty() {
+        return None;
+    }
+    Some((data[0] as u64, &data[1..]))
+}
+
+// ── Commonware Network Config ────────────────────────────────────────
+
+/// Configuration for the commonware-p2p network.
+#[derive(Clone)]
+pub struct CommonwareConfig {
+    /// Listen address
+    pub listen_addr: SocketAddr,
+    /// Peer public keys to connect to (peer_id hex -> socket address)
+    pub bootstrap_peers: Vec<(String, SocketAddr)>,
+    /// Maximum message size in bytes
+    pub max_message_size: u32,
+    /// Whether to allow private IP connections (for devnet/testing)
+    pub allow_private_ips: bool,
+    /// Namespace for signing (prevents replay attacks across networks)
+    pub namespace: Vec<u8>,
+}
+
+impl Default for CommonwareConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: "0.0.0.0:51235".parse().unwrap(),
+            bootstrap_peers: Vec::new(),
+            max_message_size: 10 * 1024 * 1024, // 10 MB
+            allow_private_ips: false,
+            namespace: b"callchain".to_vec(),
+        }
+    }
+}
+
+impl CommonwareConfig {
+    /// Create a config suitable for local testing (allows private IPs).
+    pub fn local(listen_addr: SocketAddr) -> Self {
+        Self {
+            listen_addr,
+            bootstrap_peers: Vec::new(),
+            max_message_size: 10 * 1024 * 1024,
+            allow_private_ips: true,
+            namespace: b"callchain-local".to_vec(),
+        }
+    }
+}
+
+// ── Commonware Network (real P2P via commonware-p2p) ─────────────────
+
+/// Real P2P network adapter backed by commonware-p2p.
+///
+/// Wraps commonware-p2p's authenticated lookup network and implements
+/// the `Network` trait. Messages are prefixed with a channel byte for
+/// multiplexing over a single commonware channel.
+///
+/// # Usage
+/// ```ignore
+/// let config = CommonwareConfig::local("0.0.0.0:51235".parse().unwrap());
+/// let network = CommonwareNetwork::new(&config).await?;
+///
+/// // Use the network
+/// network.broadcast(1, vec![1, 2, 3]).await;
+/// let (peer_id, channel, data) = network.receive().await?;
+/// ```
+pub struct CommonwareNetwork {
+    /// Sender for outgoing messages
+    sender: tokio::sync::Mutex<p2p_lookup::Sender<ed25519::PublicKey, commonware_runtime::tokio::Context>>,
+    /// Receiver for incoming messages (wrapped in async mutex)
+    receiver: tokio::sync::Mutex<p2p_lookup::Receiver<ed25519::PublicKey>>,
+    /// Oracle for peer management
+    oracle: tokio::sync::Mutex<p2p_lookup::Oracle<ed25519::PublicKey>>,
+    /// Map of connected peers: hex(public_key) -> socket address
+    /// Note: populated as peers are tracked; updated via subscribe
+    peers: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, SocketAddr>>>,
+    /// Our own peer ID (hex-encoded ed25519 public key)
+    our_peer_id: String,
+    /// Local listen address
+    listen_addr: SocketAddr,
+    /// Shutdown signal sender (sent to background thread on drop)
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Background thread running the commonware runtime
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CommonwareNetwork {
+    /// Create and initialize a new commonware-p2p network.
+    ///
+    /// Spawns a background thread running the commonware runtime.
+    /// Returns once the network is ready to send/receive messages.
+    pub async fn new(config: &CommonwareConfig) -> Result<Self, NetworkError> {
+        use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
+
+        let listen_addr = config.listen_addr;
+
+        // Channels for returning initialized components and shutdown signal
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let cfg = config.clone();
+        let thread_handle = std::thread::spawn(move || {
+            let runtime_cfg = RuntimeConfig::new();
+            let runner = TokioRunner::new(runtime_cfg);
+            runner.start(|context: commonware_runtime::tokio::Context| async move {
+                // Generate ed25519 keypair for this node
+                let signer = ed25519::PrivateKey::from_seed(0);
+                let public_key = signer.public_key();
+                let our_peer_id = hex::encode(public_key.as_ref());
+
+                // Build P2P config
+                let p2p_cfg = if cfg.allow_private_ips {
+                    P2PConfig::local(signer, &cfg.namespace, cfg.listen_addr, cfg.max_message_size)
+                } else {
+                    P2PConfig::recommended(signer, &cfg.namespace, cfg.listen_addr, cfg.max_message_size)
+                };
+
+                // Create network
+                let (mut network, mut oracle) = p2p_lookup::Network::new(
+                    context.with_label("network"),
+                    p2p_cfg,
+                );
+
+                // Register bootstrap peers using commonware_utils::ordered::Map
+                if !cfg.bootstrap_peers.is_empty() {
+                    let mut peer_entries: Vec<(ed25519::PublicKey, Address)> = Vec::new();
+                    for (peer_id_hex, socket_addr) in &cfg.bootstrap_peers {
+                        if let Ok(pk_bytes) = hex::decode(peer_id_hex) {
+                            if let Ok(pk) = ed25519::PublicKey::decode(&*pk_bytes) {
+                                peer_entries.push((pk, Address::Symmetric(*socket_addr)));
+                            }
+                        }
+                    }
+                    if !peer_entries.is_empty() {
+                        let peer_map: Map<ed25519::PublicKey, Address> =
+                            Map::from_iter_dedup(peer_entries);
+                        oracle.track(0, peer_map).await;
+                    }
+                }
+
+                // Register application channel
+                let quota = Quota::per_second(NonZeroU32::new(1000).unwrap());
+                let (sender, receiver) = network.register(0, quota, 10_000);
+
+                // Start the network (spawns background tasks)
+                let _handle = network.start();
+
+                // Collect initial peer info
+                let peers = Arc::new(tokio::sync::RwLock::new(
+                    cfg.bootstrap_peers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
+                ));
+
+                // Subscribe to peer set changes
+                let peers_clone = peers.clone();
+                let mut subscription: tokio::sync::mpsc::UnboundedReceiver<PeerSetUpdate<ed25519::PublicKey>> = oracle.subscribe().await;
+                let _subscribe_handle = context.clone().spawn(move |_ctx| async move {
+                    while let Some(update) = subscription.recv().await {
+                        let mut peers_guard = peers_clone.write().await;
+                        peers_guard.clear();
+                        let all = update.all.union();
+                        for pk in all.into_iter() {
+                            let pk: ed25519::PublicKey = pk;
+                            peers_guard.insert(hex::encode(pk.as_ref()), listen_addr);
+                        }
+                    }
+                });
+
+                // Send components back to the calling thread
+                let _ = tx.send(InitComponents {
+                    sender,
+                    receiver,
+                    oracle,
+                    peers,
+                    our_peer_id,
+                    listen_addr,
+                });
+
+                // Wait for shutdown signal
+                let _ = shutdown_rx.await;
+            });
+        });
+
+        // Wait for the network to be initialized
+        let components = rx.await.map_err(|e| {
+            NetworkError::NetworkError(format!("commonware initialization failed: {e}"))
+        })?;
+
+        Ok(Self {
+            sender: tokio::sync::Mutex::new(components.sender),
+            receiver: tokio::sync::Mutex::new(components.receiver),
+            oracle: tokio::sync::Mutex::new(components.oracle),
+            peers: components.peers,
+            our_peer_id: components.our_peer_id,
+            listen_addr: components.listen_addr,
+            shutdown_tx: Some(shutdown_tx),
+            thread_handle: Some(thread_handle),
+        })
+    }
+
+    /// Get our public key as a hex string (our peer ID)
+    pub fn peer_id(&self) -> &str {
+        &self.our_peer_id
+    }
+
+    /// Get the local listen address
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.listen_addr
+    }
+
+    /// Stop the network (signal the background thread to shut down)
+    pub fn stop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct InitComponents {
+    sender: p2p_lookup::Sender<ed25519::PublicKey, commonware_runtime::tokio::Context>,
+    receiver: p2p_lookup::Receiver<ed25519::PublicKey>,
+    oracle: p2p_lookup::Oracle<ed25519::PublicKey>,
+    peers: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, SocketAddr>>>,
+    our_peer_id: String,
+    listen_addr: SocketAddr,
+}
+
+#[async_trait::async_trait]
+impl Network for CommonwareNetwork {
+    async fn broadcast(&self, channel: u64, message: Vec<u8>) {
+        let mut sender = self.sender.lock().await;
+        let data = encode_with_channel(channel, &message);
+        let buf = IoBuf::copy_from_slice(&data);
+        let _ = sender.send(Recipients::All, buf, false).await;
+    }
+
+    async fn send_to(&self, peers: Vec<String>, message: Vec<u8>) {
+        if peers.is_empty() {
+            return;
+        }
+
+        let mut sender = self.sender.lock().await;
+
+        // Parse peer IDs into public keys
+        let pub_keys: Vec<ed25519::PublicKey> = peers
+            .iter()
+            .filter_map(|peer_id| hex::decode(peer_id).ok())
+            .filter_map(|bytes| ed25519::PublicKey::decode(&*bytes).ok())
+            .collect();
+
+        if pub_keys.is_empty() {
+            return;
+        }
+
+        let recipients = if pub_keys.len() == 1 {
+            Recipients::One(pub_keys.into_iter().next().unwrap())
+        } else {
+            Recipients::Some(pub_keys)
+        };
+
+        let buf = IoBuf::copy_from_slice(&message);
+        let _ = sender.send(recipients, buf, false).await;
+    }
+
+    async fn receive(&self) -> Result<(String, u64, Vec<u8>), NetworkError> {
+        let mut receiver = self.receiver.lock().await;
+        let (public_key, io_buf) = receiver.recv().await.map_err(|e| {
+            NetworkError::NetworkError(format!("receive failed: {e}"))
+        })?;
+
+        let peer_id = hex::encode(public_key.as_ref());
+        let data: &[u8] = io_buf.as_ref();
+
+        let (channel, payload) = decode_with_channel(data).ok_or_else(|| {
+            NetworkError::NetworkError("empty message received".into())
+        })?;
+
+        Ok((peer_id, channel, payload.to_vec()))
+    }
+
+    fn peer_count(&self) -> usize {
+        // Read from the peers RwLock, which is updated by the peer set subscription
+        if let Ok(guard) = self.peers.try_read() {
+            guard.len()
+        } else {
+            0
+        }
+    }
+
+    fn peer_ids(&self) -> Vec<String> {
+        if let Ok(guard) = self.peers.try_read() {
+            guard.keys().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    async fn connect(&self, address: &str) -> Result<(), NetworkError> {
+        let addr: SocketAddr = address.parse().map_err(|e| {
+            NetworkError::NetworkError(format!("invalid address '{address}': {e}"))
+        })?;
+
+        // Store the address in the peers map for bookkeeping.
+        // In commonware-p2p's authenticated model, a full connection requires
+        // the peer's public key. This is typically obtained via peer discovery
+        // or pre-configured bootstrap peers. For direct address-based connects,
+        // we record the intent here; the oracle will establish the connection
+        // once the peer is tracked with its public key.
+        self.peers.write().await.insert(
+            format!("{addr}"),
+            addr,
+        );
+        Ok(())
+    }
+
+    async fn disconnect(&self, peer_id: &str) -> Result<(), NetworkError> {
+        let mut oracle = self.oracle.lock().await;
+
+        // Decode peer_id as public key and block
+        let pk_bytes = hex::decode(peer_id).map_err(|e| {
+            NetworkError::NetworkError(format!("invalid peer_id: {e}"))
+        })?;
+        let public_key = ed25519::PublicKey::decode(&*pk_bytes).map_err(|_| {
+            NetworkError::PeerNotFound { peer_id: peer_id.to_string() }
+        })?;
+
+        oracle.block(public_key).await;
+        Ok(())
+    }
+
+    fn is_healthy(&self) -> bool {
+        // The network is healthy if it was successfully initialized
+        true
+    }
+}
+
+// ── In-Memory Network (for local testing) ────────────────────────────
+
+/// In-memory network implementation for local testing.
+///
+/// Simulates a P2P network with in-memory message buffering.
+/// Useful for testing without actual network connectivity.
+pub struct InMemoryNetwork {
+    connected_peers: std::sync::Mutex<Vec<String>>,
+    message_buffer: std::sync::Mutex<Vec<(String, u64, Vec<u8>)>>,
+}
+
+impl InMemoryNetwork {
+    pub fn new() -> Self {
+        Self {
+            connected_peers: std::sync::Mutex::new(Vec::new()),
+            message_buffer: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Simulate receiving a message (pushes to buffer for testing)
+    pub fn simulate_receive(&self, peer_id: String, channel: u64, message: Vec<u8>) {
+        if let Ok(mut buffer) = self.message_buffer.lock() {
+            buffer.push((peer_id, channel, message));
+        }
+    }
+}
+
+impl Default for InMemoryNetwork {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Network for InMemoryNetwork {
+    async fn broadcast(&self, channel: u64, message: Vec<u8>) {
+        if let Ok(mut buffer) = self.message_buffer.lock() {
+            buffer.push(("broadcast".into(), channel, message));
+        }
+    }
+
+    async fn send_to(&self, peers: Vec<String>, message: Vec<u8>) {
+        if let Ok(mut buffer) = self.message_buffer.lock() {
+            for peer in &peers {
+                buffer.push((peer.clone(), 0, message.clone()));
+            }
+        }
+    }
+
+    async fn receive(&self) -> Result<(String, u64, Vec<u8>), NetworkError> {
+        let mut buffer = self.message_buffer.lock().map_err(|_| NetworkError::NetworkError("lock poisoned".into()))?;
+        buffer.pop().ok_or_else(|| NetworkError::NetworkError("no messages".into()))
+    }
+
+    fn peer_count(&self) -> usize {
+        self.connected_peers.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    fn peer_ids(&self) -> Vec<String> {
+        self.connected_peers.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    async fn connect(&self, address: &str) -> Result<(), NetworkError> {
+        if let Ok(mut peers) = self.connected_peers.lock() {
+            if !peers.contains(&address.to_string()) {
+                peers.push(address.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    async fn disconnect(&self, peer_id: &str) -> Result<(), NetworkError> {
+        if let Ok(mut peers) = self.connected_peers.lock() {
+            peers.retain(|p| p != peer_id);
+        }
+        Ok(())
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.connected_peers.lock().map(|p| !p.is_empty()).unwrap_or(false)
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -302,5 +745,73 @@ mod tests {
         let limits = NetworkLimits::default();
         assert_eq!(limits.max_peers, 50);
         assert_eq!(limits.max_messages_per_second, 100);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_network_connect_disconnect() {
+        let network = InMemoryNetwork::new();
+        assert_eq!(network.peer_count(), 0);
+        assert!(!network.is_healthy());
+
+        network.connect("peer_1").await.unwrap();
+        assert_eq!(network.peer_count(), 1);
+        assert!(network.is_healthy());
+
+        network.disconnect("peer_1").await.unwrap();
+        assert_eq!(network.peer_count(), 0);
+        assert!(!network.is_healthy());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_network_broadcast() {
+        let network = InMemoryNetwork::new();
+        network.connect("peer_1").await.unwrap();
+        network.broadcast(1, vec![1, 2, 3]).await;
+
+        let (peer_id, channel, data) = network.receive().await.unwrap();
+        assert_eq!(peer_id, "broadcast");
+        assert_eq!(channel, 1);
+        assert_eq!(data, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_network_receive_empty() {
+        let network = InMemoryNetwork::new();
+        let result = network.receive().await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wire_protocol_channel_encoding() {
+        let channel = 42u64;
+        let payload = vec![1, 2, 3, 4, 5];
+        let encoded = encode_with_channel(channel, &payload);
+
+        assert_eq!(encoded[0], 42);
+        assert_eq!(&encoded[1..], &payload);
+
+        let (decoded_channel, decoded_payload) = decode_with_channel(&encoded).unwrap();
+        assert_eq!(decoded_channel, channel);
+        assert_eq!(decoded_payload, payload.as_slice());
+    }
+
+    #[test]
+    fn test_wire_protocol_empty_message() {
+        assert!(decode_with_channel(&[]).is_none());
+    }
+
+    #[test]
+    fn test_commonware_config_defaults() {
+        let cfg = CommonwareConfig::default();
+        assert!(!cfg.allow_private_ips);
+        assert_eq!(cfg.namespace, b"callchain");
+    }
+
+    #[test]
+    fn test_commonware_config_local() {
+        let addr = "127.0.0.1:51235".parse().unwrap();
+        let cfg = CommonwareConfig::local(addr);
+        assert!(cfg.allow_private_ips);
+        assert_eq!(cfg.listen_addr, addr);
     }
 }
