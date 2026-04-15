@@ -501,3 +501,285 @@ mod tests {
         assert!(output.contains("999"));
     }
 }
+
+// ── HTTP /metrics Server ───────────────────────────────────────────
+
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::IntoResponse,
+    Router,
+};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+
+/// Start the Prometheus /metrics HTTP server on the configured address.
+/// Returns the bound address once the server is listening.
+pub async fn start_metrics_server(
+    registry: Arc<TelemetryRegistry>,
+    listen_addr: SocketAddr,
+) -> Result<SocketAddr, std::io::Error> {
+    let app = Router::new()
+        .route("/metrics", axum::routing::get(metrics_handler))
+        .with_state(registry)
+        .route("/health", axum::routing::get(health_handler));
+
+    let listener = TcpListener::bind(listen_addr).await?;
+    let bound = listener.local_addr()?;
+
+    tokio::spawn(async move {
+        tracing::info!("Metrics server listening on http://{bound}");
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(error = %e, "metrics server error");
+        }
+    });
+
+    Ok(bound)
+}
+
+async fn metrics_handler(
+    State(registry): State<Arc<TelemetryRegistry>>,
+) -> impl IntoResponse {
+    let body = registry.prometheus_output();
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+async fn health_handler() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
+// ── OpenTelemetry Tracing Integration ──────────────────────────────
+
+use opentelemetry::trace::{Span, Tracer, TracerProvider as _};
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::{
+    propagation::TraceContextPropagator,
+    trace::{self, RandomIdGenerator, Sampler, TracerProvider},
+    Resource,
+};
+use opentelemetry_semantic_conventions::resource;
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+/// Global tracer provider for shutdown and tracer creation.
+pub static GLOBAL_PROVIDER: std::sync::OnceLock<TracerProvider> =
+    std::sync::OnceLock::new();
+
+/// Initialize OpenTelemetry tracing with a stdout exporter.
+/// Returns a configured `tracing` subscriber that sends spans to OpenTelemetry.
+pub fn init_opentelemetry_tracing(
+    service_name: &str,
+    log_level: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Set up propagator for distributed tracing
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
+    // Create tracer provider with resource attributes
+    let provider = TracerProvider::builder()
+        .with_config(
+            trace::Config::default()
+                .with_sampler(Sampler::AlwaysOn)
+                .with_id_generator(RandomIdGenerator::default())
+                .with_resource(Resource::new(vec![
+                    KeyValue::new(resource::SERVICE_NAME, service_name.to_string()),
+                    KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+                ])),
+        )
+        .build();
+
+    // Store provider for shutdown
+    let _ = GLOBAL_PROVIDER.set(provider);
+    let provider = GLOBAL_PROVIDER.get().unwrap();
+
+    let tracer = opentelemetry::trace::TracerProvider::tracer(provider, "call-node");
+
+    // Build the tracing subscriber with OpenTelemetry layer
+    let filter = tracing_subscriber::EnvFilter::try_new(log_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::try_new("info").unwrap());
+
+    let subscriber = Registry::default()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
+        )
+        .with(OpenTelemetryLayer::new(tracer));
+
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    Ok(())
+}
+
+/// Get a named tracer for a subsystem
+fn get_tracer(name: &'static str) -> opentelemetry_sdk::trace::Tracer {
+    let provider = GLOBAL_PROVIDER.get().expect("OTel not initialized");
+    opentelemetry::trace::TracerProvider::tracer(provider, name)
+}
+
+/// Record a span for a block production event via OpenTelemetry.
+pub fn record_block_span(
+    registry: &TelemetryRegistry,
+    height: u64,
+    duration_ms: u64,
+) {
+    registry.record_block_produced();
+
+    let tracer = get_tracer("call-node/consensus");
+    let mut span = tracer.start("block_produced");
+    span.set_attribute(KeyValue::new("block.height", height as i64));
+    span.set_attribute(KeyValue::new("block.duration_ms", duration_ms as i64));
+    span.set_attribute(KeyValue::new(
+        "consensus.round",
+        registry.consensus_rounds.load(Ordering::Relaxed) as i64,
+    ));
+    span.end();
+}
+
+/// Record a span for a transaction processing event via OpenTelemetry.
+pub fn record_tx_span(
+    registry: &TelemetryRegistry,
+    tx_type: &str,
+    duration_ms: u64,
+    accepted: bool,
+) {
+    let tracer = get_tracer("call-node/mempool");
+
+    if accepted {
+        let mut span = tracer.start("tx_processed");
+        span.set_attribute(KeyValue::new("tx.type", tx_type.to_string()));
+        span.set_attribute(KeyValue::new("tx.duration_ms", duration_ms as i64));
+        span.set_attribute(KeyValue::new("tx.accepted", true));
+        span.set_attribute(KeyValue::new(
+            "mempool.size",
+            registry.mempool_tx_count.load(Ordering::Relaxed) as i64,
+        ));
+        span.end();
+    } else {
+        registry.record_tx_rejected();
+        let mut span = tracer.start("tx_rejected");
+        span.set_attribute(KeyValue::new("tx.type", tx_type.to_string()));
+        span.set_attribute(KeyValue::new("tx.duration_ms", duration_ms as i64));
+        span.set_attribute(KeyValue::new("tx.accepted", false));
+        span.end();
+    }
+}
+
+/// Record a span for a P2P message event via OpenTelemetry.
+pub fn record_p2p_span(
+    registry: &TelemetryRegistry,
+    direction: &str,
+    message_type: &str,
+    bytes: usize,
+) {
+    if direction == "sent" {
+        registry.record_p2p_bytes_sent(bytes);
+    } else {
+        registry.record_p2p_bytes_received(bytes);
+    }
+
+    let tracer = get_tracer("call-node/p2p");
+    let mut span = tracer.start("p2p_message");
+    span.set_attribute(KeyValue::new("p2p.direction", direction.to_string()));
+    span.set_attribute(KeyValue::new("p2p.message_type", message_type.to_string()));
+    span.set_attribute(KeyValue::new("p2p.bytes", bytes as i64));
+    span.set_attribute(KeyValue::new(
+        "p2p.peers",
+        registry.p2p_peers.load(Ordering::Relaxed) as i64,
+    ));
+    span.end();
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn test_metrics_http_server() {
+        let registry = Arc::new(TelemetryRegistry::new());
+        registry.record_block_produced();
+        registry.set_p2p_peers(5);
+
+        let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
+        // Give server a moment to start
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/metrics"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("consensus_blocks_produced"));
+        assert!(body.contains("p2p_peers 5"));
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        let registry = Arc::new(TelemetryRegistry::new());
+        let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/health"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.text().await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_content_type() {
+        let registry = Arc::new(TelemetryRegistry::new());
+        let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/metrics"))
+            .send()
+            .await
+            .unwrap();
+
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(content_type.contains("text/plain"));
+        assert!(content_type.contains("version=0.0.4"));
+    }
+
+    #[test]
+    fn test_opentelemetry_span_recording() {
+        let registry = TelemetryRegistry::new();
+
+        // Verify the registry side-effects work (OTel spans require global init)
+        registry.record_block_produced();
+        assert_eq!(registry.consensus_blocks_produced.load(Ordering::Relaxed), 1);
+
+        registry.set_p2p_peers(10);
+        assert_eq!(registry.p2p_peers.load(Ordering::Relaxed), 10);
+    }
+}

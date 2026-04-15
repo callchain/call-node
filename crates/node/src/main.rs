@@ -1,15 +1,17 @@
 //! calld — Callchain node binary (per spec §21).
 //!
 //! Boot sequence: parse config → init logging → open DB → load genesis →
-//! init P2P → connect seeds → init consensus → start RPC → sync/participate.
+//! init P2P → connect seeds → init consensus → start RPC → start metrics → sync/participate.
 
 use call_node::boot::boot_node;
 use call_node::cli::CliArgs;
 use call_node::config::NodeConfig;
+use call_node::telemetry::{init_opentelemetry_tracing, start_metrics_server, TelemetryRegistry};
 use clap::Parser;
+use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = CliArgs::parse();
 
     // Load config: TOML file (if provided) → merge CLI overrides
@@ -22,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     config.validate()?;
 
-    // Init logging (per config)
-    init_logging(&config);
+    // Init logging with OpenTelemetry tracing (per spec §21.3 + §20)
+    init_logging(&config)?;
 
     tracing::info!("Starting Callchain node...");
     tracing::info!("  Mode:      {:?}", config.mode);
@@ -37,6 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Boot sequence
     let mut node = boot_node(&config).await?;
 
+    // Start Prometheus /metrics HTTP server (per spec §20)
+    let registry = Arc::new(TelemetryRegistry::new());
+    let metrics_addr = start_metrics_server(Arc::clone(&registry), config.metrics.addr).await?;
+    tracing::info!("  Metrics server started on http://{metrics_addr}");
+
     tracing::info!("Callchain node running. Press Ctrl+C to stop.");
 
     // Wait for shutdown signal
@@ -46,29 +53,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     node.stop().await?;
     tracing::info!("Node stopped.");
 
+    // Shut down OpenTelemetry tracer
+    if let Some(provider) = call_node::telemetry::GLOBAL_PROVIDER.get() {
+        provider.shutdown();
+    }
+
     Ok(())
 }
 
-/// Initialize logging based on config (per spec §21.3)
-fn init_logging(config: &NodeConfig) {
+/// Initialize logging with OpenTelemetry tracing integration (per spec §21.3 + §20)
+fn init_logging(config: &NodeConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let level = &config.logging.level;
-    let filter = match level.as_str() {
-        "trace" => "trace",
-        "debug" => "debug",
-        "info" => "info",
-        "warn" => "warn",
-        "error" => "error",
-        _ => "info",
-    };
-
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(filter.parse().unwrap()),
-        );
-
-    match config.logging.format.as_str() {
-        "json" => subscriber.json().init(),
-        _ => subscriber.init(),
-    }
+    init_opentelemetry_tracing("call-node", level)
 }

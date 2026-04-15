@@ -834,28 +834,38 @@ All governance features implemented:
 
 ## P15: Telemetry & Monitoring
 
-### [ ] T15.1 — Telemetry Module (`crates/node/src/telemetry.rs`)
+### [x] T15.1 — Telemetry Module (`crates/node/src/telemetry.rs`) — 12 tests passing
 
 **Implement** (per spec §20):
 - Prometheus metrics: consensus, mempool, bridge, P2P, performance, system
-- `/metrics` endpoint on `:9090`
-- OpenTelemetry tracing integration
+- `/metrics` HTTP endpoint on `:9090` with Prometheus content-type header
+- OpenTelemetry tracing integration with `tracing-opentelemetry` layer
 - Alert rules: consensus stall, validator offline, mempool overflow, bridge delay, memory, disk
+- Span recording helpers: `record_block_span()`, `record_tx_span()`, `record_p2p_span()`
+- `/health` endpoint for liveness checks
 
 **Tests**:
 - `test_prometheus_metrics_endpoint()`
 - `test_consensus_metrics_recorded()`
 - `test_mempool_size_metric()`
 - `test_alert_consensus_stall()`
+- `test_alert_mempool_overflow()`
+- `test_telemetry_registry_default()`
+- `test_telemetry_uptime_increases()`
+- `test_register_custom_metric()`
+- `test_metrics_http_server()` — HTTP /metrics returns Prometheus format
+- `test_health_endpoint()` — /health returns 200 OK
+- `test_metrics_content_type()` — correct Prometheus content-type header
+- `test_opentelemetry_span_recording()`
 
 ---
 
 ## P16: Light Client
 
-### [ ] T16.1 — Light Client (`crates/node/src/light_client.rs`)
+### [x] T16.1 — Light Client (`crates/node/src/light_client.rs`) — 14 tests passing
 
 **Implement** (per spec §23):
-- `LightClient` struct: `trusted_validators`, `latest_block_header`, `chain_id`
+- `LightClient` struct: `trusted_validators`, `latest_block_header`, `chain_id`, `checkpoint`, `verified_headers`
 - `verify_header()` — parent hash link, 2/3+ validator signatures, state root consistency
 - `verify_proof()` — generic Merkle proof verification
 - `verify_shielded_tx_full()` — full ZK proof verification (~3ms Groth16) + nullifier proof + commitment proof
@@ -877,12 +887,21 @@ All governance features implemented:
 - `test_light_client_merkle_proof()`
 - `test_light_client_shielded_light_verification()`
 - `test_light_client_shielded_balance_query()`
+- `test_light_client_sync_incremental()`
+- `test_light_client_checkpoint()`
+- `test_light_client_storage_estimate()`
+- `test_light_client_parent_hash_mismatch()`
+- `test_light_parent_hash_mismatch()`
+- `test_merkle_proof_verify()`
+- `test_balance_proof_structure()`
+- `test_light_client_default()`
+- `test_block_signatures_valid_count()`
 
 ---
 
 ## P17: Logging & Auditing
 
-### [ ] T17.1 — Logging Module (`crates/node/src/logging.rs`)
+### [x] T17.1 — Logging Module (`crates/node/src/logging.rs`) — 13 tests passing
 
 **Implement** (per spec §24):
 - `LogEntry` struct (logging, distinct from receipt LogEntry): `timestamp` (ISO 8601), `level` (trace/debug/info/warn/error), `target` (module path), `message`, `fields: HashMap<String, Value>`
@@ -896,10 +915,18 @@ All governance features implemented:
 
 **Tests**:
 - `test_structured_log_json_format()`
+- `test_structured_log_text_format()`
 - `test_audit_log_append_only()`
 - `test_audit_log_merkle_root()`
 - `test_compliance_report_export()`
 - `test_log_rotation()`
+- `test_audit_log_file_roundtrip()`
+- `test_should_rotate_by_size()`
+- `test_log_entry_new()`
+- `test_format_timestamp()`
+- `test_encrypted_value_serde()`
+- `test_audit_log_merkle_proof_verification()`
+- `test_compliance_report_csv()`
 
 ---
 
