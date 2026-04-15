@@ -3,14 +3,14 @@
 //! Functions: getPrice(), getTWAP(), isStale(), getOracleStatus()
 
 use call_primitives::AssetId;
+use call_protocol::OracleManager;
 use alloy_primitives::address;
-use std::collections::HashMap;
 
 /// Precompile address
 pub const ORACLE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000101");
 
-/// Price entry for an asset
+/// Price entry for an asset (legacy, used by precompile)
 #[derive(Debug, Clone)]
 pub struct OraclePrice {
     pub price: u128,
@@ -26,59 +26,61 @@ pub enum OracleStatus {
     Disabled,
 }
 
-/// Oracle state
-#[derive(Debug, Default)]
+/// Oracle state (wraps OracleManager for precompile access)
+#[derive(Debug)]
 pub struct OracleState {
-    prices: HashMap<AssetId, Vec<OraclePrice>>,
+    manager: OracleManager,
     stale_threshold_secs: u64,
+}
+
+impl Default for OracleState {
+    fn default() -> Self {
+        Self::new(3600)
+    }
 }
 
 impl OracleState {
     pub fn new(stale_threshold_secs: u64) -> Self {
         Self {
-            prices: HashMap::new(),
+            manager: OracleManager::default(),
             stale_threshold_secs,
         }
     }
 
-    pub fn get_price(&self, asset_id: AssetId) -> Option<&OraclePrice> {
-        self.prices.get(&asset_id).and_then(|v| v.last())
+    /// Get current aggregated price from the oracle manager
+    pub fn get_price(&self, asset_id: AssetId) -> Option<OraclePrice> {
+        self.manager.get_price(asset_id).map(|agg| OraclePrice {
+            price: agg.median_price,
+            timestamp: agg.timestamp,
+            block_number: agg.block_number,
+        })
     }
 
-    pub fn get_twapped(&self, asset_id: AssetId, period_secs: u64) -> Option<u128> {
-        let prices = self.prices.get(&asset_id)?;
-        if prices.is_empty() {
-            return None;
-        }
-        let latest_ts = prices.last().unwrap().timestamp;
-        let cutoff = latest_ts.saturating_sub(period_secs);
-        let relevant: Vec<_> = prices.iter().filter(|p| p.timestamp >= cutoff).collect();
-        if relevant.is_empty() {
-            return None;
-        }
-        let sum: u128 = relevant.iter().map(|p| p.price).sum();
-        Some(sum / relevant.len() as u128)
+    /// Get TWAP from the oracle manager
+    pub fn get_twapped(&self, asset_id: AssetId, current_timestamp: u64) -> Option<u128> {
+        self.manager.get_twap(asset_id, current_timestamp)
     }
 
+    /// Check if price is stale
     pub fn is_stale(&self, asset_id: AssetId, current_timestamp: u64) -> bool {
-        self.prices
-            .get(&asset_id)
-            .and_then(|v| v.last())
-            .map(|p| current_timestamp - p.timestamp > self.stale_threshold_secs)
-            .unwrap_or(true)
+        self.manager.is_stale(asset_id, current_timestamp)
     }
 
+    /// Get oracle status for an asset
     pub fn get_oracle_status(&self, asset_id: AssetId, current_timestamp: u64) -> OracleStatus {
-        if !self.prices.contains_key(&asset_id) {
-            return OracleStatus::Disabled;
-        }
-        if self.is_stale(asset_id, current_timestamp) {
-            OracleStatus::Stale
-        } else {
-            OracleStatus::Active
+        match self.manager.get_price(asset_id) {
+            None => OracleStatus::Disabled,
+            Some(_) => {
+                if self.is_stale(asset_id, current_timestamp) {
+                    OracleStatus::Stale
+                } else {
+                    OracleStatus::Active
+                }
+            }
         }
     }
 
+    /// Submit a price (delegates to OracleManager)
     pub fn submit_price(
         &mut self,
         asset_id: AssetId,
@@ -86,14 +88,19 @@ impl OracleState {
         timestamp: u64,
         block_number: u64,
     ) {
-        self.prices
-            .entry(asset_id)
-            .or_default()
-            .push(OraclePrice {
-                price,
-                timestamp,
-                block_number,
-            });
+        // Legacy simple submission — full oracle uses OracleSubmission with signatures
+        self.manager
+            .simple_submit_price(asset_id, price, timestamp, block_number);
+    }
+
+    /// Access the underlying manager for advanced operations
+    pub fn manager(&self) -> &OracleManager {
+        &self.manager
+    }
+
+    /// Access the underlying manager mutably
+    pub fn manager_mut(&mut self) -> &mut OracleManager {
+        &mut self.manager
     }
 }
 
@@ -114,7 +121,7 @@ mod tests {
         let mut state = OracleState::new(3600);
         state.submit_price(1, 1_000_000, 900, 90);
         state.submit_price(1, 2_000_000, 1000, 100);
-        let twap = state.get_twapped(1, 200).unwrap();
+        let twap = state.get_twapped(1, 1000).unwrap();
         assert_eq!(twap, 1_500_000);
     }
 

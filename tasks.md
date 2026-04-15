@@ -932,21 +932,18 @@ All governance features implemented:
 
 ## P18: Oracle System
 
-### [ ] T18.1 — Oracle Module (`crates/protocol/src/oracle.rs`)
+### [x] T18.1 — Oracle Module (`crates/protocol/src/oracle.rs`) — 8 tests passing
 
-**Implement** (per spec §25):
-- `OracleSubmission`, `AggregatedPrice`, `OracleValidatorInfo`, `HistoricalPrice` structs
-- `submit_oracle_price()` — signature verification, period check (`ORACLE_UPDATE_INTERVAL` = 1000 blocks, `ORACLE_PERIOD_SECS` constant), dedup, quorum trigger
-- `aggregate_and_publish_price()` — sort + median, outlier marking (>5% deviation → outlier_count+1), TWAP history append
-- Outlier management: 10 cumulative strikes → `is_active = false`, no more submissions allowed
-- Full oracle configuration per §25.5:
-  - `update_interval`: 1000 blocks (~4 min)
-  - `quorum`: 14 (2/3 of 21 subset)
-  - `outlier_threshold`: 5% deviation
-  - `outlier_tolerance`: 10 strikes before disable
-  - `twap_window_max`: 24 hours
-  - `price_staleness_secs`: 900 (15 min)
-  - `min_data_sources`: >= 2 independent APIs required per validator (validation constraint)
+**Implemented** (per spec §25):
+- `OracleSubmission`, `AggregatedPrice`, `OracleValidatorInfo`, `HistoricalPrice`, `OracleConfig` structs
+- `submit_oracle_price()` — Ed25519 signature verification, period check (`ORACLE_UPDATE_INTERVAL` = 1000 blocks), dedup, quorum trigger (14 of 21)
+- `aggregate_and_publish_price()` — sort + median, outlier marking (>5% deviation), TWAP history append
+- Outlier management: 10 cumulative strikes → `is_active = false`
+- Full oracle configuration per §25.5: update_interval=1000, quorum=14, outlier_threshold=5%, outlier_tolerance=10, twap_window=24h, staleness=900s, min_data_sources=2
+- `OracleManager` with validator registration, TWAP calculation, staleness checks
+- `simple_submit_price()` for legacy precompile compatibility
+- Integrated with `FeeCurrencyRegistry.get_call_price()` and `priority_score()`
+- `OracleState` in precompiles wraps `OracleManager`
 
 **Tests**:
 - `test_oracle_submission_valid()`

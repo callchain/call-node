@@ -3,6 +3,7 @@
 //! Multi-currency fee payment, oracle price lookup, governance management.
 
 use call_primitives::{AssetId, Balance};
+use crate::oracle::OracleManager;
 use crate::ProtocolResult;
 use crate::ProtocolError;
 
@@ -83,10 +84,12 @@ impl FeeCurrencyRegistry {
         Ok(())
     }
 
-    /// Get CALL price from oracle (simplified — actual oracle is external)
-    pub fn get_call_price(&self) -> u128 {
-        // Placeholder: actual price from oracle
-        2_000_000 // $2.00 with 6 decimals
+    /// Get CALL price from oracle, or fallback to hardcoded value
+    pub fn get_call_price(&self, oracle: Option<&OracleManager>) -> u128 {
+        match oracle.and_then(|o| o.get_price(0)) {
+            Some(agg) => agg.median_price,
+            None => 2_000_000, // Fallback: $2.00 with 6 decimals
+        }
     }
 
     /// Enforce stablecoin cap per block
@@ -101,12 +104,12 @@ impl FeeCurrencyRegistry {
     }
 
     /// Priority score for mempool sorting
-    pub fn priority_score(&self, fee: u128, is_call: bool) -> u128 {
+    pub fn priority_score(&self, fee: u128, is_call: bool, oracle: Option<&OracleManager>) -> u128 {
         if is_call {
             fee // CALL direct
         } else {
             // Stablecoin converted via oracle price
-            fee * self.get_call_price() / 1_000_000
+            fee * self.get_call_price(oracle) / 1_000_000
         }
     }
 }
@@ -161,15 +164,24 @@ mod tests {
     #[test]
     fn test_priority_score_call() {
         let registry = FeeCurrencyRegistry::new();
-        let score = registry.priority_score(1_000_000, true);
+        let score = registry.priority_score(1_000_000, true, None);
         assert_eq!(score, 1_000_000); // CALL = direct fee
     }
 
     #[test]
     fn test_priority_score_stablecoin_conversion() {
         let registry = FeeCurrencyRegistry::new();
-        let score = registry.priority_score(1_000_000, false);
-        // Stablecoin: fee * call_price / 1_000_000
+        let score = registry.priority_score(1_000_000, false, None);
+        // Stablecoin: fee * call_price / 1_000_000 (fallback price)
         assert_eq!(score, 2_000_000); // 1M * 2M / 1M = 2M
+    }
+
+    #[test]
+    fn test_priority_score_with_oracle() {
+        let registry = FeeCurrencyRegistry::new();
+        let mut oracle = OracleManager::default();
+        oracle.simple_submit_price(0, 3_000_000, 1000, 100); // Set oracle price to $3.00
+        let score = registry.priority_score(1_000_000, false, Some(&oracle));
+        assert_eq!(score, 3_000_000); // 1M * 3M / 1M = 3M
     }
 }

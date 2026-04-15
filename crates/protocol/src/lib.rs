@@ -1,5 +1,6 @@
 //! Callchain Protocol Layer — Core protocol types, execution, and economics.
 
+pub mod oracle;
 pub mod registry;
 pub mod balances;
 pub mod compliance;
@@ -26,6 +27,7 @@ pub use sponsor::*;
 pub use receipts::*;
 pub use issuer::*;
 pub use economics::*;
+pub use oracle::*;
 
 use thiserror::Error;
 
