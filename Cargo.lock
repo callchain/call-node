@@ -1089,9 +1089,13 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
+ "call-agent",
+ "call-bridge",
+ "call-consensus",
  "call-crypto",
  "call-primitives",
  "call-serialization",
+ "call-shielded",
  "call-storage",
  "ed25519-dalek",
  "hex",

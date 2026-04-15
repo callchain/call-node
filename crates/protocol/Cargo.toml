@@ -25,3 +25,7 @@ thiserror.workspace = true
 [dev-dependencies]
 hex-literal = "0.4"
 hex = "0.4"
+call-bridge.workspace = true
+call-agent.workspace = true
+call-shielded.workspace = true
+call-consensus.workspace = true

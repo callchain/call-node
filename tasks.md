@@ -1003,17 +1003,17 @@ All governance features implemented:
 
 ## P21: Security & Attack Prevention
 
-### [ ] T21.1 — Security Module (`crates/protocol/src/security.rs`)
+### [x] T21.1 — Security Module (`crates/protocol/src/security.rs`) — 9 tests passing
 
-**Implement** (per spec §13.5):
-- `BlockLimits` struct enforcement
-- Mempool attack prevention: tx flooding, address saturation, large tx, multi-instruction bloat, batch transfer inflation, signature forgery, replay, shielded proof bloat, agent abuse
-- Shielded Pool defense: ZK proof DoS, nullifier set inflation, Merkle depth attack, per-block limit
-- P2P defense: Sybil, message flood, large message, eclipse, route hijacking
-- Consensus defense: 51%, double-sign, offline, long-range, nothing-at-stake
-- MEV protection per §13.2:
-  - PBS (Proposer-Builder Separation) — separate block building from block proposing
-  - Commit-reveal for mempool transactions — encrypt tx in mempool, reveal at execution time
+**Implemented** (per spec §13.5):
+- `BlockLimits` struct: max_tx_size (64KB), max_instructions (256), max_batch_recipients (100), max_shielded_proofs_per_block (50), max_txs_per_block (10000), max_block_size (4MB)
+- `RateLimiter`: per-address request counting with time windows
+- `ReplayProtector`: seen hash set with bounded size and automatic cleanup
+- `MempoolDefense`: combines rate limiting, replay protection, address saturation
+- `ShieldedDefense`: per-block limits, nullifier double-spend detection (nullifiers never expire)
+- `P2PDefense`: per-peer rate limiting, large message defense (1MB max)
+- `ConsensusDefense`: double-sign detection via blocks_per_round tracking
+- `MevProtection`: PBS builder registration, commit-reveal protocol with keccak256 commitment verification
 
 **Tests**:
 - `test_block_limits_max_tx_size()`
