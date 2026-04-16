@@ -1096,9 +1096,13 @@ All governance features implemented:
 
 ## P23: End-to-End (E2E) Tests
 
-### [ ] T23.1 — E2E Test Suite (`tests/e2e/`)
+### [x] T23.1 — E2E Test Suite (`tests/e2e/`)
 
-**Files**: `tests/e2e/mod.rs`, `tests/e2e/harness.rs`, `tests/e2e/test_full_node_lifecycle.rs`, `tests/e2e/test_consensus_block_production.rs`, `tests/e2e/test_multi_node_network.rs`, `tests/e2e/test_malicious_proposer.rs`, `tests/e2e/test_fork_upgrade.rs`, `tests/e2e/test_evm_compatibility.rs`, `tests/e2e/test_stress.rs`
+**Files**: `tests/e2e/mod.rs`, `tests/e2e/harness.rs`, `tests/test_full_node_lifecycle.rs`, `tests/test_consensus_block_production.rs`, `tests/test_multi_node_network.rs`, `tests/test_malicious_proposer.rs`, `tests/test_fork_upgrade.rs`, `tests/test_evm_compatibility.rs`, `tests/test_stress.rs`, `tests/test_shielded_e2e.rs`
+
+**New E2E test files added**:
+- `test_evm_compatibility.rs` — 12 tests: EVM/protocol isolation, nonce tracking, gas tracking, account creation, block persistence, multiple accounts, storage operations, code deployment
+- `test_stress.rs` — 9 tests: high throughput, mempool capacity (multi-sender), duplicate rejection, base fee under load, no double-spend, state consistency, multi-sender stress, high-volume block production, rapid block production
 
 **Test harness (`harness.rs`)** — inspired by Tempo's `tempo_e2e` deterministic runtime approach:
 - `TestNode` struct — encapsulates consensus + execution layer start/stop, with custom genesis injection
