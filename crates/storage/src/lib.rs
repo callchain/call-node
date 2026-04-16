@@ -6,7 +6,7 @@
 mod db;
 mod expiration;
 mod prune;
-mod reth_db;
+pub mod reth_db;
 mod tables;
 
 pub use db::*;

@@ -5,6 +5,9 @@
 //!
 //! Uses raw byte keys/values with serde_json serialization to avoid
 //! the complexity of reth-codecs trait implementations for every type.
+//!
+//! Generic CRUD helpers are provided here. Type-specific save/load functions
+//! live in the `call-node` crate to avoid cyclic dependencies.
 
 use std::path::Path;
 use std::sync::Arc;

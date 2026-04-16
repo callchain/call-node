@@ -45,3 +45,5 @@ dirs = "5"
 sysinfo = "0.33"
 fs2 = "0.4"
 hex.workspace = true
+alloy-primitives.workspace = true
+reth-db.workspace = true

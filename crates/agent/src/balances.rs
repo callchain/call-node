@@ -118,6 +118,11 @@ impl AgentBalances {
             .map(|(_, &balance)| balance)
             .sum()
     }
+
+    /// Get a reference to the underlying balances HashMap
+    pub fn balances_map(&self) -> &std::collections::HashMap<(Address, u64, AssetId), u128> {
+        &self.balances
+    }
 }
 
 /// Agent nonces: keyed by (owner, agent_id)

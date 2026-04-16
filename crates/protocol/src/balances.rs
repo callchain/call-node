@@ -129,6 +129,11 @@ impl ProtocolBalances {
     pub fn iter(&self) -> impl Iterator<Item = (&(AssetId, Address), &Balance)> {
         self.balances.iter()
     }
+
+    /// Get a reference to the underlying balances HashMap
+    pub fn balances_map(&self) -> &HashMap<(AssetId, Address), Balance> {
+        &self.balances
+    }
 }
 
 // ── Allowance operations ──────────────────────────────────────────────
@@ -177,6 +182,11 @@ impl Allowances {
         self.allowances
             .insert((asset_id, owner, spender), current - amount);
         Ok(())
+    }
+
+    /// Get a reference to the underlying allowances HashMap
+    pub fn allowances_map(&self) -> &HashMap<(AssetId, Address, Address), Balance> {
+        &self.allowances
     }
 }
 

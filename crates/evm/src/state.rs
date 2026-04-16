@@ -104,6 +104,11 @@ impl EvmState {
         &self.accounts
     }
 
+    /// Get all accounts, consuming self
+    pub fn into_accounts(self) -> std::collections::HashMap<Address, EvmAccount> {
+        self.accounts
+    }
+
     /// Sync EvmState into a revm InMemoryDB
     pub fn sync_to_revm_db(&self, db: &mut InMemoryDB) {
         for (addr, account) in &self.accounts {

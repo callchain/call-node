@@ -59,6 +59,11 @@ impl NullifierSet {
         self.spent.len()
     }
 
+    /// Get all spent nullifiers
+    pub fn spent_nullifiers(&self) -> &HashSet<Nullifier> {
+        &self.spent
+    }
+
     /// Check if the set is empty
     pub fn is_empty(&self) -> bool {
         self.spent.is_empty()

@@ -1347,6 +1347,7 @@ dependencies = [
 name = "call-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "axum",
  "call-agent",
  "call-bridge",
@@ -1370,6 +1371,7 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.27.1",
  "reqwest",
+ "reth-db",
  "serde",
  "serde_json",
  "sysinfo 0.33.1",
