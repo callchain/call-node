@@ -208,8 +208,26 @@ impl ShieldedState {
     /// Process a shielded transfer: verify proof, check nullifiers, update state
     pub fn process_transfer(&mut self, transfer: &ShieldedTransfer) -> Result<(), ShieldedError> {
         // 1. Verify ZK proof
-        if !verify_zk_proof(&transfer.proof) {
-            return Err(ShieldedError::InvalidZkProof);
+        #[cfg(feature = "real-prover")]
+        {
+            let circuit_type = if transfer.input_notes.is_empty() {
+                "deposit"
+            } else if transfer.output_notes.is_empty() {
+                "withdraw"
+            } else {
+                "transfer"
+            };
+            match verify_shielded_proof(&transfer.proof, circuit_type) {
+                Ok(true) => {}
+                Ok(false) => return Err(ShieldedError::InvalidZkProof),
+                Err(e) => return Err(ShieldedError::InvalidZkProofWithReason(e)),
+            }
+        }
+        #[cfg(not(feature = "real-prover"))]
+        {
+            if !verify_zk_proof(&transfer.proof) {
+                return Err(ShieldedError::InvalidZkProof);
+            }
         }
 
         // 2. Check nullifiers not already spent
@@ -383,6 +401,8 @@ pub fn verify_shielded_balance(
 pub enum ShieldedError {
     #[error("invalid ZK proof")]
     InvalidZkProof,
+    #[error("invalid ZK proof: {0}")]
+    InvalidZkProofWithReason(String),
     #[error("double spend detected: nullifier {0:?}")]
     DoubleSpend(Nullifier),
     #[error("shielded value conservation violated")]

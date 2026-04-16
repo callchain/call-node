@@ -2,6 +2,8 @@
 
 use crate::handlers::{RpcState, invalid_params, internal_error};
 use call_primitives::Address;
+use call_protocol::governance::{ProposalType, Vote as GovernanceVote};
+use call_protocol::oracle::OracleSubmission;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
 use std::sync::Arc;
@@ -519,6 +521,413 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 "noteCount": leaf_count,
                 "spentNullifiers": nullifier_count,
                 "merkleRoot": format!("{:?}", shielded.merkle_root()),
+            }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // ── Governance RPC Methods ──────────────────────────────────────
+
+    // call_governanceSubmitProposal
+    module
+        .register_async_method("call_governanceSubmitProposal", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let proposer_str = call_obj.get("proposer")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'proposer' field".into()))?;
+            let proposer = proposer_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            let type_str = call_obj.get("type")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'type' field".into()))?;
+            let title = call_obj.get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'title' field".into()))?
+                .to_string();
+            let description = call_obj.get("description")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'description' field".into()))?
+                .to_string();
+            let execution_data = call_obj.get("executionData")
+                .and_then(|v| v.as_str())
+                .map(|s| s.as_bytes().to_vec())
+                .unwrap_or_default();
+
+            let proposal_type = serde_json::from_value::<ProposalType>(call_obj["proposalType"].clone())
+                .map_err(|e| invalid_params(format!("invalid proposalType: {e}")))?;
+
+            let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            match gov.submit_proposal(proposer, proposal_type.clone(), title, description, execution_data) {
+                Ok(id) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "proposalId": id,
+                    "type": type_str,
+                    "status": "pending",
+                })),
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_governanceVote
+    module
+        .register_async_method("call_governanceVote", |params, state, _ctx| async move {
+            let (proposal_id, voter_str, vote_str): (u64, String, String) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let voter = voter_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let vote = match vote_str.to_lowercase().as_str() {
+                "yes" => GovernanceVote::Yes,
+                "no" => GovernanceVote::No,
+                "abstain" => GovernanceVote::Abstain,
+                _ => return Err(invalid_params("vote must be 'yes', 'no', or 'abstain'".into())),
+            };
+
+            let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            match gov.vote(proposal_id, voter, vote) {
+                Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "proposalId": proposal_id,
+                    "voter": voter_str,
+                    "vote": vote_str,
+                    "status": "recorded",
+                })),
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_governanceQueue
+    module
+        .register_async_method("call_governanceQueue", |params, state, _ctx| async move {
+            let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            match gov.queue_proposal(proposal_id) {
+                Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "proposalId": proposal_id,
+                    "status": "queued",
+                })),
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_governanceExecute
+    module
+        .register_async_method("call_governanceExecute", |params, state, _ctx| async move {
+            let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            match gov.execute_proposal(proposal_id) {
+                Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "proposalId": proposal_id,
+                    "status": "executed",
+                })),
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_governanceGetProposal
+    module
+        .register_async_method("call_governanceGetProposal", |params, state, _ctx| async move {
+            let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            match gov.get_proposal(proposal_id) {
+                Some(p) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "id": p.id,
+                    "proposer": format!("{:?}", p.proposer),
+                    "title": p.title,
+                    "description": p.description,
+                    "state": format!("{:?}", p.state),
+                    "votingPowerYes": p.voting_power_yes.to_string(),
+                    "votingPowerNo": p.voting_power_no.to_string(),
+                    "votingPowerAbstain": p.voting_power_abstain.to_string(),
+                    "quorumRequired": p.quorum_required.to_string(),
+                    "startBlock": p.start_block,
+                    "endBlock": p.end_block,
+                    "executionBlock": p.execution_block,
+                })),
+                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_governanceGetAllProposals
+    module
+        .register_async_method("call_governanceGetAllProposals", |_params, state, _ctx| async move {
+            let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let proposals: Vec<serde_json::Value> = gov.get_all_proposals().values()
+                .map(|p| serde_json::json!({
+                    "id": p.id,
+                    "proposer": format!("{:?}", p.proposer),
+                    "title": p.title,
+                    "state": format!("{:?}", p.state),
+                    "votingPowerYes": p.voting_power_yes.to_string(),
+                    "votingPowerNo": p.voting_power_no.to_string(),
+                }))
+                .collect();
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "proposals": proposals }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_governanceEmergencyPause
+    module
+        .register_async_method("call_governanceEmergencyPause", |params, state, _ctx| async move {
+            let (validator_id, reason): (u32, String) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            match gov.emergency_pause_initiate(validator_id, reason) {
+                Ok(activated) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "activated": activated,
+                    "isPaused": gov.is_paused(),
+                    "message": if activated { "chain paused" } else { "more signatures needed" },
+                })),
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_governanceIsPaused
+    module
+        .register_async_method("call_governanceIsPaused", |_params, state, _ctx| async move {
+            let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "isPaused": gov.is_paused() }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // ── Oracle RPC Methods ──────────────────────────────────────────
+
+    // call_oracleSubmitPrice
+    module
+        .register_async_method("call_oracleSubmitPrice", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let validator_id = call_obj.get("validatorId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'validatorId' field".into()))? as u32;
+            let asset_id = call_obj.get("assetId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
+            let price = call_obj.get("price")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'price' field".into()))? as u128;
+            let sig_hex = call_obj.get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            let mut signature = [0u8; 64];
+            signature.copy_from_slice(&sig_bytes);
+
+            let block_number = state.get_current_block();
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            let submission = OracleSubmission {
+                validator_id,
+                asset_id,
+                price,
+                block_number,
+                timestamp,
+                signature,
+            };
+
+            let mut oracle = state.oracle.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            match oracle.submit_price(submission) {
+                Ok(()) => {
+                    let agg = oracle.get_price(asset_id);
+                    Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                        "status": "accepted",
+                        "assetId": asset_id,
+                        "currentPrice": agg.map(|a| a.median_price.to_string()),
+                    }))
+                }
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_oracleGetPrice
+    module
+        .register_async_method("call_oracleGetPrice", |params, state, _ctx| async move {
+            let asset_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let oracle = state.oracle.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            match oracle.get_price(asset_id) {
+                Some(p) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "assetId": p.asset_id,
+                    "medianPrice": p.median_price.to_string(),
+                    "blockNumber": p.block_number,
+                    "timestamp": p.timestamp,
+                    "submissionCount": p.submission_count,
+                    "outlierCount": p.outlier_count,
+                    "isStale": oracle.is_stale(asset_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                })),
+                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_oracleGetTwap
+    module
+        .register_async_method("call_oracleGetTwap", |params, state, _ctx| async move {
+            let (asset_id,): (u64,) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let oracle = state.oracle.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match oracle.get_twap(asset_id, now) {
+                Some(twap) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "assetId": asset_id,
+                    "twap": twap.to_string(),
+                    "windowSecs": 86_400,
+                })),
+                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_oracleGetValidatorInfo
+    module
+        .register_async_method("call_oracleGetValidatorInfo", |params, state, _ctx| async move {
+            let validator_id: u32 = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let oracle = state.oracle.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            match oracle.get_validator_info(validator_id) {
+                Some(v) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "validatorId": v.validator_id,
+                    "isActive": v.is_active,
+                    "outlierCount": v.outlier_count,
+                    "lastSubmissionBlock": v.last_submission_block,
+                    "submissionCount": v.submission_count,
+                })),
+                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // ── External Bridge RPC Methods ─────────────────────────────────
+
+    // call_bridgeSubmitDeposit
+    module
+        .register_async_method("call_bridgeSubmitDeposit", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let source_tx_hash_hex = call_obj.get("sourceTxHash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sourceTxHash' field".into()))?;
+            let source_tx_hash = source_tx_hash_hex.parse::<alloy_primitives::B256>()
+                .map_err(|e| invalid_params(format!("invalid sourceTxHash: {e}")))?;
+
+            let source_chain_str = call_obj.get("sourceChain")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sourceChain' field".into()))?;
+            let source_chain = match source_chain_str.to_lowercase().as_str() {
+                "ethereum" | "ethereummainnet" => call_bridge::ExternalChain::EthereumMainnet,
+                "arbitrum" => call_bridge::ExternalChain::Arbitrum,
+                _ => return Err(invalid_params("unknown source chain".into())),
+            };
+
+            let source_block_number = call_obj.get("sourceBlockNumber")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'sourceBlockNumber' field".into()))?;
+
+            let sender_hex = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = hex::decode(sender_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid sender: {e}")))?;
+
+            let recipient_hex = call_obj.get("recipient")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'recipient' field".into()))?;
+            let recipient = recipient_hex.parse::<alloy_primitives::Address>()
+                .map_err(|e| invalid_params(format!("invalid recipient: {e}")))?;
+
+            let asset_id = call_obj.get("assetId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
+            let amount = call_obj.get("amount")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'amount' field".into()))? as u128;
+
+            // Parse signatures
+            let sigs_array = call_obj.get("signatures")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| invalid_params("missing 'signatures' field".into()))?;
+            let signatures: Vec<call_bridge::BridgeSignature> = sigs_array
+                .iter()
+                .filter_map(|entry| {
+                    let idx = entry.get(0)?.as_u64()? as u32;
+                    let sig_hex = entry.get(1)?.as_str()?;
+                    let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x")).ok()?;
+                    if sig_bytes.len() != 65 { return None; }
+                    let mut sig = [0u8; 65];
+                    sig.copy_from_slice(&sig_bytes);
+                    Some(call_bridge::BridgeSignature {
+                        validator_index: idx,
+                        signature: sig,
+                    })
+                })
+                .collect();
+
+            let op = call_bridge::ExternalBridgeOp::Deposit {
+                source_chain,
+                source_tx_hash,
+                source_block_number,
+                sender,
+                recipient,
+                asset_id,
+                amount,
+                signatures,
+            };
+
+            // Get validator addresses from consensus
+            let validators: Vec<Address> = state.validator_state.read()
+                .map_err(|_| internal_error("lock poisoned".into()))?
+                .get_all_validators()
+                .values()
+                .map(|s| s.address)
+                .collect();
+
+            let config = call_bridge::BridgeConfig::default();
+
+            // Verify signatures
+            let verify_result = call_bridge::verify_bridge_signatures(&op, &validators, config.min_validator_signatures);
+
+            if let Err(e) = verify_result {
+                return Err(invalid_params(e.to_string()));
+            }
+
+            // Process deposit
+            let mut balances = state.balance_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            let mut bridge_state = state.bridge_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
+
+            // Track processed txs in a local set (in production, this would be persisted)
+            let mut processed_txs = std::collections::HashSet::new();
+
+            match call_bridge::process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, &mut processed_txs) {
+                Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "status": "deposited",
+                    "sourceTxHash": source_tx_hash_hex,
+                    "assetId": asset_id,
+                    "amount": amount.to_string(),
+                    "recipient": format!("0x{}", hex::encode(recipient.as_slice())),
+                })),
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_bridgeGetDepositStatus
+    module
+        .register_async_method("call_bridgeGetDepositStatus", |params, state, _ctx| async move {
+            let source_tx_hash: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let bridge = state.bridge_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            // Return aggregate bridge stats (in production, track per-deposit status)
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "sourceTxHash": source_tx_hash,
+                "totalDeposits": bridge.total_deposits,
+                "totalWithdrawals": bridge.total_withdrawals,
+                "pendingOps": bridge.pending_ops.len(),
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;

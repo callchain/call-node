@@ -1,6 +1,8 @@
 //! Core handler trait and RPC state management.
 
 use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams};
+use call_protocol::governance::GovernanceManager;
+use call_protocol::oracle::{OracleManager, OracleConfig};
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
 use call_consensus::ValidatorStateManager;
@@ -33,6 +35,8 @@ pub struct RpcState {
     pub mempool: Arc<RwLock<Mempool>>,
     pub chain_id: u64,
     pub subscriptions: SubscriptionManager,
+    pub governance: RwLock<GovernanceManager>,
+    pub oracle: RwLock<OracleManager>,
 }
 
 impl RpcState {
@@ -66,6 +70,8 @@ impl RpcState {
             mempool,
             chain_id,
             subscriptions: SubscriptionManager::new(),
+            governance: RwLock::new(GovernanceManager::new()),
+            oracle: RwLock::new(OracleManager::new(OracleConfig::default())),
         }
     }
 
