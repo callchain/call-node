@@ -20,7 +20,7 @@ use call_protocol::{
     transaction::ProtocolTransaction,
 };
 use call_rpc::{RpcState, RpcConfig, build_rpc_module};
-use call_storage::{CallDb, open_db};
+use call_storage::{CallDb, open_db, PruneState};
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
 use call_bridge::BridgeStateManager;
@@ -45,6 +45,7 @@ pub struct CallNode {
     pub consensus: Arc<RwLock<SimplexConsensus>>,
     pub network: Option<Arc<dyn Network>>,
     pub db: CallDb,
+    pub prune_state: PruneState,
     pub server_handle: Option<ServerHandle>,
     pub parent_hash: BlockHash,
 }
@@ -54,6 +55,10 @@ impl CallNode {
     pub fn new(data_dir: PathBuf) -> Result<Self, String> {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
         let db = open_db(data_dir).map_err(|e| e.to_string())?;
+
+        // Restore prune state from disk if previously persisted
+        let prune_state = db.load_prune_state()
+            .map_err(|e| format!("failed to load prune state: {e}"))?;
 
         let consensus = SimplexConsensus::new(
             ConsensusParams::default(),
@@ -80,6 +85,7 @@ impl CallNode {
             consensus: Arc::new(RwLock::new(consensus)),
             network: None,
             db,
+            prune_state,
             server_handle: None,
             parent_hash: BlockHash::ZERO,
         })
@@ -130,7 +136,8 @@ impl CallNode {
         let consensus = Arc::clone(&self.consensus);
         let network = self.network.clone();
         let parent_hash = self.parent_hash;
-        let db_dir = self.db.data_dir.clone();
+        let db = self.db.clone();
+        let prune_state = self.prune_state.clone();
 
         tokio::spawn(block_production_loop(
             state,
@@ -138,7 +145,8 @@ impl CallNode {
             consensus,
             network,
             parent_hash,
-            db_dir,
+            db,
+            prune_state,
         ))
     }
 
@@ -173,9 +181,11 @@ async fn block_production_loop(
     consensus: Arc<RwLock<SimplexConsensus>>,
     network: Option<Arc<dyn Network>>,
     initial_parent_hash: BlockHash,
-    db_dir: PathBuf,
+    db: CallDb,
+    mut prune_state: PruneState,
 ) {
     let mut parent_hash = initial_parent_hash;
+    let prune_config = call_storage::PruneConfig::default();
 
     let mut interval = tokio::time::interval(Duration::from_millis(
         consensus.read().ok().map(|c| c.params().block_time_millis).unwrap_or(250),
@@ -265,13 +275,32 @@ async fn block_production_loop(
         state.finalize_block();
 
         // 6. Persist block to disk
-        if let Err(e) = persist_block(&db_dir, height, &block) {
-            tracing::warn!(error = e, "failed to persist block");
+        if let Err(ref e) = persist_block(&db.data_dir, height, &block) {
+            tracing::warn!(error = %e, "failed to persist block");
+        }
+
+        // 7. Update prune tracking state
+        prune_state.add_block_body(height, call_storage::BlockBody {
+            block_hash: parent_hash,
+            tx_count: result.total_tx_count() as u32,
+            body_size: 0, // would be actual serialized size in production
+        });
+
+        // 8. Run periodic prune checks
+        if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config) {
+            tracing::warn!(error = %e, "prune check failed");
+        }
+
+        // 9. Persist prune state to disk periodically (every 100 blocks)
+        if new_height % 100 == 0 {
+            if let Err(ref e) = db.save_prune_state(&prune_state) {
+                tracing::warn!(error = %e, "failed to persist prune state");
+            }
         }
 
         tracing::info!(height = new_height, tx_count = result.total_tx_count(), "committed block");
 
-        // 7. Broadcast block announcement via P2P
+        // 10. Broadcast block announcement via P2P
         if let Some(ref net) = network {
             let announcement = BlockAnnouncement {
                 block_hash: parent_hash,

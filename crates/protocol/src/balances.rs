@@ -7,19 +7,19 @@ use crate::{ProtocolError, ProtocolResult};
 use std::collections::HashMap;
 
 /// Protocol balances: asset_id → address → balance
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProtocolBalances {
     balances: HashMap<(AssetId, Address), Balance>,
 }
 
 /// Allowances: (asset_id, owner, spender) → amount
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Allowances {
     allowances: HashMap<(AssetId, Address, Address), Balance>,
 }
 
 /// Combined protocol balance state
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BalanceState {
     pub balances: ProtocolBalances,
     pub allowances: Allowances,

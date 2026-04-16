@@ -44,7 +44,7 @@ use thiserror::Error;
 use std::collections::HashMap;
 
 /// Note commitment wrapper
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NoteCommitment(pub Hash);
 
 impl NoteCommitment {
@@ -64,7 +64,7 @@ impl AsRef<[u8]> for NoteCommitment {
 }
 
 /// Nullifier for spent notes
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Nullifier(pub Hash);
 
 impl Nullifier {
@@ -129,7 +129,7 @@ impl ViewingKey {
 }
 
 /// ZK proof data with public inputs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ZkProof {
     pub proof_data: Vec<u8>,
     pub nullifiers: Vec<Nullifier>,
@@ -148,7 +148,7 @@ impl ZkProof {
 }
 
 /// Shielded transaction input/output pair
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShieldedTransfer {
     pub input_notes: Vec<Note>,
     pub output_notes: Vec<Note>,
@@ -175,11 +175,25 @@ impl ShieldedTransfer {
 }
 
 /// Shielded pool state
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ShieldedState {
+    #[serde(serialize_with = "serialize_merkle", deserialize_with = "deserialize_merkle")]
     pub merkle_tree: IncrementalMerkleTree,
     pub nullifier_set: NullifierSet,
     pub note_registry: HashMap<NoteCommitment, Note>,
+}
+
+fn serialize_merkle<S>(_: &IncrementalMerkleTree, serializer: S) -> Result<S::Ok, S::Error>
+where S: serde::Serializer {
+    // Serialize as empty vec since tree can be rebuilt from note_registry
+    serializer.serialize_bytes(&[])
+}
+
+fn deserialize_merkle<'de, D>(deserializer: D) -> Result<IncrementalMerkleTree, D::Error>
+where D: serde::Deserializer<'de> {
+    // Rebuild tree from empty data — caller should rebuild from notes
+    let _: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(IncrementalMerkleTree::new(32))
 }
 
 impl ShieldedState {
@@ -386,7 +400,7 @@ pub enum ShieldedError {
 }
 
 /// Per-block shielded transaction tracker
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShieldedBlockTracker {
     pub count: u32,
     pub pending: Vec<ShieldedTransfer>,

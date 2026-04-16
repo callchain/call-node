@@ -42,7 +42,7 @@ pub struct ValidatorStake {
 }
 
 /// Pending unbonding request
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnbondingRequest {
     pub validator_id: ValidatorId,
     pub amount: u128,

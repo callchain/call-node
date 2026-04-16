@@ -120,7 +120,7 @@ mod serde_bytes {
 /// Archive nodes skip all pruning. Full/Validator/Light nodes track
 /// execution traces, receipts, block bodies, and snapshots by height,
 /// removing entries that fall beyond their respective retention windows.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PruneState {
     /// Execution traces keyed by block height
     execution_traces: BTreeMap<u64, Vec<ExecutionTrace>>,

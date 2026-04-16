@@ -88,6 +88,8 @@ commonware-utils = "2026.4.0"
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
+reth-codecs = "0.1.0"
+reth-codecs-derive = "0.1.0"
 reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-db-api = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-engine-local = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }

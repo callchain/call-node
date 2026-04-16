@@ -9,7 +9,7 @@ use call_crypto::keccak256;
 /// Incremental Merkle Tree (fixed depth, append-only)
 ///
 /// Stores all tree nodes explicitly for efficient proof generation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IncrementalMerkleTree {
     depth: usize,
     count: usize,

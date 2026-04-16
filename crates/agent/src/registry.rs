@@ -4,11 +4,12 @@ use call_primitives::{Address, PublicKey};
 use crate::{AgentError, DomainProof};
 
 /// Agent registration record (per spec §6.2)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentRegistration {
     pub agent_id: u64,
     pub owner: Address,
-    pub agent_public_key: PublicKey,
+    #[serde(with = "serde_bytes")]
+    pub agent_public_key: call_primitives::PublicKey,
     pub name: String,
     pub url: String,
     pub metadata_hash: [u8; 32],
@@ -18,7 +19,7 @@ pub struct AgentRegistration {
 }
 
 /// Agent registry
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct AgentRegistry {
     pub agents: std::collections::HashMap<u64, AgentRegistration>,
     pub agents_by_owner: std::collections::HashMap<Address, Vec<u64>>,

@@ -6,11 +6,13 @@
 mod db;
 mod expiration;
 mod prune;
+mod reth_db;
 mod tables;
 
 pub use db::*;
 pub use expiration::*;
 pub use prune::*;
+pub use reth_db::*;
 pub use tables::*;
 
 use thiserror::Error;

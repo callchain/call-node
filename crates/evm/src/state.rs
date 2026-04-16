@@ -10,7 +10,7 @@ use revm::{
 use std::collections::HashMap;
 
 /// EVM account info
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EvmAccount {
     pub nonce: u64,
     pub balance: U256,
@@ -30,7 +30,7 @@ impl Default for EvmAccount {
 }
 
 /// EVM state database
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct EvmState {
     accounts: HashMap<Address, EvmAccount>,
 }
