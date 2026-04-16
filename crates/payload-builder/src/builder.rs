@@ -592,9 +592,7 @@ mod tests {
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
 
-        // Provide a non-zero evm_state_root that won't match
-        // Since EVM execution is placeholder (returns ZERO), this should pass
-        // (we only check if both are non-zero and different)
+        // Provide a non-zero evm_state_root that won't match the computed root
         let result = builder.build(
             &attrs,
             protocol_txs,

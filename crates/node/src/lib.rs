@@ -317,7 +317,9 @@ fn handle_network_message(
             if let Ok(tx_msg) = serde_json::from_slice::<TransactionMessage>(data) {
                 if tx_msg.verify_checksum() {
                     if let Ok(mut pool) = mempool.write() {
-                        let _ = pool.insert_evm_tx(tx_msg.hash, Default::default(), 0, 0, tx_msg.data);
+                        if let Ok(evm_tx) = serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data) {
+                            let _ = pool.insert_evm_tx(evm_tx);
+                        }
                     }
                 }
             }

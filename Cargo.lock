@@ -1339,6 +1339,8 @@ version = "0.1.0"
 dependencies = [
  "call-bridge",
  "call-consensus",
+ "call-crypto",
+ "call-evm",
  "call-network",
  "call-primitives",
  "call-protocol",

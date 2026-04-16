@@ -5,6 +5,8 @@
 use call_primitives::{Address, TxHash};
 use call_protocol::transaction::ProtocolTransaction;
 use call_bridge::BridgeOp;
+use call_crypto::keccak256;
+use call_evm::EvmTransaction;
 use std::collections::{HashSet, VecDeque};
 
 use crate::priority::{
@@ -125,7 +127,7 @@ impl Mempool {
         &mut self,
         tx: ProtocolTransaction,
     ) -> Result<TxHash, MempoolError> {
-        // Compute tx hash (placeholder — real hash computation uses RLP)
+        // Compute tx hash via JSON serialization + keccak256
         let hash = self.compute_protocol_tx_hash(&tx);
 
         // Deduplication check
@@ -193,35 +195,34 @@ impl Mempool {
         Ok(hash)
     }
 
-    // ── EVM Transactions (placeholder) ─────────────────────────────
+    // ── EVM Transactions ─────────────────────────────────────────────
 
     /// Insert an EVM transaction into the mempool
     pub fn insert_evm_tx(
         &mut self,
-        hash: TxHash,
-        sender: Address,
-        nonce: u64,
-        gas_price: u128,
-        data: Vec<u8>,
-    ) -> Result<(), MempoolError> {
+        tx: EvmTransaction,
+    ) -> Result<TxHash, MempoolError> {
+        let data = serde_json::to_vec(&tx).map_err(|e| MempoolError::Generic(e.to_string()))?;
+        let hash = keccak256(&data);
+
         // Deduplication check
         if self.known_txs.contains(&hash) {
             return Err(MempoolError::Duplicate(hash));
         }
 
         // Validate gas price
-        if gas_price < self.config.min_gas_price {
+        if tx.gas_price < self.config.min_gas_price {
             return Err(MempoolError::FeeTooLow {
-                fee: gas_price,
+                fee: tx.gas_price,
                 min: self.config.min_gas_price,
             });
         }
 
         // Check per-address limit
-        let addr_count = self.evm_pool.count_per_address(&sender);
+        let addr_count = self.evm_pool.count_per_address(&tx.caller);
         if addr_count >= self.limits.max_per_address {
             return Err(MempoolError::AddressLimitReached {
-                address: sender,
+                address: tx.caller,
                 count: addr_count,
                 max: self.limits.max_per_address,
             });
@@ -238,9 +239,9 @@ impl Mempool {
 
         let entry = MempoolEntry::new(
             hash,
-            gas_price,
-            sender,
-            nonce,
+            tx.gas_price,
+            tx.caller,
+            tx.nonce,
             PoolKind::Evm,
             data,
             self.current_block,
@@ -249,7 +250,7 @@ impl Mempool {
         self.evm_pool.insert(entry);
         self.known_txs.insert(hash);
 
-        Ok(())
+        Ok(hash)
     }
 
     // ── Bridge Operations ──────────────────────────────────────────
@@ -355,11 +356,8 @@ impl Mempool {
     // ── Placeholder Hash Computation ───────────────────────────────
 
     fn compute_protocol_tx_hash(&self, tx: &ProtocolTransaction) -> TxHash {
-        // Simple hash from sender + nonce for uniqueness
-        let mut data = [0u8; 32];
-        data[..20].copy_from_slice(tx.sender.as_slice());
-        data[24..].copy_from_slice(&tx.nonce.to_le_bytes());
-        TxHash::from_slice(&data)
+        let data = serde_json::to_vec(tx).unwrap_or_default();
+        keccak256(&data)
     }
 }
 
@@ -390,6 +388,8 @@ mod tests {
     use call_primitives::Address;
     use call_protocol::instructions::Instruction;
     use call_protocol::transaction::{AuthScheme, GasConfig};
+    use call_evm::EvmTransaction;
+    use call_primitives::U256;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -412,6 +412,19 @@ mod tests {
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
             },
+        }
+    }
+
+    fn make_evm_tx(nonce: u64, gas_price: u128) -> EvmTransaction {
+        EvmTransaction {
+            caller: test_addr(1),
+            nonce,
+            gas_limit: 21_000,
+            gas_price,
+            to: Some(test_addr(2)),
+            value: U256::from(100),
+            data: call_evm::Bytes::default(),
+            chain_id: 1,
         }
     }
 
@@ -547,33 +560,9 @@ mod tests {
     fn test_mempool_evm_tx_priority() {
         let mut mempool = Mempool::new();
 
-        mempool
-            .insert_evm_tx(
-                TxHash::repeat_byte(1),
-                test_addr(1),
-                0,
-                100,
-                vec![1],
-            )
-            .unwrap();
-        mempool
-            .insert_evm_tx(
-                TxHash::repeat_byte(2),
-                test_addr(2),
-                0,
-                200,
-                vec![2],
-            )
-            .unwrap();
-        mempool
-            .insert_evm_tx(
-                TxHash::repeat_byte(3),
-                test_addr(3),
-                0,
-                150,
-                vec![3],
-            )
-            .unwrap();
+        mempool.insert_evm_tx(make_evm_tx(0, 100)).unwrap();
+        mempool.insert_evm_tx(make_evm_tx(1, 200)).unwrap();
+        mempool.insert_evm_tx(make_evm_tx(2, 150)).unwrap();
 
         assert_eq!(mempool.evm_pool.len(), 3);
 
@@ -637,15 +626,7 @@ mod tests {
 
         let tx = make_test_tx(0, 1_000_000);
         mempool.insert_protocol_tx(tx).unwrap();
-        mempool
-            .insert_evm_tx(
-                TxHash::repeat_byte(2),
-                test_addr(2),
-                0,
-                100,
-                vec![2],
-            )
-            .unwrap();
+        mempool.insert_evm_tx(make_evm_tx(0, 100)).unwrap();
 
         let stats = mempool.pool_stats();
         assert_eq!(stats.protocol_count, 1);
