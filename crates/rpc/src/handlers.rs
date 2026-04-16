@@ -410,6 +410,15 @@ impl RpcState {
         };
         self.store_receipt(tx_hash, receipt);
 
+        // Broadcast EVM transaction to WebSocket subscribers
+        self.subscriptions.broadcast_payment(
+            format!("0x{}", hex::encode(tx_hash)),
+            format!("0x{}", hex::encode(caller.as_slice())),
+            to_addr.map(|a| format!("0x{}", hex::encode(a.as_slice()))).unwrap_or_else(|| "contract_creation".into()),
+            0,
+            value.try_into().unwrap_or(0),
+        );
+
         Ok(tx_hash)
     }
 
@@ -520,6 +529,16 @@ impl RpcState {
                 };
                 drop(balances);
                 self.store_receipt(tx_hash, receipt);
+
+                // Broadcast payment to WebSocket subscribers
+                self.subscriptions.broadcast_payment(
+                    format!("0x{}", hex::encode(tx_hash)),
+                    format!("0x{}", hex::encode(sender.as_slice())),
+                    format!("0x{}", hex::encode(to.as_slice())),
+                    asset_id,
+                    amount,
+                );
+
                 Ok(tx_hash)
             }
             Err(e) => {

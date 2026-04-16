@@ -11,8 +11,10 @@ pub mod light_client;
 pub mod logging;
 pub mod wallet;
 
+use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
+    BlockSignature,
 };
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse};
 use call_primitives::BlockHash;
@@ -261,6 +263,22 @@ impl CallNode {
                                 "sync: received blocks from peer"
                             );
 
+                            // Build light client from current validator set for verification
+                            let validator_state = state.validator_state.read().unwrap();
+                            let validators = validator_state.get_all_validators();
+                            let total_validators = validators.len() as u32;
+                            let mut trusted_validators = std::collections::HashMap::new();
+                            for (id, stake) in validators.iter() {
+                                trusted_validators.insert(*id, stake.ed25519_pubkey);
+                            }
+                            drop(validator_state);
+
+                            let mut light_client = LightClient::new(
+                                state.chain_id,
+                                trusted_validators,
+                                total_validators,
+                            );
+
                             // Apply received blocks
                             let mut count = 0;
                             let mut current_parent = if response.start_height == 0 {
@@ -275,6 +293,22 @@ impl CallNode {
                             for block_data in &response.blocks {
                                 if let Ok(mut block) = serde_json::from_slice::<Block>(block_data) {
                                     let height = block.header.height;
+
+                                    // Light client verification: verify header + signatures
+                                    let sig = &block.header.signature;
+                                    let signatures = BlockSignatures {
+                                        block_hash: block.header.hash(),
+                                        signatures: vec![(
+                                            block.header.proposer,
+                                            PubKeyBytes([0u8; 32]), // pubkey not in signature, verified via consensus
+                                            SigBytes(sig.0),
+                                        )],
+                                    };
+
+                                    if let Err(e) = light_client.verify_header(&block.header, &signatures) {
+                                        tracing::warn!(height, error = %e, "sync: block header verification failed, skipping");
+                                        continue;
+                                    }
 
                                     // Execute and apply the block
                                     let execute_result = {
@@ -300,6 +334,9 @@ impl CallNode {
                                         if let Ok(mut c) = consensus.write() {
                                             let _ = c.commit_block(&block, &result);
                                         }
+
+                                        // Register verified header for incremental sync
+                                        let _ = light_client.sync_incremental(&block.header, &signatures);
 
                                         state.set_current_block(height + 1);
                                         current_parent = block.header.hash();
