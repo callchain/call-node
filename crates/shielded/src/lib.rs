@@ -302,6 +302,18 @@ impl ShieldedState {
         }
     }
 
+    /// Deserialize ShieldedState from any serde deserializer and rebuild the
+    /// Merkle tree from note_registry. Use this instead of direct deserialization
+    /// to ensure the merkle tree is properly reconstructed.
+    pub fn deserialize_and_rebuild<'de, D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut state: Self = serde::Deserialize::deserialize(deserializer)?;
+        state.rebuild_merkle_tree();
+        Ok(state)
+    }
+
     /// Get current Merkle root
     pub fn merkle_root(&self) -> Hash {
         self.merkle_tree.root()
@@ -565,6 +577,29 @@ mod tests {
         };
         state.process_transfer(&transfer).unwrap();
         assert_eq!(state.merkle_tree.leaf_count(), 1);
+    }
+
+    #[test]
+    fn test_shielded_state_rebuild_merkle_tree() {
+        // Simulate post-deserialization state: note_registry populated, merkle_tree empty
+        let note = test_note(1000, 1, 1);
+        let cm = note.commitment();
+
+        // Build expected state with a properly populated tree
+        let mut expected = ShieldedState::new();
+        expected.note_registry.insert(cm.clone(), note.clone());
+        expected.merkle_tree.insert(cm.0);
+        let expected_root = expected.merkle_root();
+
+        // Simulate deserialized state: note_registry kept, tree reset
+        let mut state = ShieldedState::new();
+        state.note_registry.insert(cm.clone(), note.clone());
+        assert_eq!(state.merkle_tree.leaf_count(), 0); // empty after deserialization
+
+        // Rebuild repopulates the tree from note_registry
+        state.rebuild_merkle_tree();
+        assert_eq!(state.merkle_tree.leaf_count(), 1);
+        assert_eq!(state.merkle_root(), expected_root);
     }
 
     #[test]
