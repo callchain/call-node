@@ -158,6 +158,14 @@ mod real_prover_impl {
     }
 
     impl RealProver {
+        /// Global singleton RealProver instance.
+        /// Lazily initializes via trusted setup on first access.
+        pub fn global() -> &'static Self {
+            use std::sync::OnceLock;
+            static INSTANCE: OnceLock<RealProver> = OnceLock::new();
+            INSTANCE.get_or_init(|| Self::setup())
+        }
+
         /// Run circuit-specific trusted setup for all three circuit types.
         ///
         /// Uses a seeded RNG (dev mode) so that setup is reproducible within

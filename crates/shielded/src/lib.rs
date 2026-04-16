@@ -277,6 +277,57 @@ impl Default for ShieldedState {
     }
 }
 
+/// Verify a ZK proof against the RealProver when the `real-prover` feature is enabled.
+///
+/// When `real-prover` is NOT enabled, this performs only structural validation
+/// (same as `verify_zk_proof`). When enabled, it runs actual Groth16 verification
+/// against the verifying keys.
+///
+/// Returns `Result<bool>` so callers can distinguish between structural rejection
+/// (false) and prover errors (Err).
+#[cfg(not(feature = "real-prover"))]
+pub fn verify_shielded_proof(
+    proof: &ZkProof,
+    _circuit_type: &str, // "deposit", "withdraw", "transfer"
+) -> Result<bool, String> {
+    // Without real-prover feature, fall back to structural validation
+    Ok(verify_zk_proof(proof))
+}
+
+#[cfg(feature = "real-prover")]
+pub fn verify_shielded_proof(
+    proof: &ZkProof,
+    circuit_type: &str,
+) -> Result<bool, String> {
+    use crate::prover::{RealProver, ProverError};
+
+    // First do structural validation
+    if !verify_zk_proof(proof) {
+        return Ok(false);
+    }
+
+    // Collect public inputs: nullifiers + commitments as raw bytes
+    let mut public_inputs = Vec::new();
+    for nf in &proof.nullifiers {
+        public_inputs.extend_from_slice(nf.0.as_slice());
+    }
+    for cm in &proof.commitments {
+        public_inputs.extend_from_slice(cm.0.as_slice());
+    }
+
+    // Use a singleton RealProver (setup is expensive — trusted setup)
+    let prover = RealProver::global();
+
+    let result: Result<bool, ProverError> = match circuit_type {
+        "deposit" => prover.verify_deposit(&proof.proof_data, &public_inputs),
+        "withdraw" => prover.verify_withdraw(&proof.proof_data, &public_inputs),
+        "transfer" => prover.verify_transfer(&proof.proof_data, &public_inputs),
+        other => return Err(format!("unknown circuit type: {other}")),
+    };
+
+    result.map_err(|e| e.to_string())
+}
+
 /// Verify a ZK proof's public inputs against current state
 pub fn verify_zk_proof(proof: &ZkProof) -> bool {
     // Structural validation of ZK proof:

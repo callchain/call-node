@@ -298,6 +298,24 @@ pub fn execute_instruction(
                 commitments: commitments.iter().map(|h| NoteCommitment::new(*h)).collect(),
                 asset_id: *asset_id,
             };
+            // Verify ZK proof (structural + real Groth16 when real-prover feature is enabled)
+            if !call_shielded::verify_zk_proof(&zk_proof) {
+                return Err(ProtocolError::InvalidInstruction(
+                    "shielded transfer: invalid ZK proof structure".into(),
+                ));
+            }
+            #[cfg(feature = "real-prover")]
+            {
+                let valid = call_shielded::verify_shielded_proof(&zk_proof, "transfer")
+                    .map_err(|e| ProtocolError::InvalidInstruction(format!(
+                        "shielded transfer: proof verification error: {e}"
+                    )))?;
+                if !valid {
+                    return Err(ProtocolError::InvalidInstruction(
+                        "shielded transfer: ZK proof verification failed".into(),
+                    ));
+                }
+            }
             // Decrypt output notes from encrypted_notes field
             let output_notes: Vec<Note> = encrypted_notes
                 .iter()
@@ -321,10 +339,24 @@ pub fn execute_instruction(
                 commitments: vec![],
                 asset_id: *asset_id,
             };
+            // Structural validation
             if !call_shielded::verify_zk_proof(&zk_proof) {
                 return Err(ProtocolError::InvalidInstruction(
                     "shielded withdraw: invalid ZK proof".into(),
                 ));
+            }
+            // Real Groth16 verification when real-prover feature is enabled
+            #[cfg(feature = "real-prover")]
+            {
+                let valid = call_shielded::verify_shielded_proof(&zk_proof, "withdraw")
+                    .map_err(|e| ProtocolError::InvalidInstruction(format!(
+                        "shielded withdraw: proof verification error: {e}"
+                    )))?;
+                if !valid {
+                    return Err(ProtocolError::InvalidInstruction(
+                        "shielded withdraw: ZK proof verification failed".into(),
+                    ));
+                }
             }
             shielded_state.process_withdraw(Nullifier::new(*nullifier)).map_err(|e| {
                 ProtocolError::InvalidInstruction(format!("shielded withdraw: {e}"))
