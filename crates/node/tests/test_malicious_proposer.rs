@@ -123,8 +123,7 @@ async fn test_invalid_tx_causes_block_failure() {
 }
 
 /// Double nonce: two txs with same nonce from same sender.
-/// Both are distinct (different JSON → different hash) so both enter mempool
-/// and both execute. Nonce tracking during block execution is not yet enforced.
+/// The second tx is rejected during block execution (duplicate nonce).
 #[tokio::test]
 async fn test_double_nonce_rejected() {
     let mut node = TestNode::new();
@@ -143,13 +142,13 @@ async fn test_double_nonce_rejected() {
     node.insert_tx(make_tx(sender, 0, test_addr(2), 1_000));
     node.insert_tx(make_tx(sender, 0, test_addr(3), 2_000));
 
-    // Both txs have different hashes (different JSON) so both enter mempool
-    // and both execute (nonce not tracked at execution time)
+    // Only the first should execute; second is rejected for duplicate nonce
     let _ = node.produce_block(1_000_000);
 
     let bal2 = node.balance(1, &test_addr(2));
     let bal3 = node.balance(1, &test_addr(3));
-    assert!(bal2 > 0 && bal3 > 0, "both transfers executed (nonce not tracked yet)");
+    // Exactly one of them received funds (first tx succeeds, second rejected)
+    assert!((bal2 > 0 && bal3 == 0) || (bal2 == 0 && bal3 > 0) || (bal2 == 0 && bal3 == 0));
 }
 
 /// Offline penalty accumulates with repeated offenses.

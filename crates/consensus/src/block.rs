@@ -231,6 +231,9 @@ impl Block {
         let executor = EvmExecutor::new(1); // chain_id = 1
         let max_evm_gas = 30_000_000u64; // default block gas limit (~30M for Ethereum-compatible)
         let mut gas_tracker = BlockGasTracker::new(max_evm_gas);
+        // Track nonces separately: EVM and protocol operate on separate namespaces
+        let mut used_evm_nonces: HashSet<(call_primitives::Address, u64)> = HashSet::new();
+        let mut used_protocol_nonces: HashSet<(call_primitives::Address, u64)> = HashSet::new();
 
         // Step 1: EVM transactions
         for raw_tx in &self.evm_txs {
@@ -240,27 +243,34 @@ impl Block {
                     // Skip invalid txs — they don't consume gas
                     continue;
                 }
+                // Check for duplicate nonce within this block
+                let caller = tx.caller;
+                let nonce = tx.nonce;
+                if !used_evm_nonces.insert((caller, nonce)) {
+                    continue; // duplicate nonce in same block
+                }
                 if let Ok(exec_result) = executor.execute_tx(tx, evm_state) {
                     if let Err(_) = gas_tracker.add_gas(exec_result.gas_used) {
-                        // Gas limit exceeded — skip this tx
+                        // Gas limit exceeded — skip this tx, release nonce
+                        used_evm_nonces.remove(&(caller, nonce));
                         continue;
                     }
                     result.evm_tx_count += 1;
                     result.evm_gas_used += exec_result.gas_used;
+                } else {
+                    // Execution failed — release nonce so it can be retried
+                    used_evm_nonces.remove(&(caller, nonce));
                 }
-            } else {
-                // Could not decode raw bytes — count with placeholder gas
-                let placeholder_gas = raw_tx.len() as u64 * 10;
-                if gas_tracker.add_gas(placeholder_gas).is_err() {
-                    continue;
-                }
-                result.evm_tx_count += 1;
-                result.evm_gas_used += placeholder_gas;
             }
         }
 
         // Step 2: Protocol transactions
         for tx in &self.protocol_txs {
+            // Reject duplicate nonce within the same block
+            if !used_protocol_nonces.insert((tx.sender, tx.nonce)) {
+                continue; // duplicate nonce
+            }
+
             let tx_results = execute_protocol_instructions(
                 &tx.instructions,
                 balances,
@@ -447,6 +457,19 @@ mod tests {
         Address::repeat_byte(n)
     }
 
+    fn make_test_evm_tx() -> EvmTransaction {
+        EvmTransaction {
+            caller: test_addr(1),
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 1_000_000_000,
+            to: Some(test_addr(2)),
+            value: call_primitives::U256::from(100),
+            data: call_evm::Bytes::default(),
+            chain_id: 1,
+        }
+    }
+
     fn make_test_tx() -> ProtocolTransaction {
         ProtocolTransaction {
             sender: test_addr(1),
@@ -568,13 +591,15 @@ mod tests {
 
     #[test]
     fn test_block_execution_order() {
+        let evm_tx = make_test_evm_tx();
+        let evm_bytes = serde_json::to_vec(&evm_tx).unwrap();
         let mut block = Block::new(
             1,
             BlockHash::ZERO,
             1000,
             1,
             vec![make_test_tx()],
-            vec![vec![0u8; 50]],
+            vec![evm_bytes],
             vec![SystemTx {
                 kind: SystemTxKind::ValidatorReward {
                     proposer: 1,
@@ -602,6 +627,7 @@ mod tests {
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
         let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
         let result = block
             .execute(
