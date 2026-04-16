@@ -1,82 +1,82 @@
 # Callchain Specification
 
-## 版本信息
+## Version Information
 
-| 项目 | 值 |
+| Item | Value |
 |------|------|
-| 版本 | 0.1.0-draft |
-| 日期 | 2026-04-13 |
-| 状态 | 草稿 |
-| 语言 | Rust |
+| Version | 0.1.0-draft |
+| Date | 2026-04-13 |
+| Status | Draft |
+| Language | Rust |
 
 ---
 
-## 1. 概述
+## 1. Overview
 
-Callchain 是一个高性能 Layer-1 区块链，采用**双执行域架构**：协议支付层（Protocol Payment Layer）和智能合约层（EVM Contract Layer），通过统一的内部桥接机制实现资产在两层之间的无缝流转。
+Callchain is a high-performance Layer-1 blockchain featuring a **dual execution domain architecture**: a Protocol Payment Layer and an EVM Contract Layer, with seamless asset flow between the two layers through a unified internal bridge mechanism.
 
-### 1.1 设计原则
+### 1.1 Design Principles
 
-- **资产一等公民**：稳定币等资产在协议层拥有原生余额映射，享受确定性执行和固定费用
-- **开放发行**：任何人都能在链上注册资产，无需许可
-- **EVM 兼容**：智能合约层完全兼容以太坊，现有 DeFi 生态可无缝迁移
-- **双域隔离**：协议层和 EVM 层各自独立，通过内部桥接转换，互不干扰
-- **合规框架**：协议级合规策略引擎，发行方自主选择策略
+- **Assets as First-Class Citizens**: Assets such as stablecoins have native balance mappings at the protocol layer, enjoying deterministic execution and fixed fees
+- **Open Issuance**: Anyone can register assets on-chain without permission
+- **EVM Compatibility**: The smart contract layer is fully Ethereum-compatible, allowing existing DeFi ecosystems to migrate seamlessly
+- **Dual-Domain Isolation**: The protocol layer and EVM layer operate independently, converting through an internal bridge without interfering with each other
+- **Compliance Framework**: Protocol-level compliance policy engine, with issuers choosing their own strategies
 
-### 1.2 核心架构
+### 1.2 Core Architecture
 
 ```
                     Callchain L1
-              Simplex BFT 共识（单一验证者集）
+              Simplex BFT Consensus (Single Validator Set)
                          │
           ┌──────────────┴──────────────┐
           ▼                             ▼
    Protocol Payment              EVM Contract
-     (协议支付层)                 (智能合约层)
+     (Protocol Payment Layer)     (Smart Contract Layer)
           │                             │
           ▼                             ▼
    ProtocolBalances                ERC-20 Storage
-   (协议级余额映射)                (合约独立余额)
+   (Protocol-Level Balance Mapping)  (Contract Independent Balances)
           │                             │
           └──────────┬──────────────────┘
                      ▼
             Internal Bridge
-           (协议级内部桥接)
-           lock-and-release 机制
+           (Protocol-Level Internal Bridge)
+           lock-and-release Mechanism
 ```
 
 ---
 
-## 2. 共识层
+## 2. Consensus Layer
 
-### 2.1 算法
+### 2.1 Algorithm
 
-采用 **Commonware Simplex BFT** 共识算法。
+Uses the **Commonware Simplex BFT** consensus algorithm.
 
-Simplex 是一种低延迟拜占庭容错共识协议，由 Commonware 提供生产级 Rust 实现（`commonware-consensus` crate）。其核心设计是一个简化的 BFT 状态机，每轮由一个提议者打包区块，验证者投票，达到 2/3 多数即最终确认。
+Simplex is a low-latency Byzantine Fault Tolerance consensus protocol, with a production-grade Rust implementation provided by Commonware (`commonware-consensus` crate). Its core design is a simplified BFT state machine where each round has a single proposer packing blocks, validators voting, and finality achieved at 2/3 majority.
 
-**核心特性：**
+**Core Features:**
 
-- BFT 容错：容忍 1/3 拜占庭验证者
-- 通信复杂度：O(n) — 每轮仅需线性数量的消息交换
-- 最终性：单轮确认，亚秒级最终性（~500ms，2 轮）
-- 区块时间：250ms
-- 优雅降级：网络分区时自动暂停出块，分区恢复后立即继续
+- BFT Fault Tolerance: Tolerates 1/3 Byzantine validators
+- Communication Complexity: O(n) -- only linear number of message exchanges per round
+- Finality: Single-round confirmation, sub-second finality (~500ms, 2 rounds)
+- Block Time: 250ms
+- Graceful Degradation: Automatically pauses block production during network partitions, resumes immediately when partition recovers
 
-**选择 Simplex 的理由：**
+**Rationale for Choosing Simplex:**
 
-| 维度 | Simplex | Tendermint 系 (Malachite) | HotStuff 系 |
+| Dimension | Simplex | Tendermint Family (Malachite) | HotStuff Family |
 |------|---------|---------------------------|-------------|
-| 通信复杂度 | O(n) | O(n²) | O(n) |
-| 状态机复杂度 | 最低 | 中等 | 高 |
-| Rust 实现成熟度 | commonware-consensus 可直接使用 | malachite-bft 可用 | 无成熟开源 Rust 实现 |
-| 子集轮换 | 原生支持 | 需额外实现 | 原生支持 |
-| 审计面 | 最小 | 中等 | 大 |
-| 生产验证 | Tempo 链验证中 | Arc 链验证中 | PlasmaBFT（闭源） |
+| Communication Complexity | O(n) | O(n²) | O(n) |
+| State Machine Complexity | Lowest | Medium | High |
+| Rust Implementation Maturity | commonware-consensus ready to use | malachite-bft available | No mature open-source Rust implementation |
+| Subset Rotation | Natively supported | Requires additional implementation | Natively supported |
+| Audit Surface | Smallest | Medium | Large |
+| Production Validation | Being validated on Tempo chain | Being validated on Arc chain | PlasmaBFT (closed source) |
 
-**关键设计决策：** 216 验证者下，Simplex 的 O(n) = 216 条消息/轮，而 Tendermint 的 O(n²) ≈ 46K 条消息/轮。通信量差距 200 倍，直接决定延迟上限。
+**Key Design Decision:** With 216 validators, Simplex's O(n) = 216 messages/round, while Tendermint's O(n²) ≈ 46K messages/round. The 200x difference in communication volume directly determines the latency ceiling.
 
-### 2.2 依赖
+### 2.2 Dependencies
 
 ```toml
 [dependencies]
@@ -86,8 +86,8 @@ commonware-p2p = "2026.3.0"
 commonware-runtime = "2026.3.0"
 commonware-codec = "2026.3.0"
 
-# Reth 全量集成（EVM + 节点框架 + RPC + 存储）
-# 锁定 commit 与 Alloy 1.8.2 兼容，避免 crates.io 版本不一致
+# Reth full integration (EVM + node framework + RPC + storage)
+# Pinned to commit compatible with Alloy 1.8.2 to avoid crates.io version inconsistency
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
@@ -123,89 +123,89 @@ reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a
 reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 ```
 
-### 2.3 验证者
+### 2.3 Validators
 
-| 参数 | 值 |
+| Parameter | Value |
 |------|------|
-| 验证者数量 | 100-216 |
-| 每轮子集大小 | 21 |
-| 轮换机制 | 轮次随机选择 |
-| 最小质押 | 动态调整（保持验证者数稳定） |
-| 出块奖励 | 50% 费用分配 + 0% 通胀 |
-| 惩罚 | 双签惩罚 + 离线惩罚 |
+| Validator Count | 100-216 |
+| Per-Round Subset Size | 21 |
+| Rotation Mechanism | Random selection per round |
+| Minimum Stake | Dynamically adjusted (to keep validator count stable) |
+| Block Reward | 50% fee distribution + 0% inflation |
+| Slashing | Double-sign slashing + offline penalty |
 
-### 2.4 区块结构
+### 2.4 Block Structure
 
 ```rust
 struct Block {
     header: BlockHeader,
-    protocol_txs: Vec<ProtocolTransaction>, // 协议原生交易（多指令）
-    evm_txs: Vec<EvmTx>,                     // EVM 交易
-    system_txs: Vec<SystemTx>,               // 系统交易
-    bridge_operations: Vec<BridgeOp>,         // 桥接操作
+    protocol_txs: Vec<ProtocolTransaction>, // protocol-native transactions (multi-instruction)
+    evm_txs: Vec<EvmTx>,                     // EVM transactions
+    system_txs: Vec<SystemTx>,               // system transactions
+    bridge_operations: Vec<BridgeOp>,         // bridge operations
 }
 
 struct BlockHeader {
     parent_hash: Hash,
     height: u64,
-    timestamp_millis: u64,          // 亚秒级时间戳
-    payment_root: Hash,             // 协议余额 Merkle 根
-    evm_state_root: Hash,           // EVM 状态根
-    bridge_root: Hash,              // 桥接状态 Merkle 根
-    receipt_root: Hash,             // 交易收据 Merkle 根
+    timestamp_millis: u64,          // sub-second timestamp
+    payment_root: Hash,             // protocol balance Merkle root
+    evm_state_root: Hash,           // EVM state root
+    bridge_root: Hash,              // bridge state Merkle root
+    receipt_root: Hash,             // transaction receipt Merkle root
     proposer: ValidatorId,
     signature: Signature,
 }
 ```
 
-### 2.5 区块执行顺序
+### 2.5 Block Execution Order
 
-每个区块按以下顺序处理：
+Each block is processed in the following order:
 
 ```
-1. 执行 EVM 交易（evm_txs）
-2. 执行协议原生交易（protocol_txs）— 多指令原子执行
-3. 执行桥接操作（bridge_operations）
-   - 处理 EVM → Protocol 的提取请求
-   - 处理 Protocol → EVM 的存款请求
-4. 执行系统交易（system_txs）
-   - 验证者奖励分配
-   - 费用结算
-   - 合规策略更新
-5. 计算最终状态根，打包区块头
+1. Execute EVM transactions (evm_txs)
+2. Execute protocol-native transactions (protocol_txs) -- multi-instruction atomic execution
+3. Execute bridge operations (bridge_operations)
+   - Process EVM → Protocol withdrawal requests
+   - Process Protocol → EVM deposit requests
+4. Execute system transactions (system_txs)
+   - Validator reward distribution
+   - Fee settlement
+   - Compliance policy updates
+5. Compute final state root, pack block header
 ```
 
 ---
 
-## 3. 协议支付层
+## 3. Protocol Payment Layer
 
-### 3.1 资产注册表
+### 3.1 Asset Registry
 
-任何人均可注册资产。注册后自动获得协议层余额映射。
+Anyone can register assets. Upon registration, protocol-level balance mapping is automatically created.
 
 ```rust
 struct Asset {
-    id: AssetId,                    // 协议分配的唯一 ID (u64)
-    name: String,                   // 显示名称，如 "USDC"
-    symbol: String,                 // 交易符号，如 "USDC"
+    id: AssetId,                    // unique ID assigned by protocol (u64)
+    name: String,                   // display name, e.g. "USDC"
+    symbol: String,                 // trading symbol, e.g. "USDC"
     decimals: u8,
-    issuer: Address,                // 发行方地址
-    total_supply: u128,             // 协议层总供应
-    policy: CompliancePolicy,       // 合规策略
-    registered_at: u64,             // 注册时间戳
-    evm_contract: Address,          // 对应的 ERC-20 合约地址
-    bridge_reserve: u128,           // 桥接池中的余额
+    issuer: Address,                // issuer address
+    total_supply: u128,             // protocol-layer total supply
+    policy: CompliancePolicy,       // compliance policy
+    registered_at: u64,             // registration timestamp
+    evm_contract: Address,          // corresponding ERC-20 contract address
+    bridge_reserve: u128,           // balance in the bridge pool
     status: AssetStatus,
 }
 
 enum AssetStatus {
-    Active,                         // 正常
-    Frozen,                         // 暂停（发行方可触发）
-    Delisted,                       // 下架
+    Active,                         // normal
+    Frozen,                         // paused (triggerable by issuer)
+    Delisted,                       // delisted
 }
 ```
 
-### 3.2 注册流程
+### 3.2 Registration Process
 
 ```rust
 fn register_asset(
@@ -215,48 +215,48 @@ fn register_asset(
     decimals: u8,
     initial_supply: u128,
     policy: CompliancePolicy,
-    registration_fee: Balance,      // 经济防垃圾费
+    registration_fee: Balance,      // economic anti-spam fee
 ) -> Result<AssetId>;
 ```
 
-注册时：
-1. 扣除注册费（防止垃圾注册）
-2. 分配唯一 AssetId
-3. 创建协议层余额映射，`balances[issuer] = initial_supply`
-4. 在 EVM 层自动部署对应的 ERC-20 合约
-5. ERC-20 合约初始供应为 0（所有资产在协议层）
-6. 桥接合约获得该代币的 mint/burn 权限
+Upon registration:
+1. Deduct registration fee (to prevent spam registration)
+2. Assign unique AssetId
+3. Create protocol-layer balance mapping, `balances[issuer] = initial_supply`
+4. Automatically deploy corresponding ERC-20 contract on the EVM layer
+5. ERC-20 contract initial supply is 0 (all assets start at the protocol layer)
+6. Bridge contract receives mint/burn authority for the token
 
-### 3.3 余额管理
+### 3.3 Balance Management
 
 ```rust
-/// 协议层余额映射
+/// Protocol-layer balance mapping
 /// asset_id → (address → balance)
 type ProtocolBalances = HashMap<AssetId, HashMap<Address, u128>>;
 
-/// 允许度映射（用于 approve/transferFrom）
+/// Allowance mapping (for approve/transferFrom)
 /// (asset_id, owner, spender) → amount
 type Allowances = HashMap<(AssetId, Address, Address), u128>;
 ```
 
-### 3.4 合规策略
+### 3.4 Compliance Policy
 
 ```rust
 enum CompliancePolicy {
-    /// 无限制，任何人都能收发
+    /// No restrictions, anyone can send/receive
     None,
-    /// OFAC 制裁地址黑名单
+    /// OFAC sanctioned address blacklist
     OfacBlacklist { blacklist_hash: Hash },
-    /// 需要 KYC 证明（链下验证，链上标记）
+    /// Requires KYC proof (off-chain verification, on-chain marking)
     KycRequired,
-    /// 仅白名单地址
+    /// Whitelist addresses only
     Whitelist { registry: Address },
-    /// 自定义逻辑（通过预编译回调）
+    /// Custom logic (via precompile callback)
     Custom { handler: Address },
 }
 ```
 
-协议层在每次转账前执行合规检查：
+The protocol layer enforces compliance checks before every transfer:
 
 ```rust
 fn check_compliance(
@@ -286,103 +286,103 @@ fn check_compliance(
 }
 ```
 
-### 3.5 多指令交易模型 (Multi-Instruction Transaction Model)
+### 3.5 Multi-Instruction Transaction Model
 
-协议原生交易支持在单个交易内组合多个不同的指令（Instruction），所有指令原子执行。
+Protocol-native transactions support combining multiple different Instructions within a single transaction, with all instructions executed atomically.
 
 ```rust
-/// 协议原生交易
+/// Protocol-native transaction
 struct ProtocolTransaction {
-    sender: Address,                  // 交易发起者（账户地址）
-    nonce: u64,                       // 防重放
-    instructions: Vec<Instruction>,   // 一个或多个指令
-    gas_config: GasConfig,            // Gas 支付配置
-    fee_currency: FeeCurrency,        // Gas 支付币种（CALL 或协议批准的稳定币）
-    gas_limit: u64,                   // 最大 gas 消耗上限
-    max_fee: u128,                    // 用户愿意支付的最高总费用（以 fee_currency 计价）
-    max_priority_fee: u128,           // 优先级小费（以 fee_currency 计价，100% 给验证者）
-    auth: AuthScheme,                 // 身份认证方案（单签/多签/Session Key）
+    sender: Address,                  // transaction initiator (account address)
+    nonce: u64,                       // anti-replay
+    instructions: Vec<Instruction>,   // one or more instructions
+    gas_config: GasConfig,            // Gas payment configuration
+    fee_currency: FeeCurrency,        // Gas payment currency (CALL or protocol-approved stablecoin)
+    gas_limit: u64,                   // maximum gas consumption limit
+    max_fee: u128,                    // maximum total fee the user is willing to pay (in fee_currency)
+    max_priority_fee: u128,           // priority tip (in fee_currency, 100% to validator)
+    auth: AuthScheme,                 // authentication scheme (single-sig/multi-sig/Session Key)
 }
 
-/// Gas 支付配置
+/// Gas payment configuration
 enum GasConfig {
-    /// 发送者自付（从 sender 的 CALL 余额扣除）
+    /// Self-pay (deducted from sender's CALL balance)
     SelfPay,
-    /// 使用预授权的代付（代付者已签名授权，无需每笔签名）
+    /// Use pre-authorized sponsor (sponsor has signed authorization, no per-tx signature needed)
     AuthorizedSponsor {
         sponsor: Address,
     },
-    /// 使用代付者预存款池
+    /// Use sponsor deposit pool
     PoolSponsor,
-    /// 单笔代付（需要代付者每笔签名）
+    /// Per-transaction sponsor (requires sponsor signature per tx)
     PerTxSponsor {
         sponsor: Address,
         sponsor_signature: Signature,
     },
 }
 
-/// Gas 支付币种
+/// Gas payment currency
 enum FeeCurrency {
-    /// 原生 CALL
+    /// Native CALL
     Call,
-    /// 协议批准的稳定币（AssetId 必须来自 FeeCurrencyRegistry）
+    /// Protocol-approved stablecoin (AssetId must be from FeeCurrencyRegistry)
     Stablecoin(AssetId),
 }
 
-/// 单条指令（交易内的一个操作）
+/// Single instruction (one operation within a transaction)
 enum Instruction {
-    /// 资产转账
+    /// Asset transfer
     Transfer {
         asset_id: AssetId,
         to: Address,
         amount: u128,
         memo: Option<PaymentMemo>,
     },
-    /// 批量转账
+    /// Batch transfer
     BatchTransfer {
         asset_id: AssetId,
         payments: Vec<PaymentEntry>,
         memo: Option<PaymentMemo>,
     },
-    /// 授权
+    /// Approve
     Approve {
         asset_id: AssetId,
         spender: Address,
         amount: u128,
     },
-    /// 代授权转账
+    /// Approve-and-transfer on behalf
     TransferFrom {
         asset_id: AssetId,
         from: Address,
         to: Address,
         amount: u128,
     },
-    /// 发行方增发
+    /// Issuer mint
     Mint {
         asset_id: AssetId,
         to: Address,
         amount: u128,
     },
-    /// 发行方销毁
+    /// Issuer burn
     Burn {
         asset_id: AssetId,
         from: Address,
         amount: u128,
     },
-    /// Agent 代付
+    /// Agent pay
     AgentPay {
         agent_id: u64,
         asset_id: AssetId,
         to: Address,
         amount: u128,
     },
-    /// Agent 批量支付
+    /// Agent batch pay
     AgentBatchPay {
         agent_id: u64,
         asset_id: AssetId,
         payments: Vec<AgentPayment>,
     },
-    /// Agent 调用 EVM 合约
+    /// Agent call EVM contract
     AgentCall {
         agent_id: u64,
         asset_id: AssetId,
@@ -390,40 +390,40 @@ enum Instruction {
         data: Vec<u8>,
         value: u128,
     },
-    /// Agent 桥接：协议层 → EVM 层
+    /// Agent bridge: Protocol layer → EVM layer
     AgentBridgeDeposit {
         agent_id: u64,
         asset_id: AssetId,
         to: Address,
         amount: u128,
     },
-    /// 桥接：协议层 → EVM 层
+    /// Bridge: Protocol layer → EVM layer
     BridgeDeposit {
         asset_id: AssetId,
         to: Address,
         amount: u128,
     },
-    /// 合规：更新地址合规状态
+    /// Compliance: Update address compliance status
     UpdateCompliance {
         asset_id: AssetId,
         address: Address,
         status: ComplianceStatus,
     },
-    /// 隐私转账：通过 Shielded Pool 隐藏发送方、接收方和金额
+    /// Shielded transfer: Hide sender, receiver, and amount via Shielded Pool
     ShieldedTransfer {
         asset_id: AssetId,
-        commitments: Vec<NoteCommitment>,  // 新输出承诺
-        nullifiers: Vec<Nullifier>,        // 输入花费
-        proof: ZkProof,                    // zk-SNARK 证明
+        commitments: Vec<NoteCommitment>,  // new output commitments
+        nullifiers: Vec<Nullifier>,        // input spends
+        proof: ZkProof,                    // zk-SNARK proof
     },
-    /// 从 Shielded Pool 提取到透明地址
+    /// Withdraw from Shielded Pool to transparent address
     ShieldedWithdraw {
         asset_id: AssetId,
         to: Address,
         nullifier: Nullifier,
         proof: ZkProof,
     },
-    /// 从透明地址存入 Shielded Pool
+    /// Deposit from transparent address into Shielded Pool
     ShieldedDeposit {
         asset_id: AssetId,
         from: Address,
@@ -444,34 +444,34 @@ struct AgentPayment {
     memo: Option<PaymentMemo>,
 }
 
-/// 支付备注 — 附加到转账指令上，记录转账目的
+/// Payment memo -- attached to transfer instructions, records the purpose of the transfer
 struct PaymentMemo {
-    message: String,                // 自由文本备注（如 "Invoice #1234"）
-    reference: Option<String>,      // 外部引用（订单号、发票号、合同编号）
-    metadata: Option<Vec<u8>>,      // 自定义二进制数据（序列化 JSON 等）
+    message: String,                // free-text memo (e.g., "Invoice #1234")
+    reference: Option<String>,      // external reference (order number, invoice number, contract number)
+    metadata: Option<Vec<u8>>,      // custom binary data (serialized JSON, etc.)
 }
 ```
 
-**PaymentMemo 限制：**
-- `message` 最大 256 字节
-- `reference` 最大 128 字节
-- `metadata` 最大 1024 字节
-- 超出限制的交易被拒绝
+**PaymentMemo Limits:**
+- `message` maximum 256 bytes
+- `reference` maximum 128 bytes
+- `metadata` maximum 1024 bytes
+- Transactions exceeding limits are rejected
 
-**Gas 成本：** 备注数据需要存储到收据中（见 §18.4），每个额外字节增加 ~1 gas。小额备注成本极低。
+**Gas Cost:** Memo data needs to be stored in receipts (see §18.4), each additional byte adds ~1 gas. Small memos are very low cost.
 
-**设计理由：** 将 `PaymentTx` 从"每个枚举变体是一笔完整交易"改为"交易包含多个指令"，实现了：
+**Design Rationale:** Changing `PaymentTx` from "each enum variant is a complete transaction" to "transaction contains multiple instructions" achieves:
 
-1. **组合性**：一个交易可同时做 "转账 + 授权 + 桥接"，无需分三笔交易
-2. **原子性**：要么所有指令都成功，要么整个交易回滚
-3. **费用优化**：首条指令付全费，后续指令享折扣
-4. **统一签名**：sender 只需签一次名，覆盖所有指令
-5. **可扩展性**：新指令类型只需添加到 `Instruction` 枚举
+1. **Composability**: A single transaction can simultaneously do "transfer + approve + bridge", without splitting into three transactions
+2. **Atomicity**: Either all instructions succeed, or the entire transaction rolls back
+3. **Fee Optimization**: First instruction pays full fee, subsequent instructions get a discount
+4. **Unified Signing**: Sender only signs once, covering all instructions
+5. **Extensibility**: New instruction types only need to be added to the `Instruction` enum
 
-**典型用例：**
+**Typical Use Cases:**
 
 ```rust
-// 用例 1：发工资 — 单笔交易批量支付给 100 人
+// Use case 1: Payroll -- batch payment to 100 people in a single transaction
 ProtocolTransaction {
     sender: company_address,
     nonce: 42,
@@ -509,23 +509,23 @@ ProtocolTransaction {
     gas_config: GasConfig::SelfPay,
     fee_currency: FeeCurrency::Call,
     gas_limit: 60_000,
-    max_fee: 1_000_000,          // 最高 1,000,000 wei
-    max_priority_fee: 5_000,     // 小费 5,000 wei
+    max_fee: 1_000_000,          // max 1,000,000 wei
+    max_priority_fee: 5_000,     // tip 5,000 wei
     auth: AuthScheme::SingleSig { signature: company_sig },
 }
 
-// 用例 2：DeFi 入场 — 桥接 + 授权 + 存款 一步完成
+// Use case 2: DeFi entry -- bridge + approve + deposit in one step
 ProtocolTransaction {
     sender: user_address,
     nonce: 7,
     instructions: vec![
-        // 1. 先桥接 1000 USDC 到 EVM 层
+        // 1. First bridge 1000 USDC to EVM layer
         Instruction::BridgeDeposit {
             asset_id: USDC_ID,
             to: user_address,
             amount: 1000_000000,
         },
-        // 2. 授权 DEX 合约使用 USDC
+        // 2. Approve DEX contract to use USDC
         Instruction::Approve {
             asset_id: USDC_ID,
             spender: dex_router,
@@ -540,7 +540,7 @@ ProtocolTransaction {
     auth: AuthScheme::SingleSig { signature: user_sig },
 }
 
-// 用例 3：Agent 自动付款 + Owner 预授权代付
+// Use case 3: Agent auto-pay + Owner pre-authorized sponsor
 ProtocolTransaction {
     sender: agent_public_key.to_address(),
     nonce: 100,
@@ -567,49 +567,49 @@ ProtocolTransaction {
 }
 ```
 
-### 3.6 指令执行语义
+### 3.6 Instruction Execution Semantics
 
 ```rust
 fn execute_protocol_tx(tx: &ProtocolTransaction) -> Result<()> {
-    // 1. 验证身份认证
+    // 1. Verify authentication
     verify_auth(tx.sender, &tx.auth)?;
 
-    // 2. 验证 nonce
+    // 2. Verify nonce
     ensure!(tx.nonce == get_nonce(&tx.sender), "Invalid nonce");
 
-    // 3. 估算 gas 消耗
+    // 3. Estimate gas consumption
     let estimated_gas = calculate_gas_units(&tx.instructions);
     ensure!(estimated_gas <= tx.gas_limit, "Gas limit exceeded");
 
-    // 4. 计算实际费用
+    // 4. Calculate actual fee
     let base_fee = get_current_base_fee();
     let actual_fee = base_fee * estimated_gas as u128 + tx.max_priority_fee;
     ensure!(actual_fee <= tx.max_fee, "Fee exceeds max_fee");
 
-    // 5. 原子执行所有指令（使用事务性状态变更）
+    // 5. Atomically execute all instructions (using transactional state changes)
     let state_snapshot = take_state_snapshot();
     let tx_hash = tx.hash();
 
-    // 扣除费用
+    // Deduct fee
     deduct_gas(&tx.sender, &tx.gas_config, actual_fee, tx_hash)?;
 
     for (i, instruction) in tx.instructions.iter().enumerate() {
         execute_instruction(instruction, i, &tx.sender)
             .map_err(|e| {
-                // 任何指令失败，回滚整个交易
+                // Any instruction failure rolls back entire transaction
                 restore_state_snapshot(&state_snapshot);
                 e
             })?;
     }
 
-    // 6. 所有指令成功，提交状态变更，递增 nonce
+    // 6. All instructions succeeded, commit state changes, increment nonce
     commit_state_changes();
     increment_nonce(&tx.sender);
 
     Ok(())
 }
 
-/// Gas 扣除逻辑
+/// Gas deduction logic
 fn deduct_gas(
     sender: &Address,
     config: &GasConfig,
@@ -617,13 +617,13 @@ fn deduct_gas(
     fee: u128,
     tx_hash: Hash,
 ) -> Result<()> {
-    // 按币种扣除
+    // Deduct by currency type
     match fee_currency {
         FeeCurrency::Call => {
             deduct_call_from_payer(sender, config, fee, tx_hash)?;
         }
         FeeCurrency::Stablecoin(asset_id) => {
-            // 稳定币支付：验证在 FeeCurrencyRegistry 中，按 oracle 价格转换
+            // Stablecoin payment: verify in FeeCurrencyRegistry, convert at oracle price
             ensure!(
                 FeeCurrencyRegistry::is_allowed(*asset_id),
                 "Fee currency not approved by governance"
@@ -635,7 +635,7 @@ fn deduct_gas(
     Ok(())
 }
 
-/// 从 payer 扣 CALL（支持代付）
+/// Deduct CALL from payer (supports sponsor)
 fn deduct_call_from_payer(
     sender: &Address,
     config: &GasConfig,
@@ -663,7 +663,7 @@ fn deduct_call_from_payer(
     Ok(())
 }
 
-/// 从 payer 扣稳定币（支持代付）
+/// Deduct stablecoin from payer (supports sponsor)
 fn deduct_stablecoin_from_payer(
     sender: &Address,
     config: &GasConfig,
@@ -751,7 +751,7 @@ fn execute_instruction(instr: &Instruction, index: usize, sender: &Address) -> R
             for nf in nullifiers {
                 ensure!(!is_nullifier_spent(*asset_id, nf), "Nullifier already spent");
             }
-            // 检查 total_output <= total_input（不暴露具体金额）
+            // Check total_output <= total_input (without exposing specific amounts)
             let asset = get_asset(*asset_id)?;
             verify_shielded_balance(&asset, nullifiers, commitments, proof)?;
             for nf in nullifiers {
@@ -770,7 +770,7 @@ fn execute_instruction(instr: &Instruction, index: usize, sender: &Address) -> R
         Instruction::ShieldedWithdraw { asset_id, to, nullifier, proof } => {
             ensure!(!is_nullifier_spent(*asset_id, nullifier), "Nullifier already spent");
             verify_zk_proof(proof)?;
-            let amount = extract_amount_from_proof(proof)?;  // 从证明中公开提取金额
+            let amount = extract_amount_from_proof(proof)?;  // publicly reveal amount from proof
             mark_nullifier_spent(*asset_id, *nullifier);
             credit_owner_balance(*to, *asset_id, amount)?;
         }
@@ -779,212 +779,212 @@ fn execute_instruction(instr: &Instruction, index: usize, sender: &Address) -> R
 }
 ```
 
-**原子性保证：** 使用状态快照（state snapshot）机制。执行第一条指令前保存完整状态快照，任何指令失败时立即回滚到快照状态，已扣减的费用不退还（防止重放攻击）。
+**Atomicity Guarantee:** Uses state snapshot mechanism. A complete state snapshot is saved before executing the first instruction; any instruction failure immediately rolls back to the snapshot state. Deducted fees are not refunded (to prevent replay attacks).
 
-**指令间依赖：** 同一交易内的指令按顺序执行，后一条指令可以依赖前一条指令的结果。例如 `AgentBridgeDeposit` + `AgentCall` 组合中，Agent 先将资产桥到 EVM 层，再用 EVM 层资产调用合约，原子完成跨层操作。
+**Inter-Instruction Dependencies:** Instructions within the same transaction are executed sequentially, and a later instruction can depend on the result of an earlier one. For example, in the `AgentBridgeDeposit` + `AgentCall` combination, the Agent first bridges assets to the EVM layer, then calls a contract with EVM-layer assets, atomically completing cross-layer operations.
 
-### 3.7 多指令费用模型
+### 3.7 Multi-Instruction Fee Model
 
-多指令交易的费用计算基于指令数量和类型的 gas unit，结合动态 base_fee，详见 §12.2。
+The fee calculation for multi-instruction transactions is based on the gas units of instruction count and types, combined with dynamic base_fee, detailed in §12.2.
 
-**费用计算示例（假设 base_fee = 1 wei/gas，priority_fee = 0）：**
+**Fee Calculation Example (assuming base_fee = 1 wei/gas, priority_fee = 0):**
 
-| 交易组合 | Gas Unit 计算 | 总 Gas |
+| Transaction Combination | Gas Unit Calculation | Total Gas |
 |----------|-------------|--------|
-| 单笔转账 | 10,000 × 1.0 | 10,000 gas |
-| 转账 + 授权 | 10,000 × 1.0 + 5,000 × 0.5 | 12,500 gas |
-| 转账 + 授权 + 桥接 | 10,000 + 2,500 + 5,000 × 0.5 | 15,000 gas |
-| 100 人批量支付 | 10,000 + 99 × 1,000 × 0.5 | 59,500 gas |
-| 100 笔独立转账 | 100 × 10,000 | 1,000,000 gas |
-| Shielded 转账 | 50,000 × 1.0 | 50,000 gas |
-| Agent 桥接 + 调用 | (10,000 + 5,000) × 0.5 × 0.5 | 3,750 gas |
+| Single transfer | 10,000 × 1.0 | 10,000 gas |
+| Transfer + Approve | 10,000 × 1.0 + 5,000 × 0.5 | 12,500 gas |
+| Transfer + Approve + Bridge | 10,000 + 2,500 + 5,000 × 0.5 | 15,000 gas |
+| 100-person batch pay | 10,000 + 99 × 1,000 × 0.5 | 59,500 gas |
+| 100 independent transfers | 100 × 10,000 | 1,000,000 gas |
+| Shielded transfer | 50,000 × 1.0 | 50,000 gas |
+| Agent bridge + call | (10,000 + 5,000) × 0.5 × 0.5 | 3,750 gas |
 
-100 人批量支付使用多指令交易节省 **~94%** gas（对比 100 笔独立转账）。
+100-person batch pay using multi-instruction transactions saves **~94%** gas (compared to 100 independent transfers).
 
-### 3.8 Shielded Pool（隐私屏蔽池）
+### 3.8 Shielded Pool
 
-Shielded Pool 提供协议级隐私转账能力，隐藏发送方、接收方和金额。基于 zk-SNARK 实现，采用 Zcash 的 Note Commitment Tree + Nullifier 模型。
+The Shielded Pool provides protocol-level private transfer capability, hiding the sender, receiver, and amount. Implemented using zk-SNARKs, adopting Zcash's Note Commitment Tree + Nullifier model.
 
-#### 3.8.1 核心数据结构
+#### 3.8.1 Core Data Structures
 
 ```rust
-/// 隐私笔记（Note）— 代表 Shielded Pool 中的一笔资产
+/// Note -- represents an asset in the Shielded Pool
 struct Note {
-    value: u128,              // 金额（加密状态）
+    value: u128,              // amount (encrypted state)
     asset_id: AssetId,
-    rcm: Scalar,              // 随机数
-    recipient_view_key: PublicKey,  // 接收方视图密钥
+    rcm: Scalar,              // random number
+    recipient_view_key: PublicKey,  // recipient view key
 }
 
-/// 笔记承诺 — 放入全局 Merkle Tree
+/// Note commitment -- placed in global Merkle Tree
 struct NoteCommitment(pub Hash);
 
-/// 空值揭露器 — 防双花
+/// Nullifier -- prevents double-spending
 struct Nullifier(pub Hash);
 
-/// 视图密钥 — 选择性披露
+/// View key -- selective disclosure
 struct ViewingKey {
-    incoming_view_key: PublicKey,  // 查看进账
-    full_view_key: PublicKey,      // 查看所有相关交易
+    incoming_view_key: PublicKey,  // view incoming
+    full_view_key: PublicKey,      // view all related transactions
 }
 
-/// ZK 证明 — 证明交易合法但不泄露细节
+/// ZK proof -- proves transaction is valid without revealing details
 struct ZkProof {
-    proof_data: Vec<u8>,         // Groth16 / Halo2 证明
-    public_inputs: PublicInputs,  // 公开的 nullifiers + commitments
+    proof_data: Vec<u8>,         // Groth16 / Halo2 proof
+    public_inputs: PublicInputs,  // public nullifiers + commitments
 }
 ```
 
-#### 3.8.2 三种操作
+#### 3.8.2 Three Operations
 
 ```
-存入（ShieldedDeposit）：
-  透明地址 → Shielded Pool
-  1. 从发送者透明余额扣除
-  2. 生成 Note 和 Commitment
-  3. Commitment 加入 Merkle Tree
+Deposit (ShieldedDeposit):
+  Transparent address → Shielded Pool
+  1. Deduct from sender's transparent balance
+  2. Generate Note and Commitment
+  3. Add Commitment to Merkle Tree
 
-  外部可见：某地址存入了资产到池
-  外部不可见：存入了多少、最终归属谁
+  Externally visible: An address deposited assets into the pool
+  Externally hidden: How much was deposited, ultimate ownership
 
-隐私转账（ShieldedTransfer）：
+Shielded Transfer (ShieldedTransfer):
   Shielded Pool → Shielded Pool
-  1. 选择已有的 Notes 作为输入
-  2. 创建新的 Notes 作为输出
-  3. 生成 ZK 证明：
-     - 输入的 Notes 确实存在（Merkle proof）
-     - 输入的 Notes 未被花费（nullifier 未在集合中）
-     - 输出总额 <= 输入总额（不造币）
-     - 发送方拥有输入 Notes 的支出密钥
-  4. 公开 nullifiers（标记输入已花费）
-  5. 新 commitments 加入 Merkle Tree
+  1. Select existing Notes as inputs
+  2. Create new Notes as outputs
+  3. Generate ZK proof:
+     - Input Notes actually exist (Merkle proof)
+     - Input Notes not yet spent (nullifier not in set)
+     - Output total <= Input total (no counterfeiting)
+     - Sender owns spending key for input Notes
+  4. Reveal nullifiers (mark inputs as spent)
+  5. New commitments added to Merkle Tree
 
-  外部可见：有人进行了隐私转账
-  外部不可见：谁转的、转给谁、转多少
+  Externally visible: Someone performed a shielded transfer
+  Externally hidden: Who sent it, to whom, how much
 
-提取（ShieldedWithdraw）：
-  Shielded Pool → 透明地址
-  1. 消费 Shielded Note
-  2. 生成 ZK 证明
-  3. 金额公开恢复到透明余额
+Withdrawal (ShieldedWithdraw):
+  Shielded Pool → Transparent address
+  1. Consume Shielded Note
+  2. Generate ZK proof
+  3. Amount publicly revealed to transparent balance
 
-  外部可见：有人从池中提取了 X 金额到地址 A
-  外部不可见：提取者原始身份
+  Externally visible: Someone withdrew amount X from pool to address A
+  Externally hidden: Original identity of the withdrawer
 ```
 
-#### 3.8.3 ZK 电路
+#### 3.8.3 ZK Circuit
 
 ```rust
-/// ShieldedTransfer 的 ZK 电路（证明陈述）
+/// ZK circuit for ShieldedTransfer (proof statement)
 ///
-/// 公共输入（公开）：
-///   - nullifiers[]          （已花费的输入）
-///   - commitments[]         （新输出）
+/// Public inputs:
+///   - nullifiers[]          (spent inputs)
+///   - commitments[]         (new outputs)
 ///   - asset_id
 ///
-/// 私有输入（保密）：
-///   - notes[]               （被消费的 Notes）
-///   - new_notes[]           （新创建的 Notes）
-///   - spending_key          （发送方私钥）
-///   - merkle_path[]         （Merkle 证明路径）
+/// Private inputs:
+///   - notes[]               (consumed Notes)
+///   - new_notes[]           (newly created Notes)
+///   - spending_key          (sender private key)
+///   - merkle_path[]         (Merkle proof path)
 ///
-/// 约束：
-///   1. 每个 note 的 nullifier 正确派生
-///   2. 每个 note 在 Merkle Tree 中（路径有效）
-///   3. 发送方拥有 notes 的支出权
+/// Constraints:
+///   1. Each note's nullifier correctly derived
+///   2. Each note is in Merkle Tree (path valid)
+///   3. Sender has spending rights for notes
 ///   4. sum(new_notes.value) <= sum(notes.value)
-///   5. 所有值在有效范围内（无溢出/下溢）
+///   5. All values in valid range (no overflow/underflow)
 ```
 
-#### 3.8.4 Merkle Tree 状态
+#### 3.8.4 Merkle Tree State
 
 ```rust
-/// 每个资产一个独立的 Merkle Tree
-/// 或共享一棵树但 asset_id 编码在 Note 中
+/// One independent Merkle Tree per asset
+/// or shared tree with asset_id encoded in Note
 struct ShieldedState {
     merkle_tree: SparseMerkleTree<NoteCommitment>,
-    nullifier_set: HashSet<Nullifier>,  // 已花费的 nullifier
-    note_registry: HashMap<NoteCommitment, EncryptedNote>,  // 链上存储加密 Note
+    nullifier_set: HashSet<Nullifier>,  // spent nullifiers
+    note_registry: HashMap<NoteCommitment, EncryptedNote>,  // on-chain storage of encrypted Notes
 }
 ```
 
-Merkle Tree 使用 **Incremental Merkle Tree**（增量默克尔树），深度 32，支持约 42 亿个叶子节点。每次新 commitment 只需 O(log n) 更新。
+The Merkle Tree uses an **Incremental Merkle Tree** with depth 32, supporting approximately 4.2 billion leaf nodes. Each new commitment only requires O(log n) update.
 
-#### 3.8.5 合规与审计
+#### 3.8.5 Compliance and Auditing
 
-Shielded Pool 内置合规支持，不是"不可追踪的暗网工具"：
+The Shielded Pool has built-in compliance support; it is not an "untraceable darknet tool":
 
 ```rust
 enum ShieldedComplianceMode {
-    /// 完全隐私，不强制任何披露
+    /// Full privacy, no mandatory disclosure
     Unrestricted,
-    /// 接收方必须持有有效 KYC 标记
+    /// Receiver must hold valid KYC mark
     KycRequired,
-    /// 资产发行方可通过 viewing key 审计
+    /// Asset issuer can audit via viewing key
     IssuerAuditable,
-    /// 仅允许在白名单地址间进行隐私转账
+    /// Only allow shielded transfers between whitelisted addresses
     WhitelistedOnly,
 }
 ```
 
-**审计流程：**
-1. 用户生成 viewing key 给审计方
-2. 审计方用 viewing key 解密相关交易
-3. 验证合规性，不暴露给公众
+**Audit Process:**
+1. User generates a viewing key for the auditor
+2. Auditor uses the viewing key to decrypt relevant transactions
+3. Verify compliance, not exposed to the public
 
-#### 3.8.6 证明系统选择
+#### 3.8.6 Proof System Selection
 
-| 方案 | 证明大小 | 验证时间 | 可信设置 | 推荐度 |
+| Scheme | Proof Size | Verification Time | Trusted Setup | Recommendation |
 |------|---------|---------|---------|--------|
-| Groth16 | ~200B | ~3ms | 需要（per circuit） | 当前首选，性能最优 |
-| Halo2 | ~1KB | ~10ms | 不需要 | 未来迁移目标 |
-| Plonk | ~1KB | ~8ms | 需要（universal） | 备选 |
+| Groth16 | ~200B | ~3ms | Required (per circuit) | Current preferred, best performance |
+| Halo2 | ~1KB | ~10ms | Not required | Future migration target |
+| Plonk | ~1KB | ~8ms | Required (universal) | Backup option |
 
-初始采用 **Groth16**（验证快、证明小），计划迁移到 **Halo2**（无需可信设置）。
+Initial adoption of **Groth16** (fast verification, small proofs), with planned migration to **Halo2** (no trusted setup).
 
-#### 3.8.7 性能影响
+#### 3.8.7 Performance Impact
 
-| 指标 | 值 |
+| Metric | Value |
 |------|------|
-| 证明生成时间 | 1-5 秒（客户端本地） |
-| 证明验证时间 | ~3ms/笔（链上） |
-| 证明数据大小 | ~200 字节 |
-| Nullifier 检查 | O(1) via HashSet |
-| Merkle Tree 更新 | O(log n)，深度 32 |
+| Proof generation time | 1-5 seconds (client-side local) |
+| Proof verification time | ~3ms/transaction (on-chain) |
+| Proof data size | ~200 bytes |
+| Nullifier check | O(1) via HashSet |
+| Merkle Tree update | O(log n), depth 32 |
 
-每轮 21 个验证者子集，假设 100 笔 Shielded 交易：
-- 总验证时间：100 × 3ms = 300ms
-- 在 250ms 区块时间内可能成为瓶颈
-- **解决方案**：每区块 Shielded 交易上限 50 笔，超出排入下一区块
+With 21 validators per round subset, assuming 100 Shielded transactions:
+- Total verification time: 100 × 3ms = 300ms
+- May become a bottleneck within 250ms block time
+- **Solution**: Cap at 50 Shielded transactions per block, excess queued for next block
 
-### 3.9 智能账户 (Smart Accounts)
+### 3.9 Smart Accounts
 
-Callchain 协议层原生支持三种身份认证方案，通过 `AuthScheme` 统一抽象。身份认证（谁有权签名）与 Gas 支付（谁来付费）是**两个独立维度**，可以自由组合。
+Callchain protocol layer natively supports three authentication schemes, unified through `AuthScheme` abstraction. Authentication (who has signing authority) and Gas payment (who pays) are **two independent dimensions** that can be freely combined.
 
 ```
-AuthScheme（谁签名）          GasConfig（谁付费）
+AuthScheme (who signs)           GasConfig (who pays)
 ├── SingleSig                ├── SelfPay
 ├── MultiSig                 ├── AuthorizedSponsor
 └── SessionKey               ├── PoolSponsor
                              └── PerTxSponsor
 ```
 
-#### 3.9.1 AuthScheme 定义
+#### 3.9.1 AuthScheme Definition
 
 ```rust
-/// 身份认证方案 — 替代传统单一签名
+/// Authentication scheme -- replaces traditional single signature
 enum AuthScheme {
-    /// 单签：标准 secp256k1 签名
+    /// Single signature: standard secp256k1 signature
     SingleSig {
         signature: Signature,
     },
 
-    /// 多签：m-of-n 门限签名
+    /// Multi-signature: m-of-n threshold signature
     MultiSig {
         signatures: Vec<Signature>,
     },
 
-    /// Session Key：临时密钥签名（用于 dApp 授权、Agent 轻量交互）
+    /// Session Key: temporary key signature (for dApp authorization, Agent lightweight interaction)
     SessionKey {
         key: Address,
         signature: Signature,
@@ -992,26 +992,26 @@ enum AuthScheme {
 }
 ```
 
-#### 3.9.2 多签账户（m-of-n）
+#### 3.9.2 Multi-Signature Account (m-of-n)
 
-多签账户允许将账户控制权分散给多个密钥。注册多签配置后，该账户发起的每笔交易都需要至少 `threshold` 个签名者签名。
+Multi-signature accounts allow distributing account control across multiple keys. After registering a multi-sig configuration, every transaction from that account requires signatures from at least `threshold` signers.
 
 ```rust
-/// 多签配置 — 绑定到账户地址
+/// Multi-sig configuration -- bound to account address
 struct MultiSigConfig {
-    signers: Vec<Address>,          // n 个签名者
-    threshold: u8,                  // 至少 m 个签名（m ≤ n）
-    version: u64,                   // 版本号（用于配置轮换）
+    signers: Vec<Address>,          // n signers
+    threshold: u8,                  // at least m signatures required (m ≤ n)
+    version: u64,                   // version number (for configuration rotation)
 }
 ```
 
-**注册与变更：**
+**Registration and Changes:**
 
 ```rust
 fn register_multi_sig(
-    new_address: Address,           // 新多签地址
+    new_address: Address,           // new multi-sig address
     config: MultiSigConfig,
-    // 注意：注册时需要所有 signers 签名，防止恶意注册
+    // Note: registration requires all signers to sign, to prevent malicious registration
 ) -> Result<()> {
     ensure!(config.threshold <= config.signers.len() as u8,
             "Threshold exceeds signers");
@@ -1019,7 +1019,7 @@ fn register_multi_sig(
     ensure!(config.signers.len() >= 2 && config.signers.len() <= 10,
             "Signer count must be 2-10");
 
-    // 验证所有 signer 都签署了注册同意
+    // Verify all signers have signed the registration consent
     for signer in &config.signers {
         ensure!(signer_signed_registration(signer, new_address),
                 "Signer did not consent");
@@ -1032,14 +1032,14 @@ fn register_multi_sig(
 fn update_multi_sig(
     account: Address,
     new_config: MultiSigConfig,
-    // 需要旧配置的 threshold 个签名授权变更
+    // Requires old config's threshold number of signatures to authorize change
     authorizations: Vec<Signature>,
 ) -> Result<()> {
     let old_config = MultiSigConfigs::get(account).ok_or("Not multi-sig")?;
     ensure!(authorizations.len() >= old_config.threshold as usize,
             "Insufficient authorizations");
 
-    // 验证签名来自旧 signers
+    // Verify signatures come from old signers
     let valid_count = verify_signatures_from_signers(
         &authorizations, &old_config.signers
     )?;
@@ -1051,7 +1051,7 @@ fn update_multi_sig(
 }
 ```
 
-**验证逻辑：**
+**Verification Logic:**
 
 ```rust
 fn verify_multisig(account: Address, auth: &AuthScheme) -> Result<()> {
@@ -1064,7 +1064,7 @@ fn verify_multisig(account: Address, auth: &AuthScheme) -> Result<()> {
     ensure!(signatures.len() >= config.threshold as usize,
             "Not enough signatures");
 
-    // 统计有多少签名来自合法 signers
+    // Count how many signatures come from legitimate signers
     let valid_count = signatures.iter()
         .filter(|sig| {
             let signer = recover_signer(&sig.hash());
@@ -1075,7 +1075,7 @@ fn verify_multisig(account: Address, auth: &AuthScheme) -> Result<()> {
     ensure!(valid_count >= config.threshold as usize,
             "Invalid threshold");
 
-    // 额外检查：去重，防止同一 signer 多签
+    // Additional check: deduplicate to prevent same signer signing multiple times
     ensure!(signatures.len() <= config.signers.len(),
             "Duplicate signer detected");
 
@@ -1083,66 +1083,66 @@ fn verify_multisig(account: Address, auth: &AuthScheme) -> Result<()> {
 }
 ```
 
-**典型用例：**
+**Typical Use Cases:**
 
-| 场景 | 配置 | 说明 |
+| Scenario | Configuration | Description |
 |------|------|------|
-| 团队金库 | 3-of-5 | 5 个核心成员，任意 3 人可操作 |
-| DAO 多签 | 5-of-9 | 9 个理事，5 人多数可决策 |
-| 家庭账户 | 2-of-3 | 本人 + 配偶 + 律师，任意 2 人 |
-| 企业审批 | 2-of-4 | CEO + CFO + 董事 + 法务，任意 2 人 |
+| Team treasury | 3-of-5 | 5 core members, any 3 can operate |
+| DAO multi-sig | 5-of-9 | 9 council members, 5 majority can decide |
+| Family account | 2-of-3 | Self + spouse + lawyer, any 2 |
+| Corporate approval | 2-of-4 | CEO + CFO + Director + Legal, any 2 |
 
-#### 3.9.3 社交恢复钱包（Social Recovery）
+#### 3.9.3 Social Recovery Wallet
 
-用户丢失私钥时，通过预设的 Guardian（守护者）网络恢复账户控制权，无需依赖助记词备份。
+When a user loses their private key, they can recover account control through a pre-configured Guardian network, without relying on mnemonic phrase backups.
 
 ```rust
-/// 社交恢复配置
+/// Social recovery configuration
 struct SocialRecoveryConfig {
-    guardians: Vec<Address>,            // 3-10 个守护者
-    threshold: u8,                      // 至少几个同意（建议 threshold = ceil(guardians/2 + 1)）
-    recovery_delay_secs: u64,           // 延迟生效时间（24-72 小时）
+    guardians: Vec<Address>,            // 3-10 guardians
+    threshold: u8,                      // minimum number of approvals required (recommended: threshold = ceil(guardians/2 + 1))
+    recovery_delay_secs: u64,           // delay before taking effect (24-72 hours)
     pending_recovery: Option<RecoveryRequest>,
 }
 
-/// 待恢复请求
+/// Pending recovery request
 struct RecoveryRequest {
-    new_key: Address,                   // 新主密钥
-    approved_by: Vec<Address>,          // 已同意的 Guardian
-    initiated_at: u64,                  // 发起时间戳
-    initiator_signature: Option<Signature>, // 旧密钥持有者签名（如果旧密钥还在）
+    new_key: Address,                   // new primary key
+    approved_by: Vec<Address>,          // Guardians who have approved
+    initiated_at: u64,                  // initiation timestamp
+    initiator_signature: Option<Signature>, // old key holder signature (if old key still available)
 }
 ```
 
-**恢复流程：**
+**Recovery Process:**
 
 ```
-1. 发起恢复请求
-   → 用户（用旧密钥或其他方式）提交 RecoveryRequest
-   → 指定新密钥 new_key
-   → 请求进入链上状态
+1. Initiate recovery request
+   → User (with old key or other method) submits RecoveryRequest
+   → Specifies new key new_key
+   → Request enters on-chain state
 
-2. Guardian 投票
-   → Guardian 逐一签名确认
-   → 每确认一个，加入 approved_by
-   → 达到 threshold 个 Guardian 同意 → 进入延迟期
+2. Guardian voting
+   → Guardians sign one by one to confirm
+   → Each confirmation adds to approved_by
+   → Reaching threshold Guardian approvals → enters delay period
 
-3. 延迟期（24-72 小时）
-   → 如果用户旧密钥还在，可以单方面取消恢复
-   → 防止 Guardian 串谋攻击
-   → 延迟期从 threshold 达成时开始计算
+3. Delay period (24-72 hours)
+   → If user still has old key, they can unilaterally cancel the recovery
+   → Prevents Guardian collusion attacks
+   → Delay period starts when threshold is reached
 
-4. 延迟结束 → 自动生效
-   → 旧密钥失效
-   → 新密钥成为账户主密钥
-   → SocialRecoveryConfig 清除 pending_recovery
+4. Delay expires → automatically takes effect
+   → Old key becomes invalid
+   → New key becomes account primary key
+   → SocialRecoveryConfig clears pending_recovery
 ```
 
 ```rust
 fn initiate_recovery(
     account: Address,
     new_key: Address,
-    old_key_signature: Option<Signature>,  // 可选，证明是本人操作
+    old_key_signature: Option<Signature>,  // optional, proves identity
 ) -> Result<()> {
     let config = SocialRecoveryConfigs::get(account)
         .ok_or("No recovery config")?;
@@ -1172,18 +1172,18 @@ fn guardian_approve(
     let request = config.pending_recovery.as_mut()
         .ok_or("No pending recovery")?;
 
-    // 验证 guardian 身份
+    // Verify guardian identity
     ensure!(config.guardians.contains(&guardian), "Not a guardian");
 
-    // 验证 guardian 签名
-    verify_signature(&guardian, &guarder_signature, request.new_key)?;
+    // Verify guardian signature
+    verify_signature(&guardian, &guardian_signature, request.new_key)?;
 
-    // 防止重复
+    // Prevent duplicates
     ensure!(!request.approved_by.contains(&guardian), "Already approved");
 
     request.approved_by.push(guardian);
 
-    // 达到阈值，设置延迟生效
+    // Threshold reached, set delay生效
     if request.approved_by.len() >= config.threshold as usize {
         let effective_time = current_timestamp() + config.recovery_delay_secs;
         emit_event("RecoveryApproved", account, effective_time);
@@ -1198,19 +1198,19 @@ fn finalize_recovery(account: Address) -> Result<()> {
     let request = config.pending_recovery.take()
         .ok_or("No pending recovery")?;
 
-    // 检查 Guardian 阈值
+    // Check Guardian threshold
     ensure!(request.approved_by.len() >= config.threshold as usize,
             "Insufficient guardian approvals");
 
-    // 检查延迟期已过
+    // Check delay period has passed
     let elapsed = current_timestamp() - request.initiated_at;
     ensure!(elapsed >= config.recovery_delay_secs,
             "Recovery delay not met");
 
-    // 替换账户主密钥
+    // Replace account primary key
     AccountKeys::insert(account, request.new_key);
 
-    // 清除 pending 状态
+    // Clear pending state
     config.pending_recovery = None;
     SocialRecoveryConfigs::insert(account, config);
 
@@ -1219,7 +1219,7 @@ fn finalize_recovery(account: Address) -> Result<()> {
 }
 
 fn cancel_recovery(account: Address, owner_signature: Signature) -> Result<()> {
-    // 账户所有者可以在延迟期内随时取消
+    // Account owner can cancel at any time during the delay period
     verify_signature(&account, &owner_signature, "cancel_recovery")?;
 
     let config = SocialRecoveryConfigs::get_mut(account)
@@ -1232,46 +1232,46 @@ fn cancel_recovery(account: Address, owner_signature: Signature) -> Result<()> {
 }
 ```
 
-**Guardian 类型建议：**
+**Guardian Type Recommendations:**
 
-| Guardian 类型 | 示例 | 推荐数量 |
+| Guardian Type | Example | Recommended Count |
 |--------------|------|---------|
-| 自有设备 | 备用手机、硬件钱包、笔记本电脑 | 1-2 |
-| 信任的人 | 配偶、家人、密友 | 1-2 |
-| 专业机构 | 律师事务所、银行、托管服务 | 0-1 |
-| 时间锁 | 基于时间的自动恢复（备选） | 0-1 |
+| Own devices | Backup phone, hardware wallet, laptop | 1-2 |
+| Trusted persons | Spouse, family member, close friend | 1-2 |
+| Professional institutions | Law firm, bank, custody service | 0-1 |
+| Time lock | Time-based auto-recovery (backup) | 0-1 |
 
-推荐配置：5 个 Guardian，阈值 3，延迟 48 小时。
+Recommended configuration: 5 Guardians, threshold 3, delay 48 hours.
 
-#### 3.9.4 Session Key（会话密钥）
+#### 3.9.4 Session Key
 
-Session Key 是临时密钥，用于授权 dApp 或 Agent 在限定范围内操作，无需用户每次签名。
+Session Keys are temporary keys used to authorize dApps or Agents to operate within defined scopes, without requiring the user to sign every time.
 
 ```rust
-/// Session Key 配置
+/// Session Key configuration
 struct SessionKeyConfig {
-    key: Address,                       // Session Key 公钥地址
+    key: Address,                       // Session Key public key address
     permissions: SessionPermissions,
-    expires_at: u64,                    // 过期时间戳
+    expires_at: u64,                    // expiry timestamp
     created_at: u64,
 }
 
-/// Session Key 权限
+/// Session Key permissions
 struct SessionPermissions {
-    /// 允许的操作类型（空 = 所有类型）
+    /// Allowed instruction types (empty = all types)
     allowed_instructions: Vec<InstructionType>,
-    /// 单笔最大金额（0 = 无限制）
+    /// Maximum amount per transaction (0 = unlimited)
     max_per_tx: u128,
-    /// 日累计金额上限（0 = 无限制）
+    /// Daily cumulative amount limit (0 = unlimited)
     max_daily: u128,
-    /// 允许交互的目标地址（空 = 任意）
+    /// Allowed target addresses for interaction (empty = any)
     allowed_targets: Vec<Address>,
-    /// 允许操作的资产（空 = 全部）
+    /// Allowed assets to operate (empty = all)
     allowed_assets: Vec<AssetId>,
 }
 ```
 
-**创建与撤销：**
+**Creation and Revocation:**
 
 ```rust
 fn create_session_key(
@@ -1279,7 +1279,7 @@ fn create_session_key(
     session_key: Address,
     permissions: SessionPermissions,
     duration_secs: u64,
-    signature: Signature,           // 账户所有者签名
+    signature: Signature,           // account owner signature
 ) -> Result<()> {
     verify_signature(&account, &signature, session_key)?;
 
@@ -1304,25 +1304,25 @@ fn revoke_session_key(
 }
 ```
 
-**验证逻辑：**
+**Verification Logic:**
 
 ```rust
 fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
     let AuthScheme::SessionKey { key, signature } = auth
         else { return Err("Expected SessionKey auth"); };
 
-    // 1. 验证 Session Key 签名
+    // 1. Verify Session Key signature
     verify_signature(key, signature, &tx_hash)?;
 
-    // 2. 获取配置
+    // 2. Retrieve configuration
     let config = SessionKeys::get(account, *key)
         .ok_or("Session key not found")?;
 
-    // 3. 验证未过期
+    // 3. Verify not expired
     ensure!(current_timestamp() < config.expires_at,
             "Session key expired");
 
-    // 4. 验证权限
+    // 4. Verify permissions
     let perms = &config.permissions;
     if !perms.allowed_instructions.is_empty() {
         for instr in &tx.instructions {
@@ -1365,19 +1365,19 @@ fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
 }
 ```
 
-**典型用例：**
+**Typical Use Cases:**
 
-| 场景 | 权限设置 | 有效期 |
+| Scenario | Permission Settings | Validity |
 |------|---------|--------|
-| dApp 游戏 | 仅 Transfer，单笔 < 10 CALL，日累计 < 100 CALL | 24 小时 |
-| Agent 自动支付 | AgentPay + AgentCall，单笔 < 50 USDC | 7 天 |
-| DeFi 策略机器人 | 仅 Approve + TransferFrom，目标 = 指定 DEX | 1 小时 |
-| 钱包预览模式 | 仅 view 操作（无需签名） | 永久 |
+| dApp gaming | Only Transfer, per-tx < 10 CALL, daily < 100 CALL | 24 hours |
+| Agent auto-pay | AgentPay + AgentCall, per-tx < 50 USDC | 7 days |
+| DeFi strategy bot | Only Approve + TransferFrom, target = specified DEX | 1 hour |
+| Wallet preview mode | Only view operations (no signature needed) | Permanent |
 
-#### 3.9.5 统一认证流程
+#### 3.9.5 Unified Authentication Flow
 
 ```rust
-/// 协议层身份认证入口 — 替代原有单一签名验证
+/// Protocol-layer authentication entry point -- replaces original single signature verification
 fn verify_auth(account: Address, auth: &AuthScheme) -> Result<()> {
     match auth {
         AuthScheme::SingleSig { signature } => {
@@ -1394,13 +1394,13 @@ fn verify_auth(account: Address, auth: &AuthScheme) -> Result<()> {
 }
 
 fn verify_single_sig(account: Address, signature: &Signature) -> Result<()> {
-    // 检查是否有社交恢复的待生效请求
+    // Check for pending social recovery request
     if let Some(config) = SocialRecoveryConfigs::get(account) {
         if let Some(request) = &config.pending_recovery {
             if request.approved_by.len() >= config.threshold as usize {
                 let elapsed = current_timestamp() - request.initiated_at;
                 if elapsed >= config.recovery_delay_secs {
-                    // 恢复已生效，旧密钥不再有效
+                    // Recovery has taken effect, old key no longer valid
                     return Err("Account key has been recovered");
                 }
             }
@@ -1412,71 +1412,71 @@ fn verify_single_sig(account: Address, signature: &Signature) -> Result<()> {
 }
 ```
 
-#### 3.9.6 存储结构
+#### 3.9.6 Storage Structure
 
 ```
 callchain/
 ├── accounts/
 │   ├── {address}/
-│   │   ├── key                     # 主密钥（SingleSig）
-│   │   ├── multi_sig_config        # 多签配置（如果设置）
-│   │   ├── social_recovery_config  # 社交恢复配置（如果设置）
-│   │   └── session_keys/           # Session Keys（0-N 个）
-│   │       └── {session_key}/      # 每个 Session Key
-│   │           ├── config          # 权限 + 过期时间
-│   │           └── daily_usage     # 日累计使用量
+│   │   ├── key                     # primary key (SingleSig)
+│   │   ├── multi_sig_config        # multi-sig configuration (if set)
+│   │   ├── social_recovery_config  # social recovery configuration (if set)
+│   │   └── session_keys/           # Session Keys (0-N)
+│   │       └── {session_key}/      # each Session Key
+│   │           ├── config          # permissions + expiry
+│   │           └── daily_usage     # daily usage total
 └── ...
 ```
 
-存储估算：
-- 多签账户：~200 字节（10 个 signer × 20 字节 + 元数据）
-- 社交恢复：~300 字节（5 个 Guardian + 待恢复状态）
-- Session Key：~100 字节/个（权限 + 过期时间）
+Storage estimates:
+- Multi-sig account: ~200 bytes (10 signers × 20 bytes + metadata)
+- Social recovery: ~300 bytes (5 Guardians + pending recovery state)
+- Session Key: ~100 bytes each (permissions + expiry)
 
-#### 3.9.7 与 Agent 模型的协同
+#### 3.9.7 Synergy with Agent Model
 
-Session Key 和 Agent 账户是不同抽象层：
+Session Keys and Agent accounts are different abstraction layers:
 
-| 特性 | Session Key | Agent 账户 |
+| Feature | Session Key | Agent Account |
 |------|------------|-----------|
-| 生命周期 | 临时（小时/天） | 长期（月/年） |
-| 权限粒度 | 指令级别、金额限制 | 资产级别、对手方限制 |
-| 资金归属 | 用户主账户 | 独立子账户（从 Owner 划拨） |
-| 费用支付 | 通常 SelfPay | 通常 AuthorizedSponsor（Owner 代付） |
-| 适用场景 | dApp 交互、临时授权 | AI Agent 长期自动支付 |
+| Lifecycle | Temporary (hours/days) | Long-term (months/years) |
+| Permission Granularity | Instruction-level, amount limits | Asset-level, counterparty limits |
+| Fund Ownership | User primary account | Independent sub-account (allocated from Owner) |
+| Fee Payment | Typically SelfPay | Typically AuthorizedSponsor (Owner pays) |
+| Applicable Scenarios | dApp interaction, temporary authorization | AI Agent long-term auto-pay |
 
-可以组合使用：Agent 交易本身可以用 Session Key 发起（短期授权），同时由 Owner 代付 Gas。
+Can be combined: Agent transactions can be initiated with Session Keys (short-term authorization), while Owner sponsors Gas.
 
 ---
 
-## 4. EVM 智能合约层
+## 4. EVM Smart Contract Layer
 
-### 4.1 执行引擎
+### 4.1 Execution Engine
 
-基于 **Reth + Revm**，作为库嵌入到同一进程中。
+Based on **Reth + Revm**, embedded as a library in the same process.
 
-- 完全兼容以太坊 EVM
-- 支持所有标准 Ethereum JSON-RPC 方法
-- 兼容 Foundry / Hardhat 开发工具链
+- Fully compatible with Ethereum EVM
+- Supports all standard Ethereum JSON-RPC methods
+- Compatible with Foundry / Hardhat development toolchain
 
-### 4.2 资产对应的 ERC-20 合约
+### 4.2 ERC-20 Contracts for Assets
 
-每个注册的协议资产在 EVM 层都有对应的 ERC-20 合约。该合约维护**独立的 EVM 层余额**，与协议层余额通过内部桥接转换。
+Each registered protocol asset has a corresponding ERC-20 contract on the EVM layer. This contract maintains **independent EVM-layer balances**, converted to/from protocol-layer balances through the internal bridge.
 
 ```solidity
-/// 协议资产对应的 ERC-20 合约
-/// 维护独立的 EVM 层余额，通过桥接与协议层转换
+/// ERC-20 contract corresponding to a protocol asset
+/// Maintains independent EVM-layer balances, converted to/from protocol layer via bridge
 contract AssetToken is IERC20 {
     uint8 public immutable decimals;
     string public name;
     string public symbol;
     uint256 public totalSupply;
 
-    // EVM 层独立余额
+    // EVM-layer independent balances
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
 
-    // 只有桥接合约可以铸造/销毁
+    // Only the bridge contract can mint/burn
     modifier onlyBridge() {
         require(msg.sender == BRIDGE_CONTRACT, "Only bridge");
         _;
@@ -1504,7 +1504,7 @@ contract AssetToken is IERC20 {
         return true;
     }
 
-    // 桥接接口
+    // Bridge interface
     function bridgeMint(address to, uint256 amount) external onlyBridge {
         _balances[to] += amount;
         totalSupply += amount;
@@ -1517,53 +1517,53 @@ contract AssetToken is IERC20 {
 }
 ```
 
-### 4.3 独立 ERC-20 合约
+### 4.3 Independent ERC-20 Contracts
 
-除协议资产对应的 ERC-20 合约外，EVM 层还支持：
-- 任意标准 ERC-20 合约部署
-- 非协议资产的代币（meme coin、治理代币等）
-- 标准 DeFi 合约（DEX、Lending、...）无需任何适配
-- EVM gas 使用动态定价
+In addition to ERC-20 contracts corresponding to protocol assets, the EVM layer also supports:
+- Deployment of any standard ERC-20 contracts
+- Non-protocol asset tokens (meme coins, governance tokens, etc.)
+- Standard DeFi contracts (DEX, Lending, ...) without any adaptation
+- EVM gas uses dynamic pricing
 
-**关键：EVM 层是一个功能完整的以太坊链，协议资产通过标准 ERC-20 接口参与 DeFi。**
+**Key: The EVM layer is a fully functional Ethereum chain, and protocol assets participate in DeFi through standard ERC-20 interfaces.**
 
 ---
 
-## 5. 内部桥接
+## 5. Internal Bridge
 
-### 5.1 设计
+### 5.1 Design
 
-协议层余额和 EVM 层余额是**两份独立的账本**，通过内部桥接合约进行转换。
+Protocol-layer balances and EVM-layer balances are **two independent ledgers**, converted through an internal bridge contract.
 
 ```
-协议层                    EVM 层
+Protocol Layer              EVM Layer
 ─────────                ─────────
 Asset: USDX              ERC-20: USDX
 balances[A] = 100        balanceOf(A) = 0
-                         (独立余额)
+                         (independent balance)
 
-A 桥接到 EVM 层：
+A bridges to EVM layer:
   balances[A] = 0        balanceOf(A) = 100
-                         (锁仓释放)
+                         (lock-and-release)
 
-A 桥回协议层：
+A bridges back to protocol layer:
   balances[A] = 100      balanceOf(A) = 0
 ```
 
-### 5.2 桥接操作
+### 5.2 Bridge Operations
 
 ```rust
 enum BridgeOp {
-    /// 协议层 → EVM 层
-    /// 从协议余额中扣除，在 EVM 层铸造
+    /// Protocol layer → EVM layer
+    /// Deduct from protocol balance, mint on EVM layer
     DepositToEvm {
         asset_id: AssetId,
         from: Address,
         to: Address,
         amount: u128,
     },
-    /// EVM 层 → 协议层
-    /// 在 EVM 层销毁，恢复到协议余额
+    /// EVM layer → Protocol layer
+    /// Burn on EVM layer, restore to protocol balance
     WithdrawToProtocol {
         asset_id: AssetId,
         from: Address,
@@ -1573,15 +1573,15 @@ enum BridgeOp {
 }
 ```
 
-### 5.3 桥接执行
+### 5.3 Bridge Execution
 
-**Protocol → EVM（Deposit）：**
+**Protocol → EVM (Deposit):**
 
 ```rust
 fn execute_deposit(op: &BridgeOp) -> Result<()> {
     let asset = get_asset(op.asset_id)?;
 
-    // 1. 协议层扣除余额
+    // 1. Deduct balance from protocol layer
     let balance = protocol_balances
         .get_mut(&op.asset_id)
         .ok_or(AssetNotFound)?;
@@ -1589,7 +1589,7 @@ fn execute_deposit(op: &BridgeOp) -> Result<()> {
     ensure!(*user_balance >= op.amount, InsufficientBalance);
     *user_balance -= op.amount;
 
-    // 2. EVM 层铸造
+    // 2. Mint on EVM layer
     evm_call(
         asset.evm_contract,
         encode("bridgeMint(address,uint256)", op.to, op.amount),
@@ -1599,19 +1599,19 @@ fn execute_deposit(op: &BridgeOp) -> Result<()> {
 }
 ```
 
-**EVM → Protocol（Withdraw）：**
+**EVM → Protocol (Withdraw):**
 
 ```rust
 fn execute_withdraw(op: &BridgeOp) -> Result<()> {
     let asset = get_asset(op.asset_id)?;
 
-    // 1. EVM 层销毁
+    // 1. Burn on EVM layer
     evm_call(
         asset.evm_contract,
         encode("bridgeBurn(address,uint256)", op.from, op.amount),
     )?;
 
-    // 2. 协议层增加余额
+    // 2. Increase balance on protocol layer
     let balance = protocol_balances
         .entry(op.asset_id)
         .or_default();
@@ -1621,93 +1621,93 @@ fn execute_withdraw(op: &BridgeOp) -> Result<()> {
 }
 ```
 
-### 5.4 桥接时机
+### 5.4 Bridge Timing
 
 ```
-每个区块的执行顺序中，桥接操作在第三步执行：
+In each block's execution order, bridge operations execute in the third step:
 
-1. EVM 交易执行
-   → 用户可能在 EVM 层触发 bridge_withdraw
-   → 这些请求被加入待处理桥接队列
+1. EVM transactions execute
+   → Users may trigger bridge_withdraw on the EVM layer
+   → These requests are added to the pending bridge queue
 
-2. 协议原生交易执行
-   → 用户可能发起协议层转账、桥接、授权等多指令组合交易
+2. Protocol-native transactions execute
+   → Users may initiate multi-instruction combination transactions: protocol-layer transfers, bridges, approvals
 
-3. 桥接操作执行
-   → 处理待处理队列中的桥接请求
-   → 保证在同一区块内完成
+3. Bridge operations execute
+   → Process bridge requests in the pending queue
+   → Guaranteed to complete within the same block
 
-4. 系统交易执行
+4. System transactions execute
 ```
 
-这意味着 **Protocol → EVM 和 EVM → Protocol 的转换在同一个区块内完成**，无需等待。
+This means **Protocol → EVM and EVM → Protocol conversions complete within the same block**, no waiting required.
 
-### 5.5 用户体验
+### 5.5 User Experience
 
 ```
-场景：用户 A 想参与 EVM 层 DeFi
+Scenario: User A wants to participate in EVM-layer DeFi
 
-钱包自动处理：
-  1. 检测到 A 的 USDX 在协议层
-  2. 用户发起 swap 操作
-  3. 钱包自动附加 bridge_deposit 操作
-  4. 同一个交易中完成：桥接 → swap
-  5. 用户无需感知"我在哪一层"
+Wallet handles automatically:
+  1. Detects A's USDX is on the protocol layer
+  2. User initiates swap operation
+  3. Wallet automatically attaches bridge_deposit operation
+  4. Same transaction completes: bridge → swap
+  5. User doesn't need to be aware of "which layer I'm on"
 
-前端展示统一余额：
+Frontend displays unified balance:
   Total USDX: 100
-  ├── Protocol: 30 (快速支付可用)
-  └── EVM: 70 (DeFi 可用)
+  ├── Protocol: 30 (available for fast payments)
+  └── EVM: 70 (available for DeFi)
 ```
 
 ---
 
-## 5.6 外部跨链桥接（External Bridge）
+## 5.6 External Cross-Chain Bridge (External Bridge)
 
-Callchain 通过**验证者共识子集签名**实现跨链桥接，不依赖第三方桥或 BLS 聚合签名。验证者使用已有的 secp256k1 共识密钥，利用每轮 21 个验证者子集中的 2/3（即 14 个签名）完成桥接验证。
+Callchain implements cross-chain bridging through **validator consensus subset signatures**, without relying on third-party bridges or BLS aggregate signatures. Validators use their existing secp256k1 consensus keys, utilizing 2/3 of the 21-validator per-round subset (i.e., 14 signatures) to complete bridge verification.
 
-### 5.6.1 信任模型
+### 5.6.1 Trust Model
 
 ```
-每轮 21 个验证者（从 100-216 中随机抽取）
+21 validators per round (randomly selected from 100-216)
     │
-    ├── 2/3 阈值 = 14 个签名
-    ├── 验证者使用 secp256k1 密钥签名
-    ├── 签名在 Callchain 协议层验证（存款方向）
-    └── 签名在以太坊合约验证（提款方向）
+    ├── 2/3 threshold = 14 signatures
+    ├── Validators sign with secp256k1 keys
+    ├── Signatures verified at Callchain protocol layer (deposit direction)
+    └── Signatures verified at Ethereum contract (withdrawal direction)
 
-安全性：
-  桥接安全 ≤ 共识安全
-  如果 14/21 验证者串谋 → 链本身也不安全
+Security:
+  Bridge security ≤ Consensus security
+  If 14/21 validators collude → the chain itself is also insecure
 ```
 
-### 5.6.2 桥接数据结构
+### 5.6.2 Bridge Data Structures
 
 ```rust
-/// 外部链标识
+/// External chain identifier
 enum ExternalChain {
-    EthereumMainnet,     // 以太坊主网
+    EthereumMainnet,     // Ethereum mainnet
     Arbitrum,            // Arbitrum
-    // 可扩展
+    // Extensible
 }
 
-/// 外部桥接操作
+/// External bridge operation
 enum ExternalBridgeOp {
-    /// 外部链 → Callchain（存款）
+    /// External chain → Callchain (deposit)
     Deposit {
         source_chain: ExternalChain,
         source_tx_hash: Hash,
         source_block_number: u64,
-        sender: Vec<u8>,              // 外部链地址（原始字节）
-        recipient: Address,           // Callchain 接收地址
+        sender: Vec<u8>,              // external chain address (raw bytes)
+        recipient: Address,           // Callchain receiving address
         asset_id: AssetId,
         amount: u128,
-        signatures: Vec<Signature>,   // 14+ 个验证者签名
+        signatures: Vec<Signature>,   // 14+ validator signatures
     },
-    /// Callchain → 外部链（提款）
+    /// Callchain → External chain (withdrawal)
     Withdraw {
         target_chain: ExternalChain,
-        target_address: Vec<u8>,      // 外部链接收地址
+        target_address: Vec<u8>,      // external chain receiving address
         asset_id: AssetId,
         sender: Address,
         amount: u128,
@@ -1715,42 +1715,42 @@ enum ExternalBridgeOp {
 }
 ```
 
-### 5.6.3 存款流程（外部链 → Callchain）
+### 5.6.3 Deposit Flow (External Chain → Callchain)
 
 ```
-用户在以太坊操作：
-  1. 调用以太坊桥接合约 deposit(assetId, amount, callchainRecipient)
-  2. 以太坊合约锁定资产，触发 DepositInitiated 事件
+User operates on Ethereum:
+  1. Calls Ethereum bridge contract deposit(assetId, amount, callchainRecipient)
+  2. Ethereum contract locks assets, triggers DepositInitiated event
 
-Callchain 验证者操作：
-  3. 每个验证者运行桥接监听进程，检测以太坊 DepositInitiated 事件
-  4. 等待 min_confirmations 个区块确认（以太坊默认 12 个）
-  5. 确认后，每个验证者用 secp256k1 私钥对 deposit_hash 签名
-  6. 签名通过 P2P 网络传播，收集到 14 个签名后聚合
-  7. 任意节点提交 ExternalBridgeDeposit 交易到 Callchain
-     （包含 14 个签名 + deposit 数据）
-  8. Callchain 协议层验证 14 个签名，验证通过后铸造对应资产
+Callchain validator operations:
+  3. Each validator runs bridge monitoring process, detects Ethereum DepositInitiated event
+  4. Waits min_confirmations block confirmations (Ethereum default 12)
+  5. After confirmation, each validator signs deposit_hash with secp256k1 private key
+  6. Signatures propagate through P2P network, aggregate after collecting 14 signatures
+  7. Any node submits ExternalBridgeDeposit transaction to Callchain
+     (includes 14 signatures + deposit data)
+  8. Callchain protocol layer verifies 14 signatures, mints corresponding asset after verification
 ```
 
-### 5.6.4 提款流程（Callchain → 外部链）
+### 5.6.4 Withdrawal Flow (Callchain → External Chain)
 
 ```
-用户在 Callchain 操作：
-  1. 发起 ExternalBridgeWithdraw 指令
-  2. Callchain 销毁对应资产
-  3. 提款请求加入待处理队列
+User operates on Callchain:
+  1. Initiates ExternalBridgeWithdraw instruction
+  2. Callchain burns corresponding asset
+  3. Withdrawal request added to pending queue
 
-验证者操作：
-  4. 验证者区块打包时收集提款请求
-  5. 每个验证者对提款数据签名
-  6. 收集到 14 个签名后，聚合提交到以太坊桥接合约
-  7. 以太坊合约验证 14 个签名，验证通过后释放资产
+Validator operations:
+  4. Validators collect withdrawal requests when packing blocks
+  5. Each validator signs the withdrawal data
+  6. After collecting 14 signatures, aggregate and submit to Ethereum bridge contract
+  7. Ethereum contract verifies 14 signatures, releases asset after verification
 ```
 
-### 5.6.5 桥接签名验证
+### 5.6.5 Bridge Signature Verification
 
 ```rust
-/// 验证桥接签名集合
+/// Verify a set of bridge signatures
 fn verify_bridge_signatures(
     message_hash: Hash,
     signatures: &[Signature],
@@ -1759,7 +1759,7 @@ fn verify_bridge_signatures(
     ensure!(signatures.len() >= min_signatures as usize,
             "Insufficient bridge signatures");
 
-    // 获取当前活跃验证者
+    // Get current active validators
     let validators = get_active_validators();
     let required = validators.len() * 2 / 3 + 1;  // 2/3 + 1
 
@@ -1778,7 +1778,7 @@ fn verify_bridge_signatures(
     Ok(())
 }
 
-/// 验证者桥接签名服务
+/// Validator bridge signature service
 fn sign_bridge_event(
     private_key: &SecretKey,
     event: &BridgeEvent,
@@ -1795,15 +1795,15 @@ fn sign_bridge_event(
 }
 ```
 
-### 5.6.6 以太坊端桥接合约
+### 5.6.6 Ethereum-Side Bridge Contract
 
 ```solidity
 contract CallchainBridge {
-    /// 验证者公钥注册
+    /// Validator public key registration
     mapping(address => bool) public validators;
     uint256 public validatorCount;
 
-    /// 存款：用户从以太坊存入到 Callchain
+    /// Deposit: user deposits from Ethereum to Callchain
     function deposit(
         uint256 assetId,
         uint256 amount,
@@ -1814,25 +1814,25 @@ contract CallchainBridge {
         emit DepositInitiated(assetId, amount, callchainRecipient, msg.sender);
     }
 
-    /// 提款：从 Callchain 提取到以太坊
-    /// 需要 14+ 个验证者签名
+    /// Withdrawal: withdraw from Callchain to Ethereum
+    /// Requires 14+ validator signatures
     function withdraw(
         uint256 assetId,
         uint256 amount,
         address recipient,
         bytes32 sourceTxHash,
-        bytes[] calldata signatures  // 14+ 个 secp256k1 签名
+        bytes[] calldata signatures  // 14+ secp256k1 signatures
     ) external {
-        // 1. 防重放
+        // 1. Anti-replay
         require(!processedWithdraws[sourceTxHash], "Already processed");
         processedWithdraws[sourceTxHash] = true;
 
-        // 2. 构建签名消息
+        // 2. Build signed message
         bytes32 messageHash = keccak256(abi.encode(
             assetId, amount, recipient, sourceTxHash, address(this)
         ));
 
-        // 3. 验证签名
+        // 3. Verify signatures
         uint256 validCount;
         for (uint256 i = 0; i < signatures.length; i++) {
             address signer = recoverSigner(messageHash, signatures[i]);
@@ -1841,7 +1841,7 @@ contract CallchainBridge {
         }
         require(validCount >= getQuorum(), "Insufficient signatures");
 
-        // 4. 释放资产
+        // 4. Release assets
         IERC20(assetId).transfer(recipient, amount);
     }
 
@@ -1851,123 +1851,123 @@ contract CallchainBridge {
 }
 ```
 
-### 5.6.7 桥接安全限制
+### 5.6.7 Bridge Security Limits
 
 ```rust
 struct BridgeConfig {
-    /// 单笔最大桥接金额
+    /// Maximum bridge amount per transaction
     max_per_tx: u128,
 
-    /// 每日总桥接上限（按资产）
+    /// Daily total bridge limit (per asset)
     daily_limit_per_asset: u128,
 
-    /// 以太坊最小确认数
-    eth_min_confirmations: u32,       // 默认 12
+    /// Ethereum minimum confirmations
+    eth_min_confirmations: u32,       // default 12
 
-    /// 桥接费用（覆盖以太坊 gas 成本）
+    /// Bridge fee (covers Ethereum gas costs)
     bridge_fee: u128,
 
-    /// 白名单资产（仅允许注册的外部资产桥接）
+    /// Whitelisted assets (only registered external assets allowed)
     allowed_assets: Vec<AssetId>,
 
-    /// 签名收集超时（防止桥接卡住）
-    signature_timeout_secs: u64,      // 默认 300 秒
+    /// Signature collection timeout (prevents bridge from stalling)
+    signature_timeout_secs: u64,      // default 300 seconds
 }
 ```
 
-| 参数 | 默认值 | 说明 |
+| Parameter | Default Value | Description |
 |------|--------|------|
-| max_per_tx | 1,000,000 USDC | 防鲸鱼攻击 |
-| daily_limit_per_asset | 10,000,000 USDC | 防大额资金流动冲击 |
-| eth_min_confirmations | 12 | 以太坊标准确认数 |
-| signature_timeout_secs | 300 | 签名收集超时，自动重试 |
+| max_per_tx | 1,000,000 USDC | Anti-whale attack |
+| daily_limit_per_asset | 10,000,000 USDC | Anti-large capital flow shock |
+| eth_min_confirmations | 12 | Ethereum standard confirmations |
+| signature_timeout_secs | 300 | Signature collection timeout, auto-retry |
 
 ---
 
-## 6. Agent 支付 (Agent Payments)
+## 6. Agent Payments
 
-### 6.1 Agent 账户模型
+### 6.1 Agent Account Model
 
-Agent 账户不独立存余额，而是从 owner 账户授权划拨。Owner 将资金存入 Agent 子账户，Agent 只能在权限范围内使用。
+Agent accounts do not hold independent balances; instead, they are allocated from the owner's account with authorization. The owner deposits funds into the Agent sub-account, and the Agent can only operate within its permission scope.
 
 ```rust
 struct AgentRegistration {
-    agent_id: u64,                    // 协议分配的唯一 Agent ID
-    owner: Address,                   // 资金所有者（Owner）
-    agent_public_key: PublicKey,      // Agent 操作密钥（secp256k1）
-    name: String,                     // 显示名称
-    url: Option<String>,              // 公开信息 URL
-    metadata_hash: Option<Hash>,      // Agent 代码/配置哈希
-    domain_proof: Option<DomainProof>, // 域名所有权证明（可选）
+    agent_id: u64,                    // unique Agent ID assigned by protocol
+    owner: Address,                   // fund owner (Owner)
+    agent_public_key: PublicKey,      // Agent operation key (secp256k1)
+    name: String,                     // display name
+    url: Option<String>,              // public info URL
+    metadata_hash: Option<Hash>,      // Agent code/configuration hash
+    domain_proof: Option<DomainProof>, // domain ownership proof (optional)
     registered_at: u64,
 }
 
 enum DomainProof {
-    /// 在指定域名的 .well-known/callchain-agent 放置验证文件
+    /// Place verification file at specified domain's .well-known/callchain-agent
     DnsTxt { domain: String, txt_value: String },
-    /// 通过 HTTP 访问域名的验证端点
+    /// Access domain verification endpoint via HTTP
     HttpFile { url: String, expected_content: String },
 }
 ```
 
-### 6.2 Agent 权限与费用配置
+### 6.2 Agent Permissions and Fee Configuration
 
 ```rust
 struct AgentPermissions {
-    allowed_assets: Vec<AssetId>,    // 允许操作的资产列表（空=全部）
-    daily_limit: u128,               // 日支出上限（0=无限制）
-    per_tx_limit: u128,             // 单笔上限（0=无限制）
-    allowed_counterparties: Vec<Address>, // 白名单（空=任意）
-    allowed_protocols: Vec<Address>,     // 允许交互的 EVM 合约（空=任意）
-    expires_at: u64,                     // 过期时间戳（0=永不过期）
+    allowed_assets: Vec<AssetId>,    // list of allowed assets (empty = all)
+    daily_limit: u128,               // daily spending cap (0 = unlimited)
+    per_tx_limit: u128,             // per-transaction cap (0 = unlimited)
+    allowed_counterparties: Vec<Address>, // whitelist (empty = any)
+    allowed_protocols: Vec<Address>,     // allowed EVM contracts for interaction (empty = any)
+    expires_at: u64,                     // expiry timestamp (0 = never expires)
 }
 
 struct AgentFeeConfig {
     fee_payer: FeePayer,
-    owner_max_daily_fee: u128,      // Owner 每天最多替 Agent 付多少
-    owner_max_total_fee: u128,       // Owner 累计最多替 Agent 付多少
-    require_owner_signature_above: u128,  // 超过此金额需要 Owner 二次签名
+    owner_max_daily_fee: u128,      // maximum daily fee the Owner pays on behalf of Agent
+    owner_max_total_fee: u128,       // maximum cumulative fee the Owner pays on behalf of Agent
+    require_owner_signature_above: u128,  // amounts above this require Owner's second signature
 }
 
 enum FeePayer {
-    /// Agent 子账户余额支付费用
+    /// Agent sub-account pays fees from its balance
     SelfPay,
-    /// Owner 主账户代付费用
+    /// Owner primary account pays fees on behalf
     OwnerPays,
-    /// 第三方代付（平台/协议补贴）
+    /// Third-party pays (platform/protocol subsidy)
     ThirdParty { payer: Address },
 }
 ```
 
-**Owner 代付是 Agent 支付的推荐模式。** Agent 只提交操作指令，Gas 通过 `GasConfig::AuthorizedSponsor` 从 Owner 账户扣除。Owner 一次签名授权，Agent 后续交易无需 Owner 再签名。Agent 可在单个交易内组合多条 `AgentPay` 指令，享受多指令边际费用折扣。
+**Owner-sponsored payment is the recommended mode for Agent payments.** The Agent only submits operation instructions, and Gas is deducted from the Owner account via `GasConfig::AuthorizedSponsor`. The Owner signs once to authorize, and the Agent's subsequent transactions do not require the Owner to sign again. Agents can combine multiple `AgentPay` instructions in a single transaction, enjoying multi-instruction marginal fee discounts.
 
-### 6.3 Agent 资金授权
+### 6.3 Agent Fund Authorization
 
 ```rust
 enum AgentFundingAction {
-    /// Owner 创建并授权 Agent
+    /// Owner creates and authorizes Agent
     Grant {
         owner: Address,
         agent_public_key: PublicKey,
         name: String,
         url: Option<String>,
         domain_proof: Option<DomainProof>,
-        amount: u128,                // 初始授权金额
+        amount: u128,                // initial authorized amount
         asset_id: AssetId,
         permissions: AgentPermissions,
         fee_config: AgentFeeConfig,
     },
-    /// 追加资金
+    /// Top up funds
     TopUp {
         agent_id: u64,
         amount: u128,
         asset_id: AssetId,
     },
-    /// 立即撤销，剩余资金返回 Owner
+    /// Immediate revocation, remaining funds returned to Owner
     Revoke {
         agent_id: u64,
     },
-    /// 更新权限或费用配置
+    /// Update permissions or fee configuration
     UpdateConfig {
         agent_id: u64,
         new_permissions: Option<AgentPermissions>,
@@ -1976,73 +1976,73 @@ enum AgentFundingAction {
 }
 ```
 
-**Revoke 和 UpdateConfig 由 Owner 直接发起，不需要 Agent 配合，立即生效。**
+**Revoke and UpdateConfig are initiated directly by the Owner, do not require Agent cooperation, and take effect immediately.**
 
-### 6.4 Agent 余额管理
+### 6.4 Agent Balance Management
 
 ```rust
-/// Agent 子账户余额
+/// Agent sub-account balances
 /// (owner_address, agent_id, asset_id) → balance
 type AgentBalances = HashMap<(Address, u64, AssetId), u128>;
 
-/// Agent nonce（防重放）
+/// Agent nonce (anti-replay)
 /// (owner_address, agent_id) → nonce
 type AgentNonces = HashMap<(Address, u64), u64>;
 ```
 
-### 6.5 Agent 指令
+### 6.5 Agent Instructions
 
-Agent 操作通过 `ProtocolTransaction` 中的 `Instruction` 变体实现：
+Agent operations are implemented through `Instruction` variants in `ProtocolTransaction`:
 
 ```rust
-// Agent 相关指令已整合到 ProtocolTransaction 的 Instruction 枚举中：
+// Agent-related instructions are integrated into the Instruction enum of ProtocolTransaction:
 //
 // Instruction::AgentPay { agent_id, asset_id, to, amount }
 // Instruction::AgentBatchPay { agent_id, asset_id, payments }
 // Instruction::AgentCall { agent_id, asset_id, contract, data, value }
 // Instruction::AgentBridgeDeposit { agent_id, asset_id, to, amount }
 //
-// Agent 可以组合多个指令在一个交易中：
+// Agents can combine multiple instructions in a single transaction:
 //
 // ProtocolTransaction {
 //     sender: agent_address,
 //     instructions: vec![
-//         Instruction::AgentBridgeDeposit { ... },  // 先桥接
-//         Instruction::AgentCall { ... },           // 再调用合约
+//         Instruction::AgentBridgeDeposit { ... },  // bridge first
+//         Instruction::AgentCall { ... },           // then call contract
 //     ],
 //     gas_config: GasConfig::AuthorizedSponsor { sponsor: owner_address },
 //     auth: AuthScheme::SingleSig { signature: agent_sig },
 // }
 ```
 
-Agent 交易签名与封装：
+Agent transaction signing and wrapping:
 
-### 6.6 Agent 交易签名与验证
+### 6.6 Agent Transaction Signing and Verification
 
 ```rust
 struct SignedAgentTx {
-    protocol_tx: ProtocolTransaction, // 多指令协议交易
-    owner_signature: Option<Signature>,  // 大额交易需要 Owner 二次确认
+    protocol_tx: ProtocolTransaction, // multi-instruction protocol transaction
+    owner_signature: Option<Signature>,  // large transactions require Owner's second confirmation
 }
 ```
 
-**协议层验证流程：**
+**Protocol-layer Verification Process:**
 
 ```rust
 fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
     let agent = get_agent_from_tx(&tx.protocol_tx)?;
 
-    // 1. 验证 Agent 签名
+    // 1. Verify Agent signature
     ensure!(
         tx.protocol_tx.signature.verify(&agent.agent_public_key, &tx.protocol_tx.hash()),
         "Invalid agent signature"
     );
 
-    // 2. 验证 nonce 防重放
+    // 2. Verify nonce anti-replay
     let current_nonce = get_agent_nonce(agent.owner, agent.agent_id);
     ensure!(tx.protocol_tx.nonce == current_nonce, "Invalid nonce");
 
-    // 3. 验证每条指令的权限
+    // 3. Verify permissions for each instruction
     for instr in &tx.protocol_tx.instructions {
         let perms = &agent.permissions;
         if let Some(asset_id) = instr.asset_id() {
@@ -2058,12 +2058,12 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
         }
     }
 
-    // 4. 验证 Agent 未过期
+    // 4. Verify Agent has not expired
     if agent.permissions.expires_at > 0 {
         ensure!(current_timestamp() < agent.permissions.expires_at, "Agent expired");
     }
 
-    // 5. 大额交易需要 Owner 二次签名
+    // 5. Large transactions require Owner's second signature
     let total_amount = tx.protocol_tx.instructions.iter().filter_map(|i| i.amount()).sum::<u128>();
     if let Some(threshold) = agent.fee_config.require_owner_signature_above {
         if total_amount > threshold {
@@ -2079,9 +2079,9 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 }
 ```
 
-### 6.7 Agent 交易执行与费用处理
+### 6.7 Agent Transaction Execution and Fee Handling
 
-Agent 交易通过 `ProtocolTransaction` 的多指令执行引擎处理：
+Agent transactions are processed through the multi-instruction execution engine of `ProtocolTransaction`:
 
 ```rust
 fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
@@ -2089,111 +2089,111 @@ fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 
     verify_agent_tx(tx)?;
 
-    // 计算多指令总费用（享受 Agent 折扣）
+    // Calculate total multi-instruction fee (with Agent discount)
     let fee = calculate_multi_instruction_fee(&tx.protocol_tx.instructions, &tx.protocol_tx.gas_config);
 
-    // 扣费（根据 gas_config 从不同账户扣除）
+    // Deduct fee (deducted from different accounts according to gas_config)
     deduct_gas(&tx.protocol_tx.sender, &tx.protocol_tx.gas_config, fee, tx_hash)?;
 
-    // 执行所有指令（原子性由多指令引擎保证）
+    // Execute all instructions (atomicity guaranteed by multi-instruction engine)
     for instruction in &tx.protocol_tx.instructions {
         execute_instruction(instruction, 0, &agent.address)?;
     }
 
-    // 更新 nonce
+    // Update nonce
     increment_agent_nonce(agent.owner, agent.agent_id);
 
     Ok(())
 }
 ```
 
-### 6.8 Agent 费用模型
+### 6.8 Agent Fee Model
 
-Agent 支付享受专属 Gas 折扣（详见 §12.2 费用表），所有 Agent 指令的基础费用为普通用户的 50%。Agent 的 Gas 通过 `GasConfig` 配置，通常使用 `AuthorizedSponsor` 模式由 Owner 代付，Agent 本身无需持有 CALL。
+Agent payments enjoy exclusive Gas discounts (see §12.2 fee table), with all Agent instruction base fees at 50% of regular users. Agent Gas is configured through `GasConfig`, typically using `AuthorizedSponsor` mode sponsored by the Owner, so the Agent itself does not need to hold CALL.
 
-### 6.9 Agent 身份验证层级
+### 6.9 Agent Authentication Layers
 
-Agent 身份验证分三层：
+Agent authentication is organized in three layers:
 
-| 层级 | 内容 | 保证 |
+| Layer | Content | Guarantee |
 |------|------|------|
-| 1. 密码学认证 | Agent 密钥签名 + nonce 防重放 | "是 Agent 自己在操作" |
-| 2. 注册声明 | 名称 + 域名验证 + 代码哈希 | "Agent 是谁运营的" |
-| 3. 信任验证 | 行为历史 + 审计证明 + 社区声誉 | "我能信它吗" |
+| 1. Cryptographic authentication | Agent key signature + nonce anti-replay | "The Agent itself is operating" |
+| 2. Registration attestation | Name + domain verification + code hash | "Who operates this Agent" |
+| 3. Trust verification | Behavior history + audit proof + community reputation | "Can I trust it" |
 
-协议层强制第 1 层，提供第 2 层的基础设施，第 3 层交给生态（审计机构、钱包 UI、社区）。
+The protocol layer enforces Layer 1, provides infrastructure for Layer 2, and Layer 3 is left to the ecosystem (audit institutions, wallet UI, community).
 
 ---
 
-## 7. 发行方管理
+## 7. Issuer Management
 
-### 7.1 发行方权限
+### 7.1 Issuer Permissions
 
-发行方对其注册的资产拥有以下权限：
+Issuers have the following permissions for assets they have registered:
 
 ```rust
 enum IssuerAction {
-    /// 增发（受合规策略约束）
+    /// Mint (subject to compliance policy constraints)
     Mint { to: Address, amount: u128 },
-    /// 销毁
+    /// Burn
     Burn { from: Address, amount: u128 },
-    /// 冻结特定地址
+    /// Freeze specific address
     FreezeAddress { target: Address },
-    /// 解冻特定地址
+    /// Unfreeze specific address
     UnfreezeAddress { target: Address },
-    /// 更新合规策略
+    /// Update compliance policy
     UpdatePolicy { new_policy: CompliancePolicy },
-    /// 转移发行权限
+    /// Transfer issuance authority
     TransferOwnership { new_issuer: Address },
 }
 ```
 
-### 7.2 限制
+### 7.2 Restrictions
 
-发行方**不能**：
-- 修改其他发行方的资产
-- 绕过协议层合规策略
-- 改变协议支付的费用模型
-- 修改桥接规则
-- 直接修改用户余额（只能通过 mint/burn）
-
----
-
-## 8. 网络层
-
-### 8.1 协议
-
-使用 **commonware-p2p** 作为 P2P 网络层，与 Simplex 共识（commonware-consensus）无缝集成。
-
-- 共识消息：gossipsub 低延迟模式
-- 交易传播：gossipsub
-- 请求-响应：commonware-p2p 请求-响应模式
-
-### 8.2 交易类型传播
-
-```
-ProtocolTransaction → gossipsub, 高优先级（支付优先）
-EvmTx               → gossipsub, 标准优先级
-BridgeOp            → 打包在区块中，不单独传播
-SystemTx            → 仅验证者生成
-```
+Issuers **cannot**:
+- Modify other issuers' assets
+- Bypass protocol-layer compliance policies
+- Alter the payment model for protocol payments
+- Modify bridge rules
+- Directly modify user balances (only through mint/burn)
 
 ---
 
-## 9. 序列化格式
+## 8. Network Layer
 
-Callchain 使用**统一 RLP 序列化**，P2P 传播、区块编码、存储层编码均使用同一种格式，避免多格式转换的复杂度。
+### 8.1 Protocol
 
-### 9.1 P2P 网络与区块编码（RLP）
+Uses **commonware-p2p** as the P2P network layer, seamlessly integrated with Simplex consensus (commonware-consensus).
 
-P2P 消息传播、区块/交易编码使用 **alloy-rlp**（RLP，Recursive Length Prefix），与以太坊生态一致。
+- Consensus messages: gossipsub low-latency mode
+- Transaction propagation: gossipsub
+- Request-response: commonware-p2p request-response mode
+
+### 8.2 Transaction Type Propagation
+
+```
+ProtocolTransaction → gossipsub, high priority (payments prioritized)
+EvmTx               → gossipsub, standard priority
+BridgeOp            → packed in blocks, not propagated separately
+SystemTx            → generated by validators only
+```
+
+---
+
+## 9. Serialization Format
+
+Callchain uses **unified RLP serialization** -- P2P propagation, block encoding, and storage layer encoding all use the same format, avoiding the complexity of multi-format conversion.
+
+### 9.1 P2P Network and Block Encoding (RLP)
+
+P2P message propagation and block/transaction encoding use **alloy-rlp** (RLP, Recursive Length Prefix), consistent with the Ethereum ecosystem.
 
 ```rust
 use alloy_rlp::{RlpEncodable, RlpDecodable};
 
-/// P2P 网络消息
+/// P2P network message
 struct NetworkMessage {
-    data: Vec<u8>,  // RLP 编码的交易或区块
+    data: Vec<u8>,  // RLP-encoded transaction or block
     checksum: u32,
 }
 
@@ -2204,22 +2204,22 @@ impl alloy_rlp::Encodable for Block { ... }
 impl alloy_rlp::Decodable for Block { ... }
 ```
 
-**为什么选 RLP 而非 Borsh/SCALE/rkyv：**
-| 维度 | RLP | Borsh | SCALE | rkyv |
+**Why RLP over Borsh/SCALE/rkyv:**
+| Dimension | RLP | Borsh | SCALE | rkyv |
 |------|-----|-------|-------|------|
-| 以太坊兼容 | ✅ 原生 | ❌ 需转换 | ❌ 需转换 | ❌ 需转换 |
-| 工具生态 | 丰富（alloy-rs） | 中等 | 仅 Polkadot | 小 |
-| 存储读写性能 | 与 Reth 原生一致 | 需要适配层 | 需要适配层 | 零拷贝读，写慢 |
-| 与 Reth 集成 | ✅ 零适配 | 需要适配层 | 需要适配层 | 需要适配层 |
+| Ethereum compatibility | ✅ Native | ❌ Requires conversion | ❌ Requires conversion | ❌ Requires conversion |
+| Tool ecosystem | Rich (alloy-rs) | Medium | Polkadot only | Small |
+| Storage read/write performance | Native consistency with Reth | Requires adapter layer | Requires adapter layer | Zero-copy read, slow write |
+| Reth integration | ✅ Zero adaptation | Requires adapter layer | Requires adapter layer | Requires adapter layer |
 
-### 9.2 JSON-RPC 与配置（Serde JSON）
+### 9.2 JSON-RPC and Configuration (Serde JSON)
 
-RPC 接口、配置文件、Genesis 使用 **serde** 序列化。
+RPC interfaces, configuration files, and Genesis use **serde** serialization.
 
 ```rust
 use serde::{Serialize, Deserialize};
 
-/// Genesis 配置（TOML/JSON 解析）
+/// Genesis configuration (TOML/JSON parsing)
 #[derive(Serialize, Deserialize)]
 struct GenesisConfig {
     chain_id: u64,
@@ -2227,7 +2227,7 @@ struct GenesisConfig {
     initial_allocations: Vec<Allocation>,
 }
 
-/// RPC 响应
+/// RPC response
 #[derive(Serialize, Deserialize)]
 struct RpcResponse<T> {
     jsonrpc: String,
@@ -2237,14 +2237,14 @@ struct RpcResponse<T> {
 }
 ```
 
-### 9.3 存储层编码
+### 9.3 Storage Layer Encoding
 
-存储层（reth-db / MDBX）使用 RLP 编码，与协议层保持一致：
+The storage layer (reth-db / MDBX) uses RLP encoding, consistent with the protocol layer:
 
 ```rust
-/// 存储键值对使用 RLP 编码
-/// 键：固定长度前缀 + 变量部分
-/// 值：RLP 编码的结构体
+/// Storage key-value pairs use RLP encoding
+/// Key: fixed-length prefix + variable portion
+/// Value: RLP-encoded struct
 
 trait StorageCodec: Sized {
     fn encode_to_buf(&self, buf: &mut Vec<u8>);
@@ -2252,29 +2252,29 @@ trait StorageCodec: Sized {
 }
 ```
 
-### 9.4 各类型序列化策略
+### 9.4 Serialization Strategy by Type
 
-| 数据类型 | P2P 传播 | 存储 | RPC 输出 |
+| Data Type | P2P Propagation | Storage | RPC Output |
 |----------|---------|------|---------|
 | ProtocolTransaction | RLP | StorageCodec | JSON |
 | SignedAgentTx | RLP | StorageCodec | JSON |
 | Block | RLP | StorageCodec | JSON |
-| ShieldedProof | RLP | 压缩二进制 | JSON（base64） |
+| ShieldedProof | RLP | Compressed binary | JSON (base64) |
 | StateSnapshot | RLP | StorageCodec | JSON |
-| ZkProof | RLP | 压缩二进制 | JSON（base64） |
+| ZkProof | RLP | Compressed binary | JSON (base64) |
 
-### 9.5 地址格式
+### 9.5 Address Format
 
 ```
-地址 = 20 字节（160 位），hex 编码，0x 前缀
+Address = 20 bytes (160 bits), hex encoded, 0x prefix
 
-示例：0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18
+Example: 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18
 
-编码规则：
-  - 内部表示：[u8; 20]
-  - 显示格式：0x + 40 字符 hex（小写）
-  - 校验：可选 EIP-55 混合大小写校验和
-  - 序列化：RLP 编码为 20 字节原始值，JSON 编码为 hex 字符串
+Encoding rules:
+  - Internal representation: [u8; 20]
+  - Display format: 0x + 40 character hex (lowercase)
+  - Checksum: Optional EIP-55 mixed-case checksum
+  - Serialization: RLP encodes as 20 raw bytes, JSON encodes as hex string
 ```
 
 ```rust
@@ -2291,10 +2291,10 @@ impl Serialize for Address { /* JSON: hex string */ }
 impl<'de> Deserialize<'de> for Address { /* JSON: from hex string */ }
 ```
 
-### 9.6 交易序列化示例
+### 9.6 Transaction Serialization Example
 
 ```rust
-// RLP 编码（P2P 传播）
+// RLP encoding (P2P propagation)
 let tx = ProtocolTransaction {
     sender: Address::from_hex("0x742d35..."),
     nonce: 42,
@@ -2306,182 +2306,182 @@ let tx = ProtocolTransaction {
 let rlp_bytes = alloy_rlp::encode(&tx);  // → Vec<u8>
 let decoded = ProtocolTransaction::decode(&mut &rlp_bytes[..])?;
 
-// JSON 编码（RPC 输出）
+// JSON encoding (RPC output)
 let json = serde_json::to_string(&tx)?;
 // → {"sender":"0x742d35...","nonce":42,"auth":"singlesig",...}
 ```
 
 ---
 
-## 10. 存储层
+## 10. Storage Layer
 
-### 10.1 引擎
+### 10.1 Engine
 
-使用 **reth-db (MDBX)** 作为持久化存储引擎。
+Uses **reth-db (MDBX)** as the persistent storage engine.
 
-### 10.2 状态结构
+### 10.2 State Structure
 
 ```
 callchain/
 ├── protocol/
-│   ├── assets/{asset_id}/          # 资产元数据
-│   ├── balances/{asset_id}/{addr}  # 协议层余额
-│   └── allowances/{asset_id}/{owner}/{spender}  # 允许度
+│   ├── assets/{asset_id}/          # asset metadata
+│   ├── balances/{asset_id}/{addr}  # protocol-layer balances
+│   └── allowances/{asset_id}/{owner}/{spender}  # allowances
 ├── shielded/
-│   ├── merkle_tree/{asset_id}/     # 每个资产的 Merkle Tree
-│   ├── nullifiers/{asset_id}/{nf}  # 已花费的 nullifier（防双花）
-│   ├── commitments/{asset_id}/{cm} # 笔记承诺（加密 Note）
-│   └── viewing_keys/{addr}/        # 用户视图密钥映射
+│   ├── merkle_tree/{asset_id}/     # Merkle Tree per asset
+│   ├── nullifiers/{asset_id}/{nf}  # spent nullifiers (anti-double-spend)
+│   ├── commitments/{asset_id}/{cm} # note commitments (encrypted Notes)
+│   └── viewing_keys/{addr}/        # user view key mappings
 ├── agent/
-│   ├── registrations/{agent_id}/   # Agent 注册信息
-│   ├── balances/{owner}/{agent_id}/{asset_id}  # Agent 子账户余额
+│   ├── registrations/{agent_id}/   # Agent registration info
+│   ├── balances/{owner}/{agent_id}/{asset_id}  # Agent sub-account balances
 │   └── nonces/{owner}/{agent_id}   # Agent nonce
 ├── evm/
-│   ├── accounts/{addr}/            # EVM 账户
-│   ├── contracts/{addr}/           # 合约代码
-│   └── storage/{addr}/{slot}       # 合约存储
+│   ├── accounts/{addr}/            # EVM accounts
+│   ├── contracts/{addr}/           # contract code
+│   └── storage/{addr}/{slot}       # contract storage
 ├── bridge/
-│   └── pending_ops/                # 待处理桥接操作
+│   └── pending_ops/                # pending bridge operations
 ├── consensus/
-│   ├── blocks/{height}             # 区块数据
-│   └── state/{height}              # 状态快照
+│   ├── blocks/{height}             # block data
+│   └── state/{height}              # state snapshots
 └── metadata/
-    ├── chain_id                    # 链 ID
-    ├── validators                  # 当前验证者集
-    ├── compliance                  # 合规策略注册表
-    └── agents/                     # Agent 注册表
-        └── {agent_id}/             # Agent 身份与权限
+    ├── chain_id                    # chain ID
+    ├── validators                  # current validator set
+    ├── compliance                  # compliance policy registry
+    └── agents/                     # Agent registry
+        └── {agent_id}/             # Agent identity and permissions
 ```
 
-### 10.3 数据 Prune 策略
+### 10.3 Data Prune Strategy
 
-区块链节点数据会随时间无限增长。Callchain 采用**分层 prune 策略**：保留当前状态 + 最近 N 个区块，历史中间状态可安全丢弃。
+Blockchain node data grows infinitely over time. Callchain adopts a **layered prune strategy**: retain current state + most recent N blocks, historical intermediate state can be safely discarded.
 
-#### 10.3.1 数据分类
+#### 10.3.1 Data Classification
 
 ```
-节点数据 = 当前状态 + 历史区块 + 中间状态 + 索引 + 归档数据
+Node data = Current state + Historical blocks + Intermediate state + Indexes + Archive data
 
-必须保留（不可 prune）：
-  ✓ 当前协议层余额
-  ✓ 当前 EVM 状态
-  ✓ 当前 Shielded Pool 状态（nullifier 集合、Merkle 根）
-  ✓ 当前 Agent 注册与余额
-  ✓ 区块头（用于链验证）
-  ✓ 最近 N 个区块的完整数据
+Must retain (cannot prune):
+  ✓ Current protocol-layer balances
+  ✓ Current EVM state
+  ✓ Current Shielded Pool state (nullifier set, Merkle root)
+  ✓ Current Agent registrations and balances
+  ✓ Block headers (for chain verification)
+  ✓ Complete data of the most recent N blocks
 
-可以 prune：
-  ✗ 历史状态的中间版本
-  ✗ 已确认交易的执行痕迹（traces）
-  ✗ 过期的交易索引（> N 区块之前）
-  ✗ 已归档的合约中间存储
+Can be pruned:
+  ✗ Historical intermediate state versions
+  ✗ Execution traces of confirmed transactions
+  ✗ Expired transaction indexes (> N blocks ago)
+  ✗ Archived contract intermediate storage
 ```
 
-#### 10.3.2 分层 Prune 配置
+#### 10.3.2 Layered Prune Configuration
 
 ```rust
 struct PruneConfig {
-    // 快照：每 E 个区块生成一个完整状态快照
-    snapshot_interval: u64,        // 默认 100_000 区块（约 7 小时）
-    snapshot_keep: u64,            // 默认 3（保留最近 3 个快照）
+    // Snapshot: generate a full state snapshot every E blocks
+    snapshot_interval: u64,        // default 100_000 blocks (~7 hours)
+    snapshot_keep: u64,            // default 3 (keep most recent 3 snapshots)
 
-    // Prune：每 P 个区块触发一次 prune
-    prune_interval: u64,           // 默认 10_000 区块
+    // Prune: trigger prune every P blocks
+    prune_interval: u64,           // default 10_000 blocks
 
-    // 热数据：保留最近的完整状态
-    keep_recent: u64,              // 默认 50_000 区块完整状态
+    // Hot data: retain most recent complete state
+    keep_recent: u64,              // default 50_000 blocks full state
 
-    // 区块头：永远保留（用于轻客户端验证）
-    // 区块体：超过 keep_recent 后只保留区块头，丢弃交易详情
-    keep_block_body: u64,          // 默认 100_000 区块
+    // Block headers: always retained (for light client verification)
+    // Block bodies: after keep_recent, only headers retained, transaction details discarded
+    keep_block_body: u64,          // default 100_000 blocks
 
-    // 收据/日志：保留更长时间，用于区块浏览器查询
-    keep_receipt: u64,             // 默认 1_000_000 区块
+    // Receipts/logs: retained longer for block explorer queries
+    keep_receipt: u64,             // default 1_000_000 blocks
 
-    // 节点模式
+    // Node mode
     node_mode: NodeMode,
 }
 
 enum NodeMode {
-    /// 验证者：保留完整状态 + 最近 10 万区块
+    /// Validator: retain full state + most recent 100K blocks
     Validator,
-    /// 全节点：prune 历史中间状态，保留当前状态
+    /// Full node: prune historical intermediate state, retain current state
     Full,
-    /// 轻节点：只保留区块头，状态按需查询
+    /// Light node: only retain block headers, state queried on demand
     Light,
-    /// 归档节点：保留所有历史数据（由社区/分析机构运行）
+    /// Archive node: retain all historical data (run by community/analysts)
     Archive,
 }
 ```
 
-#### 10.3.3 各层 Prune 规则
+#### 10.3.3 Prune Rules by Layer
 
-**协议层（Protocol）：**
+**Protocol Layer:**
 ```
-- 当前余额：始终保留（增量更新，覆盖旧值）
-- 允许度：始终保留
-- 资产注册表：始终保留
-- 历史交易痕迹：超过 keep_recent prune
-```
-
-**EVM 层：**
-```
-- 当前 EVM 状态：始终保留
-- 合约代码：始终保留
-- 历史存储版本：超过 keep_recent prune
-- 交易痕迹（traces）：超过 prune 策略丢弃
+- Current balances: always retained (incremental updates, overwrite old values)
+- Allowances: always retained
+- Asset registry: always retained
+- Historical transaction traces: pruned after keep_recent
 ```
 
-**Shielded Pool：**
+**EVM Layer:**
 ```
-Nullifier 集合（不可 prune）：
-  - 必须完整保留，否则无法检测双花
-  - 使用 BitSet 压缩存储，~1 bit / 已花费 nullifier
-  - 预计 1 亿笔交易 ~ 12.5 MB
-
-Merkle Tree（部分 prune）：
-  - 根哈希：始终保留
-  - 分支节点：保留到深度允许快速验证的范围
-  - 加密 Note 数据：超过 keep_recent 可 prune 到归档节点
-  - Viewing key 映射：始终保留
-
-commitment 树增长估算：
-  每笔 Shielded 交易 ~2 个 commitment
-  10 万笔/天 × 365 天 = 3650 万 commitment
-  每个 commitment ~32 字节 = ~1.2 GB/年（可接受）
+- Current EVM state: always retained
+- Contract code: always retained
+- Historical storage versions: pruned after keep_recent
+- Transaction traces: discarded per prune policy
 ```
 
-**Agent 层：**
+**Shielded Pool:**
 ```
-- 当前注册信息：始终保留
-- 当前余额：始终保留
-- 当前 nonce：始终保留
-- 历史交易：超过 keep_recent prune
+Nullifier set (cannot be pruned):
+  - Must be fully retained, otherwise double-spending cannot be detected
+  - Compressed storage using BitSet, ~1 bit / spent nullifier
+  - Estimated 100M transactions ~ 12.5 MB
+
+Merkle Tree (partial prune):
+  - Root hash: always retained
+  - Branch nodes: retained to depth allowing fast verification
+  - Encrypted Note data: can be pruned to archive nodes after keep_recent
+  - Viewing key mappings: always retained
+
+Commitment tree growth estimate:
+  Each Shielded transaction ~2 commitments
+  100K/day × 365 days = 36.5M commitments
+  Each commitment ~32 bytes = ~1.2 GB/year (acceptable)
 ```
 
-**共识层：**
+**Agent Layer:**
 ```
-- 区块头：始终保留
-- 区块体（交易详情）：超过 keep_block_body prune
-- 状态快照：保留最近 snapshot_keep 个
-- 验证者历史集：超过 keep_recent prune
+- Current registration info: always retained
+- Current balances: always retained
+- Current nonce: always retained
+- Historical transactions: pruned after keep_recent
 ```
 
-#### 10.3.4 状态快照生成与验证
+**Consensus Layer:**
+```
+- Block headers: always retained
+- Block bodies (transaction details): pruned after keep_block_body
+- State snapshots: retain most recent snapshot_keep
+- Historical validator sets: pruned after keep_recent
+```
+
+#### 10.3.4 State Snapshot Generation and Verification
 
 ```rust
 struct StateSnapshot {
     height: u64,
-    protocol_root: Hash,         // 协议余额 Merkle 根
-    evm_root: Hash,              // EVM 状态根
-    shielded_root: Hash,         // Shielded Merkle 根
-    agent_root: Hash,            // Agent 状态根
-    consensus_root: Hash,        // 验证者集哈希
-    total_size: u64,             // 快照大小（字节）
-    validator_signatures: Vec<ValidatorSignature>,  // 2/3 签名
+    protocol_root: Hash,         // protocol balance Merkle root
+    evm_root: Hash,              // EVM state root
+    shielded_root: Hash,         // Shielded Merkle root
+    agent_root: Hash,            // Agent state root
+    consensus_root: Hash,        // validator set hash
+    total_size: u64,             // snapshot size (bytes)
+    validator_signatures: Vec<ValidatorSignature>,  // 2/3 signatures
 }
 
-// 快照生成（每 snapshot_interval 个区块）
+// Snapshot generation (every snapshot_interval blocks)
 fn generate_snapshot(state: &State, height: u64) -> StateSnapshot {
     StateSnapshot {
         height,
@@ -2495,43 +2495,43 @@ fn generate_snapshot(state: &State, height: u64) -> StateSnapshot {
     }
 }
 
-// 快照验证
+// Snapshot verification
 fn verify_snapshot(snapshot: &StateSnapshot) -> Result<()> {
-    // 需要 2/3 验证者签名
+    // Requires 2/3 validator signatures
     let valid_sigs = snapshot.validator_signatures
         .iter()
         .filter(|sig| verify_validator_sig(sig, &snapshot))
         .count();
-    ensure!(valid_sigs >= quorum(), "Ins validator signatures");
+    ensure!(valid_sigs >= quorum(), "Insufficient validator signatures");
     Ok(())
 }
 ```
 
-#### 10.3.5 快速同步流程
+#### 10.3.5 Fast Sync Process
 
-新节点使用快照 + 增量同步，无需从创世区块重放：
+New nodes use snapshot + incremental sync, no need to replay from genesis block:
 
 ```
-1. 从网络获取最近的状态快照（从其他节点或 P2P 快照市场）
-2. 验证快照：
-   - 检查 2/3 验证者签名
-   - 验证 Merkle 根一致性
-3. 恢复快照状态到本地存储
-4. 从快照高度开始，逐区块同步后续数据
-5. 达到最新高度后，开始参与共识/验证
+1. Fetch recent state snapshot from network (from other nodes or P2P snapshot market)
+2. Verify snapshot:
+   - Check 2/3 validator signatures
+   - Verify Merkle root consistency
+3. Restore snapshot state to local storage
+4. Sync subsequent data block by block from snapshot height
+5. After reaching latest height, begin participating in consensus/verification
 
-预计时间：
-  - 快照下载：~30 秒（100MB @ 100Mbps）
-  - 快照验证：~5 秒
-  - 状态恢复：~30 秒
-  - 增量同步：~2-3 分钟（取决于落后区块数）
-  - 总计：< 5 分钟
+Estimated time:
+  - Snapshot download: ~30 seconds (100MB @ 100Mbps)
+  - Snapshot verification: ~5 seconds
+  - State restore: ~30 seconds
+  - Incremental sync: ~2-3 minutes (depending on number of blocks behind)
+  - Total: < 5 minutes
 ```
 
-#### 10.3.6 Prune 触发与清理
+#### 10.3.6 Prune Trigger and Cleanup
 
 ```rust
-// 定期 prune 检查
+// Periodic prune check
 fn maybe_prune(state: &State, config: &PruneConfig) -> Result<()> {
     let current_height = state.current_height();
 
@@ -2541,53 +2541,53 @@ fn maybe_prune(state: &State, config: &PruneConfig) -> Result<()> {
 
     let prune_boundary = current_height.saturating_sub(config.keep_recent);
 
-    // 1. Prune 历史交易痕迹
+    // 1. Prune historical transaction traces
     prune_execution_traces(prune_boundary)?;
 
-    // 2. Prune 过期收据/日志
+    // 2. Prune expired receipts/logs
     prune_receipts(current_height.saturating_sub(config.keep_receipt))?;
 
-    // 3. Prune 过期区块体
+    // 3. Prune expired block bodies
     prune_block_bodies(current_height.saturating_sub(config.keep_block_body))?;
 
-    // 4. 清理过期快照（保留最近 N 个）
+    // 4. Clean up expired snapshots (retain most recent N)
     prune_old_snapshots(config.snapshot_keep)?;
 
-    // 5. Compact 数据库（释放物理磁盘空间）
+    // 5. Compact database (release physical disk space)
     compact_database()?;
 
     Ok(())
 }
 ```
 
-#### 10.3.7 存储增长估算
+#### 10.3.7 Storage Growth Estimate
 
-| 节点模式 | 年化增长 | 1 年后总大小 | 说明 |
+| Node Mode | Annual Growth | Total Size After 1 Year | Description |
 |----------|---------|------------|------|
-| Validator | ~2 GB/月 | ~50 GB | 热数据 + 最近 5 万区块 |
-| Full | ~500 MB/月 | ~20 GB | 当前状态 + 区块头 |
-| Light | ~100 MB/月 | ~5 GB | 仅区块头 |
-| Archive | ~50 GB/月 | ~600 GB | 保留所有历史 |
+| Validator | ~2 GB/month | ~50 GB | Hot data + most recent 50K blocks |
+| Full | ~500 MB/month | ~20 GB | Current state + block headers |
+| Light | ~100 MB/month | ~5 GB | Block headers only |
+| Archive | ~50 GB/month | ~600 GB | Retains all history |
 
-#### 10.3.8 CLI 配置示例
+#### 10.3.8 CLI Configuration Example
 
 ```bash
-# 验证者节点（默认）
+# Validator node (default)
 calld run --mode validator
 
-# 全节点（prune 历史，保留当前状态）
+# Full node (prune history, retain current state)
 calld run --mode full \
   --prune.keep-recent 50000 \
   --prune.keep-receipt 1000000 \
   --prune.keep-block-body 100000
 
-# 轻节点（仅区块头，适合嵌入式设备）
+# Light node (block headers only, suitable for embedded devices)
 calld run --mode light
 
-# 归档节点（保留所有历史，用于分析/浏览器）
+# Archive node (retain all history, for analysis/explorer)
 calld run --mode archive
 
-# 自定义快照策略
+# Custom snapshot strategy
 calld run \
   --snapshot.interval 100000 \
   --snapshot.keep 3
@@ -2595,20 +2595,20 @@ calld run \
 
 ---
 
-## 11. RPC 接口
+## 11. RPC Interface
 
-### 11.1 标准以太坊 JSON-RPC
+### 11.1 Standard Ethereum JSON-RPC
 
-完全支持以太坊 JSON-RPC 2.0 规范：
+Fully supports the Ethereum JSON-RPC 2.0 specification:
 - `eth_call`, `eth_sendRawTransaction`
 - `eth_getBalance`, `eth_getTransactionReceipt`
 - `eth_blockNumber`, `eth_getLogs`
-- ... 所有标准方法
+- ... all standard methods
 
-### 11.2 Callchain 扩展方法
+### 11.2 Callchain Extension Methods
 
 ```json
-// 协议层资产查询
+// Protocol-layer asset query
 {
     "method": "call_assetInfo",
     "params": [42],
@@ -2616,7 +2616,7 @@ calld run \
 }
 → { asset_id, name, symbol, decimals, issuer, total_supply, policy }
 
-// 协议层余额查询
+// Protocol-layer balance query
 {
     "method": "call_protocolBalance",
     "params": [42, "0x..."],
@@ -2624,7 +2624,7 @@ calld run \
 }
 → { balance: "1000000000000000000" }
 
-// 发起协议支付交易
+// Submit protocol payment transaction
 {
     "method": "call_sendPayment",
     "params": [{ asset_id, from, to, amount, signature }],
@@ -2632,7 +2632,7 @@ calld run \
 }
 → { tx_hash }
 
-// 资产注册
+// Asset registration
 {
     "method": "call_registerAsset",
     "params": [{ name, symbol, decimals, policy, signature }],
@@ -2640,7 +2640,7 @@ calld run \
 }
 → { asset_id, evm_contract }
 
-// 合规策略查询
+// Compliance policy query
 {
     "method": "call_compliancePolicy",
     "params": [42],
@@ -2648,7 +2648,7 @@ calld run \
 }
 → { policy: "OfacBlacklist", details: {...} }
 
-// 统一余额查询
+// Unified balance query
 {
     "method": "call_totalBalance",
     "params": [42, "0x..."],
@@ -2656,7 +2656,7 @@ calld run \
 }
 → { protocol: "30", evm: "70", total: "100" }
 
-// Agent 注册
+// Agent registration
 {
     "method": "call_agentRegister",
     "params": [{ name, agent_public_key, url, permissions, fee_config, signature }],
@@ -2664,7 +2664,7 @@ calld run \
 }
 → { agent_id: 42 }
 
-// Agent 信息查询
+// Agent info query
 {
     "method": "call_agentInfo",
     "params": [42],
@@ -2672,7 +2672,7 @@ calld run \
 }
 → { agent_id, owner, name, url, permissions, fee_config, registered_at }
 
-// Agent 余额查询
+// Agent balance query
 {
     "method": "call_agentBalance",
     "params": ["0x...", 42, 1],
@@ -2680,7 +2680,7 @@ calld run \
 }
 → { balance: "500000000", asset_id: 1 }
 
-// Agent 交易历史
+// Agent transaction history
 {
     "method": "call_agentHistory",
     "params": [42, { from_block: 0, to_block: "latest" }],
@@ -2688,7 +2688,7 @@ calld run \
 }
 → { transactions: [...], total_spent: "...", days_active: 365 }
 
-// Agent 资金授权
+// Agent fund authorization
 {
     "method": "call_agentGrant",
     "params": [{ agent_id, amount, asset_id, signature }],
@@ -2696,7 +2696,7 @@ calld run \
 }
 → { tx_hash }
 
-// Agent 撤销
+// Agent revocation
 {
     "method": "call_agentRevoke",
     "params": [{ agent_id, signature }],
@@ -2704,7 +2704,7 @@ calld run \
 }
 → { tx_hash }
 
-// Shielded Pool：生成存款证明（客户端调用，链下）
+// Shielded Pool: generate deposit proof (client-side, off-chain)
 {
     "method": "call_shieldedDepositProve",
     "params": [{ asset_id, amount, recipient }],
@@ -2712,7 +2712,7 @@ calld run \
 }
 → { commitment, encrypted_note }
 
-// Shielded Pool：生成隐私转账证明（客户端调用，链下）
+// Shielded Pool: generate shielded transfer proof (client-side, off-chain)
 {
     "method": "call_shieldedTransferProve",
     "params": [{ asset_id, notes_to_spend, recipients, viewing_key }],
@@ -2720,7 +2720,7 @@ calld run \
 }
 → { nullifiers, commitments, proof }
 
-// Shielded Pool：余额查询（需要 viewing key）
+// Shielded Pool: balance query (requires viewing key)
 {
     "method": "call_shieldedBalance",
     "params": [{ asset_id, viewing_key }],
@@ -2728,7 +2728,7 @@ calld run \
 }
 → { total: "1000", notes: [{ commitment, encrypted_amount }] }
 
-// Shielded Pool：Merkle Tree 状态
+// Shielded Pool: Merkle Tree state
 {
     "method": "call_shieldedTreeState",
     "params": [42],
@@ -2739,131 +2739,131 @@ calld run \
 
 ### 11.3 WebSocket
 
-支持 WebSocket 订阅：
-- `call_newPaymentBlock` — 新区块
-- `call_paymentReceived` — 收到协议支付
-- `call_bridgeCompleted` — 桥接完成
-- `call_assetRegistered` — 新资产注册
-- `call_agentExecuted` — Agent 交易执行
-- `call_agentRevoked` — Agent 被撤销
-- `call_shieldedDeposit` — 收到 Shielded 存款（需要 viewing key）
-- `call_shieldedWithdrawal` — Shielded 提取到透明地址
+Supports WebSocket subscriptions:
+- `call_newPaymentBlock` -- new block
+- `call_paymentReceived` -- received protocol payment
+- `call_bridgeCompleted` -- bridge completed
+- `call_assetRegistered` -- new asset registered
+- `call_agentExecuted` -- Agent transaction executed
+- `call_agentRevoked` -- Agent revoked
+- `call_shieldedDeposit` -- received Shielded deposit (requires viewing key)
+- `call_shieldedWithdrawal` -- Shielded withdrawal to transparent address
 
 ---
 
-## 12. 经济模型
+## 12. Economic Model
 
-### 12.1 CALL 代币
+### 12.1 CALL Token
 
-CALL 是 Callchain 的原生代币，承担 Gas、质押、治理三重功能。
+CALL is Callchain's native token, serving the triple role of Gas, staking, and governance.
 
-| 属性 | 值 |
+| Attribute | Value |
 |------|------|
-| 总供应量 | 1,000,000,000 CALL（10 亿，固定） |
-| 最小单位 | 1 wei = 10⁻¹⁸ CALL |
-| 增发 | 无，固定供应 |
-| 通缩机制 | 50% 交易费销毁 |
+| Total Supply | 1,000,000,000 CALL (1 billion, fixed) |
+| Smallest Unit | 1 wei = 10⁻¹⁸ CALL |
+| Issuance | None, fixed supply |
+| Deflationary Mechanism | 50% transaction fee burn |
 
-**初始分配：**
+**Initial Allocation:**
 
-| 类别 | 比例 | 数量 | 锁仓 |
+| Category | Proportion | Amount | Lock-up |
 |------|------|------|------|
-| 验证者奖励 | 70% | 350M | 线性释放 8 年 |
-| 生态基金 | 20% | 100M | 多签管理，社区治理 |
-| 社区空投 | 10% | 50M | 主网上线释放 30%，剩余 24 个月线性 |
-| 历史已分配 | - | 500M | 创世前已完成分配 |
+| Validator rewards | 70% | 350M | Linear release over 8 years |
+| Ecosystem fund | 20% | 100M | Multi-sig managed, community governance |
+| Community airdrop | 10% | 50M | 30% released at mainnet launch, remaining linear over 24 months |
+| Historically allocated | - | 500M | Completed pre-genesis allocation |
 
-### 12.2 Gas 支付（EIP-1559 动态费率）
+### 12.2 Gas Payment (EIP-1559 Dynamic Fee)
 
-所有协议层交易的 Gas 以 CALL 支付。采用**类 EIP-1559 动态费率**：每条指令定义固定的 gas unit，网络基础费率每区块自动调整，拥堵时涨价、空闲时降价。
+All protocol-layer transactions pay Gas in CALL. Uses an **EIP-1559-like dynamic fee**: each instruction has a fixed gas unit, and the network base rate adjusts automatically each block, rising during congestion and falling during idle periods.
 
-#### 12.2.1 指令 Gas Unit 表
+#### 12.2.1 Instruction Gas Unit Table
 
-| 指令类型 | Gas Unit | 说明 |
+| Instruction Type | Gas Unit | Description |
 |----------|---------|------|
-| Transfer | 10,000 gas | 标准转账 |
-| Transfer（含 Memo） | 10,000 + memo_bytes × 1 gas | 带备注转账 |
-| Approve / Mint / Burn | 5,000 gas | 授权/铸造/销毁 |
-| BatchTransfer 内每笔 | 1,000 gas | 批量支付每收款人 |
-| BatchTransfer Memo | memo_bytes × 1 gas | 批量备注附加费用 |
-| BridgeDeposit | 10,000 gas | 内部桥接存款 |
-| ShieldedDeposit / Withdraw | 20,000 gas | 含 ZK 证明验证 |
-| ShieldedTransfer | 50,000 gas | 含 ZK 证明验证 |
-| Agent 指令 | 上述 × 0.5 | Agent 专属折扣 |
-| ExternalBridgeDeposit | 30,000 gas | 外部桥接（含签名验证） |
+| Transfer | 10,000 gas | Standard transfer |
+| Transfer (with Memo) | 10,000 + memo_bytes × 1 gas | Transfer with memo |
+| Approve / Mint / Burn | 5,000 gas | Approve/mint/burn |
+| Each recipient in BatchTransfer | 1,000 gas | Per payee in batch payment |
+| BatchTransfer Memo | memo_bytes × 1 gas | Batch memo additional fee |
+| BridgeDeposit | 10,000 gas | Internal bridge deposit |
+| ShieldedDeposit / Withdraw | 20,000 gas | Includes ZK proof verification |
+| ShieldedTransfer | 50,000 gas | Includes ZK proof verification |
+| Agent instructions | Above × 0.5 | Agent exclusive discount |
+| ExternalBridgeDeposit | 30,000 gas | External bridge (includes signature verification) |
 
-#### 12.2.2 费用计算公式
+#### 12.2.2 Fee Calculation Formula
 
 ```
-总费用 = base_fee × 总 gas unit + priority_fee
+Total fee = base_fee × total gas units + priority_fee
 
-其中：
-  base_fee：每区块动态调整的基础费率（wei/gas unit）
-  total_gas = 首条指令 gas + (N-1) × 后续指令 gas × 边际折扣系数
-  priority_fee：用户自选优先级小费（全部给验证者）
+Where:
+  base_fee: dynamically adjusted base rate per block (wei/gas unit)
+  total_gas = first instruction gas + (N-1) × subsequent instruction gas × marginal discount coefficient
+  priority_fee: user-selected priority tip (all goes to validators)
 ```
 
-**边际折扣系数：**
+**Marginal Discount Coefficient:**
 ```
-第 1 条指令：1.0 × gas（全价）
-第 2-10 条指令：0.5 × gas（50% 折扣）
-第 11+ 条指令：0.25 × gas（75% 折扣）
+1st instruction: 1.0 × gas (full price)
+2nd-10th instructions: 0.5 × gas (50% discount)
+11th+ instructions: 0.25 × gas (75% discount)
 ```
 
-#### 12.2.3 Base Fee 动态调整
+#### 12.2.3 Base Fee Dynamic Adjustment
 
 ```rust
-/// 每区块 base fee 调整参数
+/// Per-block base fee adjustment parameters
 struct FeeParams {
-    base_fee: u128,               // 当前基础费率（wei/gas）
-    target_gas_per_block: u64,   // 目标 gas 使用量（区块）
-    max_gas_per_block: u64,      // 最大 gas 上限
-    adjustment_coefficient: u128, // 调整系数（1/8 = 12.5%）
+    base_fee: u128,               // current base rate (wei/gas)
+    target_gas_per_block: u64,   // target gas usage (block)
+    max_gas_per_block: u64,      // maximum gas limit
+    adjustment_coefficient: u128, // adjustment coefficient (1/8 = 12.5%)
 }
 
-/// 每区块更新 base fee
+/// Update base fee each block
 fn update_base_fee(current_base_fee: u128, block_gas_used: u64, params: &FeeParams) -> u128 {
     let target = params.target_gas_per_block;
     if block_gas_used == target {
-        return current_base_fee;  // 刚好达到目标，不变
+        return current_base_fee;  // exactly at target, no change
     }
 
     let adjustment = current_base_fee
         * (block_gas_used as i128 - target as i128).abs() as u128
         / target as u128
-        / 8;  // 最大调整 12.5%
+        / 8;  // maximum adjustment 12.5%
 
     if block_gas_used > target {
-        // 拥堵：涨价，最大 +12.5%
+        // Congested: price increase, max +12.5%
         current_base_fee.saturating_add(adjustment)
     } else {
-        // 空闲：降价，最大 -12.5%
+        // Idle: price decrease, max -12.5%
         current_base_fee.saturating_sub(adjustment)
     }
 }
 ```
 
-**Base Fee 调整示例（假设初始 base_fee = 1 wei/gas，target_gas = 10M）：**
+**Base Fee Adjustment Example (assuming initial base_fee = 1 wei/gas, target_gas = 10M):**
 
-| 场景 | 区块 Gas 使用 | base_fee 变化 |
+| Scenario | Block Gas Usage | base_fee Change |
 |------|-------------|--------------|
-| 刚好目标 | 10,000,000 | 不变 |
-| 轻度拥堵 | 12,000,000 (+20%) | +2.5% |
-| 严重拥堵 | 15,000,000 (+50%) | +6.25% |
-| 满负载 | 20,000,000 (+100%) | +12.5% |
-| 空闲 | 5,000,000 (-50%) | -6.25% |
-| 极空闲 | 0 | -12.5% |
+| Exactly at target | 10,000,000 | No change |
+| Light congestion | 12,000,000 (+20%) | +2.5% |
+| Severe congestion | 15,000,000 (+50%) | +6.25% |
+| Full load | 20,000,000 (+100%) | +12.5% |
+| Idle | 5,000,000 (-50%) | -6.25% |
+| Extremely idle | 0 | -12.5% |
 
-**连续拥堵时 base_fee 呈指数增长：** 每区块 +12.5%，连续 6 个满负载区块 base_fee 翻倍。
+**During continuous congestion, base_fee grows exponentially:** +12.5% per block, base_fee doubles after 6 consecutive full-load blocks.
 
-#### 12.2.4 费用计算示例
+#### 12.2.4 Fee Calculation Example
 
 ```rust
-// 示例：3 条指令的交易（Transfer + Approve + BridgeDeposit）
-// 参数：base_fee = 10 wei/gas, priority_fee = 50,000 wei
+// Example: 3-instruction transaction (Transfer + Approve + BridgeDeposit)
+// Parameters: base_fee = 10 wei/gas, priority_fee = 50,000 wei
 
-let gas_units = vec![10_000, 5_000, 10_000];  // 三条指令的 gas
-let discounts = vec![1.0, 0.5, 0.5];           // 边际折扣
+let gas_units = vec![10_000, 5_000, 10_000];  // gas for three instructions
+let discounts = vec![1.0, 0.5, 0.5];           // marginal discounts
 
 let total_gas: u64 = gas_units.iter().zip(discounts.iter())
     .map(|(g, d)| (*g as f64 * d) as u64)
@@ -2874,65 +2874,65 @@ let total_fee = base_fee * total_gas + priority_fee;
 // = 10 × 17,500 + 50,000 = 225,000 wei = 0.000000225 CALL
 ```
 
-#### 12.2.5 费用分配
+#### 12.2.5 Fee Distribution
 
-**CALL 支付时：**
+**When paying with CALL:**
 ```
-用户支付的总费用 = base_fee × gas + priority_fee（以 CALL 计价）
-  ├── base_fee × gas × 50% → 验证者奖励（CALL）
-  ├── base_fee × gas × 50% → 直接销毁（通缩，仅 CALL）
-  └── priority_fee 100%    → 打包该交易的验证者（CALL）
-```
-
-**稳定币支付时：**
-```
-用户支付的总费用 = base_fee × gas + priority_fee（以稳定币计价）
-  ├── base_fee × gas × 50% → 验证者奖励（稳定币）
-  ├── base_fee × gas × 50% → 进入国库储备（稳定币，不销毁）
-  └── priority_fee 100%    → 打包该交易的验证者（稳定币）
+Total fee paid by user = base_fee × gas + priority_fee (in CALL)
+  ├── base_fee × gas × 50% → validator rewards (CALL)
+  ├── base_fee × gas × 50% → directly burned (deflationary, CALL only)
+  └── priority_fee 100%    → validator that packed the transaction (CALL)
 ```
 
-**多币种汇总（按区块）：**
+**When paying with stablecoin:**
 ```
-区块收入汇总:
-  CALL:    1000 CALL → 50% 销毁 + 50% 验证者
-  USDC:    20 USDC   → 50% 国库储备 + 50% 验证者
-  USDT:    5 USDT    → 50% 国库储备 + 50% 验证者
-
-验证者 A（权重 1/8）获得:
-  CALL:  1000 × 50% × 1/8 = 62.5 CALL（奖励）
-  USDC:  20 × 50% × 1/8 = 1.25 USDC（奖励）
-  USDT:  5 × 50% × 1/8 = 0.3125 USDT（奖励）
-  + priority_fee（全部给打包验证者）
+Total fee paid by user = base_fee × gas + priority_fee (in stablecoin)
+  ├── base_fee × gas × 50% → validator rewards (stablecoin)
+  ├── base_fee × gas × 50% → into treasury reserve (stablecoin, not burned)
+  └── priority_fee 100%    → validator that packed the transaction (stablecoin)
 ```
 
-#### 12.2.6 配置参数
+**Multi-currency summary (per block):**
+```
+Block revenue summary:
+  CALL:    1000 CALL → 50% burned + 50% to validators
+  USDC:    20 USDC   → 50% treasury reserve + 50% to validators
+  USDT:    5 USDT    → 50% treasury reserve + 50% to validators
 
-| 参数 | 默认值 | 说明 |
+Validator A (weight 1/8) receives:
+  CALL:  1000 × 50% × 1/8 = 62.5 CALL (reward)
+  USDC:  20 × 50% × 1/8 = 1.25 USDC (reward)
+  USDT:  5 × 50% × 1/8 = 0.3125 USDT (reward)
+  + priority_fee (all to packing validator)
+```
+
+#### 12.2.6 Configuration Parameters
+
+| Parameter | Default Value | Description |
 |------|--------|------|
-| initial_base_fee | 10 wei/gas | 初始基础费率 |
-| target_gas_per_block | 10,000,000 gas | 目标区块 gas 使用量 |
-| max_gas_per_block | 20,000,000 gas | 最大区块 gas 上限（2× target） |
-| adjustment_coefficient | 1/8 | 每区块最大调整 12.5% |
-| min_base_fee | 1 wei/gas | base_fee 下限（防止为零） |
-| max_base_fee | 1,000,000,000 wei/gas | base_fee 上限（防止极端情况） |
+| initial_base_fee | 10 wei/gas | Initial base rate |
+| target_gas_per_block | 10,000,000 gas | Target block gas usage |
+| max_gas_per_block | 20,000,000 gas | Maximum block gas limit (2× target) |
+| adjustment_coefficient | 1/8 | Maximum adjustment 12.5% per block |
+| min_base_fee | 1 wei/gas | base_fee floor (prevents zero) |
+| max_base_fee | 1,000,000,000 wei/gas | base_fee ceiling (prevents extreme cases) |
 
-#### 12.2.7 MemPool 准入
+#### 12.2.7 MemPool Admission
 
 ```rust
 fn accept_to_mempool(tx: &ProtocolTransaction) -> Result<()> {
     let current_base_fee = get_current_base_fee();
     let estimated_gas = estimate_gas(&tx.instructions);
 
-    // 1. gas_limit 检查
+    // 1. gas_limit check
     ensure!(tx.gas_limit >= estimated_gas, "Gas limit too low");
 
-    // 2. 费用检查：max_fee 必须 >= 当前 base_fee × estimated_gas
+    // 2. Fee check: max_fee must be >= current base_fee × estimated_gas
     let min_total_fee = current_base_fee * estimated_gas + tx.max_priority_fee;
     ensure!(tx.max_fee >= min_total_fee,
             "max_fee insufficient for current base_fee");
 
-    // 3. 余额足够支付最大可能费用
+    // 3. Balance sufficient to cover maximum possible fee
     let sender_balance = get_call_balance(tx.sender);
     ensure!(sender_balance >= tx.max_fee + instruction_values(&tx.instructions),
             "Insufficient balance");
@@ -2941,63 +2941,41 @@ fn accept_to_mempool(tx: &ProtocolTransaction) -> Result<()> {
 }
 ```
 
-### 12.3 Gas 代付机制
+### 12.3 Gas Sponsorship Mechanism
 
-协议层原生支持 Gas 代付，无需智能合约。代付者不需要每笔交易都签名（除单笔代付模式外）。
+The protocol layer natively supports Gas sponsorship without requiring smart contracts. Sponsors do not need to sign every transaction (except in per-transaction sponsorship mode).
 
-#### 12.3.1 代付模式
+#### 12.3.0 Stablecoin Direct Gas Payment
 
-```rust
-enum GasConfig {
-    /// 发送者自付
-    SelfPay,
+The protocol allows users to pay Gas fees directly with governance-approved stablecoins. Validators receive rewards in the actual stablecoin received, with no currency conversion performed by the protocol.
 
-    /// 预授权代付（代付者签一次授权，之后无需再签名）
-    AuthorizedSponsor {
-        sponsor: Address,
-    },
-
-    /// 预存款池代付（代付者预存 CALL 到池中）
-    PoolSponsor,
-
-    /// 单笔代付（代付者需对每笔交易签名）
-    PerTxSponsor {
-        sponsor: Address,
-        sponsor_signature: Signature,
-    },
-}
-
-#### 12.3.0 稳定币直付 Gas（Stablecoin Direct Pay）
-
-协议允许用户使用治理批准的稳定币直接支付 Gas 费用。验证者按实际收到的稳定币获得奖励，协议不执行币种转换。
-
-**稳定币注册表：**
+**Stablecoin Registry:**
 
 ```rust
-/// 允许的 Gas 支付币种
+/// Allowed Gas payment currencies
 struct FeeCurrencyEntry {
     asset_id: AssetId,
-    name: String,                // 如 "USDC"
+    name: String,                // e.g., "USDC"
     decimals: u8,
-    oracle_price_key: String,    // 预言机价格对，如 "USDC_CALL"
+    oracle_price_key: String,    // oracle price pair, e.g., "USDC_CALL"
     added_at_block: u64,
-    added_by_proposal: u64,      // 通过治理提案 ID
+    added_by_proposal: u64,      // governance proposal ID
 }
 
 struct FeeCurrencyRegistry {
-    /// 已批准的稳定币列表
+    /// List of approved stablecoins
     allowed_currencies: Vec<FeeCurrencyEntry>,
-    /// 每区块稳定币 Gas 支付上限（占总费用的比例，0-10000 bps）
-    stablecoin_cap_bps: u16,     // 默认 5000 = 50%
+    /// Per-block stablecoin Gas payment cap (proportion of total fees, 0-10000 bps)
+    stablecoin_cap_bps: u16,     // default 5000 = 50%
 }
 
 impl FeeCurrencyRegistry {
-    /// 验证稳定币是否在治理批准列表中
+    /// Verify stablecoin is in governance-approved list
     fn is_allowed(asset_id: AssetId) -> bool {
         Self::allowed_currencies.iter().any(|e| e.asset_id == asset_id)
     }
 
-    /// 查询指定稳定币的 oracle 价格（asset → CALL）
+    /// Query oracle price for specified stablecoin (asset → CALL)
     fn get_call_price(asset_id: AssetId) -> Option<u128> {
         let entry = Self::allowed_currencies.iter()
             .find(|e| e.asset_id == asset_id)?;
@@ -3006,13 +2984,13 @@ impl FeeCurrencyRegistry {
 }
 ```
 
-**价格转换逻辑：**
+**Price Conversion Logic:**
 
 ```rust
-/// 将 CALL 计价的 fee 转换为目标稳定币数量
+/// Convert CALL-denominated fee to target stablecoin amount
 fn convert_fee_to_stablecoin(asset_id: AssetId, fee_call: u128) -> Result<u128> {
-    // oracle 价格: 1 unit stablecoin = price CALL
-    // 例: 1 USDC = 50 CALL → price = 50_000_000_000_000_000_000 (18 decimals)
+    // oracle price: 1 unit stablecoin = price CALL
+    // e.g., 1 USDC = 50 CALL → price = 50_000_000_000_000_000_000 (18 decimals)
     let price_call = FeeCurrencyRegistry::get_call_price(asset_id)
         .ok_or("No oracle price for fee currency")?;
 
@@ -3024,30 +3002,30 @@ fn convert_fee_to_stablecoin(asset_id: AssetId, fee_call: u128) -> Result<u128> 
         .checked_div(price_call)
         .ok_or("Division by zero in fee conversion")?;
 
-    // 向上取整，确保协议不收少
+    // Round up to ensure protocol does not receive less
     Ok(fee_stablecoin)
 }
 ```
 
-**执行流程：**
+**Execution Flow:**
 
 ```
-1. 用户提交交易: fee_currency = Stablecoin(USDC)
-2. 协议验证: USDC 在 FeeCurrencyRegistry 中 ✓
-3. 查询 oracle: 1 USDC = 50 CALL
-4. 计算: fee_call = gas_used × base_fee
-5. 转换: fee_usdc = fee_call / 50（向上取整）
-6. 从 sender 扣 USDC 余额
-7. USDC 计入区块费用汇总
-8. 验证者按比例获得 USDC 奖励
+1. User submits transaction: fee_currency = Stablecoin(USDC)
+2. Protocol verifies: USDC is in FeeCurrencyRegistry ✓
+3. Query oracle: 1 USDC = 50 CALL
+4. Calculate: fee_call = gas_used × base_fee
+5. Convert: fee_usdc = fee_call / 50 (rounded up)
+6. Deduct USDC balance from sender
+7. USDC counted in block fee summary
+8. Validators receive USDC rewards proportionally
 ```
 
-**治理提案 — 添加/移除稳定币：**
+**Governance Proposal -- Add/Remove Stablecoin:**
 
 ```rust
-// 治理提案类型扩展
+// Governance proposal type extension
 enum ProposalType {
-    // ... 已有类型
+    // ... existing types
     FeeCurrencyAdd {
         asset_id: AssetId,
         name: String,
@@ -3055,22 +3033,22 @@ enum ProposalType {
     },
     FeeCurrencyRemove {
         asset_id: AssetId,
-        grace_period_blocks: u64,  // 移除前的宽限期
+        grace_period_blocks: u64,  // grace period before removal
     },
     FeeCurrencyCap {
-        new_cap_bps: u16,          // 新的稳定币支付上限（bps）
+        new_cap_bps: u16,          // new stablecoin payment cap (bps)
     },
 }
 ```
 
-| 参数 | 默认值 | 说明 |
+| Parameter | Default Value | Description |
 |------|--------|------|
-| stablecoin_cap_bps | 5000 (50%) | 每区块稳定币 Gas 占总费用上限 |
-| min_market_cap_usd | 100,000,000 | 治理准入最低市值 |
-| oracle_strikes_before_disable | 10 | 预言机异常 strikes 后自动停用 |
-| grace_period_blocks | 86,400 (~1 天) | 移除前的宽限期 |
+| stablecoin_cap_bps | 5000 (50%) | Per-block stablecoin Gas cap as percentage of total fees |
+| min_market_cap_usd | 100,000,000 | Governance admission minimum market cap |
+| oracle_strikes_before_disable | 10 | Auto-disable after oracle anomaly strikes |
+| grace_period_blocks | 86,400 (~1 day) | Grace period before removal |
 
-**Mempool 多币种优先级排序：**
+**Mempool Multi-Currency Priority Sorting:**
 
 ```rust
 fn priority_score(tx: &ProtocolTransaction) -> u128 {
@@ -3080,52 +3058,52 @@ fn priority_score(tx: &ProtocolTransaction) -> u128 {
         FeeCurrency::Stablecoin(asset_id) => {
             let price = FeeCurrencyRegistry::get_call_price(asset_id)
                 .unwrap_or(0);
-            // 转换为 CALL 等价值排序
+            // Convert to CALL equivalent value for sorting
             priority_fee * price / 10u128.pow(get_asset_decimals(asset_id) as u32)
         }
     }
 }
 ```
 
-**验证者费用分配（多币种）：**
+**Validator Fee Distribution (Multi-Currency):**
 
 ```
-区块费用汇总:
-  CALL 收入:    1000 CALL
-  USDC 收入:    20 USDC
-  USDT 收入:    5 USDT
+Block fee summary:
+  CALL revenue:    1000 CALL
+  USDC revenue:    20 USDC
+  USDT revenue:    5 USDT
 
-分配:
-  50% base_fee × 50% 销毁 → 仅 CALL 部分销毁
-  50% base_fee × 50% 验证者 → 按各币种比例分配
-  priority_fee 100% → 打包验证者
+Distribution:
+  50% base_fee × 50% burn → only CALL portion burned
+  50% base_fee × 50% validators → distributed proportionally by currency
+  priority_fee 100% → packing validator
 
-验证者 A 获得: 250 CALL + 5 USDC + 1.25 USDT + priority_fee
+Validator A receives: 250 CALL + 5 USDC + 1.25 USDT + priority_fee
 ```
 ```
 
-| 模式 | 适用场景 | 代付者需在线 | 控制粒度 |
+| Mode | Applicable Scenario | Sponsor Needs to Be Online | Control Granularity |
 |------|---------|------------|---------|
-| SelfPay | 普通用户 | - | - |
-| AuthorizedSponsor | Agent 支付、平台补贴 | 不需要 | 按日限额 + 白名单 |
-| PoolSponsor | 平台批量补贴用户 | 不需要 | 存款总额控制 |
-| PerTxSponsor | 低频单笔代付 | 需要 | 单笔控制 |
+| SelfPay | Regular users | - | - |
+| AuthorizedSponsor | Agent payments, platform subsidies | Not required | Per-daily-limit + whitelist |
+| PoolSponsor | Platform batch user subsidies | Not required | Total deposit control |
+| PerTxSponsor | Low-frequency single sponsorship | Required | Per-transaction control |
 
-#### 12.3.2 预授权代付（AuthorizedSponsor）
+#### 12.3.2 Pre-Authorized Sponsorship (AuthorizedSponsor)
 
-代付者签署一次授权，允许指定地址使用其 CALL 支付 Gas。
+Sponsors sign one authorization, allowing specified addresses to use their CALL for Gas payment.
 
 ```rust
 struct GasSponsorAuth {
-    sponsor: Address,           // 代付者
-    allowed_senders: Vec<Address>,  // 可被代付的地址（空 = 任何人）
-    max_daily: u128,            // 每日 Gas 上限（0 = 无限制）
-    expires_at: u64,            // 过期时间戳（0 = 永不过期）
-    sponsor_signature: Signature,  // 代付者签名
+    sponsor: Address,           // sponsor
+    allowed_senders: Vec<Address>,  // addresses that can be sponsored (empty = anyone)
+    max_daily: u128,            // daily Gas limit (0 = unlimited)
+    expires_at: u64,            // expiry timestamp (0 = never expires)
+    sponsor_signature: Signature,  // sponsor signature
 }
 ```
 
-**授权注册：**
+**Authorization Registration:**
 
 ```rust
 fn register_sponsor_auth(auth: GasSponsorAuth) -> Result<()> {
@@ -3133,13 +3111,13 @@ fn register_sponsor_auth(auth: GasSponsorAuth) -> Result<()> {
     GasSponsorAuths::insert(auth.sponsor, auth);
 }
 
-// 代付者随时可撤销
+// Sponsors can revoke at any time
 fn revoke_sponsor_auth(sponsor: Address) -> Result<()> {
     GasSponsorAuths::remove(sponsor);
 }
 ```
 
-**执行时代付验证：**
+**Runtime Sponsor Verification:**
 
 ```rust
 fn verify_and_deduct_authorized_sponsor(
@@ -3149,17 +3127,17 @@ fn verify_and_deduct_authorized_sponsor(
 ) -> Result<()> {
     let auth = GasSponsorAuths::get(sponsor).ok_or("No sponsor auth")?;
 
-    // 1. 验证未过期
+    // 1. Verify not expired
     if auth.expires_at > 0 {
         ensure!(current_timestamp() < auth.expires_at, "Sponsor auth expired");
     }
 
-    // 2. 验证 sender 在白名单
+    // 2. Verify sender is in whitelist
     if !auth.allowed_senders.is_empty() {
         ensure!(auth.allowed_senders.contains(&sender), "Sender not whitelisted");
     }
 
-    // 3. 验证每日限额
+    // 3. Verify daily limit
     if auth.max_daily > 0 {
         let today = current_timestamp() / 86400;
         let (last_date, spent) = GasSponsorDailyUsage::get(sponsor).unwrap_or((0, 0));
@@ -3171,22 +3149,22 @@ fn verify_and_deduct_authorized_sponsor(
         }
     }
 
-    // 4. 扣费
+    // 4. Deduct fee
     deduct_call_balance(sponsor, fee)?;
     Ok(())
 }
 ```
 
-#### 12.3.3 预存款池代付（PoolSponsor）
+#### 12.3.3 Pre-Deposit Pool Sponsorship (PoolSponsor)
 
-代付者在协议层预存一笔 CALL，授权给特定地址使用，系统自动从池中扣费。
+Sponsors pre-deposit a sum of CALL in the protocol layer, authorizing specific addresses to use it, with the system automatically deducting fees from the pool.
 
 ```rust
 struct GasSponsorPool {
     sponsor: Address,
-    balance: u128,                   // 预存余额
-    delegated_to: Vec<Address>,      // 授权地址（空 = 任何人）
-    per_tx_limit: u128,              // 单笔上限（0 = 无限制）
+    balance: u128,                   // pre-deposited balance
+    delegated_to: Vec<Address>,      // authorized addresses (empty = anyone)
+    per_tx_limit: u128,              // per-transaction limit (0 = unlimited)
 }
 
 fn deposit_to_pool(sponsor: Address, amount: u128) -> Result<()> {
@@ -3203,14 +3181,14 @@ fn withdraw_from_pool(sponsor: Address, amount: u128) -> Result<()> {
 }
 ```
 
-**使用场景：** 平台给新用户补贴 Gas，用户提交交易时选择 `GasConfig::PoolSponsor`，系统自动从平台池中扣 CALL。
+**Use Case:** Platform subsidizes Gas for new users; when users submit transactions, they select `GasConfig::PoolSponsor`, and the system automatically deducts CALL from the platform pool.
 
-#### 12.3.4 单笔代付（PerTxSponsor）
+#### 12.3.4 Per-Transaction Sponsorship (PerTxSponsor)
 
-代付者对每笔交易签名确认，适合低频场景。
+Sponsors sign confirmation for each transaction, suitable for low-frequency scenarios.
 
 ```rust
-// 交易结构中包含代付者签名
+// Transaction structure includes sponsor signature
 GasConfig::PerTxSponsor { sponsor, sponsor_signature }
 
 fn verify_and_deduct_per_tx_sponsor(
@@ -3224,164 +3202,164 @@ fn verify_and_deduct_per_tx_sponsor(
 }
 ```
 
-### 12.4 费用分配
+### 12.4 Fee Distribution
 
 ```
-用户支付 CALL:
-  ├── 50% → 验证者奖励（按质押比例分配）
-  ├── 50% → 直接销毁（通缩机制）
+User pays CALL:
+  ├── 50% → Validator rewards (distributed by stake proportion)
+  ├── 50% → Directly burned (deflationary mechanism)
 ```
 
-### 12.5 无通胀
+### 12.5 No Inflation
 
-- 无代币增发
-- 验证者收入 100% 来自交易费用
-- 50% 费用销毁使 CALL 总供应量持续通缩
-- 长期验证者收入由链上经济活动驱动
+- No token issuance
+- Validator income 100% from transaction fees
+- 50% fee burn makes CALL total supply continuously deflationary
+- Long-term validator income driven by on-chain economic activity
 
-### 12.6 验证者质押
+### 12.6 Validator Staking
 
 ```rust
 struct ValidatorStake {
     validator_id: ValidatorId,
-    staked_call: u128,              // 质押 CALL 数量
-    self_stake: u128,               // 自质押部分
-    delegated_call: u128,           // 委托质押
-    rewards: u128,                  // 未领取的奖励
-    slash_history: Vec<SlashEvent>, // 惩罚历史
+    staked_call: u128,              // staked CALL amount
+    self_stake: u128,               // self-staked portion
+    delegated_call: u128,           // delegated stake
+    rewards: u128,                  // unclaimed rewards
+    slash_history: Vec<SlashEvent>, // slashing history
 }
 ```
 
-| 参数 | 值 |
+| Parameter | Value |
 |------|------|
-| 最小自质押 | 1,000,000 CALL |
-| 委托质押上限 | 无限制 |
-| 解锁期 | 7 天（约 2,419,200 区块） |
-| 双签惩罚 | 扣除全部自质押 |
-| 离线惩罚 | 按离线轮次比例扣除 |
+| Minimum self-stake | 1,000,000 CALL |
+| Delegate stake limit | No limit |
+| Unlock period | 7 days (~2,419,200 blocks) |
+| Double-sign slashing | Deduct all self-stake |
+| Offline penalty | Proportional deduction based on offline rounds |
 
-### 12.7 费用 AMM（可选升级路径）
+### 12.7 Fee AMM (Optional Upgrade Path)
 
-未来可支持用户用非 CALL 资产支付 Gas，通过内部 AMM 自动兑换：
+Future support for users to pay Gas with non-CALL assets, through an internal AMM for automatic conversion:
 
 ```
-用户支付 USDC → AMM 自动买入 CALL → 50% 给验证者 / 50% 销毁
+User pays USDC → AMM automatically buys CALL → 50% to validators / 50% burned
 ```
 
-当前阶段仅支持 CALL 支付 Gas。
+Currently only CALL payment for Gas is supported.
 
 ---
 
-## 13. 安全设计
+## 13. Security Design
 
-### 13.1 密码学
+### 13.1 Cryptography
 
-| 用途 | 算法 |
+| Purpose | Algorithm |
 |------|------|
-| 交易签名 | secp256k1 |
-| 共识签名 | ed25519 |
-| 状态承诺 | SHA-256 + Merkle Tree |
-| 地址生成 | Keccak-256 (EVM 兼容) |
+| Transaction signing | secp256k1 |
+| Consensus signing | ed25519 |
+| State commitment | SHA-256 + Merkle Tree |
+| Address generation | Keccak-256 (EVM compatible) |
 
-### 13.2 MEV 防护
+### 13.2 MEV Protection
 
-- PBS（Proposer-Builder Separation）内置
-- 验证者不参与 MEV 提取
-- 支付交易在 mempool 中加密（commit-reveal）
+- PBS (Proposer-Builder Separation) built-in
+- Validators do not participate in MEV extraction
+- Payment transactions encrypted in mempool (commit-reveal)
 
-### 13.3 链上治理 (On-chain Governance)
+### 13.3 On-Chain Governance
 
-Callchain 采用**双轨治理**：验证者投票决定技术参数，CALL 持有者投票决定生态决策。两者通过时间锁协调执行。
+Callchain adopts **dual-track governance**: validators vote on technical parameters, CALL holders vote on ecosystem decisions. Both are coordinated through a timelock for execution.
 
-#### 13.3.1 治理架构
+#### 13.3.1 Governance Architecture
 
 ```rust
-/// 治理提案
+/// Governance proposal
 struct Proposal {
     id: u64,
-    proposer: Address,              // 提案人
-    proposal_type: ProposalType,     // 提案类型
-    title: String,                   // 标题
-    description: String,             // 详细说明
-    voting_power_yes: u128,          // 赞成票权重
-    voting_power_no: u128,           // 反对票权重
-    voting_power_abstain: u128,      // 弃权票权重
-    start_block: u64,                // 投票开始区块
-    end_block: u64,                  // 投票结束区块
-    execution_block: u64,            // 时间锁执行区块
+    proposer: Address,              // proposer
+    proposal_type: ProposalType,     // proposal type
+    title: String,                   // title
+    description: String,             // detailed description
+    voting_power_yes: u128,          // yes vote weight
+    voting_power_no: u128,           // no vote weight
+    voting_power_abstain: u128,      // abstain vote weight
+    start_block: u64,                // voting start block
+    end_block: u64,                  // voting end block
+    execution_block: u64,            // timelock execution block
     state: ProposalState,
-    quorum_required: u128,           // 法定人数门槛
-    execution_data: Vec<u8>,         // 序列化执行数据
+    quorum_required: u128,           // quorum threshold
+    execution_data: Vec<u8>,         // serialized execution data
 }
 
 enum ProposalType {
-    /// 技术参数变更（gas 价格、区块大小、验证者数量等）
+    /// Technical parameter changes (gas price, block size, validator count, etc.)
     ParameterChange { param_id: u64, new_value: Vec<u8> },
-    /// 协议升级（新特性、指令类型、ZK 电路等）
+    /// Protocol upgrade (new features, instruction types, ZK circuits, etc.)
     ProtocolUpgrade { activation_block: u64, changelog: String },
-    /// 生态基金拨款（社区项目资助、空投等）
+    /// Ecosystem fund allocation (community project funding, airdrops, etc.)
     TreasurySpend { recipient: Address, amount: u128, asset_id: AssetId },
-    /// 验证者惩罚提案（Slash 恶意验证者）
+    /// Validator penalty proposal (slash malicious validators)
     ValidatorSlash { validator_id: ValidatorId, reason: String },
-    /// 合规策略更新（OFAC 黑名单更新等）
+    /// Compliance policy update (OFAC blacklist update, etc.)
     ComplianceUpdate { asset_id: AssetId, new_policy: CompliancePolicy },
-    /// 紧急暂停（共识层 bug，需 2/3 验证者联合签名）
+    /// Emergency pause (consensus layer bug, requires 2/3 validator joint signature)
     EmergencyPause { reason: String },
 }
 
 enum ProposalState {
-    Pending,        // 等待投票开始
-    Active,         // 投票进行中
-    Passed,         // 投票通过，等待时间锁
-    Defeated,       // 投票未通过
-    Queued,         // 进入时间锁队列
-    Executed,       // 已执行
-    Expired,        // 时间锁过期未执行
+    Pending,        // waiting for voting to start
+    Active,         // voting in progress
+    Passed,         // voting passed, waiting for timelock
+    Defeated,       // voting failed
+    Queued,         // entered timelock queue
+    Executed,       // executed
+    Expired,        // timelock expired without execution
 }
 ```
 
-#### 13.3.2 双轨投票
+#### 13.3.2 Dual-Track Voting
 
-| 决策类型 | 投票群体 | 通过门槛 | 时间锁 |
+| Decision Type | Voting Body | Passing Threshold | Timelock |
 |---------|---------|---------|--------|
-| 技术参数变更 | 验证者（1 验证者 = 1 票） | 2/3 多数 | 7 天 |
-| 协议升级 | 验证者 + CALL 持有者 | 2/3 验证者 + >50% CALL | 14 天 |
-| 生态基金拨款 | CALL 持有者（1 CALL = 1 票） | >50% CALL 投票 + 60% 赞成 | 7 天 |
-| 验证者惩罚 | 验证者 | 2/3 多数 | 立即 |
-| 紧急暂停 | 验证者 | 2/3 多数 | 立即 |
+| Technical parameter change | Validators (1 validator = 1 vote) | 2/3 majority | 7 days |
+| Protocol upgrade | Validators + CALL holders | 2/3 validators + >50% CALL | 14 days |
+| Ecosystem fund allocation | CALL holders (1 CALL = 1 vote) | >50% CALL voting + 60% yes | 7 days |
+| Validator penalty | Validators | 2/3 majority | Immediate |
+| Emergency pause | Validators | 2/3 majority | Immediate |
 
 ```rust
-/// 投票权重计算
+/// Voting power calculation
 fn calculate_voting_power(proposal: &Proposal, voter: Address) -> u128 {
     match proposal.proposal_type {
         ProposalType::ParameterChange { .. }
         | ProposalType::ProtocolUpgrade { .. }
         | ProposalType::ValidatorSlash { .. }
         | ProposalType::EmergencyPause { .. } => {
-            // 验证者投票：1 验证者 = 1 票
+            // Validator voting: 1 validator = 1 vote
             if is_validator(voter) { 1 } else { 0 }
         }
         ProposalType::TreasurySpend { .. } => {
-            // 社区投票：CALL 余额加权
+            // Community voting: CALL balance weighted
             get_call_balance(voter)
         }
         ProposalType::ComplianceUpdate { .. } => {
-            // 资产发行方 + 验证者联合投票
+            // Asset issuer + validator joint voting
             let asset = get_asset(proposal.proposal_type.asset_id());
-            if asset.issuer == voter { asset.total_supply / 10 } // 发行方 10% 权重
+            if asset.issuer == voter { asset.total_supply / 10 } // issuer 10% weight
             else if is_validator(voter) { 1 }
             else { 0 }
         }
     }
 }
 
-/// 委托投票（Delegation）
-/// CALL 持有者可将投票权委托给第三方
+/// Vote delegation
+/// CALL holders can delegate voting power to third parties
 struct VoteDelegation {
     delegator: Address,
     delegate: Address,
-    amount: u128,               // 委托的 CALL 数量
-    expires_at: u64,            // 过期时间（0=永久）
+    amount: u128,               // delegated CALL amount
+    expires_at: u64,            // expiry (0=permanent)
 }
 
 type VoteDelegations = HashMap<Address, Vec<VoteDelegation>>; // delegate → delegations
@@ -3395,146 +3373,146 @@ fn get_delegated_voting_power(delegate: Address, asset_id: AssetId) -> u128 {
 }
 ```
 
-#### 13.3.3 提案流程
+#### 13.3.3 Proposal Process
 
 ```
-1. 提交提案
-   - 存入押金（防垃圾，10,000 CALL）
-   - 指定提案类型、参数、执行数据
-   - 提案进入 2 天审查期
+1. Submit proposal
+   - Deposit (anti-spam, 10,000 CALL)
+   - Specify proposal type, parameters, execution data
+   - Proposal enters 2-day review period
 
-2. 投票期（7 天）
-   - 验证者/CALL 持有者按权重投票
-   - 可选：赞成 / 反对 / 弃权
-   - 投票实时计入链上
+2. Voting period (7 days)
+   - Validators/CALL holders vote by weight
+   - Options: Yes / No / Abstain
+   - Votes counted on-chain in real time
 
-3. 结果判定
-   - 达到法定人数（quorum）且赞成票 > 反对票 → Passed
-   - 未达法定人数或反对票 > 赞成票 → Defeated
+3. Result determination
+   - Quorum reached and yes votes > no votes → Passed
+   - Quorum not reached or no votes > yes votes → Defeated
 
-4. 时间锁（7-14 天，取决于提案类型）
-   - Passed 的提案进入时间锁队列
-   - 社区有时间协调升级或退出
-   - 任何人均可触发执行
+4. Timelock (7-14 days, depending on proposal type)
+   - Passed proposals enter timelock queue
+   - Community has time to coordinate upgrades or exit
+   - Anyone can trigger execution
 
-5. 执行
-   - 到达 execution_block 后自动执行
-   - 执行数据写入状态
-   - 押金退还给提案人
+5. Execution
+   - Automatically executed after reaching execution_block
+   - Execution data written to state
+   - Deposit refunded to proposer
 
-6. 超时
-   - execution_block 后 30 天内未执行 → Expired
-   - 押金没收，充入生态基金
+6. Timeout
+   - Not executed within 30 days after execution_block → Expired
+   - Deposit confiscated, added to ecosystem fund
 ```
 
-#### 13.3.4 法定人数 (Quorum)
+#### 13.3.4 Quorum
 
 ```rust
 fn calculate_quorum(proposal_type: &ProposalType) -> u128 {
     match proposal_type {
         ProposalType::ParameterChange { .. } => {
-            // 2/3 验证者参与
+            // 2/3 validators participate
             validator_count() * 2 / 3
         }
         ProposalType::ProtocolUpgrade { .. } => {
-            // 2/3 验证者 + 总 CALL 供应 20% 参与
+            // 2/3 validators + 20% of total CALL supply participate
             max(validator_count() * 2 / 3, total_call_supply() / 5)
         }
         ProposalType::TreasurySpend { .. } => {
-            // 总 CALL 供应 20% 参与
+            // 20% of total CALL supply participates
             total_call_supply() / 5
         }
-        _ => validator_count() / 2 + 1,  // 简单多数
+        _ => validator_count() / 2 + 1,  // simple majority
     }
 }
 ```
 
-#### 13.3.5 治理参数
+#### 13.3.5 Governance Parameters
 
-| 参数 | 值 |
+| Parameter | Value |
 |------|------|
-| 提案押金 | 10,000 CALL |
-| 审查期 | 2 天（~691,200 区块） |
-| 投票期 | 7 天（~2,419,200 区块） |
-| 时间锁（参数变更） | 7 天 |
-| 时间锁（协议升级） | 14 天 |
-| 时间锁（紧急） | 立即 |
-| 执行超时 | 30 天 |
-| 委托投票 | 支持，可撤销 |
-| 二次方投票 | 不支持（1 CALL = 1 票） |
+| Proposal deposit | 10,000 CALL |
+| Review period | 2 days (~691,200 blocks) |
+| Voting period | 7 days (~2,419,200 blocks) |
+| Timelock (parameter change) | 7 days |
+| Timelock (protocol upgrade) | 14 days |
+| Timelock (emergency) | Immediate |
+| Execution timeout | 30 days |
+| Vote delegation | Supported, revocable |
+| Quadratic voting | Not supported (1 CALL = 1 vote) |
 
-### 13.4 升级机制
+### 13.4 Upgrade Mechanism
 
-- 通过治理提案触发（详见 §19）
-- 紧急暂停仅限共识层 bug（需 2/3 验证者签名）
-- 无多签管理合约
+- Triggered via governance proposal (see §19)
+- Emergency pause only for consensus-layer bugs (requires 2/3 validator signatures)
+- No multi-sig management contract
 
-### 13.5 网络攻击防护 (Network Attack Protection)
+### 13.5 Network Attack Protection
 
-#### 13.5.1 区块级别限制
+#### 13.5.1 Block-Level Limits
 
 ```rust
-/// 区块配置限制
+/// Block configuration limits
 struct BlockLimits {
-    /// 区块最大字节数（RLP 编码）
-    max_block_size: u64,             // 默认 5 MB
+    /// Maximum block size in bytes (RLP encoded)
+    max_block_size: u64,             // default 5 MB
 
-    /// 区块最大交易数量
-    max_transactions: u32,           // 默认 10,000
+    /// Maximum transactions per block
+    max_transactions: u32,           // default 10,000
 
-    /// Shielded 交易上限（ZK 证明验证成本高）
-    max_shielded_per_block: u32,     // 默认 50
+    /// Shielded transaction cap (ZK proof verification is costly)
+    max_shielded_per_block: u32,     // default 50
 
-    /// 单笔交易最大指令数量
-    max_instructions_per_tx: u32,    // 默认 1,000
+    /// Maximum instructions per transaction
+    max_instructions_per_tx: u32,    // default 1,000
 
-    /// 单笔交易最大字节数
-    max_tx_size: u32,                // 默认 256 KB
+    /// Maximum transaction size in bytes
+    max_tx_size: u32,                // default 256 KB
 
-    /// 批量转账最大收款人数
-    max_batch_payments: u32,         // 默认 5,000
+    /// Maximum recipients in batch transfer
+    max_batch_payments: u32,         // default 5,000
 
-    /// EVM 区块 gas 上限
-    max_evm_gas_per_block: u64,      // 默认 30,000,000
+    /// EVM block gas limit
+    max_evm_gas_per_block: u64,      // default 30,000,000
 }
 ```
 
-验证者在打包时强制执行这些限制，超出部分排入下一个区块。
+Validators enforce these limits when packing blocks; excess is queued for the next block.
 
-#### 13.5.2 Mempool 防护
+#### 13.5.2 Mempool Protection
 
-| 攻击类型 | 防护措施 | 参数 |
+| Attack Type | Countermeasure | Parameter |
 |---------|---------|------|
-| 交易洪泛 | 最低费用阈值 + 动态拒绝 | 低于动态阈值直接拒绝 |
-| 单地址占满 | 单地址 Pending 上限 | 256 tx/地址 |
-| 大交易攻击 | 交易大小上限 | 256 KB |
-| 多指令膨胀 | 指令数量上限 | 1,000 指令/tx |
-| 批量转账膨胀 | 批量支付人数上限 | 5,000 人/tx |
-| 签名伪造 | 立即验证并丢弃 | 无效签名永不进入 mempool |
-| 重放攻击 | Nonce 检查 | 过时 nonce 立即拒绝 |
-| Shielded 证明膨胀 | 证明大小验证 | >1KB 的 ZK 证明拒绝 |
-| Agent 子账户滥用 | 权限 + 限额检查 | 日限额 + 单笔限额 |
+| Transaction flood | Minimum fee threshold + dynamic rejection | Directly reject below dynamic threshold |
+| Single address pool fill | Per-address Pending limit | 256 tx/address |
+| Large transaction attack | Transaction size limit | 256 KB |
+| Multi-instruction inflation | Instruction count limit | 1,000 instructions/tx |
+| Batch transfer inflation | Batch payment recipient limit | 5,000 recipients/tx |
+| Signature forgery | Immediate verification and discard | Invalid signatures never enter mempool |
+| Replay attack | Nonce check | Stale nonce immediately rejected |
+| Shielded proof inflation | Proof size validation | ZK proofs >1KB rejected |
+| Agent sub-account abuse | Permission + limit checks | Daily limit + per-transaction limit |
 
 ```rust
-/// Mempool 准入检查
+/// Mempool admission check
 fn accept_tx(tx: &ProtocolTransaction) -> Result<()> {
-    // 1. 交易大小检查
+    // 1. Transaction size check
     let tx_size = alloy_rlp::encode(tx).len();
     ensure!(tx_size <= BLOCK_LIMITS.max_tx_size as usize, "Tx too large");
 
-    // 2. 指令数量检查
+    // 2. Instruction count check
     ensure!(tx.instructions.len() <= BLOCK_LIMITS.max_instructions_per_tx as usize,
             "Too many instructions");
 
-    // 3. 最低费用检查
+    // 3. Minimum fee check
     let fee = calculate_multi_instruction_fee(&tx.instructions, &tx.gas_config);
     ensure!(fee >= current_min_acceptable_fee(), "Fee too low");
 
-    // 4. 单地址 Pending 上限
+    // 4. Per-address Pending limit
     let pending_count = mempool.count_pending(&tx.sender);
     ensure!(pending_count < 256, "Pending limit exceeded");
 
-    // 5. 批量支付人数检查
+    // 5. Batch payment recipient count check
     for instr in &tx.instructions {
         if let Instruction::BatchTransfer { payments, .. } = instr {
             ensure!(payments.len() <= BLOCK_LIMITS.max_batch_payments as usize,
@@ -3542,150 +3520,150 @@ fn accept_tx(tx: &ProtocolTransaction) -> Result<()> {
         }
     }
 
-    // 6. 签名验证
+    // 6. Signature verification
     ensure!(verify_signature(&tx.sender, &tx.signature, &tx.hash()),
             "Invalid signature");
 
-    // 7. Nonce 检查
+    // 7. Nonce check
     ensure!(tx.nonce == get_nonce(&tx.sender), "Invalid nonce");
 
-    // 8. Pool 容量检查
+    // 8. Pool capacity check
     ensure!(mempool.protocol_pool.len() < 50_000, "Pool full");
 
     Ok(())
 }
 ```
 
-#### 13.5.3 Shielded Pool 防护
+#### 13.5.3 Shielded Pool Protection
 
-| 风险 | 防护 |
+| Risk | Protection |
 |------|------|
-| ZK 证明 DoS（大量无效证明） | 验证失败的交易立即丢弃 + 收取小额证明验证费（即使失败也收取） |
-| Nullifier 集合膨胀 | 使用 BitSet 压缩存储，1 亿笔 ~12.5 MB |
-| Merkle Tree 深度攻击 | 增量 Merkle Tree 深度上限 32，自动拒绝 |
-| 大额隐私转账洗钱 | 合规模式（KYC/Whitelist）由资产发行方配置 |
-| 每区块 Shielded 洪泛 | 每区块上限 50 笔，超出排队 |
+| ZK proof DoS (大量 invalid proofs) | Transactions with failed verification immediately dropped + small proof verification fee charged (even on failure) |
+| Nullifier set膨胀 | Compressed storage using BitSet, 100M entries ~12.5 MB |
+| Merkle Tree depth attack | Incremental Merkle Tree depth limit 32, automatic rejection |
+| Large shielded transfer money laundering | Compliance mode (KYC/Whitelist) configured by asset issuer |
+| Per-block Shielded flood | Per-block limit of 50, excess queued |
 
-#### 13.5.4 P2P 网络防护
+#### 13.5.4 P2P Network Protection
 
 ```rust
 struct NetworkLimits {
-    /// 最大对等连接数
-    max_peers: u32,                  // 默认 50
+    /// Maximum peer connections
+    max_peers: u32,                  // default 50
 
-    /// 单连接最大消息速率
-    max_messages_per_second: u32,    // 默认 100
+    /// Maximum message rate per connection
+    max_messages_per_second: u32,    // default 100
 
-    /// 消息大小上限
-    max_message_size: u32,           // 默认 10 MB
+    /// Maximum message size
+    max_message_size: u32,           // default 10 MB
 
-    /// 已知交易去重缓存大小
-    known_txs_cache_size: u32,       // 默认 1,000,000
+    /// Known transaction deduplication cache size
+    known_txs_cache_size: u32,       // default 1,000,000
 
-    /// 恶意节点封禁时间
-    ban_duration_seconds: u64,       // 默认 3600（1 小时）
+    /// Malicious node ban duration
+    ban_duration_seconds: u64,       // default 3600 (1 hour)
 }
 ```
 
-| 攻击类型 | 防护 |
+| Attack Type | Protection |
 |---------|------|
-| Sybil 攻击（大量虚假节点） | 连接数上限 + 节点声誉系统，异常连接自动断开 |
-| 消息洪泛 | 单连接速率限制，超过阈值暂停 1 小时 |
-| 大消息 DoS | 10 MB 消息上限，超出立即断开 |
-| 区块/交易重传 | 去重缓存，已知 hash 不重复处理 |
-| 日蚀攻击 | 维持 ≥8 个出站连接到不同子网 |
-| 路由劫持 | commonware-p2p 支持 TLS 加密通道 + 节点 ID 验证 |
+| Sybil attack (大量 fake nodes) | Connection limit + node reputation system, abnormal connections automatically disconnected |
+| Message flood | Per-connection rate limiting, pause 1 hour when threshold exceeded |
+| Large message DoS | 10 MB message limit, immediately disconnect if exceeded |
+| Block/transaction retransmission | Deduplication cache, known hashes not reprocessed |
+| Eclipse attack | Maintain ≥8 outbound connections to different subnets |
+| Route hijacking | commonware-p2p supports TLS encrypted channels + node ID verification |
 
-#### 13.5.5 共识层防护
+#### 13.5.5 Consensus Layer Protection
 
-| 攻击类型 | 防护 |
+| Attack Type | Protection |
 |---------|------|
-| 51% 攻击 | Simplex BFT 容忍 <1/3 拜占庭节点，>2/3 诚实才能出块 |
-| 双签攻击 | 检测到双签 → 自动 Slash 全部自质押 |
-| 验证者离线 | 按离线轮次比例扣除质押，连续 100 轮离线 → 踢出验证者集 |
-| 长程攻击（Long-range） | 轻客户端仅信任最近检查点，旧分叉自动拒绝 |
-| Nothing-at-Stake | 每轮子集轮换，无法提前知道下一轮提议者 |
+| 51% attack | Simplex BFT tolerates <1/3 Byzantine nodes, requires >2/3 honest to produce blocks |
+| Double-sign attack | Double-sign detected → automatic slash of all self-stake |
+| Validator offline | Proportional stake deduction based on offline rounds, 100 consecutive rounds offline → removed from validator set |
+| Long-range attack | Light clients only trust recent checkpoints, old forks automatically rejected |
+| Nothing-at-Stake | Per-round subset rotation, cannot know next round's proposer in advance |
 
-#### 13.5.6 经济防护总结
+#### 13.5.6 Economic Protection Summary
 
-| 层级 | 防护手段 | 成本模型 |
+| Layer | Protection Mechanism | Cost Model |
 |------|---------|---------|
-| 交易层 | 费用防垃圾 | 每笔交易需支付 CALL |
-| Mempool | 动态最低费用 + 容量限制 | 低费交易被拒绝 |
-| 网络层 | 速率限制 + 连接数上限 | 攻击者带宽成本线性增长 |
-| 共识层 | 质押 Slash | 恶意行为损失 > 收益 |
-| Shielded | 证明验证费 + 每区块上限 | ZK 证明生成成本高 |
-| 治理层 | 提案押金 | 垃圾提案损失 10,000 CALL |
+| Transaction layer | Fee anti-spam | Each transaction requires CALL payment |
+| Mempool | Dynamic minimum fee + capacity limits | Low-fee transactions rejected |
+| Network layer | Rate limiting + connection limits | Attacker bandwidth cost grows linearly |
+| Consensus layer | Stake slashing | Malicious behavior loss > gain |
+| Shielded | Proof verification fee + per-block cap | ZK proof generation cost is high |
+| Governance layer | Proposal deposit | Spam proposals lose 10,000 CALL |
 
 ---
 
-## 14. 性能目标
+## 14. Performance Targets
 
-| 指标 | 目标值 |
+| Metric | Target Value |
 |------|--------|
 | TPS | 5,000+ |
-| 区块时间 | 250ms |
-| 最终性 | ~500ms |
-| 协议支付延迟 | < 10ms（协议层） |
-| 桥接延迟 | < 1 个区块（< 250ms） |
-| 节点硬件要求 | 4 核 / 8GB / 500GB SSD |
+| Block time | 250ms |
+| Finality | ~500ms |
+| Protocol payment latency | < 10ms (protocol layer) |
+| Bridge latency | < 1 block (< 250ms) |
+| Node hardware requirements | 4 cores / 8GB / 500GB SSD |
 
 ---
 
-## 15. Rust Crate 结构
+## 15. Rust Crate Structure
 
 ```
 call-core/
 ├── Cargo.toml
 ├── crates/
-│   ├── primitives/        # 基础类型 (Address, Hash, AssetId, Balance)
-│   ├── crypto/            # 密码学 (secp256k1, ed25519, SHA-256)
-│   ├── serialization/     # 协议序列化
-│   ├── protocol/          # 协议支付层
-│   │   ├── registry/      # 资产注册表
-│   │   ├── balances/      # 余额管理
-│   │   ├── compliance/    # 合规策略引擎
-│   │   └── payment/       # 支付交易执行
-│   ├── agent/             # Agent 支付层
-│   │   ├── registry/      # Agent 注册与身份验证
-│   │   ├── permissions/   # 权限与费用配置
-│   │   ├── balances/      # Agent 子账户余额
-│   │   └── executor/      # Agent 交易执行与费用代付
-│   ├── shielded/          # Shielded Pool 隐私层
-│   │   ├── merkle/        # 增量 Merkle Tree 管理
-│   │   ├── notes/         # Note 创建、加密、存储
-│   │   ├── nullifiers/    # Nullifier 集合与防双花
-│   │   ├── circuit/       # ZK 电路定义与参数管理
-│   │   ├── prover/        # 证明生成（客户端）与验证（节点）
-│   │   └── compliance/    # 视图密钥管理与合规审计
-│   ├── evm/               # EVM 智能合约层
-│   │   ├── executor/      # EVM 执行器 (Revm)
-│   │   ├── precompiles/   # 预编译合约 (桥接、协议余额)
-│   │   └── contracts/     # 系统合约 (ERC-20 模板、桥接)
-│   ├── bridge/            # 内部桥接
+│   ├── primitives/        # Base types (Address, Hash, AssetId, Balance)
+│   ├── crypto/            # Cryptography (secp256k1, ed25519, SHA-256)
+│   ├── serialization/     # Protocol serialization
+│   ├── protocol/          # Protocol payment layer
+│   │   ├── registry/      # Asset registry
+│   │   ├── balances/      # Balance management
+│   │   ├── compliance/    # Compliance policy engine
+│   │   └── payment/       # Payment transaction execution
+│   ├── agent/             # Agent payment layer
+│   │   ├── registry/      # Agent registration and identity verification
+│   │   ├── permissions/   # Permissions and fee configuration
+│   │   ├── balances/      # Agent sub-account balances
+│   │   └── executor/      # Agent transaction execution and fee sponsorship
+│   ├── shielded/          # Shielded Pool privacy layer
+│   │   ├── merkle/        # Incremental Merkle Tree management
+│   │   ├── notes/         # Note creation, encryption, storage
+│   │   ├── nullifiers/    # Nullifier set and anti-double-spend
+│   │   ├── circuit/       # ZK circuit definitions and parameter management
+│   │   ├── prover/        # Proof generation (client) and verification (node)
+│   │   └── compliance/    # View key management and compliance auditing
+│   ├── evm/               # EVM smart contract layer
+│   │   ├── executor/      # EVM executor (Revm)
+│   │   ├── precompiles/   # Precompiled contracts (bridge, protocol balances)
+│   │   └── contracts/     # System contracts (ERC-20 template, bridge)
+│   ├── bridge/            # Internal bridge
 │   │   ├── deposit/       # Protocol → EVM
 │   │   ├── withdraw/      # EVM → Protocol
-│   │   └── sync/          # 跨层状态同步
-│   ├── consensus/         # 共识层 (Commonware Simplex)
-│   │   ├── simplex/       # Simplex 状态机集成
-│   │   ├── proposer/      # 提议者选择与子集轮换
-│   │   └── validator/     # 验证者管理与质押
-│   ├── network/           # P2P 网络 (commonware-p2p)
-│   ├── storage/           # 存储层 (reth-db)
-│   ├── rpc/               # RPC 服务器 (jsonrpsee)
-│   └── node/              # 节点应用和 CLI
+│   │   └── sync/          # Cross-layer state synchronization
+│   ├── consensus/         # Consensus layer (Commonware Simplex)
+│   │   ├── simplex/       # Simplex state machine integration
+│   │   ├── proposer/      # Proposer selection and subset rotation
+│   │   └── validator/     # Validator management and staking
+│   ├── network/           # P2P network (commonware-p2p)
+│   ├── storage/           # Storage layer (reth-db)
+│   ├── rpc/               # RPC server (jsonrpsee)
+│   └── node/              # Node application and CLI
 └── tests/
-    ├── integration/       # 集成测试
-    └── e2e/              # 端到端测试
+    ├── integration/       # Integration tests
+    └── e2e/              # End-to-end tests
 ```
 
 ---
 
-## 16. 创世 (Genesis)
+## 16. Genesis
 
-### 16.1 创世区块
+### 16.1 Genesis Block
 
-创世区块是链的初始状态，高度为 0，无父区块。
+The genesis block is the chain's initial state, at height 0, with no parent block.
 
 ```rust
 struct Genesis {
@@ -3721,9 +3699,9 @@ struct ConsensusParams {
 }
 ```
 
-### 16.2 创世格式
+### 16.2 Genesis Format
 
-创世配置以 JSON 格式提供：
+The genesis configuration is provided in JSON format:
 
 ```json
 {
@@ -3769,48 +3747,48 @@ struct ConsensusParams {
 }
 ```
 
-### 16.3 启动流程
+### 16.3 Startup Process
 
 ```
-1. 解析 genesis.json
-2. 初始化协议层余额：对每个 GenesisAsset，balances[issuer] = initial_supply
-3. 部署对应 ERC-20 合约到 EVM 层（初始供应为 0）
-4. 注册初始验证者集
-5. 注册初始 Gas 支付币种到 FeeCurrencyRegistry
-6. 创建创世区块（height=0, parent_hash=0x0）
-7. 计算初始状态根（payment_root + evm_state_root + bridge_root）
-8. 节点从高度 0 开始运行共识
+1. Parse genesis.json
+2. Initialize protocol-layer balances: for each GenesisAsset, balances[issuer] = initial_supply
+3. Deploy corresponding ERC-20 contracts to EVM layer (initial supply 0)
+4. Register initial validator set
+5. Register initial Gas payment currencies to FeeCurrencyRegistry
+6. Create genesis block (height=0, parent_hash=0x0)
+7. Compute initial state root (payment_root + evm_state_root + bridge_root)
+8. Nodes begin running consensus from height 0
 ```
 
 ---
 
-## 17. 交易池 (Mempool)
+## 17. Transaction Pool (Mempool)
 
-### 17.1 设计
+### 17.1 Design
 
-交易池维护待打包交易，按类型分桶管理：
+The transaction pool maintains transactions waiting to be packed, managed in type-based buckets:
 
 ```rust
 struct Mempool {
-    protocol_pool: PriorityTxs<ProtocolTransaction>, // 协议原生交易，高优先级
-    agent_pool: PriorityTxs<SignedAgentTx>,          // Agent 交易，中高优先级
-    evm_pool: PriorityTxs<EvmTx>,                    // EVM 交易，标准优先级
-    pending_bridges: VecDeque<BridgeOp>,             // 待处理桥接
-    known_txs: LruCache<TxHash, ()>,                 // 去重缓存
+    protocol_pool: PriorityTxs<ProtocolTransaction>, // protocol-native transactions, high priority
+    agent_pool: PriorityTxs<SignedAgentTx>,          // Agent transactions, medium-high priority
+    evm_pool: PriorityTxs<EvmTx>,                    // EVM transactions, standard priority
+    pending_bridges: VecDeque<BridgeOp>,             // pending bridges
+    known_txs: LruCache<TxHash, ()>,                 // deduplication cache
 }
 ```
 
-### 17.2 优先级与排序
+### 17.2 Priority and Sorting
 
-| 维度 | 策略 |
+| Dimension | Strategy |
 |------|------|
-| ProtocolTransaction 排序 | 按 `priority_score()`（CALL 等值）降序 + 时间戳 FIFO |
-| AgentTx 排序 | 按 `priority_score()`（CALL 等值）降序 + 时间戳 FIFO |
-| EvmTx 排序 | 按 gas price 降序 + nonce 顺序 |
-| BridgeOp | 按到达顺序 FIFO，区块内批量处理 |
-| 跨池优先级 | ProtocolTransaction > AgentTx > EvmTx > BridgeOp |
+| ProtocolTransaction sorting | Descending by `priority_score()` (CALL equivalent) + timestamp FIFO |
+| AgentTx sorting | Descending by `priority_score()` (CALL equivalent) + timestamp FIFO |
+| EvmTx sorting | Descending by gas price + nonce order |
+| BridgeOp | FIFO by arrival order, batch processed within block |
+| Cross-pool priority | ProtocolTransaction > AgentTx > EvmTx > BridgeOp |
 
-**`priority_score()` 计算（多币种统一）：**
+**`priority_score()` calculation (multi-currency unified):**
 ```rust
 fn priority_score(tx: &ProtocolTransaction) -> u128 {
     match tx.fee_currency {
@@ -3823,34 +3801,34 @@ fn priority_score(tx: &ProtocolTransaction) -> u128 {
 }
 ```
 
-### 17.3 容量与驱逐
+### 17.3 Capacity and Eviction
 
-| 参数 | 值 | 说明 |
+| Parameter | Value | Description |
 |------|------|------|
-| protocol_pool 上限 | 50,000 txs | 多指令交易，数量动态调整 |
-| evm_pool 上限 | 100,000 txs | 根据 gas limit 动态调整 |
-| 单地址 Pending 上限 | 256 txs | 防止单地址占满池 |
-| 最小 gas price | 动态 | 低于阈值自动驱逐 |
-| 生命周期 | 72 区块 | 超时未打包驱逐 |
+| protocol_pool limit | 50,000 txs | Multi-instruction transactions, dynamically adjusted |
+| evm_pool limit | 100,000 txs | Dynamically adjusted based on gas limit |
+| Per-address Pending limit | 256 txs | Prevent single address from filling pool |
+| Minimum gas price | Dynamic | Automatically evicted below threshold |
+| Lifetime | 72 blocks | Evicted if not packed within timeout |
 
-**驱逐策略：**
-1. gas price（CALL 等值）低于当前最低接受阈值的交易优先驱逐
-2. nonce 过时（已过期）的交易立即清除
-3. 池满时按优先级从尾部驱逐
+**Eviction Strategy:**
+1. Transactions with gas price (CALL equivalent) below current minimum acceptance threshold are evicted first
+2. Stale nonce (expired) transactions immediately cleared
+3. When pool is full, evict from the tail by priority
 
-### 17.4 防垃圾机制
+### 17.4 Anti-Spam Mechanism
 
-- ProtocolTransaction：多指令 CALL 费用天然防垃圾（需支付费用）
-- EvmTx：最低 gas price 要求
-- 稳定币支付 Gas：需在 FeeCurrencyRegistry 中，且有有效 oracle 价格
-- 重复交易检测：已知 TxHash 直接拒绝
-- 无效签名交易立即丢弃并记录
+- ProtocolTransaction: Multi-instruction CALL fees naturally anti-spam (requires fee payment)
+- EvmTx: Minimum gas price requirement
+- Stablecoin Gas payment: Must be in FeeCurrencyRegistry with valid oracle price
+- Duplicate transaction detection: Known TxHash directly rejected
+- Invalid signature transactions immediately dropped and logged
 
 ---
 
-## 18. 状态转换 (State Transition)
+## 18. State Transition
 
-### 18.1 形式化定义
+### 18.1 Formal Definition
 
 ```
 State = (ProtocolBalances, EvmState, BridgeState, ShieldedState)
@@ -3864,88 +3842,88 @@ apply_block(state, block) -> Result<State> {
 }
 ```
 
-### 18.2 交易有效性规则
+### 18.2 Transaction Validity Rules
 
-**ProtocolTransaction 验证：**
-- `AuthScheme` 认证通过（单签 / 多签 / Session Key 按 §3.9 验证）
-- 若指定 `GasConfig::PerTxSponsor`，代付者签名也必须有效
-- 发送者或代付者余额 >= 总费用 + 总转账金额
-- 所有指令的合规检查通过（`check_compliance`）
-- 所有涉及的资产存在且状态为 Active
-- 非重放（nonce 递增）
-- 单条指令执行失败则整个交易回滚
+**ProtocolTransaction validation:**
+- `AuthScheme` authentication passes (single-sig / multi-sig / Session Key verified per §3.9)
+- If `GasConfig::PerTxSponsor` specified, sponsor signature must also be valid
+- Sender or sponsor balance >= total fee + total transfer amount
+- All instruction compliance checks pass (`check_compliance`)
+- All involved assets exist and are in Active status
+- Non-replay (incrementing nonce)
+- If any single instruction fails, the entire transaction is rolled back
 
-**EvmTx 验证：**
-- 签名有效（secp256k1，以太坊兼容）
-- nonce >= 账户当前 nonce
-- 发送者余额 >= gas_limit * gas_price + value
-- gas_limit <= 区块 gas 上限
+**EvmTx validation:**
+- Signature valid (secp256k1, Ethereum compatible)
+- nonce >= account's current nonce
+- Sender balance >= gas_limit * gas_price + value
+- gas_limit <= block gas limit
 
-**BridgeOp 验证：**
-- 对应 EVM 层桥接合约已触发（WithdrawToProtocol）
-- 或协议层桥接请求已记录（DepositToEvm）
-- 资产存在且桥接池余额充足
+**BridgeOp validation:**
+- Corresponding EVM-layer bridge contract has triggered (WithdrawToProtocol)
+- Or protocol-layer bridge request has been recorded (DepositToEvm)
+- Asset exists and bridge pool balance is sufficient
 
-**Shielded 指令验证：**
-- ZK 证明验证通过（Groth16/Halo2）
-- 所有 nullifier 未被花费（防双花）
-- Merkle Tree 根匹配（输入 Notes 确实存在）
-- 资产存在且 Shielded 功能已启用
-- ShieldedDeposit：发送者透明余额 >= 存入金额
-- ShieldedWithdraw：证明中公开提取金额，余额恢复到目标地址
-- ShieldedTransfer：证明中隐含 input >= output（不暴露具体值）
+**Shielded instruction validation:**
+- ZK proof verification passes (Groth16/Halo2)
+- All nullifiers unspent (anti-double-spend)
+- Merkle Tree root matches (input Notes actually exist)
+- Asset exists and Shielded functionality is enabled
+- ShieldedDeposit: sender transparent balance >= deposit amount
+- ShieldedWithdraw: amount publicly revealed in proof, balance restored to target address
+- ShieldedTransfer: proof implies input >= output (without exposing specific values)
 
-### 18.3 原子性保证
+### 18.3 Atomicity Guarantee
 
-区块内所有操作要么全部成功，要么全部回滚：
-- EVM 交易：Revm 的 Journal 机制保证单 tx 原子性
-- 协议原生交易：状态快照机制保证多指令原子性——执行前保存快照，任何指令失败回滚整个交易（已扣费用不退还）
-- 桥接操作：两步操作（扣减+铸造 / 销毁+恢复）在同一函数内完成
-- 区块级别：状态根在所有操作后计算，不一致则拒绝区块
+All operations within a block either all succeed or all roll back:
+- EVM transactions: Revm's Journal mechanism guarantees single-tx atomicity
+- Protocol-native transactions: State snapshot mechanism guarantees multi-instruction atomicity -- snapshot saved before execution, any instruction failure rolls back the entire transaction (deducted fees not refunded)
+- Bridge operations: Two-step operation (deduct+mint / burn+restore) completed within the same function
+- Block level: State root computed after all operations, inconsistent results reject the block
 
-### 18.4 交易收据（Transaction Receipts）
+### 18.4 Transaction Receipts
 
-每个交易执行后生成一条收据，打包到区块中。收据是区块浏览器查询、合约日志读取、事件监听的唯一来源。
+After each transaction executes, a receipt is generated and packed into the block. Receipts are the sole source for block explorer queries, contract log reading, and event monitoring.
 
-#### 18.4.1 协议交易收据
+#### 18.4.1 Protocol Transaction Receipt
 
 ```rust
-/// 协议交易收据
+/// Protocol transaction receipt
 struct ProtocolReceipt {
-    /// 交易哈希
+    /// Transaction hash
     tx_hash: Hash,
 
-    /// 执行结果
+    /// Execution result
     status: ExecutionStatus,
 
-    /// 实际消耗的 Gas
+    /// Actual gas consumed
     gas_used: u128,
 
-    /// Gas 支付方
+    /// Gas payer
     gas_payer: Address,
 
-    /// Gas 支付币种（CALL 或稳定币 AssetId）
+    /// Gas payment currency (CALL or stablecoin AssetId)
     fee_currency: FeeCurrency,
 
-    /// 实际扣除的 Gas 费用（以 fee_currency 计价）
+    /// Actual gas fee deducted (in fee_currency)
     fee_amount: u128,
 
-    /// 执行的指令结果（按顺序）
+    /// Instruction results (in order)
     instruction_results: Vec<InstructionResult>,
 
-    /// 事件日志
+    /// Event logs
     logs: Vec<LogEntry>,
 
-    /// 支付备注（转账附言）
+    /// Payment memos (transfer notes)
     memos: Vec<MemoEntry>,
 
-    /// 状态变更摘要（余额变化等）
+    /// State change summary (balance changes, etc.)
     state_changes: Vec<StateChange>,
 }
 
-/// 收据中的备注条目
+/// Memo entry in receipt
 struct MemoEntry {
-    instruction_index: u32,       // 指令索引
+    instruction_index: u32,       // instruction index
     memo: PaymentMemo,
 }
 
@@ -3958,7 +3936,7 @@ struct InstructionResult {
     instruction_type: InstructionType,
     status: InstructionStatus,
     gas_used: u128,
-    output: Vec<u8>,  // 指令返回数据
+    output: Vec<u8>,  // instruction return data
 }
 
 enum InstructionStatus {
@@ -3966,14 +3944,14 @@ enum InstructionStatus {
     Reverted { reason: String },
 }
 
-/// 事件日志
+/// Event log
 struct LogEntry {
-    address: Address,         // 事件发起者地址
-    topics: Vec<Hash>,        // 索引字段（可过滤）
-    data: Vec<u8>,            // 非索引数据
+    address: Address,         // event initiator address
+    topics: Vec<Hash>,        // indexed fields (filterable)
+    data: Vec<u8>,            // non-indexed data
 }
 
-/// 状态变更摘要
+/// State change summary
 struct StateChange {
     asset_id: AssetId,
     address: Address,
@@ -3989,18 +3967,18 @@ enum ChangeType {
 }
 ```
 
-#### 18.4.2 EVM 交易收据
+#### 18.4.2 EVM Transaction Receipt
 
-EVM 交易收据遵循以太坊标准格式，与现有以太坊工具链兼容：
+EVM transaction receipts follow the Ethereum standard format, compatible with existing Ethereum toolchains:
 
 ```rust
 struct EvmReceipt {
     tx_hash: Hash,
     status: bool,               // true = success, false = reverted
     gas_used: u64,
-    contract_address: Option<Address>,  // 如果是合约创建
+    contract_address: Option<Address>,  // if contract creation
     logs: Vec<EvmLogEntry>,
-    logs_bloom: Bloom,          // Bloom 过滤器（快速日志过滤）
+    logs_bloom: Bloom,          // Bloom filter (fast log filtering)
 }
 
 struct EvmLogEntry {
@@ -4010,9 +3988,9 @@ struct EvmLogEntry {
 }
 ```
 
-#### 18.4.3 Shielded 交易收据
+#### 18.4.3 Shielded Transaction Receipt
 
-Shielded 交易的收据需要隐藏敏感信息（金额、参与者），同时保证可验证性：
+Shielded transaction receipts need to hide sensitive information (amounts, participants) while ensuring verifiability:
 
 ```rust
 struct ShieldedReceipt {
@@ -4021,23 +3999,23 @@ struct ShieldedReceipt {
     gas_used: u128,
     gas_payer: Address,
 
-    // 公开信息
-    nullifiers: Vec<Nullifier>,    // 公开（防双花）
-    commitments: Vec<NoteCommitment>, // 公开（Merkle Tree 更新）
+    // Public information
+    nullifiers: Vec<Nullifier>,    // public (anti-double-spend)
+    commitments: Vec<NoteCommitment>, // public (Merkle Tree update)
 
-    // 隐藏信息（只有 viewing key 持有者可读）
-    encrypted_event: Option<Vec<u8>>, // 加密的事件数据
-    // 不暴露：发送方、接收方、金额
+    // Hidden information (only view key holders can read)
+    encrypted_event: Option<Vec<u8>>, // encrypted event data
+    // Not exposed: sender, receiver, amount
 }
 ```
 
-Shielded 收据的特点：
-- `nullifiers` 和 `commitments` 公开，用于 Merkle Tree 状态维护
-- 金额、发送方、接收方不写入收据
-- `encrypted_event` 可选，包含加密的详细信息，只有 viewing key 持有者可以解密
-- 区块浏览器只显示"发生了 Shielded 操作"，不显示具体内容
+Characteristics of Shielded receipts:
+- `nullifiers` and `commitments` are public, used for Merkle Tree state maintenance
+- Amounts, senders, receivers are not written to the receipt
+- `encrypted_event` is optional, contains encrypted details, only decryptable by view key holders
+- Block explorers only show "a Shielded operation occurred", not the specifics
 
-#### 18.4.4 外部桥接交易收据
+#### 18.4.4 External Bridge Transaction Receipt
 
 ```rust
 struct ExternalBridgeReceipt {
@@ -4046,19 +4024,19 @@ struct ExternalBridgeReceipt {
     gas_used: u128,
     bridge_op: ExternalBridgeOp,
 
-    // 桥接特有信息
-    source_tx_hash: Option<Hash>,     // 源链交易哈希
-    source_block: Option<u64>,        // 源链区块高度
-    confirmations: Option<u32>,       // 源链确认数
+    // Bridge-specific information
+    source_tx_hash: Option<Hash>,     // source chain transaction hash
+    source_block: Option<u64>,        // source chain block height
+    confirmations: Option<u32>,       // source chain confirmations
 }
 ```
 
-#### 18.4.5 区块收据树
+#### 18.4.5 Block Receipt Tree
 
-每个区块的收据打包成一棵 Merkle Tree，根哈希写入区块头：
+Each block's receipts are packed into a Merkle Tree, with the root hash written into the block header:
 
 ```rust
-/// 区块头增加字段
+/// Block header adds new field
 struct BlockHeader {
     parent_hash: Hash,
     height: u64,
@@ -4066,13 +4044,13 @@ struct BlockHeader {
     payment_root: Hash,
     evm_state_root: Hash,
     bridge_root: Hash,
-    receipt_root: Hash,             // 新增：收据 Merkle 根
+    receipt_root: Hash,             // new: receipt Merkle root
     proposer: ValidatorId,
     signature: Signature,
 }
 
-/// 收据 Merkle 树
-/// 按交易顺序排列，根哈希保证收据完整性
+/// Receipt Merkle tree
+/// Ordered by transaction, root hash guarantees receipt integrity
 fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
     let leaves: Vec<Hash> = receipts.iter()
         .map(|r| keccak256(rlp_encode(r)))
@@ -4081,10 +4059,10 @@ fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
 }
 ```
 
-#### 18.4.6 收据查询（RPC 接口）
+#### 18.4.6 Receipt Query (RPC Interface)
 
 ```json
-// 按交易哈希查询收据
+// Query receipt by transaction hash
 {
     "method": "call_getTransactionReceipt",
     "params": ["0xabc..."],
@@ -4104,7 +4082,7 @@ fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
     ]
 }
 
-// 按区块高度查询所有收据
+// Query all receipts by block height
 {
     "method": "call_getBlockReceipts",
     "params": [42],
@@ -4112,7 +4090,7 @@ fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
 }
 → [{ receipt_1, receipt_2, ... }]
 
-// 按地址过滤日志
+// Filter logs by address
 {
     "method": "call_getLogs",
     "params": [{ address: "0x...", topics: ["..."], from_block: 0, to_block: "latest" }],
@@ -4120,15 +4098,15 @@ fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
 }
 → [{ log_1, log_2, ... }]
 
-// EVM 兼容查询（eth_getTransactionReceipt）
+// EVM-compatible query (eth_getTransactionReceipt)
 {
     "method": "eth_getTransactionReceipt",
     "params": ["0xabc..."],
     "id": 1
 }
-→ 标准以太坊收据格式
+→ Standard Ethereum receipt format
 
-// 按备注参考号查询交易
+// Query transaction by memo reference number
 {
     "method": "call_getTxByReference",
     "params": ["PAYROLL-2026-03-001"],
@@ -4137,173 +4115,173 @@ fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
 → [{ tx_hash, block_height, memo, status, timestamp }]
 ```
 
-#### 18.4.7 收据 Prune 策略
+#### 18.4.7 Receipt Prune Strategy
 
-收据数据增长快，但主要用于历史查询。Prune 策略见 §10.3：
+Receipt data grows quickly but is primarily used for historical queries. Prune strategy see §10.3:
 
 ```
-- 近期收据（最近 keep_receipt 区块）：完整存储
-- 历史收据：超过 keep_receipt 后 prune
-- 收据根哈希（receipt_root）：永远保留在区块头
-- prune 后仍可通过 Merkle 证明验证某条收据属于某区块
+- Recent receipts (most recent keep_receipt blocks): fully stored
+- Historical receipts: pruned after keep_receipt
+- Receipt root hash (receipt_root): always retained in block header
+- After pruning, receipts can still be verified as belonging to a block via Merkle proof
 ```
 
-| 节点模式 | 收据保留 |
+| Node Mode | Receipt Retention |
 |----------|---------|
-| Validator | 最近 100 万区块 |
-| Full | 最近 100 万区块 |
-| Light | 无（按需查询全节点） |
-| Archive | 所有历史 |
+| Validator | Most recent 1 million blocks |
+| Full | Most recent 1 million blocks |
+| Light | None (query full nodes on demand) |
+| Archive | All history |
 
 ---
 
-## 19. 分叉升级 (Fork/Upgrade)
+## 19. Fork/Upgrade
 
-### 19.1 协议版本
+### 19.1 Protocol Version
 
 ```rust
 struct ProtocolVersion {
-    major: u32,   // 不兼容变更
-    minor: u32,   // 向后兼容特性
-    patch: u32,   // Bug 修复
+    major: u32,   // incompatible changes
+    minor: u32,   // backward-compatible features
+    patch: u32,   // bug fixes
 }
 ```
 
-### 19.2 升级机制选项
+### 19.2 Upgrade Mechanism Options
 
-| 机制 | 选项 A: 高度激活 | 选项 B: 信号投票 | 选项 C: 治理提案 |
+| Mechanism | Option A: Height Activation | Option B: Signal Voting | Option C: Governance Proposal |
 |------|------------------|------------------|------------------|
-| 触发方式 | 预设区块高度 | 验证者 2/3 信号 | 链上治理提案通过 |
-| 灵活性 | 低（需提前计划） | 中 | 高 |
-| 安全性 | 高（确定性） | 中 | 高 |
-| 复杂度 | 最低 | 中 | 高 |
-| **推荐** | ✅ 用于计划内升级 | ⚠️ 用于紧急升级 | ✅ 长期治理方向 |
+| Trigger | Preset block height | 2/3 validator signal | On-chain governance proposal passed |
+| Flexibility | Low (requires advance planning) | Medium | High |
+| Security | High (deterministic) | Medium | High |
+| Complexity | Lowest | Medium | High |
+| **Recommended** | ✅ For planned upgrades | ⚠️ For emergency upgrades | ✅ Long-term governance direction |
 
-**当前选择：高度激活 + 治理提案双轨制**
-- 计划内升级：预设区块高度，所有节点同步升级
-- 重大变更：通过链上治理提案（2/3 验证者投票）+ 时间锁执行
+**Current choice: Height activation + governance proposal dual-track system**
+- Planned upgrades: Preset block height, all nodes upgrade in sync
+- Major changes: Via on-chain governance proposal (2/3 validator vote) + timelock execution
 
-### 19.3 升级流程
+### 19.3 Upgrade Process
 
 ```
-1. 提案：提交升级提案（包含新版本、激活高度、变更说明）
-2. 投票：验证者在 7 天内投票，需 2/3 多数
-3. 时间锁：通过后 7 天时间锁，给节点升级时间
-4. 激活：到达预设高度后，新版本规则生效
-5. 未升级节点：自动停止出块（版本检查失败）
+1. Proposal: Submit upgrade proposal (includes new version, activation height, changelog)
+2. Voting: Validators vote within 7 days, requires 2/3 majority
+3. Timelock: 7-day timelock after passing, giving nodes time to upgrade
+4. Activation: New version rules take effect at preset height
+5. Non-upgraded nodes: Automatically stop producing blocks (version check fails)
 ```
 
-### 19.4 回滚策略
+### 19.4 Rollback Strategy
 
-- 升级后 100 个区块内发现严重 bug：2/3 验证者签名可紧急暂停
-- 暂停后网络停止出块，直到问题修复
-- 无自动回滚（会破坏最终性），需协调重启
+- Critical bugs discovered within 100 blocks after upgrade: 2/3 validator signatures can trigger emergency pause
+- After pause, network stops producing blocks until issue is fixed
+- No automatic rollback (would break finality), requires coordinated restart
 
 ---
 
-## 20. 遥测与监控 (Telemetry/Metrics)
+## 20. Telemetry/Metrics
 
-### 20.1 指标系统
+### 20.1 Metrics System
 
 ```rust
-// Prometheus 指标
+// Prometheus metrics
 metrics: {
-    // 共识层
+    // Consensus layer
     call_consensus_round_duration_seconds: Histogram,
     call_consensus_rounds_total: Counter,
     call_consensus_proposals_received: Counter,
     call_consensus_votes_received: Counter,
     call_consensus_validator_set_size: Gauge,
 
-    // 交易层
-    call_mempool_size: GaugeVec,          // 按类型分
-    call_transactions_processed_total: CounterVec, // 按类型/状态分
+    // Transaction layer
+    call_mempool_size: GaugeVec,          // by type
+    call_transactions_processed_total: CounterVec, // by type/status
     call_transaction_execution_time_seconds: Histogram,
 
-    // 桥接
+    // Bridge
     bridge_operations_processed_total: Counter,
-    bridge_deposit_total: CounterVec,      // 按资产分
+    bridge_deposit_total: CounterVec,      // by asset
     bridge_withdraw_total: CounterVec,
 
-    // P2P 网络
+    // P2P Network
     call_p2p_peers: Gauge,
     call_p2p_messages_sent_total: CounterVec,
     call_p2p_messages_received_total: CounterVec,
     call_p2p_bandwidth_bytes: CounterVec,
 
-    // 性能
+    // Performance
     call_block_height: Gauge,
     call_block_processing_time_seconds: Histogram,
     call_state_root_computation_time_seconds: Histogram,
 
-    // 系统
+    // System
     call_process_cpu_seconds: Counter,
     call_process_memory_bytes: Gauge,
     call_process_open_fds: Gauge,
 }
 ```
 
-### 20.2 集成
+### 20.2 Integration
 
-- **Prometheus**: 默认在 `:9090` 暴露 `/metrics` 端点
-- **OpenTelemetry**: 可选集成，支持 Jaeger/Zipkin 分布式追踪
-- **Grafana Dashboards**: 预置仪表板
-  - Consensus Overview: 轮次时间、投票率、验证者活性
-  - Transaction Throughput: TPS、延迟、池大小
-  - Bridge Operations: 存款/提取量、延迟
-  - System Health: CPU、内存、磁盘、网络
+- **Prometheus**: Exposes `/metrics` endpoint at `:9090` by default
+- **OpenTelemetry**: Optional integration, supports Jaeger/Zipkin distributed tracing
+- **Grafana Dashboards**: Pre-built dashboards
+  - Consensus Overview: Round times, vote rates, validator activity
+  - Transaction Throughput: TPS, latency, pool size
+  - Bridge Operations: Deposit/withdrawal volume, latency
+  - System Health: CPU, memory, disk, network
 
-### 20.3 告警规则
+### 20.3 Alert Rules
 
-| 告警 | 条件 | 级别 |
+| Alert | Condition | Severity |
 |------|------|------|
-| 共识停滞 | 60 秒无新区块 | Critical |
-| 验证者离线 | 验证者 100 轮未投票 | Warning |
-| 交易池溢出 | 池使用率 > 90% | Warning |
-| 桥接延迟 | 待处理桥接 > 100 笔 | Warning |
-| 内存溢出 | RSS > 6GB | Critical |
-| 磁盘空间 | 可用空间 < 50GB | Warning |
+| Consensus stall | No new block for 60 seconds | Critical |
+| Validator offline | Validator has not voted for 100 rounds | Warning |
+| Transaction pool overflow | Pool utilization > 90% | Warning |
+| Bridge delay | Pending bridges > 100 | Warning |
+| Memory overflow | RSS > 6GB | Critical |
+| Disk space | Available space < 50GB | Warning |
 
 ---
 
-## 21. 节点启动与配置 (Boot/Config)
+## 21. Node Startup and Configuration (Boot/Config)
 
-### 21.1 CLI 参数
+### 21.1 CLI Arguments
 
 ```bash
 callchain-node [OPTIONS]
 
-共识层:
-    --genesis <PATH>              创世配置文件路径（必需）
-    --validator                   以验证者模式运行
-    --validator-key <HEX>         验证者私钥
-    --consensus-key <HEX>         共识 ed25519 私钥
-    --peers <ADDRS>               初始种子节点，逗号分隔
+Consensus layer:
+    --genesis <PATH>              Path to genesis configuration file (required)
+    --validator                   Run in validator mode
+    --validator-key <HEX>         Validator private key
+    --consensus-key <HEX>         Consensus ed25519 private key
+    --peers <ADDRS>               Initial seed nodes, comma-separated
 
-网络层:
-    --p2p-listen <ADDR>           P2P 监听地址（默认 0.0.0.0:51235）
-    --p2p-advertise <ADDR>        对外公告地址
-    --max-peers <N>               最大对等连接数（默认 50）
+Network layer:
+    --p2p-listen <ADDR>           P2P listen address (default 0.0.0.0:51235)
+    --p2p-advertise <ADDR>        Public advertise address
+    --max-peers <N>               Maximum peer connections (default 50)
 
-RPC 层:
-    --rpc-http-addr <ADDR>        HTTP RPC 地址（默认 127.0.0.1:8545）
-    --rpc-ws-addr <ADDR>          WebSocket 地址（默认 127.0.0.1:8546）
-    --rpc-cors <ORIGINS>          CORS 允许来源
+RPC layer:
+    --rpc-http-addr <ADDR>        HTTP RPC address (default 127.0.0.1:8545)
+    --rpc-ws-addr <ADDR>          WebSocket address (default 127.0.0.1:8546)
+    --rpc-cors <ORIGINS>          CORS allowed origins
 
-存储层:
-    --data-dir <PATH>             数据目录（默认 ~/.callchain）
-    --db-cache-size <MB>          数据库缓存大小（默认 1024）
+Storage layer:
+    --data-dir <PATH>             Data directory (default ~/.callchain)
+    --db-cache-size <MB>          Database cache size (default 1024)
 
-监控层:
-    --metrics-addr <ADDR>         Prometheus 地址（默认 0.0.0.0:9090）
-    --tracing                     启用 OpenTelemetry 追踪
+Monitoring layer:
+    --metrics-addr <ADDR>         Prometheus address (default 0.0.0.0:9090)
+    --tracing                     Enable OpenTelemetry tracing
 
-日志层:
-    --log-level <LEVEL>           日志级别（默认 info）
-    --log-format <FORMAT>         日志格式：json|text（默认 text）
+Logging layer:
+    --log-level <LEVEL>           Log level (default info)
+    --log-format <FORMAT>         Log format: json|text (default text)
 ```
 
-### 21.2 配置文件 (TOML)
+### 21.2 Configuration File (TOML)
 
 ```toml
 [chain]
@@ -4342,91 +4320,91 @@ format = "json"
 file = "/var/log/callchain/node.log"
 ```
 
-### 21.3 启动流程
+### 21.3 Startup Process
 
 ```
-1. 解析 CLI 参数 + 配置文件（CLI 优先）
-2. 初始化日志系统
-3. 打开/创建数据库 (reth-db)
-4. 加载创世配置，初始化状态
-   - 若数据库为空：执行创世初始化
-   - 若数据库已有数据：从最后状态恢复
-5. 初始化 P2P 网络（commonware-p2p）
-6. 连接种子节点，建立对等连接
-7. 初始化共识引擎（Simplex）
-8. 启动 RPC 服务器（HTTP + WebSocket）
-9. 启动监控端点（Prometheus）
-10. 开始同步区块 / 参与共识
+1. Parse CLI arguments + configuration file (CLI takes priority)
+2. Initialize logging system
+3. Open/create database (reth-db)
+4. Load genesis configuration, initialize state
+   - If database is empty: perform genesis initialization
+   - If database has data: restore from last state
+5. Initialize P2P network (commonware-p2p)
+6. Connect to seed nodes, establish peer connections
+7. Initialize consensus engine (Simplex)
+8. Start RPC server (HTTP + WebSocket)
+9. Start monitoring endpoint (Prometheus)
+10. Begin block synchronization / participate in consensus
 ```
 
 ---
 
-## 22. 状态过期 (State Expiration)
+## 22. State Expiration
 
-### 22.1 设计选项
+### 22.1 Design Options
 
-| 模型 | 选项 A: 无状态过期 | 选项 B: 状态租金 | 选项 C: 自动过期 |
+| Model | Option A: No State Expiration | Option B: State Rent | Option C: Auto Expiration |
 |------|-------------------|------------------|------------------|
-| 状态增长 | 无限增长 | 需支付维持费 | 超时自动清除 |
-| 用户负担 | 无 | 周期性支付 | 需定期活跃 |
-| 节点负担 | 持续增长 | 可控 | 可控 |
-| 实现复杂度 | 最低 | 高 | 中 |
-| **推荐** | ✅ 初期 | ⚠️ 长期目标 | ❌ 不适合资产链 |
+| State growth | Infinite growth | Requires maintenance fee | Auto-clear on timeout |
+| User burden | None | Periodic payments | Requires periodic activity |
+| Node burden | Continuous growth | Controllable | Controllable |
+| Implementation complexity | Lowest | High | Medium |
+| **Recommended** | ✅ Initial phase | ⚠️ Long-term goal | ❌ Not suitable for asset chain |
 
-**当前选择：无状态过期（初期）**
+**Current choice: No state expiration (initial phase)**
 
-理由：协议支付层的核心价值是确定性余额映射，状态过期会破坏这一保证。初期采用**无状态过期**，协议层余额和桥接状态永不过期。
+Rationale: The core value of the protocol payment layer is deterministic balance mapping, and state expiration would break this guarantee. Initially adopting **no state expiration**, protocol-layer balances and bridge state never expire.
 
-### 22.2 EVM 层状态管理
+### 22.2 EVM Layer State Management
 
-EVM 层遵循以太坊 EIP-161 规则：
-- 空账户（nonce=0, balance=0, code_hash=empty）在交易后自动清除
-- 合约存储槽为零值时不写入磁盘
-- 未来可考虑 EIP-7742（有状态过期）作为升级路径
+The EVM layer follows Ethereum EIP-161 rules:
+- Empty accounts (nonce=0, balance=0, code_hash=empty) are automatically cleared after transactions
+- Contract storage slots with zero values are not written to disk
+- EIP-7742 (stateful expiration) may be considered as an upgrade path in the future
 
-### 22.3 存储优化
+### 22.3 Storage Optimization
 
-- 状态剪枝：保留最近 N 个区块的状态，更早的状态通过 Merkle 证明重建
-- 快照压缩：定期创建状态快照，删除旧的历史数据
-- 归档节点可选：提供完整历史查询的归档节点模式
+- State pruning: Retain state for the most recent N blocks, earlier state reconstructed via Merkle proofs
+- Snapshot compression: Periodically create state snapshots, delete old historical data
+- Optional archive nodes: Archive node mode providing full historical queries
 
-### 22.4 状态过期与 Prune 的关系
+### 22.4 Relationship Between State Expiration and Pruning
 
-状态过期（§22）和数据 Prune（§10.3）解决不同层面的问题，但相互配合：
+State expiration (§22) and data pruning (§10.3) address different layers of the problem but work together:
 
 ```
-状态过期（State Expiration）
-  → 解决"哪些逻辑数据应该从账本中移除"
-  → 协议语义层：账户不活跃 N 天后是否还保留
-  → 决定什么数据"不再有意义"
+State Expiration
+  → Solves "which logical data should be removed from the ledger"
+  → Protocol semantics layer: Should an account be retained after N days of inactivity
+  → Determines what data "no longer has meaning"
 
-数据 Prune（Data Pruning）
-  → 解决"节点硬盘上保留多少历史数据"
-  → 存储实现层：即使数据有意义，也不必保留所有中间状态
-  → 决定什么数据"不再需要存储在本地"
+Data Pruning
+  → Solves "how much historical data the node keeps on disk"
+  → Storage implementation layer: Even meaningful data doesn't require all intermediate state
+  → Determines what data "no longer needs to be stored locally"
 
-关系：
-  1. 状态过期减少 prune 的工作量（过期数据自然不需要 prune）
-  2. Prune 可以比状态过期更激进（当前余额不过期，但历史中间状态可 prune）
-  3. 两者共同保证节点存储可控增长
+Relationship:
+  1. State expiration reduces pruning workload (expired data naturally doesn't need pruning)
+  2. Pruning can be more aggressive than state expiration (current balances don't expire, but historical intermediate state can be pruned)
+  3. Together they ensure node storage grows controllably
 ```
 
-| 数据类型 | 状态过期策略 | Prune 策略 |
+| Data Type | State Expiration Policy | Prune Strategy |
 |----------|------------|-----------|
-| 协议层余额 | 永不过期 | 当前值保留，历史版本 prune |
-| Shielded nullifier | 永不过期 | 永不过期（防双花必需） |
-| Agent 注册信息 | 永不过期（除非 Revoke） | 当前值保留 |
-| EVM 空账户 | 自动清除（EIP-161） | 清除后自然释放存储 |
-| 历史交易痕迹 | 不适用 | 超过 keep_recent prune |
-| 区块体（交易详情） | 不适用 | 超过 keep_block_body prune |
+| Protocol-layer balances | Never expire | Current value retained, historical versions pruned |
+| Shielded nullifiers | Never expire | Never pruned (required for anti-double-spend) |
+| Agent registration info | Never expire (unless Revoked) | Current value retained |
+| EVM empty accounts | Auto-cleared (EIP-161) | Storage naturally freed after clearing |
+| Historical transaction traces | Not applicable | Pruned after keep_recent |
+| Block body (transaction details) | Not applicable | Pruned after keep_block_body |
 
 ---
 
-## 23. 轻客户端 (Light Client)
+## 23. Light Client
 
-### 23.1 协议
+### 23.1 Protocol
 
-轻客户端不存储完整状态，仅验证区块头：
+Light clients do not store the full state, only verify block headers:
 
 ```rust
 struct LightClient {
@@ -4436,22 +4414,22 @@ struct LightClient {
 }
 
 impl LightClient {
-    /// 验证新区块头
+    /// Verify new block header
     fn verify_header(&mut self, header: &BlockHeader) -> Result<()> {
-        // 1. 验证父哈希链接
+        // 1. Verify parent hash linkage
         ensure!(header.parent_hash == self.latest_block_header.hash());
 
-        // 2. 验证 2/3+ 验证者签名
+        // 2. Verify 2/3+ validator signatures
         let signatures = header.aggregate_signature;
         let voting_power = self.calculate_voting_power(&signatures);
         ensure!(voting_power > self.total_voting_power() * 2 / 3);
 
-        // 3. 验证状态根一致性
+        // 3. Verify state root consistency
         self.latest_block_header = header.clone();
         Ok(())
     }
 
-    /// 验证 Merkle 证明
+    /// Verify Merkle proof
     fn verify_proof<T: MerkleProof>(
         &self,
         proof: &T,
@@ -4462,36 +4440,36 @@ impl LightClient {
 }
 ```
 
-### 23.2 支持的操作
+### 23.2 Supported Operations
 
-| 操作 | 方法 |
+| Operation | Method |
 |------|------|
-| 验证区块头 | `light_verifyBlockHeader` |
-| 协议余额证明 | `call_getBalanceProof(asset_id, address)` → MerkleProof |
-| EVM 余额证明 | `eth_getProof(address, storageKeys, blockNumber)` |
-| 交易包含证明 | `call_getTransactionProof(tx_hash)` → MerkleProof |
-| 桥接操作证明 | `call_getBridgeProof(op_hash)` |
-| Shielded Pool 状态证明 | `call_getShieldedStateProof(asset_id)` → ShieldedStateProof |
-| Shielded 余额查询 | `call_getShieldedBalanceProof(viewing_key)` → EncryptedBalanceProof |
-| Shielded 交易包含 | `call_getShieldedTxProof(tx_hash)` → ShieldedMerkleProof |
+| Verify block header | `light_verifyBlockHeader` |
+| Protocol balance proof | `call_getBalanceProof(asset_id, address)` → MerkleProof |
+| EVM balance proof | `eth_getProof(address, storageKeys, blockNumber)` |
+| Transaction inclusion proof | `call_getTransactionProof(tx_hash)` → MerkleProof |
+| Bridge operation proof | `call_getBridgeProof(op_hash)` |
+| Shielded Pool state proof | `call_getShieldedStateProof(asset_id)` → ShieldedStateProof |
+| Shielded balance query | `call_getShieldedBalanceProof(viewing_key)` → EncryptedBalanceProof |
+| Shielded transaction inclusion | `call_getShieldedTxProof(tx_hash)` → ShieldedMerkleProof |
 
-### 23.3 Shielded Pool 轻客户端验证
+### 23.3 Shielded Pool Light Client Verification
 
-轻客户端对 Shielded Pool 的支持分为两类：
+Light client support for the Shielded Pool is divided into two categories:
 
-**全验证模式（验证 ZK 证明）：**
+**Full validation mode (verifies ZK proofs):**
 ```rust
-/// 轻客户端验证 ShieldedTransfer
-/// 需要下载 ZK 证明并验证（计算量大，安全性最高）
+/// Light client verifies ShieldedTransfer
+/// Requires downloading and verifying ZK proofs (computationally intensive, highest security)
 fn verify_shielded_tx_full(&self, tx: &ShieldedTransfer) -> Result<()> {
-    // 1. 验证 ZK 证明（Groth16 ~3ms）
+    // 1. Verify ZK proof (Groth16 ~3ms)
     verify_zk_proof(&tx.proof)?;
 
-    // 2. 验证 nullifier 未被花费（需要全节点提供证明）
+    // 2. Verify nullifiers unspent (requires full node proof)
     let nullifier_proof = request_nullifier_proof(tx.nullifiers)?;
     ensure!(verify_merkle_proof(&nullifier_proof));
 
-    // 3. 验证 commitment 已上链
+    // 3. Verify commitments are on-chain
     let commit_proof = request_commitment_proof(tx.commitments)?;
     ensure!(verify_merkle_proof(&commit_proof));
 
@@ -4499,74 +4477,74 @@ fn verify_shielded_tx_full(&self, tx: &ShieldedTransfer) -> Result<()> {
 }
 ```
 
-**简化模式（信任节点摘要，适用于移动端）：**
+**Simplified mode (trust node summary, suitable for mobile):**
 ```rust
-/// 轻客户端仅验证 Shielded 状态的摘要证明
-/// 不验证 ZK 证明本身，只验证"验证者已验证此交易"
+/// Light client only verifies Shielded state summary proof
+/// Does not verify ZK proof itself, only verifies "validators have verified this transaction"
 fn verify_shielded_tx_light(&self, tx_hash: Hash) -> Result<()> {
-    // 1. 请求全节点提供 Shielded 交易的 Merkle 包含证明
+    // 1. Request full node to provide Shielded transaction Merkle inclusion proof
     let proof = request_shielded_merkle_proof(tx_hash)?;
 
-    // 2. 验证该交易确实包含在被验证的区块中
+    // 2. Verify transaction is indeed included in the verified block
     ensure!(proof.verify(self.latest_block_header.shielded_root));
 
-    // 3. 验证 2/3 验证者已签名该区块头
-    // （隐含验证者已验证了 ZK 证明）
+    // 3. Verify 2/3 validators have signed this block header
+    // (implicitly validators have verified the ZK proof)
     Ok(())
 }
 ```
 
-**Shielded 余额查询（通过 Viewing Key）：**
+**Shielded Balance Query (via Viewing Key):**
 ```rust
-/// 轻客户端使用 viewing key 查询 Shielded 余额
+/// Light client queries Shielded balance using viewing key
 fn query_shielded_balance(
     &self,
     viewing_key: &ViewingKey,
     asset_id: AssetId,
 ) -> Result<u128> {
-    // 1. 向全节点请求：用 viewing key 解密相关 Notes
+    // 1. Request full node: decrypt relevant Notes using viewing key
     let notes = request_shielded_notes(viewing_key, asset_id)?;
 
-    // 2. 每个 Note 附带 Merkle 包含证明
+    // 2. Each Note includes Merkle inclusion proof
     for note in &notes {
         ensure!(note.proof.verify(self.latest_block_header.shielded_root));
     }
 
-    // 3. 总和 = 余额（仅持有 viewing key 可解密）
+    // 3. Sum = balance (only view key holder can decrypt)
     Ok(notes.iter().map(|n| n.value).sum())
 }
 ```
 
-### 23.4 同步策略
+### 23.4 Sync Strategy
 
-| 阶段 | 说明 |
+| Phase | Description |
 |------|------|
-| 初始同步 | 从可信检查点（checkpoint）开始，验证每个区块头 |
-| 增量同步 | 逐个验证新区块头签名和状态根 |
-| 状态同步 | 按需请求全节点获取 Merkle 证明 |
+| Initial sync | Start from trusted checkpoint, verify each block header |
+| Incremental sync | Verify new block header signatures and state roots one by one |
+| State sync | Request Merkle proofs from full nodes on demand |
 
-轻客户端资源占用：
-- 存储：仅区块头 + 验证者集（< 10MB）
-- 带宽：每区块 ~1KB 区块头
-- 计算：每区块签名验证（216 个验证者 ~50ms）
+Light client resource usage:
+- Storage: Block headers + validator set only (< 10MB)
+- Bandwidth: ~1KB block header per block
+- Computation: Signature verification per block (216 validators ~50ms)
 
 ---
 
-## 24. 日志与审计 (Logging/Auditing)
+## 24. Logging/Auditing
 
-### 24.1 结构化日志
+### 24.1 Structured Logging
 
 ```rust
-// 示例日志条目
+// Example log entry
 struct LogEntry {
     timestamp: String,        // ISO 8601
     level: LogLevel,          // trace, debug, info, warn, error
-    target: String,           // 模块路径
+    target: String,           // module path
     message: String,
-    fields: HashMap<String, Value>,  // 结构化字段
+    fields: HashMap<String, Value>,  // structured fields
 }
 
-// 示例输出（JSON 格式）
+// Example output (JSON format)
 {
     "timestamp": "2026-04-13T10:30:00.123Z",
     "level": "info",
@@ -4584,9 +4562,9 @@ struct LogEntry {
 }
 ```
 
-### 24.2 审计日志
+### 24.2 Audit Log
 
-与普通日志不同，审计日志是不可变的追加日志，记录所有状态变更：
+Unlike regular logs, audit logs are immutable append-only logs recording all state changes:
 
 ```rust
 struct AuditEntry {
@@ -4595,31 +4573,31 @@ struct AuditEntry {
     tx_type: String,        // "payment", "agent", "evm", "bridge", "system", "shielded"
     action: String,         // "transfer", "agent_pay", "mint", "burn", "deposit", "withdraw",
                             // "shielded_transfer", "shielded_deposit", "shielded_withdraw"
-    agent_id: Option<u64>,  // Agent 交易时记录
-    fee_payer: Option<String>, // "self", "owner", "third_party"（Agent 交易时）
-    before_state: StateSnapshot,  // 变更前的相关状态
-    after_state: StateSnapshot,   // 变更后的相关状态
+    agent_id: Option<u64>,  // Recorded for Agent transactions
+    fee_payer: Option<String>, // "self", "owner", "third_party" (for Agent transactions)
+    before_state: StateSnapshot,  // relevant state before change
+    after_state: StateSnapshot,   // relevant state after change
     tx_hash: Hash,
-    shielded_details: Option<ShieldedAuditInfo>, // 隐私交易审计（仅 viewing key 持有者可读）
+    shielded_details: Option<ShieldedAuditInfo>, // shielded transaction audit (only view key holders can read)
 }
 
-/// 隐私交易审计信息（加密存储）
+/// Shielded transaction audit info (encrypted storage)
 struct ShieldedAuditInfo {
     nullifiers: Vec<Nullifier>,
     commitments: Vec<NoteCommitment>,
-    encrypted_amounts: Vec<EncryptedValue>,  // 只有 viewing key 持有者可解密
+    encrypted_amounts: Vec<EncryptedValue>,  // only decryptable by view key holders
     compliance_mode: String,                 // "unrestricted", "kyc_required", ...
 }
 ```
 
-审计日志存储：
-- 独立数据库表（`audit_log`），仅追加，不可删除
-- 定期 Merkle 化，根哈希写入区块头（可选，用于第三方审计验证）
+Audit log storage:
+- Independent database table (`audit_log`), append-only, never deleted
+- Periodically Merkle-ized, root hash written to block header (optional, for third-party audit verification)
 
-### 24.3 合规报告 API
+### 24.3 Compliance Report API
 
 ```json
-// 导出特定时间范围内的合规报告
+// Export compliance report for a specific time range
 {
     "method": "call_exportComplianceReport",
     "params": [{
@@ -4634,112 +4612,112 @@ struct ShieldedAuditInfo {
 → { report_url: "https://.../report.csv", expires_at: "..." }
 ```
 
-### 24.4 日志配置
+### 24.4 Log Configuration
 
-| 参数 | 选项 | 默认值 |
+| Parameter | Options | Default Value |
 |------|------|--------|
-| 日志级别 | trace, debug, info, warn, error | info |
-| 日志格式 | json, text | text |
-| 日志输出 | stdout, file, both | stdout |
-| 日志轮转 | 按大小（100MB）或按天 | 按天 |
-| 日志保留 | 30 天（可配置） | 30 天 |
-| 审计日志 | 始终启用 | - |
+| Log level | trace, debug, info, warn, error | info |
+| Log format | json, text | text |
+| Log output | stdout, file, both | stdout |
+| Log rotation | By size (100MB) or daily | Daily |
+| Log retention | 30 days (configurable) | 30 days |
+| Audit log | Always enabled | - |
 
 ---
 
-## 25. 预言机（Oracle）
+## 25. Oracle
 
-### 25.1 设计
+### 25.1 Design
 
-Callchain 原生支持验证者喂价系统，通过共识子集验证者定期提交价格数据，取中位数作为官方价格。价格数据通过 EVM 预编译合约提供 DeFi 合约直接读取。
+Callchain natively supports a validator feed price system, where a consensus subset of validators periodically submits price data, with the median taken as the official price. Price data is exposed to DeFi contracts for direct reading via an EVM precompiled contract.
 
-### 25.2 核心数据结构
+### 25.2 Core Data Structures
 
 ```rust
-/// 验证者价格提交
+/// Validator price submission
 struct OracleSubmission {
     asset_id: AssetId,
-    price: u128,              // 以 CALL 计价，放大 18 位
+    price: u128,              // denominated in CALL, scaled by 18 decimals
     timestamp: u64,
     validator_id: ValidatorId,
     signature: Signature,
 }
 
-/// 聚合价格（取中位数）
+/// Aggregated price (median)
 struct AggregatedPrice {
     asset_id: AssetId,
-    median_price: u128,       // 中位数价格
-    valid_submissions: u32,    // 有效提交数
-    timestamp: u64,            // 更新时间戳
-    block_updated: u64,        // 更新的区块高度
+    median_price: u128,       // median price
+    valid_submissions: u32,    // number of valid submissions
+    timestamp: u64,            // update timestamp
+    block_updated: u64,        // updating block height
 }
 
-/// 验证者预言机状态
+/// Validator oracle state
 struct OracleValidatorInfo {
-    submission_count: u32,     // 累计提交次数
-    outlier_count: u32,        // 偏离中位数 >5% 的次数
-    is_active: bool,           // 是否有提交资格
-    last_submission: u64,      // 最后一次提交时间
+    submission_count: u32,     // cumulative submissions
+    outlier_count: u32,        // times deviating >5% from median
+    is_active: bool,           // eligible to submit
+    last_submission: u64,      // last submission timestamp
 }
 
-/// 历史价格（用于 TWAP）
+/// Historical price (for TWAP)
 struct HistoricalPrice {
     price: u128,
     timestamp: u64,
 }
 ```
 
-### 25.3 价格提交流程
+### 25.3 Price Submission Process
 
 ```
-每个价格更新周期（每 1000 区块 ≈ 4 分钟）：
+Each price update cycle (every 1000 blocks ≈ 4 minutes):
 
-1. 验证者从外部 API 获取价格
-   → 数据源：CoinGecko、Binance、Coinbase（至少 2 个独立源）
-   → 验证者本地计算：取多个源的中位数
+1. Validator obtains price from external API
+   → Data sources: CoinGecko, Binance, Coinbase (at least 2 independent sources)
+   → Validator locally computes: takes median of multiple sources
 
-2. 验证者签名并提交
-   → 用 secp256k1 密钥签名：sign(hash(asset_id, price, timestamp))
-   → 提交到 Oracle 系统合约
+2. Validator signs and submits
+   → Signs with secp256k1 key: sign(hash(asset_id, price, timestamp))
+   → Submits to Oracle system contract
 
-3. 系统合约收集提交
-   → 等待 2/3 验证者提交（14/21）
-   → 排除异常值（偏离中位数 >5% 的提交）
-   → 计算中位数作为官方价格
+3. System contract collects submissions
+   → Waits for 2/3 validator submissions (14/21)
+   → Excludes outliers (submissions deviating >5% from median)
+   → Calculates median as official price
 
-4. 价格写入状态
-   → AggregatedPrice 更新
-   → 历史记录追加到 TWAP 队列
-   → EVM 预编译合约自动暴露最新价格
+4. Price written to state
+   → AggregatedPrice updated
+   → Historical record appended to TWAP queue
+   → EVM precompiled contract automatically exposes latest price
 
-5. 异常验证者标记
+5. Anomalous validators flagged
    → outlier_count +1
-   → 连续 10 次异常 → 失去提交资格
+   → 10 consecutive anomalies → lose submission eligibility
 ```
 
 ```rust
-/// 验证者提交价格
+/// Validator submits price
 fn submit_oracle_price(
     submission: OracleSubmission,
 ) -> Result<()> {
     let validator = get_validator_info(submission.validator_id)?;
 
-    // 1. 验证是否有提交资格
+    // 1. Verify submission eligibility
     ensure!(validator.oracle_info.is_active, "Oracle submission disabled");
 
-    // 2. 验证签名
+    // 2. Verify signature
     verify_signature(
         &validator.consensus_key,
         &submission.signature,
         &submission.hash()
     )?;
 
-    // 3. 验证时间窗口（当前周期内）
+    // 3. Verify time window (within current cycle)
     let current_period = current_block_height() / ORACLE_UPDATE_INTERVAL;
     let submission_period = submission.timestamp / ORACLE_PERIOD_SECS;
     ensure!(submission_period == current_period, "Wrong submission period");
 
-    // 4. 防重放（每周期每验证者只能提交一次）
+    // 4. Anti-replay (each validator can only submit once per cycle)
     ensure!(
         !OracleSubmissions::has_submitted(
             submission.validator_id,
@@ -4749,7 +4727,7 @@ fn submit_oracle_price(
         "Already submitted this period"
     );
 
-    // 5. 记录提交
+    // 5. Record submission
     OracleSubmissions::insert(
         submission.validator_id,
         submission.asset_id,
@@ -4759,7 +4737,7 @@ fn submit_oracle_price(
 
     OracleValidatorInfo::record_submission(submission.validator_id);
 
-    // 6. 如果收集到足够的提交，触发聚合
+    // 6. If sufficient submissions collected, trigger aggregation
     let submission_count = OracleSubmissions::count_for_asset(submission.asset_id, current_period);
     if submission_count >= oracle_quorum() {
         aggregate_and_publish_price(submission.asset_id, current_period)?;
@@ -4768,18 +4746,18 @@ fn submit_oracle_price(
     Ok(())
 }
 
-/// 聚合价格：取中位数，排除异常值
+/// Aggregate price: take median, exclude outliers
 fn aggregate_and_publish_price(asset_id: AssetId, period: u64) -> Result<()> {
     let submissions = OracleSubmissions::get_all(asset_id, period);
 
-    // 排序
+    // Sort
     let mut prices: Vec<u128> = submissions.iter().map(|s| s.price).collect();
     prices.sort();
 
-    // 计算中位数
+    // Calculate median
     let median = prices[prices.len() / 2];
 
-    // 标记异常值（偏离中位数 >5%）
+    // Mark outliers (deviating >5% from median)
     for submission in &submissions {
         let deviation = ((submission.price as i128 - median as i128).abs() as u128) * 100 / median;
         if deviation > 5 {
@@ -4787,7 +4765,7 @@ fn aggregate_and_publish_price(asset_id: AssetId, period: u64) -> Result<()> {
         }
     }
 
-    // 检查验证者是否因多次异常被禁用
+    // Check if validator should be disabled due to repeated anomalies
     for submission in &submissions {
         let info = OracleValidatorInfo::get(submission.validator_id);
         if info.outlier_count >= 10 {
@@ -4796,7 +4774,7 @@ fn aggregate_and_publish_price(asset_id: AssetId, period: u64) -> Result<()> {
         }
     }
 
-    // 更新聚合价格
+    // Update aggregated price
     let aggregated = AggregatedPrice {
         asset_id,
         median_price: median,
@@ -4806,7 +4784,7 @@ fn aggregate_and_publish_price(asset_id: AssetId, period: u64) -> Result<()> {
     };
     AggregatedPrices::insert(asset_id, aggregated);
 
-    // 追加 TWAP 历史记录
+    // Append TWAP historical record
     PriceHistory::push(asset_id, HistoricalPrice {
         price: median,
         timestamp: current_timestamp(),
@@ -4817,44 +4795,44 @@ fn aggregate_and_publish_price(asset_id: AssetId, period: u64) -> Result<()> {
 }
 ```
 
-### 25.4 EVM 预编译接口
+### 25.4 EVM Precompiled Interface
 
-DeFi 合约通过预编译合约读取价格数据：
+DeFi contracts read price data through a precompiled contract:
 
 ```solidity
-/// 预编译合约地址：0x0000...0101
+/// Precompiled contract address: 0x0000...0101
 interface ICallOracle {
-    /// 获取最新价格
-    /// @return price 以 CALL 计价（18 位小数）
-    /// @return timestamp 价格更新时间戳
+    /// Get latest price
+    /// @return price denominated in CALL (18 decimals)
+    /// @return timestamp of price update
     function getPrice(bytes32 assetId)
         external view
         returns (uint256 price, uint256 timestamp);
 
-    /// 获取时间加权平均价格（TWAP）
-    /// @param window 时间窗口（秒）
-    /// @return twap 时间加权平均价格
+    /// Get time-weighted average price (TWAP)
+    /// @param window time window (seconds)
+    /// @return twap time-weighted average price
     function getTWAP(bytes32 assetId, uint256 window)
         external view
         returns (uint256 twap);
 
-    /// 检查价格是否过期
-    /// @param maxAge 最大允许年龄（秒）
-    /// @return isStale true 表示价格已过期
+    /// Check if price is stale
+    /// @param maxAge maximum allowed age (seconds)
+    /// @return isStale true if price is stale
     function isStale(bytes32 assetId, uint256 maxAge)
         external view
         returns (bool isStale);
 
-    /// 获取预言机状态
-    /// @return updateInterval 价格更新间隔（区块）
-    /// @return quorum 法定人数
+    /// Get oracle status
+    /// @return updateInterval price update interval (blocks)
+    /// @return quorum quorum count
     function getOracleStatus()
         external view
         returns (uint256 updateInterval, uint256 quorum);
 }
 ```
 
-**使用示例：**
+**Usage Example:**
 
 ```solidity
 contract MyDEX {
@@ -4863,111 +4841,111 @@ contract MyDEX {
     function swap(address tokenIn, uint256 amountIn) external {
         (uint256 price, uint256 timestamp) = ORACLE.getPrice(tokenIn);
 
-        // 检查价格是否有效
+        // Check price is valid
         require(!ORACLE.isStale(tokenIn, 300), "Price too stale");
 
-        // 计算输出金额
+        // Calculate output amount
         uint256 amountOut = (amountIn * price) / 1e18;
 
-        // 执行交换...
+        // Execute swap...
     }
 }
 ```
 
-### 25.5 配置参数
+### 25.5 Configuration Parameters
 
-| 参数 | 默认值 | 说明 |
+| Parameter | Default Value | Description |
 |------|--------|------|
-| 更新间隔 | 1000 区块（~4 分钟） | 价格更新频率 |
-| 法定人数 | 14（2/3 of 21） | 触发聚合的最小提交数 |
-| 异常阈值 | 5% | 偏离中位数 >5% 标记为异常 |
-| 异常容忍上限 | 10 次 | 累计 10 次异常失去提交资格 |
-| TWAP 窗口上限 | 24 小时 | TWAP 最大查询范围 |
-| 价格过期时间 | 15 分钟 | 超过此时间视为过期 |
-| 初始数据源要求 | ≥2 个独立源 | 验证者必须从至少 2 个 API 获取价格 |
+| Update interval | 1000 blocks (~4 minutes) | Price update frequency |
+| Quorum | 14 (2/3 of 21) | Minimum submissions to trigger aggregation |
+| Outlier threshold | 5% | Deviation >5% from median marked as anomalous |
+| Outlier tolerance limit | 10 times | 10 cumulative anomalies lose submission eligibility |
+| TWAP window cap | 24 hours | TWAP maximum query range |
+| Price staleness | 15 minutes | Considered stale beyond this time |
+| Initial data source requirement | ≥2 independent sources | Validators must obtain prices from at least 2 APIs |
 
-### 25.6 支持的资产
+### 25.6 Supported Assets
 
-| 资产 | 数据源 | 优先级 |
+| Asset | Data Sources | Priority |
 |------|--------|--------|
-| CALL/USD | CoinGecko, Binance | 最高（协议原生） |
-| USDC/USD | CoinGecko, Binance, Coinbase | 高 |
-| ETH/USD | CoinGecko, Binance, Coinbase | 高 |
-| BTC/USD | CoinGecko, Binance | 中 |
-| 其他协议资产 | 按需添加 | 低 |
+| CALL/USD | CoinGecko, Binance | Highest (protocol native) |
+| USDC/USD | CoinGecko, Binance, Coinbase | High |
+| ETH/USD | CoinGecko, Binance, Coinbase | High |
+| BTC/USD | CoinGecko, Binance | Medium |
+| Other protocol assets | Added as needed | Low |
 
 ---
 
-## 26. 关键设计决策
+## 26. Key Design Decisions
 
-### 25.1 为什么双账本而非单一账本
+### 26.1 Why Dual Ledger vs Single Ledger
 
-| 单一账本 | 双账本 |
+| Single Ledger | Dual Ledger |
 |----------|--------|
-| EVM 合约需要适配协议层 API | EVM 合约完全独立，无需适配 |
-| 实现复杂（锁仓感知、状态同步） | 实现简单（两层互不干扰） |
-| DeFi 合约需要修改 | DeFi 合约和以太坊一模一样 |
-| 用户体验无缝 | 需要桥接操作（但可自动化） |
+| EVM contracts need to adapt to protocol-layer API | EVM contracts completely independent, no adaptation needed |
+| Complex implementation (lock-aware, state sync) | Simple implementation (two layers don't interfere) |
+| DeFi contracts need modification | DeFi contracts are identical to Ethereum |
+| Seamless user experience | Requires bridge operations (but can be automated) |
 
-选择**双账本**：简单性 > 无缝体验。桥接操作可通过钱包自动化实现近乎无感的体验。
+**Choice: Dual ledger**: Simplicity > seamless experience. Bridge operations can be automated through wallets for a near-seamless experience.
 
-### 25.2 为什么选择 Commonware Simplex
+### 26.2 Why Commonware Simplex
 
-- O(n) 通信复杂度，216 验证者下仅 216 条消息/轮（vs Tendermint 的 ~46K 条）
-- 状态机最简洁 — 轮次、提议、投票、提交，四步完成一轮
-- `commonware-consensus` crate 可直接使用，无需从零实现
-- 子集轮换天然支持 — 每轮随机抽样提议者
-- Tempo 链已在生产环境验证
-- 审计面最小 — 代码量最少，形式化验证可行
+- O(n) communication complexity, only 216 messages/round with 216 validators (vs ~46K for Tendermint)
+- Simplest state machine -- round, proposal, vote, commit, four steps per round
+- `commonware-consensus` crate ready to use, no need to implement from scratch
+- Native subset rotation support -- random proposer sampling each round
+- Already production-validated on Tempo chain
+- Smallest audit surface -- least code, feasible for formal verification
 
-### 25.3 为什么选择 Reth 而非自研执行引擎
+### 26.3 Why Reth over Custom Execution Engine
 
-- 2026 年 Reth 已是 EVM 执行的事实标准
-- 完整的工具链（Foundry, Hardhat 兼容）
-- 不需要重新实现 EVM 语义
-- Reth 的模块化架构允许深度定制
+- By 2026, Reth is the de facto standard for EVM execution
+- Complete toolchain (Foundry, Hardhat compatible)
+- No need to reimplement EVM semantics
+- Reth's modular architecture allows deep customization
 
 ---
 
-## 附录 A：交易生命周期
+## Appendix A: Transaction Lifecycle
 
 ```
-1. 用户发起操作
-   ├── 协议支付 → 签名 ProtocolTransaction（可组合多指令）→ 广播到 mempool
-   ├── EVM 交易 → 签名 EvmTx → 广播到 mempool
-   └── 桥接操作 → 通过钱包自动创建 → 广播
+1. User initiates operation
+   ├── Protocol payment → Sign ProtocolTransaction (composable multi-instruction) → broadcast to mempool
+   ├── EVM transaction → Sign EvmTx → broadcast to mempool
+   └── Bridge operation → Auto-created by wallet → broadcast
 
-2. 验证者收集交易
-   ├── 高优先级：ProtocolTransaction
-   ├── 标准优先级：EvmTx
-   └── 内部队列：BridgeOp
+2. Validators collect transactions
+   ├── High priority: ProtocolTransaction
+   ├── Standard priority: EvmTx
+   └── Internal queue: BridgeOp
 
-3. 验证者打包区块
-   ├── 执行 EVM 交易 → 更新 EVM 状态
-   ├── 执行协议支付 → 更新协议余额
-   ├── 执行桥接操作 → 同步两层余额
-   └── 执行系统交易 → 奖励/费用结算
+3. Validators pack block
+   ├── Execute EVM transactions → update EVM state
+   ├── Execute protocol payments → update protocol balances
+   ├── Execute bridge operations → synchronize two-layer balances
+   └── Execute system transactions → reward/fee settlement
 
-4. Simplex 共识出块
-   ├── 提议者打包 → 广播提议
-   ├── 验证者投票 → 2/3 多数
-   └── 最终确认 → 区块不可回滚
+4. Simplex consensus block production
+   ├── Proposer packs → broadcasts proposal
+   ├── Validators vote → 2/3 majority
+   └── Final confirmation → block is immutable
 
-5. 节点同步
-   ├── 接收新区块
-   ├── 验证签名和状态根
-   └── 更新本地状态
+5. Node synchronization
+   ├── Receive new block
+   ├── Verify signatures and state root
+   └── Update local state
 ```
 
-## 附录 B：术语表
+## Appendix B: Glossary
 
-| 术语 | 定义 |
+| Term | Definition |
 |------|------|
-| Protocol Payment Layer | 协议支付层，维护原生余额映射 |
-| EVM Contract Layer | EVM 智能合约层，运行智能合约 |
-| Internal Bridge | 内部桥接，两层之间的资产转换机制 |
-| Asset Registry | 资产注册表，记录所有协议资产 |
-| CompliancePolicy | 合规策略，定义资产的转账限制 |
-| BridgeOp | 桥接操作，在两层之间转移资产 |
-| Simplex | 低延迟 BFT 共识算法，O(n) 通信复杂度 |
-| Commonware | Simplex 共识的 Rust 实现框架 |
+| Protocol Payment Layer | Protocol payment layer, maintains native balance mappings |
+| EVM Contract Layer | EVM smart contract layer, runs smart contracts |
+| Internal Bridge | Internal bridge, asset conversion mechanism between two layers |
+| Asset Registry | Asset registry, records all protocol assets |
+| CompliancePolicy | Compliance policy, defines transfer restrictions for assets |
+| BridgeOp | Bridge operation, transfers assets between two layers |
+| Simplex | Low-latency BFT consensus algorithm, O(n) communication complexity |
+| Commonware | Rust implementation framework for Simplex consensus |
