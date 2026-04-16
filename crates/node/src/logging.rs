@@ -217,11 +217,11 @@ impl AuditLog {
         let mut all_paths: Vec<Vec<(Hash, bool)>> = vec![Vec::new(); current_level.len()];
 
         while current_level.len() > 1 {
-            let next_level = Vec::with_capacity((current_level.len() + 1) / 2);
-            let mut next_paths: Vec<Vec<(Hash, bool)>> = vec![Vec::new(); (current_level.len() + 1) / 2];
+            let next_level = Vec::with_capacity(current_level.len().div_ceil(2));
+            let mut next_paths: Vec<Vec<(Hash, bool)>> = vec![Vec::new(); current_level.len().div_ceil(2)];
 
             for (i, chunk) in current_level.chunks(2).enumerate() {
-                let (parent, _sibling_left) = match chunk {
+                let (_parent, _sibling_left) = match chunk {
                     [a, b] => {
                         let mut data = Vec::with_capacity(64);
                         data.extend_from_slice(a.as_slice());
@@ -384,8 +384,8 @@ pub fn export_compliance_report(
 
     for audit in &audit_log.entries {
         // Filter by asset if specified in before/after state
-        let before_asset = audit.before_state.get(&asset_id.to_string());
-        let after_asset = audit.after_state.get(&asset_id.to_string());
+        let before_asset = audit.before_state.get(asset_id.to_string());
+        let after_asset = audit.after_state.get(asset_id.to_string());
 
         if before_asset.is_none() && after_asset.is_none() {
             continue;

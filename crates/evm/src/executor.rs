@@ -423,7 +423,7 @@ fn build_erc20_init_code(
     let mut slot_buf = [0u8; 32];
     slot_buf[0..20].copy_from_slice(deployer_key.as_slice());
     slot_buf[31] = 4;
-    let balance_slot = keccak256(&slot_buf);
+    let balance_slot = keccak256(slot_buf);
 
     // Store balance in computed slot
     if high_u128 != 0 {

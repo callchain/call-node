@@ -154,13 +154,13 @@ fn bridge_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     let _state = BridgeState::default();
     let mut output = [0u8; 32];
 
-    match &input[..4] {
+    match input[..4] {
         // getTotalDeposits() -> uint256
-        &[0xa8, 0x7e, 0x4f, 0x2a] => {
+        [0xa8, 0x7e, 0x4f, 0x2a] => {
             output[16..].copy_from_slice(&_state.total_deposits.to_be_bytes());
         }
         // getTotalWithdrawals() -> uint256
-        &[0x9c, 0x3e, 0x6d, 0x1b] => {
+        [0x9c, 0x3e, 0x6d, 0x1b] => {
             output[16..].copy_from_slice(&_state.total_withdrawals.to_be_bytes());
         }
         _ => return Err(PrecompileError::Other("unknown selector".into())),

@@ -245,7 +245,7 @@ impl RpcState {
         let signer = envelope
             .recover_signer()
             .map_err(|_| "sig recovery failed")?;
-        let caller = Address::from(signer);
+        let caller = signer;
 
         // Extract transaction fields for validation
         let gas_price = match &envelope {
@@ -321,7 +321,7 @@ impl RpcState {
                     nonce: tx.nonce(),
                     gas_limit: tx.gas_limit(),
                     gas_price: tx.gas_price().unwrap_or(0),
-                    to: tx.to().map(|a| Address::from(a)),
+                    to: tx.to(),
                     value: tx.value(),
                     data: tx.input().clone(),
                     chain_id: tx.chain_id().unwrap_or(self.chain_id),
@@ -334,7 +334,7 @@ impl RpcState {
                     nonce: tx.nonce(),
                     gas_limit: tx.gas_limit(),
                     gas_price: tx.max_fee_per_gas(),
-                    to: tx.to().map(|a| Address::from(a)),
+                    to: tx.to(),
                     value: tx.value(),
                     data: tx.input().clone(),
                     chain_id: tx.chain_id().unwrap_or(self.chain_id),
@@ -347,7 +347,7 @@ impl RpcState {
                     nonce: tx.nonce(),
                     gas_limit: tx.gas_limit(),
                     gas_price: tx.gas_price().unwrap_or(0),
-                    to: tx.to().map(|a| Address::from(a)),
+                    to: tx.to(),
                     value: tx.value(),
                     data: tx.input().clone(),
                     chain_id: tx.chain_id().unwrap_or(self.chain_id),
@@ -360,7 +360,7 @@ impl RpcState {
                     nonce: tx.nonce(),
                     gas_limit: tx.gas_limit(),
                     gas_price: tx.max_fee_per_gas(),
-                    to: tx.to().map(|a| Address::from(a)),
+                    to: tx.to(),
                     value: tx.value(),
                     data: tx.input().clone(),
                     chain_id: tx.chain_id().unwrap_or(self.chain_id),
@@ -373,7 +373,7 @@ impl RpcState {
                     nonce: tx.nonce(),
                     gas_limit: tx.gas_limit(),
                     gas_price: tx.max_fee_per_gas(),
-                    to: tx.to().map(|a| Address::from(a)),
+                    to: tx.to(),
                     value: tx.value(),
                     data: tx.input().clone(),
                     chain_id: tx.chain_id().unwrap_or(self.chain_id),

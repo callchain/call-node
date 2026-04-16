@@ -164,7 +164,7 @@ impl OracleManager {
         }
 
         // Period check: only accept at update interval boundaries
-        if submission.block_number % self.config.update_interval != 0 {
+        if !submission.block_number.is_multiple_of(self.config.update_interval) {
             return Err(OracleError::WrongPeriod);
         }
 
@@ -268,7 +268,7 @@ impl OracleManager {
         };
 
         // Store aggregated price
-        self.aggregated.insert(asset_id, aggregated.clone());
+        self.aggregated.insert(asset_id, aggregated);
 
         // Append to TWAP history
         self.history

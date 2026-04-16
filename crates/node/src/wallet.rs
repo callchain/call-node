@@ -1,5 +1,7 @@
 //! Wallet CLI subcommands — generate keys, query balances, send payments.
 
+#![allow(clippy::print_stdout)]
+
 use call_primitives::Address;
 use reqwest::Client;
 use std::error::Error;
@@ -30,7 +32,7 @@ async fn rpc_call(
 
     let parsed: serde_json::Value = serde_json::from_str(&resp)?;
     if let Some(error) = parsed.get("error") {
-        eprintln!("RPC Error: {error}");
+        tracing::error!(error = %error, "RPC error");
         return Ok(None);
     }
     Ok(parsed.get("result").cloned())

@@ -36,7 +36,7 @@ impl CallDb {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         let path = self.prune_dir.join("prune_state.json");
         std::fs::write(&path, data)
-            .map_err(|e| StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
         Ok(())
     }
 
@@ -52,7 +52,7 @@ impl CallDb {
             return Ok(PruneState::new());
         }
         let data = std::fs::read(&path)
-            .map_err(|e| StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
         serde_json::from_slice(&data)
             .map_err(|e| StorageError::Serialization(e.to_string()))
     }
@@ -64,23 +64,23 @@ impl CallDb {
 /// If reth-db initialization fails, falls back to JSON file persistence.
 pub fn open_db(data_dir: PathBuf) -> Result<CallDb, StorageError> {
     std::fs::create_dir_all(&data_dir).map_err(|e| {
-        StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        StorageError::IoError(std::io::Error::other(e.to_string()))
     })?;
 
     let state_dir = data_dir.join("state");
     let prune_dir = data_dir.join("prune");
     std::fs::create_dir_all(&state_dir).map_err(|e| {
-        StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        StorageError::IoError(std::io::Error::other(e.to_string()))
     })?;
     std::fs::create_dir_all(&prune_dir).map_err(|e| {
-        StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        StorageError::IoError(std::io::Error::other(e.to_string()))
     })?;
 
     // Try to initialize reth-db
     let db = match init_call_db(&data_dir) {
         Ok(db_env) => Some(db_env),
         Err(e) => {
-            eprintln!("WARN: failed to initialize reth-db, falling back to JSON persistence: {e}");
+            tracing::warn!(error = %e, "failed to initialize reth-db, falling back to JSON persistence");
             None
         }
     };

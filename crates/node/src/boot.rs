@@ -10,7 +10,7 @@ use call_primitives::Address;
 use call_rpc::RpcConfig;
 use serde::Deserialize;
 use std::fs;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Result type for boot sequence
 pub type BootResult = Result<CallNode, String>;

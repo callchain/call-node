@@ -169,7 +169,7 @@ impl SponsorRegistry {
         }
 
         // Check pool balance
-        if (pool.balance as u128) < fee {
+        if pool.balance < fee {
             return Err(ProtocolError::SponsorError(
                 "insufficient pool balance".into(),
             ));

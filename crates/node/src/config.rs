@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Full node configuration — loaded from TOML file, overridden by CLI.
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct NodeConfig {
     #[serde(default)]
     pub mode: NodeMode,
@@ -26,20 +27,6 @@ pub struct NodeConfig {
     pub logging: LoggingConfig,
 }
 
-impl Default for NodeConfig {
-    fn default() -> Self {
-        Self {
-            mode: NodeMode::default(),
-            keys: KeysConfig::default(),
-            genesis: GenesisConfig::default(),
-            p2p: P2pConfig::default(),
-            rpc: RpcConfig::default(),
-            storage: StorageConfig::default(),
-            metrics: MetricsConfig::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -59,16 +46,12 @@ pub struct KeysConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct GenesisConfig {
     #[serde(default = "GenesisConfig::default_path")]
     pub path: Option<PathBuf>,
 }
 
-impl Default for GenesisConfig {
-    fn default() -> Self {
-        Self { path: None }
-    }
-}
 
 impl GenesisConfig {
     fn default_path() -> Option<PathBuf> { None }

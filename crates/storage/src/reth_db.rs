@@ -217,8 +217,8 @@ pub fn db_iter_all<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv) -
     let tx = db.tx().map_err(db_err)?;
     let mut cursor = tx.cursor_read::<T>().map_err(db_err)?;
     let mut results = Vec::new();
-    let mut walker = cursor.walk(None).map_err(db_err)?;
-    while let Some(entry) = walker.next() {
+    let walker = cursor.walk(None).map_err(db_err)?;
+    for entry in walker {
         let (k, v) = entry.map_err(db_err)?;
         results.push((k, v));
     }

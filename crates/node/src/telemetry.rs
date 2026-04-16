@@ -577,7 +577,7 @@ async fn health_handler() -> impl IntoResponse {
 
 // ── OpenTelemetry Tracing Integration ──────────────────────────────
 
-use opentelemetry::trace::{Span, Tracer, TracerProvider as _};
+use opentelemetry::trace::{Span, Tracer};
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::{
     propagation::TraceContextPropagator,

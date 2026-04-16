@@ -98,11 +98,11 @@ pub struct ValidatorSignature {
 
 mod serde_bytes {
     use serde::{Deserialize, Serializer, Deserializer};
-    pub fn serialize<S>(sig: &[u8; 65], serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(sig: &[u8; 65], serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
         serializer.serialize_bytes(sig.as_slice())
     }
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 65], D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 65], D::Error>
     where D: Deserializer<'de> {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
         let len = bytes.len();
@@ -292,7 +292,7 @@ pub fn maybe_prune(
     current_height: u64,
     config: &PruneConfig,
 ) -> Result<(), StorageError> {
-    if current_height % config.prune_interval != 0 {
+    if !current_height.is_multiple_of(config.prune_interval) {
         return Ok(());
     }
 
@@ -308,7 +308,7 @@ pub fn maybe_prune(
 
 /// Verify a state snapshot: check that at least 2/3 of validators signed.
 pub fn verify_snapshot(snapshot: &StateSnapshot, total_validators: u32) -> bool {
-    let quorum = (2 * total_validators + 2) / 3; // ceiling of 2/3
+    let quorum = (2 * total_validators).div_ceil(3); // ceiling of 2/3
     snapshot.validator_signatures.len() as u32 >= quorum
 }
 
@@ -326,12 +326,12 @@ impl FastSyncFlow {
     /// Save a snapshot to disk as JSON.
     pub fn save_snapshot(snapshot: &StateSnapshot, dir: &Path) -> Result<(), StorageError> {
         std::fs::create_dir_all(dir)
-            .map_err(|e| StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
         let path = dir.join(format!("snapshot-{}.json", snapshot.height));
         let data = serde_json::to_vec_pretty(snapshot)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         std::fs::write(&path, data)
-            .map_err(|e| StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
         Ok(())
     }
 
@@ -339,7 +339,7 @@ impl FastSyncFlow {
     pub fn load_snapshot(dir: &Path, height: u64) -> Result<StateSnapshot, StorageError> {
         let path = dir.join(format!("snapshot-{}.json", height));
         let data = std::fs::read(&path)
-            .map_err(|e| StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
         serde_json::from_slice(&data)
             .map_err(|e| StorageError::Serialization(e.to_string()))
     }
@@ -347,7 +347,7 @@ impl FastSyncFlow {
     /// List all available snapshot heights in the directory.
     pub fn list_snapshots(dir: &Path) -> Result<Vec<u64>, StorageError> {
         let entries = std::fs::read_dir(dir)
-            .map_err(|e| StorageError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
         let mut heights = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name();

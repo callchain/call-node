@@ -59,7 +59,7 @@ impl ShieldedComplianceMode {
         // Derive recipient address from each note's incoming viewing key
         // and verify it's in the KYC registry
         for (i, note) in notes.iter().enumerate() {
-            let recipient = Self::derive_address_from_ivk(&note);
+            let recipient = Self::derive_address_from_ivk(note);
             if !kyc_registry.contains(&recipient) {
                 return Err(ShieldedError::ComplianceViolation(
                     format!("note {} recipient not KYC-verified", i),

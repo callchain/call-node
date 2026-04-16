@@ -124,10 +124,10 @@ pub fn execute_agent_tx(
     agent: &AgentRegistration,
     balances: &mut AgentBalances,
     protocol_balances: &mut BalanceState,
-    evm_state: &mut EvmState,
-    evm_executor: &EvmExecutor,
-    bridge_state: &mut BridgeStateManager,
-    bridge_config: &BridgeConfig,
+    _evm_state: &mut EvmState,
+    _evm_executor: &EvmExecutor,
+    _bridge_state: &mut BridgeStateManager,
+    _bridge_config: &BridgeConfig,
     registry: &AssetRegistry,
     compliance: &ComplianceEngine,
     shielded_state: &mut ShieldedState,
@@ -175,7 +175,7 @@ pub fn execute_agent_pay(
     balances.deduct(owner, agent_id, asset_id, amount)?;
 
     // Credit to protocol balance of recipient
-    protocol_balances.credit_balance(asset_id, to, amount);
+    let _ = protocol_balances.credit_balance(asset_id, to, amount);
 
     Ok(())
 }
@@ -198,7 +198,7 @@ pub fn execute_agent_batch_pay(
 pub fn execute_agent_call(
     _agent_id: u64,
     target: Address,
-    data: Vec<u8>,
+    _data: Vec<u8>,
     evm_state: &mut EvmState,
     evm_executor: &EvmExecutor,
     caller: Address,
@@ -268,14 +268,14 @@ pub fn execute_agent_bridge_deposit(
             } else {
                 // Restore balances on failure
                 balances.credit(owner, agent_id, asset_id, amount);
-                protocol_balances.credit_balance(asset_id, owner, amount);
+                let _ = protocol_balances.credit_balance(asset_id, owner, amount);
                 Err(AgentError::ExecutionFailed("bridge deposit failed".into()))
             }
         }
         Err(e) => {
             // Restore balances on failure
             balances.credit(owner, agent_id, asset_id, amount);
-            protocol_balances.credit_balance(asset_id, owner, amount);
+            let _ = protocol_balances.credit_balance(asset_id, owner, amount);
             Err(AgentError::ExecutionFailed(format!("{:?}", e)))
         }
     }
@@ -299,7 +299,7 @@ fn compute_agent_tx_hash(
     let mut buf = Vec::new();
     buf.extend_from_slice(&agent_id.to_be_bytes());
     buf.extend_from_slice(&tx.nonce.to_be_bytes());
-    buf.extend_from_slice(&(tx.gas_limit as u64).to_be_bytes());
+    buf.extend_from_slice(&tx.gas_limit.to_be_bytes());
     buf.extend_from_slice(&tx.max_fee.to_be_bytes());
     keccak256(&buf).0
 }

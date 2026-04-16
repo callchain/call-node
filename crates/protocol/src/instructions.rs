@@ -3,7 +3,7 @@
 //! Instruction enum, execution flow, atomicity with rollback.
 
 use call_primitives::{Address, AssetId, Balance, Hash};
-use call_shielded::{ShieldedState, ShieldedTransfer, ZkProof, Note, Nullifier, NoteCommitment, ShieldedBlockTracker};
+use call_shielded::{ShieldedState, ShieldedTransfer, ZkProof, Note, Nullifier, NoteCommitment};
 use crate::balances::BalanceState;
 use crate::registry::AssetRegistry;
 use crate::compliance::ComplianceEngine;

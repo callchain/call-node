@@ -83,7 +83,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let issuer_addr = issuer.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
             let mut registry = state.asset_registry.write().map_err(|_| internal_error("lock poisoned".into()))?;
-            let id = registry.register_asset(symbol.clone(), name.clone(), decimals, issuer_addr, 0)
+            let id = registry.register_asset(symbol.clone(), name, decimals, issuer_addr, 0)
                 .map_err(|e| invalid_params(e.to_string()))?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": id,
@@ -204,7 +204,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let (agent_id, asset_id, amount): (u64, u64, u128) =
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
             state.grant_agent_balance(agent_id, asset_id, amount)
-                .map_err(|e| invalid_params(e))?;
+                .map_err(invalid_params)?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "agentId": agent_id,
                 "assetId": asset_id,
@@ -220,7 +220,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let (agent_id, asset_id): (u64, u64) =
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
             state.revoke_agent_balance(agent_id, asset_id)
-                .map_err(|e| invalid_params(e))?;
+                .map_err(invalid_params)?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "agentId": agent_id,
                 "assetId": asset_id,
@@ -387,7 +387,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .map_err(|_| internal_error("lock poisoned".into()))?;
             let validators = validator_state.get_all_validators();
             let total = validators.len() as u32;
-            let quorum = ((2 * total as usize + 2) / 3).max(1);
+            let quorum = (2 * total as usize).div_ceil(3).max(1);
 
             // Count valid signatures
             let mut valid_count = 0;
@@ -425,7 +425,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let balance = state.get_balance(asset_id, &address);
 
             // Generate a simple Merkle proof from the balance state
-            let leaf_hash = call_crypto::keccak256(&format!("{asset_id}:{address:?}:{balance}").as_bytes());
+            let leaf_hash = call_crypto::keccak256(format!("{asset_id}:{address:?}:{balance}").as_bytes());
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": asset_id,
                 "address": address_str,

@@ -102,7 +102,7 @@ fn estimate_tx_size(tx: &ProtocolTransaction) -> usize {
         .instructions
         .iter()
         .map(|i| match i {
-            Instruction::Transfer { amount, memo, .. } => {
+            Instruction::Transfer { amount: _, memo, .. } => {
                 8 + 20 + 16 + memo.as_ref().map(|m: &PaymentMemo| m.message.len()).unwrap_or(0)
             }
             Instruction::BatchTransfer { payments, .. } => {
@@ -401,6 +401,12 @@ pub struct ConsensusDefense {
     blocks_per_round: HashMap<u64, HashMap<ValidatorId, [u8; 32]>>, // round -> (validator -> block_hash)
     /// Validators that have been slashed for double-signing
     slashed_validators: HashSet<ValidatorId>,
+}
+
+impl Default for ConsensusDefense {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConsensusDefense {

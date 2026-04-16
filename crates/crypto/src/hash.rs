@@ -33,7 +33,7 @@ pub fn build_merkle_root(leaves: &[Hash]) -> Option<Hash> {
 
     let mut current_level: Vec<Hash> = leaves.to_vec();
     while current_level.len() > 1 {
-        let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
+        let mut next_level = Vec::with_capacity(current_level.len().div_ceil(2));
         for chunk in current_level.chunks(2) {
             let combined = match chunk {
                 [a, b] => {

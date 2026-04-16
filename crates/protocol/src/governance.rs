@@ -196,6 +196,12 @@ pub struct GovernanceManager {
     pub emergency_pause: EmergencyPauseState,
 }
 
+impl Default for GovernanceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GovernanceManager {
     pub fn new() -> Self {
         Self {
@@ -291,7 +297,7 @@ impl GovernanceManager {
         vote: Vote,
     ) -> Result<(), GovernanceError> {
         // Check proposal exists and get info we need
-        let (current_state, start_block, end_block, proposal_type) = {
+        let (current_state, start_block, _end_block, proposal_type) = {
             let proposal = self
                 .proposals
                 .get(&proposal_id)
@@ -470,11 +476,11 @@ impl GovernanceManager {
         self.emergency_pause.pause_signatures.insert(*address, true);
 
         let signed_count = self.emergency_pause.pause_signatures.len() as u64;
-        let threshold = (2 * total_validators + 2) / 3; // ceil(2/3)
+        let threshold = (2 * total_validators).div_ceil(3); // ceil(2/3)
 
         if signed_count >= threshold {
             self.emergency_pause.is_paused = true;
-            self.emergency_pause.pause_reason = reason.clone();
+            self.emergency_pause.pause_reason = reason;
             Ok(true) // pause activated
         } else {
             Ok(false) // more signatures needed
@@ -624,11 +630,11 @@ impl GovernanceManager {
         let quorum = match proposal_type {
             ProposalType::ParameterChange { .. } => {
                 // 2/3 of validators
-                (2 * total_validators + 2) / 3
+                (2 * total_validators).div_ceil(3)
             }
             ProposalType::ProtocolUpgrade { .. } => {
                 // max(2/3 validators, 20% total supply)
-                let validator_quorum = (2 * total_validators + 2) / 3;
+                let validator_quorum = (2 * total_validators).div_ceil(3);
                 let supply_quorum = TOTAL_SUPPLY / 5; // 20%
                 validator_quorum.max(supply_quorum)
             }
@@ -638,7 +644,7 @@ impl GovernanceManager {
             }
             ProposalType::ValidatorSlash { .. } => {
                 // 2/3 of validators
-                (2 * total_validators + 2) / 3
+                (2 * total_validators).div_ceil(3)
             }
             ProposalType::ComplianceUpdate { .. } => {
                 // Simple majority of joint voters
@@ -646,7 +652,7 @@ impl GovernanceManager {
             }
             ProposalType::EmergencyPause { .. } => {
                 // 2/3 of validators (handled via separate signature collection)
-                (2 * total_validators + 2) / 3
+                (2 * total_validators).div_ceil(3)
             }
             ProposalType::FeeCurrencyAdd { .. }
             | ProposalType::FeeCurrencyRemove { .. }

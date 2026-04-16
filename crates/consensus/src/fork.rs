@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 /// Minimum 2/3 quorum for emergency rollback (computed as ceil(2n/3))
 pub fn rollback_quorum(total_validators: u32) -> u32 {
-    (2 * total_validators + 2) / 3
+    (2 * total_validators).div_ceil(3)
 }
 /// Timelock duration in blocks before upgrade activates
 pub const DEFAULT_TIMELOCK_BLOCKS: u64 = 1000;
@@ -213,7 +213,7 @@ impl ForkManager {
             let result = EmergencyRollbackResult {
                 target_height: rollback.target_height,
                 target_version: rollback.target_version,
-                signature_count: sig_count as u32,
+                signature_count: sig_count,
                 total_validators: self.total_validators,
             };
             self.active_rollback = None; // Clear active rollback (consumed)

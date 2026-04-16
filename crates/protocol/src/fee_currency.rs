@@ -32,6 +32,12 @@ pub const ORACLE_STRIKES_BEFORE_DISABLE: u32 = 10;
 /// Default grace period for FeeCurrencyRemove (86400 blocks ≈ 1 day)
 pub const FEE_CURRENCY_GRACE_PERIOD: u64 = 86_400;
 
+impl Default for FeeCurrencyRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FeeCurrencyRegistry {
     pub fn new() -> Self {
         Self {
@@ -94,7 +100,7 @@ impl FeeCurrencyRegistry {
 
     /// Enforce stablecoin cap per block
     pub fn check_stablecoin_cap(&self, amount: Balance) -> ProtocolResult<()> {
-        let cap = (self.block_gas_limit as u128 * self.stablecoin_cap_bps as u128) / 10000;
+        let cap = (self.block_gas_limit * self.stablecoin_cap_bps as u128) / 10000;
         if self.current_stablecoin_used + amount > cap {
             return Err(ProtocolError::GasError(
                 "stablecoin fee cap exceeded".into(),

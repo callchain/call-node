@@ -14,11 +14,11 @@ use std::collections::HashSet;
 mod sig_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(sig: &[u8; 65], serializer: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(sig: &[u8; 65], serializer: S) -> Result<S::Ok, S::Error> {
         sig.as_slice().serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 65], D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 65], D::Error> {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
         bytes.try_into().map_err(|_| serde::de::Error::custom("expected 65 bytes"))
     }
@@ -28,13 +28,13 @@ mod sig_serde {
 mod sig_vec_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(sigs: &[[u8; 65]], serializer: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(sigs: &[[u8; 65]], serializer: S) -> Result<S::Ok, S::Error> {
         // Flatten Vec<[u8; 65]> into Vec<u8> (65 bytes per signature)
         let flat: Vec<u8> = sigs.iter().flat_map(|s| s.iter().copied()).collect();
         serializer.serialize_bytes(&flat)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<[u8; 65]>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<[u8; 65]>, D::Error> {
         let flat = Vec::<u8>::deserialize(deserializer)?;
         if flat.len() % 65 != 0 {
             return Err(serde::de::Error::custom("signature data not multiple of 65"));
@@ -323,9 +323,9 @@ pub fn convert_fee_to_stablecoin(
     }
     // ceil(call_fee * call_price / stablecoin_price)
     // simplified: call_fee * price with ceil rounding
-    let scaled = call_fee as u128 * call_price_usd;
+    let scaled = call_fee * call_price_usd;
     let divisor = 10u128.pow(stablecoin_decimals as u32);
-    (scaled + divisor - 1) / divisor
+    scaled.div_ceil(divisor)
 }
 
 // ── Mempool acceptance (per spec §12.2.7) ────────────────────────────

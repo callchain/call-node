@@ -4,13 +4,14 @@
 //! Targets: <10MB storage, ~1KB/block bandwidth, ~50ms compute per block.
 
 use call_consensus::{BlockHeader, BlockSignature};
-use call_crypto::keccak256;
 use call_primitives::{Address, Balance, BlockHash, Hash, TxHash, ValidatorId};
 use call_primitives::Ed25519PublicKey;
 use call_shielded::{
-    IncrementalMerkleTree, Note, ViewingKey,
+    Note, ViewingKey,
     verify_merkle_path, verify_zk_proof, ZkProof,
+    IncrementalMerkleTree,
 };
+use call_crypto::keccak256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -268,7 +269,7 @@ impl LightClient {
 
         // 3. Verify commitment proofs against Merkle root
         for cm in &zk_proof.commitments {
-            let proof = MerkleProof {
+            let _proof = MerkleProof {
                 leaf: *cm.as_hash(),
                 proof_path: vec![], // Path would be provided by full node
                 root: merkle_root,
@@ -301,7 +302,7 @@ impl LightClient {
         viewing_key: &ViewingKey,
         notes: &[Note],
         merkle_proofs: &[MerkleProof],
-        state_root: Hash,
+        _state_root: Hash,
     ) -> Result<Balance, LightClientError> {
         let mut total: Balance = 0;
 
@@ -354,7 +355,7 @@ impl LightClient {
 
     /// Calculate quorum: ceil(2/3 * total_validators)
     pub fn quorum(&self) -> usize {
-        ((2 * self.total_validators as usize + 2) / 3).max(1)
+        (2 * self.total_validators as usize).div_ceil(3).max(1)
     }
 
     /// Get estimated storage usage (target: <10MB)

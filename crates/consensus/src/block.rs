@@ -239,7 +239,7 @@ impl Block {
         for raw_tx in &self.evm_txs {
             if let Ok(tx) = decode_evm_tx(raw_tx) {
                 // Validate nonce and balance before execution
-                if let Err(_) = call_evm::validate_evm_tx(&tx, evm_state) {
+                if call_evm::validate_evm_tx(&tx, evm_state).is_err() {
                     // Skip invalid txs — they don't consume gas
                     continue;
                 }
@@ -250,7 +250,7 @@ impl Block {
                     continue; // duplicate nonce in same block
                 }
                 if let Ok(exec_result) = executor.execute_tx(tx, evm_state) {
-                    if let Err(_) = gas_tracker.add_gas(exec_result.gas_used) {
+                    if gas_tracker.add_gas(exec_result.gas_used).is_err() {
                         // Gas limit exceeded — skip this tx, release nonce
                         used_evm_nonces.remove(&(caller, nonce));
                         continue;

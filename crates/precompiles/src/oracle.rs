@@ -7,7 +7,7 @@ use call_protocol::OracleManager;
 use alloy_primitives::address;
 
 /// Precompile address
-pub const ORACLE_ADDRESS: alloy_primitives::Address =
+pub(crate) const ORACLE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000101");
 
 /// Price entry for an asset (legacy, used by precompile)

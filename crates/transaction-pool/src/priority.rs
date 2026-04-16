@@ -184,7 +184,7 @@ impl PriorityPool {
             .entries
             .iter()
             .find(|(_, e)| e.hash == *hash)
-            .map(|(k, _)| k.clone());
+            .map(|(k, _)| *k);
 
         if let Some(key) = key {
             self.entries.remove(&key)
@@ -220,7 +220,7 @@ impl PriorityPool {
     /// Remove the lowest score entry
     pub fn evict_lowest(&mut self) -> Option<MempoolEntry> {
         if let Some((key, _)) = self.entries.iter().next() {
-            let key = key.clone();
+            let key = *key;
             self.entries.remove(&key)
         } else {
             None
@@ -233,7 +233,7 @@ impl PriorityPool {
             .entries
             .iter()
             .filter(|(_, e)| e.is_expired(current_block, lifetime))
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| *k)
             .collect();
 
         let count = expired.len();

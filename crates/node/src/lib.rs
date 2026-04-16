@@ -14,7 +14,6 @@ pub mod wallet;
 use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
-    BlockSignature,
 };
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse};
 use call_primitives::BlockHash;
@@ -25,10 +24,10 @@ use call_protocol::{
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager};
 use call_storage::{CallDb, open_db, PruneState, StorageError};
 use call_storage::reth_db::{
-    init_call_db, save_balances as db_save_balances, load_balances as db_load_balances,
-    save_prune_state as db_save_prune, load_prune_state as db_load_prune,
+    save_balances as db_save_balances, load_balances as db_load_balances,
+    save_prune_state as db_save_prune,
     db_put, db_batch_put, db_clear, db_iter_all, db_get,
-    CallEvmAccounts, CallEvmStorage, CallBridgeOps,
+    CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
 };
 use reth_db::DatabaseEnv;
@@ -38,7 +37,7 @@ use call_bridge::BridgeStateManager;
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use jsonrpsee::server::{Server, ServerHandle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -59,6 +58,7 @@ pub struct CallNode {
     pub db: CallDb,
     pub prune_state: PruneState,
     pub server_handle: Option<ServerHandle>,
+    pub ws_server_handle: Option<ServerHandle>,
     pub parent_hash: BlockHash,
 }
 
@@ -66,7 +66,7 @@ impl CallNode {
     /// Create a new node with default state
     pub fn new(data_dir: PathBuf) -> Result<Self, String> {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
-        let db = open_db(data_dir.clone()).map_err(|e| format!("failed to open db: {e}"))?;
+        let db = open_db(data_dir).map_err(|e| format!("failed to open db: {e}"))?;
 
         // Restore prune state from disk if previously persisted
         let prune_state = db.load_prune_state()
@@ -109,6 +109,7 @@ impl CallNode {
             db,
             prune_state,
             server_handle: None,
+            ws_server_handle: None,
             parent_hash: BlockHash::ZERO,
         })
     }
@@ -144,12 +145,8 @@ impl CallNode {
             .map_err(|e| format!("WS bind failed: {e}"))?;
 
         let handle = server.start(module);
+        self.ws_server_handle = Some(handle);
         tracing::info!("WebSocket RPC server started on {}", config.ws_addr);
-
-        // Keep the WS server alive by spawning a task
-        tokio::spawn(async move {
-            handle.stopped().await;
-        });
 
         Ok(())
     }
@@ -180,7 +177,7 @@ impl CallNode {
                         }
                     }
                 } else {
-                    handle_network_message(&peer_id, channel, &data, &mempool, &state);
+                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone);
                 }
             }
         });
@@ -218,143 +215,154 @@ impl CallNode {
         let data_dir = self.db.data_dir.clone();
         let state = Arc::clone(&self.state);
         let consensus = Arc::clone(&self.consensus);
-        let db = self.db.clone();
-        let parent_hash = self.parent_hash;
 
         tokio::spawn(async move {
             // Give the network a moment to connect to peers
             tokio::time::sleep(Duration::from_secs(2)).await;
 
-            let local_height = find_latest_height(&data_dir);
+            let mut local_height = find_latest_height(&data_dir);
             tracing::info!(local_height, "sync: checking local state");
 
-            // Request sync from a random peer (send handshake-style request)
-            // We request from height 0 to a large number; peer responds with what it has
-            let request = SyncRequest {
-                start_height: local_height,
-                count: 100, // batch size
-                full_state: false,
+            const BATCH_SIZE: u64 = 100;
+            const MAX_EMPTY_ROUNDS: u32 = 3;
+            let mut empty_rounds = 0;
+
+            // Build light client from current validator set once at the start
+            let (trusted_validators, total_validators) = {
+                let validator_state = state.validator_state.read().unwrap();
+                let validators = validator_state.get_all_validators();
+                let total = validators.len() as u32;
+                let mut map = std::collections::HashMap::new();
+                for (id, stake) in validators.iter() {
+                    map.insert(*id, stake.ed25519_pubkey);
+                }
+                (map, total)
             };
-            let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
-                .expect("serialize sync request");
 
-            // Broadcast sync request; peers will respond on SYNC_CHANNEL
-            network.broadcast(SYNC_CHANNEL, req_data).await;
+            let mut light_client = LightClient::new(
+                state.chain_id,
+                trusted_validators,
+                total_validators,
+            );
 
-            // Wait for responses by listening on the network
-            // In a real implementation this would be a dedicated sync channel
-            // For now we use the receive loop pattern
-            let mut received_any = false;
-            for _ in 0..5 {
-                // Try to receive sync responses
-                let result = tokio::time::timeout(
-                    Duration::from_secs(3),
-                    network.receive(),
-                ).await;
+            loop {
+                // Check if we have peers
+                if network.peer_count() == 0 {
+                    tracing::warn!("sync: no peers available");
+                    break;
+                }
 
-                if let Ok(Ok((peer_id, channel, data))) = result {
-                    if channel == SYNC_CHANNEL {
-                        if let Ok(NetworkMessage::SyncResponse(response)) = serde_json::from_slice(&data) {
-                            received_any = true;
-                            tracing::info!(
-                                peer_id,
-                                start = response.start_height,
-                                block_count = response.blocks.len(),
-                                "sync: received blocks from peer"
-                            );
+                // Request next batch of blocks
+                let request = SyncRequest {
+                    start_height: local_height,
+                    count: BATCH_SIZE,
+                    full_state: false,
+                };
+                let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
+                    .expect("serialize sync request");
+                network.broadcast(SYNC_CHANNEL, req_data).await;
 
-                            // Build light client from current validator set for verification
-                            let validator_state = state.validator_state.read().unwrap();
-                            let validators = validator_state.get_all_validators();
-                            let total_validators = validators.len() as u32;
-                            let mut trusted_validators = std::collections::HashMap::new();
-                            for (id, stake) in validators.iter() {
-                                trusted_validators.insert(*id, stake.ed25519_pubkey);
-                            }
-                            drop(validator_state);
+                let mut batch_applied = 0;
+                let mut received_any = false;
 
-                            let mut light_client = LightClient::new(
-                                state.chain_id,
-                                trusted_validators,
-                                total_validators,
-                            );
+                // Listen for responses with timeout
+                for _ in 0..5 {
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        network.receive(),
+                    ).await;
 
-                            // Apply received blocks
-                            let mut count = 0;
-                            let mut current_parent = if response.start_height == 0 {
-                                BlockHash::ZERO
-                            } else {
-                                // Load the block before our sync start as parent
-                                load_block(&data_dir, response.start_height - 1)
-                                    .map(|b| b.header.hash())
-                                    .unwrap_or(parent_hash)
-                            };
+                    if let Ok(Ok((_peer_id, channel, data))) = result {
+                        if channel == SYNC_CHANNEL {
+                            if let Ok(NetworkMessage::SyncResponse(response)) = serde_json::from_slice(&data) {
+                                received_any = true;
+                                tracing::info!(
+                                    peer_id = _peer_id,
+                                    start = response.start_height,
+                                    block_count = response.blocks.len(),
+                                    "sync: received blocks from peer"
+                                );
 
-                            for block_data in &response.blocks {
-                                if let Ok(mut block) = serde_json::from_slice::<Block>(block_data) {
-                                    let height = block.header.height;
+                                for block_data in &response.blocks {
+                                    if let Ok(mut block) = serde_json::from_slice::<Block>(block_data) {
+                                        let height = block.header.height;
 
-                                    // Light client verification: verify header + signatures
-                                    let sig = &block.header.signature;
-                                    let signatures = BlockSignatures {
-                                        block_hash: block.header.hash(),
-                                        signatures: vec![(
-                                            block.header.proposer,
-                                            PubKeyBytes([0u8; 32]), // pubkey not in signature, verified via consensus
-                                            SigBytes(sig.0),
-                                        )],
-                                    };
+                                        // Light client verification
+                                        let sig = &block.header.signature;
+                                        let signatures = BlockSignatures {
+                                            block_hash: block.header.hash(),
+                                            signatures: vec![(
+                                                block.header.proposer,
+                                                PubKeyBytes([0u8; 32]),
+                                                SigBytes(sig.0),
+                                            )],
+                                        };
 
-                                    if let Err(e) = light_client.verify_header(&block.header, &signatures) {
-                                        tracing::warn!(height, error = %e, "sync: block header verification failed, skipping");
-                                        continue;
-                                    }
-
-                                    // Execute and apply the block
-                                    let execute_result = {
-                                        let mut balances = state.balance_state.write().unwrap();
-                                        let registry = state.asset_registry.read().unwrap();
-                                        let compliance = state.compliance_engine.read().unwrap();
-                                        let mut bridge_state = state.bridge_state.write().unwrap();
-                                        let mut shielded_state = state.shielded_state.write().unwrap();
-                                        let mut fee_params = state.fee_params.write().unwrap();
-                                        let mut evm_state = state.evm_state.write().unwrap();
-
-                                        block.execute(
-                                            &mut balances, &registry, &compliance, &mut bridge_state,
-                                            &mut shielded_state, &mut fee_params, height, &mut evm_state,
-                                        )
-                                    };
-
-                                    if let Ok(result) = execute_result {
-                                        block.finalize(&result);
-                                        let _ = persist_block(&data_dir, height, &block);
-
-                                        // Update consensus state
-                                        if let Ok(mut c) = consensus.write() {
-                                            let _ = c.commit_block(&block, &result);
+                                        if let Err(e) = light_client.verify_header(&block.header, &signatures) {
+                                            tracing::warn!(height, error = %e, "sync: header verification failed, skipping");
+                                            continue;
                                         }
 
-                                        // Register verified header for incremental sync
-                                        let _ = light_client.sync_incremental(&block.header, &signatures);
+                                        // Execute block
+                                        let execute_result = {
+                                            let mut balances = state.balance_state.write().unwrap();
+                                            let registry = state.asset_registry.read().unwrap();
+                                            let compliance = state.compliance_engine.read().unwrap();
+                                            let mut bridge_state = state.bridge_state.write().unwrap();
+                                            let mut shielded_state = state.shielded_state.write().unwrap();
+                                            let mut fee_params = state.fee_params.write().unwrap();
+                                            let mut evm_state = state.evm_state.write().unwrap();
 
-                                        state.set_current_block(height + 1);
-                                        current_parent = block.header.hash();
-                                        count += 1;
+                                            block.execute(
+                                                &mut balances, &registry, &compliance, &mut bridge_state,
+                                                &mut shielded_state, &mut fee_params, height, &mut evm_state,
+                                            )
+                                        };
+
+                                        if let Ok(result) = execute_result {
+                                            block.finalize(&result);
+                                            let _ = persist_block(&data_dir, height, &block);
+
+                                            if let Ok(mut c) = consensus.write() {
+                                                let _ = c.commit_block(&block, &result);
+                                            }
+
+                                            let _ = light_client.sync_incremental(&block.header, &signatures);
+                                            state.set_current_block(height + 1);
+                                            local_height = height + 1;
+                                            batch_applied += 1;
+                                        }
                                     }
                                 }
-                            }
-
-                            if count > 0 {
-                                tracing::info!(count, "sync: applied blocks");
                             }
                         }
                     }
                 }
+
+                if received_any {
+                    empty_rounds = 0;
+                } else {
+                    empty_rounds += 1;
+                    if empty_rounds >= MAX_EMPTY_ROUNDS {
+                        tracing::info!("sync: no responses after {MAX_EMPTY_ROUNDS} rounds, stopping");
+                        break;
+                    }
+                    continue;
+                }
+
+                if batch_applied > 0 {
+                    tracing::info!(applied = batch_applied, height = local_height, "sync: batch applied");
+                }
+
+                // If we received fewer blocks than requested, we're caught up
+                if batch_applied < BATCH_SIZE {
+                    tracing::info!(height = local_height, "sync: caught up");
+                    break;
+                }
             }
 
-            if received_any {
-                tracing::info!("sync: completed");
+            if local_height > 0 {
+                tracing::info!(height = local_height, "sync: completed");
             } else {
                 tracing::info!("sync: no peers responded, starting fresh");
             }
@@ -364,7 +372,10 @@ impl CallNode {
     /// Stop the RPC server and flush final state to disk.
     pub async fn stop(&mut self) -> Result<(), String> {
         if let Some(handle) = self.server_handle.take() {
-            handle.stop().map_err(|_| "server already stopped".to_string())?;
+            let _ = handle.stop();
+        }
+        if let Some(handle) = self.ws_server_handle.take() {
+            let _ = handle.stop();
         }
         // Flush final state to reth-db
         if let Some(ref db_env) = self.db.db {
@@ -406,7 +417,7 @@ fn load_state_from_db(
     let (balances, allowances) = match db_load_balances(db_env) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("WARN: failed to load balances from db: {e}");
+            tracing::warn!(error = %e, "failed to load balances from db");
             (std::collections::HashMap::new(), std::collections::HashMap::new())
         }
     };
@@ -422,7 +433,7 @@ fn load_state_from_db(
     let evm_state = match load_evm_accounts_inner(db_env) {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("WARN: failed to load evm accounts: {e}");
+            tracing::warn!(error = %e, "failed to load evm accounts");
             EvmState::new()
         }
     };
@@ -431,7 +442,7 @@ fn load_state_from_db(
     let bridge_state = match load_bridge_state_inner(db_env) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("WARN: failed to load bridge state: {e}");
+            tracing::warn!(error = %e, "failed to load bridge state");
             BridgeStateManager::default()
         }
     };
@@ -440,7 +451,7 @@ fn load_state_from_db(
     let shielded_state = match load_shielded_state_inner(db_env) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("WARN: failed to load shielded state: {e}");
+            tracing::warn!(error = %e, "failed to load shielded state");
             ShieldedState::new()
         }
     };
@@ -449,7 +460,7 @@ fn load_state_from_db(
     let validators = match load_validator_state_inner(db_env) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("WARN: failed to load validator state: {e}");
+            tracing::warn!(error = %e, "failed to load validator state");
             ValidatorStateManager::default()
         }
     };
@@ -458,7 +469,7 @@ fn load_state_from_db(
     let (registry, agent_balances) = match load_agent_state_inner(db_env) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("WARN: failed to load agent state: {e}");
+            tracing::warn!(error = %e, "failed to load agent state");
             (AgentRegistry::new(), AgentBalances::new())
         }
     };
@@ -579,7 +590,7 @@ fn load_shielded_state_inner(db: &DatabaseEnv) -> Result<ShieldedState, String> 
     }
 
     // Rebuild merkle tree from note commitments
-    for (cm, _) in &state.note_registry {
+    for cm in state.note_registry.keys() {
         state.merkle_tree.insert(cm.0);
     }
 
@@ -941,7 +952,7 @@ fn current_timestamp_millis() -> u64 {
         .unwrap_or(1)
 }
 
-fn persist_block(data_dir: &PathBuf, height: u64, block: &Block) -> Result<(), String> {
+fn persist_block(data_dir: &Path, height: u64, block: &Block) -> Result<(), String> {
     let dir = data_dir.join("blocks");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create blocks dir: {e}"))?;
@@ -954,14 +965,14 @@ fn persist_block(data_dir: &PathBuf, height: u64, block: &Block) -> Result<(), S
 }
 
 /// Load a single block from disk by height.
-fn load_block(data_dir: &PathBuf, height: u64) -> Option<Block> {
+fn load_block(data_dir: &Path, height: u64) -> Option<Block> {
     let path = data_dir.join("blocks").join(format!("{height:012}.json"));
     let data = std::fs::read(&path).ok()?;
     serde_json::from_slice(&data).ok()
 }
 
 /// Find the highest block height on disk by scanning the blocks directory.
-fn find_latest_height(data_dir: &PathBuf) -> u64 {
+fn find_latest_height(data_dir: &Path) -> u64 {
     let dir = data_dir.join("blocks");
     if !dir.exists() {
         return 0;
@@ -982,7 +993,7 @@ fn find_latest_height(data_dir: &PathBuf) -> u64 {
 }
 
 /// Handle a sync request from a peer: load blocks from disk and respond.
-fn handle_sync_request(data_dir: &PathBuf, request: &SyncRequest) -> Option<SyncResponse> {
+fn handle_sync_request(data_dir: &Path, request: &SyncRequest) -> Option<SyncResponse> {
     let mut blocks = Vec::new();
     let end = request.start_height.saturating_add(request.count);
     for h in request.start_height..end {
@@ -997,10 +1008,10 @@ fn handle_sync_request(data_dir: &PathBuf, request: &SyncRequest) -> Option<Sync
     if blocks.is_empty() {
         return None;
     }
-    let state_root = blocks.last().map(|b| {
+    let state_root = blocks.last().and_then(|b| {
         let block: Block = serde_json::from_slice(b).ok()?;
         Some(block.header.payment_root)
-    }).flatten().unwrap_or(BlockHash::ZERO);
+    }).unwrap_or(BlockHash::ZERO);
     Some(SyncResponse {
         start_height: request.start_height,
         blocks,
@@ -1013,7 +1024,8 @@ fn handle_network_message(
     channel: u64,
     data: &[u8],
     mempool: &Arc<RwLock<Mempool>>,
-    _state: &Arc<RpcState>,
+    state: &Arc<RpcState>,
+    network: &Arc<dyn Network>,
 ) {
     match channel {
         TX_CHANNEL => {
@@ -1029,17 +1041,38 @@ fn handle_network_message(
         }
         BLOCK_CHANNEL => {
             if let Ok(announcement) = serde_json::from_slice::<BlockAnnouncement>(data) {
-                tracing::info!(
-                    peer_id,
-                    height = announcement.height,
-                    proposer = announcement.proposer,
-                    "received block announcement"
-                );
+                let local_height = state.get_current_block();
+                if announcement.height > local_height {
+                    tracing::info!(
+                        peer_id,
+                        height = announcement.height,
+                        local = local_height,
+                        "block announcement: peer ahead, requesting sync"
+                    );
+                    let request = SyncRequest {
+                        start_height: local_height,
+                        count: 100,
+                        full_state: false,
+                    };
+                    let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
+                        .expect("serialize sync request");
+                    let peer_id_owned = peer_id.to_string();
+                    let net = Arc::clone(network);
+                    tokio::spawn(async move {
+                        net.send_to(vec![peer_id_owned], req_data).await;
+                    });
+                } else {
+                    tracing::debug!(
+                        peer_id,
+                        height = announcement.height,
+                        local = local_height,
+                        "block announcement: already caught up"
+                    );
+                }
             }
         }
         SYNC_CHANNEL => {
             // SyncRequest / SyncResponse are handled by the sync task separately
-            // This path is for forwarded sync messages we don't act on here
         }
         _ => {}
     }

@@ -238,14 +238,13 @@ impl PayloadBuilder {
         )?;
 
         // Verify EVM state root matches expected (if non-zero)
-        if evm_state_root != Hash::ZERO && result.evm_state_root != Hash::ZERO {
-            if result.evm_state_root != evm_state_root {
+        if evm_state_root != Hash::ZERO && result.evm_state_root != Hash::ZERO
+            && result.evm_state_root != evm_state_root {
                 return Err(BuilderError::StateRootMismatch {
                     expected: evm_state_root,
                     actual: result.evm_state_root,
                 });
             }
-        }
 
         // Finalize block with computed roots
         block.finalize(&result);

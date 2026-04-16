@@ -105,7 +105,7 @@ impl SimplexConsensus {
         // Refresh proposer subset periodically (every N rounds = epoch)
         // For now, refresh every 100 rounds to balance stability and rotation
         let epoch_length = 100u64;
-        if self.current_round % epoch_length == 0 {
+        if self.current_round.is_multiple_of(epoch_length) {
             let active = self.validators.get_active_validators();
             self.proposer_subset =
                 select_proposer_subset(&active, self.current_round, self.params.subset_size);

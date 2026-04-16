@@ -60,8 +60,8 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or(10);
 
-            let caller = call_primitives::Address::from(from);
-            let to_addr = to.map(|a| call_primitives::Address::from(a));
+            let caller = from;
+            let to_addr = to;
 
             match state.execute_evm_call(caller, to_addr, value, data, gas, gas_price) {
                 Ok(result) => {
@@ -122,12 +122,10 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let addresses: Vec<call_primitives::Address> = filter.get("address")
                 .map(|v| match v {
                     serde_json::Value::String(s) => vec![s.parse::<alloy_primitives::Address>()]
-                        .into_iter().filter_map(|r| r.ok())
-                        .map(|a| call_primitives::Address::from(a)).collect(),
+                        .into_iter().filter_map(|r| r.ok()).collect(),
                     serde_json::Value::Array(arr) => arr.iter()
                         .filter_map(|x| x.as_str()
-                            .and_then(|s| s.parse::<alloy_primitives::Address>().ok())
-                            .map(|a| call_primitives::Address::from(a)))
+                            .and_then(|s| s.parse::<alloy_primitives::Address>().ok()))
                         .collect(),
                     _ => vec![],
                 })

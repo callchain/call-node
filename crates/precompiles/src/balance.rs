@@ -4,7 +4,7 @@ use call_primitives::{Address, AssetId, Balance};
 use alloy_primitives::address;
 use std::collections::HashMap;
 
-pub const BALANCE_ADDRESS: alloy_primitives::Address =
+pub(crate) const BALANCE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000102");
 
 #[derive(Debug, Default)]
