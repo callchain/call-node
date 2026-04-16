@@ -20,6 +20,14 @@ pub mod poseidon;
 mod merkle_poseidon;
 #[cfg(feature = "real-prover")]
 pub mod circuit_deposit;
+#[cfg(feature = "real-prover")]
+pub mod circuit_withdraw;
+#[cfg(feature = "real-prover")]
+pub mod circuit_transfer;
+#[cfg(feature = "real-prover")]
+pub mod proof_ser;
+#[cfg(feature = "real-prover")]
+pub mod keygen;
 
 pub use merkle::*;
 #[cfg(feature = "real-prover")]
@@ -217,6 +225,37 @@ impl ShieldedState {
             let cm = note.commitment();
             self.note_registry.insert(cm, note.clone());
         }
+
+        Ok(())
+    }
+
+    /// Process a shielded deposit: transparent -> shielded
+    pub fn process_deposit(
+        &mut self,
+        commitment: NoteCommitment,
+        note: Note,
+    ) -> Result<(), ShieldedError> {
+        // Insert commitment into Merkle tree
+        self.merkle_tree.insert(commitment.0);
+
+        // Register the note
+        self.note_registry.insert(commitment, note);
+
+        Ok(())
+    }
+
+    /// Process a shielded withdraw: shielded -> transparent
+    pub fn process_withdraw(
+        &mut self,
+        nullifier: Nullifier,
+    ) -> Result<(), ShieldedError> {
+        // Check nullifier not already spent
+        if self.nullifier_set.is_spent(&nullifier) {
+            return Err(ShieldedError::DoubleSpend(nullifier.clone()));
+        }
+
+        // Mark nullifier spent
+        self.nullifier_set.insert(&nullifier);
 
         Ok(())
     }
