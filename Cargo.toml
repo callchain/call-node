@@ -180,7 +180,7 @@ rayon = "1.10"
 jiff = { version = "0.2", features = ["std"] }
 
 # JSON-RPC
-jsonrpsee = { version = "0.24", features = ["server"] }
+jsonrpsee = { version = "0.24", features = ["server", "ws-client"] }
 
 # Build
 vergen = "9"

@@ -162,7 +162,8 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         ws_addr: config.rpc.ws_addr,
         max_connections: config.rpc.max_connections,
     };
-    node.start_rpc(rpc_config).await?;
+    node.start_rpc(rpc_config.clone()).await?;
+    node.start_ws_rpc(rpc_config).await?;
 
     // Step 7: Start consensus block production
     info!("step 7: starting consensus loop");

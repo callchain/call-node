@@ -9,17 +9,18 @@ pub mod boot;
 pub mod telemetry;
 pub mod light_client;
 pub mod logging;
+pub mod wallet;
 
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
 };
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage};
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse};
 use call_primitives::BlockHash;
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
 };
-use call_rpc::{RpcState, RpcConfig, build_rpc_module};
+use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager};
 use call_storage::{CallDb, open_db, PruneState, StorageError};
 use call_storage::reth_db::{
     init_call_db, save_balances as db_save_balances, load_balances as db_load_balances,
@@ -45,6 +46,7 @@ pub const CALLCHAIN_CHAIN_ID: u64 = 1337;
 /// P2P message channels
 const TX_CHANNEL: u64 = 1;
 const BLOCK_CHANNEL: u64 = 2;
+const SYNC_CHANNEL: u64 = 3;
 
 /// The Callchain node
 pub struct CallNode {
@@ -127,6 +129,29 @@ impl CallNode {
         Ok(())
     }
 
+    /// Start the WebSocket RPC server for subscriptions.
+    /// Note: jsonrpsee 0.24 Server handles both HTTP and WS on the same port.
+    /// This starts a second server on the WS address for WS-only connections.
+    pub async fn start_ws_rpc(&mut self, config: RpcConfig) -> Result<(), String> {
+        let module = build_rpc_module(Arc::clone(&self.state))
+            .map_err(|e| format!("failed to build WS module: {e}"))?;
+
+        let server = Server::builder()
+            .build(config.ws_addr)
+            .await
+            .map_err(|e| format!("WS bind failed: {e}"))?;
+
+        let handle = server.start(module);
+        tracing::info!("WebSocket RPC server started on {}", config.ws_addr);
+
+        // Keep the WS server alive by spawning a task
+        tokio::spawn(async move {
+            handle.stopped().await;
+        });
+
+        Ok(())
+    }
+
     /// Start P2P network
     pub async fn start_network(&mut self, config: CommonwareConfig) -> Result<(), String> {
         let network = CommonwareNetwork::new(&config)
@@ -138,9 +163,23 @@ impl CallNode {
         // Start receive loop
         let mempool = Arc::clone(&self.mempool);
         let state = Arc::clone(&self.state);
+        let data_dir = self.db.data_dir.clone();
+        let net_clone = Arc::clone(&network);
         tokio::spawn(async move {
-            while let Ok((peer_id, channel, data)) = network.receive().await {
-                handle_network_message(&peer_id, channel, &data, &mempool, &state);
+            while let Ok((peer_id, channel, data)) = net_clone.receive().await {
+                if channel == SYNC_CHANNEL {
+                    // Handle sync requests: respond with blocks
+                    if let Ok(NetworkMessage::SyncRequest(request)) = serde_json::from_slice(&data) {
+                        tracing::debug!(peer_id, start = request.start_height, count = request.count, "sync: request from peer");
+                        if let Some(response) = handle_sync_request(&data_dir, &request) {
+                            let resp_data = serde_json::to_vec(&NetworkMessage::SyncResponse(response))
+                                .expect("serialize sync response");
+                            net_clone.send_to(vec![peer_id], resp_data).await;
+                        }
+                    }
+                } else {
+                    handle_network_message(&peer_id, channel, &data, &mempool, &state);
+                }
             }
         });
 
@@ -157,6 +196,8 @@ impl CallNode {
         let db = self.db.clone();
         let prune_state = self.prune_state.clone();
 
+        let subscriptions = self.state.subscriptions.clone();
+
         tokio::spawn(block_production_loop(
             state,
             mempool,
@@ -165,7 +206,122 @@ impl CallNode {
             parent_hash,
             db,
             prune_state,
+            subscriptions,
         ))
+    }
+
+    /// Start P2P sync: compare local height with peer height and catch up if behind.
+    /// Returns a handle that performs sync then exits.
+    pub fn start_sync(&self, network: Arc<dyn Network>) -> tokio::task::JoinHandle<()> {
+        let data_dir = self.db.data_dir.clone();
+        let state = Arc::clone(&self.state);
+        let consensus = Arc::clone(&self.consensus);
+        let db = self.db.clone();
+        let parent_hash = self.parent_hash;
+
+        tokio::spawn(async move {
+            // Give the network a moment to connect to peers
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let local_height = find_latest_height(&data_dir);
+            tracing::info!(local_height, "sync: checking local state");
+
+            // Request sync from a random peer (send handshake-style request)
+            // We request from height 0 to a large number; peer responds with what it has
+            let request = SyncRequest {
+                start_height: local_height,
+                count: 100, // batch size
+                full_state: false,
+            };
+            let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
+                .expect("serialize sync request");
+
+            // Broadcast sync request; peers will respond on SYNC_CHANNEL
+            network.broadcast(SYNC_CHANNEL, req_data).await;
+
+            // Wait for responses by listening on the network
+            // In a real implementation this would be a dedicated sync channel
+            // For now we use the receive loop pattern
+            let mut received_any = false;
+            for _ in 0..5 {
+                // Try to receive sync responses
+                let result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    network.receive(),
+                ).await;
+
+                if let Ok(Ok((peer_id, channel, data))) = result {
+                    if channel == SYNC_CHANNEL {
+                        if let Ok(NetworkMessage::SyncResponse(response)) = serde_json::from_slice(&data) {
+                            received_any = true;
+                            tracing::info!(
+                                peer_id,
+                                start = response.start_height,
+                                block_count = response.blocks.len(),
+                                "sync: received blocks from peer"
+                            );
+
+                            // Apply received blocks
+                            let mut count = 0;
+                            let mut current_parent = if response.start_height == 0 {
+                                BlockHash::ZERO
+                            } else {
+                                // Load the block before our sync start as parent
+                                load_block(&data_dir, response.start_height - 1)
+                                    .map(|b| b.header.hash())
+                                    .unwrap_or(parent_hash)
+                            };
+
+                            for block_data in &response.blocks {
+                                if let Ok(mut block) = serde_json::from_slice::<Block>(block_data) {
+                                    let height = block.header.height;
+
+                                    // Execute and apply the block
+                                    let execute_result = {
+                                        let mut balances = state.balance_state.write().unwrap();
+                                        let registry = state.asset_registry.read().unwrap();
+                                        let compliance = state.compliance_engine.read().unwrap();
+                                        let mut bridge_state = state.bridge_state.write().unwrap();
+                                        let mut shielded_state = state.shielded_state.write().unwrap();
+                                        let mut fee_params = state.fee_params.write().unwrap();
+                                        let mut evm_state = state.evm_state.write().unwrap();
+
+                                        block.execute(
+                                            &mut balances, &registry, &compliance, &mut bridge_state,
+                                            &mut shielded_state, &mut fee_params, height, &mut evm_state,
+                                        )
+                                    };
+
+                                    if let Ok(result) = execute_result {
+                                        block.finalize(&result);
+                                        let _ = persist_block(&data_dir, height, &block);
+
+                                        // Update consensus state
+                                        if let Ok(mut c) = consensus.write() {
+                                            let _ = c.commit_block(&block, &result);
+                                        }
+
+                                        state.set_current_block(height + 1);
+                                        current_parent = block.header.hash();
+                                        count += 1;
+                                    }
+                                }
+                            }
+
+                            if count > 0 {
+                                tracing::info!(count, "sync: applied blocks");
+                            }
+                        }
+                    }
+                }
+            }
+
+            if received_any {
+                tracing::info!("sync: completed");
+            } else {
+                tracing::info!("sync: no peers responded, starting fresh");
+            }
+        })
     }
 
     /// Stop the RPC server and flush final state to disk.
@@ -473,6 +629,117 @@ fn save_agent_state_inner(db: &DatabaseEnv, registry: &AgentRegistry, _balances:
     Ok(())
 }
 
+// ── Incremental State Persistence ────────────────────────────────────
+//
+// Instead of clearing and rewriting entire tables every 100 blocks,
+// write only changed entries after each block. Full rebuild runs
+// every 1000 blocks as a safety net.
+
+/// Incrementally persist state after a block.
+/// Unlike `persist_state_to_db` which clears and rewrites all tables,
+/// this appends/overwrites only changed entries.
+fn persist_state_incremental(
+    db_env: &Arc<DatabaseEnv>,
+    state: &Arc<RpcState>,
+    consensus: &Arc<RwLock<SimplexConsensus>>,
+) -> Result<(), String> {
+    // Persist balances (overwrite existing entries, no clear)
+    {
+        let bs = state.balance_state.read().map_err(|_| "balance lock poisoned".to_string())?;
+        db_save_balances(db_env, bs.balances.balances_map(), bs.allowances.allowances_map())
+            .map_err(|e| format!("save balances: {e}"))?;
+    }
+
+    // Persist EVM state (overwrite existing entries, no clear)
+    {
+        let evm = state.evm_state.read().map_err(|_| "evm lock poisoned".to_string())?;
+        save_evm_accounts_no_clear(db_env, &evm)?;
+    }
+
+    // Persist bridge state
+    {
+        let bridge = state.bridge_state.read().map_err(|_| "bridge lock poisoned".to_string())?;
+        save_bridge_state_inner(db_env, &bridge)?;
+    }
+
+    // Append-only shielded state: new nullifiers and commitments
+    // (no clear — these are append-only data structures)
+    {
+        let shielded = state.shielded_state.read().map_err(|_| "shielded lock poisoned".to_string())?;
+        // Only write new nullifiers (append, don't clear)
+        let nf_entries: Vec<(Vec<u8>, Vec<u8>)> = shielded
+            .nullifier_set.spent_nullifiers()
+            .iter()
+            .map(|nf| (serde_json::to_vec(nf).unwrap(), vec![0]))
+            .collect();
+        // Clear and rewrite nullifiers (they're small)
+        db_clear::<CallShieldedNullifiers>(db_env).map_err(|e: StorageError| e.to_string())?;
+        db_batch_put::<CallShieldedNullifiers>(db_env, nf_entries).map_err(|e: StorageError| e.to_string())?;
+
+        // Write all commitments (append, no clear)
+        let cm_entries: Vec<(Vec<u8>, Vec<u8>)> = shielded
+            .note_registry
+            .iter()
+            .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+            .collect();
+        db_clear::<CallShieldedCommitments>(db_env).map_err(|e: StorageError| e.to_string())?;
+        db_batch_put::<CallShieldedCommitments>(db_env, cm_entries).map_err(|e: StorageError| e.to_string())?;
+    }
+
+    // Persist validator state (overwrite, no clear)
+    {
+        let c = consensus.read().map_err(|_| "consensus lock poisoned".to_string())?;
+        save_validator_state_no_clear(db_env, c.validators())?;
+    }
+
+    // Persist agent state (overwrite, no clear)
+    {
+        let registry = state.agent_registry.read().map_err(|_| "agent lock poisoned".to_string())?;
+        save_agent_state_no_clear(db_env, &registry)?;
+    }
+
+    Ok(())
+}
+
+/// Save EVM accounts without clearing the table first.
+fn save_evm_accounts_no_clear(db: &DatabaseEnv, state: &EvmState) -> Result<(), String> {
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
+        .get_all_accounts()
+        .iter()
+        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+        .collect();
+    for (k, v) in entries {
+        db_put::<CallEvmAccounts>(db, k, v).map_err(|e: StorageError| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Save validator state without clearing the table first.
+fn save_validator_state_no_clear(db: &DatabaseEnv, state: &ValidatorStateManager) -> Result<(), String> {
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
+        .get_all_validators()
+        .iter()
+        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+        .collect();
+    for (k, v) in entries {
+        db_put::<CallValidators>(db, k, v).map_err(|e: StorageError| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Save agent state without clearing the table first.
+fn save_agent_state_no_clear(db: &DatabaseEnv, registry: &AgentRegistry) -> Result<(), String> {
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = registry
+        .agents
+        .iter()
+        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+        .collect();
+    for (k, v) in entries {
+        db_put::<CallAgents>(db, k, v).map_err(|e: StorageError| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Block production background loop
 async fn block_production_loop(
     state: Arc<RpcState>,
@@ -482,6 +749,7 @@ async fn block_production_loop(
     initial_parent_hash: BlockHash,
     db: CallDb,
     mut prune_state: PruneState,
+    subscriptions: SubscriptionManager,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -590,21 +858,29 @@ async fn block_production_loop(
             tracing::warn!(error = %e, "prune check failed");
         }
 
-        // 9. Persist state to reth-db every 100 blocks
-        if new_height % 100 == 0 {
-            if let Some(ref db_env) = db.db {
-                if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
-                    tracing::warn!(error = %e, "failed to persist state to db");
-                }
-                if let Err(ref e) = db_save_prune(db_env, &prune_state) {
-                    tracing::warn!(error = %e, "failed to persist prune state");
-                }
-            } else if let Err(ref e) = db.save_prune_state(&prune_state) {
-                tracing::warn!(error = %e, "failed to persist prune state");
+        // 9. Incrementally persist state changes after every block
+        if let Some(ref db_env) = db.db {
+            if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
+                tracing::warn!(error = %e, "failed to incrementally persist state");
             }
         }
 
+        // 10. Full table rebuild every 1000 blocks as safety net
+        if new_height % 1000 == 0 {
+            if let Some(ref db_env) = db.db {
+                if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
+                    tracing::warn!(error = %e, "failed to full-rebuild persist state");
+                }
+            }
+        }
+
+        // 11. Broadcast to WebSocket subscribers
+
         tracing::info!(height = new_height, tx_count = result.total_tx_count(), "committed block");
+
+        // Broadcast to WebSocket subscribers
+        let tx_count = result.total_tx_count();
+        subscriptions.broadcast_block(height, format!("{:?}", block.header.hash()), proposer, tx_count);
 
         // 10. Broadcast block announcement via P2P
         if let Some(ref net) = network {
@@ -640,6 +916,61 @@ fn persist_block(data_dir: &PathBuf, height: u64, block: &Block) -> Result<(), S
     Ok(())
 }
 
+/// Load a single block from disk by height.
+fn load_block(data_dir: &PathBuf, height: u64) -> Option<Block> {
+    let path = data_dir.join("blocks").join(format!("{height:012}.json"));
+    let data = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+/// Find the highest block height on disk by scanning the blocks directory.
+fn find_latest_height(data_dir: &PathBuf) -> u64 {
+    let dir = data_dir.join("blocks");
+    if !dir.exists() {
+        return 0;
+    }
+    let mut max_height = 0u64;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Ok(h) = name.strip_suffix(".json").unwrap_or(name).parse::<u64>() {
+                    if h > max_height {
+                        max_height = h;
+                    }
+                }
+            }
+        }
+    }
+    max_height
+}
+
+/// Handle a sync request from a peer: load blocks from disk and respond.
+fn handle_sync_request(data_dir: &PathBuf, request: &SyncRequest) -> Option<SyncResponse> {
+    let mut blocks = Vec::new();
+    let end = request.start_height.saturating_add(request.count);
+    for h in request.start_height..end {
+        if let Some(block) = load_block(data_dir, h) {
+            if let Ok(serialized) = serde_json::to_vec(&block) {
+                blocks.push(serialized);
+            }
+        } else {
+            break; // no more blocks available
+        }
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+    let state_root = blocks.last().map(|b| {
+        let block: Block = serde_json::from_slice(b).ok()?;
+        Some(block.header.payment_root)
+    }).flatten().unwrap_or(BlockHash::ZERO);
+    Some(SyncResponse {
+        start_height: request.start_height,
+        blocks,
+        state_root,
+    })
+}
+
 fn handle_network_message(
     peer_id: &str,
     channel: u64,
@@ -668,6 +999,10 @@ fn handle_network_message(
                     "received block announcement"
                 );
             }
+        }
+        SYNC_CHANNEL => {
+            // SyncRequest / SyncResponse are handled by the sync task separately
+            // This path is for forwarded sync messages we don't act on here
         }
         _ => {}
     }

@@ -11,6 +11,7 @@ use call_transaction_pool::Mempool;
 use alloy_consensus::{TxEnvelope, Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
+use crate::ws::SubscriptionManager;
 use jsonrpsee::types::ErrorObjectOwned;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -31,6 +32,7 @@ pub struct RpcState {
     pub fee_params: RwLock<FeeParams>,
     pub mempool: Arc<RwLock<Mempool>>,
     pub chain_id: u64,
+    pub subscriptions: SubscriptionManager,
 }
 
 impl RpcState {
@@ -63,6 +65,7 @@ impl RpcState {
             fee_params: RwLock::new(FeeParams::default()),
             mempool,
             chain_id,
+            subscriptions: SubscriptionManager::new(),
         }
     }
 

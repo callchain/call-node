@@ -54,9 +54,9 @@ pub async fn start_http_server(
 
 /// Build a combined RPC module with all endpoints
 pub fn build_rpc_module(state: Arc<RpcState>) -> Result<RpcModule<Arc<RpcState>>, ErrorObjectOwned> {
-    let mut module = RpcModule::new(state);
+    let mut module = RpcModule::new(state.clone());
     standard::register_standard_rpc(&mut module)?;
     callchain::register_callchain_rpc(&mut module)?;
-    ws::register_ws_subscriptions(&mut module)?;
+    ws::register_ws_subscriptions(&mut module, &state.subscriptions)?;
     Ok(module)
 }

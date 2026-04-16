@@ -4,15 +4,21 @@
 //! init P2P → connect seeds → init consensus → start RPC → start metrics → sync/participate.
 
 use call_node::boot::boot_node;
-use call_node::cli::CliArgs;
+use call_node::cli::{CliArgs, Commands, WalletCommand};
 use call_node::config::NodeConfig;
 use call_node::telemetry::{init_opentelemetry_tracing, start_metrics_server, TelemetryRegistry};
+use call_node::wallet;
 use clap::Parser;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = CliArgs::parse();
+
+    // Handle subcommands first
+    if let Some(command) = &args.command {
+        return handle_command(command).await;
+    }
 
     // Load config: TOML file (if provided) → merge CLI overrides
     let config = match &args.config {
@@ -55,10 +61,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Shut down OpenTelemetry tracer
     if let Some(provider) = call_node::telemetry::GLOBAL_PROVIDER.get() {
-        provider.shutdown();
+        let _ = provider.shutdown();
     }
 
     Ok(())
+}
+
+/// Handle CLI subcommands
+async fn handle_command(command: &Commands) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        Commands::Run { .. } => {
+            // Fall through to normal boot (should not reach here due to earlier check)
+            Ok(())
+        }
+        Commands::Wallet(wallet_cmd) => handle_wallet(wallet_cmd).await,
+    }
+}
+
+async fn handle_wallet(cmd: &WalletCommand) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match cmd {
+        WalletCommand::GenerateKeys => wallet::generate_keys(),
+        WalletCommand::Address { pubkey } => wallet::derive_address(pubkey),
+        WalletCommand::Balance { address, asset_id, rpc_url } => {
+            wallet::query_balance(address, *asset_id, rpc_url).await
+        }
+        WalletCommand::Send { from_key, to, asset_id, amount, nonce, rpc_url } => {
+            wallet::send_payment(from_key, to, *asset_id, *amount, *nonce, rpc_url).await
+        }
+        WalletCommand::ServerInfo { rpc_url } => wallet::server_info(rpc_url).await,
+        WalletCommand::Mempool { rpc_url } => wallet::mempool_stats(rpc_url).await,
+    }
 }
 
 /// Initialize logging with OpenTelemetry tracing integration (per spec §21.3 + §20)

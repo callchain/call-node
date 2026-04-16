@@ -47,3 +47,5 @@ fs2 = "0.4"
 hex.workspace = true
 alloy-primitives.workspace = true
 reth-db.workspace = true
+k256 = { version = "0.13", features = ["ecdsa"] }
+rand.workspace = true

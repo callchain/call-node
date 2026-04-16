@@ -1,6 +1,6 @@
 //! T14.1 — CLI argument definitions (per spec §21)
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -8,6 +8,9 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "calld", version, about = "Callchain Node")]
 pub struct CliArgs {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
     // ── Mode ──────────────────────────────────────────────────────────
 
     /// Run as validator node (requires --validator-key)
@@ -89,4 +92,73 @@ pub struct CliArgs {
     /// Path to TOML config file (CLI args override these values)
     #[arg(long)]
     pub config: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Run the node (default behavior)
+    Run {
+        // Additional run-time args can be added here
+    },
+
+    /// Wallet subcommands
+    #[command(subcommand)]
+    Wallet(WalletCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WalletCommand {
+    /// Generate a new keypair
+    GenerateKeys,
+    /// Derive address from public key
+    Address {
+        /// Hex-encoded public key (64 hex chars)
+        #[arg(long)]
+        pubkey: String,
+    },
+    /// Query account balance
+    Balance {
+        /// Account address
+        #[arg(long)]
+        address: String,
+        /// Asset ID (default: 0 for CALL)
+        #[arg(long, default_value_t = 0)]
+        asset_id: u64,
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc_url: String,
+    },
+    /// Send a payment
+    Send {
+        /// Hex-encoded secret key
+        #[arg(long)]
+        from_key: String,
+        /// Recipient address
+        #[arg(long)]
+        to: String,
+        /// Asset ID
+        #[arg(long, default_value_t = 0)]
+        asset_id: u64,
+        /// Amount to send
+        #[arg(long)]
+        amount: u128,
+        /// Nonce
+        #[arg(long)]
+        nonce: u64,
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc_url: String,
+    },
+    /// Query node server info
+    ServerInfo {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc_url: String,
+    },
+    /// Query mempool stats
+    Mempool {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc_url: String,
+    },
 }

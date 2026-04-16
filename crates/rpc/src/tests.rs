@@ -238,11 +238,13 @@ mod tests {
         // WebSocket subscription registration test:
         // The subscription endpoints are registered successfully.
         // Full subscription testing requires a running server.
-        use crate::ws::register_ws_subscriptions;
+        use crate::ws::{register_ws_subscriptions, SubscriptionManager};
         use jsonrpsee::RpcModule;
         use std::sync::Arc;
-        let mut module = RpcModule::new(Arc::new(make_test_state()));
-        let result = register_ws_subscriptions(&mut module);
+        let state = Arc::new(make_test_state());
+        let subs = SubscriptionManager::new();
+        let mut module = RpcModule::new(Arc::clone(&state));
+        let result = register_ws_subscriptions(&mut module, &subs);
         assert!(result.is_ok(), "WebSocket subscriptions should register OK");
     }
 
