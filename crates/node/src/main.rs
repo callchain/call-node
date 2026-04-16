@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut node = boot_node(&config).await?;
 
     // Start Prometheus /metrics HTTP server (per spec §20)
-    let registry = Arc::new(TelemetryRegistry::new());
+    let registry = Arc::new(TelemetryRegistry::new(config.storage.data_dir.clone()));
     let metrics_addr = start_metrics_server(Arc::clone(&registry), config.metrics.addr).await?;
     tracing::info!("  Metrics server started on http://{metrics_addr}");
 

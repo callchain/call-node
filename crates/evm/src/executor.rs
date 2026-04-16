@@ -39,7 +39,7 @@ pub struct EvmExecutionResult {
 }
 
 /// EVM transaction input
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EvmTransaction {
     pub caller: Address,
     pub nonce: u64,

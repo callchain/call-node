@@ -41,8 +41,12 @@ impl Default for OracleState {
 
 impl OracleState {
     pub fn new(stale_threshold_secs: u64) -> Self {
+        let config = call_protocol::OracleConfig {
+            staleness_secs: stale_threshold_secs,
+            ..Default::default()
+        };
         Self {
-            manager: OracleManager::default(),
+            manager: OracleManager::new(config),
             stale_threshold_secs,
         }
     }

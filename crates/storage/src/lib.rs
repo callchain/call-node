@@ -26,4 +26,10 @@ pub enum StorageError {
     Decoding(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("io error: {0}")]
+    IoError(std::io::Error),
+    #[error("serialization error: {0}")]
+    Serialization(String),
+    #[error("validation error: {0}")]
+    Validation(String),
 }

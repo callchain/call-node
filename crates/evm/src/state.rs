@@ -1,7 +1,7 @@
 //! EVM state management (accounts, contracts, storage).
 
 use call_primitives::Address;
-use alloy_primitives::{U256, Bytes};
+use alloy_primitives::{U256, Bytes, keccak256};
 use revm::{
     database::InMemoryDB,
     state::AccountInfo,
@@ -144,6 +144,31 @@ impl EvmState {
                 }
             }
         }
+    }
+
+    /// Compute a state root hash from all account states.
+    /// This is a simple keccak256 hash of all accounts sorted by address,
+    /// analogous to the Ethereum state trie root.
+    pub fn compute_state_root(&self) -> alloy_primitives::B256 {
+        let mut data = Vec::with_capacity(256 * self.accounts.len());
+        let mut sorted_accounts: Vec<_> = self.accounts.iter().collect();
+        sorted_accounts.sort_by_key(|(addr, _)| *addr);
+        for (addr, account) in &sorted_accounts {
+            data.extend_from_slice(addr.as_slice());
+            data.extend_from_slice(&account.nonce.to_le_bytes());
+            data.extend_from_slice(&account.balance.to_le_bytes::<32>());
+            data.extend_from_slice(&keccak256(&account.code).0);
+            // Storage root: hash of all key-value pairs
+            let mut storage_data = Vec::new();
+            let mut sorted_storage: Vec<_> = account.storage.iter().collect();
+            sorted_storage.sort_by_key(|(k, _)| *k);
+            for (key, value) in &sorted_storage {
+                storage_data.extend_from_slice(&key.to_le_bytes::<32>());
+                storage_data.extend_from_slice(&value.to_le_bytes::<32>());
+            }
+            data.extend_from_slice(&keccak256(&storage_data).0);
+        }
+        keccak256(&data)
     }
 }
 

@@ -42,3 +42,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml = "0.8"
 dirs = "5"
+sysinfo = "0.33"
+fs2 = "0.4"
+hex.workspace = true

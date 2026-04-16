@@ -227,6 +227,7 @@ async fn block_production_loop(
             let mut bridge_state = state.bridge_state.write().unwrap();
             let mut shielded_state = state.shielded_state.write().unwrap();
             let mut fee_params = state.fee_params.write().unwrap();
+            let mut evm_state = state.evm_state.write().unwrap();
 
             block.execute(
                 &mut balances,
@@ -236,6 +237,7 @@ async fn block_production_loop(
                 &mut shielded_state,
                 &mut fee_params,
                 height,
+                &mut evm_state,
             )
         };
         let result = match result {
@@ -489,6 +491,7 @@ mod tests {
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
             .execute(
@@ -499,6 +502,7 @@ mod tests {
                 &mut shielded_state,
                 &mut fee_params,
                 height,
+                &mut evm_state,
             )
             .expect("execution");
         block.finalize(&result);
@@ -570,6 +574,7 @@ mod tests {
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
             .execute(
@@ -580,6 +585,7 @@ mod tests {
                 &mut shielded_state,
                 &mut fee_params,
                 height,
+                &mut evm_state,
             )
             .expect("empty block execution");
         block.finalize(&result);
@@ -675,9 +681,10 @@ mod tests {
         let mut bridge_state = node1.state.bridge_state.write().unwrap();
         let mut shielded_state = node1.state.shielded_state.write().unwrap();
         let mut fee_params = node1.state.fee_params.write().unwrap();
+        let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height)
+            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
             .expect("execution");
         block.finalize(&result);
 
@@ -779,9 +786,10 @@ mod tests {
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height)
+            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
             .expect("execution");
         block.finalize(&result);
 

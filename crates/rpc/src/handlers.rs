@@ -404,6 +404,7 @@ impl RpcState {
         memo: Option<String>,
         gas_limit: u64,
         max_fee: u128,
+        signature: Option<[u8; 65]>,
     ) -> Result<TxHash, String> {
         use call_protocol::{
             Instruction, PaymentMemo,
@@ -450,7 +451,13 @@ impl RpcState {
             gas_limit,
             max_fee,
             auth: call_protocol::transaction::AuthScheme::SingleSig {
-                signature: [0u8; 65], // placeholder — real tx would have signature
+                signature: signature.unwrap_or_else(|| {
+                    // Derive a deterministic placeholder signature from tx hash preimage
+                    let hash = call_crypto::keccak256(&preimage);
+                    let mut sig = [0u8; 65];
+                    sig[..32].copy_from_slice(&hash.0[..32]);
+                    sig
+                }),
             },
         };
 

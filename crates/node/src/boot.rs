@@ -6,11 +6,100 @@
 use crate::config::{NodeConfig, NodeMode, parse_bootstrap_peers};
 use crate::CallNode;
 use call_network::CommonwareConfig;
+use call_primitives::Address;
 use call_rpc::RpcConfig;
-use tracing::info;
+use serde::Deserialize;
+use std::fs;
+use tracing::{info, warn};
 
 /// Result type for boot sequence
 pub type BootResult = Result<CallNode, String>;
+
+/// Genesis file format: balances, assets, validators, timestamp.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Genesis {
+    #[serde(default)]
+    pub balances: Vec<GenesisBalance>,
+    #[serde(default)]
+    pub validators: Vec<GenesisValidator>,
+    #[serde(default = "Genesis::default_timestamp")]
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GenesisBalance {
+    pub address: String,
+    pub asset_id: u64,
+    pub amount: u128,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GenesisValidator {
+    pub address: String,
+    pub pubkey: String,
+    pub stake: u128,
+}
+
+impl Genesis {
+    fn default_timestamp() -> u64 {
+        1_000_000 // default genesis timestamp
+    }
+
+    /// Load and parse a genesis file from disk
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("failed to read genesis file: {e}"))?;
+        let genesis: Genesis = serde_json::from_str(&content)
+            .map_err(|e| format!("failed to parse genesis JSON: {e}"))?;
+        Ok(genesis)
+    }
+
+    /// Apply genesis state to the node: balances and validators
+    pub fn apply(&self, node: &mut CallNode) -> Result<(), String> {
+        // Apply genesis balances
+        let mut balance_state = node.state.balance_state.write().map_err(|_| "lock poisoned")?;
+        for entry in &self.balances {
+            let addr = parse_address(&entry.address)?;
+            balance_state
+                .balances
+                .set_balance(entry.asset_id, addr, entry.amount)
+                .map_err(|e| format!("failed to set genesis balance: {e}"))?;
+        }
+
+        // Stake genesis validators
+        let mut consensus = node.consensus.write().map_err(|_| "lock poisoned")?;
+        for val in &self.validators {
+            let addr = parse_address(&val.address)?;
+            let pubkey = parse_pubkey(&val.pubkey)?;
+            consensus
+                .stake_validator(addr, pubkey, val.stake)
+                .map_err(|e| format!("failed to stake validator: {e}"))?;
+        }
+        consensus.refresh_proposer_subset();
+
+        Ok(())
+    }
+}
+
+fn parse_address(s: &str) -> Result<Address, String> {
+    let bytes = hex::decode(s.trim_start_matches("0x"))
+        .map_err(|e| format!("invalid address hex: {e}"))?;
+    if bytes.len() != 20 {
+        return Err(format!("address must be 20 bytes, got {}", bytes.len()));
+    }
+    Ok(Address::from_slice(&bytes))
+}
+
+fn parse_pubkey(s: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s.trim_start_matches("0x"))
+        .map_err(|e| format!("invalid pubkey hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("pubkey must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
 
 /// Execute the full boot sequence per §21.3.
 pub async fn boot_node(config: &NodeConfig) -> BootResult {
@@ -30,9 +119,13 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     // Step 3: Load genesis if path provided
     if let Some(ref genesis_path) = config.genesis.path {
         info!(path = ?genesis_path, "step 3: loading genesis");
-        // Genesis loading is handled by CallNode::new for now;
-        // in production, parse and apply genesis here.
-        info!("genesis loaded (placeholder)");
+        let genesis = Genesis::load(genesis_path)?;
+        info!(
+            balances = genesis.balances.len(),
+            validators = genesis.validators.len(),
+            "genesis loaded"
+        );
+        genesis.apply(&mut node)?;
     }
 
     // Step 4: Init P2P and connect seeds

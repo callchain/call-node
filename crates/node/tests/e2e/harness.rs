@@ -226,6 +226,7 @@ impl TestNode {
             let mut bridge_state = self.state.bridge_state.write().unwrap();
             let mut shielded_state = self.state.shielded_state.write().unwrap();
             let mut fee_params = self.state.fee_params.write().unwrap();
+            let mut evm_state = self.state.evm_state.write().unwrap();
 
             block
                 .execute(
@@ -236,6 +237,7 @@ impl TestNode {
                     &mut shielded_state,
                     &mut fee_params,
                     height,
+                    &mut evm_state,
                 )
                 .expect("block execution")
         };
