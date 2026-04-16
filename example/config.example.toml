@@ -1,0 +1,47 @@
+# Callchain Node Configuration
+# Copy this file and modify as needed: cp config.example.toml config.toml
+
+# Node mode: full, validator, archive
+mode = "full"
+
+[keys]
+# Validator consensus key (hex Ed25519, 64 hex chars)
+# validator_key = "00..."
+# P2P identity key (hex Ed25519, 64 hex chars)
+# identity_key = "00..."
+
+[genesis]
+# Path to genesis JSON file
+# path = "genesis.json"
+
+[p2p]
+# P2P listen address
+listen_addr = "0.0.0.0:51235"
+# Bootstrap peers (comma-separated: "peer_id@addr,peer_id2@addr2")
+# bootstrap_peers = ""
+# Max peers
+max_peers = 50
+
+[rpc]
+# HTTP RPC listen address
+http_addr = "127.0.0.1:5005"
+# WebSocket RPC listen address
+ws_addr = "127.0.0.1:5006"
+# Max concurrent connections
+max_connections = 100
+
+[storage]
+# Data directory
+data_dir = "~/.callchain"
+# DB cache size (MB)
+# cache_size = 1024
+
+[metrics]
+# Prometheus metrics listen address
+addr = "0.0.0.0:9090"
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+# Log format: text, json
+format = "text"

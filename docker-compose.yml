@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  node1:
+    build: .
+    ports:
+      - "5005:5005"   # HTTP RPC
+      - "5006:5006"   # WebSocket RPC
+      - "51235:51235" # P2P
+      - "9090:9090"   # Metrics
+    volumes:
+      - node1-data:/var/lib/callchain
+      - ./example/config.example.toml:/etc/callchain/config.toml:ro
+      - ./example/genesis.example.json:/etc/callchain/genesis.json:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --p2p-listen-addr 0.0.0.0:51235
+      --log-level info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "calld", "wallet", "server-info", "--rpc-url", "http://127.0.0.1:5005"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Uncomment to add more nodes to the local devnet:
+  # node2:
+  #   build: .
+  #   ports:
+  #     - "5007:5005"
+  #     - "5008:5006"
+  #     - "51236:51235"
+  #   volumes:
+  #     - node2-data:/var/lib/callchain
+  #   command: >
+  #     --data-dir /var/lib/callchain
+  #     --p2p-listen-addr 0.0.0.0:51235
+  #     --p2p-bootstrap-peers node1@node1:51235
+  #     --log-level info
+  #   depends_on:
+  #     - node1
+  #   restart: unless-stopped
+
+volumes:
+  node1-data:

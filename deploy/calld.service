@@ -1,0 +1,26 @@
+[Unit]
+Description=Callchain Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calld
+Group=calld
+ExecStart=/usr/local/bin/calld \
+  --data-dir /var/lib/callchain \
+  --config /etc/callchain/config.toml \
+  --p2p-listen-addr 0.0.0.0:51235 \
+  --log-level info
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/callchain
+
+[Install]
+WantedBy=multi-user.target
