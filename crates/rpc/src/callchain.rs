@@ -80,12 +80,16 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             signature.copy_from_slice(&sig_bytes);
 
             // Recover signer address from signature and verify it matches sender
+            // Include all tx fields in preimage (like Ethereum EIP-155/EIP-1559) to prevent
+            // signature malleability — changing any field invalidates the signature
             let mut preimage = Vec::new();
             preimage.extend_from_slice(from.as_slice());
             preimage.extend_from_slice(&nonce.to_be_bytes());
             preimage.extend_from_slice(&asset_id.to_be_bytes());
             preimage.extend_from_slice(to.as_slice());
             preimage.extend_from_slice(&amount.to_be_bytes());
+            preimage.extend_from_slice(&gas_limit.to_be_bytes());
+            preimage.extend_from_slice(&max_fee.to_be_bytes());
             let tx_hash_preimage = call_crypto::keccak256(&preimage);
             let recovered = call_crypto::recover_secp256k1_signer(&tx_hash_preimage.0, &signature)
                 .map_err(|e| invalid_params(format!("signature recovery failed: {e:?}")))?;

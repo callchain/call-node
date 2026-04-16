@@ -483,13 +483,15 @@ impl RpcState {
             }),
         }];
 
-        // Build tx hash preimage
+        // Build tx hash preimage — include all fields to prevent malleability
         let mut preimage = Vec::new();
         preimage.extend_from_slice(sender.as_slice());
         preimage.extend_from_slice(&nonce.to_be_bytes());
         preimage.extend_from_slice(&asset_id.to_be_bytes());
         preimage.extend_from_slice(to.as_slice());
         preimage.extend_from_slice(&amount.to_be_bytes());
+        preimage.extend_from_slice(&gas_limit.to_be_bytes());
+        preimage.extend_from_slice(&max_fee.to_be_bytes());
         let tx_hash = TxHash::from_slice(&call_crypto::keccak256(&preimage).0);
 
         // Build protocol transaction
