@@ -228,7 +228,7 @@ mod test_shielded_flow_impl {
     fn test_shielded_deposit_instruction() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         let asset_id = setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
@@ -239,7 +239,7 @@ mod test_shielded_flow_impl {
         let cm = note.commitment();
 
         let instructions = vec![Instruction::ShieldedDeposit { asset_id, amount: 1_000, commitment: cm.0, encrypted_note: encrypted }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender).unwrap();
         assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
         assert_eq!(shielded_state.merkle_tree.leaf_count(), 1);
     }
@@ -248,7 +248,7 @@ mod test_shielded_flow_impl {
     fn test_shielded_withdraw_instruction() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         let receiver = addr(2);
@@ -259,7 +259,7 @@ mod test_shielded_flow_impl {
         let nullifier = note.nullifier();
 
         let instructions = vec![Instruction::ShieldedWithdraw { asset_id: 0, target: receiver, amount: 500, proof: vec![1u8; 200], nullifier: nullifier.0 }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender).unwrap();
         assert_eq!(balances.get_balance(0, &receiver), 500);
         assert!(shielded_state.nullifier_set.is_spent(&nullifier));
     }

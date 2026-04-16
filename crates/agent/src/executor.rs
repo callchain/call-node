@@ -129,7 +129,7 @@ pub fn execute_agent_tx(
     _bridge_state: &mut BridgeStateManager,
     _bridge_config: &BridgeConfig,
     registry: &AssetRegistry,
-    compliance: &ComplianceEngine,
+    compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     agent_evm_address: Address,
 ) -> Result<Vec<InstructionResult>, AgentError> {

@@ -152,8 +152,9 @@ pub struct AgentPayment {
 }
 
 /// Compliance status for UpdateCompliance instruction
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ComplianceStatus {
+    #[default]
     Clear,
     UnderReview,
     Flagged,
@@ -171,7 +172,7 @@ pub fn execute_protocol_instructions(
     instructions: &[Instruction],
     balances: &mut BalanceState,
     registry: &AssetRegistry,
-    compliance: &ComplianceEngine,
+    compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     sender: Address,
 ) -> ProtocolResult<Vec<InstructionResult>> {
@@ -201,8 +202,8 @@ pub fn execute_protocol_instructions(
 pub fn execute_instruction(
     instruction: &Instruction,
     balances: &mut BalanceState,
-    _registry: &AssetRegistry,
-    _compliance: &ComplianceEngine,
+    registry: &AssetRegistry,
+    compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     sender: Address,
 ) -> ProtocolResult<InstructionResult> {
@@ -216,6 +217,8 @@ pub fn execute_instruction(
             if let Some(m) = memo {
                 m.validate()?;
             }
+            // Check compliance before transfer
+            compliance.check_compliance_by_policy_id(&sender, registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0))?;
             balances.transfer(*asset_id, sender, *to, *amount)?;
             Ok(InstructionResult::Success)
         }
@@ -251,6 +254,15 @@ pub fn execute_instruction(
             to,
             amount,
         } => {
+            // Verify sender is the asset issuer
+            let asset = registry
+                .get_asset(*asset_id)
+                .ok_or(ProtocolError::AssetError("asset not found".into()))?;
+            if asset.issuer != sender {
+                return Err(ProtocolError::Unauthorized);
+            }
+            // Update total supply in registry
+            let _ = registry; // registry is immutable here; supply update done at block level
             balances.mint(*asset_id, &sender, *to, *amount)?;
             Ok(InstructionResult::Success)
         }
@@ -259,6 +271,13 @@ pub fn execute_instruction(
             from,
             amount,
         } => {
+            // Verify sender is the asset issuer
+            let asset = registry
+                .get_asset(*asset_id)
+                .ok_or(ProtocolError::AssetError("asset not found".into()))?;
+            if asset.issuer != sender {
+                return Err(ProtocolError::Unauthorized);
+            }
             balances.burn(*asset_id, *from, *amount)?;
             Ok(InstructionResult::Success)
         }
@@ -280,14 +299,44 @@ pub fn execute_instruction(
             // Bridge deposit — handled by bridge layer
             Ok(InstructionResult::Success)
         }
-        Instruction::BridgeDeposit { .. } => {
-            // Cross-chain bridge deposit
+        Instruction::BridgeDeposit {
+            source_chain,
+            target_address,
+            amount,
+            asset_id,
+            proof,
+        } => {
+            // Cross-chain bridge deposit: mint tokens after verifying bridge proof
+            // Proof verification delegated to bridge module; here we ensure
+            // the asset exists and credit the target address
+            let _asset = registry
+                .get_asset(*asset_id)
+                .ok_or(ProtocolError::AssetError("asset not found".into()))?;
+            // Proof must be non-empty (actual sig check in bridge layer)
+            if proof.is_empty() {
+                return Err(ProtocolError::InvalidInstruction(
+                    "bridge deposit: empty proof".into(),
+                ));
+            }
+            let _ = (source_chain, target_address);
+            balances.mint(*asset_id, &sender, *target_address, *amount)?;
             Ok(InstructionResult::Success)
         }
-        Instruction::UpdateCompliance { target, status, .. } => {
-            // Update compliance status
-            // Actual update delegated to compliance engine
-            let _ = (target, status);
+        Instruction::UpdateCompliance {
+            asset_id,
+            target,
+            status,
+        } => {
+            // Update compliance status for a target address
+            // Compliance engine validates the caller has authority
+            let asset = registry
+                .get_asset(*asset_id)
+                .ok_or(ProtocolError::AssetError("asset not found".into()))?;
+            // Only the asset issuer can update compliance status
+            if asset.issuer != sender {
+                return Err(ProtocolError::Unauthorized);
+            }
+            compliance.set_address_compliance(*target, asset.compliance_policy, *status)?;
             Ok(InstructionResult::Success)
         }
         Instruction::ShieldedTransfer { asset_id, proof, nullifiers, commitments, encrypted_notes } => {
@@ -406,7 +455,7 @@ mod tests {
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![Instruction::Transfer {
@@ -420,7 +469,7 @@ mod tests {
             &instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut shielded_state,
             test_addr(1),
         )
@@ -439,7 +488,7 @@ mod tests {
             .set_balance(1, test_addr(1), 3000)
             .unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![Instruction::BatchTransfer {
@@ -462,7 +511,7 @@ mod tests {
             &instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut shielded_state,
             test_addr(1),
         )
@@ -479,7 +528,7 @@ mod tests {
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![
@@ -500,7 +549,7 @@ mod tests {
             &instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut shielded_state,
             test_addr(1),
         )
@@ -511,59 +560,84 @@ mod tests {
 
     #[test]
     fn test_execute_mint_issuer_only() {
-        // Mint at instruction level is gated by asset issuer check.
-        // Balance layer allows any caller; caller (tx processor) validates issuer.
-        // This is by design — separation of concerns.
+        // Mint requires sender to be the asset issuer.
         let mut balances = BalanceState::new();
-        let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0)
+            .unwrap();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
+        // Non-issuer tries to mint — should fail
         let instructions = vec![Instruction::Mint {
             asset_id: 1,
-            to: test_addr(1),
+            to: test_addr(99),
             amount: 1000,
         }];
-
-        // Succeeds at balance layer; issuer check is in instruction processor
         let result = execute_protocol_instructions(
             &instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut shielded_state,
-            test_addr(99),
+            test_addr(99), // not the issuer
+        );
+        assert!(result.is_err());
+
+        // Issuer mints — should succeed
+        let result = execute_protocol_instructions(
+            &instructions,
+            &mut balances,
+            &registry,
+            &mut compliance,
+            &mut shielded_state,
+            test_addr(1), // the issuer
         );
         assert!(result.is_ok());
+        assert_eq!(balances.get_balance(1, &test_addr(99)), 1000);
     }
 
     #[test]
     fn test_execute_burn_issuer_only() {
         let mut balances = BalanceState::new();
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0)
+            .unwrap();
         balances
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
-        let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
+        // Non-issuer tries to burn — should fail
         let instructions = vec![Instruction::Burn {
             asset_id: 1,
             from: test_addr(1),
             amount: 500,
         }];
-
-        let results = execute_protocol_instructions(
+        let result = execute_protocol_instructions(
             &instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut shielded_state,
-            test_addr(99),
-        )
-        .expect("execute");
-        assert_eq!(results.len(), 1);
+            test_addr(99), // not the issuer
+        );
+        assert!(result.is_err());
+
+        // Issuer burns — should succeed
+        let result = execute_protocol_instructions(
+            &instructions,
+            &mut balances,
+            &registry,
+            &mut compliance,
+            &mut shielded_state,
+            test_addr(1), // the issuer
+        );
+        assert!(result.is_ok());
         assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
     }
 
@@ -606,7 +680,7 @@ mod tests {
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![
@@ -628,7 +702,7 @@ mod tests {
             &instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut shielded_state,
             test_addr(1),
         );
@@ -646,7 +720,7 @@ mod tests {
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![
@@ -668,7 +742,7 @@ mod tests {
             &instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut shielded_state,
             test_addr(1),
         )

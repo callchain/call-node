@@ -132,8 +132,14 @@ impl ValidatorStateManager {
             return Err(ConsensusError::UnbondingNotElapsed);
         }
 
-        validator.delegated_call += amount;
-        validator.staked_call += amount;
+        validator.delegated_call = validator
+            .delegated_call
+            .checked_add(amount)
+            .ok_or(ConsensusError::ConsensusError("delegation overflow".into()))?;
+        validator.staked_call = validator
+            .staked_call
+            .checked_add(amount)
+            .ok_or(ConsensusError::ConsensusError("stake overflow".into()))?;
         Ok(())
     }
 
@@ -205,7 +211,7 @@ impl ValidatorStateManager {
             block: self.current_block,
         });
         validator.self_stake = 0;
-        validator.staked_call -= slashed;
+        validator.staked_call = validator.staked_call.saturating_sub(slashed);
         Ok(slashed)
     }
 
@@ -229,8 +235,8 @@ impl ValidatorStateManager {
             amount_slashed: slashed,
             block: self.current_block,
         });
-        validator.self_stake -= slashed;
-        validator.staked_call -= slashed;
+        validator.self_stake = validator.self_stake.saturating_sub(slashed);
+        validator.staked_call = validator.staked_call.saturating_sub(slashed);
         Ok(slashed)
     }
 
@@ -248,7 +254,10 @@ impl ValidatorStateManager {
             .get_mut(&proposer_id)
             .ok_or(ConsensusError::ValidatorNotFound(proposer_id))?;
 
-        validator.rewards += total_reward;
+        validator.rewards = validator
+            .rewards
+            .checked_add(total_reward)
+            .ok_or(ConsensusError::ConsensusError("reward overflow".into()))?;
         Ok(())
     }
 

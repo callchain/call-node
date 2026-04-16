@@ -322,9 +322,12 @@ pub fn convert_fee_to_stablecoin(
         return u128::MAX;
     }
     // ceil(call_fee * call_price / stablecoin_price)
-    // simplified: call_fee * price with ceil rounding
-    let scaled = call_fee * call_price_usd;
+    // Use saturating multiplication to prevent overflow
+    let scaled = call_fee.saturating_mul(call_price_usd);
     let divisor = 10u128.pow(stablecoin_decimals as u32);
+    if divisor == 0 {
+        return u128::MAX;
+    }
     scaled.div_ceil(divisor)
 }
 
@@ -368,8 +371,12 @@ pub fn accept_to_mempool(
         return Err(ProtocolError::GasError("max fee too low".into()));
     }
 
-    // Check balance
-    let balance = balances.get_balance(0, &tx.sender);
+    // Check balance in the correct fee currency
+    let fee_asset_id = match tx.fee_currency {
+        FeeCurrency::Call => 0,
+        FeeCurrency::Stablecoin(asset_id) => asset_id,
+    };
+    let balance = balances.get_balance(fee_asset_id, &tx.sender);
     if balance < required_fee {
         return Err(ProtocolError::InsufficientBalance);
     }

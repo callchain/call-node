@@ -100,7 +100,7 @@ pub fn execute_tx(
     tx: &ProtocolTransaction,
     balances: &mut BalanceState,
     registry: &AssetRegistry,
-    compliance: &ComplianceEngine,
+    compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     fee_params: &FeeParams,
 ) -> Result<(), String> {

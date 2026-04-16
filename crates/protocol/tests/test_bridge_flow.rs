@@ -185,17 +185,16 @@ mod test_bridge_flow_impl {
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig { allowed_assets: vec![1], ..Default::default() };
         let (secrets, validators) = generate_bridge_validators(21);
-        let mut processed_txs = std::collections::HashSet::new();
 
         let op = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, &mut processed_txs).unwrap();
+        process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators).unwrap();
 
         if let ExternalBridgeOp::Deposit { recipient, amount, .. } = op {
             assert_eq!(balances.get_balance(1, &recipient), amount);
         }
 
         // Replay protection
-        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, &mut processed_txs);
+        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators);
         assert!(result.is_err());
     }
 
@@ -205,7 +204,6 @@ mod test_bridge_flow_impl {
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig { allowed_assets: vec![1], ..Default::default() };
         let (_, validators) = generate_bridge_validators(21);
-        let mut processed_txs = std::collections::HashSet::new();
 
         let op = ExternalBridgeOp::Deposit {
             source_chain: ExternalChain::EthereumMainnet, source_tx_hash: B256::ZERO,
@@ -213,7 +211,7 @@ mod test_bridge_flow_impl {
             asset_id: 99, amount: 1000, signatures: vec![],
         };
         assert!(matches!(
-            process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, &mut processed_txs),
+            process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators),
             Err(call_bridge::BridgeError::ExternalAssetNotAllowed(99))
         ));
     }
@@ -272,10 +270,9 @@ mod test_bridge_flow_impl {
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig { allowed_assets: vec![1], daily_limit_per_asset: 1_500, ..Default::default() };
         let (secrets, validators) = generate_bridge_validators(21);
-        let mut processed_txs = std::collections::HashSet::new();
 
         let op1 = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        process_external_deposit(&op1, &mut balances, &mut bridge_state, &config, &validators, &mut processed_txs).unwrap();
+        process_external_deposit(&op1, &mut balances, &mut bridge_state, &config, &validators).unwrap();
 
         // Second deposit would exceed daily limit
         let op2 = ExternalBridgeOp::Deposit {
@@ -288,7 +285,7 @@ mod test_bridge_flow_impl {
                 signature: sign_bridge_event(&secrets[i], &ExternalChain::EthereumMainnet, B256::from_slice(&[1u8; 32]), 101, &[0u8; 32], addr(2), 1, 600),
             }).collect(),
         };
-        let result = process_external_deposit(&op2, &mut balances, &mut bridge_state, &config, &validators, &mut processed_txs);
+        let result = process_external_deposit(&op2, &mut balances, &mut bridge_state, &config, &validators);
         assert!(result.is_err());
     }
 }

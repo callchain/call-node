@@ -307,14 +307,14 @@ impl CallNode {
                                         let execute_result = {
                                             let mut balances = state.balance_state.write().unwrap();
                                             let registry = state.asset_registry.read().unwrap();
-                                            let compliance = state.compliance_engine.read().unwrap();
+                                            let mut compliance = state.compliance_engine.write().unwrap();
                                             let mut bridge_state = state.bridge_state.write().unwrap();
                                             let mut shielded_state = state.shielded_state.write().unwrap();
                                             let mut fee_params = state.fee_params.write().unwrap();
                                             let mut evm_state = state.evm_state.write().unwrap();
 
                                             block.execute(
-                                                &mut balances, &registry, &compliance, &mut bridge_state,
+                                                &mut balances, &registry, &mut compliance, &mut bridge_state,
                                                 &mut shielded_state, &mut fee_params, height, &mut evm_state,
                                             )
                                         };
@@ -848,7 +848,7 @@ async fn block_production_loop(
         let result = {
             let mut balances = state.balance_state.write().unwrap();
             let registry = state.asset_registry.read().unwrap();
-            let compliance = state.compliance_engine.read().unwrap();
+            let mut compliance = state.compliance_engine.write().unwrap();
             let mut bridge_state = state.bridge_state.write().unwrap();
             let mut shielded_state = state.shielded_state.write().unwrap();
             let mut fee_params = state.fee_params.write().unwrap();
@@ -857,7 +857,7 @@ async fn block_production_loop(
             block.execute(
                 &mut balances,
                 &registry,
-                &compliance,
+                &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
                 &mut fee_params,
@@ -1229,7 +1229,7 @@ mod tests {
         // Execute
         let mut balances = node.state.balance_state.write().unwrap();
         let registry = node.state.asset_registry.read().unwrap();
-        let compliance = node.state.compliance_engine.read().unwrap();
+        let mut compliance = node.state.compliance_engine.write().unwrap();
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
@@ -1239,7 +1239,7 @@ mod tests {
             .execute(
                 &mut balances,
                 &registry,
-                &compliance,
+                &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
                 &mut fee_params,
@@ -1312,7 +1312,7 @@ mod tests {
         // Execute empty block
         let mut balances = node.state.balance_state.write().unwrap();
         let registry = node.state.asset_registry.read().unwrap();
-        let compliance = node.state.compliance_engine.read().unwrap();
+        let mut compliance = node.state.compliance_engine.write().unwrap();
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
@@ -1322,7 +1322,7 @@ mod tests {
             .execute(
                 &mut balances,
                 &registry,
-                &compliance,
+                &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
                 &mut fee_params,
@@ -1419,14 +1419,14 @@ mod tests {
 
         let mut balances = node1.state.balance_state.write().unwrap();
         let registry = node1.state.asset_registry.read().unwrap();
-        let compliance = node1.state.compliance_engine.read().unwrap();
+        let mut compliance = node1.state.compliance_engine.write().unwrap();
         let mut bridge_state = node1.state.bridge_state.write().unwrap();
         let mut shielded_state = node1.state.shielded_state.write().unwrap();
         let mut fee_params = node1.state.fee_params.write().unwrap();
         let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
             .expect("execution");
         block.finalize(&result);
 
@@ -1524,14 +1524,14 @@ mod tests {
 
         let mut balances = node.state.balance_state.write().unwrap();
         let registry = node.state.asset_registry.read().unwrap();
-        let compliance = node.state.compliance_engine.read().unwrap();
+        let mut compliance = node.state.compliance_engine.write().unwrap();
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
         let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
             .expect("execution");
         block.finalize(&result);
 
@@ -1625,13 +1625,13 @@ mod tests {
             let result = {
                 let mut balances = node.state.balance_state.write().unwrap();
                 let registry = node.state.asset_registry.read().unwrap();
-                let compliance = node.state.compliance_engine.read().unwrap();
+                let mut compliance = node.state.compliance_engine.write().unwrap();
                 let mut bridge_state = node.state.bridge_state.write().unwrap();
                 let mut shielded_state = node.state.shielded_state.write().unwrap();
                 let mut fee_params = node.state.fee_params.write().unwrap();
                 let mut evm_state = node.state.evm_state.write().unwrap();
 
-                block.execute(&mut balances, &registry, &compliance, &mut bridge_state,
+                block.execute(&mut balances, &registry, &mut compliance, &mut bridge_state,
                               &mut shielded_state, &mut fee_params, height, &mut evm_state)
                     .expect("execution")
             };

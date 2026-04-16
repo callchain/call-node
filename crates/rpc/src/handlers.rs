@@ -116,6 +116,19 @@ impl RpcState {
         }
     }
 
+    /// Prune receipts older than the given block number.
+    /// Called periodically to bound memory usage.
+    pub fn prune_receipts(&self, max_age_blocks: u64) {
+        let current = self.get_current_block();
+        if current <= max_age_blocks {
+            return;
+        }
+        let cutoff = current - max_age_blocks;
+        if let Ok(mut receipts) = self.receipts.write() {
+            receipts.retain(|_, r| r.block_number >= cutoff);
+        }
+    }
+
     pub fn get_receipts_by_block(&self, _block: u64) -> Vec<ProtocolReceipt> {
         self.receipts.read().map(|r| r.values().cloned().collect()).unwrap_or_default()
     }
@@ -405,6 +418,7 @@ impl RpcState {
             gas_payer: caller,
             fee_currency: call_primitives::FeeCurrency::Call,
             fee_amount: result.gas_used as u128 * gas_price,
+            block_number: self.get_current_block(),
             instruction_results: vec![InstructionExecResult {
                 success: result.success,
                 gas_used: result.gas_used,
@@ -507,10 +521,10 @@ impl RpcState {
         // Execute immediately
         let mut balances = self.balance_state.write().map_err(|_| "lock poisoned".to_string())?;
         let registry_guard = self.asset_registry.read().map_err(|_| "lock poisoned".to_string())?;
-        let compliance_guard = self.compliance_engine.read().map_err(|_| "lock poisoned".to_string())?;
+        let mut compliance_guard = self.compliance_engine.write().map_err(|_| "lock poisoned".to_string())?;
         let mut shielded_state = self.shielded_state.write().map_err(|_| "lock poisoned".to_string())?;
 
-        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &compliance_guard, &mut shielded_state, sender) {
+        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender) {
             Ok(results) => {
                 let status = call_primitives::ExecutionStatus::Success;
                 let gas_used = results.iter().map(|r| match r {
@@ -524,6 +538,7 @@ impl RpcState {
                     gas_payer: sender,
                     fee_currency: call_primitives::FeeCurrency::Call,
                     fee_amount: gas_used as u128 * 10,
+                    block_number: self.get_current_block(),
                     instruction_results: results.into_iter().map(|r| InstructionExecResult {
                         success: matches!(r, call_protocol::InstructionResult::Success),
                         gas_used: 10_000,
@@ -555,6 +570,7 @@ impl RpcState {
                     gas_payer: sender,
                     fee_currency: call_primitives::FeeCurrency::Call,
                     fee_amount: 0,
+                    block_number: self.get_current_block(),
                     instruction_results: vec![],
                     logs: vec![],
                     memos: vec![],
@@ -573,6 +589,8 @@ impl RpcState {
         if let Ok(mut mempool) = self.mempool.write() {
             mempool.prune_expired();
         }
+        // Prune receipts older than 1000 blocks to bound memory growth
+        self.prune_receipts(1000);
     }
 }
 

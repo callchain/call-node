@@ -78,7 +78,7 @@ impl SponsorRegistry {
             .ok_or_else(|| ProtocolError::SponsorError("sponsor not registered".into()))?;
 
         // Check expiry
-        if current_day > auth.expires_at {
+        if current_day >= auth.expires_at {
             return Err(ProtocolError::SponsorError("sponsor expired".into()));
         }
 
@@ -169,29 +169,35 @@ impl SponsorRegistry {
         }
 
         // Check pool balance
-        if pool.balance < fee {
+        if pool.balance < fee as Balance {
             return Err(ProtocolError::SponsorError(
                 "insufficient pool balance".into(),
             ));
         }
 
-        // Deduct from pool
+        // Deduct from pool balance only (balances layer tracks pool separately)
         let pool = self.pools.get_mut(sponsor).unwrap();
         pool.balance -= fee as Balance;
 
-        // Also deduct from balances layer
-        balances.balances.deduct_balance(0, *sponsor, fee)
+        // Deduct from sponsor's balance layer entry
+        balances.balances.deduct_balance(0, *sponsor, fee as Balance)
     }
 
     pub fn verify_and_deduct_per_tx_sponsor(
         &mut self,
-        _sponsor: &Address,
-        _fee: u128,
-        _balances: &mut BalanceState,
+        sponsor: &Address,
+        fee: u128,
+        balances: &mut BalanceState,
     ) -> ProtocolResult<()> {
-        // Per-tx sponsor signature verification
-        // Actual sig verification done by caller
-        Ok(())
+        // Check sponsor has sufficient balance
+        let sponsor_bal = balances.balances.get_balance(0, sponsor);
+        if sponsor_bal < fee {
+            return Err(ProtocolError::SponsorError(
+                "sponsor insufficient balance".into(),
+            ));
+        }
+        // Deduct from sponsor balance
+        balances.balances.deduct_balance(0, *sponsor, fee)
     }
 }
 
@@ -310,7 +316,15 @@ mod tests {
     #[test]
     fn test_per_tx_sponsor_signature_verification() {
         let mut registry = SponsorRegistry::new();
-        let result = registry.verify_and_deduct_per_tx_sponsor(&test_addr(1), 100, &mut BalanceState::new());
-        assert!(result.is_ok()); // Sig check delegated to caller
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(0, test_addr(1), 1000).unwrap();
+        // With sufficient balance, should succeed
+        let result = registry.verify_and_deduct_per_tx_sponsor(&test_addr(1), 100, &mut balances);
+        assert!(result.is_ok());
+        assert_eq!(balances.balances.get_balance(0, &test_addr(1)), 900);
+
+        // Insufficient balance should fail
+        let result = registry.verify_and_deduct_per_tx_sponsor(&test_addr(2), 100, &mut balances);
+        assert!(result.is_err());
     }
 }

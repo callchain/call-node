@@ -50,9 +50,12 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .ok_or_else(|| invalid_params("missing 'to' field".into()))?;
             let to = to_str.parse::<Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
-            let amount = call_obj.get("amount")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| invalid_params("missing 'amount' field".into()))? as u128;
+            let amount_str = call_obj.get("amount")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'amount' field (must be string)".into()))?;
+            let amount: u128 = amount_str
+                .parse()
+                .map_err(|_| invalid_params("invalid amount: must be a numeric string".into()))?;
             let asset_id = call_obj.get("assetId")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
@@ -68,7 +71,29 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .map(|v| v as u128)
                 .unwrap_or(gas_limit as u128 * 10);
 
-            match state.submit_payment(from, nonce, asset_id, to, amount, memo, gas_limit, max_fee, None) {
+            let sig_hex = call_obj.get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
+
+            // Recover signer address from signature and verify it matches sender
+            let mut preimage = Vec::new();
+            preimage.extend_from_slice(from.as_slice());
+            preimage.extend_from_slice(&nonce.to_be_bytes());
+            preimage.extend_from_slice(&asset_id.to_be_bytes());
+            preimage.extend_from_slice(to.as_slice());
+            preimage.extend_from_slice(&amount.to_be_bytes());
+            let tx_hash_preimage = call_crypto::keccak256(&preimage);
+            let recovered = call_crypto::recover_secp256k1_signer(&tx_hash_preimage.0, &signature)
+                .map_err(|e| invalid_params(format!("signature recovery failed: {e:?}")))?;
+            if recovered != from {
+                return Err(invalid_params("signature does not match sender address".into()));
+            }
+
+            match state.submit_payment(from, nonce, asset_id, to, amount, memo, gas_limit, max_fee, Some(signature)) {
                 Ok(tx_hash) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "txHash": format!("0x{}", hex::encode(tx_hash)),
                     "status": "pending",
@@ -203,8 +228,19 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_agentGrant
     module
         .register_async_method("call_agentGrant", |params, state, _ctx| async move {
-            let (agent_id, asset_id, amount): (u64, u64, u128) =
+            let (caller_str, agent_id, asset_id, amount): (String, u64, u64, u128) =
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let caller = caller_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            // Verify caller is the agent owner
+            let registry = state.agent_registry.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let agent = registry.get_agent(agent_id)
+                .ok_or_else(|| invalid_params("agent not found".into()))?;
+            if agent.owner != caller {
+                return Err(invalid_params("only the agent owner can grant balance".into()));
+            }
+            drop(registry);
+
             state.grant_agent_balance(agent_id, asset_id, amount)
                 .map_err(invalid_params)?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -219,8 +255,19 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_agentRevoke
     module
         .register_async_method("call_agentRevoke", |params, state, _ctx| async move {
-            let (agent_id, asset_id): (u64, u64) =
+            let (caller_str, agent_id, asset_id): (String, u64, u64) =
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let caller = caller_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            // Verify caller is the agent owner
+            let registry = state.agent_registry.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let agent = registry.get_agent(agent_id)
+                .ok_or_else(|| invalid_params("agent not found".into()))?;
+            if agent.owner != caller {
+                return Err(invalid_params("only the agent owner can revoke balance".into()));
+            }
+            drop(registry);
+
             state.revoke_agent_balance(agent_id, asset_id)
                 .map_err(invalid_params)?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -234,21 +281,16 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_shieldedDepositProve
     module
         .register_async_method("call_shieldedDepositProve", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "proof": "0x",
-                "commitment": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            }))
+            Err::<serde_json::Value, _>(internal_error(
+                "shielded deposit proving requires a local prover — use the CLI wallet or a dedicated proving service".into()))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
     // call_shieldedTransferProve
     module
         .register_async_method("call_shieldedTransferProve", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "proof": "0x",
-                "nullifiers": [],
-                "commitments": [],
-            }))
+            Err::<serde_json::Value, _>(internal_error(
+                "shielded transfer proving requires a local prover — use the CLI wallet or a dedicated proving service".into()))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -845,11 +887,12 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let asset_id = call_obj.get("assetId")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
-            let amount = call_obj.get("amount")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| invalid_params("missing 'amount' field".into()))? as u128;
-
-            // Parse signatures
+            let amount_str = call_obj.get("amount")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'amount' field (must be string)".into()))?;
+            let amount: u128 = amount_str
+                .parse()
+                .map_err(|_| invalid_params("invalid amount: must be a numeric string".into()))?;
             let sigs_array = call_obj.get("signatures")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| invalid_params("missing 'signatures' field".into()))?;
@@ -901,10 +944,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let mut balances = state.balance_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
             let mut bridge_state = state.bridge_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
 
-            // Track processed txs in a local set (in production, this would be persisted)
-            let mut processed_txs = std::collections::HashSet::new();
-
-            match call_bridge::process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, &mut processed_txs) {
+            match call_bridge::process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators) {
                 Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "status": "deposited",
                     "sourceTxHash": source_tx_hash_hex,

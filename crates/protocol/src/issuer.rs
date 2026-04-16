@@ -72,12 +72,11 @@ impl IssuerState {
             }
             IssuerAction::UpdatePolicy { new_policy } => {
                 // Update compliance policy on asset
-                // Done via registry update
-                let _ = new_policy;
+                registry.update_asset_compliance_policy(asset_id, caller, new_policy)?;
             }
             IssuerAction::TransferOwnership { new_issuer } => {
-                // Transfer ownership — actual mutation done by caller
-                let _ = new_issuer;
+                // Transfer ownership by updating the registry
+                registry.transfer_asset_issuer(asset_id, caller, new_issuer)?;
             }
         }
         Ok(())
@@ -121,9 +120,8 @@ impl IssuerState {
             return Err(ProtocolError::Unauthorized);
         }
 
-        // Ownership transferred — caller would update registry
-        let _ = (asset_id, new_issuer);
-        Ok(())
+        // Actually update the registry
+        registry.transfer_asset_issuer(asset_id, caller, new_issuer)
     }
 }
 

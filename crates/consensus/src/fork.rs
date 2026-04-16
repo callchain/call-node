@@ -246,13 +246,16 @@ impl ForkManager {
 // ─── Helpers ───────────────────────────────────────────────────────────
 
 /// Canonical message for rollback signatures
+/// All validators sign the same (target_height, target_version) tuple.
+/// validator_id is NOT included so that a single message is verifiable by any validator.
 pub fn rollback_message_hash(
-    validator_id: ValidatorId,
+    _validator_id: ValidatorId,
     target_height: u64,
     target_version: ProtocolVersion,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(4 + 8 + 2 + 2 + 2);
-    msg.extend_from_slice(&validator_id.to_le_bytes());
+    let mut msg = Vec::with_capacity(8 + 2 + 2 + 2);
+    // Domain separator to prevent replay across different contexts
+    msg.extend_from_slice(b"CALL-EMERGENCY-ROLLBACK:");
     msg.extend_from_slice(&target_height.to_le_bytes());
     msg.extend_from_slice(&target_version.major.to_le_bytes());
     msg.extend_from_slice(&target_version.minor.to_le_bytes());

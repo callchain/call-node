@@ -109,6 +109,27 @@ impl FeeCurrencyRegistry {
         Ok(())
     }
 
+    /// Increment the stablecoin usage counter (call after a stablecoin fee is paid)
+    pub fn increment_stablecoin_used(&mut self, amount: Balance) -> ProtocolResult<()> {
+        self.current_stablecoin_used = self
+            .current_stablecoin_used
+            .checked_add(amount)
+            .ok_or(ProtocolError::GasError(
+                "stablecoin used overflow".into(),
+            ))?;
+        Ok(())
+    }
+
+    /// Reset the stablecoin counter (called at the start of each cap window)
+    pub fn reset_stablecoin_used(&mut self) {
+        self.current_stablecoin_used = 0;
+    }
+
+    /// Get current stablecoin usage
+    pub fn stablecoin_used(&self) -> Balance {
+        self.current_stablecoin_used
+    }
+
     /// Priority score for mempool sorting
     pub fn priority_score(&self, fee: u128, is_call: bool, oracle: Option<&OracleManager>) -> u128 {
         if is_call {

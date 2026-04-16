@@ -98,7 +98,7 @@ impl PayloadBuilder {
         bridge_ops: Vec<BridgeOp>,
         balances: &mut BalanceState,
         registry: &AssetRegistry,
-        compliance: &ComplianceEngine,
+        compliance: &mut ComplianceEngine,
         bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
@@ -276,7 +276,7 @@ impl PayloadBuilder {
         selection: MempoolSelection,
         balances: &mut BalanceState,
         registry: &AssetRegistry,
-        compliance: &ComplianceEngine,
+        compliance: &mut ComplianceEngine,
         bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
@@ -394,7 +394,7 @@ mod tests {
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
@@ -406,7 +406,7 @@ mod tests {
             bridge_ops,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
@@ -437,7 +437,7 @@ mod tests {
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, test_addr(1), 100_000).unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
@@ -449,7 +449,7 @@ mod tests {
             bridge_ops,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
@@ -485,7 +485,7 @@ mod tests {
         balances.balances.set_balance(1, test_addr(2), 10_000).unwrap();
         balances.balances.set_balance(1, test_addr(3), 10_000).unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
@@ -497,7 +497,7 @@ mod tests {
             vec![],
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
@@ -546,7 +546,7 @@ mod tests {
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
@@ -559,7 +559,7 @@ mod tests {
             bridge_ops,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
@@ -586,7 +586,7 @@ mod tests {
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
@@ -599,7 +599,7 @@ mod tests {
             bridge_ops,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
@@ -651,7 +651,7 @@ mod tests {
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
@@ -662,7 +662,7 @@ mod tests {
             selection,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
@@ -708,7 +708,7 @@ mod tests {
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
         let registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
@@ -720,7 +720,7 @@ mod tests {
             vec![],
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,

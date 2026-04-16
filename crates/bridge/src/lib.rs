@@ -11,7 +11,7 @@ pub use deposit::*;
 pub use withdraw::*;
 pub use external::*;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use call_primitives::AssetId;
 use call_protocol::ProtocolError;
 use thiserror::Error;
@@ -99,6 +99,8 @@ pub struct BridgeStateManager {
     pub daily_usage: std::collections::HashMap<AssetId, u128>,
     /// Bridge paused assets
     pub paused_assets: std::collections::HashSet<AssetId>,
+    /// Processed external tx hashes (replay protection, persisted)
+    pub processed_external_txs: std::collections::HashSet<B256>,
 }
 
 impl BridgeStateManager {
@@ -169,6 +171,16 @@ impl BridgeStateManager {
     /// Reset daily usage (called at start of each new day/block cycle)
     pub fn reset_daily_usage(&mut self) {
         self.daily_usage.clear();
+    }
+
+    /// Check if an external tx was already processed (replay protection)
+    pub fn is_external_tx_processed(&self, tx_hash: &B256) -> bool {
+        self.processed_external_txs.contains(tx_hash)
+    }
+
+    /// Mark an external tx as processed
+    pub fn mark_external_tx_processed(&mut self, tx_hash: B256) {
+        self.processed_external_txs.insert(tx_hash);
     }
 }
 

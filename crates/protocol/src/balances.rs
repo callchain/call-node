@@ -58,10 +58,13 @@ impl ProtocolBalances {
             return Err(ProtocolError::InsufficientBalance);
         }
         let to_bal = self.get_balance(asset_id, &to);
+        let new_to_bal = to_bal
+            .checked_add(amount)
+            .ok_or(ProtocolError::BalanceError("overflow".into()))?;
         self.balances
             .insert((asset_id, from), from_bal - amount);
         self.balances
-            .insert((asset_id, to), to_bal + amount);
+            .insert((asset_id, to), new_to_bal);
         Ok(())
     }
 

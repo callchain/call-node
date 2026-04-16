@@ -201,7 +201,6 @@ pub fn process_external_deposit(
     bridge_state: &mut BridgeStateManager,
     config: &BridgeConfig,
     validators: &[Address],
-    processed_txs: &mut std::collections::HashSet<B256>,
 ) -> Result<(), BridgeError> {
     let ExternalBridgeOp::Deposit {
         source_tx_hash,
@@ -228,8 +227,8 @@ pub fn process_external_deposit(
     // 4. Check daily limit
     bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset)?;
 
-    // 5. Check source tx not already processed (replay protection)
-    if processed_txs.contains(source_tx_hash) {
+    // 5. Check source tx not already processed (replay protection, persisted)
+    if bridge_state.is_external_tx_processed(source_tx_hash) {
         return Err(BridgeError::EvmExecutionFailed(
             "source tx already processed".into(),
         ));
@@ -238,8 +237,8 @@ pub fn process_external_deposit(
     // 6. Credit protocol balance
     let _ = protocol_balances.credit_balance(*asset_id, *recipient, *amount);
 
-    // 7. Mark source tx as processed
-    processed_txs.insert(*source_tx_hash);
+    // 7. Mark source tx as processed (persisted in bridge_state)
+    bridge_state.mark_external_tx_processed(*source_tx_hash);
 
     // 8. Record deposit
     bridge_state.record_deposit(*asset_id, *amount);
@@ -539,7 +538,6 @@ mod tests {
             ..Default::default()
         };
         let (_, validators) = generate_validators(21);
-        let mut processed_txs = std::collections::HashSet::new();
 
         let op = ExternalBridgeOp::Deposit {
             source_chain: ExternalChain::EthereumMainnet,
@@ -558,7 +556,6 @@ mod tests {
             &mut bridge_state,
             &config,
             &validators,
-            &mut processed_txs,
         );
         assert!(matches!(result, Err(BridgeError::ExternalAssetNotAllowed(99))));
     }

@@ -159,6 +159,7 @@ mod tests {
             gas_payer: test_addr(1),
             fee_currency: FeeCurrency::Call,
             fee_amount: 1_000_000,
+            block_number: 1,
             instruction_results: vec![InstructionExecResult {
                 success: true,
                 gas_used: 10_000,
@@ -194,6 +195,7 @@ mod tests {
             gas_payer: test_addr(1),
             fee_currency: FeeCurrency::Call,
             fee_amount: 0,
+            block_number: 1,
             instruction_results: vec![],
             logs: vec![],
             memos: vec![],
@@ -206,6 +208,7 @@ mod tests {
             gas_payer: test_addr(2),
             fee_currency: FeeCurrency::Call,
             fee_amount: 0,
+            block_number: 1,
             instruction_results: vec![],
             logs: vec![],
             memos: vec![],

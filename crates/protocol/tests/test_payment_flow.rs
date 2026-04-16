@@ -27,7 +27,7 @@ mod test_payment_flow_impl {
     fn test_full_payment_flow_register_transfer_balance() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
@@ -46,7 +46,7 @@ mod test_payment_flow_impl {
             vec![make_transfer(asset_id, receiver, 3_000)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &holder), 7_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 3_000);
@@ -59,7 +59,7 @@ mod test_payment_flow_impl {
     fn test_atomic_multi_instruction_transfer_approve_bridge() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
@@ -87,7 +87,7 @@ mod test_payment_flow_impl {
             ],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &holder), 4_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
@@ -102,7 +102,7 @@ mod test_payment_flow_impl {
     fn test_atomic_rollback_on_failure() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let fee_params = FeeParams::default();
 
         let holder = addr(1);
@@ -127,7 +127,7 @@ mod test_payment_flow_impl {
             ],
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut ShieldedState::new(),
             holder,
         );
@@ -143,7 +143,7 @@ mod test_payment_flow_impl {
     fn test_batch_transfer_with_memo() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
@@ -174,7 +174,7 @@ mod test_payment_flow_impl {
         let gas_units = calculate_gas_units(&tx.instructions);
         assert!(gas_units > 0);
 
-        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         for r in &recipients {
             assert_eq!(balances.get_balance(asset_id, r), 1_000);
@@ -188,7 +188,7 @@ mod test_payment_flow_impl {
     fn test_stablecoin_gas_payment() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
@@ -196,7 +196,8 @@ mod test_payment_flow_impl {
         let receiver = addr(2);
 
         let stable_id = setup_asset(&mut balances, &mut registry, "USDC", addr(10), sender, 10_000);
-        balances.balances.set_balance(0, sender, 10_000_000).unwrap();
+        // Need enough stablecoin balance to cover the fee (~100k CALL wei equivalent)
+        balances.balances.set_balance(stable_id, sender, 10_000_000).unwrap();
 
         let tx = ProtocolTransaction {
             sender,
@@ -211,7 +212,7 @@ mod test_payment_flow_impl {
             },
         };
 
-        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(stable_id, &receiver), 100);
     }
@@ -222,7 +223,7 @@ mod test_payment_flow_impl {
     fn test_gas_self_pay_deducted_from_sender() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
@@ -240,7 +241,7 @@ mod test_payment_flow_impl {
             vec![make_transfer(1, receiver, 100)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         let call_balance_after = balances.get_balance(0, &sender);
         assert!(call_balance_after < call_balance_before);
@@ -252,7 +253,7 @@ mod test_payment_flow_impl {
     fn test_gas_authorized_sponsor_pays() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut fee_params = FeeParams::default();
         let mut sponsors = SponsorRegistry::new();
 
@@ -282,7 +283,7 @@ mod test_payment_flow_impl {
             &tx.instructions,
             &mut balances,
             &registry,
-            &compliance,
+            &mut compliance,
             &mut ShieldedState::new(),
             sender,
         )

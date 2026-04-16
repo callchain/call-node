@@ -191,8 +191,10 @@ where S: serde::Serializer {
 
 fn deserialize_merkle<'de, D>(deserializer: D) -> Result<IncrementalMerkleTree, D::Error>
 where D: serde::Deserializer<'de> {
-    // Rebuild tree from empty data — caller should rebuild from notes
+    // Deserialize the raw bytes (may be empty for backward compatibility)
     let _: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+    // Return a fresh empty tree — the caller must rebuild from note_registry
+    // using rebuild_merkle_from_notes after deserializing the full ShieldedState
     Ok(IncrementalMerkleTree::new(32))
 }
 
@@ -292,6 +294,14 @@ impl ShieldedState {
         Ok(())
     }
 
+    /// Rebuild Merkle tree from note_registry (used after deserialization)
+    pub fn rebuild_merkle_tree(&mut self) {
+        self.merkle_tree = IncrementalMerkleTree::new(32);
+        for commitment in self.note_registry.keys() {
+            self.merkle_tree.insert(commitment.0);
+        }
+    }
+
     /// Get current Merkle root
     pub fn merkle_root(&self) -> Hash {
         self.merkle_tree.root()
@@ -311,19 +321,18 @@ impl Default for ShieldedState {
 
 /// Verify a ZK proof against the RealProver when the `real-prover` feature is enabled.
 ///
-/// When `real-prover` is NOT enabled, this performs only structural validation
-/// (same as `verify_zk_proof`). When enabled, it runs actual Groth16 verification
-/// against the verifying keys.
-///
-/// Returns `Result<bool>` so callers can distinguish between structural rejection
-/// (false) and prover errors (Err).
+/// When `real-prover` is NOT enabled, this returns an error — structural-only
+/// validation is not acceptable in production builds.
 #[cfg(not(feature = "real-prover"))]
 pub fn verify_shielded_proof(
     proof: &ZkProof,
     _circuit_type: &str, // "deposit", "withdraw", "transfer"
 ) -> Result<bool, String> {
-    // Without real-prover feature, fall back to structural validation
-    Ok(verify_zk_proof(proof))
+    // Without real-prover feature, reject outright — structural validation
+    // is insufficient for production security. Use --features real-prover
+    // to enable actual Groth16 verification.
+    let _ = proof;
+    Err("ZK proof verification requires the `real-prover` feature — structural-only validation is not acceptable in production".into())
 }
 
 #[cfg(feature = "real-prover")]

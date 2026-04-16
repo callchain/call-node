@@ -50,7 +50,7 @@ mod test_shielded_integration_impl {
     fn test_shielded_deposit_deducts_transparent_balance() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         let asset_id = setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
@@ -67,7 +67,7 @@ mod test_shielded_integration_impl {
         }];
         let mut shielded_state2 = ShieldedState::new();
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &compliance, &mut shielded_state2, sender,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state2, sender,
         ).unwrap();
 
         // Transparent balance should be deducted
@@ -82,7 +82,7 @@ mod test_shielded_integration_impl {
     fn test_shielded_withdraw_credits_transparent_balance() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         let receiver = addr(2);
@@ -99,7 +99,7 @@ mod test_shielded_integration_impl {
             nullifier: nullifier.0,
         }];
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender,
         ).unwrap();
 
         // Transparent balance should be credited
@@ -114,7 +114,7 @@ mod test_shielded_integration_impl {
     fn test_shielded_transfer_updates_nullifier_set() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
@@ -134,7 +134,7 @@ mod test_shielded_integration_impl {
             encrypted_notes: vec![output_note.to_encrypted_bytes()],
         }];
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender,
         ).unwrap();
 
         // Nullifier should be marked spent
@@ -147,7 +147,7 @@ mod test_shielded_integration_impl {
     fn test_shielded_transfer_double_spend_rejected() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = ComplianceEngine::new();
+        let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
@@ -167,7 +167,7 @@ mod test_shielded_integration_impl {
         }];
         // First transfer should succeed
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender,
         ).unwrap();
 
         // Second transfer with same nullifier should fail
@@ -180,7 +180,7 @@ mod test_shielded_integration_impl {
             encrypted_notes: vec![output_note2.to_encrypted_bytes()],
         }];
         let result = call_protocol::instructions::execute_protocol_instructions(
-            &instructions2, &mut balances, &registry, &compliance, &mut shielded_state, sender,
+            &instructions2, &mut balances, &registry, &mut compliance, &mut shielded_state, sender,
         );
         assert!(result.is_err());
     }

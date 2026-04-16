@@ -222,7 +222,7 @@ impl TestNode {
         let result = {
             let mut balances = self.state.balance_state.write().unwrap();
             let registry = self.state.asset_registry.read().unwrap();
-            let compliance = self.state.compliance_engine.read().unwrap();
+            let mut compliance = self.state.compliance_engine.write().unwrap();
             let mut bridge_state = self.state.bridge_state.write().unwrap();
             let mut shielded_state = self.state.shielded_state.write().unwrap();
             let mut fee_params = self.state.fee_params.write().unwrap();
@@ -232,7 +232,7 @@ impl TestNode {
                 .execute(
                     &mut balances,
                     &registry,
-                    &compliance,
+                    &mut compliance,
                     &mut bridge_state,
                     &mut shielded_state,
                     &mut fee_params,

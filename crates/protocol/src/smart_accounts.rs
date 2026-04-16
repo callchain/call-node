@@ -56,11 +56,12 @@ pub struct RecoveryRequest {
 #[derive(Debug, Clone)]
 pub struct SocialRecoveryConfig {
     pub recovery_delay_secs: u64, // 24-72 hours
+    pub guardians: Vec<Address>,  // authorized guardian addresses
     pub pending_recovery: Option<RecoveryRequest>,
 }
 
 impl SocialRecoveryConfig {
-    pub fn new(delay_secs: u64) -> ProtocolResult<Self> {
+    pub fn new(delay_secs: u64, guardians: Vec<Address>) -> ProtocolResult<Self> {
         let min_delay = 24 * 3600;  // 24 hours
         let max_delay = 72 * 3600;  // 72 hours
         if delay_secs < min_delay || delay_secs > max_delay {
@@ -68,8 +69,14 @@ impl SocialRecoveryConfig {
                 format!("delay must be 24-72 hours ({min_delay}-{max_delay}s)")
             ));
         }
+        if guardians.len() < 2 {
+            return Err(ProtocolError::Recovery(
+                "at least 2 guardians required".into(),
+            ));
+        }
         Ok(Self {
             recovery_delay_secs: delay_secs,
+            guardians,
             pending_recovery: None,
         })
     }
@@ -106,7 +113,8 @@ pub struct SessionKeyDailyUsage {
 pub struct SmartAccountRegistry {
     multi_sigs: HashMap<Address, MultiSigConfig>,
     recovery_configs: HashMap<Address, SocialRecoveryConfig>,
-    session_keys: HashMap<Address, SessionKeyConfig>,
+    /// Multiple session keys per account: account → (session_key → config)
+    session_keys: HashMap<Address, HashMap<Address, SessionKeyConfig>>,
     session_usage: HashMap<Address, SessionKeyDailyUsage>,
 }
 
@@ -212,6 +220,11 @@ impl SmartAccountRegistry {
             .get_mut(&account)
             .ok_or_else(|| ProtocolError::Recovery("no recovery config".into()))?;
 
+        // Only authorized guardians can approve
+        if !config.guardians.contains(&guardian) {
+            return Err(ProtocolError::Unauthorized);
+        }
+
         let request = config
             .pending_recovery
             .as_mut()
@@ -258,20 +271,24 @@ impl SmartAccountRegistry {
         permissions: SessionPermissions,
         expires_at: u64,
     ) -> ProtocolResult<()> {
-        self.session_keys.insert(
-            account,
-            SessionKeyConfig {
+        self.session_keys
+            .entry(account)
+            .or_default()
+            .insert(
                 session_key,
-                permissions,
-                expires_at,
-            },
-        );
+                SessionKeyConfig {
+                    session_key,
+                    permissions,
+                    expires_at,
+                },
+            );
         Ok(())
     }
 
-    pub fn revoke_session_key(&mut self, account: Address) -> ProtocolResult<()> {
+    pub fn revoke_session_key(&mut self, account: Address, session_key: &Address) -> ProtocolResult<()> {
         self.session_keys
-            .remove(&account)
+            .get_mut(&account)
+            .and_then(|map| map.remove(session_key))
             .map(|_| ())
             .ok_or_else(|| ProtocolError::SessionKey("no session key".into()))
     }
@@ -282,14 +299,15 @@ impl SmartAccountRegistry {
         session_key: &Address,
         current_time: u64,
     ) -> ProtocolResult<()> {
-        let config = self
+        let account_keys = self
             .session_keys
             .get(account)
             .ok_or_else(|| ProtocolError::SessionKey("no session key config".into()))?;
 
-        if &config.session_key != session_key {
-            return Err(ProtocolError::Unauthorized);
-        }
+        let config = account_keys
+            .get(session_key)
+            .ok_or_else(|| ProtocolError::Unauthorized)?;
+
         if current_time > config.expires_at {
             return Err(ProtocolError::SessionKey("session expired".into()));
         }
@@ -387,7 +405,7 @@ mod tests {
         let mut registry = SmartAccountRegistry::new();
         registry.recovery_configs.insert(
             test_addr(1),
-            SocialRecoveryConfig::new(48 * 3600).unwrap(),
+            SocialRecoveryConfig::new(48 * 3600, vec![test_addr(2), test_addr(3), test_addr(4)]).unwrap(),
         );
 
         registry
@@ -403,12 +421,13 @@ mod tests {
         let mut registry = SmartAccountRegistry::new();
         registry.recovery_configs.insert(
             test_addr(1),
-            SocialRecoveryConfig::new(48 * 3600).unwrap(),
+            SocialRecoveryConfig::new(48 * 3600, vec![test_addr(2), test_addr(3), test_addr(4)]).unwrap(),
         );
         registry
             .initiate_recovery(test_addr(1), [0u8; 64], test_addr(2), [0u8; 65])
             .unwrap();
 
+        // Authorized guardian can approve
         registry
             .guardian_approve(test_addr(1), test_addr(3))
             .unwrap();
@@ -416,6 +435,10 @@ mod tests {
         let config = registry.recovery_configs.get(&test_addr(1)).unwrap();
         let request = config.pending_recovery.as_ref().unwrap();
         assert_eq!(request.approved_by.len(), 2);
+
+        // Non-guardian cannot approve
+        let result = registry.guardian_approve(test_addr(1), test_addr(99));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -423,7 +446,7 @@ mod tests {
         let mut registry = SmartAccountRegistry::new();
         registry.recovery_configs.insert(
             test_addr(1),
-            SocialRecoveryConfig::new(48 * 3600).unwrap(),
+            SocialRecoveryConfig::new(48 * 3600, vec![test_addr(2), test_addr(3)]).unwrap(),
         );
         registry
             .initiate_recovery(test_addr(1), [1u8; 64], test_addr(2), [0u8; 65])
@@ -441,7 +464,7 @@ mod tests {
         let mut registry = SmartAccountRegistry::new();
         registry.recovery_configs.insert(
             test_addr(1),
-            SocialRecoveryConfig::new(48 * 3600).unwrap(),
+            SocialRecoveryConfig::new(48 * 3600, vec![test_addr(2), test_addr(3)]).unwrap(),
         );
         registry
             .initiate_recovery(test_addr(1), [0u8; 64], test_addr(2), [0u8; 65])
@@ -470,10 +493,30 @@ mod tests {
             )
             .unwrap();
 
-        registry.revoke_session_key(test_addr(1)).unwrap();
+        // Multiple session keys per account
+        registry
+            .create_session_key(
+                test_addr(1),
+                test_addr(11),
+                SessionPermissions {
+                    allowed_instructions: vec![InstructionType::Transfer],
+                    max_per_tx: 500,
+                    max_daily: 5000,
+                    allowed_targets: vec![],
+                    allowed_assets: vec![],
+                },
+                2000,
+            )
+            .unwrap();
+
+        registry.revoke_session_key(test_addr(1), &test_addr(10)).unwrap();
         assert!(registry
             .verify_session_key(&test_addr(1), &test_addr(10), 500)
             .is_err());
+        // Second key still valid
+        assert!(registry
+            .verify_session_key(&test_addr(1), &test_addr(11), 500)
+            .is_ok());
     }
 
     #[test]

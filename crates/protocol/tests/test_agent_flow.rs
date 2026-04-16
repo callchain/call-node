@@ -146,14 +146,14 @@ mod test_agent_flow_impl {
     fn test_agent_pay_instruction_executes() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let sender = addr(1);
         let receiver = addr(2);
         let asset_id = setup_asset(&mut balances, &mut registry, "AGENT", addr(10), sender, 5_000);
 
         let instructions = vec![Instruction::AgentPay { payment: AgentPayment { agent_id: 0, asset_id, to: receiver, amount: 1_000 } }];
         let mut shielded_state = ShieldedState::new();
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
@@ -163,14 +163,14 @@ mod test_agent_flow_impl {
     fn test_agent_batch_pay_multiple() {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
-        let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let sender = addr(1);
         let asset_id = setup_asset(&mut balances, &mut registry, "BATCH", addr(10), sender, 10_000);
 
         let payments: Vec<AgentPayment> = (2..6).map(|i| AgentPayment { agent_id: 0, asset_id, to: addr(i), amount: 500 }).collect();
         let instructions = vec![Instruction::AgentBatchPay { payments }];
         let mut shielded_state = ShieldedState::new();
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &sender), 8_000);
         for i in 2..6 {

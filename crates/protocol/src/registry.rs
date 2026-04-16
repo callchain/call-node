@@ -154,6 +154,45 @@ impl AssetRegistry {
     pub fn next_id(&self) -> AssetId {
         self.next_id
     }
+
+    /// Transfer ownership of an asset to a new issuer
+    pub fn transfer_asset_issuer(
+        &mut self,
+        id: AssetId,
+        caller: Address,
+        new_issuer: Address,
+    ) -> ProtocolResult<()> {
+        let asset = self
+            .assets_by_id
+            .get_mut(&id)
+            .ok_or(ProtocolError::AssetError("asset not found".into()))?;
+        if asset.issuer != caller {
+            return Err(ProtocolError::Unauthorized);
+        }
+        if caller == new_issuer {
+            return Err(ProtocolError::Unauthorized);
+        }
+        asset.issuer = new_issuer;
+        Ok(())
+    }
+
+    /// Update the compliance policy for an asset (issuer only)
+    pub fn update_asset_compliance_policy(
+        &mut self,
+        id: AssetId,
+        caller: Address,
+        new_policy: u8,
+    ) -> ProtocolResult<()> {
+        let asset = self
+            .assets_by_id
+            .get_mut(&id)
+            .ok_or(ProtocolError::AssetError("asset not found".into()))?;
+        if asset.issuer != caller {
+            return Err(ProtocolError::Unauthorized);
+        }
+        asset.compliance_policy = new_policy;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

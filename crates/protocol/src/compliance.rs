@@ -21,6 +21,15 @@ pub enum CompliancePolicy {
     Custom,
 }
 
+/// Compliance status for a specific address and asset
+pub use crate::instructions::ComplianceStatus;
+
+/// Per-address compliance state keyed by (address, policy_id)
+#[derive(Debug, Default)]
+struct AddressComplianceState {
+    status: ComplianceStatus,
+}
+
 /// Compliance engine state
 #[derive(Default)]
 pub struct ComplianceEngine {
@@ -28,6 +37,8 @@ pub struct ComplianceEngine {
     kyc_verified: HashSet<Address>,
     whitelisted: HashSet<Address>,
     custom_handlers: HashMap<u8, Box<dyn CustomComplianceHandler + Send + Sync>>,
+    /// Per-address compliance status: (address, policy_id) → state
+    address_states: HashMap<(Address, u8), AddressComplianceState>,
 }
 
 /// Trait for custom compliance handlers
@@ -139,6 +150,59 @@ impl ComplianceEngine {
             .get(&id)
             .map(|h| h.check(address))
             .unwrap_or(false)
+    }
+
+    // ── Per-address compliance status ──
+
+    /// Set compliance status for an address under a specific policy
+    pub fn set_address_compliance(
+        &mut self,
+        address: Address,
+        policy_id: u8,
+        status: ComplianceStatus,
+    ) -> ProtocolResult<()> {
+        self.address_states.insert(
+            (address, policy_id),
+            AddressComplianceState { status },
+        );
+        Ok(())
+    }
+
+    /// Get compliance status for an address under a specific policy
+    pub fn get_address_compliance(
+        &self,
+        address: &Address,
+        policy_id: u8,
+    ) -> ComplianceStatus {
+        self.address_states
+            .get(&(*address, policy_id))
+            .map(|s| s.status)
+            .unwrap_or(ComplianceStatus::Clear)
+    }
+
+    /// Check compliance using raw policy ID (u8), used by instruction execution
+    pub fn check_compliance_by_policy_id(
+        &self,
+        address: &Address,
+        policy_id: u8,
+    ) -> ProtocolResult<()> {
+        // Convert u8 to CompliancePolicy enum
+        let policy = match policy_id {
+            0 => CompliancePolicy::None,
+            1 => CompliancePolicy::OfacBlacklist,
+            2 => CompliancePolicy::KycRequired,
+            3 => CompliancePolicy::Whitelist,
+            4 => CompliancePolicy::Custom,
+            _ => CompliancePolicy::None,
+        };
+        // Check if address is restricted
+        let state = self.get_address_compliance(address, policy_id);
+        if state == ComplianceStatus::Restricted {
+            return Err(ProtocolError::Compliance(
+                "address compliance status is restricted".into(),
+            ));
+        }
+        self.check_compliance(address, policy)
     }
 }
 

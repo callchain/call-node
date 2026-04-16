@@ -220,7 +220,7 @@ impl Block {
         &self,
         balances: &mut BalanceState,
         registry: &AssetRegistry,
-        compliance: &call_protocol::compliance::ComplianceEngine,
+        compliance: &mut call_protocol::compliance::ComplianceEngine,
         bridge_state: &mut call_bridge::BridgeStateManager,
         shielded_state: &mut ShieldedState,
         fee_params: &mut FeeParams,
@@ -622,7 +622,7 @@ mod tests {
             .set_balance(1, test_addr(1), 10_000)
             .unwrap();
         let registry = AssetRegistry::new();
-        let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
@@ -633,7 +633,7 @@ mod tests {
             .execute(
                 &mut balances,
                 &registry,
-                &compliance,
+                &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
                 &mut fee_params,
@@ -690,7 +690,7 @@ mod tests {
 
         let mut balances = BalanceState::new();
         let registry = AssetRegistry::new();
-        let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
@@ -700,7 +700,7 @@ mod tests {
             .execute(
                 &mut balances,
                 &registry,
-                &compliance,
+                &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
                 &mut fee_params,
