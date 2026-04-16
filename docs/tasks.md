@@ -1277,30 +1277,30 @@ P1-P22 ───────────→ P23 (E2E Tests)
 
 After all tasks complete, verify against spec.md section-by-section:
 
-- [ ] §1 Overview — dual execution architecture reflected in crate structure
-- [ ] §2 Consensus — Simplex BFT, 216 validators, 21 subset, 250ms blocks
-- [ ] §3 Protocol Payment — all Instruction variants, GasConfig, FeeCurrency, AuthScheme
-- [ ] §4 EVM — Revm integration, ERC-20 templates, independent contracts
-- [ ] §5 Internal Bridge — deposit/withdraw, same-block completion
-- [ ] §5.6 External Bridge — validator signatures, deposit/withdraw flows
-- [ ] §6 Agent — registration, permissions, funding, execution, gas discount
-- [ ] §7 Issuer — IssuerAction enum, freeze/unfreeze, transfer ownership, issuer limitations
-- [ ] §8 Network — commonware-p2p, gossip priorities
-- [ ] §9 Serialization — RLP for P2P/storage, Serde for RPC/config
-- [ ] §10 Storage — reth-db, prune strategy, snapshots, fast sync flow
-- [ ] §11 RPC — all standard + Callchain + WS methods
-- [ ] §12 Economics — token distribution, EIP-1559, fee allocation (CALL burn + stablecoin treasury), staking, gas unit table
-- [ ] §13 Security — crypto, MEV (PBS + commit-reveal), governance, attack prevention
-- [ ] §14 Performance — TPS target, block time, finality
-- [ ] §15 Crate structure — matches §15 directory layout
-- [ ] §16 Genesis — JSON format, initialization flow
-- [ ] §17 Mempool — pools, priority, capacity, eviction
-- [ ] §18 State Transition — apply_block, validity rules, atomicity, receipts (incl. ChangeType, receipt prune)
-- [ ] §19 Fork/Upgrade — height activation, governance trigger
-- [ ] §20 Telemetry — Prometheus metrics, alerts
-- [ ] §21 Boot/Config — CLI, TOML, boot sequence
-- [ ] §22 State Expiration — no expiration for protocol, EIP-161 for EVM, expiration vs prune relationship
-- [ ] §23 Light Client — header verification, 8 RPC methods, proof types, sync strategy
-- [ ] §24 Logging — structured LogEntry, audit log (AppendOnly, ShieldedAuditInfo), compliance report
-- [ ] §25 Oracle — submissions, aggregation, precompile, TWAP, full config params
-- [ ] §26 Design Decisions — dual ledger, Simplex, Reth rationale preserved
+- [x] §1 Overview — dual execution architecture reflected in crate structure
+- [x] §2 Consensus — Simplex BFT, 216 validators, 21 subset, 250ms blocks
+- [x] §3 Protocol Payment — all Instruction variants, GasConfig, FeeCurrency, AuthScheme
+- [x] §4 EVM — Revm integration, ERC-20 templates, independent contracts
+- [x] §5 Internal Bridge — deposit/withdraw, same-block completion
+- [x] §5.6 External Bridge — validator signatures, deposit/withdraw flows
+- [x] §6 Agent — registration, permissions, funding, execution, gas discount
+- [x] §7 Issuer — IssuerAction enum, freeze/unfreeze, transfer ownership, issuer limitations
+- [x] §8 Network — commonware-p2p, gossip priorities
+- [x] §9 Serialization — RLP for P2P/storage, Serde for RPC/config
+- [x] §10 Storage — reth-db, prune strategy, snapshots, fast sync flow
+- [x] §11 RPC — all standard + Callchain + WS methods
+- [x] §12 Economics — token distribution, EIP-1559, fee allocation (CALL burn + stablecoin treasury), staking, gas unit table
+- [x] §13 Security — crypto, MEV (PBS + commit-reveal), governance, attack prevention
+- [x] §14 Performance — TPS target, block time, finality
+- [x] §15 Crate structure — matches §15 directory layout
+- [x] §16 Genesis — JSON format, initialization flow
+- [x] §17 Mempool — pools, priority, capacity, eviction
+- [x] §18 State Transition — apply_block, validity rules, atomicity, receipts (incl. ChangeType, receipt prune)
+- [x] §19 Fork/Upgrade — height activation, governance trigger
+- [x] §20 Telemetry — Prometheus metrics, alerts
+- [x] §21 Boot/Config — CLI, TOML, boot sequence
+- [x] §22 State Expiration — no expiration for protocol, EIP-161 for EVM, expiration vs prune relationship
+- [x] §23 Light Client — header verification, 8 RPC methods, proof types, sync strategy
+- [x] §24 Logging — structured LogEntry, audit log (AppendOnly, ShieldedAuditInfo), compliance report
+- [x] §25 Oracle — submissions, aggregation, precompile, TWAP, full config params
+- [x] §26 Design Decisions — dual ledger, Simplex, Reth rationale preserved
