@@ -119,7 +119,7 @@ impl ShieldedComplianceMode {
     }
 
     /// Derive a 20-byte Address from a note's incoming viewing key
-    fn derive_address_from_ivk(note: &Note) -> Address {
+    pub fn derive_address_from_ivk(note: &Note) -> Address {
         use call_crypto::keccak256;
         let ivk = note.rcm(); // rcm is derived from the same IVK used in note creation
         let hash = keccak256(ivk);
