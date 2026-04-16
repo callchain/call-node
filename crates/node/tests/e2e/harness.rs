@@ -224,6 +224,7 @@ impl TestNode {
             let registry = self.state.asset_registry.read().unwrap();
             let compliance = self.state.compliance_engine.read().unwrap();
             let mut bridge_state = self.state.bridge_state.write().unwrap();
+            let mut shielded_state = self.state.shielded_state.write().unwrap();
             let mut fee_params = self.state.fee_params.write().unwrap();
 
             block
@@ -232,6 +233,7 @@ impl TestNode {
                     &registry,
                     &compliance,
                     &mut bridge_state,
+                    &mut shielded_state,
                     &mut fee_params,
                     height,
                 )

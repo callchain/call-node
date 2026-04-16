@@ -18,6 +18,7 @@ use call_bridge::{
     BridgeConfig, BridgeStateManager,
 };
 use call_evm::{EvmExecutor, EvmState};
+use call_shielded::ShieldedState;
 use crate::{
     AgentBalances, AgentError, AgentFeeConfig, AgentNonces, AgentPermissions,
     AgentDailyUsage, AgentRegistration, SignedAgentTx,
@@ -129,6 +130,7 @@ pub fn execute_agent_tx(
     bridge_config: &BridgeConfig,
     registry: &AssetRegistry,
     compliance: &ComplianceEngine,
+    shielded_state: &mut ShieldedState,
     agent_evm_address: Address,
 ) -> Result<Vec<InstructionResult>, AgentError> {
     let protocol_tx = &signed_tx.protocol_tx;
@@ -151,6 +153,7 @@ pub fn execute_agent_tx(
         protocol_balances,
         registry,
         compliance,
+        shielded_state,
         agent_evm_address,
     )
     .map_err(|e| AgentError::ExecutionFailed(format!("{:?}", e)))?;

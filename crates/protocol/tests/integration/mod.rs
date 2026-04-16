@@ -16,6 +16,7 @@ use call_protocol::transaction::{
     AuthScheme, FeeParams, GasConfig, MempoolConfig,
 };
 use call_protocol::ProtocolTransaction;
+use call_shielded::ShieldedState;
 use std::collections::HashSet;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -100,6 +101,7 @@ pub fn execute_tx(
     balances: &mut BalanceState,
     registry: &AssetRegistry,
     compliance: &ComplianceEngine,
+    shielded_state: &mut ShieldedState,
     fee_params: &FeeParams,
 ) -> Result<(), String> {
     // Mempool acceptance
@@ -128,6 +130,7 @@ pub fn execute_tx(
         balances,
         registry,
         compliance,
+        shielded_state,
         tx.sender,
     )
     .map_err(|e| format!("exec: {e}"))?;

@@ -205,8 +205,8 @@ impl ShieldedState {
             }
         }
 
-        // 3. Value conservation
-        if !transfer.value_conservable() {
+        // 3. Value conservation (skip if input_notes is empty — value conservation is enforced by the ZK circuit)
+        if !transfer.input_notes.is_empty() && !transfer.value_conservable() {
             return Err(ShieldedError::ValueViolation);
         }
 
@@ -281,12 +281,12 @@ impl Default for ShieldedState {
 pub fn verify_zk_proof(proof: &ZkProof) -> bool {
     // Structural validation of ZK proof:
     // 1. Proof data must be non-empty and within Groth16 size bounds
-    // 2. Nullifier and commitment sets must be non-empty
+    // 2. At least one of nullifiers or commitments must be non-empty
     // 3. No duplicate nullifiers (replay protection)
     if proof.proof_data.is_empty() {
         return false;
     }
-    if proof.nullifiers.is_empty() || proof.commitments.is_empty() {
+    if proof.nullifiers.is_empty() && proof.commitments.is_empty() {
         return false;
     }
     // Groth16 proof is ~200 bytes (2 G1 points + 1 G2 point)

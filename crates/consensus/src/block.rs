@@ -10,6 +10,7 @@ use call_protocol::instructions::{execute_protocol_instructions, InstructionResu
 use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::ProtocolTransaction;
 use call_protocol::FeeParams;
+use call_shielded::ShieldedState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -219,6 +220,7 @@ impl Block {
         registry: &AssetRegistry,
         compliance: &call_protocol::compliance::ComplianceEngine,
         bridge_state: &mut call_bridge::BridgeStateManager,
+        shielded_state: &mut ShieldedState,
         fee_params: &mut FeeParams,
         current_block_height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
@@ -234,6 +236,7 @@ impl Block {
                 balances,
                 registry,
                 compliance,
+                shielded_state,
                 tx.sender,
             )
             .map_err(|e| ConsensusError::InvalidBlock(format!("protocol tx: {e}")))?;
@@ -519,6 +522,7 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
 
         let result = block
@@ -527,6 +531,7 @@ mod tests {
                 &registry,
                 &compliance,
                 &mut bridge_state,
+                &mut shielded_state,
                 &mut fee_params,
                 1,
             )
@@ -582,6 +587,7 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
 
         let result = block
@@ -590,6 +596,7 @@ mod tests {
                 &registry,
                 &compliance,
                 &mut bridge_state,
+                &mut shielded_state,
                 &mut fee_params,
                 1,
             )

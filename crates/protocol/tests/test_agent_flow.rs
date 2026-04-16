@@ -11,6 +11,7 @@ mod test_agent_flow_impl {
         AgentRegistry, AgentBalances, AgentNonces, AgentFeeConfig, AgentFundingAction,
         FeePayer, DomainProof, AgentError,
     };
+    use call_shielded::ShieldedState;
 
     #[test]
     fn test_agent_register_no_domain_proof() {
@@ -151,7 +152,8 @@ mod test_agent_flow_impl {
         let asset_id = setup_asset(&mut balances, &mut registry, "AGENT", addr(10), sender, 5_000);
 
         let instructions = vec![Instruction::AgentPay { payment: AgentPayment { agent_id: 0, asset_id, to: receiver, amount: 1_000 } }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, sender).unwrap();
+        let mut shielded_state = ShieldedState::new();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
@@ -167,7 +169,8 @@ mod test_agent_flow_impl {
 
         let payments: Vec<AgentPayment> = (2..6).map(|i| AgentPayment { agent_id: 0, asset_id, to: addr(i), amount: 500 }).collect();
         let instructions = vec![Instruction::AgentBatchPay { payments }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, sender).unwrap();
+        let mut shielded_state = ShieldedState::new();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &sender), 8_000);
         for i in 2..6 {

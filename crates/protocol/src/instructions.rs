@@ -3,6 +3,7 @@
 //! Instruction enum, execution flow, atomicity with rollback.
 
 use call_primitives::{Address, AssetId, Balance, Hash};
+use call_shielded::{ShieldedState, ShieldedTransfer, ZkProof, Note, Nullifier, NoteCommitment, ShieldedBlockTracker};
 use crate::balances::BalanceState;
 use crate::registry::AssetRegistry;
 use crate::compliance::ComplianceEngine;
@@ -77,17 +78,22 @@ pub enum Instruction {
     ShieldedTransfer {
         asset_id: AssetId,
         proof: Vec<u8>,
+        nullifiers: Vec<Hash>,
+        commitments: Vec<Hash>,
+        encrypted_notes: Vec<Vec<u8>>,
     },
     ShieldedWithdraw {
         asset_id: AssetId,
         target: Address,
         amount: Balance,
         proof: Vec<u8>,
+        nullifier: Hash,
     },
     ShieldedDeposit {
         asset_id: AssetId,
         amount: Balance,
         commitment: Hash,
+        encrypted_note: Vec<u8>,
     },
 }
 
@@ -166,6 +172,7 @@ pub fn execute_protocol_instructions(
     balances: &mut BalanceState,
     registry: &AssetRegistry,
     compliance: &ComplianceEngine,
+    shielded_state: &mut ShieldedState,
     sender: Address,
 ) -> ProtocolResult<Vec<InstructionResult>> {
     // Take state snapshot for rollback
@@ -174,7 +181,7 @@ pub fn execute_protocol_instructions(
     let mut results = Vec::with_capacity(instructions.len());
 
     for (i, instr) in instructions.iter().enumerate() {
-        match execute_instruction(instr, balances, registry, compliance, sender) {
+        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender) {
             Ok(result) => results.push(result),
             Err(e) => {
                 // Restore state snapshot on failure
@@ -196,6 +203,7 @@ pub fn execute_instruction(
     balances: &mut BalanceState,
     _registry: &AssetRegistry,
     _compliance: &ComplianceEngine,
+    shielded_state: &mut ShieldedState,
     sender: Address,
 ) -> ProtocolResult<InstructionResult> {
     match instruction {
@@ -282,16 +290,61 @@ pub fn execute_instruction(
             let _ = (target, status);
             Ok(InstructionResult::Success)
         }
-        Instruction::ShieldedTransfer { .. } => {
-            // Shielded pool execution
+        Instruction::ShieldedTransfer { asset_id, proof, nullifiers, commitments, encrypted_notes } => {
+            // Reconstruct ZkProof from instruction data
+            let zk_proof = ZkProof {
+                proof_data: proof.clone(),
+                nullifiers: nullifiers.iter().map(|h| Nullifier::new(*h)).collect(),
+                commitments: commitments.iter().map(|h| NoteCommitment::new(*h)).collect(),
+                asset_id: *asset_id,
+            };
+            // Decrypt output notes from encrypted_notes field
+            let output_notes: Vec<Note> = encrypted_notes
+                .iter()
+                .filter_map(|data| Note::from_encrypted_bytes(data).ok())
+                .collect();
+            let transfer = ShieldedTransfer {
+                input_notes: vec![], // input notes are not transmitted; proven via ZK
+                output_notes,
+                proof: zk_proof,
+            };
+            shielded_state.process_transfer(&transfer).map_err(|e| {
+                ProtocolError::InvalidInstruction(format!("shielded transfer: {e}"))
+            })?;
             Ok(InstructionResult::Success)
         }
-        Instruction::ShieldedWithdraw { target, amount, .. } => {
+        Instruction::ShieldedWithdraw { asset_id, target, amount, proof, nullifier } => {
+            // Verify ZK proof and consume nullifier in shielded pool
+            let zk_proof = ZkProof {
+                proof_data: proof.clone(),
+                nullifiers: vec![Nullifier::new(*nullifier)],
+                commitments: vec![],
+                asset_id: *asset_id,
+            };
+            if !call_shielded::verify_zk_proof(&zk_proof) {
+                return Err(ProtocolError::InvalidInstruction(
+                    "shielded withdraw: invalid ZK proof".into(),
+                ));
+            }
+            shielded_state.process_withdraw(Nullifier::new(*nullifier)).map_err(|e| {
+                ProtocolError::InvalidInstruction(format!("shielded withdraw: {e}"))
+            })?;
+            // Credit transparent balance
             balances.credit_balance(0, *target, *amount)?;
             Ok(InstructionResult::Success)
         }
-        Instruction::ShieldedDeposit { asset_id, amount, .. } => {
+        Instruction::ShieldedDeposit { asset_id, amount, commitment, encrypted_note } => {
+            // Deduct from transparent balance
             balances.deduct_balance(*asset_id, sender, *amount)?;
+            // Register note in shielded pool
+            let note = Note::from_encrypted_bytes(encrypted_note)
+                .map_err(|e| ProtocolError::InvalidInstruction(format!(
+                    "shielded deposit: invalid encrypted note: {e}"
+                )))?;
+            let note_cm = NoteCommitment::new(*commitment);
+            shielded_state.process_deposit(note_cm, note).map_err(|e| {
+                ProtocolError::InvalidInstruction(format!("shielded deposit: {e}"))
+            })?;
             Ok(InstructionResult::Success)
         }
     }
@@ -322,6 +375,7 @@ mod tests {
             .unwrap();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![Instruction::Transfer {
             asset_id: 1,
@@ -335,6 +389,7 @@ mod tests {
             &mut balances,
             &registry,
             &compliance,
+            &mut shielded_state,
             test_addr(1),
         )
         .expect("execute");
@@ -353,6 +408,7 @@ mod tests {
             .unwrap();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![Instruction::BatchTransfer {
             asset_id: 1,
@@ -375,6 +431,7 @@ mod tests {
             &mut balances,
             &registry,
             &compliance,
+            &mut shielded_state,
             test_addr(1),
         )
         .expect("execute");
@@ -391,6 +448,7 @@ mod tests {
             .unwrap();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![
             Instruction::Approve {
@@ -411,6 +469,7 @@ mod tests {
             &mut balances,
             &registry,
             &compliance,
+            &mut shielded_state,
             test_addr(1),
         )
         .expect("execute");
@@ -426,6 +485,7 @@ mod tests {
         let mut balances = BalanceState::new();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![Instruction::Mint {
             asset_id: 1,
@@ -439,6 +499,7 @@ mod tests {
             &mut balances,
             &registry,
             &compliance,
+            &mut shielded_state,
             test_addr(99),
         );
         assert!(result.is_ok());
@@ -453,6 +514,7 @@ mod tests {
             .unwrap();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![Instruction::Burn {
             asset_id: 1,
@@ -465,6 +527,7 @@ mod tests {
             &mut balances,
             &registry,
             &compliance,
+            &mut shielded_state,
             test_addr(99),
         )
         .expect("execute");
@@ -512,6 +575,7 @@ mod tests {
             .unwrap();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![
             Instruction::Transfer {
@@ -533,6 +597,7 @@ mod tests {
             &mut balances,
             &registry,
             &compliance,
+            &mut shielded_state,
             test_addr(1),
         );
         assert!(result.is_err());
@@ -550,6 +615,7 @@ mod tests {
             .unwrap();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
 
         let instructions = vec![
             Instruction::Transfer {
@@ -571,6 +637,7 @@ mod tests {
             &mut balances,
             &registry,
             &compliance,
+            &mut shielded_state,
             test_addr(1),
         )
         .expect("execute");

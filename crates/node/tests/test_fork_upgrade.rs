@@ -111,10 +111,11 @@ async fn test_height_activated_upgrade() {
             let registry = node.state.asset_registry.read().unwrap();
             let compliance = node.state.compliance_engine.read().unwrap();
             let mut bridge_state = node.state.bridge_state.write().unwrap();
+            let mut shielded_state = node.state.shielded_state.write().unwrap();
             let mut fee_params = node.state.fee_params.write().unwrap();
 
             block
-                .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut fee_params, height)
+                .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height)
                 .expect("execution")
         };
         block.finalize(&result);

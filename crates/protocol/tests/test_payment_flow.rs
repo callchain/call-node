@@ -18,6 +18,7 @@ mod test_payment_flow_impl {
         AuthScheme, FeeParams, GasConfig,
     };
     use call_protocol::ProtocolTransaction;
+    use call_shielded::ShieldedState;
 
     // ── Full Protocol Payment Flow ─────────────────────────────────────────
 
@@ -27,6 +28,7 @@ mod test_payment_flow_impl {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
         let issuer = addr(1);
@@ -44,7 +46,7 @@ mod test_payment_flow_impl {
             vec![make_transfer(asset_id, receiver, 3_000)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &compliance, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &holder), 7_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 3_000);
@@ -58,6 +60,7 @@ mod test_payment_flow_impl {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
         let holder = addr(1);
@@ -84,7 +87,7 @@ mod test_payment_flow_impl {
             ],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &compliance, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &holder), 4_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
@@ -125,6 +128,7 @@ mod test_payment_flow_impl {
             &mut balances,
             &registry,
             &compliance,
+            &mut ShieldedState::new(),
             holder,
         );
         assert!(result.is_err());
@@ -140,6 +144,7 @@ mod test_payment_flow_impl {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
         let sender = addr(1);
@@ -169,7 +174,7 @@ mod test_payment_flow_impl {
         let gas_units = calculate_gas_units(&tx.instructions);
         assert!(gas_units > 0);
 
-        execute_tx(&tx, &mut balances, &registry, &compliance, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
 
         for r in &recipients {
             assert_eq!(balances.get_balance(asset_id, r), 1_000);
@@ -184,6 +189,7 @@ mod test_payment_flow_impl {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
         let sender = addr(1);
@@ -205,7 +211,7 @@ mod test_payment_flow_impl {
             },
         };
 
-        execute_tx(&tx, &mut balances, &registry, &compliance, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(stable_id, &receiver), 100);
     }
@@ -217,6 +223,7 @@ mod test_payment_flow_impl {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
         let fee_params = FeeParams::default();
 
         let sender = addr(1);
@@ -233,7 +240,7 @@ mod test_payment_flow_impl {
             vec![make_transfer(1, receiver, 100)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &compliance, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &registry, &compliance, &mut shielded_state, &fee_params).unwrap();
 
         let call_balance_after = balances.get_balance(0, &sender);
         assert!(call_balance_after < call_balance_before);
@@ -276,6 +283,7 @@ mod test_payment_flow_impl {
             &mut balances,
             &registry,
             &compliance,
+            &mut ShieldedState::new(),
             sender,
         )
         .unwrap();

@@ -14,6 +14,7 @@ call-protocol.workspace = true
 call-crypto.workspace = true
 call-bridge.workspace = true
 call-evm.workspace = true
+call-shielded.workspace = true
 alloy-primitives.workspace = true
 thiserror.workspace = true
 

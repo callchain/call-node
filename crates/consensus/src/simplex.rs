@@ -162,6 +162,7 @@ impl SimplexConsensus {
         registry: &call_protocol::registry::AssetRegistry,
         compliance: &call_protocol::compliance::ComplianceEngine,
         bridge_state: &mut call_bridge::BridgeStateManager,
+        shielded_state: &mut call_shielded::ShieldedState,
         fee_params: &mut call_protocol::FeeParams,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(
@@ -169,6 +170,7 @@ impl SimplexConsensus {
             registry,
             compliance,
             bridge_state,
+            shielded_state,
             fee_params,
             self.current_height,
         )

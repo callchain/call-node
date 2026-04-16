@@ -225,6 +225,7 @@ async fn block_production_loop(
             let registry = state.asset_registry.read().unwrap();
             let compliance = state.compliance_engine.read().unwrap();
             let mut bridge_state = state.bridge_state.write().unwrap();
+            let mut shielded_state = state.shielded_state.write().unwrap();
             let mut fee_params = state.fee_params.write().unwrap();
 
             block.execute(
@@ -232,6 +233,7 @@ async fn block_production_loop(
                 &registry,
                 &compliance,
                 &mut bridge_state,
+                &mut shielded_state,
                 &mut fee_params,
                 height,
             )
@@ -485,6 +487,7 @@ mod tests {
         let registry = node.state.asset_registry.read().unwrap();
         let compliance = node.state.compliance_engine.read().unwrap();
         let mut bridge_state = node.state.bridge_state.write().unwrap();
+        let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
 
         let result = block
@@ -493,6 +496,7 @@ mod tests {
                 &registry,
                 &compliance,
                 &mut bridge_state,
+                &mut shielded_state,
                 &mut fee_params,
                 height,
             )
@@ -564,6 +568,7 @@ mod tests {
         let registry = node.state.asset_registry.read().unwrap();
         let compliance = node.state.compliance_engine.read().unwrap();
         let mut bridge_state = node.state.bridge_state.write().unwrap();
+        let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
 
         let result = block
@@ -572,6 +577,7 @@ mod tests {
                 &registry,
                 &compliance,
                 &mut bridge_state,
+                &mut shielded_state,
                 &mut fee_params,
                 height,
             )
@@ -667,10 +673,11 @@ mod tests {
         let registry = node1.state.asset_registry.read().unwrap();
         let compliance = node1.state.compliance_engine.read().unwrap();
         let mut bridge_state = node1.state.bridge_state.write().unwrap();
+        let mut shielded_state = node1.state.shielded_state.write().unwrap();
         let mut fee_params = node1.state.fee_params.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut fee_params, height)
+            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height)
             .expect("execution");
         block.finalize(&result);
 
@@ -770,10 +777,11 @@ mod tests {
         let registry = node.state.asset_registry.read().unwrap();
         let compliance = node.state.compliance_engine.read().unwrap();
         let mut bridge_state = node.state.bridge_state.write().unwrap();
+        let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut fee_params, height)
+            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height)
             .expect("execution");
         block.finalize(&result);
 

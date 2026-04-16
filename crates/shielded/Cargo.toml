@@ -10,7 +10,6 @@ workspace = true
 
 [dependencies]
 call-primitives.workspace = true
-call-protocol.workspace = true
 call-crypto.workspace = true
 alloy-primitives.workspace = true
 thiserror.workspace = true

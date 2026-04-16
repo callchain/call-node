@@ -229,12 +229,19 @@ mod test_shielded_flow_impl {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         let asset_id = setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
 
-        let instructions = vec![Instruction::ShieldedDeposit { asset_id, amount: 1_000, commitment: shield_hash(1) }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, sender).unwrap();
+        // Create a valid encrypted note for deposit
+        let note = shield_note(1_000, asset_id, 1);
+        let encrypted = note.to_encrypted_bytes();
+        let cm = note.commitment();
+
+        let instructions = vec![Instruction::ShieldedDeposit { asset_id, amount: 1_000, commitment: cm.0, encrypted_note: encrypted }];
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
         assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
+        assert_eq!(shielded_state.merkle_tree.leaf_count(), 1);
     }
 
     #[test]
@@ -242,13 +249,19 @@ mod test_shielded_flow_impl {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         let compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         let receiver = addr(2);
         setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
 
-        let instructions = vec![Instruction::ShieldedWithdraw { asset_id: 0, target: receiver, amount: 500, proof: vec![] }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, sender).unwrap();
+        // Create a valid nullifier for withdraw
+        let note = shield_note(500, 0, 1);
+        let nullifier = note.nullifier();
+
+        let instructions = vec![Instruction::ShieldedWithdraw { asset_id: 0, target: receiver, amount: 500, proof: vec![1u8; 200], nullifier: nullifier.0 }];
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &compliance, &mut shielded_state, sender).unwrap();
         assert_eq!(balances.get_balance(0, &receiver), 500);
+        assert!(shielded_state.nullifier_set.is_spent(&nullifier));
     }
 
     #[test]
@@ -283,10 +296,11 @@ mod test_shielded_flow_impl {
 
     #[test]
     fn test_zk_proof_empty_nullifiers_rejected() {
+        // A proof with empty nullifiers AND empty commitments should be rejected
         let bad = ZkProof {
             proof_data: vec![1u8; 200],
             nullifiers: vec![],
-            commitments: vec![NoteCommitment::new(shield_hash(2))],
+            commitments: vec![],
             asset_id: 1,
         };
         assert!(!verify_zk_proof(&bad));
