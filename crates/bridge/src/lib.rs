@@ -79,7 +79,7 @@ impl BridgeOp {
 }
 
 /// Pending bridge queue entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingBridgeOp {
     pub op: BridgeOp,
     pub submitted_at_block: u64,
@@ -87,7 +87,7 @@ pub struct PendingBridgeOp {
 }
 
 /// Bridge state tracking (per spec §5.3)
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeStateManager {
     /// Pending deposit/withdraw operations awaiting completion
     pub pending_ops: Vec<PendingBridgeOp>,
@@ -173,7 +173,7 @@ impl BridgeStateManager {
 }
 
 /// Bridge configuration (per spec §5.6)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BridgeConfig {
     /// Maximum amount per single transaction per asset
     pub max_per_tx: u128,

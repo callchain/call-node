@@ -17,5 +17,7 @@ call-evm.workspace = true
 call-shielded.workspace = true
 alloy-primitives.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
 
 [dev-dependencies]

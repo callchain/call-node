@@ -10,7 +10,7 @@ use crate::AgentError;
 ///
 /// Per spec §6.4: agents have separate balances from the owner.
 /// Owners fund agents via Grant/TopUp, and can Revoke funds.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct AgentBalances {
     /// (owner, agent_id, asset_id) -> balance
     balances: std::collections::HashMap<(Address, u64, AssetId), u128>,
@@ -118,13 +118,18 @@ impl AgentBalances {
             .map(|(_, &balance)| balance)
             .sum()
     }
+
+    /// Get a reference to the underlying balances HashMap
+    pub fn balances_map(&self) -> &std::collections::HashMap<(Address, u64, AssetId), u128> {
+        &self.balances
+    }
 }
 
 /// Agent nonces: keyed by (owner, agent_id)
 ///
 /// Per spec §6.6: agent transactions have their own nonce sequence
 /// to prevent replay attacks.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct AgentNonces {
     /// (owner, agent_id) -> nonce
     nonces: std::collections::HashMap<(Address, u64), u64>,

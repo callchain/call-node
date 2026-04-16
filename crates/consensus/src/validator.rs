@@ -42,7 +42,7 @@ pub struct ValidatorStake {
 }
 
 /// Pending unbonding request
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnbondingRequest {
     pub validator_id: ValidatorId,
     pub amount: u128,
@@ -76,6 +76,14 @@ impl ValidatorStateManager {
         let id = self.next_validator_id;
         self.next_validator_id = self.next_validator_id.wrapping_add(1);
         id
+    }
+
+    /// Register a validator from an existing ValidatorStake (used during DB recovery)
+    pub fn register_validator_from_stake(&mut self, id: ValidatorId, stake: ValidatorStake) {
+        if id >= self.next_validator_id {
+            self.next_validator_id = id + 1;
+        }
+        self.validators.insert(id, stake);
     }
 
     // ── Staking ───────────────────────────────────────────────────────
@@ -264,6 +272,11 @@ impl ValidatorStateManager {
     /// Get all validator IDs
     pub fn get_all_validator_ids(&self) -> Vec<ValidatorId> {
         self.validators.keys().copied().collect()
+    }
+
+    /// Get all validator stake info
+    pub fn get_all_validators(&self) -> &HashMap<ValidatorId, ValidatorStake> {
+        &self.validators
     }
 
     /// Total staked CALL across all active validators

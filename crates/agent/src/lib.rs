@@ -20,7 +20,7 @@ use call_protocol::ProtocolTransaction;
 use thiserror::Error;
 
 /// Domain proof for agent registration (per spec §6.2)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum DomainProof {
     DnsTxt {
         domain: String,
@@ -33,7 +33,7 @@ pub enum DomainProof {
 }
 
 /// Fee payer mode for agent transactions (per spec §6.5)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FeePayer {
     SelfPay,
     OwnerPays,
@@ -41,7 +41,7 @@ pub enum FeePayer {
 }
 
 /// Agent fee configuration (per spec §6.5)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentFeeConfig {
     pub fee_payer: FeePayer,
     pub owner_max_daily_fee: u128,
@@ -61,7 +61,7 @@ impl Default for AgentFeeConfig {
 }
 
 /// Agent funding action (per spec §6.7)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentFundingAction {
     Grant {
         agent_id: u64,

@@ -284,10 +284,29 @@ impl RpcState {
         // Compute tx hash
         let tx_hash = TxHash::from_slice(&call_crypto::keccak256(raw_tx).0);
 
+        // Extract to and value from envelope
+        let (to_addr, value) = match &envelope {
+            TxEnvelope::Legacy(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
+            TxEnvelope::Eip1559(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
+            TxEnvelope::Eip2930(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
+            TxEnvelope::Eip7702(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
+            TxEnvelope::Eip4844(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
+        };
+
         // Insert into mempool (for tracking/dedup)
         {
             let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
-            let _ = mempool.insert_evm_tx(tx_hash, caller, nonce, gas_price, raw_tx.to_vec());
+            let evm_tx = call_evm::EvmTransaction {
+                caller,
+                nonce,
+                gas_limit,
+                gas_price,
+                to: to_addr,
+                value,
+                data: alloy_primitives::Bytes::from(raw_tx.to_vec()),
+                chain_id: self.chain_id,
+            };
+            let _ = mempool.insert_evm_tx(evm_tx);
         }
 
         // Execute immediately
@@ -404,6 +423,7 @@ impl RpcState {
         memo: Option<String>,
         gas_limit: u64,
         max_fee: u128,
+        signature: Option<[u8; 65]>,
     ) -> Result<TxHash, String> {
         use call_protocol::{
             Instruction, PaymentMemo,
@@ -450,7 +470,13 @@ impl RpcState {
             gas_limit,
             max_fee,
             auth: call_protocol::transaction::AuthScheme::SingleSig {
-                signature: [0u8; 65], // placeholder — real tx would have signature
+                signature: signature.unwrap_or_else(|| {
+                    // Derive a deterministic placeholder signature from tx hash preimage
+                    let hash = call_crypto::keccak256(&preimage);
+                    let mut sig = [0u8; 65];
+                    sig[..32].copy_from_slice(&hash.0[..32]);
+                    sig
+                }),
             },
         };
 

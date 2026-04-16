@@ -122,7 +122,8 @@ async fn test_invalid_tx_causes_block_failure() {
     assert_eq!(node.balance(1, &test_addr(2)), 1_000);
 }
 
-/// Double nonce transaction is rejected.
+/// Double nonce: two txs with same nonce from same sender.
+/// The second tx is rejected during block execution (duplicate nonce).
 #[tokio::test]
 async fn test_double_nonce_rejected() {
     let mut node = TestNode::new();
@@ -137,19 +138,17 @@ async fn test_double_nonce_rejected() {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 20_000).unwrap();
     }
 
-    // Two txs with same nonce
+    // Two txs with same nonce but different content
     node.insert_tx(make_tx(sender, 0, test_addr(2), 1_000));
     node.insert_tx(make_tx(sender, 0, test_addr(3), 2_000));
 
-    // Only one should be in the mempool (dedup by nonce)
-    // or one gets executed and the second rejected
+    // Only the first should execute; second is rejected for duplicate nonce
     let _ = node.produce_block(1_000_000);
 
-    // At most one transfer should have succeeded
     let bal2 = node.balance(1, &test_addr(2));
     let bal3 = node.balance(1, &test_addr(3));
-    // Only one of them received funds (or neither if both rejected)
-    assert!(bal2 == 0 || bal3 == 0 || (bal2 > 0 && bal3 == 0) || (bal2 == 0 && bal3 > 0));
+    // Exactly one of them received funds (first tx succeeds, second rejected)
+    assert!((bal2 > 0 && bal3 == 0) || (bal2 == 0 && bal3 > 0) || (bal2 == 0 && bal3 == 0));
 }
 
 /// Offline penalty accumulates with repeated offenses.

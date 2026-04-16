@@ -7,7 +7,7 @@ use call_crypto::keccak256;
 use crate::{NoteCommitment, Nullifier, ViewingKey};
 
 /// A shielded note: encrypted value with commitment and nullifier derivation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Note {
     pub value: Balance,
     pub asset_id: AssetId,

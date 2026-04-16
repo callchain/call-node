@@ -7,3 +7,4 @@ mod state;
 
 pub use executor::*;
 pub use state::*;
+pub use alloy_primitives::{U256, Bytes};

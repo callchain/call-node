@@ -164,6 +164,7 @@ impl SimplexConsensus {
         bridge_state: &mut call_bridge::BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         fee_params: &mut call_protocol::FeeParams,
+        evm_state: &mut call_evm::EvmState,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(
             balances,
@@ -173,6 +174,7 @@ impl SimplexConsensus {
             shielded_state,
             fee_params,
             self.current_height,
+            evm_state,
         )
     }
 

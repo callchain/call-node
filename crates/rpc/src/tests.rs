@@ -285,6 +285,7 @@ mod tests {
             sender, 1, asset_id, to, 5_000,
             Some("test payment".into()),
             100_000, 1_000_000,
+            None,
         ).unwrap();
 
         assert_eq!(tx_hash.as_slice().len(), 32);
@@ -314,6 +315,7 @@ mod tests {
         let result = state.submit_payment(
             sender, 1, asset_id, to, 5_000,
             None, 100_000, 1_000_000,
+            None,
         );
         assert!(result.is_err());
     }

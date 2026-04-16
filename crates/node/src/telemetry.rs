@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -40,6 +41,7 @@ pub struct TelemetryRegistry {
     metrics: RwLock<HashMap<String, Metric>>,
     alerts: RwLock<Vec<Alert>>,
     start_time: Instant,
+    data_dir: PathBuf,
     // Atomic counters for hot-path performance
     pub consensus_blocks_produced: AtomicU64,
     pub consensus_blocks_committed: AtomicU64,
@@ -54,11 +56,12 @@ pub struct TelemetryRegistry {
 }
 
 impl TelemetryRegistry {
-    pub fn new() -> Self {
+    pub fn new(data_dir: PathBuf) -> Self {
         Self {
             metrics: RwLock::new(HashMap::new()),
             alerts: RwLock::new(Vec::new()),
             start_time: Instant::now(),
+            data_dir,
             consensus_blocks_produced: AtomicU64::new(0),
             consensus_blocks_committed: AtomicU64::new(0),
             consensus_rounds: AtomicU64::new(0),
@@ -241,7 +244,7 @@ impl TelemetryRegistry {
 
 impl Default for TelemetryRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new(std::env::temp_dir())
     }
 }
 
@@ -340,19 +343,38 @@ pub fn default_alert_rules() -> Vec<AlertRule> {
             "Bridge pending operations exceed 100",
             Box::new(|r: &TelemetryRegistry| r.mempool_bridge_pending.load(Ordering::Relaxed) > 100),
         ),
-        // Memory pressure: not directly measurable here, placeholder
+        // Memory pressure: check system RAM usage via sysinfo
         AlertRule::new(
             "high_memory_usage",
             AlertSeverity::Warning,
-            "Memory usage exceeds threshold",
-            Box::new(|_: &TelemetryRegistry| false), // External monitoring required
+            "Memory usage exceeds 90%",
+            Box::new(|_: &TelemetryRegistry| {
+                use sysinfo::System;
+                let mut sys = System::new_all();
+                sys.refresh_memory();
+                let total = sys.total_memory();
+                let used = sys.used_memory();
+                if total == 0 {
+                    false
+                } else {
+                    (used as f64 / total as f64) > 0.9
+                }
+            }),
         ),
-        // Disk space: not directly measurable here, placeholder
+        // Disk space: check available space on data directory filesystem
         AlertRule::new(
             "low_disk_space",
             AlertSeverity::Critical,
             "Disk space below 10%",
-            Box::new(|_: &TelemetryRegistry| false), // External monitoring required
+            Box::new(|r: &TelemetryRegistry| {
+                use fs2::available_space;
+                if let Ok(space) = available_space(&r.data_dir) {
+                    // Assume 100GB total if we can't get total; alert if < 10GB free
+                    space < 10 * 1024 * 1024 * 1024
+                } else {
+                    false
+                }
+            }),
         ),
     ]
 }
@@ -365,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_prometheus_metrics_endpoint() {
-        let reg = TelemetryRegistry::new();
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
         reg.record_block_produced();
         reg.record_block_committed();
         reg.set_mempool_size(50);
@@ -388,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_consensus_metrics_recorded() {
-        let reg = TelemetryRegistry::new();
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
 
         // Simulate consensus activity
         reg.record_block_produced();
@@ -408,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_mempool_size_metric() {
-        let reg = TelemetryRegistry::new();
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
 
         reg.set_mempool_size(100);
         assert_eq!(reg.mempool_tx_count.load(Ordering::Relaxed), 100);
@@ -431,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_alert_consensus_stall() {
-        let reg = TelemetryRegistry::new();
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
         let rules = default_alert_rules();
 
         // Initially no alerts (no timeouts, no blocks — normal startup)
@@ -456,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_alert_mempool_overflow() {
-        let reg = TelemetryRegistry::new();
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
         let rules = default_alert_rules();
 
         reg.set_mempool_size(10_001);
@@ -481,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_telemetry_uptime_increases() {
-        let reg = TelemetryRegistry::new();
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
         let t1 = reg.uptime();
         thread::sleep(Duration::from_millis(50));
         let t2 = reg.uptime();
@@ -490,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_register_custom_metric() {
-        let reg = TelemetryRegistry::new();
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
         let mut labels = HashMap::new();
         labels.insert("asset".to_string(), "CALL".to_string());
         reg.set_gauge("custom_balance", "Custom balance metric", 999.0, labels);
@@ -701,7 +723,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_metrics_http_server() {
-        let registry = Arc::new(TelemetryRegistry::new());
+        let registry = Arc::new(TelemetryRegistry::new(std::env::temp_dir()));
         registry.record_block_produced();
         registry.set_p2p_peers(5);
 
@@ -727,7 +749,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_health_endpoint() {
-        let registry = Arc::new(TelemetryRegistry::new());
+        let registry = Arc::new(TelemetryRegistry::new(std::env::temp_dir()));
         let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
@@ -747,7 +769,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_metrics_content_type() {
-        let registry = Arc::new(TelemetryRegistry::new());
+        let registry = Arc::new(TelemetryRegistry::new(std::env::temp_dir()));
         let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
@@ -773,7 +795,7 @@ mod integration_tests {
 
     #[test]
     fn test_opentelemetry_span_recording() {
-        let registry = TelemetryRegistry::new();
+        let registry = TelemetryRegistry::new(std::env::temp_dir());
 
         // Verify the registry side-effects work (OTel spans require global init)
         registry.record_block_produced();

@@ -66,7 +66,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .map(|v| v as u128)
                 .unwrap_or(gas_limit as u128 * 10);
 
-            match state.submit_payment(from, nonce, asset_id, to, amount, memo, gas_limit, max_fee) {
+            match state.submit_payment(from, nonce, asset_id, to, amount, memo, gas_limit, max_fee, None) {
                 Ok(tx_hash) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "txHash": format!("0x{}", hex::encode(tx_hash)),
                     "status": "pending",

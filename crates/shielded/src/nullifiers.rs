@@ -7,12 +7,13 @@ use crate::Nullifier;
 use std::collections::HashSet;
 
 /// Nullifier set: tracks spent nullifiers with BitSet compression
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NullifierSet {
     /// Primary set of spent nullifiers
     spent: HashSet<Nullifier>,
     /// BitSet compression: 1 bit per nullifier bucket
     /// Each bucket covers 64 nullifiers (by hash prefix)
+    #[serde(skip, default)]
     bitset: Vec<u64>,
 }
 
@@ -56,6 +57,11 @@ impl NullifierSet {
     /// Get the number of spent nullifiers
     pub fn len(&self) -> usize {
         self.spent.len()
+    }
+
+    /// Get all spent nullifiers
+    pub fn spent_nullifiers(&self) -> &HashSet<Nullifier> {
+        &self.spent
     }
 
     /// Check if the set is empty

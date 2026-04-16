@@ -20,7 +20,15 @@ use call_protocol::{
     transaction::ProtocolTransaction,
 };
 use call_rpc::{RpcState, RpcConfig, build_rpc_module};
-use call_storage::{CallDb, open_db};
+use call_storage::{CallDb, open_db, PruneState, StorageError};
+use call_storage::reth_db::{
+    init_call_db, save_balances as db_save_balances, load_balances as db_load_balances,
+    save_prune_state as db_save_prune, load_prune_state as db_load_prune,
+    db_put, db_batch_put, db_clear, db_iter_all, db_get,
+    CallEvmAccounts, CallEvmStorage, CallBridgeOps,
+    CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
+};
+use reth_db::DatabaseEnv;
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
 use call_bridge::BridgeStateManager;
@@ -45,6 +53,7 @@ pub struct CallNode {
     pub consensus: Arc<RwLock<SimplexConsensus>>,
     pub network: Option<Arc<dyn Network>>,
     pub db: CallDb,
+    pub prune_state: PruneState,
     pub server_handle: Option<ServerHandle>,
     pub parent_hash: BlockHash,
 }
@@ -53,23 +62,37 @@ impl CallNode {
     /// Create a new node with default state
     pub fn new(data_dir: PathBuf) -> Result<Self, String> {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
-        let db = open_db(data_dir).map_err(|e| e.to_string())?;
+        let db = open_db(data_dir.clone()).map_err(|e| format!("failed to open db: {e}"))?;
+
+        // Restore prune state from disk if previously persisted
+        let prune_state = db.load_prune_state()
+            .map_err(|e| format!("failed to load prune state: {e}"))?;
+
+        // Load persisted state from reth-db if available
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances) =
+            if let Some(ref db_env) = db.db {
+                load_state_from_db(db_env)
+            } else {
+                (BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
+                 ShieldedState::new(), ValidatorStateManager::default(),
+                 AgentRegistry::new(), AgentBalances::new())
+            };
 
         let consensus = SimplexConsensus::new(
             ConsensusParams::default(),
-            ValidatorStateManager::default(),
+            consensus_validators,
         );
 
         let state = Arc::new(RpcState::new(
-            BalanceState::new(),
+            balance_state,
             AssetRegistry::new(),
             ComplianceEngine::new(),
-            EvmState::new(),
-            BridgeStateManager::default(),
+            evm_state,
+            bridge_state,
             ValidatorStateManager::default(),
-            AgentRegistry::new(),
-            AgentBalances::new(),
-            ShieldedState::new(),
+            registry,
+            agent_balances,
+            shielded_state,
             mempool.clone(),
             CALLCHAIN_CHAIN_ID,
         ));
@@ -80,6 +103,7 @@ impl CallNode {
             consensus: Arc::new(RwLock::new(consensus)),
             network: None,
             db,
+            prune_state,
             server_handle: None,
             parent_hash: BlockHash::ZERO,
         })
@@ -130,7 +154,8 @@ impl CallNode {
         let consensus = Arc::clone(&self.consensus);
         let network = self.network.clone();
         let parent_hash = self.parent_hash;
-        let db_dir = self.db.data_dir.clone();
+        let db = self.db.clone();
+        let prune_state = self.prune_state.clone();
 
         tokio::spawn(block_production_loop(
             state,
@@ -138,14 +163,25 @@ impl CallNode {
             consensus,
             network,
             parent_hash,
-            db_dir,
+            db,
+            prune_state,
         ))
     }
 
-    /// Stop the RPC server
+    /// Stop the RPC server and flush final state to disk.
     pub async fn stop(&mut self) -> Result<(), String> {
         if let Some(handle) = self.server_handle.take() {
             handle.stop().map_err(|_| "server already stopped".to_string())?;
+        }
+        // Flush final state to reth-db
+        if let Some(ref db_env) = self.db.db {
+            if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus) {
+                tracing::warn!(error = %e, "failed to flush state on shutdown");
+            }
+            if let Err(e) = db_save_prune(db_env, &self.prune_state) {
+                tracing::warn!(error = %e, "failed to flush prune state on shutdown");
+            }
+            tracing::info!("flushed state to reth-db on shutdown");
         }
         Ok(())
     }
@@ -166,6 +202,277 @@ impl CallNode {
     }
 }
 
+// ── State Persistence ─────────────────────────────────────────────────
+
+/// Load all state types from the reth-db database.
+fn load_state_from_db(
+    db_env: &Arc<DatabaseEnv>,
+) -> (BalanceState, EvmState, BridgeStateManager, ShieldedState,
+      ValidatorStateManager, AgentRegistry, AgentBalances) {
+    // Load balances
+    let (balances, allowances) = match db_load_balances(db_env) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("WARN: failed to load balances from db: {e}");
+            (std::collections::HashMap::new(), std::collections::HashMap::new())
+        }
+    };
+    let mut balance_state = BalanceState::new();
+    for ((asset_id, address), balance) in &balances {
+        let _ = balance_state.balances.set_balance(*asset_id, *address, *balance);
+    }
+    for ((asset_id, owner, spender), allowance) in &allowances {
+        balance_state.allowances.set_allowance(*asset_id, *owner, *spender, *allowance);
+    }
+
+    // Load EVM accounts
+    let evm_state = match load_evm_accounts_inner(db_env) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("WARN: failed to load evm accounts: {e}");
+            EvmState::new()
+        }
+    };
+
+    // Load bridge state
+    let bridge_state = match load_bridge_state_inner(db_env) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("WARN: failed to load bridge state: {e}");
+            BridgeStateManager::default()
+        }
+    };
+
+    // Load shielded state
+    let shielded_state = match load_shielded_state_inner(db_env) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("WARN: failed to load shielded state: {e}");
+            ShieldedState::new()
+        }
+    };
+
+    // Load validator state
+    let validators = match load_validator_state_inner(db_env) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("WARN: failed to load validator state: {e}");
+            ValidatorStateManager::default()
+        }
+    };
+
+    // Load agent state
+    let (registry, agent_balances) = match load_agent_state_inner(db_env) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("WARN: failed to load agent state: {e}");
+            (AgentRegistry::new(), AgentBalances::new())
+        }
+    };
+
+    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances)
+}
+
+/// Persist all state types to the reth-db database.
+fn persist_state_to_db(
+    db_env: &Arc<DatabaseEnv>,
+    state: &Arc<RpcState>,
+    consensus: &Arc<RwLock<SimplexConsensus>>,
+) -> Result<(), String> {
+    // Persist balances
+    {
+        let bs = state.balance_state.read().unwrap();
+        db_save_balances(db_env, bs.balances.balances_map(), bs.allowances.allowances_map())
+            .map_err(|e| format!("save balances: {e}"))?;
+    }
+
+    // Persist EVM state
+    {
+        let evm = state.evm_state.read().unwrap();
+        save_evm_accounts_inner(db_env, &evm)
+            .map_err(|e| format!("save evm: {e}"))?;
+    }
+
+    // Persist bridge state
+    {
+        let bridge = state.bridge_state.read().unwrap();
+        save_bridge_state_inner(db_env, &bridge)
+            .map_err(|e| format!("save bridge: {e}"))?;
+    }
+
+    // Persist shielded state
+    {
+        let shielded = state.shielded_state.read().unwrap();
+        save_shielded_state_inner(db_env, &shielded)
+            .map_err(|e| format!("save shielded: {e}"))?;
+    }
+
+    // Persist validator state
+    {
+        let c = consensus.read().unwrap();
+        save_validator_state_inner(db_env, c.validators())
+            .map_err(|e| format!("save validators: {e}"))?;
+    }
+
+    // Persist agent state
+    {
+        let registry = state.agent_registry.read().unwrap();
+        let agent_balances = state.agent_balances.read().unwrap();
+        save_agent_state_inner(db_env, &registry, &agent_balances)
+            .map_err(|e| format!("save agents: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// Load EVM accounts from DB
+fn load_evm_accounts_inner(db: &DatabaseEnv) -> Result<EvmState, String> {
+    let data = db_iter_all::<CallEvmAccounts>(db).map_err(|e: StorageError| e.to_string())?;
+    let mut state = EvmState::new();
+    for (k, v) in data {
+        let addr: alloy_primitives::Address = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
+        let account: call_evm::EvmAccount = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
+        let existing = state.get_account_mut(&addr);
+        *existing = account;
+    }
+    Ok(state)
+}
+
+/// Save EVM accounts to DB
+fn save_evm_accounts_inner(db: &DatabaseEnv, state: &EvmState) -> Result<(), String> {
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
+        .get_all_accounts()
+        .iter()
+        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+        .collect();
+    db_clear::<CallEvmAccounts>(db).map_err(|e: StorageError| e.to_string())?;
+    db_batch_put::<CallEvmAccounts>(db, entries).map_err(|e: StorageError| e.to_string())?;
+    Ok(())
+}
+
+/// Load bridge state from DB
+fn load_bridge_state_inner(db: &DatabaseEnv) -> Result<BridgeStateManager, String> {
+    match db_get::<CallBridgeOps>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e: serde_json::Error| e.to_string()),
+        None => Ok(BridgeStateManager::default()),
+    }
+}
+
+/// Save bridge state to DB
+fn save_bridge_state_inner(db: &DatabaseEnv, state: &BridgeStateManager) -> Result<(), String> {
+    let data = serde_json::to_vec(state).map_err(|e: serde_json::Error| e.to_string())?;
+    db_clear::<CallBridgeOps>(db).map_err(|e: StorageError| e.to_string())?;
+    db_put::<CallBridgeOps>(db, vec![0], data).map_err(|e: StorageError| e.to_string())?;
+    Ok(())
+}
+
+/// Load shielded state from DB
+fn load_shielded_state_inner(db: &DatabaseEnv) -> Result<ShieldedState, String> {
+    let mut state = ShieldedState::new();
+
+    // Load nullifiers
+    let nf_data = db_iter_all::<CallShieldedNullifiers>(db).map_err(|e: StorageError| e.to_string())?;
+    for (k, _) in nf_data {
+        let nf: call_shielded::Nullifier = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
+        state.nullifier_set.insert(&nf);
+    }
+
+    // Load note commitments
+    let cm_data = db_iter_all::<CallShieldedCommitments>(db).map_err(|e: StorageError| e.to_string())?;
+    for (k, v) in cm_data {
+        let key: call_shielded::NoteCommitment = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
+        let value: call_shielded::Note = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
+        state.note_registry.insert(key, value);
+    }
+
+    // Rebuild merkle tree from note commitments
+    for (cm, _) in &state.note_registry {
+        state.merkle_tree.insert(cm.0);
+    }
+
+    Ok(state)
+}
+
+/// Save shielded state to DB
+fn save_shielded_state_inner(db: &DatabaseEnv, state: &ShieldedState) -> Result<(), String> {
+    // Save nullifiers
+    let nf_entries: Vec<(Vec<u8>, Vec<u8>)> = state
+        .nullifier_set.spent_nullifiers()
+        .iter()
+        .map(|nf| (serde_json::to_vec(nf).unwrap(), vec![0]))
+        .collect();
+    db_clear::<CallShieldedNullifiers>(db).map_err(|e: StorageError| e.to_string())?;
+    db_batch_put::<CallShieldedNullifiers>(db, nf_entries).map_err(|e: StorageError| e.to_string())?;
+
+    // Save note commitments
+    let cm_entries: Vec<(Vec<u8>, Vec<u8>)> = state
+        .note_registry
+        .iter()
+        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+        .collect();
+    db_clear::<CallShieldedCommitments>(db).map_err(|e: StorageError| e.to_string())?;
+    db_batch_put::<CallShieldedCommitments>(db, cm_entries).map_err(|e: StorageError| e.to_string())?;
+
+    Ok(())
+}
+
+/// Load validator state from DB
+fn load_validator_state_inner(db: &DatabaseEnv) -> Result<ValidatorStateManager, String> {
+    let data = db_iter_all::<CallValidators>(db).map_err(|e: StorageError| e.to_string())?;
+    let mut manager = ValidatorStateManager::new();
+    for (k, v) in data {
+        let stake: call_consensus::validator::ValidatorStake = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
+        let id: call_primitives::ValidatorId = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
+        manager.register_validator_from_stake(id, stake);
+    }
+    Ok(manager)
+}
+
+/// Save validator state to DB
+fn save_validator_state_inner(db: &DatabaseEnv, state: &ValidatorStateManager) -> Result<(), String> {
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
+        .get_all_validators()
+        .iter()
+        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+        .collect();
+    db_clear::<CallValidators>(db).map_err(|e: StorageError| e.to_string())?;
+    db_batch_put::<CallValidators>(db, entries).map_err(|e: StorageError| e.to_string())?;
+    Ok(())
+}
+
+/// Load agent state from DB
+fn load_agent_state_inner(db: &DatabaseEnv) -> Result<(AgentRegistry, AgentBalances), String> {
+    let data = db_iter_all::<CallAgents>(db).map_err(|e: StorageError| e.to_string())?;
+    let mut registry = AgentRegistry::new();
+    let mut next_id: u64 = 0;
+
+    for (k, v) in data {
+        let reg: call_agent::AgentRegistration = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
+        if reg.agent_id >= next_id {
+            next_id = reg.agent_id + 1;
+        }
+        let id: u64 = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
+        registry.agents.insert(id, reg.clone());
+        registry.agents_by_owner.entry(reg.owner).or_default().push(reg.agent_id);
+        registry.agents_by_name.insert(reg.name.clone(), reg.agent_id);
+    }
+    registry.next_id = next_id;
+
+    Ok((registry, AgentBalances::new()))
+}
+
+/// Save agent state to DB
+fn save_agent_state_inner(db: &DatabaseEnv, registry: &AgentRegistry, _balances: &AgentBalances) -> Result<(), String> {
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = registry
+        .agents
+        .iter()
+        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
+        .collect();
+    db_clear::<CallAgents>(db).map_err(|e: StorageError| e.to_string())?;
+    db_batch_put::<CallAgents>(db, entries).map_err(|e: StorageError| e.to_string())?;
+    Ok(())
+}
+
 /// Block production background loop
 async fn block_production_loop(
     state: Arc<RpcState>,
@@ -173,9 +480,11 @@ async fn block_production_loop(
     consensus: Arc<RwLock<SimplexConsensus>>,
     network: Option<Arc<dyn Network>>,
     initial_parent_hash: BlockHash,
-    db_dir: PathBuf,
+    db: CallDb,
+    mut prune_state: PruneState,
 ) {
     let mut parent_hash = initial_parent_hash;
+    let prune_config = call_storage::PruneConfig::default();
 
     let mut interval = tokio::time::interval(Duration::from_millis(
         consensus.read().ok().map(|c| c.params().block_time_millis).unwrap_or(250),
@@ -227,6 +536,7 @@ async fn block_production_loop(
             let mut bridge_state = state.bridge_state.write().unwrap();
             let mut shielded_state = state.shielded_state.write().unwrap();
             let mut fee_params = state.fee_params.write().unwrap();
+            let mut evm_state = state.evm_state.write().unwrap();
 
             block.execute(
                 &mut balances,
@@ -236,6 +546,7 @@ async fn block_production_loop(
                 &mut shielded_state,
                 &mut fee_params,
                 height,
+                &mut evm_state,
             )
         };
         let result = match result {
@@ -263,13 +574,39 @@ async fn block_production_loop(
         state.finalize_block();
 
         // 6. Persist block to disk
-        if let Err(e) = persist_block(&db_dir, height, &block) {
-            tracing::warn!(error = e, "failed to persist block");
+        if let Err(ref e) = persist_block(&db.data_dir, height, &block) {
+            tracing::warn!(error = %e, "failed to persist block");
+        }
+
+        // 7. Update prune tracking state
+        prune_state.add_block_body(height, call_storage::BlockBody {
+            block_hash: parent_hash,
+            tx_count: result.total_tx_count() as u32,
+            body_size: 0, // would be actual serialized size in production
+        });
+
+        // 8. Run periodic prune checks
+        if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config) {
+            tracing::warn!(error = %e, "prune check failed");
+        }
+
+        // 9. Persist state to reth-db every 100 blocks
+        if new_height % 100 == 0 {
+            if let Some(ref db_env) = db.db {
+                if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
+                    tracing::warn!(error = %e, "failed to persist state to db");
+                }
+                if let Err(ref e) = db_save_prune(db_env, &prune_state) {
+                    tracing::warn!(error = %e, "failed to persist prune state");
+                }
+            } else if let Err(ref e) = db.save_prune_state(&prune_state) {
+                tracing::warn!(error = %e, "failed to persist prune state");
+            }
         }
 
         tracing::info!(height = new_height, tx_count = result.total_tx_count(), "committed block");
 
-        // 7. Broadcast block announcement via P2P
+        // 10. Broadcast block announcement via P2P
         if let Some(ref net) = network {
             let announcement = BlockAnnouncement {
                 block_hash: parent_hash,
@@ -315,7 +652,9 @@ fn handle_network_message(
             if let Ok(tx_msg) = serde_json::from_slice::<TransactionMessage>(data) {
                 if tx_msg.verify_checksum() {
                     if let Ok(mut pool) = mempool.write() {
-                        let _ = pool.insert_evm_tx(tx_msg.hash, Default::default(), 0, 0, tx_msg.data);
+                        if let Ok(evm_tx) = serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data) {
+                            let _ = pool.insert_evm_tx(evm_tx);
+                        }
                     }
                 }
             }
@@ -489,6 +828,7 @@ mod tests {
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
             .execute(
@@ -499,6 +839,7 @@ mod tests {
                 &mut shielded_state,
                 &mut fee_params,
                 height,
+                &mut evm_state,
             )
             .expect("execution");
         block.finalize(&result);
@@ -570,6 +911,7 @@ mod tests {
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
             .execute(
@@ -580,6 +922,7 @@ mod tests {
                 &mut shielded_state,
                 &mut fee_params,
                 height,
+                &mut evm_state,
             )
             .expect("empty block execution");
         block.finalize(&result);
@@ -675,9 +1018,10 @@ mod tests {
         let mut bridge_state = node1.state.bridge_state.write().unwrap();
         let mut shielded_state = node1.state.shielded_state.write().unwrap();
         let mut fee_params = node1.state.fee_params.write().unwrap();
+        let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height)
+            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
             .expect("execution");
         block.finalize(&result);
 
@@ -779,9 +1123,10 @@ mod tests {
         let mut bridge_state = node.state.bridge_state.write().unwrap();
         let mut shielded_state = node.state.shielded_state.write().unwrap();
         let mut fee_params = node.state.fee_params.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height)
+            .execute(&mut balances, &registry, &compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
             .expect("execution");
         block.finalize(&result);
 
@@ -804,5 +1149,120 @@ mod tests {
         assert_eq!(restored.header.hash(), block.header.hash());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_e2e_state_persistence_restart() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-persist-restart-{}",
+            std::process::id()
+        ));
+        let initial_balance: u128 = 50_000;
+        let transfer_amount: u128 = 5_000;
+
+        // === Phase 1: Create node, fund account, produce block, persist state ===
+        {
+            let node = CallNode::new(tmp.clone()).expect("node creation");
+
+            // Stake validator
+            {
+                let mut consensus = node.consensus.write().unwrap();
+                consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+                consensus.refresh_proposer_subset();
+            }
+
+            // Fund sender balance
+            {
+                let mut balances = node.state.balance_state.write().unwrap();
+                balances.balances.set_balance(1, test_addr(1), initial_balance).unwrap();
+            }
+
+            // Insert a transfer tx
+            let tx = ProtocolTransaction {
+                sender: test_addr(1),
+                nonce: 0,
+                instructions: vec![Instruction::Transfer {
+                    asset_id: 1,
+                    to: test_addr(2),
+                    amount: transfer_amount,
+                    memo: None,
+                }],
+                gas_config: GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 100_000,
+                max_fee: 1_000_000,
+                auth: AuthScheme::SingleSig {
+                    signature: [0u8; 65],
+                },
+            };
+            {
+                let mut mempool = node.mempool.write().unwrap();
+                let _ = mempool.insert_protocol_tx(tx);
+            }
+
+            // Produce and commit block
+            let selection = { node.mempool.write().unwrap().select_transactions() };
+            let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
+            let height = node.consensus.read().unwrap().current_height();
+
+            let protocol_txs: Vec<ProtocolTransaction> = selection
+                .protocol_txs
+                .into_iter()
+                .filter_map(|e| serde_json::from_slice(&e.data).ok())
+                .collect();
+
+            let mut block = Block::new(
+                height, node.parent_hash, 5_000, proposer, protocol_txs, vec![],
+                vec![SystemTx { kind: SystemTxKind::UpdateBaseFee, data: vec![] }],
+                selection.bridge_ops,
+            );
+
+            let result = {
+                let mut balances = node.state.balance_state.write().unwrap();
+                let registry = node.state.asset_registry.read().unwrap();
+                let compliance = node.state.compliance_engine.read().unwrap();
+                let mut bridge_state = node.state.bridge_state.write().unwrap();
+                let mut shielded_state = node.state.shielded_state.write().unwrap();
+                let mut fee_params = node.state.fee_params.write().unwrap();
+                let mut evm_state = node.state.evm_state.write().unwrap();
+
+                block.execute(&mut balances, &registry, &compliance, &mut bridge_state,
+                              &mut shielded_state, &mut fee_params, height, &mut evm_state)
+                    .expect("execution")
+            };
+            block.finalize(&result);
+
+            {
+                let mut consensus = node.consensus.write().unwrap();
+                consensus.commit_block(&block, &result).expect("commit");
+            }
+
+            // Persist state to reth-db immediately
+            if let Some(ref db_env) = node.db.db {
+                persist_state_to_db(db_env, &node.state, &node.consensus)
+                    .expect("persist state");
+            }
+
+            // Node is dropped here, simulating shutdown
+        }
+
+        // === Phase 2: Create new node from same data dir, verify state ===
+        {
+            let node2 = CallNode::new(tmp.clone()).expect("node creation (restart)");
+
+            // Verify balance was recovered
+            let sender_balance = {
+                let balances = node2.state.balance_state.read().unwrap();
+                balances.balances.get_balance(1, &test_addr(1))
+            };
+
+            // Balance should be less than initial (transfer + fees deducted)
+            assert!(
+                sender_balance < initial_balance,
+                "sender balance should be reduced after restart, got {sender_balance}"
+            );
+
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
     }
 }

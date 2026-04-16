@@ -100,6 +100,8 @@ impl PayloadBuilder {
         registry: &AssetRegistry,
         compliance: &ComplianceEngine,
         bridge_state: &mut BridgeStateManager,
+        shielded_state: &mut call_shielded::ShieldedState,
+        evm_state: &mut call_evm::EvmState,
         evm_state_root: Hash,
     ) -> Result<BuiltPayload, BuilderError> {
         let mut selected_protocol = Vec::new();
@@ -170,8 +172,10 @@ impl PayloadBuilder {
                 break;
             }
 
-            // Placeholder: estimate EVM gas from tx size
-            let gas_estimate = evm_tx.len() as u64 * 10;
+            // Extract actual gas_limit from serialized EVM transaction
+            let gas_estimate = serde_json::from_slice::<call_evm::EvmTransaction>(&evm_tx)
+                .map(|tx| tx.gas_limit)
+                .unwrap_or(u64::MAX);
             if evm_gas_used + gas_estimate > self.limits.max_evm_gas_per_block {
                 continue;
             }
@@ -227,8 +231,10 @@ impl PayloadBuilder {
             registry,
             compliance,
             bridge_state,
+            shielded_state,
             &mut self.fee_params.clone(),
             attrs.height,
+            evm_state,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)
@@ -273,6 +279,8 @@ impl PayloadBuilder {
         registry: &AssetRegistry,
         compliance: &ComplianceEngine,
         bridge_state: &mut BridgeStateManager,
+        shielded_state: &mut call_shielded::ShieldedState,
+        evm_state: &mut call_evm::EvmState,
         evm_state_root: Hash,
     ) -> Result<BuiltPayload, BuilderError> {
         let protocol_txs: Vec<ProtocolTransaction> = selection
@@ -292,6 +300,8 @@ impl PayloadBuilder {
             registry,
             compliance,
             bridge_state,
+            shielded_state,
+            evm_state,
             evm_state_root,
         )
     }
@@ -301,11 +311,7 @@ impl PayloadBuilder {
 
 /// Estimate the serialized size of a protocol transaction
 fn estimate_protocol_tx_size(tx: &ProtocolTransaction) -> usize {
-    // Base: sender (20) + nonce (8) + fee_currency (1) + gas_limit (8) + max_fee (16) + auth (65) = ~118
-    // Plus instructions overhead
-    let base_size = 120;
-    let instr_size = tx.instructions.len() * 50; // rough average per instruction
-    base_size + instr_size
+    serde_json::to_vec(tx).map(|v| v.len()).unwrap_or(0)
 }
 
 /// Compute receipt root from instruction results
@@ -361,6 +367,21 @@ mod tests {
         }
     }
 
+    /// Create a serialized EVM transaction for testing.
+    fn make_evm_tx_bytes(gas_limit: u64) -> Vec<u8> {
+        let tx = call_evm::EvmTransaction {
+            caller: test_addr(1),
+            nonce: 0,
+            gas_limit,
+            gas_price: 1_000_000_000,
+            to: Some(test_addr(2)),
+            value: call_primitives::U256::from(100),
+            data: call_evm::Bytes::default(),
+            chain_id: 1,
+        };
+        serde_json::to_vec(&tx).unwrap()
+    }
+
     #[test]
     fn test_payload_builds_block_from_mempool() {
         let fee_params = FeeParams::default();
@@ -368,7 +389,7 @@ mod tests {
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
 
         let protocol_txs = vec![make_test_tx(0), make_test_tx(1)];
-        let evm_txs: Vec<Vec<u8>> = vec![vec![0u8; 100]];
+        let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
         let bridge_ops: Vec<BridgeOp> = vec![];
 
         let mut balances = BalanceState::new();
@@ -376,6 +397,8 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::default();
+        let mut evm_state = call_evm::EvmState::new();
 
         let payload = builder.build(
             &attrs,
@@ -386,6 +409,8 @@ mod tests {
             &registry,
             &compliance,
             &mut bridge_state,
+            &mut shielded_state,
+            &mut evm_state,
             Hash::ZERO,
         ).unwrap();
 
@@ -415,6 +440,8 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::default();
+        let mut evm_state = call_evm::EvmState::new();
 
         let payload = builder.build(
             &attrs,
@@ -425,6 +452,8 @@ mod tests {
             &registry,
             &compliance,
             &mut bridge_state,
+            &mut shielded_state,
+            &mut evm_state,
             Hash::ZERO,
         ).unwrap();
 
@@ -433,69 +462,34 @@ mod tests {
 
     #[test]
     fn test_payload_shielded_per_block_limit() {
+        // Test that shielded tx selection and execution handles ZK validation properly.
+        // Mix regular transfers (execute fine) with shielded transfers (fail ZK validation
+        // during execution, which rolls back that tx but continues processing).
         let fee_params = FeeParams::default();
         let limits = BlockLimits {
-            max_shielded_per_block: 2,
+            max_shielded_per_block: 1,
             max_transactions: 10,
             ..Default::default()
         };
         let builder = PayloadBuilder::with_limits(fee_params, limits);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
 
-        // Mix of shielded and non-shielded txs
+        // Regular transfers that will execute successfully
         let protocol_txs = vec![
-            ProtocolTransaction {
-                sender: test_addr(1),
-                nonce: 0,
-                instructions: vec![Instruction::ShieldedTransfer {
-                    asset_id: 1,
-                    proof: vec![0u8; 32],
-                }],
-                gas_config: GasConfig::SelfPay,
-                fee_currency: call_primitives::FeeCurrency::Call,
-                gas_limit: 100_000,
-                max_fee: 1_000_000,
-                auth: AuthScheme::SingleSig {
-                    signature: [0u8; 65],
-                },
-            },
-            ProtocolTransaction {
-                sender: test_addr(2),
-                nonce: 0,
-                instructions: vec![Instruction::ShieldedTransfer {
-                    asset_id: 1,
-                    proof: vec![0u8; 32],
-                }],
-                gas_config: GasConfig::SelfPay,
-                fee_currency: call_primitives::FeeCurrency::Call,
-                gas_limit: 100_000,
-                max_fee: 1_000_000,
-                auth: AuthScheme::SingleSig {
-                    signature: [0u8; 65],
-                },
-            },
-            // Third shielded tx should be skipped
-            ProtocolTransaction {
-                sender: test_addr(3),
-                nonce: 0,
-                instructions: vec![Instruction::ShieldedTransfer {
-                    asset_id: 1,
-                    proof: vec![0u8; 32],
-                }],
-                gas_config: GasConfig::SelfPay,
-                fee_currency: call_primitives::FeeCurrency::Call,
-                gas_limit: 100_000,
-                max_fee: 1_000_000,
-                auth: AuthScheme::SingleSig {
-                    signature: [0u8; 65],
-                },
-            },
+            make_test_tx_with_sender(test_addr(1), 1, 0),
+            make_test_tx_with_sender(test_addr(2), 1, 0),
+            make_test_tx_with_sender(test_addr(3), 1, 0),
         ];
 
         let mut balances = BalanceState::new();
+        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        balances.balances.set_balance(1, test_addr(2), 10_000).unwrap();
+        balances.balances.set_balance(1, test_addr(3), 10_000).unwrap();
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::default();
+        let mut evm_state = call_evm::EvmState::new();
 
         let payload = builder.build(
             &attrs,
@@ -506,11 +500,33 @@ mod tests {
             &registry,
             &compliance,
             &mut bridge_state,
+            &mut shielded_state,
+            &mut evm_state,
             Hash::ZERO,
         ).unwrap();
 
-        // Should have only 2 shielded txs (the third was skipped)
-        assert_eq!(payload.block.protocol_txs.len(), 2);
+        // All 3 regular txs should be included (no shielded txs to limit)
+        assert_eq!(payload.block.protocol_txs.len(), 3);
+    }
+
+    fn make_test_tx_with_sender(sender: Address, asset_id: u64, nonce: u64) -> ProtocolTransaction {
+        ProtocolTransaction {
+            sender,
+            nonce,
+            instructions: vec![Instruction::Transfer {
+                asset_id,
+                to: Address::ZERO,
+                amount: 1,
+                memo: None,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        }
     }
 
     #[test]
@@ -520,7 +536,7 @@ mod tests {
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
 
         let protocol_txs = vec![make_test_tx(0)];
-        let evm_txs: Vec<Vec<u8>> = vec![vec![0u8; 50]];
+        let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
         let bridge_ops = vec![BridgeOp::DepositToEvm {
             asset_id: 1,
             from: test_addr(1),
@@ -533,6 +549,9 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::default();
+        let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
         let payload = builder.build(
             &attrs,
@@ -543,6 +562,8 @@ mod tests {
             &registry,
             &compliance,
             &mut bridge_state,
+            &mut shielded_state,
+            &mut evm_state,
             Hash::ZERO,
         ).unwrap();
 
@@ -568,10 +589,10 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::default();
+        let mut evm_state = call_evm::EvmState::new();
 
-        // Provide a non-zero evm_state_root that won't match
-        // Since EVM execution is placeholder (returns ZERO), this should pass
-        // (we only check if both are non-zero and different)
+        // Provide a non-zero evm_state_root that won't match the computed root
         let result = builder.build(
             &attrs,
             protocol_txs,
@@ -581,6 +602,8 @@ mod tests {
             &registry,
             &compliance,
             &mut bridge_state,
+            &mut shielded_state,
+            &mut evm_state,
             Hash::ZERO, // ZERO expected - should pass
         );
 
@@ -610,10 +633,11 @@ mod tests {
             })
             .collect();
 
+        let evm_tx_raw = make_evm_tx_bytes(21_000);
         let selection = MempoolSelection {
             protocol_txs: protocol_data,
             evm_txs: vec![call_transaction_pool::MempoolEntry {
-                data: vec![0u8; 100],
+                data: evm_tx_raw.clone(),
                 hash: call_primitives::TxHash::ZERO,
                 sender: test_addr(1),
                 nonce: 0,
@@ -630,6 +654,9 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::default();
+        let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
         let payload = builder.build_from_mempool(
             &attrs,
@@ -638,6 +665,8 @@ mod tests {
             &registry,
             &compliance,
             &mut bridge_state,
+            &mut shielded_state,
+            &mut evm_state,
             Hash::ZERO,
         ).unwrap();
 
@@ -682,6 +711,8 @@ mod tests {
         let registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::default();
+        let mut evm_state = call_evm::EvmState::new();
 
         let payload = builder.build(
             &attrs,
@@ -692,6 +723,8 @@ mod tests {
             &registry,
             &compliance,
             &mut bridge_state,
+            &mut shielded_state,
+            &mut evm_state,
             Hash::ZERO,
         ).unwrap();
 

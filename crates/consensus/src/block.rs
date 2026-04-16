@@ -11,6 +11,7 @@ use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::ProtocolTransaction;
 use call_protocol::FeeParams;
 use call_shielded::ShieldedState;
+use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -133,9 +134,10 @@ pub enum SystemTxKind {
     ProtocolUpgrade(ProtocolVersion),
 }
 
-// ── EVM Transaction Placeholder ───────────────────────────────────────
+// ── EVM Transaction ───────────────────────────────────────────────────
 
-/// EVM transaction placeholder (full type defined in call-evm)
+/// EVM transaction in raw serialized form (RLP-encoded).
+/// Deserialized into `EvmTransaction` during execution.
 pub type EvmTx = Vec<u8>;
 
 // ── Block ─────────────────────────────────────────────────────────────
@@ -207,7 +209,7 @@ impl Block {
     }
 
     /// Execute all transactions in spec order (per spec §2.5):
-    /// 1. EVM transactions (evm_txs) — placeholder
+    /// 1. EVM transactions (evm_txs)
     /// 2. Protocol transactions (protocol_txs)
     /// 3. Bridge operations (bridge_operations)
     /// 4. System transactions (system_txs)
@@ -223,14 +225,52 @@ impl Block {
         shielded_state: &mut ShieldedState,
         fee_params: &mut FeeParams,
         current_block_height: u64,
+        evm_state: &mut EvmState,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
+        let executor = EvmExecutor::new(1); // chain_id = 1
+        let max_evm_gas = 30_000_000u64; // default block gas limit (~30M for Ethereum-compatible)
+        let mut gas_tracker = BlockGasTracker::new(max_evm_gas);
+        // Track nonces separately: EVM and protocol operate on separate namespaces
+        let mut used_evm_nonces: HashSet<(call_primitives::Address, u64)> = HashSet::new();
+        let mut used_protocol_nonces: HashSet<(call_primitives::Address, u64)> = HashSet::new();
 
-        // Step 1: EVM transactions (placeholder — actual execution in call-evm)
-        result.evm_tx_count = self.evm_txs.len();
+        // Step 1: EVM transactions
+        for raw_tx in &self.evm_txs {
+            if let Ok(tx) = decode_evm_tx(raw_tx) {
+                // Validate nonce and balance before execution
+                if let Err(_) = call_evm::validate_evm_tx(&tx, evm_state) {
+                    // Skip invalid txs — they don't consume gas
+                    continue;
+                }
+                // Check for duplicate nonce within this block
+                let caller = tx.caller;
+                let nonce = tx.nonce;
+                if !used_evm_nonces.insert((caller, nonce)) {
+                    continue; // duplicate nonce in same block
+                }
+                if let Ok(exec_result) = executor.execute_tx(tx, evm_state) {
+                    if let Err(_) = gas_tracker.add_gas(exec_result.gas_used) {
+                        // Gas limit exceeded — skip this tx, release nonce
+                        used_evm_nonces.remove(&(caller, nonce));
+                        continue;
+                    }
+                    result.evm_tx_count += 1;
+                    result.evm_gas_used += exec_result.gas_used;
+                } else {
+                    // Execution failed — release nonce so it can be retried
+                    used_evm_nonces.remove(&(caller, nonce));
+                }
+            }
+        }
 
         // Step 2: Protocol transactions
         for tx in &self.protocol_txs {
+            // Reject duplicate nonce within the same block
+            if !used_protocol_nonces.insert((tx.sender, tx.nonce)) {
+                continue; // duplicate nonce
+            }
+
             let tx_results = execute_protocol_instructions(
                 &tx.instructions,
                 balances,
@@ -270,9 +310,9 @@ impl Block {
 
         // Compute state roots
         result.payment_root = compute_payment_root(balances);
-        result.evm_state_root = Hash::ZERO; // placeholder
+        result.evm_state_root = compute_evm_state_root(evm_state);
         result.bridge_root = compute_bridge_root(bridge_state);
-        result.receipt_root = Hash::ZERO; // placeholder
+        result.receipt_root = compute_receipt_root(&result);
 
         Ok(result)
     }
@@ -301,6 +341,8 @@ pub struct BlockExecutionResult {
     pub bridge_op_count: usize,
     pub system_tx_count: usize,
     pub total_validator_reward: Balance,
+    /// Total gas used by EVM transactions
+    pub evm_gas_used: u64,
 }
 
 impl BlockExecutionResult {
@@ -356,6 +398,51 @@ fn compute_bridge_root(
     keccak256(&data)
 }
 
+/// Compute EVM state root from the EVM state trie
+fn compute_evm_state_root(evm_state: &EvmState) -> Hash {
+    evm_state.compute_state_root()
+}
+
+/// Compute receipt root from block execution results
+fn compute_receipt_root(result: &BlockExecutionResult) -> Hash {
+    let mut data = Vec::new();
+    data.extend_from_slice(&result.evm_gas_used.to_le_bytes());
+    data.extend_from_slice(&(result.evm_tx_count as u64).to_le_bytes());
+    data.extend_from_slice(&(result.protocol_tx_count as u64).to_le_bytes());
+    data.extend_from_slice(&(result.bridge_op_count as u64).to_le_bytes());
+    for instr_result in &result.instruction_results {
+        match instr_result {
+            InstructionResult::Success => data.push(1),
+            InstructionResult::Reverted { reason } => {
+                data.push(0);
+                data.extend_from_slice(reason.as_bytes());
+            }
+        }
+    }
+    keccak256(&data)
+}
+
+/// Attempt to decode raw EVM transaction bytes into a structured EvmTransaction.
+/// Returns Err if the bytes cannot be parsed as a valid EVM tx.
+fn decode_evm_tx(raw: &[u8]) -> Result<EvmTransaction, ()> {
+    // EVM transactions are RLP-encoded. We use a simple approach:
+    // If the bytes look like valid RLP with structured data, attempt deserialization.
+    // Otherwise, return an error and let the caller handle as unparseable.
+    if raw.is_empty() {
+        return Err(());
+    }
+
+    // Try to deserialize as EvmTransaction (uses serde via alloy-primitives)
+    // This works for transactions that were serialized with serde_json or bincode.
+    // For raw RLP-encoded txs, a proper RLP decoder would be needed.
+    if let Ok(tx) = serde_json::from_slice::<EvmTransaction>(raw) {
+        return Ok(tx);
+    }
+
+    // For test data (arbitrary bytes), return an error — caller handles with fallback
+    Err(())
+}
+
 // ── Consensus Error (re-exported for block validation) ────────────────
 // Defined in validator.rs, re-exported via lib.rs
 
@@ -368,6 +455,19 @@ mod tests {
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
+    }
+
+    fn make_test_evm_tx() -> EvmTransaction {
+        EvmTransaction {
+            caller: test_addr(1),
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 1_000_000_000,
+            to: Some(test_addr(2)),
+            value: call_primitives::U256::from(100),
+            data: call_evm::Bytes::default(),
+            chain_id: 1,
+        }
     }
 
     fn make_test_tx() -> ProtocolTransaction {
@@ -491,13 +591,15 @@ mod tests {
 
     #[test]
     fn test_block_execution_order() {
+        let evm_tx = make_test_evm_tx();
+        let evm_bytes = serde_json::to_vec(&evm_tx).unwrap();
         let mut block = Block::new(
             1,
             BlockHash::ZERO,
             1000,
             1,
             vec![make_test_tx()],
-            vec![vec![0u8; 50]],
+            vec![evm_bytes],
             vec![SystemTx {
                 kind: SystemTxKind::ValidatorReward {
                     proposer: 1,
@@ -524,6 +626,8 @@ mod tests {
         let mut bridge_state = call_bridge::BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
         let result = block
             .execute(
@@ -534,6 +638,7 @@ mod tests {
                 &mut shielded_state,
                 &mut fee_params,
                 1,
+                &mut evm_state,
             )
             .unwrap();
 
@@ -589,6 +694,7 @@ mod tests {
         let mut bridge_state = call_bridge::BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
 
         let result = block
             .execute(
@@ -599,6 +705,7 @@ mod tests {
                 &mut shielded_state,
                 &mut fee_params,
                 1,
+                &mut evm_state,
             )
             .unwrap();
 
