@@ -203,7 +203,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             // Look up agent info to get owner address
             match state.get_agent_info(agent_id) {
                 Some(info) => {
-                    let receipts = state.get_receipts_by_block(0);
+                    let receipts = state.get_all_receipts();
                     let history: Vec<serde_json::Value> = receipts
                         .iter()
                         .filter(|r| r.gas_payer == info.owner)

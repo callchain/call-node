@@ -131,7 +131,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 })
                 .unwrap_or_default();
 
-            let receipts = state.get_receipts_by_block(0);
+            let receipts = state.get_all_receipts();
             let logs: Vec<serde_json::Value> = receipts
                 .iter()
                 .flat_map(|r| r.logs.iter().map(|log| (r.tx_hash, log)))

@@ -129,8 +129,23 @@ impl RpcState {
         }
     }
 
-    pub fn get_receipts_by_block(&self, _block: u64) -> Vec<ProtocolReceipt> {
-        self.receipts.read().map(|r| r.values().cloned().collect()).unwrap_or_default()
+    pub fn get_receipts_by_block(&self, block: u64) -> Vec<ProtocolReceipt> {
+        self.receipts
+            .read()
+            .map(|r| {
+                r.values()
+                    .filter(|receipt| receipt.block_number == block)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_all_receipts(&self) -> Vec<ProtocolReceipt> {
+        self.receipts
+            .read()
+            .map(|r| r.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn get_current_block(&self) -> u64 {

@@ -215,7 +215,7 @@ mod tests {
             state_changes: vec![],
         });
 
-        let receipts = state.get_receipts_by_block(0);
+        let receipts = state.get_all_receipts();
         assert_eq!(receipts.len(), 2);
     }
 
@@ -224,7 +224,7 @@ mod tests {
         // Logs are stored in receipts; filtering by address returns empty
         // (placeholder until real log indexing is implemented)
         let state = make_test_state();
-        let receipts = state.get_receipts_by_block(0);
+        let receipts = state.get_all_receipts();
         assert!(receipts.is_empty());
     }
 
