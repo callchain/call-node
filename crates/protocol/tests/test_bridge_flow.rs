@@ -187,14 +187,26 @@ mod test_bridge_flow_impl {
         let (secrets, validators) = generate_bridge_validators(21);
 
         let op = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators).unwrap();
+        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 100).unwrap();
+        assert!(matches!(result, call_bridge::ExternalDepositResult::Queued { .. }));
+
+        // Deposit is queued, not credited yet (challenge period)
+        if let ExternalBridgeOp::Deposit { recipient, .. } = &op {
+            assert_eq!(balances.get_balance(1, recipient), 0);
+        }
+
+        // Finalize after challenge period
+        let finalized = call_bridge::finalize_pending_external_deposits_with_period(
+            &mut bridge_state, &mut balances, 100 + config.challenge_period_blocks, config.challenge_period_blocks,
+        );
+        assert_eq!(finalized, 1);
 
         if let ExternalBridgeOp::Deposit { recipient, amount, .. } = op {
             assert_eq!(balances.get_balance(1, &recipient), amount);
         }
 
         // Replay protection
-        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators);
+        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 200);
         assert!(result.is_err());
     }
 
@@ -211,7 +223,7 @@ mod test_bridge_flow_impl {
             asset_id: 99, amount: 1000, signatures: vec![],
         };
         assert!(matches!(
-            process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators),
+            process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 100),
             Err(call_bridge::BridgeError::ExternalAssetNotAllowed(99))
         ));
     }
@@ -228,7 +240,7 @@ mod test_bridge_flow_impl {
             target_chain: ExternalChain::EthereumMainnet, target_address: vec![0u8; 32],
             asset_id: 1, sender, amount: 2_000,
         };
-        process_external_withdraw(&op, &mut balances, &mut bridge_state, &config).unwrap();
+        process_external_withdraw(&op, &mut balances, &mut bridge_state, &config, 100).unwrap();
         assert_eq!(balances.get_balance(1, &sender), 3_000);
         assert_eq!(bridge_state.total_withdrawals.get(&1), Some(&2_000));
     }
@@ -246,7 +258,7 @@ mod test_bridge_flow_impl {
             asset_id: 1, sender, amount: 500,
         };
         assert!(matches!(
-            process_external_withdraw(&op, &mut balances, &mut bridge_state, &config),
+            process_external_withdraw(&op, &mut balances, &mut bridge_state, &config, 100),
             Err(call_bridge::BridgeError::InsufficientProtocolBalance(1, 500))
         ));
     }
@@ -272,7 +284,8 @@ mod test_bridge_flow_impl {
         let (secrets, validators) = generate_bridge_validators(21);
 
         let op1 = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        process_external_deposit(&op1, &mut balances, &mut bridge_state, &config, &validators).unwrap();
+        let result1 = process_external_deposit(&op1, &mut balances, &mut bridge_state, &config, &validators, 100);
+        assert!(result1.is_ok());
 
         // Second deposit would exceed daily limit
         let op2 = ExternalBridgeOp::Deposit {
@@ -285,7 +298,7 @@ mod test_bridge_flow_impl {
                 signature: sign_bridge_event(&secrets[i], &ExternalChain::EthereumMainnet, B256::from_slice(&[1u8; 32]), 101, &[0u8; 32], addr(2), 1, 600),
             }).collect(),
         };
-        let result = process_external_deposit(&op2, &mut balances, &mut bridge_state, &config, &validators);
+        let result = process_external_deposit(&op2, &mut balances, &mut bridge_state, &config, &validators, 100);
         assert!(result.is_err());
     }
 }

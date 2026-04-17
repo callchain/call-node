@@ -948,13 +948,18 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let mut balances = state.balance_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
             let mut bridge_state = state.bridge_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
 
-            match call_bridge::process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators) {
-                Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "status": "deposited",
+            let current_block = state.get_current_block();
+
+            // Process deposit — now queues for challenge period instead of instant credit
+            match call_bridge::process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, current_block) {
+                Ok(call_bridge::ExternalDepositResult::Queued { finalized_at_block, .. }) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "status": "queued",
                     "sourceTxHash": source_tx_hash_hex,
                     "assetId": asset_id,
                     "amount": amount.to_string(),
                     "recipient": format!("0x{}", hex::encode(recipient.as_slice())),
+                    "challengePeriodBlocks": config.challenge_period_blocks,
+                    "finalizedAtBlock": finalized_at_block,
                 })),
                 Err(e) => Err(invalid_params(e.to_string())),
             }
