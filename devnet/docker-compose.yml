@@ -1,0 +1,117 @@
+name: callchain-devnet
+
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: callchain-node1
+    ports:
+      - "5005:5005"    # HTTP RPC
+      - "5006:5006"    # WebSocket RPC
+      - "51235:51235"  # P2P
+      - "9090:9090"    # Metrics
+    volumes:
+      - node1-data:/var/lib/callchain
+      - ./genesis.json:/etc/callchain/genesis.json:ro
+      - ./configs/node1.toml:/etc/callchain/config.toml:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --log-level info
+    restart: unless-stopped
+    networks:
+      devnet:
+        ipv4_address: 172.28.0.11
+
+  node2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: callchain-node2
+    ports:
+      - "5007:5005"    # HTTP RPC
+      - "5008:5006"    # WebSocket RPC
+      - "51236:51235"  # P2P
+      - "9091:9090"    # Metrics
+    volumes:
+      - node2-data:/var/lib/callchain
+      - ./genesis.json:/etc/callchain/genesis.json:ro
+      - ./configs/node2.toml:/etc/callchain/config.toml:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --log-level info
+    depends_on:
+      - node1
+    restart: unless-stopped
+    networks:
+      devnet:
+        ipv4_address: 172.28.0.12
+
+  node3:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: callchain-node3
+    ports:
+      - "5009:5005"    # HTTP RPC
+      - "5010:5006"    # WebSocket RPC
+      - "51237:51235"  # P2P
+      - "9092:9090"    # Metrics
+    volumes:
+      - node3-data:/var/lib/callchain
+      - ./genesis.json:/etc/callchain/genesis.json:ro
+      - ./configs/node3.toml:/etc/callchain/config.toml:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --log-level info
+    depends_on:
+      - node1
+    restart: unless-stopped
+    networks:
+      devnet:
+        ipv4_address: 172.28.0.13
+
+  node4:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: callchain-node4
+    ports:
+      - "5011:5005"    # HTTP RPC
+      - "5012:5006"    # WebSocket RPC
+      - "51238:51235"  # P2P
+      - "9093:9090"    # Metrics
+    volumes:
+      - node4-data:/var/lib/callchain
+      - ./genesis.json:/etc/callchain/genesis.json:ro
+      - ./configs/node4.toml:/etc/callchain/config.toml:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --log-level info
+    depends_on:
+      - node1
+    restart: unless-stopped
+    networks:
+      devnet:
+        ipv4_address: 172.28.0.14
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+
+networks:
+  devnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
