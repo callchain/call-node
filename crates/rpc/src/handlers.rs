@@ -2,7 +2,7 @@
 
 use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams};
 use call_protocol::governance::GovernanceManager;
-use call_protocol::oracle::{OracleManager, OracleConfig};
+use call_protocol::oracle::OracleManager;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
 use call_consensus::ValidatorStateManager;
@@ -55,6 +55,7 @@ impl RpcState {
         shielded_state: ShieldedState,
         mempool: Arc<RwLock<Mempool>>,
         chain_id: u64,
+        oracle: OracleManager,
     ) -> Self {
         Self {
             balance_state: RwLock::new(balance_state),
@@ -73,7 +74,7 @@ impl RpcState {
             chain_id,
             subscriptions: SubscriptionManager::new(),
             governance: RwLock::new(GovernanceManager::new()),
-            oracle: RwLock::new(OracleManager::new(OracleConfig::default())),
+            oracle: RwLock::new(oracle),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
         }

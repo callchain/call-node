@@ -21,6 +21,7 @@ use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
 };
+use call_protocol::oracle::OracleManager;
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager};
 use call_storage::{CallDb, open_db, PruneState, StorageError};
 use call_storage::reth_db::{
@@ -99,6 +100,7 @@ impl CallNode {
             shielded_state,
             mempool.clone(),
             CALLCHAIN_CHAIN_ID,
+            OracleManager::default(),
         ));
 
         Ok(Self {

@@ -104,6 +104,8 @@ impl Default for OracleConfig {
 pub struct OracleManager {
     config: OracleConfig,
     validators: HashMap<u32, OracleValidatorInfo>,
+    /// Asset IDs to track for oracle submissions
+    pub tracked_assets: Vec<AssetId>,
     /// Pending submissions for current period: asset_id -> (validator_id -> submission)
     pending: HashMap<AssetId, HashMap<u32, OracleSubmission>>,
     /// Current aggregated prices per asset
@@ -124,6 +126,7 @@ impl OracleManager {
         Self {
             config,
             validators: HashMap::new(),
+            tracked_assets: Vec::new(),
             pending: HashMap::new(),
             aggregated: HashMap::new(),
             history: HashMap::new(),
@@ -144,6 +147,11 @@ impl OracleManager {
                 submission_count: 0,
             },
         );
+    }
+
+    /// Set the list of asset IDs to track for oracle submissions
+    pub fn set_tracked_assets(&mut self, asset_ids: Vec<AssetId>) {
+        self.tracked_assets = asset_ids;
     }
 
     /// Submit a price from a validator.

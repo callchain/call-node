@@ -24,6 +24,9 @@ pub struct Genesis {
     pub validators: Vec<GenesisValidator>,
     #[serde(default = "Genesis::default_timestamp")]
     pub timestamp: u64,
+    /// Asset IDs to track for oracle price submissions
+    #[serde(default)]
+    pub oracle_assets: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +129,17 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             "genesis loaded"
         );
         genesis.apply(&mut node)?;
+
+        // Register genesis validators into the oracle for price submissions
+        let mut oracle = node.state.oracle.write().map_err(|_| "lock poisoned")?;
+        for (i, val) in genesis.validators.iter().enumerate() {
+            let pubkey = parse_pubkey(&val.pubkey)?;
+            oracle.register_validator(i as u32, pubkey);
+        }
+        if !genesis.oracle_assets.is_empty() {
+            oracle.set_tracked_assets(genesis.oracle_assets.clone());
+        }
+        drop(oracle);
     }
 
     // Step 4: Init P2P and connect seeds

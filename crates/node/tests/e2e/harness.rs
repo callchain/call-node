@@ -11,6 +11,7 @@ use call_protocol::{
     instructions::Instruction,
     transaction::{AuthScheme, FeeParams, GasConfig, ProtocolTransaction},
 };
+use call_protocol::oracle::OracleManager;
 use call_transaction_pool::Mempool;
 use call_rpc::RpcState;
 use std::path::PathBuf;
@@ -116,6 +117,7 @@ impl NodeBuilder {
             call_shielded::ShieldedState::new(),
             mempool.clone(),
             self.chain_id,
+            OracleManager::default(),
         ));
 
         for (asset_id, addr, amount) in &self.initial_balances {

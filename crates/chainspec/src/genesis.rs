@@ -10,6 +10,7 @@ use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
 use call_protocol::balances::BalanceState;
 use call_protocol::compliance::ComplianceEngine;
+use call_protocol::oracle::{OracleConfig, OracleManager};
 use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::FeeParams;
 use alloy_primitives::U256;
@@ -79,6 +80,9 @@ pub struct Genesis {
     /// Fee parameters
     #[serde(skip, default = "FeeParams::default")]
     pub fee_params: FeeParams,
+    /// Asset IDs to track for oracle price submissions
+    #[serde(default)]
+    pub oracle_assets: Option<Vec<AssetId>>,
 }
 
 impl Genesis {
@@ -94,6 +98,7 @@ impl Genesis {
             validators: Vec::new(),
             consensus_params: ConsensusParams::default(),
             fee_params: FeeParams::default(),
+            oracle_assets: None,
         }
     }
 
@@ -176,6 +181,8 @@ pub struct GenesisState {
     pub validators: ValidatorStateManager,
     /// Registered fee currency asset IDs
     pub fee_currencies: Vec<AssetId>,
+    /// Oracle manager with registered validators and tracked assets
+    pub oracle: OracleManager,
 }
 
 // ── Genesis Executor ──────────────────────────────────────────────────
@@ -224,7 +231,17 @@ impl GenesisExecutor {
         // Step 6: Deploy EVM ERC-20 templates
         self.deploy_evm_templates(&mut evm_state)?;
 
-        // Step 7: Compute initial state roots
+        // Step 7: Initialize oracle with genesis validators and tracked assets
+        let mut oracle = OracleManager::new(OracleConfig::default());
+        for (i, gv) in self.genesis.validators.iter().enumerate() {
+            let pubkey = parse_pubkey(&gv.ed25519_pubkey)?;
+            oracle.register_validator(i as u32, pubkey);
+        }
+        if let Some(ref assets) = self.genesis.oracle_assets {
+            oracle.set_tracked_assets(assets.clone());
+        }
+
+        // Step 8: Compute initial state roots
         let payment_root = compute_payment_root(&balances);
         let evm_state_root = compute_evm_state_root(&evm_state);
         let bridge_root = Hash::ZERO; // No bridge operations in genesis
@@ -239,6 +256,7 @@ impl GenesisExecutor {
             evm_state,
             validators,
             fee_currencies,
+            oracle,
         })
     }
 
