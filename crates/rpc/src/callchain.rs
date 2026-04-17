@@ -2,7 +2,7 @@
 
 use crate::handlers::{RpcState, invalid_params, internal_error};
 use call_primitives::Address;
-use call_protocol::governance::{ProposalType, Vote as GovernanceVote};
+use call_governance::{ProposalType, Vote as GovernanceVote};
 use call_oracle::OracleSubmission;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;

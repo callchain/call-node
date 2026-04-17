@@ -182,7 +182,7 @@ async fn test_chain_fork_and_reconcile() {
 /// Governance-style upgrade: proposal passes, upgrade activates at height.
 #[tokio::test]
 async fn test_governance_triggered_upgrade() {
-    use call_protocol::governance::{GovernanceManager, ProposalType, Vote};
+    use call_governance::{GovernanceManager, ProposalType, Vote};
 
     let mut node = TestNode::new();
 
@@ -218,7 +218,7 @@ async fn test_governance_triggered_upgrade() {
 
     // The upgrade is scheduled for block 100
     let proposal = gov.get_proposal(proposal_id).unwrap();
-    assert_eq!(proposal.state, call_protocol::governance::ProposalState::Pending);
+    assert_eq!(proposal.state, call_governance::ProposalState::Pending);
 
     // Produce blocks up to the activation height
     for i in 0..10 {

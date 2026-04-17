@@ -4,7 +4,7 @@ mod integration;
 mod test_governance_flow_impl {
     use super::integration::*;
     use call_primitives::{Address, ValidatorId};
-    use call_protocol::governance::{
+    use call_governance::{
         GovernanceManager, ProposalType, ProposalState, Vote,
         PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS,
         TIMELOCK_PERIOD_BLOCKS, EXECUTION_TIMEOUT_BLOCKS,

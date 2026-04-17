@@ -15,6 +15,7 @@ call-crypto.workspace = true
 call-storage.workspace = true
 call-shielded = { workspace = true }
 call-oracle = { workspace = true, features = ["test-utils"] }
+call-governance = { workspace = true, features = ["test-utils"] }
 ed25519-dalek = "2"
 rand = "0.8"
 alloy-primitives.workspace = true

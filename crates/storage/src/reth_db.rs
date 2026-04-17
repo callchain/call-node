@@ -135,6 +135,16 @@ impl Table for CallPruneState {
     type Value = Vec<u8>;
 }
 
+/// Governance state: single entry () -> serialized GovernanceManager snapshot
+#[derive(Debug)]
+pub struct CallGovernanceState;
+impl Table for CallGovernanceState {
+    const NAME: &'static str = "call_governance_state";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// All Callchain tables
 pub struct CallTables;
 impl TableSet for CallTables {
@@ -155,6 +165,7 @@ impl TableSet for CallTables {
                 box_info::<CallAgents>,
                 box_info::<CallOracleState>,
                 box_info::<CallPruneState>,
+                box_info::<CallGovernanceState>,
             ]
             .into_iter()
             .map(|f| f()),

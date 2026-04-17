@@ -3,9 +3,21 @@
 //! Proposal lifecycle, dual-track voting, timelock, emergency pause.
 
 use call_primitives::{Address, AssetId, Balance, ValidatorId};
-use crate::economics::TOTAL_SUPPLY;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Total supply: 1B CALL * 10^18 (18 decimals)
+pub const TOTAL_SUPPLY: Balance = 1_000_000_000_000_000_000_000_000_000u128;
+
+// ── Proposal Executor ─────────────────────────────────────────────────
+
+/// Trait for executing real on-chain changes when a governance proposal passes.
+/// Implement this in the node layer to dispatch to consensus, fork manager, etc.
+pub trait ProposalExecutor: Send + Sync {
+    /// Execute the on-chain effect of a proposal. Called after state is updated.
+    fn on_proposal_executed(&self, proposal: &Proposal) -> Result<(), String>;
+}
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -167,7 +179,7 @@ pub struct VoteDelegation {
 
 // ── Emergency Pause State ─────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EmergencyPauseState {
     pub is_paused: bool,
     pub pause_reason: String,
@@ -177,6 +189,7 @@ pub struct EmergencyPauseState {
 // ── Governance Manager ────────────────────────────────────────────────
 
 /// Manages governance proposals, voting, and execution (per spec §13.3)
+#[derive(Serialize, Deserialize)]
 pub struct GovernanceManager {
     proposals: HashMap<u64, Proposal>,
     next_proposal_id: u64,
@@ -196,6 +209,9 @@ pub struct GovernanceManager {
     current_block: u64,
     /// Emergency pause state
     pub emergency_pause: EmergencyPauseState,
+    /// Optional executor for real on-chain side effects (not serialized — rewired after load)
+    #[serde(skip)]
+    pub executor: Option<Arc<dyn ProposalExecutor>>,
 }
 
 impl Default for GovernanceManager {
@@ -217,7 +233,14 @@ impl GovernanceManager {
             voted_addresses: HashMap::new(),
             current_block: 0,
             emergency_pause: EmergencyPauseState::default(),
+            executor: None,
         }
+    }
+
+    /// Set a proposal executor for real on-chain side effects.
+    pub fn with_executor(mut self, executor: Arc<dyn ProposalExecutor>) -> Self {
+        self.executor = Some(executor);
+        self
     }
 
     /// Set current block height
@@ -428,8 +451,14 @@ impl GovernanceManager {
 
         self.proposals.get_mut(&proposal_id).unwrap().state = ProposalState::Executed;
 
-        // Apply the on-chain change
+        // Apply the on-chain change (internal placeholder)
         self.apply_proposal(proposal_id)?;
+
+        // Execute real on-chain side effects via the executor (if configured)
+        if let Some(ref executor) = self.executor {
+            let proposal = self.proposals.get(&proposal_id).ok_or(GovernanceError::ProposalNotFound)?;
+            executor.on_proposal_executed(proposal).map_err(|e| GovernanceError::ExecutionFailed(e))?;
+        }
 
         // Return deposit to proposer
         if let Some(deposit) = self.deposits.remove(&proposer) {

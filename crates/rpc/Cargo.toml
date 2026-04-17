@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 call-primitives.workspace = true
 call-protocol.workspace = true
+call-governance.workspace = true
 call-oracle.workspace = true
 call-evm.workspace = true
 call-bridge.workspace = true

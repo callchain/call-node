@@ -21,8 +21,9 @@ use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
 };
+use call_governance::{GovernanceManager, ProposalExecutor};
 use call_oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
-use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager};
+use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager, wire_governance_executor};
 use call_storage::{CallDb, open_db, PruneState, StorageError};
 use call_storage::reth_db::{
     save_balances as db_save_balances, load_balances as db_load_balances,
@@ -30,6 +31,7 @@ use call_storage::reth_db::{
     db_put, db_batch_put, db_clear, db_iter_all, db_get,
     CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
+    CallGovernanceState,
 };
 use reth_db::DatabaseEnv;
 use call_transaction_pool::Mempool;
@@ -75,17 +77,20 @@ impl CallNode {
             .map_err(|e| format!("failed to load prune state: {e}"))?;
 
         // Load persisted state from reth-db if available
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager) =
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager, governance_manager) =
             if let Some(ref db_env) = db.db {
                 let loaded = load_state_from_db(db_env);
                 // Try to load oracle state from disk
                 let oracle = load_oracle_state(db_env)
                     .map_err(|e| format!("failed to load oracle state: {e}"))?;
-                (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle)
+                // Try to load governance state from disk
+                let governance = load_governance_state(db_env)
+                    .map_err(|e| format!("failed to load governance state: {e}"))?;
+                (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle, governance)
             } else {
                 (BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
                  ShieldedState::new(), ValidatorStateManager::default(),
-                 AgentRegistry::new(), AgentBalances::new(), OracleManager::default())
+                 AgentRegistry::new(), AgentBalances::new(), OracleManager::default(), GovernanceManager::new())
             };
 
         let consensus = SimplexConsensus::new(
@@ -110,6 +115,12 @@ impl CallNode {
 
         // Wire live oracle into precompiles so EVM contracts can read prices
         call_precompiles::set_live_oracle(Arc::clone(&state.oracle));
+
+        // Replace default governance with persisted state
+        *state.governance.write().unwrap() = governance_manager;
+
+        // Wire governance executor so proposals can trigger real side effects
+        wire_governance_executor(&state);
 
         Ok(Self {
             state,
@@ -423,7 +434,7 @@ impl CallNode {
 fn load_state_from_db(
     db_env: &Arc<DatabaseEnv>,
 ) -> (BalanceState, EvmState, BridgeStateManager, ShieldedState,
-      ValidatorStateManager, AgentRegistry, AgentBalances) {
+      ValidatorStateManager, AgentRegistry, AgentBalances, GovernanceManager) {
     // Load balances
     let (balances, allowances) = match db_load_balances(db_env) {
         Ok(b) => b,
@@ -485,7 +496,16 @@ fn load_state_from_db(
         }
     };
 
-    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances)
+    // Load governance state
+    let governance = match load_governance_state(db_env) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load governance state");
+            GovernanceManager::new()
+        }
+    };
+
+    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, governance)
 }
 
 /// Persist all state types to the reth-db database.
@@ -542,6 +562,13 @@ fn persist_state_to_db(
         let oracle = state.oracle.read().unwrap();
         save_oracle_state(db_env, &oracle)
             .map_err(|e| format!("save oracle: {e}"))?;
+    }
+
+    // Persist governance state
+    {
+        let governance = state.governance.read().unwrap();
+        save_governance_state(db_env, &governance)
+            .map_err(|e| format!("save governance: {e}"))?;
     }
 
     Ok(())
@@ -709,6 +736,20 @@ fn load_oracle_state(db: &DatabaseEnv) -> Result<OracleManager, String> {
     }
 }
 
+/// Save governance state to the database.
+fn save_governance_state(db: &DatabaseEnv, state: &GovernanceManager) -> Result<(), String> {
+    let data = serde_json::to_vec(state).map_err(|e| format!("serialize governance: {e}"))?;
+    db_put::<CallGovernanceState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+/// Load governance state from the database.
+fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManager, String> {
+    match db_get::<CallGovernanceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize governance: {e}")),
+        None => Ok(GovernanceManager::new()),
+    }
+}
+
 // ── Incremental State Persistence ────────────────────────────────────
 //
 // Instead of clearing and rewriting entire tables every 100 blocks,
@@ -783,6 +824,13 @@ fn persist_state_incremental(
         let oracle = state.oracle.read().map_err(|_| "oracle lock poisoned".to_string())?;
         save_oracle_state(db_env, &oracle)
             .map_err(|e| format!("save oracle: {e}"))?;
+    }
+
+    // Persist governance state (overwrite)
+    {
+        let governance = state.governance.read().map_err(|_| "governance lock poisoned".to_string())?;
+        save_governance_state(db_env, &governance)
+            .map_err(|e| format!("save governance: {e}"))?;
     }
 
     Ok(())

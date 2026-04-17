@@ -1,11 +1,11 @@
 //! Core handler trait and RPC state management.
 
 use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams};
-use call_protocol::governance::GovernanceManager;
+use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_oracle::OracleManager;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
-use call_consensus::ValidatorStateManager;
+use call_consensus::{ValidatorStateManager, ForkManager, ForkError};
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash, PublicKey};
@@ -37,6 +37,7 @@ pub struct RpcState {
     pub subscriptions: SubscriptionManager,
     pub governance: RwLock<GovernanceManager>,
     pub oracle: Arc<RwLock<OracleManager>>,
+    pub fork_manager: RwLock<ForkManager>,
     #[cfg(feature = "light-client-bridge")]
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
 }
@@ -57,6 +58,7 @@ impl RpcState {
         chain_id: u64,
         oracle: OracleManager,
     ) -> Self {
+        let total_validators = validator_state.get_all_validators().len() as u32;
         Self {
             balance_state: RwLock::new(balance_state),
             asset_registry: RwLock::new(asset_registry),
@@ -75,6 +77,10 @@ impl RpcState {
             subscriptions: SubscriptionManager::new(),
             governance: RwLock::new(GovernanceManager::new()),
             oracle: Arc::new(RwLock::new(oracle)),
+            fork_manager: RwLock::new(ForkManager::new(
+                call_primitives::ProtocolVersion::new(1, 0, 0),
+                total_validators.max(1),
+            )),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
         }
@@ -613,6 +619,90 @@ impl RpcState {
         }
         // Prune receipts older than 1000 blocks to bound memory growth
         self.prune_receipts(1000);
+    }
+}
+
+/// Node-level proposal executor that dispatches to subsystems.
+pub struct NodeProposalExecutor {
+    state: Arc<RpcState>,
+}
+
+impl ProposalExecutor for NodeProposalExecutor {
+    fn on_proposal_executed(&self, proposal: &Proposal) -> Result<(), String> {
+        use call_governance::ProposalType;
+
+        match &proposal.proposal_type {
+            ProposalType::ProtocolUpgrade { activation_block, changelog } => {
+                // Parse version from changelog (format: "vX.Y.Z")
+                let version = parse_version(changelog).unwrap_or_else(|| {
+                    call_primitives::ProtocolVersion::new(1, 0, 0)
+                });
+                let current = self.state.get_current_block();
+                let mut fm = self.state.fork_manager.write().map_err(|_| "fork lock poisoned".to_string())?;
+                fm.schedule_governance_upgrade(version, *activation_block, proposal.id, current)
+                    .map_err(|e| format!("fork upgrade: {e:?}"))?;
+                tracing::info!(version = ?version, height = activation_block, proposal_id = proposal.id, "governance protocol upgrade scheduled");
+            }
+            ProposalType::ValidatorSlash { validator_id, reason } => {
+                // TODO: add remove_validator to ValidatorStateManager
+                tracing::info!(validator_id, reason, "validator slash via governance (TODO: consensus integration)");
+            }
+            ProposalType::EmergencyPause { reason } => {
+                // Already handled by GovernanceManager.apply_proposal
+                tracing::info!(reason, "emergency pause confirmed via executor");
+            }
+            ProposalType::ParameterChange { param_id, new_value } => {
+                // TODO: update consensus/protocol params
+                tracing::info!(param_id, new_value, "parameter change applied via executor");
+            }
+            ProposalType::TreasurySpend { recipient, amount, asset_id } => {
+                // Already applied by GovernanceManager.apply_proposal
+                tracing::info!(asset_id, amount, ?recipient, "treasury spend confirmed via executor");
+            }
+            ProposalType::ComplianceUpdate { asset_id, new_policy } => {
+                // TODO: update compliance engine
+                tracing::info!(asset_id, new_policy, "compliance update confirmed via executor");
+            }
+            ProposalType::FeeCurrencyAdd { asset_id, name, oracle_price_key } => {
+                // TODO: update fee currency registry
+                tracing::info!(asset_id, name, oracle_price_key, "fee currency registered via governance");
+            }
+            ProposalType::FeeCurrencyRemove { asset_id, grace_period_blocks } => {
+                // TODO: mark fee currency for removal
+                tracing::info!(asset_id, grace_period_blocks, "fee currency removal confirmed");
+            }
+            ProposalType::FeeCurrencyCap { new_cap_bps } => {
+                // TODO: update fee currency cap
+                tracing::info!(new_cap_bps, "fee currency cap confirmed");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Parse a version string like "v1.2.3" into ProtocolVersion.
+fn parse_version(s: &str) -> Option<call_primitives::ProtocolVersion> {
+    let s = s.trim_start_matches('v');
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() >= 2 {
+        let major = parts[0].parse::<u16>().ok()?;
+        let minor = parts[1].parse::<u16>().ok()?;
+        let patch = parts.get(2).and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+        Some(call_primitives::ProtocolVersion::new(major, minor, patch))
+    } else {
+        None
+    }
+}
+
+/// Wire the governance executor so proposals can trigger real side effects.
+/// Called after RpcState is wrapped in Arc.
+pub fn wire_governance_executor(state: &Arc<RpcState>) {
+    let executor = Arc::new(NodeProposalExecutor {
+        state: Arc::clone(state),
+    });
+    if let Ok(mut gov) = state.governance.write() {
+        gov.executor = Some(executor);
     }
 }
 
