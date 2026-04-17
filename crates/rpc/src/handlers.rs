@@ -36,7 +36,7 @@ pub struct RpcState {
     pub chain_id: u64,
     pub subscriptions: SubscriptionManager,
     pub governance: RwLock<GovernanceManager>,
-    pub oracle: RwLock<OracleManager>,
+    pub oracle: Arc<RwLock<OracleManager>>,
     #[cfg(feature = "light-client-bridge")]
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
 }
@@ -74,7 +74,7 @@ impl RpcState {
             chain_id,
             subscriptions: SubscriptionManager::new(),
             governance: RwLock::new(GovernanceManager::new()),
-            oracle: RwLock::new(oracle),
+            oracle: Arc::new(RwLock::new(oracle)),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
         }
@@ -546,7 +546,7 @@ impl RpcState {
         let mut compliance_guard = self.compliance_engine.write().map_err(|_| "lock poisoned".to_string())?;
         let mut shielded_state = self.shielded_state.write().map_err(|_| "lock poisoned".to_string())?;
 
-        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender) {
+        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender, None) {
             Ok(results) => {
                 let status = call_primitives::ExecutionStatus::Success;
                 let gas_used = results.iter().map(|r| match r {

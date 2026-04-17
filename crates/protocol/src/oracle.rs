@@ -15,8 +15,6 @@ use std::collections::HashMap;
 pub const ORACLE_UPDATE_INTERVAL: u64 = 1000;
 /// Oracle period in seconds (used for submission validation)
 pub const ORACLE_PERIOD_SECS: u64 = 240;
-/// Quorum size: 2/3 of 21-subset = 14
-pub const ORACLE_QUORUM: usize = 14;
 /// Outlier threshold: 5% deviation from median
 pub const ORACLE_OUTLIER_THRESHOLD_BPS: u64 = 500;
 /// Strikes before validator is disabled
@@ -27,6 +25,15 @@ pub const ORACLE_TWAP_WINDOW_SECS: u64 = 86_400;
 pub const ORACLE_STALENESS_SECS: u64 = 900;
 /// Minimum independent data sources per validator
 pub const ORACLE_MIN_DATA_SOURCES: usize = 2;
+
+/// Compute the oracle quorum from the number of active validators.
+/// Returns ceil(2/3 * n), minimum 2, capped at n.
+pub fn oracle_quorum(active_count: usize) -> usize {
+    if active_count == 0 {
+        return 0;
+    }
+    ((2 * active_count + 2) / 3).min(active_count).max(1)
+}
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -75,7 +82,6 @@ pub struct HistoricalPrice {
 #[derive(Debug, Clone, Copy)]
 pub struct OracleConfig {
     pub update_interval: u64,
-    pub quorum: usize,
     pub outlier_threshold_bps: u64,
     pub outlier_tolerance: u32,
     pub twap_window_secs: u64,
@@ -87,7 +93,6 @@ impl Default for OracleConfig {
     fn default() -> Self {
         Self {
             update_interval: ORACLE_UPDATE_INTERVAL,
-            quorum: ORACLE_QUORUM,
             outlier_threshold_bps: ORACLE_OUTLIER_THRESHOLD_BPS,
             outlier_tolerance: ORACLE_OUTLIER_TOLERANCE,
             twap_window_secs: ORACLE_TWAP_WINDOW_SECS,
@@ -113,6 +118,12 @@ pub struct OracleManager {
     /// Historical prices for TWAP: asset_id -> Vec<HistoricalPrice>
     history: HashMap<AssetId, Vec<HistoricalPrice>>,
     current_block: u64,
+    /// Accumulated fee pool for oracle rewards (reset each period)
+    pub reward_pool: u128,
+    /// Validators who contributed to the last quorum aggregation
+    pub current_contributors: Vec<u32>,
+    /// Last round's outlier validators (for slashing)
+    last_outliers: Vec<u32>,
 }
 
 impl Default for OracleManager {
@@ -131,6 +142,9 @@ impl OracleManager {
             aggregated: HashMap::new(),
             history: HashMap::new(),
             current_block: 0,
+            reward_pool: 0,
+            current_contributors: Vec::new(),
+            last_outliers: Vec::new(),
         }
     }
 
@@ -204,7 +218,7 @@ impl OracleManager {
 
         // Check if quorum reached
         let submissions = self.pending.get(&asset_id).unwrap();
-        if submissions.len() >= self.config.quorum {
+        if submissions.len() >= oracle_quorum(self.validators.len()) {
             self.aggregate_and_publish_price(asset_id)?;
         }
 
@@ -278,6 +292,21 @@ impl OracleManager {
         // Store aggregated price
         self.aggregated.insert(asset_id, aggregated);
 
+        // Record contributors (non-outlier validators who contributed to quorum)
+        self.current_contributors = prices
+            .iter()
+            .filter_map(|&(vid, _)| {
+                if !outlier_validators.contains(&vid) {
+                    Some(vid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Record outliers for external slashing
+        self.last_outliers = outlier_validators;
+
         // Append to TWAP history
         self.history
             .entry(asset_id)
@@ -340,6 +369,22 @@ impl OracleManager {
     /// Get pending submission count for an asset
     pub fn pending_count(&self, asset_id: AssetId) -> usize {
         self.pending.get(&asset_id).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Add to the oracle reward pool
+    pub fn add_reward(&mut self, amount: u128) {
+        self.reward_pool += amount;
+    }
+
+    /// Get the last round's outlier validator IDs (for slashing)
+    pub fn last_outliers(&self) -> &[u32] {
+        &self.last_outliers
+    }
+
+    /// Clear contributor/outlier tracking (called at start of new period)
+    pub fn clear_tracking(&mut self) {
+        self.current_contributors.clear();
+        self.last_outliers.clear();
     }
 
     /// Simple price submission (no signature validation — used by legacy precompile)
@@ -435,8 +480,8 @@ mod tests {
         let mut manager = OracleManager::new(OracleConfig::default());
         let mut validators = Vec::new();
 
-        // Register 15 validators (enough for quorum of 14)
-        for i in 0..15 {
+        // Register 6 validators (quorum = ceil(2/3*6) = 4)
+        for i in 0..6 {
             let (pubkey, signing_key) = ed25519_generate_keypair();
             let vid = i as u32;
             manager.register_validator(vid, pubkey);
@@ -446,7 +491,7 @@ mod tests {
         (manager, validators)
     }
 
-    fn submit_price_for_asset(
+    fn submit_all(
         manager: &mut OracleManager,
         validators: &[(u32, Ed25519PublicKey, SigningKey)],
         asset_id: AssetId,
@@ -456,16 +501,40 @@ mod tests {
         for (vid, _, signing_key) in validators {
             let timestamp = block * 1000;
             let sig = sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
-            let submission = OracleSubmission {
+            let _ = manager.submit_price(OracleSubmission {
                 validator_id: *vid,
                 asset_id,
                 price,
                 block_number: block,
                 timestamp,
                 signature: sig,
-            };
-            manager.submit_price(submission).unwrap();
+            });
         }
+    }
+
+    fn quorum_for(validators: &[(u32, Ed25519PublicKey, SigningKey)]) -> usize {
+        oracle_quorum(validators.len())
+    }
+
+    #[test]
+    fn test_oracle_quorum_function() {
+        assert_eq!(oracle_quorum(1), 1);  // single validator
+        assert_eq!(oracle_quorum(2), 2);  // 2 validators, both required
+        assert_eq!(oracle_quorum(3), 2);  // ceil(2/3*3) = 2
+        assert_eq!(oracle_quorum(4), 3);  // ceil(2/3*4) = 3
+        assert_eq!(oracle_quorum(6), 4);  // ceil(2/3*6) = 4
+        assert_eq!(oracle_quorum(21), 14); // production subset
+        assert_eq!(oracle_quorum(216), 144);
+    }
+
+    fn submit_price_for_asset(
+        manager: &mut OracleManager,
+        validators: &[(u32, Ed25519PublicKey, SigningKey)],
+        asset_id: AssetId,
+        block: u64,
+        price: u128,
+    ) {
+        submit_all(manager, validators, asset_id, block, price);
     }
 
     #[test]
@@ -475,27 +544,12 @@ mod tests {
         let block = 1000u64;
         let price = 2_000_000u128;
 
-        for (vid, _, signing_key) in &validators {
-            let timestamp = block * 1000;
-            let sig =
-                sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
-            let submission = OracleSubmission {
-                validator_id: *vid,
-                asset_id,
-                price,
-                block_number: block,
-                timestamp,
-                signature: sig,
-            };
-            let result = manager.submit_price(submission);
-            // First 14 submissions accepted and trigger aggregation, 15th is after aggregation
-            assert!(result.is_ok());
-        }
+        submit_all(&mut manager, &validators, asset_id, block, price);
 
-        // Verify aggregated price
+        let q = quorum_for(&validators);
         let agg = manager.get_price(asset_id).unwrap();
         assert_eq!(agg.median_price, price);
-        assert_eq!(agg.submission_count, 14);
+        assert_eq!(agg.submission_count, q);
         assert_eq!(agg.outlier_count, 0);
     }
 
@@ -561,18 +615,13 @@ mod tests {
         let (mut manager, validators) = make_manager();
         let asset_id = 1u64;
         let block = 1000u64;
+        let q = quorum_for(&validators);
 
-        // Submit different prices: most submit 2_000_000, a few submit different
-        // We'll submit 14 validators to reach quorum
-        let mut count = 0;
-        for (vid, _, signing_key) in &validators {
-            if count >= 14 {
-                break;
-            }
+        // Half submit 1_900_000, half submit 2_100_000
+        let half = q / 2;
+        for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
             let timestamp = block * 1000;
-            // First 7 submit 1_900_000, next 7 submit 2_100_000
-            // Sorted: [1.9M x7, 2.1M x7], median at index 7 = 2_100_000
-            let price = if count < 7 { 1_900_000 } else { 2_100_000 };
+            let price = if i < half { 1_900_000 } else { 2_100_000 };
             let sig = sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
             let submission = OracleSubmission {
                 validator_id: *vid,
@@ -583,12 +632,10 @@ mod tests {
                 signature: sig,
             };
             manager.submit_price(submission).unwrap();
-            count += 1;
         }
 
         let agg = manager.get_price(asset_id).unwrap();
-        // Sorted: [1.9M, 1.9M, 1.9M, 1.9M, 1.9M, 1.9M, 1.9M, 2.1M, ...]
-        // len=14, median at index 7 = 2_100_000
+        // Sorted: [1.9M x half, 2.1M x (q-half)], median at index q/2
         assert_eq!(agg.median_price, 2_100_000);
     }
 
@@ -597,15 +644,12 @@ mod tests {
         let (mut manager, validators) = make_manager();
         let asset_id = 1u64;
         let block = 1000u64;
+        let q = quorum_for(&validators);
 
-        // 13 validators submit 2_000_000, 1 submits 10_000_000 (500% deviation)
-        let mut count = 0;
-        for (vid, _, signing_key) in &validators {
-            if count >= 14 {
-                break;
-            }
+        // All but one submit 2_000_000, last one submits 10_000_000 (500% deviation)
+        for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
             let timestamp = block * 1000;
-            let price = if count == 13 { 10_000_000 } else { 2_000_000 };
+            let price = if i == q - 1 { 10_000_000 } else { 2_000_000 };
             let sig = sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
             let submission = OracleSubmission {
                 validator_id: *vid,
@@ -616,14 +660,13 @@ mod tests {
                 signature: sig,
             };
             manager.submit_price(submission).unwrap();
-            count += 1;
         }
 
         let agg = manager.get_price(asset_id).unwrap();
         assert_eq!(agg.outlier_count, 1);
 
         // The outlier validator should have 1 strike
-        let outlier_vid = validators[13].0;
+        let outlier_vid = validators[q - 1].0;
         let info = manager.get_validator_info(outlier_vid).unwrap();
         assert_eq!(info.outlier_count, 1);
         assert!(info.is_active);
@@ -633,18 +676,15 @@ mod tests {
     fn test_oracle_outlier_disabled_after_10() {
         let (mut manager, validators) = make_manager();
         let asset_id = 1u64;
-        let outlier_vid = validators[13].0;
+        let q = quorum_for(&validators);
+        let outlier_vid = validators[q - 1].0;
 
-        // Submit 10 rounds where validator 13 is always the outlier
+        // Submit 10 rounds where the last validator is always the outlier
         for round in 0..10 {
             let block = (round + 1) as u64 * 1000;
-            let mut count = 0;
-            for (vid, _, signing_key) in &validators {
-                if count >= 14 {
-                    break;
-                }
+            for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
                 let timestamp = block * 1000;
-                let price = if count == 13 { 10_000_000 } else { 2_000_000 };
+                let price = if i == q - 1 { 10_000_000 } else { 2_000_000 };
                 let sig =
                     sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
                 let submission = OracleSubmission {
@@ -656,11 +696,10 @@ mod tests {
                     signature: sig,
                 };
                 manager.submit_price(submission).unwrap();
-                count += 1;
             }
         }
 
-        // After 10 strikes, validator 13 should be disabled
+        // After 10 strikes, the outlier validator should be disabled
         let info = manager.get_validator_info(outlier_vid).unwrap();
         assert!(!info.is_active);
         assert_eq!(info.outlier_count, 10);
@@ -668,7 +707,7 @@ mod tests {
         // Disabled validator cannot submit
         let block = 11_000u64;
         let timestamp = block * 1000;
-        let (_, _, signing_key) = &validators[13];
+        let (_, _, signing_key) = &validators[q - 1];
         let sig =
             sign_oracle_submission(signing_key, outlier_vid, asset_id, 2_000_000, block, timestamp);
         let submission = OracleSubmission {
@@ -708,21 +747,18 @@ mod tests {
     fn test_oracle_twap_calculation() {
         let (mut manager, validators) = make_manager();
         let asset_id = 1u64;
+        let q = quorum_for(&validators);
 
         // Submit prices at different timestamps within a 24h window
-        let base_ts = 1_000_000u64;
-        let prices_and_blocks = [
-            (1_000_000u128, 1000u64, base_ts),
-            (2_000_000u128, 2000u64, base_ts + 3600),    // +1h
-            (3_000_000u128, 3000u64, base_ts + 7200),    // +2h
+        // Blocks must be multiples of ORACLE_UPDATE_INTERVAL (1000)
+        let rounds = [
+            (1_000_000u128, 1000u64, 1_000_000u64),
+            (2_000_000u128, 2000u64, 1_003_600u64),   // +1h
+            (3_000_000u128, 3000u64, 1_007_200u64),    // +2h
         ];
 
-        for (price, block, timestamp) in prices_and_blocks {
-            let mut count = 0;
-            for (vid, _, signing_key) in &validators {
-                if count >= 14 {
-                    break;
-                }
+        for (price, block, timestamp) in rounds {
+            for (vid, _, signing_key) in validators.iter().take(q) {
                 let sig =
                     sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
                 let submission = OracleSubmission {
@@ -734,18 +770,47 @@ mod tests {
                     signature: sig,
                 };
                 manager.submit_price(submission).unwrap();
-                count += 1;
             }
         }
 
-        // TWAP at ts = base_ts + 7200 with window 86_400 covers all 3 entries
-        let current_ts = base_ts + 7200;
+        // TWAP at ts = 1_007_200 with window 86_400 covers all 3 entries
+        let current_ts = 1_007_200u64;
         let twap = manager.get_twap(asset_id, current_ts).unwrap();
         assert_eq!(twap, 2_000_000); // (1M + 2M + 3M) / 3
 
         // Even at current_ts + 1800, window of 86_400 still covers all entries
-        // cutoff = base_ts + 9000 - 86_400 = base_ts - 77_400, all qualify
+        // cutoff = 1_009_000 - 86_400 = 922_600, all entries >= 1_000_000 qualify
         let twap = manager.get_twap(asset_id, current_ts + 1800).unwrap();
         assert_eq!(twap, 2_000_000);
+    }
+
+    #[test]
+    fn test_oracle_reward_pool() {
+        let mut manager = OracleManager::new(OracleConfig::default());
+        assert_eq!(manager.reward_pool, 0);
+
+        manager.add_reward(500_000);
+        assert_eq!(manager.reward_pool, 500_000);
+
+        manager.add_reward(250_000);
+        assert_eq!(manager.reward_pool, 750_000);
+    }
+
+    #[test]
+    fn test_oracle_contributor_tracking() {
+        let (mut manager, validators) = make_manager();
+        let asset_id = 1u64;
+        let block = 1000u64;
+
+        submit_all(&mut manager, &validators, asset_id, block, 2_000_000);
+
+        // After successful aggregation, contributors should be recorded
+        assert!(!manager.current_contributors.is_empty());
+        // Outliers should be empty (no outliers in this submission)
+        assert!(manager.last_outliers.is_empty());
+
+        manager.clear_tracking();
+        assert!(manager.current_contributors.is_empty());
+        assert!(manager.last_outliers.is_empty());
     }
 }

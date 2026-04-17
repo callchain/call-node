@@ -240,6 +240,27 @@ impl ValidatorStateManager {
         Ok(slashed)
     }
 
+    /// Slash for submitting oracle price outliers (0.1% of self_stake)
+    pub fn slash_oracle_outlier(
+        &mut self,
+        validator_id: ValidatorId,
+    ) -> Result<u128, ConsensusError> {
+        let validator = self
+            .validators
+            .get_mut(&validator_id)
+            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
+
+        let slashed = (validator.self_stake * 10) / 10_000; // 0.1%
+        validator.slash_history.push(SlashEvent {
+            reason: "oracle outlier".into(),
+            amount_slashed: slashed,
+            block: self.current_block,
+        });
+        validator.self_stake = validator.self_stake.saturating_sub(slashed);
+        validator.staked_call = validator.staked_call.saturating_sub(slashed);
+        Ok(slashed)
+    }
+
     // ── Rewards ───────────────────────────────────────────────────────
 
     /// Distribute reward to proposer: 50% fee split by stake proportion
@@ -440,6 +461,24 @@ mod tests {
         let stake = state.get_validator_stake(id).unwrap();
         assert!(stake.self_stake < stake_amount);
         assert_eq!(stake.slash_history.len(), 1);
+    }
+
+    #[test]
+    fn test_slash_oracle_outlier() {
+        let mut state = ValidatorStateManager::new();
+        let stake_amount = MIN_SELF_STAKE;
+        let id = state
+            .stake(test_addr(1), test_pubkey(1), stake_amount)
+            .unwrap();
+
+        let slashed = state.slash_oracle_outlier(id).unwrap();
+        let expected = (stake_amount * 10) / 10_000; // 0.1%
+        assert_eq!(slashed, expected);
+
+        let stake = state.get_validator_stake(id).unwrap();
+        assert_eq!(stake.self_stake, stake_amount.saturating_sub(expected));
+        assert_eq!(stake.slash_history.len(), 1);
+        assert_eq!(stake.slash_history[0].reason, "oracle outlier");
     }
 
     #[test]

@@ -1371,6 +1371,7 @@ dependencies = [
  "call-crypto",
  "call-evm",
  "call-network",
+ "call-precompiles",
  "call-primitives",
  "call-protocol",
  "call-rpc",

@@ -175,6 +175,7 @@ impl SimplexConsensus {
             fee_params,
             self.current_height,
             evm_state,
+            None,
         )
     }
 

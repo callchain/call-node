@@ -7,6 +7,7 @@ use call_shielded::{ShieldedState, ShieldedTransfer, ZkProof, Note, Nullifier, N
 use crate::balances::BalanceState;
 use crate::registry::AssetRegistry;
 use crate::compliance::ComplianceEngine;
+use crate::oracle::{OracleManager, OracleSubmission};
 use crate::{ProtocolError, ProtocolResult};
 
 // ── Instruction types ─────────────────────────────────────────────────
@@ -95,6 +96,13 @@ pub enum Instruction {
         commitment: Hash,
         encrypted_note: Vec<u8>,
     },
+    OracleSubmit {
+        asset_id: AssetId,
+        price: u128,
+        block_number: u64,
+        timestamp: u64,
+        signature: Vec<u8>,
+    },
 }
 
 /// Payment memo with size limits per spec §3.5
@@ -175,6 +183,7 @@ pub fn execute_protocol_instructions(
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     sender: Address,
+    mut oracle: Option<&mut OracleManager>,
 ) -> ProtocolResult<Vec<InstructionResult>> {
     // Take state snapshot for rollback
     let snapshot = balances.clone();
@@ -182,7 +191,7 @@ pub fn execute_protocol_instructions(
     let mut results = Vec::with_capacity(instructions.len());
 
     for (i, instr) in instructions.iter().enumerate() {
-        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender) {
+        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender, oracle.as_deref_mut()) {
             Ok(result) => results.push(result),
             Err(e) => {
                 // Restore state snapshot on failure
@@ -206,6 +215,7 @@ pub fn execute_instruction(
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     sender: Address,
+    oracle: Option<&mut OracleManager>,
 ) -> ProtocolResult<InstructionResult> {
     match instruction {
         Instruction::Transfer {
@@ -428,6 +438,28 @@ pub fn execute_instruction(
             })?;
             Ok(InstructionResult::Success)
         }
+        Instruction::OracleSubmit { asset_id, price, block_number, timestamp, signature } => {
+            let oracle = oracle.ok_or(ProtocolError::InvalidInstruction(
+                "oracle not available".into(),
+            ))?;
+            let validator_id = u32::from_le_bytes(sender.as_slice()[0..4].try_into().map_err(|_| {
+                ProtocolError::InvalidInstruction("oracle: invalid sender for validator_id".into())
+            })?);
+            let sig: [u8; 64] = signature.as_slice().try_into().map_err(|_| {
+                ProtocolError::InvalidInstruction("oracle: signature must be 64 bytes".into())
+            })?;
+            let submission = OracleSubmission {
+                validator_id,
+                asset_id: *asset_id,
+                price: *price,
+                block_number: *block_number,
+                timestamp: *timestamp,
+                signature: sig,
+            };
+            oracle.submit_price(submission)
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("oracle: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
     }
 }
 
@@ -472,6 +504,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
+            None,
         )
         .expect("execute");
 
@@ -514,6 +547,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
+            None,
         )
         .expect("execute");
         assert_eq!(results.len(), 1);
@@ -552,6 +586,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
+            None,
         )
         .expect("execute");
         assert_eq!(results.len(), 2);
@@ -582,6 +617,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(99), // not the issuer
+            None,
         );
         assert!(result.is_err());
 
@@ -593,6 +629,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(1), // the issuer
+            None,
         );
         assert!(result.is_ok());
         assert_eq!(balances.get_balance(1, &test_addr(99)), 1000);
@@ -625,6 +662,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(99), // not the issuer
+            None,
         );
         assert!(result.is_err());
 
@@ -636,6 +674,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(1), // the issuer
+            None,
         );
         assert!(result.is_ok());
         assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
@@ -705,6 +744,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
+            None,
         );
         assert!(result.is_err());
         // State should be rolled back to original
@@ -745,6 +785,7 @@ mod tests {
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
+            None,
         )
         .expect("execute");
         assert_eq!(results.len(), 2);

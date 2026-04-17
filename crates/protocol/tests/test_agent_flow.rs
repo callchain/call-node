@@ -153,7 +153,7 @@ mod test_agent_flow_impl {
 
         let instructions = vec![Instruction::AgentPay { payment: AgentPayment { agent_id: 0, asset_id, to: receiver, amount: 1_000 } }];
         let mut shielded_state = ShieldedState::new();
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
@@ -170,7 +170,7 @@ mod test_agent_flow_impl {
         let payments: Vec<AgentPayment> = (2..6).map(|i| AgentPayment { agent_id: 0, asset_id, to: addr(i), amount: 500 }).collect();
         let instructions = vec![Instruction::AgentBatchPay { payments }];
         let mut shielded_state = ShieldedState::new();
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &sender), 8_000);
         for i in 2..6 {

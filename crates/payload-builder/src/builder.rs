@@ -235,6 +235,7 @@ impl PayloadBuilder {
             &mut self.fee_params.clone(),
             attrs.height,
             evm_state,
+            None,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)

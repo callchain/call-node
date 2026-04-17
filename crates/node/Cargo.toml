@@ -18,6 +18,7 @@ call-transaction-pool.workspace = true
 call-primitives.workspace = true
 call-protocol.workspace = true
 call-evm.workspace = true
+call-precompiles.workspace = true
 call-bridge.workspace = true
 call-consensus.workspace = true
 call-agent.workspace = true

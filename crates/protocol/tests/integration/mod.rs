@@ -132,6 +132,7 @@ pub fn execute_tx(
         compliance,
         shielded_state,
         tx.sender,
+        None,
     )
     .map_err(|e| format!("exec: {e}"))?;
 

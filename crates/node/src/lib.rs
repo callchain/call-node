@@ -103,6 +103,9 @@ impl CallNode {
             OracleManager::default(),
         ));
 
+        // Wire live oracle into precompiles so EVM contracts can read prices
+        call_precompiles::set_live_oracle(Arc::clone(&state.oracle));
+
         Ok(Self {
             state,
             mempool,
@@ -318,6 +321,7 @@ impl CallNode {
                                             block.execute(
                                                 &mut balances, &registry, &mut compliance, &mut bridge_state,
                                                 &mut shielded_state, &mut fee_params, height, &mut evm_state,
+                                                None,
                                             )
                                         };
 
@@ -855,6 +859,7 @@ async fn block_production_loop(
             let mut shielded_state = state.shielded_state.write().unwrap();
             let mut fee_params = state.fee_params.write().unwrap();
             let mut evm_state = state.evm_state.write().unwrap();
+            let mut oracle = state.oracle.write().unwrap();
 
             block.execute(
                 &mut balances,
@@ -865,6 +870,7 @@ async fn block_production_loop(
                 &mut fee_params,
                 height,
                 &mut evm_state,
+                Some(&mut *oracle),
             )
         };
         let result = match result {
@@ -1247,6 +1253,7 @@ mod tests {
                 &mut fee_params,
                 height,
                 &mut evm_state,
+                None,
             )
             .expect("execution");
         block.finalize(&result);
@@ -1330,6 +1337,7 @@ mod tests {
                 &mut fee_params,
                 height,
                 &mut evm_state,
+                None,
             )
             .expect("empty block execution");
         block.finalize(&result);
@@ -1428,7 +1436,7 @@ mod tests {
         let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -1533,7 +1541,7 @@ mod tests {
         let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -1634,7 +1642,7 @@ mod tests {
                 let mut evm_state = node.state.evm_state.write().unwrap();
 
                 block.execute(&mut balances, &registry, &mut compliance, &mut bridge_state,
-                              &mut shielded_state, &mut fee_params, height, &mut evm_state)
+                              &mut shielded_state, &mut fee_params, height, &mut evm_state, None)
                     .expect("execution")
             };
             block.finalize(&result);

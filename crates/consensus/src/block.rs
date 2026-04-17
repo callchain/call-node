@@ -226,6 +226,7 @@ impl Block {
         fee_params: &mut FeeParams,
         current_block_height: u64,
         evm_state: &mut EvmState,
+        mut oracle: Option<&mut call_protocol::oracle::OracleManager>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -278,6 +279,7 @@ impl Block {
                 compliance,
                 shielded_state,
                 tx.sender,
+                oracle.as_deref_mut(),
             )
             .map_err(|e| ConsensusError::InvalidBlock(format!("protocol tx: {e}")))?;
 
@@ -306,6 +308,16 @@ impl Block {
                 }
             }
             result.system_tx_count += 1;
+        }
+
+        // Step 5: Oracle reward pool allocation from block fees
+        if let Some(oracle) = oracle.as_mut() {
+            // Approximate total gas used: EVM gas + protocol txs * base gas per tx
+            let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+            let total_fees = total_gas as u128 * fee_params.base_fee;
+            let oracle_share = total_fees * fee_params.oracle_fee_share_bps as u128 / 10_000;
+            oracle.add_reward(oracle_share);
+            oracle.clear_tracking();
         }
 
         // Compute state roots
@@ -639,6 +651,7 @@ mod tests {
                 &mut fee_params,
                 1,
                 &mut evm_state,
+                None,
             )
             .unwrap();
 
@@ -706,6 +719,7 @@ mod tests {
                 &mut fee_params,
                 1,
                 &mut evm_state,
+                None,
             )
             .unwrap();
 

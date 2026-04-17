@@ -50,13 +50,13 @@ The submission only contains `(validator_id, asset_id, price, signature)`. There
 
 ---
 
-## Phase 2: Configurable Quorum (do this first — 1 file, 3 lines)
+## [x] Phase 2: Configurable Quorum (do this first — 1 file, 3 lines)
 
 **Why first**: It's the smallest change that immediately makes the devnet oracle functional.
 
 ### File: `crates/protocol/src/oracle.rs`
 
-#### Change 1: Remove hardcoded `ORACLE_QUORUM`
+##### Change 1: Remove hardcoded `ORACLE_QUORUM`
 
 Delete the constant at line 19:
 ```rust
@@ -102,7 +102,7 @@ fn test_oracle_quorum_small() {
 
 ---
 
-## Phase 1: Deterministic On-Chain Oracle
+## [x] Phase 1: Deterministic On-Chain Oracle
 
 **Goal**: Oracle submissions are protocol transactions included in blocks. All nodes compute the same oracle state from the same block data.
 
@@ -358,7 +358,7 @@ fn test_oracle_submit_instruction() {
 
 ---
 
-## Phase 4: EVM Oracle Precompile
+## [x] Phase 4: EVM Oracle Precompile
 
 **Goal**: Smart contracts can read oracle prices from within EVM execution.
 
@@ -460,7 +460,7 @@ fn test_live_oracle_precompile() {
 
 ---
 
-## Phase 3: Economic Incentives
+## [x] Phase 3: Economic Incentives
 
 **Goal**: Reward correct submissions, penalize bad behavior.
 

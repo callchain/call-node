@@ -3,12 +3,26 @@
 //! Functions: getPrice(), getTWAP(), isStale(), getOracleStatus()
 
 use call_primitives::AssetId;
-use call_protocol::OracleManager;
+use call_protocol::oracle::OracleManager;
 use alloy_primitives::address;
+use std::sync::{Arc, RwLock};
 
 /// Precompile address
 pub(crate) const ORACLE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000101");
+
+/// Live oracle shared across the system
+static LIVE_ORACLE: std::sync::OnceLock<Arc<RwLock<OracleManager>>> = std::sync::OnceLock::new();
+
+/// Set the live oracle reference (called once during node boot)
+pub fn set_live_oracle(oracle: Arc<RwLock<OracleManager>>) {
+    let _ = LIVE_ORACLE.set(oracle);
+}
+
+/// Get the live oracle reference if initialized
+pub fn get_live_oracle() -> Option<Arc<RwLock<OracleManager>>> {
+    LIVE_ORACLE.get().cloned()
+}
 
 /// Price entry for an asset (legacy, used by precompile)
 #[derive(Debug, Clone)]

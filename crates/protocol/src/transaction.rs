@@ -132,6 +132,7 @@ pub fn base_gas_units(instruction: &Instruction) -> u64 {
         Instruction::UpdateCompliance { .. } => 5_000,
         Instruction::AgentPay { .. } | Instruction::AgentBatchPay { .. } => 5_000, // 0.5x base
         Instruction::AgentCall { .. } | Instruction::AgentBridgeDeposit { .. } => 5_000, // 0.5x base
+        Instruction::OracleSubmit { .. } => 50_000, // oracle price submission
     }
 }
 
@@ -168,6 +169,8 @@ pub struct FeeParams {
     pub max_base_fee: u128,
     /// Initial base fee (10 wei)
     pub initial_base_fee: u128,
+    /// Percentage of block fees allocated to oracle rewards (basis points, 100 = 1%)
+    pub oracle_fee_share_bps: u16,
 }
 
 impl Default for FeeParams {
@@ -180,6 +183,7 @@ impl Default for FeeParams {
             min_base_fee: 1,             // 1 wei
             max_base_fee: 1_000_000_000, // 1B wei
             initial_base_fee: 10,        // 10 wei
+            oracle_fee_share_bps: 100,   // 1% of block fees to oracle rewards
         }
     }
 }

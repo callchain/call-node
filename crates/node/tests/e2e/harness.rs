@@ -229,6 +229,7 @@ impl TestNode {
             let mut shielded_state = self.state.shielded_state.write().unwrap();
             let mut fee_params = self.state.fee_params.write().unwrap();
             let mut evm_state = self.state.evm_state.write().unwrap();
+            let mut oracle = self.state.oracle.write().unwrap();
 
             block
                 .execute(
@@ -240,6 +241,7 @@ impl TestNode {
                     &mut fee_params,
                     height,
                     &mut evm_state,
+                    Some(&mut *oracle),
                 )
                 .expect("block execution")
         };

@@ -155,6 +155,7 @@ pub fn execute_agent_tx(
         compliance,
         shielded_state,
         agent_evm_address,
+        None,
     )
     .map_err(|e| AgentError::ExecutionFailed(format!("{:?}", e)))?;
 
