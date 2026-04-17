@@ -28,7 +28,7 @@ use call_storage::reth_db::{
     save_balances as db_save_balances, load_balances as db_load_balances,
     save_prune_state as db_save_prune,
     db_put, db_batch_put, db_clear, db_iter_all, db_get,
-    CallEvmAccounts, CallBridgeOps,
+    CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
 };
 use reth_db::DatabaseEnv;
@@ -74,13 +74,17 @@ impl CallNode {
             .map_err(|e| format!("failed to load prune state: {e}"))?;
 
         // Load persisted state from reth-db if available
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances) =
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager) =
             if let Some(ref db_env) = db.db {
-                load_state_from_db(db_env)
+                let loaded = load_state_from_db(db_env);
+                // Try to load oracle state from disk
+                let oracle = load_oracle_state(db_env)
+                    .map_err(|e| format!("failed to load oracle state: {e}"))?;
+                (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle)
             } else {
                 (BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
                  ShieldedState::new(), ValidatorStateManager::default(),
-                 AgentRegistry::new(), AgentBalances::new())
+                 AgentRegistry::new(), AgentBalances::new(), OracleManager::default())
             };
 
         let consensus = SimplexConsensus::new(
@@ -100,7 +104,7 @@ impl CallNode {
             shielded_state,
             mempool.clone(),
             CALLCHAIN_CHAIN_ID,
-            OracleManager::default(),
+            oracle_manager,
         ));
 
         // Wire live oracle into precompiles so EVM contracts can read prices
@@ -532,6 +536,13 @@ fn persist_state_to_db(
             .map_err(|e| format!("save agents: {e}"))?;
     }
 
+    // Persist oracle state
+    {
+        let oracle = state.oracle.read().unwrap();
+        save_oracle_state(db_env, &oracle)
+            .map_err(|e| format!("save oracle: {e}"))?;
+    }
+
     Ok(())
 }
 
@@ -683,6 +694,20 @@ fn save_agent_state_inner(db: &DatabaseEnv, registry: &AgentRegistry, _balances:
     Ok(())
 }
 
+/// Save oracle state to the database.
+fn save_oracle_state(db: &DatabaseEnv, state: &OracleManager) -> Result<(), String> {
+    let data = serde_json::to_vec(state).map_err(|e| format!("serialize oracle: {e}"))?;
+    db_put::<CallOracleState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+/// Load oracle state from the database.
+fn load_oracle_state(db: &DatabaseEnv) -> Result<OracleManager, String> {
+    match db_get::<CallOracleState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize oracle: {e}")),
+        None => Ok(OracleManager::default()),
+    }
+}
+
 // ── Incremental State Persistence ────────────────────────────────────
 //
 // Instead of clearing and rewriting entire tables every 100 blocks,
@@ -750,6 +775,13 @@ fn persist_state_incremental(
     {
         let registry = state.agent_registry.read().map_err(|_| "agent lock poisoned".to_string())?;
         save_agent_state_no_clear(db_env, &registry)?;
+    }
+
+    // Persist oracle state (overwrite)
+    {
+        let oracle = state.oracle.read().map_err(|_| "oracle lock poisoned".to_string())?;
+        save_oracle_state(db_env, &oracle)
+            .map_err(|e| format!("save oracle: {e}"))?;
     }
 
     Ok(())
@@ -882,7 +914,26 @@ async fn block_production_loop(
         };
         block.finalize(&result);
 
-        // 4. Commit via consensus
+        // 4. Slash oracle outliers before clearing tracking
+        {
+            let oracle = state.oracle.read().unwrap();
+            let outliers: Vec<u32> = oracle.last_outliers().to_vec();
+            if !outliers.is_empty() {
+                let mut c = consensus.write().unwrap();
+                for vid in &outliers {
+                    if let Err(e) = c.handle_oracle_outlier(*vid) {
+                        tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
+                    }
+                }
+                tracing::info!(outliers = ?outliers, "slashed oracle outliers");
+            }
+            // Clear tracking after slashing
+            drop(oracle);
+            let mut oracle = state.oracle.write().unwrap();
+            oracle.clear_tracking();
+        }
+
+        // 5. Commit via consensus
         {
             let mut c = consensus.write().unwrap();
             if let Err(e) = c.commit_block(&block, &result) {

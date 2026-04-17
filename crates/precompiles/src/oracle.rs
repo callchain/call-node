@@ -14,9 +14,12 @@ pub(crate) const ORACLE_ADDRESS: alloy_primitives::Address =
 /// Live oracle shared across the system
 static LIVE_ORACLE: std::sync::OnceLock<Arc<RwLock<OracleManager>>> = std::sync::OnceLock::new();
 
-/// Set the live oracle reference (called once during node boot)
+/// Set the live oracle reference (called once during node boot).
+/// Logs a warning if called more than once (the first caller wins).
 pub fn set_live_oracle(oracle: Arc<RwLock<OracleManager>>) {
-    let _ = LIVE_ORACLE.set(oracle);
+    if LIVE_ORACLE.set(oracle).is_err() {
+        tracing::warn!("set_live_oracle called after initialization — ignoring duplicate");
+    }
 }
 
 /// Get the live oracle reference if initialized

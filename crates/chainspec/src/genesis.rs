@@ -234,8 +234,9 @@ impl GenesisExecutor {
         // Step 7: Initialize oracle with genesis validators and tracked assets
         let mut oracle = OracleManager::new(OracleConfig::default());
         for (i, gv) in self.genesis.validators.iter().enumerate() {
+            let addr = parse_address(&gv.address)?;
             let pubkey = parse_pubkey(&gv.ed25519_pubkey)?;
-            oracle.register_validator(i as u32, pubkey);
+            oracle.register_validator(i as u32, addr, pubkey);
         }
         if let Some(ref assets) = self.genesis.oracle_assets {
             oracle.set_tracked_assets(assets.clone());

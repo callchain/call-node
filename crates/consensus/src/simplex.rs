@@ -235,6 +235,16 @@ impl SimplexConsensus {
         Ok(slashed)
     }
 
+    /// Handle oracle outlier detection: slash the offending validator.
+    pub fn handle_oracle_outlier(
+        &mut self,
+        validator_id: ValidatorId,
+    ) -> Result<u128, ConsensusError> {
+        let slashed = self.validators.slash_oracle_outlier(validator_id)?;
+        warn!(validator_id, slashed, "slashed validator for oracle outlier");
+        Ok(slashed)
+    }
+
     /// Get active validator IDs for network layer.
     pub fn active_validators(&self) -> Vec<ValidatorId> {
         self.validators.get_active_validators()

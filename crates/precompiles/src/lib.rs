@@ -13,6 +13,7 @@ pub use balance::*;
 pub use bridge::*;
 
 use alloy_primitives::{address, Address};
+use revm::context_interface::LocalContextTr;
 use revm_precompile::{Precompile, PrecompileId, PrecompileResult, PrecompileError};
 
 /// Precompile addresses
@@ -26,16 +27,36 @@ pub fn all_precompiles() -> &'static [Address] {
     &PRECOMPILES
 }
 
-/// Build the full precompiles set: standard Ethereum precompiles + Callchain custom precompiles
-pub fn build_precompiles() -> revm_precompile::Precompiles {
+/// Callchain precompile provider implementing revm's `PrecompileProvider` trait.
+///
+/// Wraps standard Ethereum precompiles with Callchain custom precompiles at
+/// `0x101` (Oracle), `0x102` (Balance), and `0x103` (Bridge).
+///
+/// This allows precompiles to be executed through revm's normal call-frame
+/// mechanism with proper gas accounting, state isolation, and call depth tracking.
+pub struct CallPrecompiles {
+    precompiles: revm_precompile::Precompiles,
+    spec: revm::primitives::hardfork::SpecId,
+}
+
+impl CallPrecompiles {
+    /// Create a new CallPrecompiles for the given spec.
+    pub fn new(spec: revm::primitives::hardfork::SpecId) -> Self {
+        Self {
+            precompiles: build_precompiles_for_spec(spec),
+            spec,
+        }
+    }
+}
+
+fn build_precompiles_for_spec(
+    spec: revm::primitives::hardfork::SpecId,
+) -> revm_precompile::Precompiles {
     use revm_precompile::PrecompileSpecId;
 
-    // Start with standard Cancun precompiles
-    let mut precompiles = revm_precompile::Precompiles::new(
-        PrecompileSpecId::CANCUN,
-    ).clone();
+    let mut precompiles =
+        revm_precompile::Precompiles::new(PrecompileSpecId::from_spec_id(spec)).clone();
 
-    // Extend with Callchain custom precompiles
     precompiles.extend([
         Precompile::new(
             PrecompileId::Custom("call_oracle".into()),
@@ -55,6 +76,95 @@ pub fn build_precompiles() -> revm_precompile::Precompiles {
     ]);
 
     precompiles
+}
+
+impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX>
+    for CallPrecompiles
+{
+    type Output = revm::interpreter::InterpreterResult;
+
+    fn set_spec(&mut self, spec: <CTX::Cfg as revm::context::Cfg>::Spec) -> bool {
+        let spec: revm::primitives::hardfork::SpecId = spec.into();
+        if spec == self.spec {
+            return false;
+        }
+        self.precompiles = build_precompiles_for_spec(spec);
+        self.spec = spec;
+        true
+    }
+
+    fn run(
+        &mut self,
+        context: &mut CTX,
+        inputs: &revm::interpreter::CallInputs,
+    ) -> Result<Option<Self::Output>, String> {
+        let Some(precompile) = self.precompiles.get(&inputs.bytecode_address) else {
+            return Ok(None);
+        };
+
+        let mut result = revm::interpreter::InterpreterResult {
+            result: revm::interpreter::InstructionResult::Return,
+            gas: revm::interpreter::Gas::new(inputs.gas_limit),
+            output: revm::primitives::Bytes::new(),
+        };
+
+        let exec_result = {
+            let r;
+            let input_bytes = match &inputs.input {
+                revm::interpreter::CallInput::SharedBuffer(range) => {
+                    if let Some(slice) =
+                        context.local().shared_memory_buffer_slice(range.clone())
+                    {
+                        r = slice;
+                        r.as_ref()
+                    } else {
+                        &[]
+                    }
+                }
+                revm::interpreter::CallInput::Bytes(bytes) => bytes.0.iter().as_slice(),
+            };
+            precompile.execute(input_bytes, inputs.gas_limit)
+        };
+
+        match exec_result {
+            Ok(output) => {
+                result.gas.record_refund(output.gas_refunded);
+                let underflow = result.gas.record_cost(output.gas_used);
+                assert!(underflow, "Gas underflow is not possible");
+                result.result = if output.reverted {
+                    revm::interpreter::InstructionResult::Revert
+                } else {
+                    revm::interpreter::InstructionResult::Return
+                };
+                result.output = output.bytes;
+            }
+            Err(revm_precompile::PrecompileError::Fatal(e)) => return Err(e),
+            Err(e) => {
+                result.result = if e.is_oog() {
+                    revm::interpreter::InstructionResult::PrecompileOOG
+                } else {
+                    revm::interpreter::InstructionResult::PrecompileError
+                };
+                if !e.is_oog() {
+                    context.local_mut().set_precompile_error_context(e.to_string());
+                }
+            }
+        }
+        Ok(Some(result))
+    }
+
+    fn warm_addresses(&self) -> Box<impl Iterator<Item = revm::primitives::Address>> {
+        Box::new(self.precompiles.addresses().cloned())
+    }
+
+    fn contains(&self, address: &revm::primitives::Address) -> bool {
+        self.precompiles.contains(address)
+    }
+}
+
+/// Build the full precompiles set: standard Ethereum precompiles + Callchain custom precompiles
+pub fn build_precompiles() -> revm_precompile::Precompiles {
+    build_precompiles_for_spec(revm::primitives::hardfork::SpecId::CANCUN)
 }
 
 /// Oracle precompile entry point

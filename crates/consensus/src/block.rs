@@ -317,7 +317,8 @@ impl Block {
             let total_fees = total_gas as u128 * fee_params.base_fee;
             let oracle_share = total_fees * fee_params.oracle_fee_share_bps as u128 / 10_000;
             oracle.add_reward(oracle_share);
-            oracle.clear_tracking();
+            // Note: clear_tracking is NOT called here — the caller must call it
+            // after processing outliers for slashing, otherwise outlier data is lost.
         }
 
         // Compute state roots

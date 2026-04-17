@@ -1437,7 +1437,9 @@ dependencies = [
  "alloy-primitives",
  "call-primitives",
  "call-protocol",
+ "revm",
  "revm-precompile",
+ "tracing",
 ]
 
 [[package]]

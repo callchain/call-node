@@ -133,8 +133,9 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         // Register genesis validators into the oracle for price submissions
         let mut oracle = node.state.oracle.write().map_err(|_| "lock poisoned")?;
         for (i, val) in genesis.validators.iter().enumerate() {
+            let addr = parse_address(&val.address)?;
             let pubkey = parse_pubkey(&val.pubkey)?;
-            oracle.register_validator(i as u32, pubkey);
+            oracle.register_validator(i as u32, addr, pubkey);
         }
         if !genesis.oracle_assets.is_empty() {
             oracle.set_tracked_assets(genesis.oracle_assets.clone());

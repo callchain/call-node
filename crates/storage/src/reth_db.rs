@@ -115,6 +115,16 @@ impl Table for CallAgents {
     type Value = Vec<u8>;
 }
 
+/// Oracle state: single entry () -> serialized OracleManager
+#[derive(Debug)]
+pub struct CallOracleState;
+impl Table for CallOracleState {
+    const NAME: &'static str = "call_oracle_state";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// Prune state: single entry () -> serialized PruneState
 #[derive(Debug)]
 pub struct CallPruneState;
@@ -143,6 +153,7 @@ impl TableSet for CallTables {
                 box_info::<CallShieldedCommitments>,
                 box_info::<CallValidators>,
                 box_info::<CallAgents>,
+                box_info::<CallOracleState>,
                 box_info::<CallPruneState>,
             ]
             .into_iter()

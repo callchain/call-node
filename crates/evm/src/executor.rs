@@ -3,10 +3,7 @@
 //! EVM transaction execution, ERC-20 deployment, gas tracking, validation.
 
 use call_primitives::Address;
-use call_precompiles::{
-    ORACLE_ADDRESS, BALANCE_ADDRESS, BRIDGE_ADDRESS,
-    oracle_precompile_fn, balance_precompile_fn, bridge_precompile_fn,
-};
+use call_precompiles::CallPrecompiles;
 use alloy_primitives::{U256, Bytes, keccak256, FixedBytes};
 use revm::{
     database::InMemoryDB,
@@ -70,34 +67,16 @@ impl EvmExecutor {
         }
     }
 
-    /// Execute an EVM transaction
+    /// Execute an EVM transaction through revm with Callchain custom precompiles.
+    ///
+    /// Custom precompiles at 0x101 (Oracle), 0x102 (Balance), and 0x103 (Bridge)
+    /// are executed via revm's normal call-frame mechanism with proper gas
+    /// accounting, state isolation, and call depth tracking.
     pub fn execute_tx(
         &self,
         tx: EvmTransaction,
         state: &mut EvmState,
     ) -> Result<EvmExecutionResult, EvmError> {
-        // Dispatch to custom precompiles before standard revm execution
-        if let Some(to) = tx.to {
-            if to == ORACLE_ADDRESS || to == BALANCE_ADDRESS || to == BRIDGE_ADDRESS {
-                let input = tx.data.as_ref();
-                let result = match to {
-                    addr if addr == ORACLE_ADDRESS => oracle_precompile_fn(input, tx.gas_limit),
-                    addr if addr == BALANCE_ADDRESS => balance_precompile_fn(input, tx.gas_limit),
-                    addr if addr == BRIDGE_ADDRESS => bridge_precompile_fn(input, tx.gas_limit),
-                    _ => unreachable!(),
-                };
-                return match result {
-                    Ok(output) => Ok(EvmExecutionResult {
-                        success: true,
-                        gas_used: output.gas_used,
-                        output: output.bytes,
-                        logs: vec![],
-                    }),
-                    Err(e) => Err(EvmError::ExecutionError(format!("precompile: {e:?}"))),
-                };
-            }
-        }
-
         // Build revm InMemoryDB and sync our state into it
         let mut db = InMemoryDB::default();
         state.sync_to_revm_db(&mut db);
@@ -118,7 +97,8 @@ impl EvmExecutor {
             .with_db(db)
             .modify_cfg_chained(|cfg| cfg.set_spec(self.spec_id));
 
-        let mut evm = ctx.build_mainnet();
+        // Build EVM with Callchain custom precompiles (0x101/0x102/0x103)
+        let mut evm = ctx.build_mainnet().with_precompiles(CallPrecompiles::new(self.spec_id));
 
         evm.set_block(revm::context::BlockEnv::default());
 

@@ -775,6 +775,10 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 block_number,
                 timestamp,
                 signature,
+                sources: call_obj.get("sources")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
             };
 
             let mut oracle = state.oracle.write().map_err(|_| internal_error("lock poisoned".into()))?;

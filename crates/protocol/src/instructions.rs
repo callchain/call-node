@@ -102,6 +102,7 @@ pub enum Instruction {
         block_number: u64,
         timestamp: u64,
         signature: Vec<u8>,
+        sources: Vec<String>,
     },
 }
 
@@ -438,13 +439,14 @@ pub fn execute_instruction(
             })?;
             Ok(InstructionResult::Success)
         }
-        Instruction::OracleSubmit { asset_id, price, block_number, timestamp, signature } => {
+        Instruction::OracleSubmit { asset_id, price, block_number, timestamp, signature, sources } => {
             let oracle = oracle.ok_or(ProtocolError::InvalidInstruction(
                 "oracle not available".into(),
             ))?;
-            let validator_id = u32::from_le_bytes(sender.as_slice()[0..4].try_into().map_err(|_| {
-                ProtocolError::InvalidInstruction("oracle: invalid sender for validator_id".into())
-            })?);
+            // Look up validator_id by sender address (proper cryptographic identity)
+            let validator_id = oracle.validator_id_by_address(sender).ok_or(
+                ProtocolError::InvalidInstruction("oracle: sender not a registered validator".into()),
+            )?;
             let sig: [u8; 64] = signature.as_slice().try_into().map_err(|_| {
                 ProtocolError::InvalidInstruction("oracle: signature must be 64 bytes".into())
             })?;
@@ -455,6 +457,7 @@ pub fn execute_instruction(
                 block_number: *block_number,
                 timestamp: *timestamp,
                 signature: sig,
+                sources: sources.clone(),
             };
             oracle.submit_price(submission)
                 .map_err(|e| ProtocolError::InvalidInstruction(format!("oracle: {e}")))?;

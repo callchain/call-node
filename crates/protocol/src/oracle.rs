@@ -5,8 +5,9 @@
 
 use call_crypto::ed25519_sign;
 use call_crypto::ed25519_verify;
-use call_primitives::{AssetId, Ed25519PublicKey};
+use call_primitives::{Address, AssetId, Ed25519PublicKey};
 use ed25519_dalek::SigningKey;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ─── Constants (per spec §25.5) ─────────────────────────────────
@@ -46,10 +47,12 @@ pub struct OracleSubmission {
     pub block_number: u64,
     pub timestamp: u64,
     pub signature: [u8; 64],
+    /// Data sources attesting to this price (e.g. "binance", "coinbase")
+    pub sources: Vec<String>,
 }
 
 /// Aggregated price after quorum
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatedPrice {
     pub asset_id: AssetId,
     pub median_price: u128,
@@ -60,9 +63,10 @@ pub struct AggregatedPrice {
 }
 
 /// Per-validator oracle tracking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleValidatorInfo {
     pub validator_id: u32,
+    pub address: Address,
     pub public_key: Ed25519PublicKey,
     pub is_active: bool,
     pub outlier_count: u32,
@@ -71,7 +75,7 @@ pub struct OracleValidatorInfo {
 }
 
 /// Historical price entry for TWAP
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoricalPrice {
     pub price: u128,
     pub timestamp: u64,
@@ -79,7 +83,7 @@ pub struct HistoricalPrice {
 }
 
 /// Oracle configuration
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleConfig {
     pub update_interval: u64,
     pub outlier_threshold_bps: u64,
@@ -87,6 +91,8 @@ pub struct OracleConfig {
     pub twap_window_secs: u64,
     pub staleness_secs: u64,
     pub min_data_sources: usize,
+    /// Allowed data source names (empty = no restriction)
+    pub allowed_sources: Vec<String>,
 }
 
 impl Default for OracleConfig {
@@ -98,6 +104,7 @@ impl Default for OracleConfig {
             twap_window_secs: ORACLE_TWAP_WINDOW_SECS,
             staleness_secs: ORACLE_STALENESS_SECS,
             min_data_sources: ORACLE_MIN_DATA_SOURCES,
+            allowed_sources: Vec::new(),
         }
     }
 }
@@ -105,13 +112,16 @@ impl Default for OracleConfig {
 // ─── Oracle State ───────────────────────────────────────────────
 
 /// Full oracle state manager
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OracleManager {
     config: OracleConfig,
     validators: HashMap<u32, OracleValidatorInfo>,
+    /// Reverse lookup: validator address -> validator_id
+    validator_ids_by_address: HashMap<Address, u32>,
     /// Asset IDs to track for oracle submissions
     pub tracked_assets: Vec<AssetId>,
     /// Pending submissions for current period: asset_id -> (validator_id -> submission)
+    #[serde(skip)]
     pending: HashMap<AssetId, HashMap<u32, OracleSubmission>>,
     /// Current aggregated prices per asset
     aggregated: HashMap<AssetId, AggregatedPrice>,
@@ -121,8 +131,10 @@ pub struct OracleManager {
     /// Accumulated fee pool for oracle rewards (reset each period)
     pub reward_pool: u128,
     /// Validators who contributed to the last quorum aggregation
+    #[serde(skip)]
     pub current_contributors: Vec<u32>,
     /// Last round's outlier validators (for slashing)
+    #[serde(skip)]
     last_outliers: Vec<u32>,
 }
 
@@ -137,6 +149,7 @@ impl OracleManager {
         Self {
             config,
             validators: HashMap::new(),
+            validator_ids_by_address: HashMap::new(),
             tracked_assets: Vec::new(),
             pending: HashMap::new(),
             aggregated: HashMap::new(),
@@ -149,11 +162,12 @@ impl OracleManager {
     }
 
     /// Register a validator for oracle submissions
-    pub fn register_validator(&mut self, validator_id: u32, public_key: Ed25519PublicKey) {
+    pub fn register_validator(&mut self, validator_id: u32, address: Address, public_key: Ed25519PublicKey) {
         self.validators.insert(
             validator_id,
             OracleValidatorInfo {
                 validator_id,
+                address,
                 public_key,
                 is_active: true,
                 outlier_count: 0,
@@ -161,6 +175,12 @@ impl OracleManager {
                 submission_count: 0,
             },
         );
+        self.validator_ids_by_address.insert(address, validator_id);
+    }
+
+    /// Look up validator_id by address
+    pub fn validator_id_by_address(&self, address: Address) -> Option<u32> {
+        self.validator_ids_by_address.get(&address).copied()
     }
 
     /// Set the list of asset IDs to track for oracle submissions
@@ -200,6 +220,21 @@ impl OracleManager {
         );
         ed25519_verify(&validator.public_key, &submission.signature, &message)
             .map_err(|_| OracleError::InvalidSignature)?;
+
+        // Data source attestation: require minimum sources and allowlist check
+        if submission.sources.len() < self.config.min_data_sources {
+            return Err(OracleError::InsufficientDataSources(
+                submission.sources.len(),
+                self.config.min_data_sources,
+            ));
+        }
+        if !self.config.allowed_sources.is_empty() {
+            for source in &submission.sources {
+                if !self.config.allowed_sources.contains(source) {
+                    return Err(OracleError::DisallowedSource(source.clone()));
+                }
+            }
+        }
 
         // Accept submission
         let asset_id = submission.asset_id;
@@ -387,7 +422,10 @@ impl OracleManager {
         self.last_outliers.clear();
     }
 
-    /// Simple price submission (no signature validation — used by legacy precompile)
+    /// Simple price submission — internal/testing only. Bypasses the full validation
+    /// pipeline (signatures, period checks, source validation). Performs minimal
+    /// sanity checks to prevent obviously invalid data.
+    #[doc(hidden)]
     pub fn simple_submit_price(
         &mut self,
         asset_id: AssetId,
@@ -395,6 +433,9 @@ impl OracleManager {
         timestamp: u64,
         block_number: u64,
     ) {
+        if price == 0 || block_number == 0 || timestamp == 0 {
+            return;
+        }
         self.history
             .entry(asset_id)
             .or_default()
@@ -467,6 +508,10 @@ pub enum OracleError {
     InvalidSignature,
     #[error("no submissions")]
     NoSubmissions,
+    #[error("insufficient data sources: got {0}, need {1}")]
+    InsufficientDataSources(usize, usize),
+    #[error("disallowed data source: {0}")]
+    DisallowedSource(String),
 }
 
 // ─── Tests ──────────────────────────────────────────────────────
@@ -477,14 +522,17 @@ mod tests {
     use call_crypto::ed25519_generate_keypair;
 
     fn make_manager() -> (OracleManager, Vec<(u32, Ed25519PublicKey, SigningKey)>) {
-        let mut manager = OracleManager::new(OracleConfig::default());
+        let mut config = OracleConfig::default();
+        config.min_data_sources = 0; // tests don't need real data sources
+        let mut manager = OracleManager::new(config);
         let mut validators = Vec::new();
 
         // Register 6 validators (quorum = ceil(2/3*6) = 4)
         for i in 0..6 {
             let (pubkey, signing_key) = ed25519_generate_keypair();
             let vid = i as u32;
-            manager.register_validator(vid, pubkey);
+            let address = Address::repeat_byte(i as u8);
+            manager.register_validator(vid, address, pubkey);
             validators.push((vid, pubkey, signing_key));
         }
 
@@ -508,6 +556,7 @@ mod tests {
                 block_number: block,
                 timestamp,
                 signature: sig,
+            sources: Vec::new(),
             });
         }
     }
@@ -568,6 +617,7 @@ mod tests {
             block_number: 500,
             timestamp,
             signature: sig,
+            sources: Vec::new(),
         };
         assert!(matches!(
             manager.submit_price(submission),
@@ -591,6 +641,7 @@ mod tests {
             block_number: block,
             timestamp,
             signature: sig,
+            sources: Vec::new(),
         };
         assert!(manager.submit_price(submission).is_ok());
 
@@ -603,6 +654,7 @@ mod tests {
             block_number: block,
             timestamp,
             signature: sig2,
+            sources: Vec::new(),
         };
         assert!(matches!(
             manager.submit_price(submission2),
@@ -630,6 +682,7 @@ mod tests {
                 block_number: block,
                 timestamp,
                 signature: sig,
+            sources: Vec::new(),
             };
             manager.submit_price(submission).unwrap();
         }
@@ -658,6 +711,7 @@ mod tests {
                 block_number: block,
                 timestamp,
                 signature: sig,
+            sources: Vec::new(),
             };
             manager.submit_price(submission).unwrap();
         }
@@ -694,6 +748,7 @@ mod tests {
                     block_number: block,
                     timestamp,
                     signature: sig,
+            sources: Vec::new(),
                 };
                 manager.submit_price(submission).unwrap();
             }
@@ -717,6 +772,7 @@ mod tests {
             block_number: block,
             timestamp,
             signature: sig,
+            sources: Vec::new(),
         };
         assert!(matches!(
             manager.submit_price(submission),
@@ -768,6 +824,7 @@ mod tests {
                     block_number: block,
                     timestamp,
                     signature: sig,
+            sources: Vec::new(),
                 };
                 manager.submit_price(submission).unwrap();
             }
