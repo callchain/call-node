@@ -198,6 +198,47 @@ mod real_prover_impl {
             }
         }
 
+        /// Create a RealProver from ceremony-derived verifying keys.
+        ///
+        /// This is the production path — keys come from the Powers of Tau
+        /// ceremony output, meaning no single party knows the toxic waste.
+        #[cfg(feature = "production-keys")]
+        pub fn from_production_keys(keys: crate::ceremony::ProductionKeys) -> Self {
+            Self {
+                transfer_pk: keys.pk.as_ref()
+                    .map(|p| p.transfer.clone())
+                    .unwrap_or_else(|| Self::empty_proving_key()),
+                transfer_vk: keys.vk.transfer,
+                withdraw_pk: keys.pk.as_ref()
+                    .map(|p| p.withdraw.clone())
+                    .unwrap_or_else(|| Self::empty_proving_key()),
+                withdraw_vk: keys.vk.withdraw,
+                deposit_pk: keys.pk.as_ref()
+                    .map(|p| p.deposit.clone())
+                    .unwrap_or_else(|| Self::empty_proving_key()),
+                deposit_vk: keys.vk.deposit,
+            }
+        }
+
+        /// Create a RealProver by loading ceremony-derived keys from disk.
+        #[cfg(feature = "production-keys")]
+        pub fn from_production_dir(
+            keys_dir: impl AsRef<std::path::Path>,
+        ) -> Result<Self, crate::ceremony::KeyLoadError> {
+            let keys = crate::ceremony::ProductionKeys::load(keys_dir)?;
+            Ok(Self::from_production_keys(keys))
+        }
+
+        /// Create a RealProver by loading and verifying keys against genesis hashes.
+        #[cfg(feature = "production-keys")]
+        pub fn from_production_verified(
+            keys_dir: impl AsRef<std::path::Path>,
+            genesis_hashes: &crate::ceremony::GenesisKeyHashes,
+        ) -> Result<Self, crate::ceremony::KeyLoadError> {
+            let keys = crate::ceremony::ProductionKeys::load_with_verification(keys_dir, genesis_hashes)?;
+            Ok(Self::from_production_keys(keys))
+        }
+
         /// Generate a Groth16 proof for a deposit circuit.
         pub fn prove_deposit(&self, circuit: &DepositCircuit) -> Result<Vec<u8>, ProverError> {
             use ark_std::rand::rngs::StdRng;
@@ -317,6 +358,30 @@ mod real_prover_impl {
                     ark_bn254::Fr::from_le_bytes_mod_order(&buf)
                 })
                 .collect()
+        }
+
+        /// Create a minimal empty proving key for validator-only nodes.
+        ///
+        /// Validators only need verifying keys, not proving keys. This provides
+        /// a placeholder for the proving key fields when loading ceremony VKs.
+        fn empty_proving_key() -> ProvingKey<Bn254> {
+            use ark_bn254::{G1Affine, G2Affine};
+            ProvingKey {
+                vk: VerifyingKey {
+                    alpha_g1: G1Affine::default(),
+                    beta_g2: G2Affine::default(),
+                    gamma_g2: G2Affine::default(),
+                    delta_g2: G2Affine::default(),
+                    gamma_abc_g1: vec![],
+                },
+                beta_g1: G1Affine::default(),
+                delta_g1: G1Affine::default(),
+                a_query: vec![],
+                b_g1_query: vec![],
+                b_g2_query: vec![],
+                h_query: vec![],
+                l_query: vec![],
+            }
         }
     }
 

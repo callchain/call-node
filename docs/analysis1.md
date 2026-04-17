@@ -1,0 +1,118 @@
+# Production Readiness Analysis
+
+**Date**: 2026-04-17
+**Commit**: e64e58e — `fix(rpc): fix get_receipts_by_block to actually filter by block number`
+**Branch**: dev
+
+## Summary
+
+This is a well-architected testnet/devnet candidate. The codebase demonstrates strong engineering discipline — clean crate separation, comprehensive test coverage, strict linting, and thorough documentation. However, several critical gaps remain before mainnet deployment.
+
+**Overall readiness**: Testnet-ready, not mainnet-ready.
+
+---
+
+## What's Done Well
+
+- **Spec coverage**: All 26 spec sections validated, all tasks (P0-P23) marked complete
+- **Test coverage**: 647+ unit/integration tests, 83 integration tests, E2E tests
+- **Architecture**: Clean workspace crate separation (18 crates), Simplex BFT consensus, dual execution domains
+- **ZK shielded**: Real arkworks Groth16 prover with 3 circuits (Deposit/Transfer/Withdraw), feature-flagged (`real-prover`)
+- **Code quality**: Strict clippy rules (warn on `unwrap`, `expect`, `panic`, `unsafe_code`)
+- **Documentation**: Detailed spec (~5K lines), task lists, ZK design docs, CHANGELOG, SECURITY policy
+- **Docker**: Production-ready multi-stage build with non-root user
+- **Telemetry**: Prometheus metrics, OpenTelemetry tracing, alert rules
+- **Governance**: Dual-track voting (validators + token holders), proposal lifecycle, emergency pause
+- **Security hardening**: Rate limiting, replay protection, double-sign slashing, MEV protection (PBS + commit-reveal)
+
+---
+
+## Gaps Before Production
+
+### Critical
+
+1. **No tagged release** — version is `0.1.0`, changelog is all `[Unreleased]`, no git releases
+2. **ZK trusted setup missing** — uses `circuit_specific_setup` (dev/dummy CRS). Production requires a Powers of Tau ceremony with MPC participants. Without this, shielded proofs have no trust assumptions.
+3. **No third-party security audit** — no audit report from a reputable firm (Trail of Bits, OpenZeppelin, etc.). Given the financial nature of the system, this is a prerequisite.
+4. **Mainnet genesis config absent** — no production genesis with real validator set, token distribution, initial parameters, and chain ID.
+
+### High
+
+5. **Bridge security model** — external bridge relies on 14/21 validator signatures with no fraud proofs, challenge period, or light client verification. A validator key compromise could mint infinite tokens.
+6. **Oracle system lacks real data sources** — price feeds are structural/mock. No Chainlink, Pyth, or other production oracle integration. Fee conversion and multi-currency payments depend on this.
+7. **Key management** — validator keys stored on-disk locally. No HSM/KMS integration, no threshold signature scheme, no key rotation protocol.
+8. **Network security** — no TLS mentioned, no authenticated P2P handshakes documented, no infra-level DoS protection. Commonware-p2p provides transport but the security posture isn't documented.
+
+### Medium
+
+9. **Compliance engine has no real data** — OFAC blacklist, KYC registry, whitelist are in-memory structures with no real data source integration.
+10. **Governance timelock too short** — 1000 blocks (~4 minutes at 250ms block time) is dangerously short for production parameter changes. Should be days or weeks.
+11. **Stress testing unverified** — E2E stress tests claim 10K tx/sec targets but this needs real benchmarking on production hardware with realistic network conditions (latency, packet loss, geographic distribution).
+12. **No bug bounty program** — SECURITY.md describes responsible disclosure but there's no mention of a bounty program (Immunefi, HackerOne) to incentivize white-hat research.
+
+### Low
+
+13. **Light client untested in real network** — the light client is implemented but needs testing against real node behavior, not just simulation.
+14. **Fork management untested at scale** — height-activated upgrades work in simulation but haven't been tested with heterogeneous node versions on a live network.
+15. **No disaster recovery runbook** — no documented procedures for chain halt, state corruption, or mass validator offline events.
+
+---
+
+## Risk Assessment by Component
+
+| Component | Readiness | Risk if Deployed | Notes |
+|-----------|-----------|-----------------|-------|
+| Protocol payments | Medium-High | Moderate | Core logic implemented, needs audit |
+| EVM layer | Medium | Moderate | Revm integration solid, ERC-20 template needs audit |
+| Consensus (Simplex BFT) | Medium | High | Via commonware — battle-tested but not at this scale |
+| ZK shielded | Low-Medium | Critical | Real prover works but dev CRS only; no production trusted setup |
+| External bridge | Low | Critical | 14/21 sig threshold, no challenge period, no fraud proofs |
+| Oracle system | Low | High | No real price feed integration |
+| Governance | Medium | Moderate | Logic complete, parameters not tuned for prod |
+| Mempool | High | Low | Well-structured with anti-spam measures |
+| RPC layer | High | Low | JSON-RPC + WebSocket, good defaults |
+| Node/CLI | High | Low | Well-structured, good defaults |
+| Telemetry | High | Low | Prometheus + OpenTelemetry, alert rules defined |
+| Light client | Medium | Low | Implemented, needs real-world testing |
+| Network/P2P | Medium | Moderate | Commonware-p2p, rate limiting in place |
+| State storage | High | Low | reth-db (MDBX), prune strategy defined |
+
+---
+
+## Recommended Production Path
+
+### Phase 1: Testnet (Current State + Minor Fixes)
+- Tag a `v0.1.0-testnet` release
+- Deploy with mock prover + mock oracles
+- Invite external developers to build and test
+- Run stress tests on real hardware with distributed validators
+
+### Phase 2: Pre-Mainnet
+- Commission a third-party security audit
+- Run Powers of Tau ceremony for ZK circuits
+- Integrate production oracle feeds (Chainlink/Pyth)
+- Implement HSM/KMS key management
+- Launch a bug bounty program
+- Tune governance parameters (longer timelocks, higher deposits)
+
+### Phase 3: Mainnet
+- Deploy with audited code and production CRS
+- Start with limited total value (gradual token release)
+- Monitor for 30-90 days before full capacity
+- Establish incident response procedures and runbooks
+
+---
+
+## Code Quality Metrics
+
+| Metric | Value | Assessment |
+|--------|-------|------------|
+| Workspace crates | 18 | Well-separated concerns |
+| Rust edition | 2021 | Current |
+| MSRV | 1.82 | Reasonable |
+| Lint strictness | High | Warns on unwrap, expect, panic, unsafe |
+| Test count | 647+ | Good coverage |
+| Integration tests | 83 | Cross-component coverage |
+| E2E tests | Present | Deterministic runtime + network simulation |
+| Dependencies | reth (git-locked), commonware, alloy, revm | Modern stack |
+| License | MIT OR Apache-2.0 | Standard |

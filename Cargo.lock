@@ -1518,6 +1518,7 @@ dependencies = [
  "poseidon-ark-no-std",
  "rand 0.8.5",
  "serde",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
 

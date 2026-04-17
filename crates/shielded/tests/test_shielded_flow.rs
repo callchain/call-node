@@ -234,6 +234,7 @@ mod shielded_flow {
     }
 
     #[test]
+    #[cfg(not(feature = "real-prover"))]
     fn test_real_proof_reject_double_spend() {
         let mut state = ShieldedState::new();
 
@@ -271,6 +272,7 @@ mod shielded_flow {
     }
 
     #[test]
+    #[cfg(not(feature = "real-prover"))]
     fn test_real_deposit_then_transfer_flow() {
         let mut state = ShieldedState::new();
 

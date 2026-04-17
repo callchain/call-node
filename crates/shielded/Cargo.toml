@@ -32,6 +32,9 @@ ark-snark = { version = "0.4", optional = true }
 poseidon-ark-no-std = { version = "0.0.1", optional = true }
 ark-crypto-primitives = { version = "0.4", features = ["crh", "merkle_tree", "sponge"], optional = true }
 
+# Ceremony key loading — SHA-256 for verifying key hash verification
+sha2 = { version = "0.10", optional = true }
+
 [features]
 default = []
 real-prover = [
@@ -47,3 +50,9 @@ real-prover = [
     "poseidon-ark-no-std",
     "ark-crypto-primitives",
 ]
+production-keys = ["real-prover", "sha2"]
+
+[[bin]]
+name = "export_r1cs"
+path = "src/bin/export_r1cs.rs"
+required-features = ["real-prover"]

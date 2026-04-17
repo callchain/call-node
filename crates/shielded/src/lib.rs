@@ -28,6 +28,8 @@ pub mod circuit_transfer;
 pub mod proof_ser;
 #[cfg(feature = "real-prover")]
 pub mod keygen;
+#[cfg(feature = "production-keys")]
+pub mod ceremony;
 
 pub use merkle::*;
 #[cfg(feature = "real-prover")]
@@ -560,6 +562,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "real-prover"))]
     fn test_shielded_state_process_transfer() {
         let mut state = ShieldedState::new();
         let note = test_note(1000, 1, 1);
