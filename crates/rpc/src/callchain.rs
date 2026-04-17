@@ -981,5 +981,114 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // ── Light Client Bridge RPC Methods ──────────────────────────────
+
+    // call_lightClientBridgeDeposit
+    module
+        .register_async_method("call_lightClientBridgeDeposit", |params, state, _ctx| async move {
+            #[cfg(not(feature = "light-client-bridge"))]
+            return Err::<serde_json::Value, _>(internal_error(
+                "light client bridge is not enabled".into()));
+
+            #[cfg(feature = "light-client-bridge")]
+            async {
+                let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+                // Parse header RLP (hex bytes)
+                let header_hex = call_obj.get("headerRlp")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| invalid_params("missing 'headerRlp' field".into()))?;
+                let header_bytes = hex::decode(header_hex.trim_start_matches("0x"))
+                    .map_err(|e| invalid_params(format!("invalid headerRlp: {e}")))?;
+
+                // Parse source chain
+                let source_chain_str = call_obj.get("sourceChain")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| invalid_params("missing 'sourceChain' field".into()))?;
+                let source_chain = match source_chain_str.to_lowercase().as_str() {
+                    "ethereum" | "ethereummainnet" => call_bridge::ExternalChain::EthereumMainnet,
+                    "arbitrum" => call_bridge::ExternalChain::Arbitrum,
+                    _ => return Err(invalid_params("unknown source chain".into())),
+                };
+
+                // Parse recipient
+                let recipient_hex = call_obj.get("recipient")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| invalid_params("missing 'recipient' field".into()))?;
+                let recipient = recipient_hex.parse::<alloy_primitives::Address>()
+                    .map_err(|e| invalid_params(format!("invalid recipient: {e}")))?;
+
+                // Parse asset_id and amount
+                let asset_id = call_obj.get("assetId")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
+                let amount_str = call_obj.get("amount")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| invalid_params("missing 'amount' field (must be string)".into()))?;
+                let amount: u128 = amount_str
+                    .parse()
+                    .map_err(|_| invalid_params("invalid amount: must be a numeric string".into()))?;
+
+                // Parse MPT proof nodes
+                let tx_proof_nodes: Vec<Vec<u8>> = call_obj.get("txProof")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())).collect())
+                    .ok_or_else(|| invalid_params("missing 'txProof' field".into()))?;
+
+                let receipt_proof_nodes: Vec<Vec<u8>> = call_obj.get("receiptProof")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())).collect())
+                    .ok_or_else(|| invalid_params("missing 'receiptProof' field".into()))?;
+
+                // Build light client types
+                use call_light_client::{EthHeader, TxInclusionProof, ReceiptProof, MptProofNode};
+
+                let header = EthHeader::from_rlp(header_bytes);
+
+                let tx_proof = TxInclusionProof::new(
+                    tx_proof_nodes.into_iter().map(MptProofNode::new).collect(),
+                );
+                let receipt_proof = ReceiptProof::new(
+                    receipt_proof_nodes.into_iter().map(MptProofNode::new).collect(),
+                );
+
+                let op = call_bridge::ExternalBridgeOp::LightClientDeposit {
+                    source_chain,
+                    header,
+                    tx_proof,
+                    receipt_proof,
+                    recipient,
+                    asset_id,
+                    amount,
+                };
+
+                // Get light client (create with dummy genesis if not initialized)
+                let mut light_client_guard = state.light_client.write().map_err(|_| internal_error("lock poisoned".into()))?;
+                let light_client = light_client_guard.as_mut()
+                    .ok_or_else(|| invalid_params("light client not initialized".into()))?;
+
+                // Get config
+                let config = call_bridge::BridgeConfig::default();
+                let current_block = state.get_current_block();
+
+                // Process deposit
+                let mut balances = state.balance_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
+                let mut bridge_state = state.bridge_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
+
+                match call_bridge::process_light_client_deposit(light_client, &op, &mut balances, &mut bridge_state, &config, current_block) {
+                    Ok(call_bridge::ExternalDepositResult::Queued { finalized_at_block, .. }) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                        "status": "queued",
+                        "assetId": asset_id,
+                        "amount": amount.to_string(),
+                        "recipient": format!("0x{}", hex::encode(recipient.as_slice())),
+                        "challengePeriodBlocks": config.challenge_period_blocks,
+                        "finalizedAtBlock": finalized_at_block,
+                    })),
+                    Err(e) => Err(invalid_params(e.to_string())),
+                }
+            }.await
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
     Ok(())
 }

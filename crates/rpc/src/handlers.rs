@@ -37,6 +37,8 @@ pub struct RpcState {
     pub subscriptions: SubscriptionManager,
     pub governance: RwLock<GovernanceManager>,
     pub oracle: RwLock<OracleManager>,
+    #[cfg(feature = "light-client-bridge")]
+    pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
 }
 
 impl RpcState {
@@ -72,6 +74,8 @@ impl RpcState {
             subscriptions: SubscriptionManager::new(),
             governance: RwLock::new(GovernanceManager::new()),
             oracle: RwLock::new(OracleManager::new(OracleConfig::default())),
+            #[cfg(feature = "light-client-bridge")]
+            light_client: RwLock::new(None),
         }
     }
 

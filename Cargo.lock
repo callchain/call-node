@@ -1487,6 +1487,7 @@ dependencies = [
  "call-consensus",
  "call-crypto",
  "call-evm",
+ "call-light-client",
  "call-primitives",
  "call-protocol",
  "call-shielded",

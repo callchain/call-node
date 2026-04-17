@@ -29,3 +29,7 @@ tracing.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 hex = "0.4"
+call-light-client = { workspace = true, optional = true }
+
+[features]
+light-client-bridge = ["call-light-client", "call-bridge/light-client-bridge"]
