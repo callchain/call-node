@@ -24,9 +24,13 @@ serde_bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
 [features]
 default = []
 real-prover = ["call-shielded/real-prover"]
+http-fetcher = ["dep:reqwest", "dep:tokio"]
 
 [dev-dependencies]
 hex-literal = "0.4"

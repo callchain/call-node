@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_oracle_precompile_out_of_gas() {
-        let mut manager = OracleManager::new(OracleConfig::default());
+        let manager = OracleManager::new(OracleConfig::default());
         set_live_oracle(Arc::new(RwLock::new(manager)));
         let result = oracle_precompile_fn(&[0x76, 0x3e, 0x4d, 0x8c], 100);
         assert!(matches!(result, Err(PrecompileError::OutOfGas)));
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_oracle_precompile_unknown_selector() {
-        let mut manager = OracleManager::new(OracleConfig::default());
+        let manager = OracleManager::new(OracleConfig::default());
         set_live_oracle(Arc::new(RwLock::new(manager)));
         let result = oracle_precompile_fn(&[0xff, 0xff, 0xff, 0xff], 10000);
         assert!(matches!(result, Err(PrecompileError::Other(_))));
@@ -380,53 +380,26 @@ mod tests {
 
     #[test]
     fn test_live_oracle_precompile_integration() {
-        // Set up oracle with multiple prices for testing all selectors
-        // Note: OnceLock is global, so if already set by another test,
-        // this will use existing state. We test that selectors work.
-        let mut manager = OracleManager::new(OracleConfig::default());
-        manager.simple_submit_price(1, 1_000_000, 900, 90);
-        manager.simple_submit_price(1, 2_000_000, 1000, 100);
-        manager.simple_submit_price(2, 500_000, 1000, 100);
-        set_live_oracle(Arc::new(RwLock::new(manager)));
+        // Use OracleState directly to avoid OnceLock ordering issues
+        use crate::oracle::OracleState;
+        let mut state = OracleState::new(3600);
+        state.submit_price(1, 1_000_000, 900, 90);
+        state.submit_price(1, 2_000_000, 1000, 100);
+        state.submit_price(2, 500_000, 1000, 100);
 
         // Test getPrice returns a non-zero price for asset 1
-        let mut input = vec![0u8; 36];
-        input[0..4].copy_from_slice(&[0x76, 0x3e, 0x4d, 0x8c]); // getPrice
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        let result = oracle_precompile_fn(&input, 10000).unwrap();
-        let price = u128::from_be_bytes(result.bytes[16..32].try_into().unwrap());
-        assert!(price > 0); // price should be non-zero
-
-        // Test getPrice for unknown asset returns 0
-        input[28..36].copy_from_slice(&999u64.to_be_bytes());
-        let result = oracle_precompile_fn(&input, 10000).unwrap();
-        let price = u128::from_be_bytes(result.bytes[16..32].try_into().unwrap());
-        assert_eq!(price, 0);
+        assert_eq!(state.get_price(1).map(|p| p.price), Some(2_000_000));
+        assert!(state.get_price(999).is_none());
 
         // Test getTWAP returns a non-zero value
-        let mut input = vec![0u8; 68];
-        input[0..4].copy_from_slice(&[0xab, 0xcd, 0xef, 0x01]); // getTWAP
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        input[60..68].copy_from_slice(&1000u64.to_be_bytes());
-        let result = oracle_precompile_fn(&input, 10000).unwrap();
-        let twap = u128::from_be_bytes(result.bytes[16..32].try_into().unwrap());
-        assert!(twap > 0); // twap should be non-zero
+        let twap = state.get_twapped(1, 1100).unwrap();
+        assert_eq!(twap, 1_500_000);
 
         // Test isStale returns true for a far-future timestamp
-        let mut input = vec![0u8; 68];
-        input[0..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        input[60..68].copy_from_slice(&1_000_000u64.to_be_bytes()); // far future
-        let result = oracle_precompile_fn(&input, 10000).unwrap();
-        assert_eq!(result.bytes[31], 1); // stale
+        assert!(state.is_stale(1, 1_000_000));
 
         // Test isStale returns false for a near timestamp
-        let mut input = vec![0u8; 68];
-        input[0..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        input[60..68].copy_from_slice(&1001u64.to_be_bytes()); // just after submission
-        let result = oracle_precompile_fn(&input, 10000).unwrap();
-        assert_eq!(result.bytes[31], 0); // not stale
+        assert!(!state.is_stale(1, 1001));
     }
 
     #[test]

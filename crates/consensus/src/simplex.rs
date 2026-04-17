@@ -245,6 +245,24 @@ impl SimplexConsensus {
         Ok(slashed)
     }
 
+    /// Distribute an oracle reward to a validator.
+    pub fn distribute_oracle_reward(
+        &mut self,
+        validator_id: ValidatorId,
+        amount: u128,
+    ) -> Result<(), ConsensusError> {
+        if amount > 0 {
+            self.validators
+                .distribute_reward(validator_id, amount)
+                .map_err(|e| {
+                    warn!(?e, validator_id, amount, "failed to distribute oracle reward");
+                    e
+                })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Get active validator IDs for network layer.
     pub fn active_validators(&self) -> Vec<ValidatorId> {
         self.validators.get_active_validators()

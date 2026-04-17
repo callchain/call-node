@@ -33,6 +33,10 @@ pub enum NetworkMessage {
     SyncResponse(SyncResponse),
     /// Handshake for new peer connection
     Handshake(Handshake),
+    /// Oracle price request broadcast by proposer
+    OraclePriceRequest(OraclePriceRequest),
+    /// Oracle price submission response from validator
+    OraclePriceSubmission(OraclePriceSubmission),
 }
 
 /// Transaction message for gossipsub propagation
@@ -108,6 +112,39 @@ pub struct Handshake {
     pub capabilities: u32,
 }
 
+/// Oracle price request — broadcast by the proposer at oracle period boundaries.
+/// Validators respond with signed price submissions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OraclePriceRequest {
+    /// Asset IDs to fetch prices for
+    pub asset_ids: Vec<u64>,
+    /// Block height at which the oracle period is advancing
+    pub block: u64,
+    /// Validator ID of the requesting proposer
+    pub requester_id: u32,
+}
+
+/// Oracle price submission — signed price data from a validator
+/// in response to an OraclePriceRequest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OraclePriceSubmission {
+    /// Validator ID submitting the price
+    pub validator_id: u32,
+    /// Asset ID for this price
+    pub asset_id: u64,
+    /// Price value
+    pub price: u128,
+    /// Block number
+    pub block_number: u64,
+    /// Timestamp in seconds
+    pub timestamp: u64,
+    /// Ed25519 signature of the submission
+    #[serde(with = "serde_bytes")]
+    pub signature: [u8; 64],
+    /// Data sources (e.g., "binance", "coinbase")
+    pub sources: Vec<String>,
+}
+
 // ── Network Trait (abstraction over commonware-p2p) ──────────────────
 
 /// Abstract network interface.
@@ -165,6 +202,16 @@ pub enum NetworkEvent {
     SyncRequestReceived {
         peer_id: String,
         request: SyncRequest,
+    },
+    /// Oracle price request received from proposer
+    OraclePriceRequestReceived {
+        peer_id: String,
+        request: OraclePriceRequest,
+    },
+    /// Oracle price submission received
+    OraclePriceSubmissionReceived {
+        peer_id: String,
+        submission: OraclePriceSubmission,
     },
 }
 
@@ -694,6 +741,72 @@ mod tests {
 
         assert_eq!(hs.version, 1);
         assert_eq!(hs.chain_id, 1);
+    }
+
+    #[test]
+    fn test_oracle_price_request() {
+        let req = OraclePriceRequest {
+            asset_ids: vec![1, 2, 3],
+            block: 1000,
+            requester_id: 5,
+        };
+        assert_eq!(req.asset_ids.len(), 3);
+        assert_eq!(req.block, 1000);
+        assert_eq!(req.requester_id, 5);
+
+        // Test serialization
+        let msg = NetworkMessage::OraclePriceRequest(req.clone());
+        let serialized = serde_json::to_string(&msg).unwrap();
+        let deserialized: NetworkMessage = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(deserialized, NetworkMessage::OraclePriceRequest(r) if r.block == 1000));
+    }
+
+    #[test]
+    fn test_oracle_price_submission() {
+        let sub = OraclePriceSubmission {
+            validator_id: 2,
+            asset_id: 1,
+            price: 2_000_000,
+            block_number: 1000,
+            timestamp: 1_000_000,
+            signature: [0u8; 64],
+            sources: vec!["binance".into()],
+        };
+        assert_eq!(sub.price, 2_000_000);
+        assert_eq!(sub.sources.len(), 1);
+
+        // Test serialization
+        let msg = NetworkMessage::OraclePriceSubmission(sub.clone());
+        let serialized = serde_json::to_string(&msg).unwrap();
+        let deserialized: NetworkMessage = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(deserialized, NetworkMessage::OraclePriceSubmission(s) if s.price == 2_000_000));
+    }
+
+    #[test]
+    fn test_network_event_oracle_variants() {
+        let evt = NetworkEvent::OraclePriceRequestReceived {
+            peer_id: "peer_1".into(),
+            request: OraclePriceRequest {
+                asset_ids: vec![1],
+                block: 1000,
+                requester_id: 0,
+            },
+        };
+        assert!(matches!(evt, NetworkEvent::OraclePriceRequestReceived { .. }));
+
+        let evt2 = NetworkEvent::OraclePriceSubmissionReceived {
+            peer_id: "peer_2".into(),
+            submission: OraclePriceSubmission {
+                validator_id: 1,
+                asset_id: 1,
+                price: 100,
+                block_number: 1000,
+                timestamp: 1000,
+                signature: [0u8; 64],
+                sources: vec![],
+            },
+        };
+        assert!(matches!(evt2, NetworkEvent::OraclePriceSubmissionReceived { .. }));
     }
 
     #[test]

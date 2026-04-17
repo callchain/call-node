@@ -25,3 +25,7 @@ alloy-rlp.workspace = true
 rand.workspace = true
 hex.workspace = true
 commonware-utils.workspace = true
+serde_bytes.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

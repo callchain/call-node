@@ -1353,6 +1353,8 @@ dependencies = [
  "hex",
  "rand 0.8.5",
  "serde",
+ "serde_bytes",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1470,10 +1472,12 @@ dependencies = [
  "hex",
  "hex-literal",
  "rand 0.8.5",
+ "reqwest",
  "serde",
  "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

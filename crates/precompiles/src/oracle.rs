@@ -101,7 +101,8 @@ impl OracleState {
         }
     }
 
-    /// Submit a price (delegates to OracleManager)
+    /// Submit a price directly, bypassing the full validation pipeline.
+    /// Used for testing and legacy integrations.
     pub fn submit_price(
         &mut self,
         asset_id: AssetId,
@@ -109,9 +110,8 @@ impl OracleState {
         timestamp: u64,
         block_number: u64,
     ) {
-        // Legacy simple submission — full oracle uses OracleSubmission with signatures
         self.manager
-            .simple_submit_price(asset_id, price, timestamp, block_number);
+            .record_direct_price(asset_id, price, timestamp, block_number);
     }
 
     /// Access the underlying manager for advanced operations
@@ -142,7 +142,11 @@ mod tests {
         let mut state = OracleState::new(3600);
         state.submit_price(1, 1_000_000, 900, 90);
         state.submit_price(1, 2_000_000, 1000, 100);
-        let twap = state.get_twapped(1, 1000).unwrap();
+        // TWAP with current_ts=1100:
+        // Entry 0: price=1_000_000, duration = 1000 - 900 = 100
+        // Entry 1: price=2_000_000, duration = 1100 - 1000 = 100
+        // TWAP = (1_000_000*100 + 2_000_000*100) / 200 = 1_500_000
+        let twap = state.get_twapped(1, 1100).unwrap();
         assert_eq!(twap, 1_500_000);
     }
 

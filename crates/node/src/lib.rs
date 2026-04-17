@@ -15,13 +15,13 @@ use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
 };
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse};
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission};
 use call_primitives::BlockHash;
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
 };
-use call_protocol::oracle::OracleManager;
+use call_protocol::oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager};
 use call_storage::{CallDb, open_db, PruneState, StorageError};
 use call_storage::reth_db::{
@@ -49,6 +49,7 @@ pub const CALLCHAIN_CHAIN_ID: u64 = 1337;
 const TX_CHANNEL: u64 = 1;
 const BLOCK_CHANNEL: u64 = 2;
 const SYNC_CHANNEL: u64 = 3;
+const ORACLE_CHANNEL: u64 = 4;
 
 /// The Callchain node
 pub struct CallNode {
@@ -914,7 +915,41 @@ async fn block_production_loop(
         };
         block.finalize(&result);
 
-        // 4. Slash oracle outliers before clearing tracking
+        // 4. Request oracle price submissions from validators before advancing
+        let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
+        if is_oracle_boundary {
+            if let Some(ref net) = network {
+                let tracked = {
+                    let oracle = state.oracle.read().unwrap();
+                    oracle.tracked_assets.clone()
+                };
+                if !tracked.is_empty() {
+                    let proposer_id = proposer;
+                    let request = OraclePriceRequest {
+                        asset_ids: tracked,
+                        block: height,
+                        requester_id: proposer_id,
+                    };
+                    let msg = serde_json::to_vec(&NetworkMessage::OraclePriceRequest(request))
+                        .expect("serialize oracle request");
+                    net.broadcast(ORACLE_CHANNEL, msg).await;
+                    // Configurable delay to allow validators to respond
+                    let delay_ms = consensus.read()
+                        .ok()
+                        .map(|c| c.params().oracle_request_delay_ms)
+                        .unwrap_or(200);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+
+        // 5. Advance oracle period at interval boundaries
+        if is_oracle_boundary {
+            let mut oracle = state.oracle.write().unwrap();
+            oracle.advance_period(height);
+        }
+
+        // 6. Slash oracle outliers before clearing tracking
         {
             let oracle = state.oracle.read().unwrap();
             let outliers: Vec<u32> = oracle.last_outliers().to_vec();
@@ -927,13 +962,29 @@ async fn block_production_loop(
                 }
                 tracing::info!(outliers = ?outliers, "slashed oracle outliers");
             }
-            // Clear tracking after slashing
             drop(oracle);
+
+            // Distribute oracle rewards to contributors before clearing tracking
+            let contributions = {
+                let mut oracle = state.oracle.write().unwrap();
+                oracle.distribute_rewards()
+            };
+            if !contributions.is_empty() {
+                let mut c = consensus.write().unwrap();
+                for (vid, amount) in &contributions {
+                    if let Err(e) = c.distribute_oracle_reward(*vid, *amount) {
+                        tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
+                    }
+                }
+                tracing::info!(count = contributions.len(), "distributed oracle rewards");
+            }
+
+            // Clear tracking after slashing and reward distribution
             let mut oracle = state.oracle.write().unwrap();
             oracle.clear_tracking();
         }
 
-        // 5. Commit via consensus
+        // 7. Commit via consensus
         {
             let mut c = consensus.write().unwrap();
             if let Err(e) = c.commit_block(&block, &result) {
@@ -942,37 +993,37 @@ async fn block_production_loop(
             }
         }
 
-        // 5. Update state
+        // 8. Update state
         let new_height = height + 1;
         state.set_current_block(new_height);
         parent_hash = block.header.hash();
         state.finalize_block();
 
-        // 6. Persist block to disk
+        // 9. Persist block to disk
         if let Err(ref e) = persist_block(&db.data_dir, height, &block) {
             tracing::warn!(error = %e, "failed to persist block");
         }
 
-        // 7. Update prune tracking state
+        // 10. Update prune tracking state
         prune_state.add_block_body(height, call_storage::BlockBody {
             block_hash: parent_hash,
             tx_count: result.total_tx_count() as u32,
             body_size: 0, // would be actual serialized size in production
         });
 
-        // 8. Run periodic prune checks
+        // 11. Run periodic prune checks
         if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config) {
             tracing::warn!(error = %e, "prune check failed");
         }
 
-        // 9. Incrementally persist state changes after every block
+        // 12. Incrementally persist state changes after every block
         if let Some(ref db_env) = db.db {
             if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
                 tracing::warn!(error = %e, "failed to incrementally persist state");
             }
         }
 
-        // 10. Full table rebuild every 1000 blocks as safety net
+        // 13. Full table rebuild every 1000 blocks as safety net
         if new_height % 1000 == 0 {
             if let Some(ref db_env) = db.db {
                 if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
@@ -981,7 +1032,7 @@ async fn block_production_loop(
             }
         }
 
-        // 11. Broadcast to WebSocket subscribers
+        // 14. Broadcast to WebSocket subscribers
 
         tracing::info!(height = new_height, tx_count = result.total_tx_count(), "committed block");
 
@@ -989,7 +1040,7 @@ async fn block_production_loop(
         let tx_count = result.total_tx_count();
         subscriptions.broadcast_block(height, format!("{:?}", block.header.hash()), proposer, tx_count);
 
-        // 10. Broadcast block announcement via P2P
+        // 15. Broadcast block announcement via P2P
         if let Some(ref net) = network {
             let announcement = BlockAnnouncement {
                 block_hash: parent_hash,
@@ -1132,6 +1183,73 @@ fn handle_network_message(
         }
         SYNC_CHANNEL => {
             // SyncRequest / SyncResponse are handled by the sync task separately
+        }
+        ORACLE_CHANNEL => {
+            if let Ok(request) = serde_json::from_slice::<OraclePriceRequest>(data) {
+                // Validator received a price request from proposer.
+                // If this node is a registered validator, fetch prices and submit them back.
+                let state_clone = Arc::clone(state);
+                let net_clone = Arc::clone(network);
+                let peer_id_owned = peer_id.to_string();
+                tokio::spawn(async move {
+                    let is_validator = {
+                        let vs = state_clone.validator_state.read().unwrap();
+                        !vs.get_active_validators().is_empty()
+                    };
+                    if is_validator {
+                        // Fetch prices for requested assets using the oracle's tracked assets
+                        let current_block = state_clone.get_current_block();
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        // Submit a price for each requested asset
+                        for asset_id in &request.asset_ids {
+                            // Use last known price as a baseline (fetchers would override)
+                            let price = {
+                                let oracle = state_clone.oracle.read().unwrap();
+                                oracle.get_price(*asset_id).map(|p| p.median_price)
+                            };
+                            if let Some(price) = price {
+                                // Send back as an oracle price submission
+                                let submission = OraclePriceSubmission {
+                                    validator_id: 0, // would be this validator's ID
+                                    asset_id: *asset_id,
+                                    price,
+                                    block_number: current_block,
+                                    timestamp,
+                                    signature: [0u8; 64], // would be signed
+                                    sources: vec!["local_oracle".into()],
+                                };
+                                if let Ok(msg) = serde_json::to_vec(&NetworkMessage::OraclePriceSubmission(submission)) {
+                                    net_clone.send_to(vec![peer_id_owned.clone()], msg).await;
+                                }
+                            }
+                        }
+                    }
+                });
+            } else if let Ok(submission) = serde_json::from_slice::<OraclePriceSubmission>(data) {
+                // Proposer received a price submission from a validator.
+                // Feed it through the oracle's full validation pipeline via RPC-style submission.
+                let state_clone = Arc::clone(state);
+                tokio::spawn(async move {
+                    let current_block = state_clone.get_current_block();
+                    let oracle_submission = OracleSubmission {
+                        validator_id: submission.validator_id,
+                        asset_id: submission.asset_id,
+                        price: submission.price,
+                        block_number: current_block,
+                        timestamp: submission.timestamp,
+                        signature: submission.signature,
+                        sources: submission.sources,
+                    };
+                    let mut oracle = state_clone.oracle.write().unwrap();
+                    if let Err(e) = oracle.submit_price(oracle_submission) {
+                        tracing::debug!(error = %e, validator_id = submission.validator_id, "oracle P2P submission rejected");
+                    }
+                });
+            }
         }
         _ => {}
     }

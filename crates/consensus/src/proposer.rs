@@ -19,6 +19,8 @@ pub struct ConsensusParams {
     pub block_time_millis: u64,
     /// Number of rounds before slashing window resets
     pub slashing_window: u64,
+    /// Delay in ms after broadcasting oracle price requests
+    pub oracle_request_delay_ms: u64,
 }
 
 impl Default for ConsensusParams {
@@ -28,6 +30,7 @@ impl Default for ConsensusParams {
             subset_size: 21,
             block_time_millis: 250,
             slashing_window: 10_000,
+            oracle_request_delay_ms: 200,
         }
     }
 }
@@ -39,12 +42,14 @@ impl ConsensusParams {
         subset_size: u32,
         block_time_millis: u64,
         slashing_window: u64,
+        oracle_request_delay_ms: u64,
     ) -> Self {
         Self {
             max_validators,
             subset_size,
             block_time_millis,
             slashing_window,
+            oracle_request_delay_ms,
         }
     }
 

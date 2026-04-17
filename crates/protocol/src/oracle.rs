@@ -3,6 +3,7 @@
 //! Validator-submitted price feeds with quorum-based aggregation,
 //! outlier detection, and TWAP history.
 
+use alloy_primitives::U256;
 use call_crypto::ed25519_sign;
 use call_crypto::ed25519_verify;
 use call_primitives::{Address, AssetId, Ed25519PublicKey};
@@ -368,7 +369,11 @@ impl OracleManager {
         self.aggregated.get(&asset_id)
     }
 
-    /// Calculate TWAP for an asset over a period
+    /// Calculate time-weighted average price over the configured window.
+    ///
+    /// Each historical price is weighted by the duration it was valid
+    /// (time until the next price update, or until `current_timestamp`
+    /// for the most recent entry).
     pub fn get_twap(&self, asset_id: AssetId, current_timestamp: u64) -> Option<u128> {
         let entries = self.history.get(&asset_id)?;
         if entries.is_empty() {
@@ -379,8 +384,33 @@ impl OracleManager {
         if relevant.is_empty() {
             return None;
         }
-        let sum: u128 = relevant.iter().map(|e| e.price).sum();
-        Some(sum / relevant.len() as u128)
+        if relevant.len() == 1 {
+            return Some(relevant[0].price);
+        }
+
+        let mut weighted_sum = U256::ZERO;
+        let mut total_duration: u64 = 0;
+
+        for i in 0..relevant.len() {
+            let start = relevant[i].timestamp;
+            let end = if i + 1 < relevant.len() {
+                relevant[i + 1].timestamp
+            } else {
+                current_timestamp.min(start + self.config.twap_window_secs)
+            };
+            let duration = end.saturating_sub(start);
+            if duration > 0 {
+                weighted_sum += U256::from(relevant[i].price) * U256::from(duration);
+                total_duration += duration;
+            }
+        }
+
+        if total_duration == 0 {
+            return relevant.first().map(|e| e.price);
+        }
+
+        let result = weighted_sum / U256::from(total_duration);
+        u128::try_from(&result).ok()
     }
 
     /// Check if a price is stale
@@ -422,9 +452,108 @@ impl OracleManager {
         self.last_outliers.clear();
     }
 
+    /// Advance the oracle period for all tracked assets.
+    ///
+    /// Called by the block proposer at each `ORACLE_UPDATE_INTERVAL` boundary.
+    /// For assets where quorum was not reached, the last known price is carried
+    /// forward (graceful degradation) so the oracle never stalls.
+    pub fn advance_period(&mut self, block: u64) {
+        for asset_id in &self.tracked_assets.clone() {
+            let has_quorum = self
+                .pending
+                .get(asset_id)
+                .map(|p| p.len() >= oracle_quorum(self.validators.len()))
+                .unwrap_or(false);
+
+            if !has_quorum {
+                // Carry forward the last known price for this asset
+                if let Some(last) = self.aggregated.get(asset_id).cloned() {
+                    self.history
+                        .entry(*asset_id)
+                        .or_default()
+                        .push(HistoricalPrice {
+                            price: last.median_price,
+                            timestamp: last.timestamp,
+                            block_number: block,
+                        });
+                }
+            }
+            // If quorum was reached, aggregate_and_publish_price was already
+            // called during submission — just prune history
+            if let Some(entries) = self.history.get_mut(asset_id) {
+                if entries.len() > 1 {
+                    let cutoff_ts = entries
+                        .last()
+                        .map(|e| e.timestamp)
+                        .unwrap_or(0)
+                        .saturating_sub(self.config.twap_window_secs);
+                    entries.retain(|e| e.timestamp >= cutoff_ts);
+                }
+            }
+        }
+        // Clear pending for all assets
+        self.pending.clear();
+    }
+
+    /// Distribute the oracle reward pool proportionally to validators who
+    /// contributed to the last quorum aggregation.
+    ///
+    /// Returns a list of (validator_id, reward_amount) and resets the pool to 0.
+    pub fn distribute_rewards(&mut self) -> Vec<(u32, u128)> {
+        let total = self.reward_pool;
+        if total == 0 || self.current_contributors.is_empty() {
+            self.reward_pool = 0;
+            return Vec::new();
+        }
+
+        let count = self.current_contributors.len() as u128;
+        let per_validator = total / count;
+        let remainder = total % count;
+
+        let rewards: Vec<(u32, u128)> = self
+            .current_contributors
+            .iter()
+            .enumerate()
+            .map(|(i, vid)| {
+                // First validator gets the remainder to avoid losing dust
+                let amount = if i == 0 {
+                    per_validator + remainder
+                } else {
+                    per_validator
+                };
+                (*vid, amount)
+            })
+            .collect();
+
+        self.reward_pool = 0;
+        rewards
+    }
+
+    /// Reset a disabled validator's oracle status, allowing it to participate again.
+    ///
+    /// Can only be called when the validator is currently disabled (`is_active == false`).
+    /// Resets outlier_count to 0 and re-enables the validator.
+    pub fn reset_validator(&mut self, validator_id: u32) -> Result<(), OracleError> {
+        let validator = self
+            .validators
+            .get_mut(&validator_id)
+            .ok_or(OracleError::ValidatorNotFound)?;
+
+        if validator.is_active {
+            return Err(OracleError::ValidatorNotDisabled);
+        }
+
+        validator.outlier_count = 0;
+        validator.is_active = true;
+        Ok(())
+    }
+
     /// Simple price submission — internal/testing only. Bypasses the full validation
     /// pipeline (signatures, period checks, source validation). Performs minimal
     /// sanity checks to prevent obviously invalid data.
+    ///
+    /// Only available in test builds. Production code must use `submit_price`.
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn simple_submit_price(
         &mut self,
@@ -446,6 +575,40 @@ impl OracleManager {
             });
 
         // Update current aggregated price
+        self.aggregated.insert(
+            asset_id,
+            AggregatedPrice {
+                asset_id,
+                median_price: price,
+                block_number,
+                timestamp,
+                submission_count: 1,
+                outlier_count: 0,
+            },
+        );
+    }
+
+    /// Directly record a price in history and aggregated state.
+    /// Used by the precompiles crate for legacy integrations.
+    /// Bypasses the full validation pipeline — use with caution.
+    pub fn record_direct_price(
+        &mut self,
+        asset_id: AssetId,
+        price: u128,
+        timestamp: u64,
+        block_number: u64,
+    ) {
+        if price == 0 || block_number == 0 || timestamp == 0 {
+            return;
+        }
+        self.history
+            .entry(asset_id)
+            .or_default()
+            .push(HistoricalPrice {
+                price,
+                timestamp,
+                block_number,
+            });
         self.aggregated.insert(
             asset_id,
             AggregatedPrice {
@@ -512,6 +675,91 @@ pub enum OracleError {
     InsufficientDataSources(usize, usize),
     #[error("disallowed data source: {0}")]
     DisallowedSource(String),
+    #[error("validator is not disabled")]
+    ValidatorNotDisabled,
+}
+
+// ─── Price Fetcher Trait ────────────────────────────────────────────
+
+/// Trait for fetching prices from external data sources.
+/// Validators implement this to provide real-time price data
+/// for oracle submissions.
+pub trait PriceFetcher: Send + Sync {
+    /// Fetch the current price for an asset. Returns price in smallest units.
+    fn fetch_price(&self, asset_id: AssetId) -> Option<u128>;
+    /// Data source names this fetcher uses (e.g., ["binance", "coinbase"])
+    fn sources(&self) -> Vec<String>;
+}
+
+/// No-op price fetcher — used in devnet or when no external API is configured.
+pub struct NoOpPriceFetcher;
+
+impl PriceFetcher for NoOpPriceFetcher {
+    fn fetch_price(&self, _asset_id: AssetId) -> Option<u128> {
+        None
+    }
+
+    fn sources(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// HTTP-based price fetcher for production use.
+/// Maps asset IDs to API endpoint URLs and queries them on demand.
+///
+/// Requires the `http-fetcher` feature flag.
+#[cfg(feature = "http-fetcher")]
+pub struct HttpPriceFetcher {
+    endpoints: std::collections::HashMap<AssetId, String>,
+    client: reqwest::Client,
+}
+
+#[cfg(feature = "http-fetcher")]
+impl HttpPriceFetcher {
+    /// Create a new HttpPriceFetcher with configured endpoints.
+    /// Each asset_id maps to an HTTP URL that returns a JSON object
+    /// with a `"price"` field containing a numeric string or float.
+    pub fn new(endpoints: std::collections::HashMap<AssetId, String>) -> Self {
+        Self {
+            endpoints,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Add an endpoint for a specific asset.
+    pub fn with_endpoint(mut self, asset_id: AssetId, url: String) -> Self {
+        self.endpoints.insert(asset_id, url);
+        self
+    }
+}
+
+#[cfg(feature = "http-fetcher")]
+impl PriceFetcher for HttpPriceFetcher {
+    fn fetch_price(&self, asset_id: AssetId) -> Option<u128> {
+        let url = self.endpoints.get(&asset_id)?;
+
+        // Blocking call — acceptable in the oracle context where we
+        // already have a configurable delay window.
+        let rt = tokio::runtime::Handle::try_current().ok()?;
+        let future = async {
+            let resp = self.client.get(url).send().await.ok()?;
+            let body: serde_json::Value = resp.json().await.ok()?;
+            // Support common formats: {"price": "123.45"}, {"lastPrice": "123.45"},
+            // or a plain number
+            let price_str = body.get("price")
+                .or_else(|| body.get("lastPrice"))
+                .or_else(|| body.get("last"))?
+                .as_str()?;
+            // Parse as f64 then convert to u128 (price in smallest units)
+            price_str.parse::<f64>().ok().map(|f| f as u128)
+        };
+
+        tokio::task::block_in_place(|| rt.block_on(future))
+    }
+
+    fn sources(&self) -> Vec<String> {
+        vec!["http".into()]
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────
@@ -831,14 +1079,15 @@ mod tests {
         }
 
         // TWAP at ts = 1_007_200 with window 86_400 covers all 3 entries
+        // Time-weighted: 1M*3600 + 2M*3600 + 3M*0 = 10_800_000_000 / 7200 = 1_500_000
         let current_ts = 1_007_200u64;
         let twap = manager.get_twap(asset_id, current_ts).unwrap();
-        assert_eq!(twap, 2_000_000); // (1M + 2M + 3M) / 3
+        assert_eq!(twap, 1_500_000);
 
-        // Even at current_ts + 1800, window of 86_400 still covers all entries
-        // cutoff = 1_009_000 - 86_400 = 922_600, all entries >= 1_000_000 qualify
+        // At current_ts + 1800, last entry gets duration 1800
+        // 1M*3600 + 2M*3600 + 3M*1800 = 16_200_000_000 / 9000 = 1_800_000
         let twap = manager.get_twap(asset_id, current_ts + 1800).unwrap();
-        assert_eq!(twap, 2_000_000);
+        assert_eq!(twap, 1_800_000);
     }
 
     #[test]
