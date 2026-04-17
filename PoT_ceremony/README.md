@@ -13,7 +13,7 @@ A **Powers of Tau** multi-party ceremony where many participants each contribute
 ## Quick Start
 
 ```bash
-cd PoT_ceremony
+cd pot_ceremony
 
 # Option A: Download the Perpetual Powers of Tau (RECOMMENDED — 5 minutes)
 ./download_pot.sh 25    # 2^25 = 33M constraints, ~2GB
@@ -35,13 +35,11 @@ cargo run --release --features real-prover --bin export_r1cs
 ## Directory Structure
 
 ```
-PoT_ceremony/
+pot_ceremony/
 ├── README.md                  # This file
 ├── download_pot.sh            # Option A: Download Perpetual PoT
 ├── run_ceremony.sh            # Option B: Run your own ceremony
 ├── phase2_derive.sh           # Derive circuit-specific keys (always needed)
-├── export_r1cs.rs             # (reference) Rust tool, actual code in crates/shielded/src/bin/export_r1cs.rs
-├── production_keys.rs          # (reference) Rust module, actual code in crates/shielded/src/ceremony.rs
 ├── r1cs/                      # (generated) R1CS constraint files
 │   ├── deposit.r1cs
 │   ├── transfer.r1cs
@@ -67,8 +65,6 @@ The actual Rust code lives in the `crates/shielded/` crate:
 - **`crates/shielded/src/ceremony.rs`** — Production key loading (`ProductionKeys`, `GenesisKeyHashes`, hash verification)
 - **`crates/shielded/src/bin/export_r1cs.rs`** — Binary to export R1CS files from arkworks circuits
 - **`crates/shielded/src/prover.rs`** — `RealProver::from_production_keys()` and related constructors
-
-Reference copies remain here for documentation purposes.
 
 ## Option A: Download Perpetual Powers of Tau (Recommended)
 
@@ -214,7 +210,7 @@ snarkjs zkey verify circuit_keys/transfer.r1cs pot_transcript/pot_final.ptau cir
 | Download Perpetual PoT | 5 min | 2GB download |
 | Export R1CS from arkworks | 1-2 days | Wire up circuit builders to `export_r1cs.rs` |
 | Phase 2 key derivation | 10 min | Run locally |
-| Copy VKs + embed hashes | 2-4 hours | Integrate `production_keys.rs` into shielded crate |
+| Copy VKs + embed hashes | 2-4 hours | Integrate ceremony keys into shielded crate |
 | Test with production keys | 1 day | Verify proofs against ceremony-derived VKs |
 | **Total** | **~2-3 days** | Assuming R1CS export is straightforward |
 
