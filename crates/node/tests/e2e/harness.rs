@@ -11,7 +11,7 @@ use call_protocol::{
     instructions::Instruction,
     transaction::{AuthScheme, FeeParams, GasConfig, ProtocolTransaction},
 };
-use call_protocol::oracle::OracleManager;
+use call_oracle::OracleManager;
 use call_transaction_pool::Mempool;
 use call_rpc::RpcState;
 use std::path::PathBuf;

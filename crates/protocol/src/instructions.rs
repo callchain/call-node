@@ -7,7 +7,7 @@ use call_shielded::{ShieldedState, ShieldedTransfer, ZkProof, Note, Nullifier, N
 use crate::balances::BalanceState;
 use crate::registry::AssetRegistry;
 use crate::compliance::ComplianceEngine;
-use crate::oracle::{OracleManager, OracleSubmission};
+use call_oracle::{OracleManager, OracleSubmission};
 use crate::{ProtocolError, ProtocolResult};
 
 // ── Instruction types ─────────────────────────────────────────────────

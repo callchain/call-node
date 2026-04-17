@@ -3,7 +3,7 @@
 //! Multi-currency fee payment, oracle price lookup, governance management.
 
 use call_primitives::{AssetId, Balance};
-use crate::oracle::OracleManager;
+use call_oracle::OracleManager;
 use crate::ProtocolResult;
 use crate::ProtocolError;
 

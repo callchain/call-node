@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 call-primitives.workspace = true
 call-protocol.workspace = true
+call-oracle.workspace = true
 alloy-primitives.workspace = true
 revm-precompile.workspace = true
 revm.workspace = true

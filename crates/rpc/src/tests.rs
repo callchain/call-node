@@ -4,7 +4,7 @@
 mod tests {
     use call_primitives::{Address, AssetId};
     use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine};
-    use call_protocol::oracle::OracleManager;
+    use call_oracle::OracleManager;
     use call_evm::EvmState;
     use call_bridge::BridgeStateManager;
     use call_consensus::ValidatorStateManager;

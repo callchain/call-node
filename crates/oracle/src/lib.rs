@@ -553,7 +553,7 @@ impl OracleManager {
     /// sanity checks to prevent obviously invalid data.
     ///
     /// Only available in test builds. Production code must use `submit_price`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn simple_submit_price(
         &mut self,

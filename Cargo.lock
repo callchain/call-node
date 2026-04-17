@@ -1266,6 +1266,7 @@ dependencies = [
  "call-consensus",
  "call-crypto",
  "call-evm",
+ "call-oracle",
  "call-primitives",
  "call-protocol",
  "hex",
@@ -1281,6 +1282,7 @@ dependencies = [
  "call-bridge",
  "call-crypto",
  "call-evm",
+ "call-oracle",
  "call-primitives",
  "call-protocol",
  "call-shielded",
@@ -1373,6 +1375,7 @@ dependencies = [
  "call-crypto",
  "call-evm",
  "call-network",
+ "call-oracle",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
@@ -1401,6 +1404,22 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry 0.28.0",
  "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "call-oracle"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "call-crypto",
+ "call-primitives",
+ "ed25519-dalek",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -1437,6 +1456,7 @@ name = "call-precompiles"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "call-oracle",
  "call-primitives",
  "call-protocol",
  "revm",
@@ -1464,6 +1484,7 @@ dependencies = [
  "call-bridge",
  "call-consensus",
  "call-crypto",
+ "call-oracle",
  "call-primitives",
  "call-serialization",
  "call-shielded",
@@ -1472,12 +1493,10 @@ dependencies = [
  "hex",
  "hex-literal",
  "rand 0.8.5",
- "reqwest",
  "serde",
  "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
 ]
 
@@ -1495,6 +1514,7 @@ dependencies = [
  "call-crypto",
  "call-evm",
  "call-light-client",
+ "call-oracle",
  "call-primitives",
  "call-protocol",
  "call-shielded",

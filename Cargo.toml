@@ -19,6 +19,7 @@ members = [
     "crates/precompiles",
     "crates/bridge",
     "crates/light-client",
+    "crates/oracle",
     "xtask",
 ]
 resolver = "2"
@@ -68,6 +69,7 @@ call-precompiles = { path = "crates/precompiles" }
 call-evm = { path = "crates/evm" }
 call-bridge = { path = "crates/bridge" }
 call-light-client = { path = "crates/light-client" }
+call-oracle = { path = "crates/oracle" }
 call-consensus = { path = "crates/consensus" }
 call-network = { path = "crates/network" }
 call-transaction-pool = { path = "crates/transaction-pool" }

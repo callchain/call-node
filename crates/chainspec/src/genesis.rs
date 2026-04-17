@@ -10,7 +10,7 @@ use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
 use call_protocol::balances::BalanceState;
 use call_protocol::compliance::ComplianceEngine;
-use call_protocol::oracle::{OracleConfig, OracleManager};
+use call_oracle::{OracleConfig, OracleManager};
 use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::FeeParams;
 use alloy_primitives::U256;

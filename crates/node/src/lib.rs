@@ -21,7 +21,7 @@ use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
 };
-use call_protocol::oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
+use call_oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager};
 use call_storage::{CallDb, open_db, PruneState, StorageError};
 use call_storage::reth_db::{

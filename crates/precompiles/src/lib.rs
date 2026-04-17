@@ -331,7 +331,7 @@ pub fn bridge_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_protocol::oracle::{OracleConfig, OracleManager};
+    use call_oracle::{OracleConfig, OracleManager};
     use std::sync::{Arc, RwLock};
 
     #[test]

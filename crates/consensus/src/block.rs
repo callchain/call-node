@@ -226,7 +226,7 @@ impl Block {
         fee_params: &mut FeeParams,
         current_block_height: u64,
         evm_state: &mut EvmState,
-        mut oracle: Option<&mut call_protocol::oracle::OracleManager>,
+        mut oracle: Option<&mut call_oracle::OracleManager>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1

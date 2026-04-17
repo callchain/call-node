@@ -3,7 +3,7 @@
 //! Functions: getPrice(), getTWAP(), isStale(), getOracleStatus()
 
 use call_primitives::AssetId;
-use call_protocol::oracle::OracleManager;
+use call_oracle::OracleManager;
 use alloy_primitives::address;
 use std::sync::{Arc, RwLock};
 
@@ -58,7 +58,7 @@ impl Default for OracleState {
 
 impl OracleState {
     pub fn new(stale_threshold_secs: u64) -> Self {
-        let config = call_protocol::OracleConfig {
+        let config = call_oracle::OracleConfig {
             staleness_secs: stale_threshold_secs,
             ..Default::default()
         };

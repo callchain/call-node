@@ -1,0 +1,29 @@
+[package]
+name = "call-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+call-primitives.workspace = true
+call-crypto.workspace = true
+alloy-primitives.workspace = true
+ed25519-dalek = "2"
+serde.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+default = []
+http-fetcher = ["dep:reqwest", "dep:tokio"]
+test-utils = []
+
+[dev-dependencies]
+hex = "0.4"

@@ -2,7 +2,7 @@
 
 use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams};
 use call_protocol::governance::GovernanceManager;
-use call_protocol::oracle::OracleManager;
+use call_oracle::OracleManager;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
 use call_consensus::ValidatorStateManager;
