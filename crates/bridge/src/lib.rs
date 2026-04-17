@@ -43,6 +43,8 @@ pub enum BridgeError {
     ExternalAssetNotAllowed(AssetId),
     #[error("EVM execution failed: {0}")]
     EvmExecutionFailed(String),
+    #[error("MPT proof verification failed: {0}")]
+    MptProofError(String),
 }
 
 /// Bridge operation types (per spec §5.1)

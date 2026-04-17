@@ -1249,6 +1249,7 @@ dependencies = [
  "alloy-primitives",
  "call-crypto",
  "call-evm",
+ "call-light-client",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
@@ -1319,6 +1320,20 @@ dependencies = [
  "revm",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "call-light-client"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "call-crypto",
+ "call-primitives",
+ "hex",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

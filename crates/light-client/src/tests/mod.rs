@@ -1,0 +1,265 @@
+//! Integration tests for the light client crate.
+
+use crate::verifier::{make_leaf_node_rlp, verify_mpt_proof, MptError, rlp_encode_short_bytes};
+use crate::*;
+use alloy_primitives::{keccak256, B256};
+
+fn encode_rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let total: usize = items.iter().map(|i| i.len()).sum();
+    let mut out = Vec::with_capacity(1 + total);
+    if total < 56 {
+        out.push(0xC0 + total as u8);
+    } else {
+        let len_bytes = total.to_be_bytes();
+        let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+        let num_len_bytes = len_bytes.len() - skip;
+        out.push(0xF7 + num_len_bytes as u8);
+        out.extend_from_slice(&len_bytes[skip..]);
+    }
+    for item in items {
+        out.extend(item);
+    }
+    out
+}
+
+/// Build a minimal valid Ethereum header RLP for testing.
+fn make_test_header_rlp(
+    parent_hash: B256,
+    block_number: u64,
+    tx_root: B256,
+    receipt_root: B256,
+) -> Vec<u8> {
+    let mut fields = Vec::new();
+    fields.push(rlp_encode_short_bytes(&parent_hash.0)); // parent_hash
+    fields.push(vec![0x80]); // sha3_uncles
+    fields.push(vec![0x80]); // miner
+    fields.push(rlp_32_zero()); // state_root
+    fields.push(rlp_encode_short_bytes(&tx_root.0)); // tx_root
+    fields.push(rlp_encode_short_bytes(&receipt_root.0)); // receipt_root
+    fields.push(vec![0x80]); // logs_bloom
+    fields.push(rlp_encode_short_bytes(&[0x01])); // difficulty
+
+    // block number
+    let num = block_number.to_be_bytes();
+    let start = num.iter().position(|&b| b != 0).unwrap_or(8);
+    fields.push(if start < 8 {
+        rlp_encode_short_bytes(&num[start..])
+    } else {
+        vec![0x80]
+    });
+
+    fields.push(rlp_encode_short_bytes(&[0x01])); // gas_limit
+    fields.push(vec![0x80]); // gas_used
+    fields.push(rlp_encode_short_bytes(&[0x01])); // timestamp
+    fields.push(vec![0x80]); // extra_data
+    fields.push(rlp_32_zero()); // mix_hash
+    fields.push(vec![0x88, 0, 0, 0, 0, 0, 0, 0, 0]); // nonce
+    fields.push(vec![0x80]); // base_fee
+
+    encode_rlp_list(&fields)
+}
+
+fn rlp_32_zero() -> Vec<u8> {
+    let mut out = Vec::with_capacity(33);
+    out.push(0xa0);
+    out.extend([0u8; 32]);
+    out
+}
+
+#[test]
+fn test_eth_header_parse_and_hash() {
+    let parent = B256::repeat_byte(0xAA);
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+    let rlp = make_test_header_rlp(parent, 1001, tx_root, receipt_root);
+    let hash = keccak256(&rlp);
+
+    let header = EthHeader::from_rlp(rlp.clone());
+    assert_eq!(header.block_hash, hash);
+    assert_eq!(header.parent_hash(), Some(parent));
+    assert_eq!(header.number(), Some(1001));
+    assert_eq!(header.transactions_root(), Some(tx_root));
+    assert_eq!(header.receipts_root(), Some(receipt_root));
+}
+
+#[test]
+fn test_header_chain_parent_verification() {
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+
+    // Submit block 1001
+    let rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    let hash_1001 = header.block_hash;
+    client.submit_header(header).unwrap();
+
+    // Submit block 1002
+    let rlp = make_test_header_rlp(hash_1001, 1002, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    let hash_1002 = header.block_hash;
+    client.submit_header(header).unwrap();
+
+    // Submit block 1003
+    let rlp = make_test_header_rlp(hash_1002, 1003, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    client.submit_header(header).unwrap();
+
+    assert_eq!(client.latest_block(), 1003);
+}
+
+#[test]
+fn test_header_reject_unlinked() {
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+    let wrong_parent = B256::repeat_byte(0xBB);
+
+    let rlp = make_test_header_rlp(wrong_parent, 1001, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    let result = client.submit_header(header);
+    assert!(matches!(result, Err(LightClientError::ParentHashMismatch { .. })));
+}
+
+#[test]
+fn test_mpt_proof_verification() {
+    use crate::verifier::bytes_to_nibbles;
+
+    let key = [0x12u8, 0x34];
+    let value = b"hello";
+    let leaf = make_leaf_node_rlp(&bytes_to_nibbles(&key), value);
+    let root = keccak256(&leaf);
+
+    let proof = vec![leaf.clone()];
+    let result = verify_mpt_proof(root, &key, &proof).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.as_ref().unwrap(), value);
+}
+
+#[test]
+fn test_mpt_reject_invalid_proof() {
+    let key = [0x12u8];
+    let key_nibbles = crate::verifier::bytes_to_nibbles(&key);
+    let value = b"data";
+    let leaf = make_leaf_node_rlp(&key_nibbles, value);
+    let correct_root = keccak256(&leaf);
+
+    let wrong_root = B256::repeat_byte(0xFF);
+    let proof = vec![leaf];
+    let result = verify_mpt_proof(wrong_root, &key, &proof);
+    assert!(matches!(result, Err(MptError::NodeHashMismatch { .. })));
+
+    // Tampered proof
+    let mut tampered_leaf = make_leaf_node_rlp(&key_nibbles, value);
+    tampered_leaf[0] ^= 0xFF; // tamper with first byte
+    let result = verify_mpt_proof(correct_root, &key, &[tampered_leaf]);
+    assert!(matches!(result, Err(MptError::NodeHashMismatch { .. })));
+}
+
+#[test]
+fn test_bridge_event_parsing_from_receipt() {
+    // Build a receipt with a bridge event log
+    // Receipt: [status, cumulative_gas, bloom, logs]
+    // Log: [address, topics, data]
+    // Topics: [event_sig, source_tx_hash, recipient_padded]
+    // Data: [source_chain, source_block, sender, asset_id, amount]
+
+    use alloy_primitives::Address;
+
+    let recipient = Address::repeat_byte(0x42);
+    let source_tx_hash = B256::repeat_byte(0xAB);
+
+    // Topics list
+    let mut topics = Vec::new();
+    topics.push(rlp_encode_short_bytes(&source_tx_hash.0)); // event signature (placeholder)
+    topics.push(rlp_encode_short_bytes(&source_tx_hash.0)); // source_tx_hash
+    // Recipient: Address padded to 32 bytes
+    let mut recipient_padded = [0u8; 32];
+    recipient_padded[12..].copy_from_slice(recipient.as_slice());
+    topics.push(rlp_encode_short_bytes(&recipient_padded));
+    let topics_rlp = encode_rlp_list(&topics);
+
+    // Data: [source_chain, source_block, sender, asset_id, amount]
+    let mut data = Vec::new();
+    data.push(rlp_encode_short_bytes(&[0x01])); // source_chain = 1 (Ethereum)
+    let block_bytes = 60003u64.to_be_bytes();
+    let start_block = block_bytes.iter().position(|&b| b != 0).unwrap_or(8);
+    data.push(rlp_encode_short_bytes(&block_bytes[start_block..])); // source_block = 60003
+    data.push(vec![0x80]); // sender (empty)
+    data.push(rlp_encode_short_bytes(&[0x01])); // asset_id = 1
+    let amount_bytes = 1000u128.to_be_bytes();
+    let start = amount_bytes.iter().position(|&b| b != 0).unwrap_or(16);
+    data.push(if start < 16 {
+        rlp_encode_short_bytes(&amount_bytes[start..])
+    } else {
+        vec![0x80]
+    });
+    let data_rlp = encode_rlp_list(&data);
+
+    // Log entry: [address, topics, data]
+    let address = vec![0xC0u8; 20]; // some contract address
+    let log = encode_rlp_list(&[
+        rlp_encode_short_bytes(&address),
+        topics_rlp,
+        data_rlp,
+    ]);
+    let logs_rlp = encode_rlp_list(&[log]);
+
+    // Receipt: [status, gas_used, bloom, logs]
+    let receipt_rlp = encode_rlp_list(&[
+        rlp_encode_short_bytes(&[0x01]), // status
+        rlp_encode_short_bytes(&[0x52, 0x08]), // gas_used = 21000
+        vec![0x80], // bloom (empty)
+        logs_rlp,
+    ]);
+
+    // Verify the header can parse this
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+
+    // Create header with the receipt as the only receipt
+    let receipt_leaf = make_leaf_node_rlp(&[], &receipt_rlp);
+    let receipt_root = keccak256(&receipt_leaf);
+    let tx_root = B256::repeat_byte(0x01);
+    let rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    let _block_hash = header.block_hash;
+    client.submit_header(header).unwrap();
+
+    // Create receipt proof
+    let proof = ReceiptProof {
+        nodes: vec![MptProofNode {
+            rlp_bytes: receipt_leaf.clone(),
+        }],
+    };
+
+    let event = client
+        .verify_receipt_and_parse_bridge_event(1001, &proof)
+        .unwrap();
+
+    assert_eq!(event.source_chain, 1);
+    assert_eq!(event.source_block, 60003);
+    assert_eq!(event.source_tx_hash, source_tx_hash);
+    assert_eq!(event.recipient, recipient);
+    assert_eq!(event.asset_id, 1);
+    assert_eq!(event.amount, 1000);
+}

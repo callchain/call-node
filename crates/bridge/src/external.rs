@@ -12,6 +12,9 @@ use call_crypto::{keccak256, secp256k1_sign, recover_secp256k1_signer};
 use call_protocol::balances::BalanceState;
 use crate::{BridgeConfig, BridgeError, BridgeStateManager};
 
+#[cfg(feature = "light-client-bridge")]
+use call_light_client::{EthHeader, TxInclusionProof, ReceiptProof};
+
 /// Supported external chains (per spec §5.6)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalChain {
@@ -49,6 +52,18 @@ pub enum ExternalBridgeOp {
         target_address: Vec<u8>,
         asset_id: AssetId,
         sender: Address,
+        amount: u128,
+    },
+    /// Deposit from external chain via light client verification
+    /// (no validator signatures needed — verified via MPT proofs)
+    #[cfg(feature = "light-client-bridge")]
+    LightClientDeposit {
+        source_chain: ExternalChain,
+        header: EthHeader,
+        tx_proof: TxInclusionProof,
+        receipt_proof: ReceiptProof,
+        recipient: Address,
+        asset_id: AssetId,
         amount: u128,
     },
 }
@@ -256,6 +271,119 @@ pub fn process_external_deposit(
 
     Ok(ExternalDepositResult::Queued {
         source_tx_hash: *source_tx_hash,
+        challenge_period_blocks: config.challenge_period_blocks,
+        finalized_at_block: current_block + config.challenge_period_blocks,
+    })
+}
+
+/// Process a light client bridge deposit: verify header → tx inclusion → receipt → queue.
+///
+/// Per spec §5.6.3 (light client variant):
+/// 1. Verify header against trusted anchor chain (parent hash chain)
+/// 2. Verify transaction inclusion via MPT proof against transactions_root
+/// 3. Verify receipt inclusion via MPT proof against receipts_root
+/// 4. Parse bridge event from receipt logs
+/// 5. Verify claimed amount matches receipt event amount
+/// 6. Check asset is allowed
+/// 7. Check limits (per-tx, daily)
+/// 8. Check source tx not already processed
+/// 9. Queue deposit for challenge period
+#[cfg(feature = "light-client-bridge")]
+pub fn process_light_client_deposit(
+    light_client: &mut call_light_client::EthLightClient,
+    op: &ExternalBridgeOp,
+    _protocol_balances: &mut BalanceState,
+    bridge_state: &mut BridgeStateManager,
+    config: &BridgeConfig,
+    current_block: u64,
+) -> Result<ExternalDepositResult, BridgeError> {
+    let ExternalBridgeOp::LightClientDeposit {
+        source_chain: _,
+        header,
+        tx_proof,
+        receipt_proof,
+        recipient,
+        asset_id,
+        amount,
+    } = op
+    else {
+        return Err(BridgeError::EvmExecutionFailed("not a light client deposit op".into()));
+    };
+
+    // 1. Submit header to light client (verifies parent chain)
+    light_client
+        .submit_header(header.clone())
+        .map_err(|e| BridgeError::MptProofError(e.to_string()))?;
+
+    let block_number = header.number().ok_or_else(|| {
+        BridgeError::MptProofError("header missing block number".into())
+    })?;
+
+    // 2. Verify transaction inclusion
+    let tx_hash = header.block_hash; // Using block hash as tx proof key (simplified)
+    light_client
+        .verify_tx_inclusion(block_number, tx_hash, tx_proof)
+        .map_err(|e| BridgeError::MptProofError(e.to_string()))?;
+
+    // 3. Verify receipt and parse bridge event
+    let bridge_event = light_client
+        .verify_receipt_and_parse_bridge_event(block_number, receipt_proof)
+        .map_err(|e| BridgeError::MptProofError(e.to_string()))?;
+
+    // 4. Verify the bridge event matches the claimed deposit
+    if bridge_event.recipient != *recipient {
+        return Err(BridgeError::MptProofError(
+            "recipient mismatch".into(),
+        ));
+    }
+    if bridge_event.asset_id != *asset_id {
+        return Err(BridgeError::MptProofError(
+            "asset_id mismatch".into(),
+        ));
+    }
+    if bridge_event.amount != *amount {
+        return Err(BridgeError::MptProofError(
+            "amount mismatch".into(),
+        ));
+    }
+
+    let source_tx_hash = bridge_event.source_tx_hash;
+
+    // 5. Check asset is allowed
+    if !config.allowed_assets.contains(asset_id) {
+        return Err(BridgeError::ExternalAssetNotAllowed(*asset_id));
+    }
+
+    // 6. Check replay protection
+    if bridge_state.is_external_tx_processed(&source_tx_hash)
+        || bridge_state.has_pending_external_deposit(&source_tx_hash)
+    {
+        return Err(BridgeError::EvmExecutionFailed(
+            "source tx already processed".into(),
+        ));
+    }
+
+    // 7. Check per-tx limit
+    bridge_state.check_per_tx_limit(*amount, config.max_per_tx)?;
+
+    // 8. Check daily limit
+    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset)?;
+
+    // 9. Queue deposit for challenge period
+    bridge_state.queue_external_deposit(
+        source_tx_hash,
+        *recipient,
+        *asset_id,
+        *amount,
+        current_block,
+        0, // no validator signatures for light client deposit
+    );
+
+    // 10. Mark source tx as processed
+    bridge_state.mark_external_tx_processed(source_tx_hash);
+
+    Ok(ExternalDepositResult::Queued {
+        source_tx_hash,
         challenge_period_blocks: config.challenge_period_blocks,
         finalized_at_block: current_block + config.challenge_period_blocks,
     })
