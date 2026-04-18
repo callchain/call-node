@@ -18,6 +18,7 @@ use call_consensus::{
     bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
     block_cache::BlockCache,
     digest::ConsensusDigest,
+    proposer::{derive_vrf_seed, select_proposer_subset, EPOCH_LENGTH},
 };
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission};
 use call_primitives::BlockHash;
@@ -49,6 +50,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use commonware_codec::extensions::DecodeExt;
 
 // Commonware Simplex BFT imports
@@ -58,6 +60,7 @@ use commonware_consensus::simplex::scheme::ed25519::Scheme as Ed25519Scheme;
 use commonware_consensus::types::{Epoch, ViewDelta};
 use commonware_cryptography::ed25519;
 use commonware_cryptography::Digest;
+use commonware_cryptography::Signer;
 use commonware_parallel::Sequential;
 use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
 use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
@@ -67,6 +70,15 @@ use commonware_utils::ordered::Set;
 
 /// Chain ID for Callchain devnet
 pub const CALLCHAIN_CHAIN_ID: u64 = 1337;
+
+/// Reason why the BFT engine exited and needs epoch rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpochRotationReason {
+    /// Epoch boundary reached (height % epoch_length == 0)
+    EpochBoundary,
+    /// Qualified validator set changed
+    ValidatorSetChange,
+}
 
 /// P2P message channels
 const TX_CHANNEL: u64 = 1;
@@ -292,9 +304,9 @@ impl CallNode {
 
     /// Start the Commonware Simplex BFT consensus engine.
     ///
-    /// Spawns a background OS thread running the BFT engine with its own
-    /// tokio runtime and commonware-p2p network. Bridges consensus events
-    /// to the main tokio runtime via channels.
+    /// Epoch coordinator: selects VRF participant subset each epoch,
+    /// starts the BFT engine if this node is selected, and sleeps
+    /// until the next epoch boundary if not.
     pub fn start_bft_engine(
         &self,
         ed25519_private_key: ed25519::PrivateKey,
@@ -306,36 +318,147 @@ impl CallNode {
         let db = self.db.clone();
         let prune_state = self.prune_state.clone();
         let subscriptions = self.state.subscriptions.clone();
-        let parent_hash = self.parent_hash;
         let network = self.network.clone();
         let data_dir = self.db.data_dir.clone();
-
-        // Bridge channels (BFT engine -> tokio event loop)
-        let (propose_tx, propose_rx) = mpsc::channel::<ProposeRequest>(16);
-        let (verify_tx, verify_rx) = mpsc::channel::<VerifyRequest>(16);
-        let (finalize_tx, finalize_rx) = mpsc::channel::<FinalizationInfo>(16);
-        let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(64);
-
         let block_cache = Arc::clone(&self.block_cache);
 
-        // Build BFT trait bridges
-        let automaton = CallAutomaton::new(propose_tx, verify_tx);
-        let relay = CallRelay::new(Arc::clone(&block_cache), broadcast_tx);
-        let reporter = CallReporter::new(finalize_tx);
+        tokio::spawn(async move {
+            let mut epoch_number: u64 = 0;
 
-        // Gather validator set as ed25519 public keys for the scheme
-        let participants = {
-            let vs = state.validator_state.read().unwrap();
-            let validators = vs.get_all_validators();
-            let mut keys: Vec<ed25519::PublicKey> = Vec::new();
-            for (_, stake) in validators.iter() {
-                let pk_bytes = stake.ed25519_pubkey;
-                if let Ok(pk) = ed25519::PublicKey::decode(&pk_bytes[..]) {
-                    keys.push(pk);
+            loop {
+                // Read current qualified validators and compute VRF subset
+                let (parent_hash, subset, my_index) = {
+                    let c = consensus.read().unwrap();
+                    let ph = c.last_block_hash();
+                    let seed = derive_vrf_seed(&ph, epoch_number);
+                    let vs = state.validator_state.read().unwrap();
+                    let qualified = vs.get_qualified_validators();
+                    let pubkeys: std::collections::HashMap<
+                        call_primitives::ValidatorId,
+                        call_primitives::Ed25519PublicKey,
+                    > = vs
+                        .get_all_validators()
+                        .iter()
+                        .map(|(id, stake)| (*id, stake.ed25519_pubkey))
+                        .collect();
+                    let params = c.params();
+                    let subset =
+                        select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
+
+                    // Check if we are in the subset
+                    let my_pk = ed25519_private_key.public_key();
+                    let my_encoded = commonware_codec::Encode::encode(&my_pk);
+                    let my_index = subset
+                        .iter()
+                        .enumerate()
+                        .find(|(_, id)| {
+                            pubkeys
+                                .get(id)
+                                .is_some_and(|pk| pk.as_slice() == my_encoded.as_ref())
+                        })
+                        .map(|(i, _)| i);
+
+                    (ph, subset, my_index)
+                };
+
+                if my_index.is_some() {
+                    tracing::info!(
+                        epoch = epoch_number,
+                        subset_size = subset.len(),
+                        "BFT: selected for epoch, starting engine"
+                    );
+                    let result = Self::start_bft_engine_inner(
+                        ed25519_private_key.clone(),
+                        consensus_p2p_port,
+                        state.clone(),
+                        mempool.clone(),
+                        consensus.clone(),
+                        db.clone(),
+                        prune_state.clone(),
+                        subscriptions.clone(),
+                        block_cache.clone(),
+                        network.clone(),
+                        data_dir.clone(),
+                        &subset,
+                        epoch_number,
+                        parent_hash,
+                    )
+                    .await;
+
+                    match result {
+                        Ok(reason) => {
+                            tracing::info!(
+                                ?reason,
+                                epoch = epoch_number,
+                                "BFT: engine exited for epoch rotation"
+                            );
+                            epoch_number += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!(?e, "BFT: engine exited with error");
+                            epoch_number += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    // Not selected — wait until next epoch boundary
+                    let epoch_length = {
+                        consensus.read().unwrap().params().epoch_length
+                    };
+                    let current_height = {
+                        consensus.read().unwrap().current_height()
+                    };
+                    let next_epoch_height =
+                        (current_height / epoch_length + 1) * epoch_length;
+                    let blocks_to_wait = next_epoch_height.saturating_sub(current_height);
+                    let sleep_secs =
+                        Duration::from_secs(blocks_to_wait.saturating_mul(2).max(1));
+                    tracing::info!(
+                        epoch = epoch_number,
+                        wait_blocks = blocks_to_wait,
+                        "BFT: not selected for epoch, sleeping"
+                    );
+                    tokio::time::sleep(sleep_secs).await;
+                    epoch_number += 1;
                 }
             }
-            Set::from_iter_dedup(keys)
-        };
+        })
+    }
+
+    /// Start a single epoch of the BFT engine. Returns the rotation reason
+    /// when the event loop exits.
+    #[allow(clippy::too_many_arguments)]
+    async fn start_bft_engine_inner(
+        ed25519_private_key: ed25519::PrivateKey,
+        consensus_p2p_port: u16,
+        state: Arc<RpcState>,
+        mempool: Arc<RwLock<Mempool>>,
+        consensus: Arc<RwLock<SimplexConsensus>>,
+        db: CallDb,
+        prune_state: PruneState,
+        subscriptions: SubscriptionManager,
+        block_cache: Arc<std::sync::Mutex<BlockCache>>,
+        network: Option<Arc<dyn Network>>,
+        data_dir: PathBuf,
+        subset: &[call_primitives::ValidatorId],
+        epoch_number: u64,
+        parent_hash: BlockHash,
+    ) -> Result<EpochRotationReason, String> {
+        // Build participants set from VRF subset
+        let mut keys: Vec<ed25519::PublicKey> = Vec::new();
+        {
+            let vs = state.validator_state.read().unwrap();
+            let all_validators = vs.get_all_validators();
+            for id in subset {
+                if let Some(stake) = all_validators.get(id) {
+                    if let Ok(pk) = ed25519::PublicKey::decode(&stake.ed25519_pubkey[..]) {
+                        keys.push(pk);
+                    }
+                }
+            }
+        }
+        let participants = Set::from_iter_dedup(keys);
 
         // Build signing scheme
         let scheme = Ed25519Scheme::signer(
@@ -345,10 +468,24 @@ impl CallNode {
         )
         .expect("ed25519 key must be in participant set");
 
+        // Bridge channels (BFT engine -> tokio event loop)
+        let (propose_tx, propose_rx) = mpsc::channel::<ProposeRequest>(16);
+        let (verify_tx, verify_rx) = mpsc::channel::<VerifyRequest>(16);
+        let (finalize_tx, finalize_rx) = mpsc::channel::<FinalizationInfo>(16);
+        let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(64);
+
+        // Build BFT trait bridges
+        let automaton = CallAutomaton::new(propose_tx, verify_tx);
+        let relay = CallRelay::new(Arc::clone(&block_cache), broadcast_tx);
+        let reporter = CallReporter::new(finalize_tx);
+
+        // Exit channel for epoch rotation
+        let (exit_tx, exit_rx) = oneshot::channel::<EpochRotationReason>();
+
         // Spawn BFT engine in a dedicated background OS thread
         let thread_port = consensus_p2p_port;
         let bft_data_dir = data_dir.join("bft_journal");
-        std::thread::spawn(move || {
+        let bft_handle = std::thread::spawn(move || {
             std::fs::create_dir_all(&bft_data_dir).ok();
             let runtime_cfg = RuntimeConfig::new().with_storage_directory(&bft_data_dir);
             let runner = TokioRunner::new(runtime_cfg);
@@ -394,7 +531,7 @@ impl CallNode {
                     strategy: Sequential,
                     partition: "callchain".to_string(),
                     mailbox_size: 1024,
-                    epoch: Epoch::new(0),
+                    epoch: Epoch::new(epoch_number),
                     replay_buffer: NonZeroUsize::new(1024).unwrap(),
                     write_buffer: NonZeroUsize::new(1024).unwrap(),
                     page_cache,
@@ -421,7 +558,7 @@ impl CallNode {
         });
 
         // Spawn the tokio-side event loop that handles BFT requests
-        tokio::spawn(bft_event_loop(
+        let event_loop_handle = tokio::spawn(bft_event_loop(
             propose_rx,
             verify_rx,
             finalize_rx,
@@ -436,7 +573,18 @@ impl CallNode {
             parent_hash,
             network,
             data_dir,
-        ))
+            epoch_number,
+            exit_tx,
+        ));
+
+        // Wait for exit_rx to fire (event loop sends reason before breaking)
+        // The event loop handle will complete shortly after.
+        let reason = exit_rx
+            .await
+            .map_err(|e| format!("exit channel canceled: {e:?}"));
+        event_loop_handle.abort();
+        let _ = bft_handle;
+        reason
     }
 
     /// Start P2P sync: compare local height with peer height and catch up if behind.
@@ -1446,6 +1594,8 @@ async fn bft_event_loop(
     mut parent_hash: BlockHash,
     network: Option<Arc<dyn Network>>,
     data_dir: PathBuf,
+    epoch_number: u64,
+    exit_tx: oneshot::Sender<EpochRotationReason>,
 ) {
     let mut execution_results: std::collections::HashMap<
         ConsensusDigest,
@@ -1453,10 +1603,10 @@ async fn bft_event_loop(
     > = std::collections::HashMap::new();
     let prune_config = call_storage::PruneConfig::default();
 
-    // Track validator set size to detect changes (BFT engine participant set is fixed at startup)
-    let mut validator_set_count = {
+    // Track qualified validator count to detect changes
+    let mut qualified_validator_count = {
         let vs = state.validator_state.read().unwrap();
-        vs.get_all_validators().len()
+        vs.get_qualified_validators().len()
     };
 
     // Build a mapping from ed25519 pubkey -> validator id for propose lookups
@@ -1846,20 +1996,34 @@ async fn bft_event_loop(
                             net_clone.broadcast(BLOCK_CHANNEL, msg).await;
                         });
                     }
-                    // Check for validator set changes — BFT engine participant set is fixed at startup
-                    let current_count = {
-                        let vs = state.validator_state.read().unwrap();
-                        vs.get_all_validators().len()
-                    };
-                    if validator_set_count != current_count {
-                        tracing::warn!(
-                            old = validator_set_count,
-                            new = current_count,
-                            "BFT: validator set changed — engine restart required"
+                    // Check for epoch boundary
+                    let epoch_length = consensus.read().unwrap().params().epoch_length;
+                    let new_height = height + 1;
+                    if new_height % epoch_length == 0 {
+                        tracing::info!(
+                            epoch = epoch_number + 1,
+                            height = new_height,
+                            "BFT: epoch boundary reached, rotating participant subset"
                         );
-                        break; // Exit event loop; caller should respawn BFT engine
+                        let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
+                        break;
                     }
-                    validator_set_count = current_count;
+
+                    // Check for qualified validator set changes
+                    let current_qualified = {
+                        let vs = state.validator_state.read().unwrap();
+                        vs.get_qualified_validators().len()
+                    };
+                    if qualified_validator_count != current_qualified {
+                        tracing::warn!(
+                            old = qualified_validator_count,
+                            new = current_qualified,
+                            "BFT: qualified validator set changed — rotating epoch"
+                        );
+                        let _ = exit_tx.send(EpochRotationReason::ValidatorSetChange);
+                        break;
+                    }
+                    qualified_validator_count = current_qualified;
                 } else {
                     tracing::warn!(digest = %info.digest, "BFT finalize: block not in cache");
                 }
@@ -1877,6 +2041,7 @@ async fn bft_event_loop(
 
             else => {
                 tracing::info!("BFT event loop: all channels closed, shutting down");
+                let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
                 break;
             }
         }

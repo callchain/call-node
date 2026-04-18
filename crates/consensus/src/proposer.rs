@@ -12,12 +12,16 @@ use serde::{Deserialize, Serialize};
 
 // ── Consensus Parameters ──────────────────────────────────────────────
 
+/// Number of blocks per epoch before rotating the participant subset.
+/// Each epoch triggers a BFT engine restart with a new VRF-selected subset.
+pub const EPOCH_LENGTH: u64 = 100;
+
 /// Consensus configuration (per spec §2.3)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ConsensusParams {
     /// Maximum validators in the active set (216)
     pub max_validators: u32,
-    /// Validators selected per round (21)
+    /// Validators selected per epoch (21)
     pub subset_size: u32,
     /// Target block time in milliseconds (250)
     pub block_time_millis: u64,
@@ -25,6 +29,8 @@ pub struct ConsensusParams {
     pub slashing_window: u64,
     /// Delay in ms after broadcasting oracle price requests
     pub oracle_request_delay_ms: u64,
+    /// Number of blocks per epoch before rotating participant subset
+    pub epoch_length: u64,
 }
 
 impl Default for ConsensusParams {
@@ -35,6 +41,7 @@ impl Default for ConsensusParams {
             block_time_millis: 250,
             slashing_window: 10_000,
             oracle_request_delay_ms: 200,
+            epoch_length: EPOCH_LENGTH,
         }
     }
 }
@@ -54,6 +61,18 @@ impl ConsensusParams {
             block_time_millis,
             slashing_window,
             oracle_request_delay_ms,
+            epoch_length: EPOCH_LENGTH,
+        }
+    }
+
+    /// Create with all parameters configurable
+    pub const fn with_epoch_length(
+        self,
+        epoch_length: u64,
+    ) -> Self {
+        Self {
+            epoch_length,
+            ..self
         }
     }
 

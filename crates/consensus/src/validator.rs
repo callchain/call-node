@@ -444,6 +444,16 @@ impl ValidatorStateManager {
             .collect()
     }
 
+    /// Get all validators with stake ≥ MIN_SELF_STAKE and not unbonding.
+    /// Used for VRF participant subset selection in BFT epochs.
+    pub fn get_qualified_validators(&self) -> Vec<ValidatorId> {
+        self.validators
+            .values()
+            .filter(|v| v.unbonding_start.is_none() && v.staked_call >= MIN_SELF_STAKE)
+            .map(|v| v.validator_id)
+            .collect()
+    }
+
     /// Get all validator IDs
     pub fn get_all_validator_ids(&self) -> Vec<ValidatorId> {
         self.validators.keys().copied().collect()

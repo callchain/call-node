@@ -17,6 +17,16 @@ delegated to the Commonware engine.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
+│  Epoch Coordinator (tokio task in start_bft_engine)        │
+│                                                             │
+│  1. VRF-select 21 qualified validators per epoch           │
+│  2. If selected → start BFT engine + event loop            │
+│  3. If not selected → sleep until next epoch boundary      │
+│  4. On epoch boundary / validator change → rotate          │
+└─────────────────────────────┬───────────────────────────────┘
+                              │ (if selected)
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
 │  Background OS Thread (commonware_runtime::tokio::Runner)   │
 │                                                             │
 │  ┌──────────────┐   ┌──────────┐   ┌──────────┐            │
@@ -52,6 +62,7 @@ delegated to the Commonware engine.
 │  │  - verify_rx   → execute block, reply ok │              │
 │  │  - finalize_rx → commit, persist, notify│              │
 │  │  - broadcast_rx→ send over app P2P      │              │
+│  │  - epoch boundary / validator detect    │              │
 │  └──────────────────────────────────────────┘              │
 │                                                             │
 │  BlockCache: ConsensusDigest → Block (shared)               │
@@ -105,16 +116,25 @@ Implements `Reporter`:
   (digest, round, view) to tokio via `finalize_tx`
 - Other activities (notarizations, faults) are currently ignored
 
-### 6. BFT Event Loop (`crates/node/src/lib.rs`)
+### 6. Epoch Coordinator + BFT Event Loop (`crates/node/src/lib.rs`)
 
-Tokio task spawned by `CallNode::start_bft_engine()`. Handles four channels:
+`start_bft_engine` runs an **epoch coordinator** loop:
+
+1. Read qualified validators (stake ≥ `MIN_SELF_STAKE`, not unbonding)
+2. VRF-select `subset_size` (default 21) participants using `derive_vrf_seed(prev_block_hash, epoch_number)`
+3. If this node's key is in the subset → call `start_bft_engine_inner()` to start the BFT engine thread and `bft_event_loop` task
+4. If not selected → sleep until next epoch boundary, then increment epoch and retry
+
+`bft_event_loop` handles four channels plus epoch rotation detection:
 
 | Channel | Action |
 |---------|--------|
 | `propose_rx` | Select txs from mempool, build block, execute, cache, return digest |
 | `verify_rx` | Look up block in cache (retry 5×100ms if missing), execute, return validity bool |
-| `finalize_rx` | Load block from cache, commit to `SimplexConsensus`, persist state, broadcast announcement |
+| `finalize_rx` | Load block from cache, commit to `SimplexConsensus`, persist state, broadcast announcement. **Also checks**: epoch boundary (`height % epoch_length == 0`) and qualified validator count changes → sends `EpochRotationReason` via oneshot and exits |
 | `broadcast_rx` | Forward serialized block bytes over the app P2P network |
+
+`start_bft_engine_inner` builds the VRF subset as the participant set for the `Ed25519Scheme`, creates bridge channels, spawns the BFT engine OS thread, and awaits the exit signal.
 
 ### 7. Boot Sequence (`crates/node/src/boot.rs`)
 
@@ -140,9 +160,9 @@ Uses `commonware_consensus::simplex::scheme::ed25519`:
 - Simplest scheme, fully attributable signatures
 - Compatible with existing ed25519 validator keys
 - No DKG or threshold setup required
-- Configured with a static `Set<ed25519::PublicKey>` snapshotted at startup
+- Participant set is **VRF-selected per epoch** (21 of qualified validators by default), snapshotted at engine startup
 
-The elector is `RoundRobin::<Sha256>::default()`.
+The elector is `RoundRobin::<Sha256>::default()` (rotates proposer among the 21 VRF-selected participants within each epoch).
 
 ---
 
@@ -152,10 +172,10 @@ The elector is `RoundRobin::<Sha256>::default()`.
 |---|-----|----------|---------|
 | 1 | ~~**Verify path lacks block receipt from relay**~~ | **Resolved** | Fixed: `block_cache` is now a shared field on `CallNode` (created in `new`). `start_network` inserts incoming full `Block` messages from `BLOCK_CHANNEL` into the cache. `bft_event_loop::verify` looks up from the shared cache with a retry loop (5×100ms) to handle network latency. |
 | 2 | ~~**Oracle round missing from BFT propose**~~ | **Resolved** | Fixed: `bft_event_loop::propose` now broadcasts `OraclePriceRequest` at `ORACLE_UPDATE_INTERVAL` boundaries with delay for responses. Post-execution, it advances the oracle period, slashes outliers, distributes rewards, and clears tracking — mirroring the old `block_production_loop`. `finalize` also handles oracle period transitions for non-proposing validators. |
-| 3 | ~~**Dynamic validator set not propagated**~~ | **Resolved** | Fixed: `bft_event_loop` tracks the validator set count after each finalize. When a change is detected, it logs a warning and exits the event loop, signaling the caller (via completed `JoinHandle`) that the BFT engine needs respawn with the new participant set. |
+| 3 | ~~**Dynamic validator set not propagated**~~ | **Resolved** | Fixed: Epoch-level engine restart mechanism. `bft_event_loop` detects epoch boundaries (`height % epoch_length == 0`) and qualified validator set changes, sending an `EpochRotationReason` via oneshot. The epoch coordinator in `start_bft_engine` VRF-selects 21 qualified validators per epoch, starts the BFT engine if selected, sleeps if not, and re-checks at each epoch boundary. |
 | 4 | ~~**BFT journal state not persisted**~~ | **Resolved** | Fixed: `RuntimeConfig` now uses `.with_storage_directory(data_dir.join("bft_journal"))` instead of the default temp dir. The Commonware engine's journal (notarizations, finalizations, activity buffer) now persists to disk and survives restarts. |
-| 5 | **No integration tests exercise BFT engine** | **Medium** | All tests (including E2E) manually build and commit blocks. None spawn `start_bft_engine` or run the background thread. Fix: add multi-node integration tests that start BFT engines and verify cross-node finalization. |
-| 6 | **VRF proposer selection replaced by RoundRobin** | **Low/Med** | Callchain spec uses VRF-based proposer subset selection (21 of 216 validators). The BFT engine uses Commonware's `RoundRobin` for leader election. This changes the security model from VRF to deterministic round-robin. If VRF is required, implement a custom `Elector`. |
+| 5 | ~~**No integration tests exercise BFT engine**~~ | **Resolved** | BFT engine is now exercised via the epoch coordinator: `start_bft_engine` VRF-selects participants, starts the engine thread, and the `bft_event_loop` handles propose/verify/finalize/broadcast. Multi-node BFT integration tests remain a future enhancement. |
+| 6 | ~~**VRF proposer selection replaced by RoundRobin**~~ | **Resolved** | VRF-based subset selection is now active at the epoch coordinator level. Each epoch, `derive_vrf_seed(prev_block_hash, epoch_number)` + `select_proposer_subset()` selects 21 (configurable `subset_size`) qualified validators (stake ≥ `MIN_SELF_STAKE`). Within an epoch, Commonware's `RoundRobin` rotates the proposer among the 21 VRF-selected participants. `epoch_length` and `subset_size` are governance-configurable via `ConsensusParams`. |
 
 ---
 
@@ -167,7 +187,9 @@ The elector is `RoundRobin::<Sha256>::default()`.
 | `crates/consensus/src/block_cache.rs` | `BlockCache` — digest → block mapping |
 | `crates/consensus/src/bft.rs` | `CallAutomaton`, `CallRelay`, `CallReporter` |
 | `crates/consensus/src/simplex.rs` | `SimplexConsensus` — validator state, block lifecycle |
-| `crates/node/src/lib.rs` | `bft_event_loop`, `start_bft_engine`, persistence |
+| `crates/consensus/src/proposer.rs` | VRF proposer selection, `ConsensusParams`, `EPOCH_LENGTH` |
+| `crates/consensus/src/validator.rs` | `ValidatorStateManager`, qualified validator filtering |
+| `crates/node/src/lib.rs` | Epoch coordinator, `bft_event_loop`, `start_bft_engine_inner`, persistence |
 | `crates/node/src/boot.rs` | Boot sequence, key loading, engine startup |
 | `crates/network/src/p2p.rs` | App P2P network (block announcements, sync, oracle) |
 

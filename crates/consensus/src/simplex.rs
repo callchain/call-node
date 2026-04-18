@@ -16,7 +16,7 @@ use tracing::{info, warn};
 /// Simplex BFT consensus driver for Callchain.
 ///
 /// Manages the consensus lifecycle:
-/// - Proposer selection per round (21 of 216 validators) using VRF
+/// - Proposer selection per epoch (21 of qualified validators) using VRF
 /// - Block proposal and validation
 /// - Commit/rollback of blocks
 /// - Validator state management (staking, slashing, rewards)
@@ -34,7 +34,7 @@ pub struct SimplexConsensus {
 impl SimplexConsensus {
     /// Create a new consensus instance with initial validators.
     pub fn new(params: ConsensusParams, validators: ValidatorStateManager) -> Self {
-        let active = validators.get_active_validators();
+        let active = validators.get_qualified_validators();
         let pubkeys = Self::build_pubkey_map(&validators);
         let seed = derive_vrf_seed(&BlockHash::ZERO, 0);
         let proposer_subset =
@@ -63,7 +63,7 @@ impl SimplexConsensus {
 
     /// Recompute the proposer subset using the current VRF seed.
     fn recompute_proposer_subset(&mut self) {
-        let active = self.validators.get_active_validators();
+        let active = self.validators.get_qualified_validators();
         let pubkeys = Self::build_pubkey_map(&self.validators);
         let seed = derive_vrf_seed(&self.last_block_hash, self.current_round);
         self.proposer_subset =
@@ -302,6 +302,12 @@ impl SimplexConsensus {
     /// Get active validator IDs for network layer.
     pub fn active_validators(&self) -> Vec<ValidatorId> {
         self.validators.get_active_validators()
+    }
+
+    /// Get qualified validator IDs (stake ≥ MIN_SELF_STAKE, not unbonding).
+    /// Used for VRF participant subset selection.
+    pub fn qualified_validators(&self) -> Vec<ValidatorId> {
+        self.validators.get_qualified_validators()
     }
 }
 
