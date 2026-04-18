@@ -14,8 +14,9 @@ pub mod wallet;
 use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
+    PersistedConsensusState,
 };
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, BlockVote};
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, BlockProposal, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, BlockVote};
 use call_crypto::{bls_sign, bls_aggregate, bls_verify, BlsPublicKey, BlsSignature};
 use call_primitives::BlockHash;
 use call_protocol::{
@@ -32,7 +33,7 @@ use call_storage::reth_db::{
     db_put, db_batch_put, db_clear, db_iter_all, db_get,
     CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
-    CallGovernanceState,
+    CallGovernanceState, CallConsensusState,
 };
 use reth_db::DatabaseEnv;
 use call_transaction_pool::Mempool;
@@ -95,10 +96,25 @@ impl CallNode {
                  AgentRegistry::new(), AgentBalances::new(), OracleManager::default(), GovernanceManager::new())
             };
 
-        let consensus = SimplexConsensus::new(
-            ConsensusParams::default(),
-            consensus_validators,
-        );
+        // Try to load persisted consensus state; fall back to genesis
+        let consensus = if let Some(ref db_env) = db.db {
+            match load_consensus_state_inner(db_env, &consensus_validators) {
+                Ok(consensus) => {
+                    tracing::info!(
+                        height = consensus.current_height(),
+                        round = consensus.current_round(),
+                        "restored consensus state from db"
+                    );
+                    consensus
+                }
+                Err(e) => {
+                    tracing::info!(error = %e, "no persisted consensus state, starting from genesis");
+                    SimplexConsensus::new(ConsensusParams::default(), consensus_validators)
+                }
+            }
+        } else {
+            SimplexConsensus::new(ConsensusParams::default(), consensus_validators)
+        };
 
         let state = Arc::new(RpcState::new(
             balance_state,
@@ -124,6 +140,9 @@ impl CallNode {
         // Wire governance executor so proposals can trigger real side effects
         wire_governance_executor(&state);
 
+        // Set parent_hash to the last committed block hash from persisted state
+        let parent_hash = consensus.last_block_hash();
+
         Ok(Self {
             state,
             mempool,
@@ -133,7 +152,7 @@ impl CallNode {
             prune_state,
             server_handle: None,
             ws_server_handle: None,
-            parent_hash: BlockHash::ZERO,
+            parent_hash,
         })
     }
 
@@ -238,13 +257,17 @@ impl CallNode {
         let data_dir = self.db.data_dir.clone();
         let state = Arc::clone(&self.state);
         let consensus = Arc::clone(&self.consensus);
+        let db_env = self.db.db.clone();
 
         tokio::spawn(async move {
             // Give the network a moment to connect to peers
             tokio::time::sleep(Duration::from_secs(2)).await;
 
-            let mut local_height = find_latest_height(&data_dir);
-            tracing::info!(local_height, "sync: checking local state");
+            // Start from persisted consensus height (more accurate than scanning blocks dir)
+            let consensus_height = consensus.read().unwrap().current_height();
+            let disk_height = find_latest_height(&data_dir);
+            let mut local_height = consensus_height.max(disk_height);
+            tracing::info!(local_height, consensus_height, disk_height, "sync: checking local state");
 
             const BATCH_SIZE: u64 = 100;
             const MAX_EMPTY_ROUNDS: u32 = 3;
@@ -353,13 +376,22 @@ impl CallNode {
                                             let _ = persist_block(&data_dir, height, &block);
 
                                             if let Ok(mut c) = consensus.write() {
-                                                let _ = c.commit_block(&block, &result);
+                                                let _ = c.commit_block(&block, &result, None);
                                             }
 
                                             let _ = light_client.sync_incremental(&block.header, &signatures);
                                             state.set_current_block(height + 1);
                                             local_height = height + 1;
                                             batch_applied += 1;
+
+                                            // Periodically save consensus state during sync
+                                            if local_height % 100 == 0 {
+                                                if let Some(ref db_env) = db_env {
+                                                    if let Ok(c) = consensus.read() {
+                                                        let _ = save_consensus_state_inner(db_env, &c);
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -395,6 +427,14 @@ impl CallNode {
             } else {
                 tracing::info!("sync: no peers responded, starting fresh");
             }
+
+            // Save recovered consensus state after sync
+            if let Some(ref db_env) = db_env {
+                let c = consensus.read().unwrap();
+                if let Err(e) = save_consensus_state_inner(db_env, &c) {
+                    tracing::warn!(error = %e, "sync: failed to save consensus state after sync");
+                }
+            }
         })
     }
 
@@ -413,6 +453,13 @@ impl CallNode {
             }
             if let Err(e) = db_save_prune(db_env, &self.prune_state) {
                 tracing::warn!(error = %e, "failed to flush prune state on shutdown");
+            }
+            // Save consensus state explicitly
+            {
+                let c = self.consensus.read().unwrap();
+                if let Err(e) = save_consensus_state_inner(db_env, &c) {
+                    tracing::warn!(error = %e, "failed to flush consensus state on shutdown");
+                }
             }
             tracing::info!("flushed state to reth-db on shutdown");
         }
@@ -576,6 +623,13 @@ fn persist_state_to_db(
         let governance = state.governance.read().unwrap();
         save_governance_state(db_env, &governance)
             .map_err(|e| format!("save governance: {e}"))?;
+    }
+
+    // Persist consensus state
+    {
+        let c = consensus.read().unwrap();
+        save_consensus_state_inner(db_env, &c)
+            .map_err(|e| format!("save consensus: {e}"))?;
     }
 
     Ok(())
@@ -757,6 +811,25 @@ fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManager, String> 
     }
 }
 
+/// Save consensus state to the database.
+fn save_consensus_state_inner(db: &DatabaseEnv, consensus: &SimplexConsensus) -> Result<(), String> {
+    let state = consensus.persist_state();
+    let data = serde_json::to_vec(&state).map_err(|e| format!("serialize consensus: {e}"))?;
+    db_put::<CallConsensusState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+/// Load consensus state from the database.
+fn load_consensus_state_inner(db: &DatabaseEnv, validators: &ValidatorStateManager) -> Result<SimplexConsensus, String> {
+    match db_get::<CallConsensusState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => {
+            let state: PersistedConsensusState = serde_json::from_slice(&data)
+                .map_err(|e| format!("deserialize consensus: {e}"))?;
+            Ok(SimplexConsensus::restore_from_persisted(state, validators.clone()))
+        }
+        None => Err("no consensus state in db".to_string()),
+    }
+}
+
 // ── Incremental State Persistence ────────────────────────────────────
 //
 // Instead of clearing and rewriting entire tables every 100 blocks,
@@ -838,6 +911,13 @@ fn persist_state_incremental(
         let governance = state.governance.read().map_err(|_| "governance lock poisoned".to_string())?;
         save_governance_state(db_env, &governance)
             .map_err(|e| format!("save governance: {e}"))?;
+    }
+
+    // Persist consensus state
+    {
+        let c = consensus.read().map_err(|_| "consensus lock poisoned".to_string())?;
+        save_consensus_state_inner(db_env, &c)
+            .map_err(|e| format!("save consensus: {e}"))?;
     }
 
     Ok(())
@@ -1056,22 +1136,130 @@ async fn block_production_loop(
             oracle.clear_tracking();
         }
 
-        // 7. Commit via consensus
+        // 7. Broadcast block proposal to validators for QC assembly
+        if let Some(ref net) = network {
+            let block_data = serde_json::to_vec(&block).expect("serialize block");
+            let proposal = BlockProposal {
+                block_data,
+                height,
+                block_hash: block.header.hash(),
+                proposer,
+            };
+            let msg = serde_json::to_vec(&NetworkMessage::BlockProposal(proposal))
+                .expect("serialize block proposal");
+            net.broadcast(BLOCK_CHANNEL, msg).await;
+
+            // 7b. Wait for votes from validators (up to half the block time)
+            let vote_wait_ms = consensus.read()
+                .ok()
+                .map(|c| c.params().block_time_millis / 2)
+                .unwrap_or(125);
+            tokio::time::sleep(Duration::from_millis(vote_wait_ms)).await;
+        }
+
+        // 8. Assemble Quorum Certificate from collected votes
+        let qc = if network.is_some() {
+            let votes = {
+                let mut pending = state.pending_votes.write().unwrap();
+                std::mem::take(&mut *pending)
+            };
+
+            let block_hash = block.header.hash();
+            let validator_state = state.validator_state.read().unwrap();
+            let validator_count = validator_state.get_all_validators().len();
+            let threshold = call_consensus::rollback_quorum(validator_count as u32);
+            let mut qc_sigs: Vec<(u32, Vec<u8>)> = Vec::new();
+            let mut valid_sigs: Vec<BlsSignature> = Vec::new();
+            let mut voter_bitmap = vec![0u8; (validator_count + 7) / 8];
+
+            for vote in votes {
+                if vote.block_hash != block_hash || vote.height != height {
+                    continue;
+                }
+                if let Some(stake) = validator_state.get_validator_stake(vote.validator_id) {
+                    if stake.bls_pubkey == [0u8; 48] {
+                        continue;
+                    }
+                    let pk = BlsPublicKey(stake.bls_pubkey);
+                    let sig = BlsSignature(vote.bls_signature);
+                    if bls_verify(&pk, &block_hash.0, &sig).is_ok() {
+                        qc_sigs.push((vote.validator_id, vote.bls_signature.to_vec()));
+                        valid_sigs.push(sig);
+                        let byte_idx = (vote.validator_id / 8) as usize;
+                        let bit_idx = (vote.validator_id % 8) as u8;
+                        if byte_idx < voter_bitmap.len() {
+                            voter_bitmap[byte_idx] |= 1 << bit_idx;
+                        }
+                    }
+                }
+            }
+            drop(validator_state);
+
+            if qc_sigs.len() >= threshold as usize {
+                // Build QC and attach aggregated BLS signature to header
+                let qc = call_consensus::QuorumCertificate {
+                    block_hash,
+                    height,
+                    round: {
+                        let c = consensus.read().unwrap();
+                        c.current_round()
+                    },
+                    signatures: qc_sigs,
+                };
+
+                if valid_sigs.len() >= 2 {
+                    match bls_aggregate(&valid_sigs) {
+                        Ok(agg) => {
+                            block.header.bls_aggregate_signature = Some(agg.0.to_vec());
+                            block.header.bls_signer_bitmap = voter_bitmap;
+                            tracing::info!(
+                                height,
+                                votes = valid_sigs.len(),
+                                threshold,
+                                "assembled QC with aggregated BLS signature"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(height, error = ?e, "BLS aggregation failed");
+                        }
+                    }
+                }
+                Some(qc)
+            } else {
+                tracing::warn!(
+                    height,
+                    votes = qc_sigs.len(),
+                    threshold,
+                    "QC not reached — discarding block"
+                );
+                // Advance round without committing (empty block semantics)
+                {
+                    let mut c = consensus.write().unwrap();
+                    c.advance_round();
+                }
+                continue;
+            }
+        } else {
+            None // single-node mode, no QC needed
+        };
+
+        // 9. Commit via consensus (with QC if in network mode)
         {
             let mut c = consensus.write().unwrap();
-            if let Err(e) = c.commit_block(&block, &result) {
+            let qc_ref = qc.as_ref();
+            if let Err(e) = c.commit_block(&block, &result, qc_ref) {
                 tracing::warn!(error = ?e, "commit failed");
                 continue;
             }
         }
 
-        // 8. Update state
+        // 10. Update state
         let new_height = height + 1;
         state.set_current_block(new_height);
         parent_hash = block.header.hash();
         state.finalize_block();
 
-        // 8b. Advance governance proposal state machine
+        // 10b. Advance governance proposal state machine
         {
             let mut gov = state.governance.write().unwrap();
             gov.set_current_block(new_height);
@@ -1096,7 +1284,7 @@ async fn block_production_loop(
             }
         }
 
-        // 8c. Sync validators from consensus into governance
+        // 10c. Sync validators from consensus into governance
         {
             let mut gov = state.governance.write().unwrap();
             let vs = state.validator_state.read().unwrap();
@@ -1105,31 +1293,31 @@ async fn block_production_loop(
             }
         }
 
-        // 9. Persist block to disk
+        // 11. Persist block to disk
         if let Err(ref e) = persist_block(&db.data_dir, height, &block) {
             tracing::warn!(error = %e, "failed to persist block");
         }
 
-        // 10. Update prune tracking state
+        // 12. Update prune tracking state
         prune_state.add_block_body(height, call_storage::BlockBody {
             block_hash: parent_hash,
             tx_count: result.total_tx_count() as u32,
             body_size: 0, // would be actual serialized size in production
         });
 
-        // 11. Run periodic prune checks
+        // 13. Run periodic prune checks
         if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config) {
             tracing::warn!(error = %e, "prune check failed");
         }
 
-        // 12. Incrementally persist state changes after every block
+        // 14. Incrementally persist state changes after every block
         if let Some(ref db_env) = db.db {
             if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
                 tracing::warn!(error = %e, "failed to incrementally persist state");
             }
         }
 
-        // 13. Full table rebuild every 1000 blocks as safety net
+        // 15. Full table rebuild every 1000 blocks as safety net
         if new_height % 1000 == 0 {
             if let Some(ref db_env) = db.db {
                 if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
@@ -1138,7 +1326,7 @@ async fn block_production_loop(
             }
         }
 
-        // 14. Broadcast to WebSocket subscribers
+        // 16. Broadcast to WebSocket subscribers
 
         tracing::info!(height = new_height, tx_count = result.total_tx_count(), "committed block");
 
@@ -1146,7 +1334,7 @@ async fn block_production_loop(
         let tx_count = result.total_tx_count();
         subscriptions.broadcast_block(height, format!("{:?}", block.header.hash()), proposer, tx_count);
 
-        // 15. Broadcast block announcement via P2P
+        // 17. Broadcast block announcement via P2P (post-commit)
         if let Some(ref net) = network {
             let announcement = BlockAnnouncement {
                 block_hash: parent_hash,
@@ -1157,62 +1345,6 @@ async fn block_production_loop(
             let msg = serde_json::to_vec(&NetworkMessage::BlockAnnouncement(announcement))
                 .expect("serialize block announcement");
             net.broadcast(BLOCK_CHANNEL, msg).await;
-
-            // 15b. Collect BLS votes from validators
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            let votes = {
-                let mut pending = state.pending_votes.write().unwrap();
-                std::mem::take(&mut *pending)
-            };
-
-            let block_hash = block.header.hash();
-            let validator_state = state.validator_state.read().unwrap();
-            let validator_count = validator_state.get_all_validators().len();
-            let mut valid_sigs: Vec<BlsSignature> = Vec::new();
-            let mut voter_bitmap = vec![0u8; (validator_count + 7) / 8];
-
-            for vote in votes {
-                if vote.block_hash != block_hash || vote.height != height {
-                    continue;
-                }
-                if let Some(stake) = validator_state.get_validator_stake(vote.validator_id) {
-                    if stake.bls_pubkey == [0u8; 48] {
-                        continue; // validator hasn't registered BLS key
-                    }
-                    let pk = BlsPublicKey(stake.bls_pubkey);
-                    let sig = BlsSignature(vote.bls_signature);
-                    if bls_verify(&pk, &block_hash.0, &sig).is_ok() {
-                        valid_sigs.push(sig);
-                        let byte_idx = (vote.validator_id / 8) as usize;
-                        let bit_idx = (vote.validator_id % 8) as u8;
-                        if byte_idx < voter_bitmap.len() {
-                            voter_bitmap[byte_idx] |= 1 << bit_idx;
-                        }
-                    }
-                }
-            }
-            drop(validator_state);
-
-            // Aggregate and update header if we have enough votes
-            if valid_sigs.len() >= 2 {
-                match bls_aggregate(&valid_sigs) {
-                    Ok(agg) => {
-                        block.header.bls_aggregate_signature = Some(agg.0.to_vec());
-                        block.header.bls_signer_bitmap = voter_bitmap;
-                        tracing::info!(
-                            height,
-                            votes = valid_sigs.len(),
-                            "aggregated BLS signatures into block header"
-                        );
-                        // Re-persist block with updated aggregate signature
-                        let _ = persist_block(&db.data_dir, height, &block);
-                    }
-                    Err(e) => {
-                        tracing::warn!(height, error = ?e, "BLS aggregation failed");
-                    }
-                }
-            }
         }
     }
 }
@@ -1312,6 +1444,77 @@ fn handle_network_message(
             }
         }
         BLOCK_CHANNEL => {
+            // Handle block proposals (pre-commit) — validators vote on these
+            if let Ok(proposal) = serde_json::from_slice::<BlockProposal>(data) {
+                let local_height = state.get_current_block();
+                if proposal.height > local_height {
+                    // Peer is ahead, request sync instead of voting
+                    tracing::info!(
+                        peer_id,
+                        height = proposal.height,
+                        local = local_height,
+                        "block proposal: peer ahead, requesting sync"
+                    );
+                    let request = SyncRequest {
+                        start_height: local_height,
+                        count: 100,
+                        full_state: false,
+                    };
+                    let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
+                        .expect("serialize sync request");
+                    let peer_id_owned = peer_id.to_string();
+                    let net = Arc::clone(network);
+                    tokio::spawn(async move {
+                        net.send_to(vec![peer_id_owned], req_data).await;
+                    });
+                } else {
+                    // If this node is a validator with a BLS key, cast a vote
+                    let state_clone = Arc::clone(state);
+                    let net_clone = Arc::clone(network);
+                    tokio::spawn(async move {
+                        let bls_secret = {
+                            let sk = state_clone.bls_secret_key.read().unwrap();
+                            sk.clone()
+                        };
+                        if let Some(secret) = bls_secret {
+                            let signer_addr = {
+                                let signer = state_clone.signer.read().unwrap();
+                                signer.as_ref().map(|s| s.address())
+                            };
+                            if let Some(addr) = signer_addr {
+                                let our_id = {
+                                    let vs = state_clone.validator_state.read().unwrap();
+                                    let mut id = None;
+                                    for (vid, stake) in vs.get_all_validators().iter() {
+                                        if stake.address == addr {
+                                            id = Some(*vid);
+                                            break;
+                                        }
+                                    }
+                                    id
+                                };
+                                if let Some(validator_id) = our_id {
+                                    let block_hash_bytes = proposal.block_hash.0;
+                                    let sig = bls_sign(&secret, &block_hash_bytes);
+                                    let vote = BlockVote {
+                                        height: proposal.height,
+                                        block_hash: proposal.block_hash,
+                                        validator_id,
+                                        bls_signature: sig.0,
+                                    };
+                                    if let Ok(msg) = serde_json::to_vec(&NetworkMessage::BlockVote(vote)) {
+                                        net_clone.broadcast(VOTE_CHANNEL, msg).await;
+                                        tracing::debug!(height = proposal.height, validator_id, "broadcast BLS block vote on proposal");
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                return;
+            }
+
+            // Handle block announcements (post-commit) — trigger sync if behind
             if let Ok(announcement) = serde_json::from_slice::<BlockAnnouncement>(data) {
                 let local_height = state.get_current_block();
                 if announcement.height > local_height {
@@ -1340,50 +1543,6 @@ fn handle_network_message(
                         local = local_height,
                         "block announcement: already caught up"
                     );
-
-                    // If this node is a validator with a BLS key, cast a vote
-                    let state_clone = Arc::clone(state);
-                    let net_clone = Arc::clone(network);
-                    tokio::spawn(async move {
-                        let bls_secret = {
-                            let sk = state_clone.bls_secret_key.read().unwrap();
-                            sk.clone()
-                        };
-                        if let Some(secret) = bls_secret {
-                            // Find our validator ID
-                            let signer_addr = {
-                                let signer = state_clone.signer.read().unwrap();
-                                signer.as_ref().map(|s| s.address())
-                            };
-                            if let Some(addr) = signer_addr {
-                                let our_id = {
-                                    let vs = state_clone.validator_state.read().unwrap();
-                                    let mut id = None;
-                                    for (vid, stake) in vs.get_all_validators().iter() {
-                                        if stake.address == addr {
-                                            id = Some(*vid);
-                                            break;
-                                        }
-                                    }
-                                    id
-                                };
-                                if let Some(validator_id) = our_id {
-                                    let block_hash_bytes = announcement.block_hash.0;
-                                    let sig = bls_sign(&secret, &block_hash_bytes);
-                                    let vote = BlockVote {
-                                        height: announcement.height,
-                                        block_hash: announcement.block_hash,
-                                        validator_id,
-                                        bls_signature: sig.0,
-                                    };
-                                    if let Ok(msg) = serde_json::to_vec(&NetworkMessage::BlockVote(vote)) {
-                                        net_clone.broadcast(VOTE_CHANNEL, msg).await;
-                                        tracing::debug!(height = announcement.height, validator_id, "broadcast BLS block vote");
-                                    }
-                                }
-                            }
-                        }
-                    });
                 }
             }
         }
@@ -1644,7 +1803,7 @@ mod tests {
         // Commit
         {
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, None).expect("commit");
         }
 
         let height_after = node.consensus.read().unwrap().current_height();
@@ -1728,7 +1887,7 @@ mod tests {
         // Commit
         {
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit empty");
+            consensus.commit_block(&block, &result, None).expect("commit empty");
         }
 
         assert_eq!(node.consensus.read().unwrap().current_height(), 1);
@@ -1826,7 +1985,7 @@ mod tests {
         // Commit on node1
         {
             let mut consensus = node1.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, None).expect("commit");
         }
         assert_eq!(node1.consensus.read().unwrap().current_height(), 1, "node1 should be at height 1");
 
@@ -1930,7 +2089,7 @@ mod tests {
 
         {
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, None).expect("commit");
         }
 
         // Persist block
@@ -2032,7 +2191,7 @@ mod tests {
 
             {
                 let mut consensus = node.consensus.write().unwrap();
-                consensus.commit_block(&block, &result).expect("commit");
+                consensus.commit_block(&block, &result, None).expect("commit");
             }
 
             // Persist state to reth-db immediately

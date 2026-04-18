@@ -39,6 +39,56 @@ pub fn ed25519_verify(
         .map_err(|_| Ed25519Error::VerificationFailed)
 }
 
+// ── VRF (Verifiable Random Function) using Ed25519 ────────────────────
+
+/// Domain separator for VRF proposer sortition.
+const VRF_DOMAIN: &[u8] = b"CALLCHAIN-PROPOSER-VRF-v1";
+
+/// Produce a VRF proof and output for the given seed.
+///
+/// Returns `(signature, output_hash)` where:
+/// - `signature` is the Ed25519 proof (64 bytes)
+/// - `output_hash` is `keccak256(signature)` used as the lottery ticket
+pub fn vrf_prove(signing_key: &SigningKey, seed: &[u8; 32]) -> ([u8; 64], [u8; 32]) {
+    let mut message = Vec::with_capacity(VRF_DOMAIN.len() + 32);
+    message.extend_from_slice(VRF_DOMAIN);
+    message.extend_from_slice(seed);
+    let sig = ed25519_sign(signing_key, &message);
+    let output = crate::keccak256(&sig);
+    (sig, output.into())
+}
+
+/// Verify a VRF proof and return the output hash.
+///
+/// Returns `Some(output_hash)` if the signature is valid, `None` otherwise.
+pub fn vrf_verify(
+    public_key: &Ed25519PublicKey,
+    seed: &[u8; 32],
+    signature: &[u8; 64],
+) -> Option<[u8; 32]> {
+    let mut message = Vec::with_capacity(VRF_DOMAIN.len() + 32);
+    message.extend_from_slice(VRF_DOMAIN);
+    message.extend_from_slice(seed);
+    ed25519_verify(public_key, signature, &message).ok()?;
+    Some(crate::keccak256(signature).into())
+}
+
+/// Compute a deterministic VRF sortition score for a validator.
+///
+/// This is a *simplified* VRF: the score is derived from the validator's
+/// public key and an unbiasable seed (e.g. previous block hash + epoch).
+/// It does not require a secret key, making it suitable for off-chain
+/// subset computation where all participants can verify the result.
+///
+/// For true unpredictability, use `vrf_prove` / `vrf_verify`.
+pub fn vrf_sortition_score(validator_pubkey: &Ed25519PublicKey, seed: &[u8; 32]) -> [u8; 32] {
+    let mut data = Vec::with_capacity(VRF_DOMAIN.len() + 32 + 32);
+    data.extend_from_slice(VRF_DOMAIN);
+    data.extend_from_slice(seed);
+    data.extend_from_slice(validator_pubkey);
+    crate::keccak256(&data).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

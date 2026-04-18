@@ -145,6 +145,16 @@ impl Table for CallGovernanceState {
     type Value = Vec<u8>;
 }
 
+/// Consensus state: single entry () -> serialized PersistedConsensusState
+#[derive(Debug)]
+pub struct CallConsensusState;
+impl Table for CallConsensusState {
+    const NAME: &'static str = "call_consensus_state";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// All Callchain tables
 pub struct CallTables;
 impl TableSet for CallTables {
@@ -166,6 +176,7 @@ impl TableSet for CallTables {
                 box_info::<CallOracleState>,
                 box_info::<CallPruneState>,
                 box_info::<CallGovernanceState>,
+                box_info::<CallConsensusState>,
             ]
             .into_iter()
             .map(|f| f()),

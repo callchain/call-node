@@ -30,6 +30,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.4",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -1697,6 +1698,7 @@ dependencies = [
  "call-protocol",
  "call-shielded",
  "commonware-codec",
+ "commonware-consensus",
  "commonware-cryptography",
  "ed25519-dalek",
  "rand 0.8.5",
@@ -2248,6 +2250,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-broadcast"
+version = "2026.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afe7362c8942f20f0eab11756932b7d1c41f4cc99e142cb563e17a04b40095d5"
+dependencies = [
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "prometheus-client",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-codec"
 version = "2026.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2260,6 +2279,59 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "commonware-coding"
+version = "2026.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e60b2b324de47773c3d4af4d83bfc76d2c287ba7f2d6eb8c2aa5068f877b4bb"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-parallel",
+ "commonware-storage",
+ "commonware-utils",
+ "num-rational",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rayon",
+ "reed-solomon-simd",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "commonware-consensus"
+version = "2026.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a67374d82c69e870105f010b895f1768952df5d0fa0d0550dedf162de16f44e"
+dependencies = [
+ "bytes",
+ "cfg-if",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-coding",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "pin-project",
+ "prometheus-client",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rand_distr",
+ "rayon",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2373,6 +2445,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-resolver"
+version = "2026.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00dfe9932b33cc31a04b7c68bf543eef7e6d04b70cf6a53880d03407d60a01e6"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "prometheus-client",
+ "rand 0.8.5",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-runtime"
 version = "2026.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2406,6 +2499,31 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry 0.32.1",
  "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "commonware-storage"
+version = "2026.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca1c42cf37aa27c3f83c31591cad4f1d96317eff81c1eb442e17191adcf9b413"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bytes",
+ "cfg-if",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "futures-util",
+ "prometheus-client",
+ "rayon",
+ "thiserror 2.0.18",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]
@@ -3142,6 +3260,12 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "fixedbitset"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "fnv"
@@ -5287,6 +5411,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5304,6 +5434,18 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "reed-solomon-simd"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffef0520d30fbd4151fb20e262947ae47fb0ab276a744a19b6398438105a072"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "fixedbitset",
+ "once_cell",
+ "readme-rustdocifier",
 ]
 
 [[package]]

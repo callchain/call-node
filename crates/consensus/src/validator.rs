@@ -70,7 +70,7 @@ pub struct KeyRotation {
 }
 
 /// Manages all validator stakes (per spec §12.6)
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ValidatorStateManager {
     validators: HashMap<ValidatorId, ValidatorStake>,
     next_validator_id: ValidatorId,

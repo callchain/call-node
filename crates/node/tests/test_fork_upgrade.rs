@@ -123,7 +123,7 @@ async fn test_height_activated_upgrade() {
 
         {
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, None).expect("commit");
         }
 
         node.state.set_current_block(height + 1);

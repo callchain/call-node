@@ -4,17 +4,20 @@
 //! consensus driver with proposer selection, validator management, and block lifecycle.
 
 use crate::block::{Block, BlockExecutionResult};
+use crate::fork::rollback_quorum;
 use crate::proposer::{
-    select_proposer, select_proposer_subset, verify_proposer_in_subset, ConsensusParams,
+    derive_vrf_seed, select_proposer, select_proposer_subset, verify_proposer_in_subset,
+    ConsensusParams,
 };
 use crate::validator::{ConsensusError, ValidatorStateManager};
-use call_primitives::{Address, ValidatorId};
+use call_primitives::{Address, BlockHash, ValidatorId};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Simplex BFT consensus driver for Callchain.
 ///
 /// Manages the consensus lifecycle:
-/// - Proposer selection per round (21 of 216 validators)
+/// - Proposer selection per round (21 of 216 validators) using VRF
 /// - Block proposal and validation
 /// - Commit/rollback of blocks
 /// - Validator state management (staking, slashing, rewards)
@@ -25,14 +28,18 @@ pub struct SimplexConsensus {
     current_height: u64,
     /// Active proposer subset for the current epoch
     proposer_subset: Vec<ValidatorId>,
+    /// Hash of the last committed block, used as VRF seed input
+    last_block_hash: BlockHash,
 }
 
 impl SimplexConsensus {
     /// Create a new consensus instance with initial validators.
     pub fn new(params: ConsensusParams, validators: ValidatorStateManager) -> Self {
         let active = validators.get_active_validators();
+        let pubkeys = Self::build_pubkey_map(&validators);
+        let seed = derive_vrf_seed(&BlockHash::ZERO, 0);
         let proposer_subset =
-            select_proposer_subset(&active, 0, params.subset_size);
+            select_proposer_subset(&active, &pubkeys, &seed, params.subset_size);
 
         Self {
             params,
@@ -40,7 +47,28 @@ impl SimplexConsensus {
             current_round: 0,
             current_height: 0,
             proposer_subset,
+            last_block_hash: BlockHash::ZERO,
         }
+    }
+
+    /// Build a map of validator ID → Ed25519 pubkey from the validator state.
+    fn build_pubkey_map(
+        validators: &ValidatorStateManager,
+    ) -> std::collections::HashMap<ValidatorId, call_primitives::Ed25519PublicKey> {
+        validators
+            .get_all_validators()
+            .iter()
+            .map(|(id, stake)| (*id, stake.ed25519_pubkey))
+            .collect()
+    }
+
+    /// Recompute the proposer subset using the current VRF seed.
+    fn recompute_proposer_subset(&mut self) {
+        let active = self.validators.get_active_validators();
+        let pubkeys = Self::build_pubkey_map(&self.validators);
+        let seed = derive_vrf_seed(&self.last_block_hash, self.current_round);
+        self.proposer_subset =
+            select_proposer_subset(&active, &pubkeys, &seed, self.params.subset_size);
     }
 
     /// Get the current consensus parameters.
@@ -65,14 +93,22 @@ impl SimplexConsensus {
 
     /// Refresh the proposer subset from the current validator set.
     pub fn refresh_proposer_subset(&mut self) {
-        let active = self.validators.get_active_validators();
-        self.proposer_subset =
-            select_proposer_subset(&active, self.current_round, self.params.subset_size);
+        self.recompute_proposer_subset();
         info!(
             round = self.current_round,
             subset_size = self.proposer_subset.len(),
             "refreshed proposer subset"
         );
+    }
+
+    /// Set the last committed block hash (used for VRF seed derivation).
+    pub fn set_last_block_hash(&mut self, hash: BlockHash) {
+        self.last_block_hash = hash;
+    }
+
+    /// Get the last committed block hash.
+    pub fn last_block_hash(&self) -> BlockHash {
+        self.last_block_hash
     }
 
     /// Get the current block height.
@@ -106,9 +142,7 @@ impl SimplexConsensus {
         // For now, refresh every 100 rounds to balance stability and rotation
         let epoch_length = 100u64;
         if self.current_round.is_multiple_of(epoch_length) {
-            let active = self.validators.get_active_validators();
-            self.proposer_subset =
-                select_proposer_subset(&active, self.current_round, self.params.subset_size);
+            self.recompute_proposer_subset();
             info!(
                 round = self.current_round,
                 subset_size = self.proposer_subset.len(),
@@ -179,12 +213,23 @@ impl SimplexConsensus {
         )
     }
 
-    /// Commit a block: advance height, distribute rewards, advance round.
+    /// Commit a block: verify QC, advance height, distribute rewards, advance round.
     pub fn commit_block(
         &mut self,
         block: &Block,
         result: &BlockExecutionResult,
+        qc: Option<&QuorumCertificate>,
     ) -> Result<(), ConsensusError> {
+        // Verify quorum certificate if provided
+        if let Some(qc) = qc {
+            if !qc.verify(&self.validators, rollback_quorum(self.validators.get_active_validators().len() as u32)) {
+                return Err(ConsensusError::InvalidBlock("QC verification failed".to_string()));
+            }
+            if qc.block_hash != block.header.hash() {
+                return Err(ConsensusError::InvalidBlock("QC block hash mismatch".to_string()));
+            }
+        }
+
         // Distribute validator reward
         if result.total_validator_reward > 0 {
             let proposer = block.header.proposer;
@@ -195,6 +240,9 @@ impl SimplexConsensus {
                     e
                 })?;
         }
+
+        // Update last block hash for VRF seed derivation
+        self.last_block_hash = block.header.hash();
 
         // Advance state
         self.current_height += 1;
@@ -266,6 +314,88 @@ impl SimplexConsensus {
     /// Get active validator IDs for network layer.
     pub fn active_validators(&self) -> Vec<ValidatorId> {
         self.validators.get_active_validators()
+    }
+}
+
+/// Quorum Certificate — aggregates validator signatures for a block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuorumCertificate {
+    pub block_hash: BlockHash,
+    pub height: u64,
+    pub round: u64,
+    /// (validator_id, BLS12-381 signature bytes)
+    pub signatures: Vec<(ValidatorId, Vec<u8>)>,
+}
+
+impl QuorumCertificate {
+    /// Verify that the QC contains enough valid signatures from the current validator set.
+    pub fn verify(
+        &self,
+        validators: &ValidatorStateManager,
+        threshold: u32,
+    ) -> bool {
+        if self.signatures.len() < threshold as usize {
+            return false;
+        }
+        let mut valid_count = 0u32;
+        for (validator_id, signature) in &self.signatures {
+            if signature.len() != 96 {
+                continue;
+            }
+            if let Some(stake) = validators.get_validator_stake(*validator_id) {
+                if stake.bls_pubkey == [0u8; 48] {
+                    continue;
+                }
+                let pk = call_crypto::BlsPublicKey(stake.bls_pubkey);
+                let mut sig_bytes = [0u8; 96];
+                sig_bytes.copy_from_slice(signature);
+                let sig = call_crypto::BlsSignature(sig_bytes);
+                if call_crypto::bls_verify(&pk, &self.block_hash.0, &sig).is_ok() {
+                    valid_count += 1;
+                }
+            }
+        }
+        valid_count >= threshold
+    }
+}
+
+/// Serialized consensus state for database persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedConsensusState {
+    pub current_height: u64,
+    pub current_round: u64,
+    pub proposer_subset: Vec<ValidatorId>,
+    pub last_block_hash: BlockHash,
+    pub params: ConsensusParams,
+}
+
+impl SimplexConsensus {
+    /// Serialize the current consensus state for persistence.
+    pub fn persist_state(&self) -> PersistedConsensusState {
+        PersistedConsensusState {
+            current_height: self.current_height,
+            current_round: self.current_round,
+            proposer_subset: self.proposer_subset.clone(),
+            last_block_hash: self.last_block_hash,
+            params: self.params,
+        }
+    }
+
+    /// Restore consensus state from a persisted snapshot.
+    ///
+    /// The validator state manager is kept as-is (loaded separately from DB).
+    pub fn restore_from_persisted(
+        state: PersistedConsensusState,
+        validators: ValidatorStateManager,
+    ) -> Self {
+        Self {
+            params: state.params,
+            validators,
+            current_round: state.current_round,
+            current_height: state.current_height,
+            proposer_subset: state.proposer_subset,
+            last_block_hash: state.last_block_hash,
+        }
     }
 }
 
@@ -394,5 +524,72 @@ mod tests {
         assert_eq!(params.max_validators, 216);
         assert_eq!(params.subset_size, 21);
         assert_eq!(params.block_time_millis, 250);
+    }
+
+    #[test]
+    fn test_consensus_persist_and_restore() {
+        let mut consensus = make_test_consensus(100);
+        consensus.current_height = 42;
+        consensus.current_round = 7;
+        consensus.last_block_hash = BlockHash::repeat_byte(0xAB);
+
+        let persisted = consensus.persist_state();
+        let data = serde_json::to_vec(&persisted).unwrap();
+        let loaded: PersistedConsensusState = serde_json::from_slice(&data).unwrap();
+
+        let validators = make_test_validators(100);
+        let restored = SimplexConsensus::restore_from_persisted(loaded, validators);
+
+        assert_eq!(restored.current_height(), 42);
+        assert_eq!(restored.current_round(), 7);
+        assert_eq!(restored.last_block_hash(), BlockHash::repeat_byte(0xAB));
+        assert_eq!(restored.proposer_subset(), consensus.proposer_subset());
+    }
+
+    #[test]
+    fn test_qc_verify_threshold() {
+        let consensus = make_test_consensus(100);
+        let hash = BlockHash::repeat_byte(0xAB);
+
+        // Empty QC should fail
+        let qc = QuorumCertificate {
+            block_hash: hash,
+            height: 1,
+            round: 0,
+            signatures: vec![],
+        };
+        assert!(!qc.verify(consensus.validators(), rollback_quorum(100)));
+
+        // QC with invalid signatures should fail
+        let fake_sig = vec![0u8; 96];
+        let mut bad_sigs = vec![];
+        for i in 0..70 {
+            bad_sigs.push((i, fake_sig.clone()));
+        }
+        let qc_bad = QuorumCertificate {
+            block_hash: hash,
+            height: 1,
+            round: 0,
+            signatures: bad_sigs,
+        };
+        assert!(!qc_bad.verify(consensus.validators(), rollback_quorum(100)));
+    }
+
+    #[test]
+    fn test_commit_block_with_qc() {
+        let mut consensus = make_test_consensus(100);
+        let hash = BlockHash::repeat_byte(0xAB);
+
+        let qc = QuorumCertificate {
+            block_hash: hash,
+            height: 1,
+            round: 0,
+            signatures: vec![],
+        };
+
+        // commit_block with QC should verify it (empty QC fails for network mode)
+        // In this test we have no real signatures, so QC verification should fail
+        // when validators require quorum.
+        // For single-node testing, we pass None.
     }
 }

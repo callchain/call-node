@@ -39,6 +39,8 @@ pub enum NetworkMessage {
     OraclePriceSubmission(OraclePriceSubmission),
     /// Block vote — signed BLS attestation from a validator
     BlockVote(BlockVote),
+    /// Block proposal — full block broadcast by the proposer before commit
+    BlockProposal(BlockProposal),
 }
 
 /// Transaction message for gossipsub propagation
@@ -160,6 +162,21 @@ pub struct BlockVote {
     /// BLS12-381 signature (96 bytes compressed)
     #[serde(with = "serde_bytes")]
     pub bls_signature: [u8; 96],
+}
+
+/// Block proposal — full block broadcast by the proposer before commit.
+/// Validators validate the block and respond with BlockVote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockProposal {
+    /// Serialized block data
+    #[serde(with = "serde_bytes")]
+    pub block_data: Vec<u8>,
+    /// Block height
+    pub height: u64,
+    /// Block hash
+    pub block_hash: BlockHash,
+    /// Proposer validator ID
+    pub proposer: u32,
 }
 
 // ── Network Trait (abstraction over commonware-p2p) ──────────────────
