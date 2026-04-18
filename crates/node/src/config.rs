@@ -25,8 +25,17 @@ pub struct NodeConfig {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub governance: GovernanceConfig,
 }
 
+
+#[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
+pub struct GovernanceConfig {
+    #[serde(default)]
+    pub require_auth: bool,
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -248,6 +257,11 @@ impl NodeConfig {
         }
         if args.log_format != "text" {
             self.logging.format.clone_from(&args.log_format);
+        }
+
+        // Governance
+        if args.require_governance_auth {
+            self.governance.require_auth = true;
         }
 
         self

@@ -42,6 +42,7 @@ mod test_governance_flow_impl {
         mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
         mgr.vote(id, test_addr(1), Vote::Yes).unwrap();
         mgr.vote(id, test_addr(2), Vote::Yes).unwrap();
+        mgr.vote(id, test_addr(3), Vote::Yes).unwrap();
         mgr.set_current_block(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
         mgr.queue_proposal(id).unwrap();
         assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Queued);
@@ -102,7 +103,8 @@ mod test_governance_flow_impl {
     fn test_emergency_pause_and_resume() {
         let mut mgr = make_manager_with_validators(3);
         assert!(!mgr.emergency_pause_initiate(1, "critical bug".into()).unwrap());
-        assert!(mgr.emergency_pause_initiate(2, "critical bug".into()).unwrap());
+        assert!(!mgr.emergency_pause_initiate(2, "critical bug".into()).unwrap());
+        assert!(mgr.emergency_pause_initiate(3, "critical bug".into()).unwrap());
         assert!(mgr.is_paused());
         mgr.emergency_pause_resume().unwrap();
         assert!(!mgr.is_paused());

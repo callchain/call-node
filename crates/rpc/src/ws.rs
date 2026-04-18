@@ -23,6 +23,7 @@ pub enum WsEvent {
     AgentRevoked { agent_id: u64 },
     ShieldedDeposit { commitment: String },
     ShieldedWithdrawal { nullifier: String },
+    GovernanceEvent { event: String, proposal_id: u64, details: String },
 }
 
 // ── Subscription Manager ─────────────────────────────────────────────
@@ -37,6 +38,7 @@ pub struct SubscriptionManager {
     agent_revoked_tx: broadcast::Sender<WsEvent>,
     shielded_deposit_tx: broadcast::Sender<WsEvent>,
     shielded_withdrawal_tx: broadcast::Sender<WsEvent>,
+    governance_tx: broadcast::Sender<WsEvent>,
 }
 
 impl SubscriptionManager {
@@ -49,10 +51,12 @@ impl SubscriptionManager {
         let (agent_revoked_tx, _) = broadcast::channel(256);
         let (shielded_deposit_tx, _) = broadcast::channel(512);
         let (shielded_withdrawal_tx, _) = broadcast::channel(512);
+        let (governance_tx, _) = broadcast::channel(256);
         Self {
             block_tx, payment_tx, bridge_tx, asset_tx,
             agent_exec_tx, agent_revoked_tx,
             shielded_deposit_tx, shielded_withdrawal_tx,
+            governance_tx,
         }
     }
 
@@ -86,6 +90,10 @@ impl SubscriptionManager {
 
     pub fn broadcast_shielded_withdrawal(&self, nullifier: String) {
         let _ = self.shielded_withdrawal_tx.send(WsEvent::ShieldedWithdrawal { nullifier });
+    }
+
+    pub fn broadcast_governance(&self, event: String, proposal_id: u64, details: String) {
+        let _ = self.governance_tx.send(WsEvent::GovernanceEvent { event, proposal_id, details });
     }
 }
 
@@ -153,5 +161,6 @@ pub fn register_ws_subscriptions(
     register_subscription(module, "call_subscribeAgentRevoked", "call_unsubscribeAgentRevoked", subscriptions.agent_revoked_tx.clone())?;
     register_subscription(module, "call_subscribeShieldedDeposit", "call_unsubscribeShieldedDeposit", subscriptions.shielded_deposit_tx.clone())?;
     register_subscription(module, "call_subscribeShieldedWithdrawal", "call_unsubscribeShieldedWithdrawal", subscriptions.shielded_withdrawal_tx.clone())?;
+    register_subscription(module, "call_subscribeGovernance", "call_unsubscribeGovernance", subscriptions.governance_tx.clone())?;
     Ok(())
 }

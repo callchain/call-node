@@ -129,6 +129,9 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     info!("step 2: initializing node");
     let mut node = CallNode::new(config.storage.data_dir.clone())?;
 
+    // Wire governance auth config
+    node.state.set_governance_auth(config.governance.require_auth);
+
     // Step 3: Load genesis if path provided
     if let Some(ref genesis_path) = config.genesis.path {
         info!(path = ?genesis_path, "step 3: loading genesis");

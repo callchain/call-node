@@ -1052,6 +1052,24 @@ async fn block_production_loop(
             let mut gov = state.governance.write().unwrap();
             gov.set_current_block(new_height);
             gov.advance(new_height);
+            // Drain and broadcast governance events
+            for event in gov.drain_events() {
+                let (event_str, proposal_id) = match &event {
+                    call_governance::GovernanceEvent::ProposalAdvanced { id, from, to } => {
+                        (format!("{:?} → {:?}", from, to), *id)
+                    }
+                    call_governance::GovernanceEvent::ProposalExecuted { id, proposal_type } => {
+                        (format!("executed: {}", proposal_type), *id)
+                    }
+                    call_governance::GovernanceEvent::ProposalExpired { id } => {
+                        ("expired".to_string(), *id)
+                    }
+                    call_governance::GovernanceEvent::ProposalDefeated { id } => {
+                        ("defeated".to_string(), *id)
+                    }
+                };
+                subscriptions.broadcast_governance(event_str, proposal_id, String::new());
+            }
         }
 
         // 8c. Sync validators from consensus into governance
@@ -1912,5 +1930,109 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&tmp);
         }
+    }
+
+    // ── Governance full cycle integration ─────────────────────────────
+
+    #[test]
+    fn test_governance_full_cycle() {
+        use call_governance::{ProposalType, GovernanceEvent, PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS, TIMELOCK_PERIOD_BLOCKS, EXECUTION_TIMEOUT_BLOCKS};
+
+        let tmp = std::env::temp_dir().join("call_gov_cycle_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Fund a proposer address with enough CALL for deposit
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            let proposer = call_primitives::Address::repeat_byte(0xAA);
+            balances.balances.credit_balance(0, proposer, PROPOSAL_DEPOSIT * 5).expect("fund proposer");
+        }
+
+        let proposer = call_primitives::Address::repeat_byte(0xAA);
+
+        // Register some validators so quorum can be met
+        {
+            let mut gov = node.state.governance.write().unwrap();
+            for i in 1u32..=3 {
+                gov.register_validator(i, call_primitives::Address::repeat_byte(i as u8));
+                gov.set_call_balance(call_primitives::Address::repeat_byte(i as u8), 1);
+            }
+        }
+
+        // Submit a proposal
+        let proposal_id = {
+            let mut gov = node.state.governance.write().unwrap();
+            gov.submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test_param".into(),
+                    new_value: "{\"base_fee\": 100}".into(),
+                },
+                "Test proposal".into(),
+                "Integration test".into(),
+                vec![],
+            ).expect("submit proposal")
+        };
+
+        // Verify proposal was created
+        {
+            let gov = node.state.governance.read().unwrap();
+            let p = gov.get_proposal(proposal_id).expect("proposal exists");
+            assert_eq!(p.state, call_governance::ProposalState::Pending);
+        }
+
+        // Advance to voting period and vote with all validators
+        {
+            let mut gov = node.state.governance.write().unwrap();
+            gov.set_current_block(REVIEW_PERIOD_BLOCKS);
+            // Vote yes from all 3 registered validators
+            for i in 1u32..=3 {
+                let validator_addr = call_primitives::Address::repeat_byte(i as u8);
+                let _ = gov.vote(proposal_id, validator_addr, call_governance::Vote::Yes);
+            }
+        }
+
+        // Advance through all phases
+        {
+            let mut gov = node.state.governance.write().unwrap();
+            gov.advance(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + TIMELOCK_PERIOD_BLOCKS + 1);
+        }
+
+        // Should be queued or executed (depending on timelock)
+        {
+            let gov = node.state.governance.read().unwrap();
+            let p = gov.get_proposal(proposal_id).expect("proposal exists");
+            assert!(
+                matches!(p.state, call_governance::ProposalState::Queued | call_governance::ProposalState::Executed),
+                "expected queued or executed, got {:?}", p.state
+            );
+        }
+
+        // Advance past timelock to execute
+        {
+            let mut gov = node.state.governance.write().unwrap();
+            let exec = gov.get_proposal(proposal_id).unwrap().execution_block.unwrap();
+            gov.advance(exec + 1);
+            // Drain events
+            let events = gov.drain_events();
+            assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalExecuted { .. })));
+        }
+
+        // Should be executed
+        {
+            let gov = node.state.governance.read().unwrap();
+            let p = gov.get_proposal(proposal_id).expect("proposal exists");
+            assert_eq!(p.state, call_governance::ProposalState::Executed);
+        }
+
+        // Verify fee_params were updated by executor
+        {
+            let fp = node.state.fee_params.read().unwrap();
+            assert_eq!(fp.base_fee, 100); // Should match the JSON in execution_data
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

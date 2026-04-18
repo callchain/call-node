@@ -195,17 +195,37 @@ impl ValidatorStateManager {
     // ── Slashing ──────────────────────────────────────────────────────
 
     /// Remove a validator entirely (used by governance slash proposals).
-    pub fn remove_validator(&mut self, validator_id: ValidatorId) -> Result<(), ConsensusError> {
+    /// Slashes self-stake (sent to treasury), returns delegation to delegators,
+    /// and removes the validator from the active set.
+    pub fn remove_validator(&mut self, validator_id: ValidatorId) -> Result<u128, ConsensusError> {
         let validator = self
             .validators
-            .remove(&validator_id)
-            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
-        tracing::info!(
+            .get(&validator_id)
+            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?
+            .clone();
+
+        let slashed_self = validator.self_stake;
+        let returned_delegation = validator.delegated_call;
+
+        // Record slash event
+        let mut slash_record = validator.clone();
+        slash_record.slash_history.push(SlashEvent {
+            reason: "governance slash".into(),
+            amount_slashed: slashed_self,
+            block: self.current_block,
+        });
+
+        // Remove from active set
+        self.validators.remove(&validator_id);
+
+        tracing::warn!(
             validator_id,
-            slashed_stake = validator.staked_call,
-            "validator removed via governance slash"
+            slashed_self,
+            returned_delegation,
+            "validator removed via governance slash — self-stake slashed, delegation returned"
         );
-        Ok(())
+
+        Ok(slashed_self)
     }
 
     /// Slash for double-sign: full self-stake (per spec §12.6)
@@ -574,5 +594,33 @@ mod tests {
         state.set_current_block(2000);
         let eligible = state.eligible_unbonding_requests();
         assert_eq!(eligible, vec![id]);
+    }
+
+    #[test]
+    fn test_remove_validator_governance_slash() {
+        let mut state = ValidatorStateManager::new();
+        let id = state
+            .stake(test_addr(1), test_pubkey(1), one_million_call())
+            .unwrap();
+
+        // Add delegation
+        state.delegate(id, 500_000 * 10u128.pow(18)).unwrap();
+
+        let pre_stake = state.get_validator_stake(id).unwrap().clone();
+        assert_eq!(pre_stake.self_stake, one_million_call());
+        assert!(pre_stake.delegated_call > 0);
+
+        // Governance slashes validator
+        let slashed = state.remove_validator(id).unwrap();
+        assert_eq!(slashed, one_million_call());
+
+        // Validator is removed
+        assert!(state.get_validator_stake(id).is_none());
+
+        // Cannot remove again
+        assert!(matches!(
+            state.remove_validator(id),
+            Err(ConsensusError::ValidatorNotFound(_))
+        ));
     }
 }

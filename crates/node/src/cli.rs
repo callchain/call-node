@@ -87,6 +87,12 @@ pub struct CliArgs {
     #[arg(long, default_value = "text")]
     pub log_format: String,
 
+    // ── Governance ────────────────────────────────────────────────────
+
+    /// Require secp256k1 signatures on governance RPC calls (disables unsigned devnet mode)
+    #[arg(long, default_value_t = false)]
+    pub require_governance_auth: bool,
+
     // ── Config file ───────────────────────────────────────────────────
 
     /// Path to TOML config file (CLI args override these values)

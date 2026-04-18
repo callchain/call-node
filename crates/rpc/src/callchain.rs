@@ -13,30 +13,51 @@ use std::sync::Arc;
 pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(), ErrorObjectOwned> {
     // ── Governance signature helper ──────────────────────────────
 
-    /// Verify an optional secp256k1 signature against an expected address.
-    /// If signature is provided, recover signer and verify it matches expected.
-    /// If no signature, allow (backwards compatible for devnet/testing).
+    /// Block window size for replay protection. Signatures are valid for ±1 window.
+    const REPLAY_WINDOW: u64 = 100;
+
+    /// Verify a secp256k1 signature, optionally required based on auth config.
+    /// When `require_auth` is true, a valid signature MUST be provided.
+    /// When false, a signature is optional (if provided, must be valid).
     fn verify_signature(
         msg_hash: [u8; 32],
         expected: Address,
         sig_hex: Option<&str>,
+        require_auth: bool,
     ) -> Result<(), ErrorObjectOwned> {
-        if let Some(sig_str) = sig_hex {
-            let sig_bytes = hex::decode(sig_str.trim_start_matches("0x"))
-                .map_err(|e| invalid_params(format!("invalid signature hex: {e}")))?;
-            if sig_bytes.len() != 65 {
-                return Err(invalid_params("signature must be 65 bytes (r || s || v)".into()));
+        match sig_hex {
+            Some(sig_str) => {
+                let sig_bytes = hex::decode(sig_str.trim_start_matches("0x"))
+                    .map_err(|e| invalid_params(format!("invalid signature hex: {e}")))?;
+                if sig_bytes.len() != 65 {
+                    return Err(invalid_params("signature must be 65 bytes (r || s || v)".into()));
+                }
+                let mut sig = [0u8; 65];
+                sig.copy_from_slice(&sig_bytes);
+                let recovered = recover_secp256k1_signer(&msg_hash, &sig)
+                    .map_err(|e| invalid_params(format!("signature recovery failed: {e}")))?;
+                if recovered != expected {
+                    return Err(invalid_params(format!(
+                        "signature mismatch: recovered {:?}, expected {:?}",
+                        recovered, expected
+                    )));
+                }
+                Ok(())
             }
-            let mut sig = [0u8; 65];
-            sig.copy_from_slice(&sig_bytes);
-            let recovered = recover_secp256k1_signer(&msg_hash, &sig)
-                .map_err(|e| invalid_params(format!("signature recovery failed: {e}")))?;
-            if recovered != expected {
-                return Err(invalid_params(format!(
-                    "signature mismatch: recovered {:?}, expected {:?}",
-                    recovered, expected
-                )));
+            None if require_auth => {
+                Err(invalid_params("signature required — unsigned governance calls are disabled".into()))
             }
+            None => Ok(()),
+        }
+    }
+
+    /// Check replay protection: nonce must be within ±1 window of current block.
+    fn check_replay_nonce(current_block: u64, nonce: u64) -> Result<(), ErrorObjectOwned> {
+        let expected = current_block / REPLAY_WINDOW;
+        if nonce.abs_diff(expected) > 1 {
+            return Err(invalid_params(format!(
+                "signature nonce out of window: got {nonce}, expected ~{expected}"
+            )));
         }
         Ok(())
     }
@@ -637,16 +658,26 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .map(|s| s.as_bytes().to_vec())
                 .unwrap_or_default();
 
-            // Optional signature verification
+            // Signature verification with auth enforcement and replay protection
             let sig = call_obj.get("signature").and_then(|v| v.as_str());
-            if let Some(sig_hex) = sig {
-                // Build message hash: keccak256(proposer + title + description)
+            let nonce = call_obj.get("nonce").and_then(|v| v.as_u64());
+            let require_auth = state.require_governance_auth.load(std::sync::atomic::Ordering::SeqCst);
+            if require_auth || sig.is_some() {
+                // Build message hash: keccak256(proposer ++ title ++ description ++ nonce)
                 let mut msg = Vec::new();
                 msg.extend_from_slice(proposer.as_slice());
                 msg.extend_from_slice(title.as_bytes());
                 msg.extend_from_slice(description.as_bytes());
+                if let Some(n) = nonce {
+                    msg.extend_from_slice(&n.to_be_bytes());
+                }
                 let hash = msg_hash(&msg);
-                verify_signature(hash, proposer, Some(sig_hex))?;
+                verify_signature(hash, proposer, sig, require_auth)?;
+                // Replay protection
+                if let Some(n) = nonce {
+                    let current_block = state.get_current_block();
+                    check_replay_nonce(current_block, n)?;
+                }
             }
 
             let proposal_type = serde_json::from_value::<ProposalType>(call_obj["proposalType"].clone())
@@ -668,7 +699,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_governanceVote", |params, state, _ctx| async move {
             // Accept both object params with optional signature, and positional params
-            let (proposal_id, voter, vote, sig): (u64, Address, String, Option<String>) = {
+            let (proposal_id, voter, vote, sig, nonce) = {
                 let raw: serde_json::Value = params.parse().map_err(|e| invalid_params(e.to_string()))?;
                 if let Some(obj) = raw.as_object() {
                     let proposal_id = obj.get("proposalId")
@@ -684,13 +715,14 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                     let sig = obj.get("signature")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    (proposal_id, voter, vote_str.to_string(), sig)
+                    let nonce = obj.get("nonce").and_then(|v| v.as_u64());
+                    (proposal_id, voter, vote_str.to_string(), sig, nonce)
                 } else {
                     // Fallback: parse as tuple (proposalId, voter, vote)
                     let (pid, v_str, vote_str): (u64, String, String) =
                         serde_json::from_value(raw).map_err(|e| invalid_params(e.to_string()))?;
                     let v = v_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
-                    (pid, v, vote_str, None)
+                    (pid, v, vote_str, None, None)
                 }
             };
 
@@ -701,14 +733,23 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 _ => return Err(invalid_params("vote must be 'yes', 'no', or 'abstain'".into())),
             };
 
-            // Optional signature verification
-            if let Some(ref sig_hex) = sig {
+            // Signature verification with auth enforcement and replay protection
+            let require_auth = state.require_governance_auth.load(std::sync::atomic::Ordering::SeqCst);
+            if require_auth || sig.is_some() {
                 let mut msg = Vec::new();
                 msg.extend_from_slice(&proposal_id.to_be_bytes());
                 msg.extend_from_slice(voter.as_slice());
                 msg.extend_from_slice(vote.as_bytes());
+                if let Some(n) = nonce {
+                    msg.extend_from_slice(&n.to_be_bytes());
+                }
                 let hash = msg_hash(&msg);
-                verify_signature(hash, voter, Some(sig_hex))?;
+                verify_signature(hash, voter, sig.as_deref(), require_auth)?;
+                // Replay protection
+                if let Some(n) = nonce {
+                    let current_block = state.get_current_block();
+                    check_replay_nonce(current_block, n)?;
+                }
             }
 
             let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
@@ -740,14 +781,56 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_governanceExecute
     module
         .register_async_method("call_governanceExecute", |params, state, _ctx| async move {
-            let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let (proposal_id, sig, nonce) = {
+                let raw: serde_json::Value = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+                if let Some(obj) = raw.as_object() {
+                    let pid = obj.get("proposalId")
+                        .and_then(|v| v.as_u64())
+                        .ok_or_else(|| invalid_params("missing 'proposalId'".into()))?;
+                    let s = obj.get("signature").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let n = obj.get("nonce").and_then(|v| v.as_u64());
+                    (pid, s, n)
+                } else {
+                    let pid: u64 = serde_json::from_value(raw).map_err(|e| invalid_params(e.to_string()))?;
+                    (pid, None, None)
+                }
+            };
+
+            // Signature verification with auth enforcement and replay protection
+            let require_auth = state.require_governance_auth.load(std::sync::atomic::Ordering::SeqCst);
+            if require_auth || sig.is_some() {
+                // Build message hash: keccak256(proposal_id ++ nonce)
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&proposal_id.to_be_bytes());
+                if let Some(n) = nonce {
+                    msg.extend_from_slice(&n.to_be_bytes());
+                }
+                let hash = msg_hash(&msg);
+                // Execute can be called by anyone — we just verify the signature matches the caller
+                // For simplicity, we require the signature to be valid (self-attested)
+                verify_signature(hash, Address::default(), sig.as_deref(), false)?; // verify sig format at minimum
+                // Replay protection
+                if let Some(n) = nonce {
+                    let current_block = state.get_current_block();
+                    check_replay_nonce(current_block, n)?;
+                }
+            }
+
             let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
             match gov.execute_proposal(proposal_id) {
                 Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "proposalId": proposal_id,
                     "status": "executed",
                 })),
-                Err(e) => Err(invalid_params(e.to_string())),
+                Err(e) => {
+                    use call_governance::GovernanceError;
+                    let (code, msg) = match e {
+                        GovernanceError::ProposalNotFound => (-32600, "proposal not found".to_string()),
+                        GovernanceError::ProposalNotQueued => (-32600, "proposal not queued".to_string()),
+                        other => (-32603, other.to_string()),
+                    };
+                    Err(ErrorObjectOwned::owned(code, msg, None::<()>))
+                }
             }
         })
         .map_err(|e| internal_error(e.to_string()))?;

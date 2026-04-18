@@ -23,10 +23,82 @@ pub trait ProposalExecutor: Send + Sync {
     fn on_proposal_executed(&self, proposal: &Proposal) -> Result<(), String>;
 }
 
+// ── Governance Configuration ──────────────────────────────────────────
+
+/// Quorum and timing configuration for governance proposals.
+/// Set at genesis and loaded into `GovernanceManager`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceConfig {
+    /// Validator quorum for parameter changes and slashes (basis points, 6667 = 2/3)
+    pub validator_quorum_bps: u32,
+    /// Supply quorum for protocol upgrades (basis points, 2000 = 20%)
+    pub supply_quorum_bps: u32,
+    /// Treasury spend quorum (basis points, 2000 = 20%)
+    pub treasury_quorum_bps: u32,
+    /// Simple majority threshold (basis points, 5001 = 50% + 1)
+    pub simple_majority_bps: u32,
+    /// Emergency pause signature threshold (basis points, 6667 = 2/3)
+    pub emergency_pause_bps: u32,
+    /// Review period in blocks (~2 days)
+    pub review_period_blocks: u64,
+    /// Voting period in blocks (~7 days)
+    pub voting_period_blocks: u64,
+    /// Timelock period in blocks (~7 days)
+    pub timelock_period_blocks: u64,
+    /// Execution timeout in blocks (~30 days)
+    pub execution_timeout_blocks: u64,
+}
+
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        Self {
+            validator_quorum_bps: 6667,    // 2/3
+            supply_quorum_bps: 2000,        // 20%
+            treasury_quorum_bps: 2000,      // 20%
+            simple_majority_bps: 5001,      // 50% + 1
+            emergency_pause_bps: 6667,      // 2/3
+            review_period_blocks: REVIEW_PERIOD_BLOCKS,
+            voting_period_blocks: VOTING_PERIOD_BLOCKS,
+            timelock_period_blocks: TIMELOCK_PERIOD_BLOCKS,
+            execution_timeout_blocks: EXECUTION_TIMEOUT_BLOCKS,
+        }
+    }
+}
+
+impl GovernanceConfig {
+    /// Calculate validator quorum count (ceil of total_validators * bps / 10000)
+    pub fn validator_quorum(&self, total_validators: u64) -> u64 {
+        (total_validators * self.validator_quorum_bps as u64).div_ceil(10_000)
+    }
+
+    /// Calculate supply quorum (ceil of total_supply * bps / 10000)
+    pub fn supply_quorum(&self) -> Balance {
+        (TOTAL_SUPPLY * self.supply_quorum_bps as u128) / 10_000
+    }
+
+    /// Calculate treasury quorum
+    pub fn treasury_quorum(&self) -> Balance {
+        (TOTAL_SUPPLY * self.treasury_quorum_bps as u128) / 10_000
+    }
+
+    /// Calculate simple majority quorum count
+    pub fn simple_majority(&self, total_validators: u64) -> u64 {
+        (total_validators * self.simple_majority_bps as u64).div_ceil(10_000)
+    }
+
+    /// Calculate emergency pause threshold
+    pub fn emergency_pause_threshold(&self, total_validators: u64) -> u64 {
+        (total_validators * self.emergency_pause_bps as u64).div_ceil(10_000)
+    }
+}
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 /// Proposal deposit: 10,000 CALL
 pub const PROPOSAL_DEPOSIT: Balance = 10_000 * 10u128.pow(18);
+
+/// Minimum blocks between proposal submissions by the same address (~1 day at 250ms)
+pub const PROPOSAL_COOLDOWN_BLOCKS: u64 = 345_600;
 
 /// Review period: 2 days ≈ 691,200 blocks (at 250ms block time)
 pub const REVIEW_PERIOD_BLOCKS: u64 = 691_200;
@@ -190,6 +262,18 @@ pub struct EmergencyPauseState {
     pub pause_signatures: HashMap<Address, bool>, // validator_id → signed
 }
 
+// ── Governance Events ─────────────────────────────────────────────────
+
+/// Events emitted during proposal state machine advancement.
+/// Drained each block and forwarded to WebSocket subscribers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GovernanceEvent {
+    ProposalAdvanced { id: u64, from: ProposalState, to: ProposalState },
+    ProposalExecuted { id: u64, proposal_type: String },
+    ProposalExpired { id: u64 },
+    ProposalDefeated { id: u64 },
+}
+
 // ── Governance Manager ────────────────────────────────────────────────
 
 /// Manages governance proposals, voting, and execution (per spec §13.3)
@@ -209,10 +293,18 @@ pub struct GovernanceManager {
     deposits: HashMap<Address, Balance>,
     /// Track who has voted on each proposal: proposal_id → set of voter addresses
     voted_addresses: HashMap<u64, std::collections::HashSet<Address>>,
+    /// Rate limiting: address → last submission block height
+    #[serde(skip)]
+    last_submission_block: HashMap<Address, u64>,
     /// Current block height
     current_block: u64,
     /// Emergency pause state
     pub emergency_pause: EmergencyPauseState,
+    /// Governance configuration (quorum thresholds, periods)
+    pub config: GovernanceConfig,
+    /// Events emitted during state advancement (not serialized — drained each block)
+    #[serde(skip)]
+    events: Vec<GovernanceEvent>,
     /// Optional executor for real on-chain side effects (not serialized — rewired after load)
     #[serde(skip)]
     pub executor: Option<Arc<dyn ProposalExecutor>>,
@@ -239,10 +331,19 @@ impl GovernanceManager {
             deposits: HashMap::new(),
             voted_addresses: HashMap::new(),
             current_block: 0,
+            last_submission_block: HashMap::new(),
             emergency_pause: EmergencyPauseState::default(),
+            config: GovernanceConfig::default(),
+            events: Vec::new(),
             executor: None,
             balance_source: None,
         }
+    }
+
+    /// Create with custom governance configuration.
+    pub fn with_config(mut self, config: GovernanceConfig) -> Self {
+        self.config = config;
+        self
     }
 
     /// Set a proposal executor for real on-chain side effects.
@@ -293,6 +394,14 @@ impl GovernanceManager {
         description: String,
         execution_data: Vec<u8>,
     ) -> Result<u64, GovernanceError> {
+        // Rate limiting: reject if proposer submitted within the last PROPOSAL_COOLDOWN_BLOCKS
+        if let Some(&last_block) = self.last_submission_block.get(&proposer) {
+            if self.current_block.saturating_sub(last_block) < PROPOSAL_COOLDOWN_BLOCKS {
+                let remaining = PROPOSAL_COOLDOWN_BLOCKS - (self.current_block - last_block);
+                return Err(GovernanceError::ProposalRateLimited(remaining));
+            }
+        }
+
         // Check deposit sufficiency
         let proposer_balance = self.get_voting_balance(proposer);
         if proposer_balance < PROPOSAL_DEPOSIT {
@@ -333,6 +442,7 @@ impl GovernanceManager {
         };
 
         self.proposals.insert(id, proposal);
+        self.last_submission_block.insert(proposer, self.current_block);
         Ok(id)
     }
 
@@ -419,7 +529,7 @@ impl GovernanceManager {
             // Already passed, move to queued
             let p = self.proposals.get_mut(&proposal_id).unwrap();
             p.state = ProposalState::Queued;
-            p.execution_block = Some(self.current_block + TIMELOCK_PERIOD_BLOCKS);
+            p.execution_block = Some(self.current_block + self.config.timelock_period_blocks);
             return Ok(());
         }
 
@@ -434,19 +544,22 @@ impl GovernanceManager {
 
         if has_quorum && majority_yes {
             let p = self.proposals.get_mut(&proposal_id).unwrap();
+            let from = p.state;
             // For emergency pause, skip timelock
             if matches!(proposal_type, ProposalType::EmergencyPause { .. }) {
                 p.state = ProposalState::Queued;
                 p.execution_block = Some(self.current_block);
             } else {
                 p.state = ProposalState::Queued;
-                p.execution_block = Some(self.current_block + TIMELOCK_PERIOD_BLOCKS);
+                p.execution_block = Some(self.current_block + self.config.timelock_period_blocks);
             }
+            self.events.push(GovernanceEvent::ProposalAdvanced { id: proposal_id, from, to: ProposalState::Queued });
         } else {
             let p = self.proposals.get_mut(&proposal_id).unwrap();
             p.state = ProposalState::Defeated;
             // Confiscate deposit
             self.deposits.remove(&proposer);
+            self.events.push(GovernanceEvent::ProposalDefeated { id: proposal_id });
             return Err(GovernanceError::ProposalDefeated);
         }
 
@@ -506,7 +619,7 @@ impl GovernanceManager {
 
         let execution_block = execution_block.ok_or(GovernanceError::ProposalNotQueued)?;
 
-        if self.current_block < execution_block + EXECUTION_TIMEOUT_BLOCKS {
+        if self.current_block < execution_block + self.config.execution_timeout_blocks {
             return Err(GovernanceError::ExecutionTimeoutNotReached);
         }
 
@@ -597,78 +710,102 @@ impl GovernanceManager {
     /// - Queued → Executed (timelock elapsed, auto-executed)
     pub fn advance(&mut self, current_block: u64) {
         self.current_block = current_block;
+        self.events.clear();
 
-        // Collect transitions first to avoid borrow conflicts
-        let mut to_activate = Vec::new();
-        let mut to_queue = Vec::new();
-        let mut to_defeat = Vec::new();
-        let mut to_expire = Vec::new();
-        let mut to_execute = Vec::new();
+        // Keep advancing until no more transitions are needed.
+        // This handles the case where we jump many blocks at once
+        // (e.g., from Pending straight past voting_end).
+        loop {
+            let mut to_activate = Vec::new();
+            let mut to_queue = Vec::new();
+            let mut to_defeat = Vec::new();
+            let mut to_expire = Vec::new();
+            let mut to_execute = Vec::new();
 
-        for (&id, proposal) in &self.proposals {
-            match proposal.state {
-                ProposalState::Pending => {
-                    if current_block >= proposal.start_block {
-                        to_activate.push(id);
-                    }
-                }
-                ProposalState::Active => {
-                    if current_block > proposal.end_block {
-                        if proposal.has_quorum() && proposal.is_majority_yes() {
-                            to_queue.push(id);
-                        } else {
-                            to_defeat.push(id);
+            for (&id, proposal) in &self.proposals {
+                match proposal.state {
+                    ProposalState::Pending => {
+                        if current_block >= proposal.start_block {
+                            to_activate.push(id);
                         }
                     }
-                }
-                ProposalState::Queued => {
-                    let exec = match proposal.execution_block {
-                        Some(b) => b,
-                        None => continue,
-                    };
-                    if current_block > exec + EXECUTION_TIMEOUT_BLOCKS {
-                        to_expire.push(id);
-                    } else if current_block >= exec {
-                        to_execute.push(id);
+                    ProposalState::Active => {
+                        if current_block > proposal.end_block {
+                            if proposal.has_quorum() && proposal.is_majority_yes() {
+                                to_queue.push(id);
+                            } else {
+                                to_defeat.push(id);
+                            }
+                        }
                     }
+                    ProposalState::Queued => {
+                        let exec = match proposal.execution_block {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        if current_block > exec + self.config.execution_timeout_blocks {
+                            to_expire.push(id);
+                        } else if current_block >= exec {
+                            to_execute.push(id);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+
+            if to_activate.is_empty() && to_queue.is_empty() && to_defeat.is_empty() && to_expire.is_empty() && to_execute.is_empty() {
+                break;
+            }
+
+            for id in to_activate {
+                if let Some(p) = self.proposals.get_mut(&id) {
+                    let from = p.state;
+                    p.state = ProposalState::Active;
+                    self.events.push(GovernanceEvent::ProposalAdvanced { id, from, to: ProposalState::Active });
+                    tracing::info!(proposal_id = id, "proposal advanced to active");
+                }
+            }
+
+            for id in &to_queue {
+                let _ = self.queue_proposal(*id);
+            }
+
+            for id in to_defeat {
+                if let Some(p) = self.proposals.get_mut(&id) {
+                    let _from = p.state;
+                    p.state = ProposalState::Defeated;
+                    let proposer = p.proposer;
+                    self.deposits.remove(&proposer);
+                    self.events.push(GovernanceEvent::ProposalDefeated { id });
+                    tracing::info!(proposal_id = id, "proposal defeated — deposit confiscated");
+                }
+            }
+
+            for id in to_expire {
+                if let Some(p) = self.proposals.get_mut(&id) {
+                    let _from = p.state;
+                    p.state = ProposalState::Expired;
+                    let proposer = p.proposer;
+                    self.deposits.remove(&proposer);
+                    self.events.push(GovernanceEvent::ProposalExpired { id });
+                    tracing::info!(proposal_id = id, "proposal expired — deposit confiscated");
+                }
+            }
+
+            for id in to_execute {
+                let proposal_type_str = self.proposals.get(&id)
+                    .map(|p| format!("{:?}", p.proposal_type))
+                    .unwrap_or_default();
+                let _ = self.execute_proposal(id);
+                self.events.push(GovernanceEvent::ProposalExecuted { id, proposal_type: proposal_type_str });
             }
         }
+    }
 
-        // Apply transitions
-        for id in to_activate {
-            if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Active;
-                tracing::info!(proposal_id = id, "proposal advanced to active");
-            }
-        }
-
-        for id in &to_queue {
-            let _ = self.queue_proposal(*id);
-        }
-
-        for id in to_defeat {
-            if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Defeated;
-                let proposer = p.proposer;
-                self.deposits.remove(&proposer);
-                tracing::info!(proposal_id = id, "proposal defeated — deposit confiscated");
-            }
-        }
-
-        for id in to_expire {
-            if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Expired;
-                let proposer = p.proposer;
-                self.deposits.remove(&proposer);
-                tracing::info!(proposal_id = id, "proposal expired — deposit confiscated");
-            }
-        }
-
-        for id in to_execute {
-            let _ = self.execute_proposal(id);
-        }
+    /// Drain and return governance events, clearing the internal buffer.
+    /// Called once per block by the node to forward events to subscribers.
+    pub fn drain_events(&mut self) -> Vec<GovernanceEvent> {
+        std::mem::take(&mut self.events)
     }
 
     // ── Emergency Pause ───────────────────────────────────────────────
@@ -693,7 +830,7 @@ impl GovernanceManager {
         self.emergency_pause.pause_signatures.insert(*address, true);
 
         let signed_count = self.emergency_pause.pause_signatures.len() as u64;
-        let threshold = (2 * total_validators).div_ceil(3); // ceil(2/3)
+        let threshold = self.config.emergency_pause_threshold(total_validators);
 
         if signed_count >= threshold {
             self.emergency_pause.is_paused = true;
@@ -840,42 +977,36 @@ impl GovernanceManager {
         &self,
         proposal_type: &ProposalType,
     ) -> (Balance, u64, u64) {
-        let total_validators = self.validator_addresses.len() as Balance;
-        let voting_start = self.current_block + REVIEW_PERIOD_BLOCKS;
-        let voting_end = voting_start + VOTING_PERIOD_BLOCKS;
+        let total_validators = self.validator_addresses.len() as u64;
+        let voting_start = self.current_block + self.config.review_period_blocks;
+        let voting_end = voting_start + self.config.voting_period_blocks;
 
-        let quorum = match proposal_type {
+        let quorum: Balance = match proposal_type {
             ProposalType::ParameterChange { .. } => {
-                // 2/3 of validators
-                (2 * total_validators).div_ceil(3)
+                self.config.validator_quorum(total_validators) as Balance
             }
             ProposalType::ProtocolUpgrade { .. } => {
-                // max(2/3 validators, 20% total supply)
-                let validator_quorum = (2 * total_validators).div_ceil(3);
-                let supply_quorum = TOTAL_SUPPLY / 5; // 20%
+                // max(validator quorum, supply quorum)
+                let validator_quorum = self.config.validator_quorum(total_validators) as Balance;
+                let supply_quorum = self.config.supply_quorum();
                 validator_quorum.max(supply_quorum)
             }
             ProposalType::TreasurySpend { .. } => {
-                // 20% total supply
-                TOTAL_SUPPLY / 5
+                self.config.treasury_quorum()
             }
             ProposalType::ValidatorSlash { .. } => {
-                // 2/3 of validators
-                (2 * total_validators).div_ceil(3)
+                self.config.validator_quorum(total_validators) as Balance
             }
             ProposalType::ComplianceUpdate { .. } => {
-                // Simple majority of joint voters
-                total_validators / 2 + 1
+                self.config.simple_majority(total_validators) as Balance
             }
             ProposalType::EmergencyPause { .. } => {
-                // 2/3 of validators (handled via separate signature collection)
-                (2 * total_validators).div_ceil(3)
+                self.config.emergency_pause_threshold(total_validators) as Balance
             }
             ProposalType::FeeCurrencyAdd { .. }
             | ProposalType::FeeCurrencyRemove { .. }
             | ProposalType::FeeCurrencyCap { .. } => {
-                // Simple majority of validators
-                total_validators / 2 + 1
+                self.config.simple_majority(total_validators) as Balance
             }
         };
 
@@ -923,6 +1054,8 @@ pub enum GovernanceError {
     AlreadyVoted,
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
+    #[error("proposal rate limited — {0} blocks remaining before next submission allowed")]
+    ProposalRateLimited(u64),
 }
 
 #[cfg(test)]
@@ -1246,7 +1379,7 @@ mod tests {
     fn test_emergency_pause_2_3_signatures() {
         let mut mgr = make_manager_with_validators(3);
 
-        // 2/3 of 3 = 2 signatures needed
+        // With 3 validators and 6667 BPS, ceil(3 * 6667 / 10000) = 3, so ALL 3 needed
         let result = mgr
             .emergency_pause_initiate(1, "critical bug".into())
             .unwrap();
@@ -1255,7 +1388,12 @@ mod tests {
         let result = mgr
             .emergency_pause_initiate(2, "critical bug".into())
             .unwrap();
-        assert!(result); // 2/3 reached, pause activated
+        assert!(!result); // still need one more
+
+        let result = mgr
+            .emergency_pause_initiate(3, "critical bug".into())
+            .unwrap();
+        assert!(result); // 3/3 reached, pause activated
 
         assert!(mgr.is_paused());
         assert_eq!(mgr.emergency_pause.pause_reason, "critical bug");
@@ -1491,5 +1629,348 @@ mod tests {
         // max(2/3 validators, 20% total supply)
         // 2/3 of 3 = 2, 20% of 1B = 200M
         assert_eq!(proposal.quorum_required, TOTAL_SUPPLY / 5);
+    }
+
+    // ── Auto-advance state machine ────────────────────────────────────
+
+    #[test]
+    fn test_advance_auto_transitions() {
+        let mut mgr = make_manager_with_validators(3);
+        let proposer = test_addr(10);
+        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test".into(),
+                    new_value: "1".into(),
+                },
+                "Test".into(),
+                "Test".into(),
+                vec![],
+            )
+            .unwrap();
+
+        // Initially pending
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Pending);
+
+        // Advance to review period — should auto-activate
+        mgr.advance(REVIEW_PERIOD_BLOCKS + 1);
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Active);
+
+        // Set votes for quorum
+        {
+            let p = mgr.proposals.get_mut(&id).unwrap();
+            p.voting_power_yes = 3;
+        }
+
+        // Advance past voting — should auto-queue and auto-execute
+        let voting_end = mgr.get_proposal(id).unwrap().end_block;
+        mgr.advance(voting_end + 1);
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Queued);
+
+        // Advance past timelock — should auto-execute
+        let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
+        mgr.advance(exec + 1);
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Executed);
+    }
+
+    #[test]
+    fn test_advance_auto_defeat() {
+        let mut mgr = make_manager_with_validators(3);
+        let proposer = test_addr(10);
+        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test".into(),
+                    new_value: "1".into(),
+                },
+                "Test".into(),
+                "Test".into(),
+                vec![],
+            )
+            .unwrap();
+
+        // Advance past review
+        mgr.advance(REVIEW_PERIOD_BLOCKS + 1);
+
+        // No votes — advance past voting end
+        let voting_end = mgr.get_proposal(id).unwrap().end_block;
+        mgr.advance(voting_end + 1);
+
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Defeated);
+        // Deposit confiscated
+        assert!(mgr.deposits.get(&proposer).is_none());
+    }
+
+    #[test]
+    fn test_advance_auto_expire() {
+        let mut mgr = make_manager_with_validators(3);
+        let proposer = test_addr(10);
+        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test".into(),
+                    new_value: "1".into(),
+                },
+                "Test".into(),
+                "Test".into(),
+                vec![],
+            )
+            .unwrap();
+
+        // Set votes, advance to queued
+        {
+            let p = mgr.proposals.get_mut(&id).unwrap();
+            p.voting_power_yes = 3;
+        }
+        mgr.advance(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
+
+        // Should be queued now
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Queued);
+
+        // Advance past execution timeout
+        let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
+        mgr.advance(exec + EXECUTION_TIMEOUT_BLOCKS + 1);
+
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Expired);
+        assert!(mgr.deposits.get(&proposer).is_none());
+    }
+
+    // ── Event emission ────────────────────────────────────────────────
+
+    #[test]
+    fn test_advance_emits_events() {
+        let mut mgr = make_manager_with_validators(3);
+        let proposer = test_addr(10);
+        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test".into(),
+                    new_value: "1".into(),
+                },
+                "Test".into(),
+                "Test".into(),
+                vec![],
+            )
+            .unwrap();
+
+        // Advance to active
+        mgr.advance(REVIEW_PERIOD_BLOCKS + 1);
+        let events = mgr.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], GovernanceEvent::ProposalAdvanced { id: event_id, from: ProposalState::Pending, to: ProposalState::Active } if *event_id == id));
+
+        // Set votes, advance past voting
+        {
+            let p = mgr.proposals.get_mut(&id).unwrap();
+            p.voting_power_yes = 3;
+        }
+        let voting_end = mgr.get_proposal(id).unwrap().end_block;
+        mgr.advance(voting_end + 1);
+        let events = mgr.drain_events();
+        // Queued transition emits event
+        assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalAdvanced { to: ProposalState::Queued, .. })));
+
+        // Advance past timelock to execute
+        let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
+        mgr.advance(exec + 1);
+        let events = mgr.drain_events();
+        assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalExecuted { id: event_id, .. } if *event_id == id)));
+
+        // drain_events clears the buffer
+        assert!(mgr.drain_events().is_empty());
+    }
+
+    // ── Balance source ────────────────────────────────────────────────
+
+    #[test]
+    fn test_balance_source_fallback() {
+        let mut mgr = GovernanceManager::new();
+        let addr = test_addr(1);
+
+        // Without balance_source, uses call_balances
+        mgr.set_call_balance(addr, 500_000);
+        assert_eq!(mgr.get_voting_balance(addr), 500_000);
+
+        // With balance_source set, uses external
+        mgr.balance_source = Some(Arc::new(|_| 1_000_000));
+        assert_eq!(mgr.get_voting_balance(addr), 1_000_000);
+    }
+
+    // ── GovernanceConfig ──────────────────────────────────────────────
+
+    #[test]
+    fn test_config_quorum_calculations() {
+        let config = GovernanceConfig::default();
+
+        // With div_ceil and 6667 BPS, small validator sets round up
+        assert_eq!(config.validator_quorum(3), 3); // ceil(3 * 6667 / 10000) = 3
+        assert_eq!(config.validator_quorum(10), 7); // ceil(10 * 6667 / 10000) = 7
+
+        assert_eq!(config.supply_quorum(), TOTAL_SUPPLY / 5); // 20%
+        assert_eq!(config.treasury_quorum(), TOTAL_SUPPLY / 5); // 20%
+
+        assert_eq!(config.simple_majority(3), 2); // ceil(3 * 5001 / 10000) = 2
+        assert_eq!(config.emergency_pause_threshold(3), 3); // ceil(3 * 6667 / 10000) = 3
+    }
+
+    #[test]
+    fn test_config_custom_periods() {
+        let config = GovernanceConfig {
+            review_period_blocks: 100,
+            voting_period_blocks: 500,
+            timelock_period_blocks: 1000,
+            execution_timeout_blocks: 5000,
+            ..GovernanceConfig::default()
+        };
+
+        let mut mgr = GovernanceManager::new().with_config(config.clone());
+        let proposer = test_addr(10);
+        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test".into(),
+                    new_value: "1".into(),
+                },
+                "Test".into(),
+                "Test".into(),
+                vec![],
+            )
+            .unwrap();
+
+        // Should activate at review_period_blocks (100), not default (691200)
+        mgr.advance(101);
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Active);
+    }
+
+    // ── Rate limiting ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_proposal_rate_limiting() {
+        let mut mgr = GovernanceManager::new();
+        let proposer = test_addr(1);
+        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 10);
+
+        // First proposal should succeed
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test".into(),
+                    new_value: "1".into(),
+                },
+                "Test".into(),
+                "Test".into(),
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(id, 0);
+
+        // Immediate second proposal should be rate limited
+        let result = mgr.submit_proposal(
+            proposer,
+            ProposalType::ParameterChange {
+                param_id: "test2".into(),
+                new_value: "2".into(),
+            },
+            "Test2".into(),
+            "Test2".into(),
+            vec![],
+        );
+        assert!(matches!(result, Err(GovernanceError::ProposalRateLimited(_))));
+
+        // Advance past cooldown and try again
+        mgr.set_current_block(PROPOSAL_COOLDOWN_BLOCKS + 1);
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test2".into(),
+                    new_value: "2".into(),
+                },
+                "Test2".into(),
+                "Test2".into(),
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+    }
+
+    // ── Full cycle (submit → advance → execute) ───────────────────────
+
+    #[test]
+    fn test_full_lifecycle_with_executor() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct TestExecutor {
+            executed_count: AtomicU64,
+        }
+        impl ProposalExecutor for TestExecutor {
+            fn on_proposal_executed(&self, _proposal: &Proposal) -> Result<(), String> {
+                self.executed_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut mgr = GovernanceManager::new()
+            .with_executor(Arc::new(TestExecutor { executed_count: AtomicU64::new(0) }));
+        let proposer = test_addr(10);
+        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+
+        // Register validators
+        for i in 1u8..=3 {
+            mgr.register_validator(i as u32, test_addr(i));
+            mgr.set_call_balance(test_addr(i), 1);
+        }
+
+        let id = mgr
+            .submit_proposal(
+                proposer,
+                ProposalType::ParameterChange {
+                    param_id: "test".into(),
+                    new_value: "1".into(),
+                },
+                "Test".into(),
+                "Test".into(),
+                vec![],
+            )
+            .unwrap();
+
+        // Set votes for quorum before advancing past voting
+        {
+            let p = mgr.proposals.get_mut(&id).unwrap();
+            p.voting_power_yes = 3; // All 3 validators
+        }
+
+        // Step 1: Advance past review + voting to get queued
+        mgr.advance(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Queued);
+
+        // Drain events from first advance
+        let events = mgr.drain_events();
+        assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalAdvanced { to: ProposalState::Queued, .. })));
+
+        // Step 2: Advance past timelock to execute
+        let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
+        mgr.advance(exec + 1);
+        assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Executed);
+
+        // Drain events — should include ProposalExecuted
+        let events = mgr.drain_events();
+        assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalExecuted { id: eid, .. } if *eid == id)));
     }
 }

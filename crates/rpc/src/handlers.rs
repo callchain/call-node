@@ -15,6 +15,7 @@ use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
 use crate::ws::SubscriptionManager;
 use jsonrpsee::types::ErrorObjectOwned;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -39,6 +40,9 @@ pub struct RpcState {
     pub oracle: Arc<RwLock<OracleManager>>,
     pub fork_manager: RwLock<ForkManager>,
     pub fee_currency_registry: RwLock<FeeCurrencyRegistry>,
+    /// When true, governance RPC methods require valid secp256k1 signatures.
+    /// When false (default, devnet), unsigned calls are allowed.
+    pub require_governance_auth: AtomicBool,
     #[cfg(feature = "light-client-bridge")]
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
 }
@@ -83,6 +87,7 @@ impl RpcState {
                 total_validators.max(1),
             )),
             fee_currency_registry: RwLock::new(FeeCurrencyRegistry::new()),
+            require_governance_auth: AtomicBool::new(false),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
         }
@@ -169,6 +174,12 @@ impl RpcState {
         if let Ok(mut b) = self.current_block.write() {
             *b = block;
         }
+    }
+
+    /// Enable or disable governance signature requirements.
+    /// When true, governance RPC methods require valid secp256k1 signatures.
+    pub fn set_governance_auth(&self, require_auth: bool) {
+        self.require_governance_auth.store(require_auth, Ordering::SeqCst);
     }
 
     pub fn register_agent(
@@ -646,34 +657,67 @@ impl ProposalExecutor for NodeProposalExecutor {
                 tracing::info!(version = ?version, height = activation_block, proposal_id = proposal.id, "governance protocol upgrade scheduled");
             }
             ProposalType::ValidatorSlash { validator_id, reason } => {
-                // Remove validator from consensus state
+                // Remove validator from consensus state and slash self-stake
                 let mut vs = self.state.validator_state.write().map_err(|_| "validator lock poisoned".to_string())?;
-                vs.remove_validator(*validator_id)
+                let slashed = vs.remove_validator(*validator_id)
                     .map_err(|e| format!("failed to slash validator: {e}"))?;
-                tracing::info!(validator_id, reason, "validator slashed via governance");
+                // Return slashed amount to caller (in production, would transfer to treasury)
+                let _ = slashed;
+                tracing::info!(validator_id, reason, slashed_amount = slashed, "validator slashed via governance");
             }
             ProposalType::EmergencyPause { reason } => {
                 // Already handled by GovernanceManager.apply_proposal
                 tracing::info!(reason, "emergency pause confirmed via executor");
             }
             ProposalType::ParameterChange { param_id, new_value } => {
-                // Parse new_value as JSON and apply to fee_params
+                // Parse new_value as JSON
                 match serde_json::from_str::<serde_json::Value>(new_value) {
                     Ok(val) => {
-                        let mut fp = self.state.fee_params.write().map_err(|_| "fee params lock poisoned".to_string())?;
-                        if let Some(v) = val.get("base_fee").and_then(|v| v.as_u64()) {
-                            fp.base_fee = v as u128;
+                        // Governance config updates: param_id starts with "governance."
+                        if param_id.starts_with("governance.") {
+                            let mut gov = self.state.governance.write().map_err(|_| "governance lock poisoned".to_string())?;
+                            if let Some(v) = val.get("validator_quorum_bps").and_then(|v| v.as_u64()) {
+                                gov.config.validator_quorum_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("supply_quorum_bps").and_then(|v| v.as_u64()) {
+                                gov.config.supply_quorum_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("treasury_quorum_bps").and_then(|v| v.as_u64()) {
+                                gov.config.treasury_quorum_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("simple_majority_bps").and_then(|v| v.as_u64()) {
+                                gov.config.simple_majority_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("review_period_blocks").and_then(|v| v.as_u64()) {
+                                gov.config.review_period_blocks = v;
+                            }
+                            if let Some(v) = val.get("voting_period_blocks").and_then(|v| v.as_u64()) {
+                                gov.config.voting_period_blocks = v;
+                            }
+                            if let Some(v) = val.get("timelock_period_blocks").and_then(|v| v.as_u64()) {
+                                gov.config.timelock_period_blocks = v;
+                            }
+                            if let Some(v) = val.get("execution_timeout_blocks").and_then(|v| v.as_u64()) {
+                                gov.config.execution_timeout_blocks = v;
+                            }
+                            tracing::info!(param_id, new_value, "governance config updated via executor");
+                        } else {
+                            // Standard fee params updates
+                            let mut fp = self.state.fee_params.write().map_err(|_| "fee params lock poisoned".to_string())?;
+                            if let Some(v) = val.get("base_fee").and_then(|v| v.as_u64()) {
+                                fp.base_fee = v as u128;
+                            }
+                            if let Some(v) = val.get("target_gas_per_block").and_then(|v| v.as_u64()) {
+                                fp.target_gas_per_block = v;
+                            }
+                            if let Some(v) = val.get("max_gas_per_block").and_then(|v| v.as_u64()) {
+                                fp.max_gas_per_block = v;
+                            }
+                            if let Some(v) = val.get("oracle_fee_share_bps").and_then(|v| v.as_u64()) {
+                                fp.oracle_fee_share_bps = v as u16;
+                            }
+                            tracing::info!(param_id, new_value, "parameter change applied via executor");
                         }
-                        if let Some(v) = val.get("target_gas_per_block").and_then(|v| v.as_u64()) {
-                            fp.target_gas_per_block = v;
-                        }
-                        if let Some(v) = val.get("max_gas_per_block").and_then(|v| v.as_u64()) {
-                            fp.max_gas_per_block = v;
-                        }
-                        if let Some(v) = val.get("oracle_fee_share_bps").and_then(|v| v.as_u64()) {
-                            fp.oracle_fee_share_bps = v as u16;
-                        }
-                        tracing::info!(param_id, new_value, "parameter change applied via executor");
                     }
                     Err(e) => {
                         tracing::warn!(param_id, error = %e, "failed to parse parameter change value as JSON, skipping");
