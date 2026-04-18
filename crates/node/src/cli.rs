@@ -43,6 +43,22 @@ pub struct CliArgs {
     #[arg(long)]
     pub identity_keystore_pass: Option<String>,
 
+    /// AWS KMS key ID or alias for validator signing (requires aws-kms feature)
+    #[arg(long)]
+    pub aws_kms_key_id: Option<String>,
+
+    /// HashiCorp Vault address for validator signing (requires hashi-vault feature)
+    #[arg(long)]
+    pub vault_addr: Option<String>,
+
+    /// HashiCorp Vault token for validator signing
+    #[arg(long)]
+    pub vault_token: Option<String>,
+
+    /// HashiCorp Vault transit key name for validator signing
+    #[arg(long)]
+    pub vault_key_name: Option<String>,
+
     // ── Genesis ───────────────────────────────────────────────────────
 
     /// Path to genesis JSON file

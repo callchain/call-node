@@ -42,6 +42,13 @@ pub struct ValidatorStake {
     pub rewards: u128,
     pub slash_history: Vec<SlashEvent>,
     pub unbonding_start: Option<u64>, // block height when unbonding started
+    /// BLS12-381 public key for aggregated vote signatures (48 bytes compressed)
+    #[serde(default = "default_bls_pubkey", with = "serde_bytes")]
+    pub bls_pubkey: [u8; 48],
+}
+
+fn default_bls_pubkey() -> [u8; 48] {
+    [0u8; 48]
 }
 
 /// Pending unbonding request
@@ -126,9 +133,25 @@ impl ValidatorStateManager {
                 rewards: 0,
                 slash_history: Vec::new(),
                 unbonding_start: None,
+                bls_pubkey: [0u8; 48],
             },
         );
         Ok(id)
+    }
+
+    /// Set the BLS12-381 public key for an existing validator.
+    /// Called after staking when the validator registers their BLS key.
+    pub fn set_validator_bls_pubkey(
+        &mut self,
+        validator_id: ValidatorId,
+        bls_pubkey: [u8; 48],
+    ) -> Result<(), ConsensusError> {
+        let validator = self
+            .validators
+            .get_mut(&validator_id)
+            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
+        validator.bls_pubkey = bls_pubkey;
+        Ok(())
     }
 
     /// Delegate CALL to an existing validator

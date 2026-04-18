@@ -21,6 +21,7 @@ call-shielded.workspace = true
 call-crypto.workspace = true
 call-transaction-pool.workspace = true
 call-chainspec.workspace = true
+call-network.workspace = true
 alloy-consensus.workspace = true
 thiserror.workspace = true
 serde.workspace = true

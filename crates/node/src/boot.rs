@@ -8,7 +8,7 @@ use crate::CallNode;
 use call_network::CommonwareConfig;
 use call_primitives::Address;
 use call_rpc::RpcConfig;
-use call_crypto::{LocalSigner, EncryptedKeystore, SignerRef, load_key as load_keystore_key};
+use call_crypto::{LocalSigner, SignerRef, load_key as load_keystore_key, bls_generate, bls_public_key_bytes};
 use serde::Deserialize;
 use std::fs;
 use std::sync::Arc;
@@ -116,9 +116,8 @@ fn parse_pubkey(s: &str) -> Result<[u8; 32], String> {
     Ok(arr)
 }
 
-/// Load validator signer from keystore or plaintext key
-fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<SignerRef, String> {
-    // Priority: keystore > plaintext hex
+/// Load validator signer from configured key source
+async fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<SignerRef, String> {
     if let Some(ref path) = keys.validator_keystore {
         let pass = keys.validator_keystore_pass
             .clone()
@@ -134,8 +133,36 @@ fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<SignerRef, 
             .map_err(|e| format!("invalid validator key: {e}"))?;
         info!("WARNING: using plaintext validator key — use --validator-keystore for production");
         Ok(Arc::new(signer))
+    } else if let Some(ref key_id) = keys.aws_kms_key_id {
+        #[cfg(feature = "aws-kms")]
+        {
+            let signer = call_crypto::AwsKmsSigner::new(key_id.clone()).await
+                .map_err(|e| format!("failed to create AWS KMS signer: {e}"))?;
+            Ok(Arc::new(signer))
+        }
+        #[cfg(not(feature = "aws-kms"))]
+        {
+            let _ = key_id;
+            Err("AWS KMS support not compiled in (enable aws-kms feature)".into())
+        }
+    } else if let Some(ref vault_addr) = keys.vault_addr {
+        #[cfg(feature = "hashi-vault")]
+        {
+            let token = keys.vault_token.clone()
+                .ok_or("--vault-token required")?;
+            let key_name = keys.vault_key_name.clone()
+                .ok_or("--vault-key-name required")?;
+            let signer = call_crypto::HashiVaultSigner::new(vault_addr.clone(), token, key_name).await
+                .map_err(|e| format!("failed to create Vault signer: {e}"))?;
+            Ok(Arc::new(signer))
+        }
+        #[cfg(not(feature = "hashi-vault"))]
+        {
+            let _ = vault_addr;
+            Err("HashiVault support not compiled in (enable hashi-vault feature)".into())
+        }
     } else {
-        Err("validator key required (use --validator-keystore or --validator-key)".into())
+        Err("validator key required (use --validator-keystore, --validator-key, --aws-kms-key-id, or --vault-addr)".into())
     }
 }
 
@@ -159,13 +186,34 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
 
     // Step 2b: Load validator signing key (if validator mode)
     if config.mode == NodeMode::Validator {
-        let signer = load_validator_signer(&config.keys)?;
+        let signer = load_validator_signer(&config.keys).await?;
         info!(
             address = ?signer.address(),
             kind = ?signer.kind(),
             "validator signing key loaded"
         );
         *node.state.signer.write().map_err(|_| "lock poisoned")? = Some(signer);
+
+        // Generate BLS12-381 keypair for aggregated vote signing
+        let (bls_secret, bls_pubkey) = bls_generate()
+            .map_err(|e| format!("failed to generate BLS keypair: {e}"))?;
+        *node.state.bls_secret_key.write().map_err(|_| "lock poisoned")? = Some(bls_secret);
+
+        // Register BLS pubkey with the validator state if this validator is known
+        {
+            let signer_guard = node.state.signer.read().map_err(|_| "lock poisoned")?;
+            if let Some(ref s) = *signer_guard {
+                let validator_addr = s.address();
+                let mut vs = node.state.validator_state.write().map_err(|_| "lock poisoned")?;
+                for (id, stake) in vs.get_all_validators().clone().iter() {
+                    if stake.address == validator_addr {
+                        let _ = vs.set_validator_bls_pubkey(*id, bls_public_key_bytes(&bls_pubkey));
+                        info!(validator_id = id, "registered BLS pubkey for validator");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // Step 3: Load genesis if path provided

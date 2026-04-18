@@ -15,7 +15,8 @@ use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
 };
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission};
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, BlockVote};
+use call_crypto::{bls_sign, bls_aggregate, bls_verify, BlsPublicKey, BlsSignature};
 use call_primitives::BlockHash;
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
@@ -52,6 +53,7 @@ const TX_CHANNEL: u64 = 1;
 const BLOCK_CHANNEL: u64 = 2;
 const SYNC_CHANNEL: u64 = 3;
 const ORACLE_CHANNEL: u64 = 4;
+const VOTE_CHANNEL: u64 = 5;
 
 /// The Callchain node
 pub struct CallNode {
@@ -249,15 +251,19 @@ impl CallNode {
             let mut empty_rounds = 0;
 
             // Build light client from current validator set once at the start
-            let (trusted_validators, total_validators) = {
+            let (trusted_validators, total_validators, bls_pubkeys) = {
                 let validator_state = state.validator_state.read().unwrap();
                 let validators = validator_state.get_all_validators();
                 let total = validators.len() as u32;
-                let mut map = std::collections::HashMap::new();
+                let mut ed25519_map = std::collections::HashMap::new();
+                let mut bls_map = std::collections::HashMap::new();
                 for (id, stake) in validators.iter() {
-                    map.insert(*id, stake.ed25519_pubkey);
+                    ed25519_map.insert(*id, stake.ed25519_pubkey);
+                    if stake.bls_pubkey != [0u8; 48] {
+                        bls_map.insert(*id, stake.bls_pubkey);
+                    }
                 }
-                (map, total)
+                (ed25519_map, total, bls_map)
             };
 
             let mut light_client = LightClient::new(
@@ -265,6 +271,7 @@ impl CallNode {
                 trusted_validators,
                 total_validators,
             );
+            light_client.set_bls_pubkeys(bls_pubkeys);
 
             loop {
                 // Check if we have peers
@@ -963,6 +970,23 @@ async fn block_production_loop(
         };
         block.finalize(&result);
 
+        // 3b. Sign the block (if validator with signing key)
+        {
+            let signer_guard = state.signer.read().unwrap();
+            if let Some(ref signer) = *signer_guard {
+                let block_hash = block.header.hash();
+                match signer.sign(&block_hash) {
+                    Ok(sig) => {
+                        block.header.signature = call_consensus::BlockSignature(sig);
+                        tracing::debug!(height, proposer, "block signed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(height, error = ?e, "block signing failed");
+                    }
+                }
+            }
+        }
+
         // 4. Request oracle price submissions from validators before advancing
         let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
         if is_oracle_boundary {
@@ -1133,6 +1157,62 @@ async fn block_production_loop(
             let msg = serde_json::to_vec(&NetworkMessage::BlockAnnouncement(announcement))
                 .expect("serialize block announcement");
             net.broadcast(BLOCK_CHANNEL, msg).await;
+
+            // 15b. Collect BLS votes from validators
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let votes = {
+                let mut pending = state.pending_votes.write().unwrap();
+                std::mem::take(&mut *pending)
+            };
+
+            let block_hash = block.header.hash();
+            let validator_state = state.validator_state.read().unwrap();
+            let validator_count = validator_state.get_all_validators().len();
+            let mut valid_sigs: Vec<BlsSignature> = Vec::new();
+            let mut voter_bitmap = vec![0u8; (validator_count + 7) / 8];
+
+            for vote in votes {
+                if vote.block_hash != block_hash || vote.height != height {
+                    continue;
+                }
+                if let Some(stake) = validator_state.get_validator_stake(vote.validator_id) {
+                    if stake.bls_pubkey == [0u8; 48] {
+                        continue; // validator hasn't registered BLS key
+                    }
+                    let pk = BlsPublicKey(stake.bls_pubkey);
+                    let sig = BlsSignature(vote.bls_signature);
+                    if bls_verify(&pk, &block_hash.0, &sig).is_ok() {
+                        valid_sigs.push(sig);
+                        let byte_idx = (vote.validator_id / 8) as usize;
+                        let bit_idx = (vote.validator_id % 8) as u8;
+                        if byte_idx < voter_bitmap.len() {
+                            voter_bitmap[byte_idx] |= 1 << bit_idx;
+                        }
+                    }
+                }
+            }
+            drop(validator_state);
+
+            // Aggregate and update header if we have enough votes
+            if valid_sigs.len() >= 2 {
+                match bls_aggregate(&valid_sigs) {
+                    Ok(agg) => {
+                        block.header.bls_aggregate_signature = Some(agg.0.to_vec());
+                        block.header.bls_signer_bitmap = voter_bitmap;
+                        tracing::info!(
+                            height,
+                            votes = valid_sigs.len(),
+                            "aggregated BLS signatures into block header"
+                        );
+                        // Re-persist block with updated aggregate signature
+                        let _ = persist_block(&db.data_dir, height, &block);
+                    }
+                    Err(e) => {
+                        tracing::warn!(height, error = ?e, "BLS aggregation failed");
+                    }
+                }
+            }
         }
     }
 }
@@ -1260,6 +1340,50 @@ fn handle_network_message(
                         local = local_height,
                         "block announcement: already caught up"
                     );
+
+                    // If this node is a validator with a BLS key, cast a vote
+                    let state_clone = Arc::clone(state);
+                    let net_clone = Arc::clone(network);
+                    tokio::spawn(async move {
+                        let bls_secret = {
+                            let sk = state_clone.bls_secret_key.read().unwrap();
+                            sk.clone()
+                        };
+                        if let Some(secret) = bls_secret {
+                            // Find our validator ID
+                            let signer_addr = {
+                                let signer = state_clone.signer.read().unwrap();
+                                signer.as_ref().map(|s| s.address())
+                            };
+                            if let Some(addr) = signer_addr {
+                                let our_id = {
+                                    let vs = state_clone.validator_state.read().unwrap();
+                                    let mut id = None;
+                                    for (vid, stake) in vs.get_all_validators().iter() {
+                                        if stake.address == addr {
+                                            id = Some(*vid);
+                                            break;
+                                        }
+                                    }
+                                    id
+                                };
+                                if let Some(validator_id) = our_id {
+                                    let block_hash_bytes = announcement.block_hash.0;
+                                    let sig = bls_sign(&secret, &block_hash_bytes);
+                                    let vote = BlockVote {
+                                        height: announcement.height,
+                                        block_hash: announcement.block_hash,
+                                        validator_id,
+                                        bls_signature: sig.0,
+                                    };
+                                    if let Ok(msg) = serde_json::to_vec(&NetworkMessage::BlockVote(vote)) {
+                                        net_clone.broadcast(VOTE_CHANNEL, msg).await;
+                                        tracing::debug!(height = announcement.height, validator_id, "broadcast BLS block vote");
+                                    }
+                                }
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -1331,6 +1455,14 @@ fn handle_network_message(
                         tracing::debug!(error = %e, validator_id = submission.validator_id, "oracle P2P submission rejected");
                     }
                 });
+            }
+        }
+        VOTE_CHANNEL => {
+            if let Ok(vote) = serde_json::from_slice::<BlockVote>(data) {
+                // Queue vote for the block production loop to aggregate
+                if let Ok(mut pending) = state.pending_votes.write() {
+                    pending.push(vote);
+                }
             }
         }
         _ => {}

@@ -60,6 +60,14 @@ pub struct KeysConfig {
     pub identity_keystore: Option<PathBuf>,
     #[serde(default)]
     pub identity_keystore_pass: Option<String>,
+    #[serde(default)]
+    pub aws_kms_key_id: Option<String>,
+    #[serde(default)]
+    pub vault_addr: Option<String>,
+    #[serde(default)]
+    pub vault_token: Option<String>,
+    #[serde(default)]
+    pub vault_key_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -230,6 +238,18 @@ impl NodeConfig {
         if args.identity_keystore_pass.is_some() {
             self.keys.identity_keystore_pass.clone_from(&args.identity_keystore_pass);
         }
+        if args.aws_kms_key_id.is_some() {
+            self.keys.aws_kms_key_id.clone_from(&args.aws_kms_key_id);
+        }
+        if args.vault_addr.is_some() {
+            self.keys.vault_addr.clone_from(&args.vault_addr);
+        }
+        if args.vault_token.is_some() {
+            self.keys.vault_token.clone_from(&args.vault_token);
+        }
+        if args.vault_key_name.is_some() {
+            self.keys.vault_key_name.clone_from(&args.vault_key_name);
+        }
 
         // Genesis
         if args.genesis_path.is_some() {
@@ -290,14 +310,22 @@ impl NodeConfig {
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == NodeMode::Validator {
-            let has_validator_key = self.keys.validator_key.is_some();
-            let has_validator_keystore = self.keys.validator_keystore.is_some();
+            let key_sources = [
+                ("--validator-key", self.keys.validator_key.is_some()),
+                ("--validator-keystore", self.keys.validator_keystore.is_some()),
+                ("--aws-kms-key-id", self.keys.aws_kms_key_id.is_some()),
+                ("--vault-addr", self.keys.vault_addr.is_some()),
+            ];
+            let active_sources: Vec<_> = key_sources.iter().filter(|(_, active)| *active).collect();
 
-            if !has_validator_key && !has_validator_keystore {
-                return Err("validator mode requires --validator-key or --validator-keystore".into());
+            if active_sources.is_empty() {
+                return Err("validator mode requires one key source: --validator-key, --validator-keystore, --aws-kms-key-id, or --vault-addr".into());
             }
-            if has_validator_key && has_validator_keystore {
-                return Err("provide either --validator-key or --validator-keystore, not both".into());
+            if active_sources.len() > 1 {
+                return Err(format!(
+                    "provide exactly one key source, got: {}",
+                    active_sources.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
+                ));
             }
             if let Some(ref key) = self.keys.validator_key {
                 if key.len() != 128 {
@@ -307,6 +335,14 @@ impl NodeConfig {
             if let Some(ref path) = self.keys.validator_keystore {
                 if !path.exists() {
                     return Err(format!("validator keystore file not found: {}", path.display()));
+                }
+            }
+            if self.keys.vault_addr.is_some() {
+                if self.keys.vault_token.is_none() {
+                    return Err("--vault-token required when using --vault-addr".into());
+                }
+                if self.keys.vault_key_name.is_none() {
+                    return Err("--vault-key-name required when using --vault-addr".into());
                 }
             }
         }

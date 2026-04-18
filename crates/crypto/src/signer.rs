@@ -110,33 +110,259 @@ impl Signer for LocalSigner {
     }
 }
 
-/// AWS KMS signer stub — requires `aws-kms` feature flag
+/// AWS KMS signer — requires `aws-kms` feature flag
 ///
-/// Actual implementation requires `aws-sdk-kms` which is a heavy dependency.
-/// The trait interface is ready; the concrete impl can be added when needed.
+/// Uses AWS KMS `Sign` API with ECDSA_SECP256K1 signing algorithm.
+/// The private key never leaves AWS — only signatures are returned.
 #[cfg(feature = "aws-kms")]
 pub struct AwsKmsSigner {
-    _key_id: String,
-    _cached_pubkey: PublicKey,
-    _cached_address: Address,
+    client: aws_sdk_kms::Client,
+    key_id: String,
+    pubkey: PublicKey,
+    address: Address,
+}
+
+#[cfg(feature = "aws-kms")]
+impl AwsKmsSigner {
+    /// Create a new AWS KMS signer.
+    ///
+    /// `key_id` is the KMS key ARN or alias (e.g., "alias/validator-key").
+    /// The public key is fetched from KMS at construction and cached.
+    pub async fn new(key_id: String) -> Result<Self, SignerError> {
+        let config = aws_config::load_from_env().await;
+        let client = aws_sdk_kms::Client::new(&config);
+
+        // Fetch and cache the public key
+        let resp = client
+            .get_public_key()
+            .key_id(&key_id)
+            .send()
+            .await
+            .map_err(|e| SignerError::KmsError(format!("get_public_key: {e}")))?;
+
+        let pk_der = resp.public_key()
+            .ok_or_else(|| SignerError::KmsError("no public key in response".into()))?
+            .as_ref();
+
+        // Parse SEC1 uncompressed public key (0x04 || x || y)
+        let pubkey = Self::parse_sec1_pubkey(pk_der)?;
+        let address = pubkey_to_address(&pubkey);
+
+        Ok(Self { client, key_id, pubkey, address })
+    }
+
+    fn parse_sec1_pubkey(der: &[u8]) -> Result<PublicKey, SignerError> {
+        // SEC1 uncompressed: 0x04 || 32-byte x || 32-byte y
+        if der.len() != 65 || der[0] != 0x04 {
+            return Err(SignerError::KmsError(
+                format!("expected 65-byte uncompressed SEC1 key, got {} bytes", der.len())
+            ));
+        }
+        let mut pubkey = [0u8; 64];
+        pubkey.copy_from_slice(&der[1..]);
+        Ok(PublicKey::from(pubkey))
+    }
 }
 
 #[cfg(feature = "aws-kms")]
 impl Signer for AwsKmsSigner {
-    fn sign(&self, _msg_hash: &[u8; 32]) -> Result<Signature, SignerError> {
-        Err(SignerError::KmsError("AWS KMS not yet implemented".into()))
+    fn sign(&self, msg_hash: &[u8; 32]) -> Result<Signature, SignerError> {
+        use aws_sdk_kms::types::SigningAlgorithmSpec;
+
+        // Block on the async KMS call using tokio's current runtime
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|e| SignerError::KmsError(format!("no tokio runtime: {e}")))?;
+
+        let sig_resp = rt.block_on(async {
+            self.client
+                .sign()
+                .key_id(&self.key_id)
+                .signing_algorithm(SigningAlgorithmSpec::EcdsaSecp256k1)
+                .message(aws_sdk_kms::types::Blob::new(msg_hash.as_slice()))
+                .message_type(aws_sdk_kms::types::MessageType::Digest)
+                .send()
+                .await
+        }).map_err(|e| SignerError::KmsError(format!("KMS sign failed: {e}")))?;
+
+        let sig_der = sig_resp.signature()
+            .ok_or_else(|| SignerError::KmsError("no signature in KMS response".into()))?
+            .as_ref();
+
+        // Convert DER signature to raw 65-byte (r || s || v)
+        Self::der_to_raw(sig_der)
     }
 
     fn public_key(&self) -> PublicKey {
-        self._cached_pubkey
+        self.pubkey
     }
 
     fn address(&self) -> Address {
-        self._cached_address
+        self.address
     }
 
     fn kind(&self) -> SignerKind {
         SignerKind::AwsKms
+    }
+}
+
+#[cfg(feature = "aws-kms")]
+impl AwsKmsSigner {
+    /// Convert ASN.1 DER ECDSA signature to raw 65-byte format (r || s || v)
+    fn der_to_raw(der: &[u8]) -> Result<Signature, SignerError> {
+        use k256::ecdsa::Signature as K256Sig;
+        let sig = K256Sig::from_der(der)
+            .map_err(|e| SignerError::KmsError(format!("DER parse: {e}")))?;
+
+        let r_bytes = sig.r().to_bytes();
+        let s_bytes = sig.s().to_bytes();
+
+        let mut result = [0u8; 65];
+        result[..32].copy_from_slice(&r_bytes);
+        result[32..64].copy_from_slice(&s_bytes);
+        result[64] = 0; // recovery id — AWS KMS doesn't provide this; caller must recover
+        Ok(result)
+    }
+}
+
+/// HashiCorp Vault transit signer — requires `hashi-vault` feature flag
+///
+/// Uses Vault's transit/sign API. The private key is stored in Vault;
+/// only signatures are returned.
+#[cfg(feature = "hashi-vault")]
+pub struct HashiVaultSigner {
+    vault_addr: String,
+    token: String,
+    key_name: String,
+    pubkey: PublicKey,
+    address: Address,
+}
+
+#[cfg(feature = "hashi-vault")]
+impl HashiVaultSigner {
+    /// Create a new Vault transit signer.
+    ///
+    /// `vault_addr`: e.g., "http://127.0.0.1:8200"
+    /// `token`: Vault authentication token
+    /// `key_name`: transit key name (e.g., "validator-key")
+    pub async fn new(
+        vault_addr: String,
+        token: String,
+        key_name: String,
+    ) -> Result<Self, SignerError> {
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/transit/keys/{}", vault_addr.trim_end_matches('/'), key_name);
+
+        let resp = client
+            .get(&url)
+            .header("X-Vault-Token", &token)
+            .send()
+            .await
+            .map_err(|e| SignerError::KmsError(format!("vault request: {e}")))?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| SignerError::KmsError(format!("vault json: {e}")))?;
+
+        let pubkey_b64 = body
+            .get("data")
+            .and_then(|d| d.get("keys"))
+            .and_then(|k| k.as_object())
+            .and_then(|m| m.values().next())
+            .and_then(|v| v.get("public_key"))
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| SignerError::KmsError("no public key in vault response".into()))?;
+
+        let pk_der = base64::decode(pubkey_b64)
+            .map_err(|e| SignerError::KmsError(format!("base64: {e}")))?;
+
+        let pubkey = Self::parse_sec1_pubkey(&pk_der)?;
+        let address = pubkey_to_address(&pubkey);
+
+        Ok(Self { vault_addr, token, key_name, pubkey, address })
+    }
+
+    fn parse_sec1_pubkey(der: &[u8]) -> Result<PublicKey, SignerError> {
+        if der.len() != 65 || der[0] != 0x04 {
+            return Err(SignerError::KmsError(
+                format!("expected 65-byte uncompressed SEC1 key, got {} bytes", der.len())
+            ));
+        }
+        let mut pubkey = [0u8; 64];
+        pubkey.copy_from_slice(&der[1..]);
+        Ok(PublicKey::from(pubkey))
+    }
+}
+
+#[cfg(feature = "hashi-vault")]
+impl Signer for HashiVaultSigner {
+    fn sign(&self, msg_hash: &[u8; 32]) -> Result<Signature, SignerError> {
+        let client = reqwest::blocking::Client::new();
+        let url = format!(
+            "{}/v1/transit/sign/{}/sha2-256",
+            self.vault_addr.trim_end_matches('/'),
+            self.key_name
+        );
+
+        let body = serde_json::json!({
+            "input": base64::encode(msg_hash)
+        });
+
+        let resp = client
+            .post(&url)
+            .header("X-Vault-Token", &self.token)
+            .json(&body)
+            .send()
+            .map_err(|e| SignerError::KmsError(format!("vault sign request: {e}")))?;
+
+        let resp_json: serde_json::Value = resp
+            .json()
+            .map_err(|e| SignerError::KmsError(format!("vault sign json: {e}")))?;
+
+        let sig_b64 = resp_json
+            .get("data")
+            .and_then(|d| d.get("signature"))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| SignerError::KmsError("no signature in vault response".into()))?;
+
+        // Vault returns signatures as "vault:v1:BASE64"
+        let sig_bytes = if let Some(idx) = sig_b64.rfind(':') {
+            base64::decode(&sig_b64[idx + 1..])
+        } else {
+            base64::decode(sig_b64)
+        }.map_err(|e| SignerError::KmsError(format!("base64: {e}")))?;
+
+        Self::der_to_raw(&sig_bytes)
+    }
+
+    fn public_key(&self) -> PublicKey {
+        self.pubkey
+    }
+
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn kind(&self) -> SignerKind {
+        SignerKind::HashiVault
+    }
+}
+
+#[cfg(feature = "hashi-vault")]
+impl HashiVaultSigner {
+    fn der_to_raw(der: &[u8]) -> Result<Signature, SignerError> {
+        use k256::ecdsa::Signature as K256Sig;
+        let sig = K256Sig::from_der(der)
+            .map_err(|e| SignerError::KmsError(format!("DER parse: {e}")))?;
+
+        let r_bytes = sig.r().to_bytes();
+        let s_bytes = sig.s().to_bytes();
+
+        let mut result = [0u8; 65];
+        result[..32].copy_from_slice(&r_bytes);
+        result[32..64].copy_from_slice(&s_bytes);
+        result[64] = 0;
+        Ok(result)
     }
 }
 

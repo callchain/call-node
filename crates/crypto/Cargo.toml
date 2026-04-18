@@ -8,6 +8,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+aws-kms = ["dep:aws-config", "dep:aws-sdk-kms", "dep:tokio"]
+hashi-vault = ["dep:reqwest"]
+
 [dependencies]
 call-primitives.workspace = true
 k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
@@ -25,9 +29,10 @@ blst = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
-
-[features]
-aws-kms = []
+reqwest = { workspace = true, optional = true }
+aws-config = { version = "1.5", optional = true }
+aws-sdk-kms = { version = "1.37", optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 hex-literal = "0.4"

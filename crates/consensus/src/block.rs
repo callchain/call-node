@@ -71,6 +71,10 @@ pub struct BlockHeader {
     pub receipt_root: Hash,
     pub proposer: call_primitives::ValidatorId,
     pub signature: BlockSignature,
+    /// Optional BLS12-381 aggregated signature for light client verification
+    pub bls_aggregate_signature: Option<Vec<u8>>,
+    /// Bitmask of which validators contributed to the BLS aggregate (bit i = validator i)
+    pub bls_signer_bitmap: Vec<u8>,
 }
 
 impl BlockHeader {
@@ -86,6 +90,8 @@ impl BlockHeader {
         data.extend_from_slice(self.receipt_root.as_slice());
         data.extend_from_slice(&self.proposer.to_le_bytes());
         data.extend_from_slice(&self.signature.0);
+        // Note: bls_aggregate_signature is intentionally excluded from the hash
+        // because it is a consensus seal added after the block content is finalized.
         keccak256(&data)
     }
 
@@ -175,6 +181,8 @@ impl Block {
             receipt_root: Hash::ZERO,
             proposer,
             signature: BlockSignature::default(),
+            bls_aggregate_signature: None,
+            bls_signer_bitmap: Vec::new(),
         };
 
         Self {
@@ -539,6 +547,8 @@ mod tests {
             receipt_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
+            bls_aggregate_signature: None,
+            bls_signer_bitmap: Vec::new(),
         };
 
         let hash = header.hash();
@@ -561,6 +571,8 @@ mod tests {
             receipt_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
+            bls_aggregate_signature: None,
+            bls_signer_bitmap: Vec::new(),
         };
 
         assert!(header.validate(BlockHash::repeat_byte(1)).is_ok());

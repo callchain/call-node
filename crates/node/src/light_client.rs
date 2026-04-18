@@ -11,7 +11,7 @@ use call_shielded::{
     verify_merkle_path, verify_zk_proof, ZkProof,
     IncrementalMerkleTree,
 };
-use call_crypto::keccak256;
+use call_crypto::{keccak256, BlsPublicKey, BlsSignature, bls_verify_aggregate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -153,6 +153,8 @@ pub struct LightClient {
     verified_headers: HashMap<u64, BlockHash>,
     /// Total validators in the active set
     pub total_validators: u32,
+    /// BLS12-381 public keys for aggregated signature verification
+    pub bls_pubkeys: HashMap<ValidatorId, [u8; 48]>,
 }
 
 /// Sync checkpoint for fast initial sync
@@ -178,7 +180,13 @@ impl LightClient {
             checkpoint: None,
             verified_headers: HashMap::new(),
             total_validators,
+            bls_pubkeys: HashMap::new(),
         }
+    }
+
+    /// Set BLS12-381 public keys for validators (used for aggregate sig verification)
+    pub fn set_bls_pubkeys(&mut self, pubkeys: HashMap<ValidatorId, [u8; 48]>) {
+        self.bls_pubkeys = pubkeys;
     }
 
     /// Set sync checkpoint (for initial sync from checkpoint)
@@ -214,12 +222,63 @@ impl LightClient {
 
         // 2. Verify 2/3+ validator signatures
         let required = self.quorum();
-        let valid_count = signatures.valid_count(&self.trusted_validators);
-        if valid_count < required {
-            return Err(LightClientError::InsufficientSignatures {
-                got: valid_count,
-                required,
-            });
+        let mut sigs_ok = false;
+
+        // Prefer BLS aggregate verification when available
+        if let Some(ref agg_sig_bytes) = header.bls_aggregate_signature {
+            if !header.bls_signer_bitmap.is_empty() && !self.bls_pubkeys.is_empty() {
+                let mut bls_pubkeys = Vec::new();
+                let mut vote_count = 0usize;
+                for byte_idx in 0..header.bls_signer_bitmap.len() {
+                    let byte = header.bls_signer_bitmap[byte_idx];
+                    for bit_idx in 0..8 {
+                        if byte & (1 << bit_idx) != 0 {
+                            let validator_id = (byte_idx * 8 + bit_idx) as u32;
+                            if let Some(pk) = self.bls_pubkeys.get(&validator_id) {
+                                bls_pubkeys.push(BlsPublicKey(*pk));
+                                vote_count += 1;
+                            }
+                        }
+                    }
+                }
+                if vote_count >= required {
+                    let agg_sig = if agg_sig_bytes.len() == 96 {
+                        let mut arr = [0u8; 96];
+                        arr.copy_from_slice(agg_sig_bytes);
+                        BlsSignature(arr)
+                    } else {
+                        return Err(LightClientError::InvalidBlsAggregate(
+                            "aggregate signature must be 96 bytes".into(),
+                        ));
+                    };
+                    let block_hash = header.hash();
+                    let block_hash_bytes = block_hash.as_slice();
+                    match bls_verify_aggregate(&bls_pubkeys, block_hash_bytes, &agg_sig) {
+                        Ok(()) => sigs_ok = true,
+                        Err(e) => {
+                            return Err(LightClientError::InvalidBlsAggregate(format!(
+                                "BLS verification failed: {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(LightClientError::InsufficientSignatures {
+                        got: vote_count,
+                        required,
+                    });
+                }
+            }
+        }
+
+        // Fallback: secp256k1-style signature counting
+        if !sigs_ok {
+            let valid_count = signatures.valid_count(&self.trusted_validators);
+            if valid_count < required {
+                return Err(LightClientError::InsufficientSignatures {
+                    got: valid_count,
+                    required,
+                });
+            }
         }
 
         // 3. State root consistency (only if checkpoint is set and height matches)
@@ -391,6 +450,8 @@ pub enum LightClientError {
     CommitmentMismatch,
     #[error("chain ID mismatch")]
     ChainIdMismatch,
+    #[error("invalid BLS aggregate signature: {0}")]
+    InvalidBlsAggregate(String),
 }
 
 // ── Light Client RPC Methods (spec §23.2) ──────────────────────────
@@ -528,6 +589,8 @@ mod tests {
             receipt_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
+            bls_aggregate_signature: None,
+            bls_signer_bitmap: Vec::new(),
         }
     }
 
@@ -850,5 +913,95 @@ mod tests {
             merkle_proofs: vec![],
         };
         assert_eq!(proof.encrypted_notes.len(), 1);
+    }
+
+    #[test]
+    fn test_light_client_verify_header_bls_aggregate() {
+        use call_crypto::{bls_aggregate, bls_generate, bls_sign};
+
+        let validators = make_validators(3);
+        let mut client = LightClient::new(1, validators.clone(), 3);
+
+        // Generate BLS keys for 3 validators (IDs 1, 2, 3)
+        let mut bls_pubkeys = HashMap::new();
+        let mut bls_secrets = Vec::new();
+        for i in 1..=3 {
+            let (sk, pk) = bls_generate().unwrap();
+            bls_pubkeys.insert(i, pk.0);
+            bls_secrets.push((i, sk));
+        }
+        client.set_bls_pubkeys(bls_pubkeys);
+
+        // Create a block header
+        let genesis = make_header(0, BlockHash::ZERO);
+        let block_hash = genesis.hash();
+
+        // Have validators 1 and 2 sign → 2/3 quorum (ceil(2/3 * 3) = 2)
+        let mut sigs = Vec::new();
+        for (id, sk) in &bls_secrets[..2] {
+            sigs.push((*id, bls_sign(sk, block_hash.as_slice())));
+        }
+        let agg_sig = bls_aggregate(&sigs.iter().map(|(_, s)| *s).collect::<Vec<_>>()).unwrap();
+
+        // Build bitmap: validator 1 → bit 1, validator 2 → bit 2
+        let mut bitmap = vec![0u8; 1];
+        bitmap[0] |= 1 << 1; // validator 1
+        bitmap[0] |= 1 << 2; // validator 2
+
+        let mut header = genesis;
+        header.bls_aggregate_signature = Some(agg_sig.0.to_vec());
+        header.bls_signer_bitmap = bitmap;
+
+        // BLS verification should pass even with empty secp256k1 signatures
+        let empty_sigs = BlockSignatures {
+            block_hash,
+            signatures: Vec::new(),
+        };
+        assert!(client.verify_header(&header, &empty_sigs).is_ok());
+    }
+
+    #[test]
+    fn test_light_client_verify_header_bls_insufficient_signers() {
+        use call_crypto::{bls_aggregate, bls_generate, bls_sign};
+
+        let validators = make_validators(3);
+        let mut client = LightClient::new(1, validators.clone(), 3);
+
+        let mut bls_pubkeys = HashMap::new();
+        let mut bls_secrets = Vec::new();
+        for i in 1..=3 {
+            let (sk, pk) = bls_generate().unwrap();
+            bls_pubkeys.insert(i, pk.0);
+            bls_secrets.push((i, sk));
+        }
+        client.set_bls_pubkeys(bls_pubkeys);
+
+        let genesis = make_header(0, BlockHash::ZERO);
+        let block_hash = genesis.hash();
+
+        // Only validator 1 signs → 1/3, need 2
+        let sig = bls_sign(&bls_secrets[0].1, block_hash.as_slice());
+        let agg_sig = bls_aggregate(&[sig]).unwrap();
+
+        let mut bitmap = vec![0u8; 1];
+        bitmap[0] |= 1 << 1; // validator 1 only
+
+        let mut header = genesis;
+        header.bls_aggregate_signature = Some(agg_sig.0.to_vec());
+        header.bls_signer_bitmap = bitmap;
+
+        let empty_sigs = BlockSignatures {
+            block_hash,
+            signatures: Vec::new(),
+        };
+        let result = client.verify_header(&header, &empty_sigs);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LightClientError::InsufficientSignatures { got, required } => {
+                assert_eq!(got, 1);
+                assert_eq!(required, 2);
+            }
+            other => panic!("expected InsufficientSignatures, got {other}"),
+        }
     }
 }

@@ -37,6 +37,8 @@ pub enum NetworkMessage {
     OraclePriceRequest(OraclePriceRequest),
     /// Oracle price submission response from validator
     OraclePriceSubmission(OraclePriceSubmission),
+    /// Block vote — signed BLS attestation from a validator
+    BlockVote(BlockVote),
 }
 
 /// Transaction message for gossipsub propagation
@@ -145,6 +147,21 @@ pub struct OraclePriceSubmission {
     pub sources: Vec<String>,
 }
 
+/// Block vote — BLS12-381 signature attesting to a block hash.
+/// Validators broadcast this after validating a proposed block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockVote {
+    /// Block height being voted on
+    pub height: u64,
+    /// Block hash being attested to
+    pub block_hash: BlockHash,
+    /// Validator ID of the voter
+    pub validator_id: u32,
+    /// BLS12-381 signature (96 bytes compressed)
+    #[serde(with = "serde_bytes")]
+    pub bls_signature: [u8; 96],
+}
+
 // ── Network Trait (abstraction over commonware-p2p) ──────────────────
 
 /// Abstract network interface.
@@ -212,6 +229,11 @@ pub enum NetworkEvent {
     OraclePriceSubmissionReceived {
         peer_id: String,
         submission: OraclePriceSubmission,
+    },
+    /// Block vote received
+    BlockVoteReceived {
+        peer_id: String,
+        vote: BlockVote,
     },
 }
 

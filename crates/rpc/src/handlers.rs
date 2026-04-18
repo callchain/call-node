@@ -19,6 +19,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use call_network::BlockVote;
 
 /// Shared RPC state — all handlers read from this.
 pub struct RpcState {
@@ -46,6 +47,10 @@ pub struct RpcState {
     pub require_governance_auth: AtomicBool,
     /// Block signing key — None for full nodes, Some(signer) for validators.
     pub signer: RwLock<Option<SignerRef>>,
+    /// BLS12-381 secret key for aggregated vote signing — None for full nodes.
+    pub bls_secret_key: RwLock<Option<call_crypto::BlsSecretKey>>,
+    /// Pending block votes received from other validators (drained by block production loop).
+    pub pending_votes: RwLock<Vec<BlockVote>>,
     #[cfg(feature = "light-client-bridge")]
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
 }
@@ -92,6 +97,8 @@ impl RpcState {
             fee_currency_registry: RwLock::new(FeeCurrencyRegistry::new()),
             require_governance_auth: AtomicBool::new(false),
             signer: RwLock::new(None),
+            bls_secret_key: RwLock::new(None),
+            pending_votes: RwLock::new(Vec::new()),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
         }
