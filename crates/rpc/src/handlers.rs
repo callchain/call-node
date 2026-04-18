@@ -1,6 +1,6 @@
 //! Core handler trait and RPC state management.
 
-use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams};
+use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams, FeeCurrencyRegistry};
 use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_oracle::OracleManager;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
@@ -38,6 +38,7 @@ pub struct RpcState {
     pub governance: RwLock<GovernanceManager>,
     pub oracle: Arc<RwLock<OracleManager>>,
     pub fork_manager: RwLock<ForkManager>,
+    pub fee_currency_registry: RwLock<FeeCurrencyRegistry>,
     #[cfg(feature = "light-client-bridge")]
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
 }
@@ -81,6 +82,7 @@ impl RpcState {
                 call_primitives::ProtocolVersion::new(1, 0, 0),
                 total_validators.max(1),
             )),
+            fee_currency_registry: RwLock::new(FeeCurrencyRegistry::new()),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
         }
@@ -644,36 +646,97 @@ impl ProposalExecutor for NodeProposalExecutor {
                 tracing::info!(version = ?version, height = activation_block, proposal_id = proposal.id, "governance protocol upgrade scheduled");
             }
             ProposalType::ValidatorSlash { validator_id, reason } => {
-                // TODO: add remove_validator to ValidatorStateManager
-                tracing::info!(validator_id, reason, "validator slash via governance (TODO: consensus integration)");
+                // Remove validator from consensus state
+                let mut vs = self.state.validator_state.write().map_err(|_| "validator lock poisoned".to_string())?;
+                vs.remove_validator(*validator_id)
+                    .map_err(|e| format!("failed to slash validator: {e}"))?;
+                tracing::info!(validator_id, reason, "validator slashed via governance");
             }
             ProposalType::EmergencyPause { reason } => {
                 // Already handled by GovernanceManager.apply_proposal
                 tracing::info!(reason, "emergency pause confirmed via executor");
             }
             ProposalType::ParameterChange { param_id, new_value } => {
-                // TODO: update consensus/protocol params
-                tracing::info!(param_id, new_value, "parameter change applied via executor");
+                // Parse new_value as JSON and apply to fee_params
+                match serde_json::from_str::<serde_json::Value>(new_value) {
+                    Ok(val) => {
+                        let mut fp = self.state.fee_params.write().map_err(|_| "fee params lock poisoned".to_string())?;
+                        if let Some(v) = val.get("base_fee").and_then(|v| v.as_u64()) {
+                            fp.base_fee = v as u128;
+                        }
+                        if let Some(v) = val.get("target_gas_per_block").and_then(|v| v.as_u64()) {
+                            fp.target_gas_per_block = v;
+                        }
+                        if let Some(v) = val.get("max_gas_per_block").and_then(|v| v.as_u64()) {
+                            fp.max_gas_per_block = v;
+                        }
+                        if let Some(v) = val.get("oracle_fee_share_bps").and_then(|v| v.as_u64()) {
+                            fp.oracle_fee_share_bps = v as u16;
+                        }
+                        tracing::info!(param_id, new_value, "parameter change applied via executor");
+                    }
+                    Err(e) => {
+                        tracing::warn!(param_id, error = %e, "failed to parse parameter change value as JSON, skipping");
+                    }
+                }
             }
             ProposalType::TreasurySpend { recipient, amount, asset_id } => {
                 // Already applied by GovernanceManager.apply_proposal
                 tracing::info!(asset_id, amount, ?recipient, "treasury spend confirmed via executor");
             }
             ProposalType::ComplianceUpdate { asset_id, new_policy } => {
-                // TODO: update compliance engine
-                tracing::info!(asset_id, new_policy, "compliance update confirmed via executor");
+                // Map policy u8 to CompliancePolicy and set asset compliance
+                let policy = match *new_policy {
+                    0 => 0, // None
+                    1 => 1, // OfacBlacklist
+                    2 => 2, // KycRequired
+                    3 => 3, // Whitelist
+                    4 => 4, // Custom
+                    _ => return Err(format!("unknown compliance policy id: {new_policy}")),
+                };
+                // Update the asset registry with the new policy
+                let mut registry = self.state.asset_registry.write().map_err(|_| "asset registry lock poisoned".to_string())?;
+                if let Some(asset) = registry.get_asset_mut(*asset_id) {
+                    asset.compliance_policy = policy;
+                    tracing::info!(asset_id, new_policy, "compliance update applied via executor");
+                } else {
+                    return Err(format!("asset {asset_id} not found for compliance update"));
+                }
             }
             ProposalType::FeeCurrencyAdd { asset_id, name, oracle_price_key } => {
-                // TODO: update fee currency registry
-                tracing::info!(asset_id, name, oracle_price_key, "fee currency registered via governance");
+                let key_bytes: Option<[u8; 32]> = if oracle_price_key.is_empty() {
+                    None
+                } else {
+                    let mut arr = [0u8; 32];
+                    let bytes = hex::decode(oracle_price_key.trim_start_matches("0x")).unwrap_or_default();
+                    let len = bytes.len().min(32);
+                    arr[..len].copy_from_slice(&bytes[..len]);
+                    Some(arr)
+                };
+                let current_block = self.state.get_current_block();
+                let entry = call_protocol::FeeCurrencyEntry {
+                    asset_id: *asset_id,
+                    name: name.clone(),
+                    decimals: 18,
+                    oracle_price_key: key_bytes,
+                    added_at_block: current_block,
+                    added_by_proposal: proposal.id,
+                };
+                let mut registry = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
+                registry.add_fee_currency(entry, proposal.id)
+                    .map_err(|e| format!("failed to add fee currency: {e}"))?;
+                tracing::info!(asset_id, name, "fee currency registered via governance");
             }
             ProposalType::FeeCurrencyRemove { asset_id, grace_period_blocks } => {
-                // TODO: mark fee currency for removal
-                tracing::info!(asset_id, grace_period_blocks, "fee currency removal confirmed");
+                let mut registry = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
+                registry.remove_fee_currency(*asset_id, *grace_period_blocks)
+                    .map_err(|e| format!("failed to remove fee currency: {e}"))?;
+                tracing::info!(asset_id, grace_period_blocks, "fee currency removed via governance");
             }
             ProposalType::FeeCurrencyCap { new_cap_bps } => {
-                // TODO: update fee currency cap
-                tracing::info!(new_cap_bps, "fee currency cap confirmed");
+                let mut registry = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
+                registry.stablecoin_cap_bps = *new_cap_bps;
+                tracing::info!(new_cap_bps, "fee currency cap updated via governance");
             }
         }
 
@@ -701,8 +764,15 @@ pub fn wire_governance_executor(state: &Arc<RpcState>) {
     let executor = Arc::new(NodeProposalExecutor {
         state: Arc::clone(state),
     });
+    let balance_source = {
+        let state = Arc::clone(state);
+        Arc::new(move |addr: Address| {
+            state.balance_state.read().ok().map(|s| s.balances.get_balance(0, &addr)).unwrap_or(0)
+        })
+    };
     if let Ok(mut gov) = state.governance.write() {
         gov.executor = Some(executor);
+        gov.balance_source = Some(balance_source);
     }
 }
 

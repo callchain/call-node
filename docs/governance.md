@@ -15,8 +15,8 @@ The CallChain governance system enables decentralized decision-making for protoc
 ┌─────────────────────────────────────────────────────────────┐
 │                      User / Validator                         │
 │  ┌──────────────────────────────────────────────────┐        │
-│  │ 1. call_governanceSubmitProposal (RPC)            │        │
-│  │ 2. call_governanceVote (RPC)                      │        │
+│  │ 1. call_governanceSubmitProposal (RPC, signed)    │        │
+│  │ 2. call_governanceVote (RPC, signed)              │        │
 │  │ 3. call_governanceQueue (RPC)                     │        │
 │  │ 4. call_governanceExecute (RPC)                   │        │
 │  │ 5. call_governanceEmergencyPause (RPC)            │        │
@@ -24,20 +24,25 @@ The CallChain governance system enables decentralized decision-making for protoc
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
-              ┌───────────────┐
-              │GovernanceManager│ ← persisted to reth-db (CallGovernanceState)
-              │ (Arc<RwLock>)   │
-              └───────┬────────┘
-                      │
-              ┌───────┴────────┐
-              │ ProposalExecutor│ ← wired via wire_governance_executor()
-              │ (trait impl)    │
-              └───────┬────────┘
-                      │
-      ┌───────────────┼───────────────┐
-      ▼               ▼               ▼
- ForkManager     Consensus       Fee Params / Compliance / etc.
- (upgrade)      (slash)
+              ┌───────────────────┐
+              │ GovernanceManager │ ← persisted to reth-db (CallGovernanceState)
+              │ (Arc<RwLock>)     │    balance_source reads from real BalanceState
+              └────────┬──────────┘
+                       │
+                       ├── auto-advance every block in production loop
+                       │  (Pending → Active → Queued → Executed/Expired)
+                       │
+              ┌────────┴──────────┐
+              │ NodeProposalExecutor │ ← wired via wire_governance_executor()
+              │ (trait impl)         │
+              └────────┬────────────┘
+                       │
+      ┌────────────────┼────────────────┬──────────────┐
+      ▼                ▼                ▼              ▼
+ ForkManager      ValidatorState    FeeCurrencyReg   AssetRegistry
+ (upgrade)        (slash/remove)    (add/remove/cap) (compliance)
+                                    FeeParams
+                                    (params)
 ```
 
 ---
@@ -50,7 +55,8 @@ The CallChain governance system enables decentralized decision-making for protoc
 |---|---|
 | `proposals` | All proposals keyed by ID |
 | `validator_addresses` | Validator ID → Address mapping for 1=1 voting |
-| `call_balances` | Address → CALL balance for balance-weighted voting |
+| `call_balances` | Address → CALL balance for balance-weighted voting (fallback) |
+| `balance_source` | `Option<BalanceSource>` — reads real on-chain CALL balances |
 | `asset_issuers` | Asset ID → Issuer Address for joint voting |
 | `delegations` | Delegator → VoteDelegation for delegated voting |
 | `deposits` | Proposer → Deposit amount (escrowed) |
@@ -76,10 +82,12 @@ The CallChain governance system enables decentralized decision-making for protoc
 ### Voting Weights
 
 - **Validator 1=1**: Each registered validator gets 1 vote. Used for `ParameterChange`, `ProtocolUpgrade`, `ValidatorSlash`, `EmergencyPause`, `FeeCurrency*`.
-- **CALL balance-weighted**: Voting power equals caller's CALL balance + delegated power. Used for `TreasurySpend` (primary), and as max(1, balance) for `ParameterChange`/`ProtocolUpgrade`/`ValidatorSlash`.
+- **CALL balance-weighted**: Voting power equals caller's real on-chain CALL balance + delegated power. Used for `TreasurySpend` (primary), and as max(1, balance) for `ParameterChange`/`ProtocolUpgrade`/`ValidatorSlash`. Balance is read via `get_voting_balance()` which checks `balance_source` (real `BalanceState`) first, falling back to `call_balances`.
 - **Joint (issuer + validator)**: Validators get 1 vote each; asset issuers get `TOTAL_SUPPLY / 10` weight. Used for `ComplianceUpdate`.
 
 ### Proposal State Machine
+
+Proposals auto-advance every block via `GovernanceManager::advance()` called in the block production loop:
 
 ```
 Pending ──(review period passes)──► Active ──(voting period passes)──┐
@@ -90,6 +98,13 @@ Pending ──(review period passes)──► Active ──(voting period passes
   │
   └── deposit confiscated on Defeated/Expired
 ```
+
+**Auto-transitions** (`advance()`):
+- `Pending → Active`: when `current_block >= start_block`
+- `Active → Passed/Queued`: when `current_block > end_block` and quorum met
+- `Active → Defeated`: when `current_block > end_block` and quorum failed
+- `Queued → Executed`: when `current_block >= execution_block`
+- `Queued → Expired`: when `current_block > execution_block + EXECUTION_TIMEOUT_BLOCKS`
 
 ### Timeline
 
@@ -141,6 +156,24 @@ Two independent mechanisms can pause the chain:
 - **Deposit return**: Returned to proposer upon successful execution
 - **Deposit confiscation**: Lost if proposal is defeated (fails quorum) or expires (not executed within timeout)
 
+### Balance Source
+
+Deposit checks and voting power calculations read from the real on-chain `BalanceState` (asset ID 0 = CALL), not a separate in-memory map:
+
+```rust
+pub type BalanceSource = Arc<dyn Fn(Address) -> Balance + Send + Sync>;
+```
+
+Wired in `wire_governance_executor()`:
+```rust
+let balance_source = Arc::new(move |addr: Address| {
+    state.balance_state.read().ok()
+        .map(|s| s.balances.get_balance(0, &addr)).unwrap_or(0)
+});
+```
+
+`call_balances` is retained as a fallback (used in tests where real balances aren't set up). The field is `#[serde(skip)]` and rewired on every node load.
+
 ### Execution Callbacks
 
 `ProposalExecutor` trait enables real on-chain side effects when proposals are executed:
@@ -155,19 +188,36 @@ pub trait ProposalExecutor: Send + Sync {
 
 | Proposal Type | Executor Action |
 |---|---|
-| `ProtocolUpgrade` | `ForkManager.schedule_governance_upgrade(...)` |
-| `ValidatorSlash` | Logs (TODO: consensus integration) |
-| `EmergencyPause` | Already handled by `apply_proposal` |
-| `FeeCurrencyAdd` | Logs (TODO: fee registry integration) |
-| `FeeCurrencyRemove` | Logs (TODO: fee registry integration) |
-| `FeeCurrencyCap` | Logs (TODO: fee registry integration) |
-| `ParameterChange` | Logs (TODO: consensus params integration) |
-| `ComplianceUpdate` | Logs (TODO: compliance engine integration) |
-| `TreasurySpend` | Handled in `apply_proposal` (in-memory transfer) |
+| `ProtocolUpgrade` | `ForkManager.schedule_governance_upgrade(version, activation_block, proposal_id, current_height)` |
+| `ValidatorSlash` | `ValidatorStateManager.remove_validator(validator_id)` — removes from consensus |
+| `EmergencyPause` | Already handled by `apply_proposal` (sets `is_paused`) |
+| `ParameterChange` | Parses JSON from `execution_data`, updates `FeeParams` fields (`base_fee`, `target_gas_per_block`, `max_gas_per_block`, `oracle_fee_share_bps`) |
+| `ComplianceUpdate` | Maps `new_policy` u8 to `CompliancePolicy`, updates `AssetRegistry.compliance_policy` for the asset |
+| `FeeCurrencyAdd` | `FeeCurrencyRegistry.add_fee_currency(entry, proposal_id)` with decoded oracle key |
+| `FeeCurrencyRemove` | `FeeCurrencyRegistry.remove_fee_currency(asset_id, grace_period_blocks)` |
+| `FeeCurrencyCap` | `FeeCurrencyRegistry.stablecoin_cap_bps = new_cap_bps` |
+| `TreasurySpend` | Handled in `apply_proposal` (in-memory transfer, confirmed by executor) |
+
+### Validator Registration
+
+Validators are registered into governance from two sources:
+
+1. **Genesis boot**: In `boot.rs`, genesis validators are registered during `Genesis::apply()`:
+   ```rust
+   for (i, val) in self.validators.iter().enumerate() {
+       gov.register_validator(i as u32, parse_address(&val.address)?);
+   }
+   ```
+2. **Runtime sync**: Every block in the production loop (step 8c), all validators from `ValidatorStateManager` are synced idempotently into governance:
+   ```rust
+   for (id, stake) in vs.get_all_validators().iter() {
+       gov.register_validator(*id, stake.address);
+   }
+   ```
 
 ### Persistence
 
-`GovernanceManager` derives `Serialize`/`Deserialize` (the `executor` field is skipped via `#[serde(skip)]`). State is persisted to reth-db:
+`GovernanceManager` derives `Serialize`/`Deserialize`. Non-serializable fields (`executor`, `balance_source`) are skipped via `#[serde(skip)]`. State is persisted to reth-db:
 
 | Table | Purpose |
 |---|---|
@@ -178,7 +228,7 @@ Persistence is wired through:
 - Called in `persist_state_to_db` (full rebuild every 1000 blocks + shutdown flush)
 - Called in `persist_state_incremental` (every block)
 - Loaded in `CallNode::new()` and `load_state_from_db`
-- Executor rewired after load via `wire_governance_executor()`
+- `executor` and `balance_source` rewired after load via `wire_governance_executor()`
 
 ---
 
@@ -186,8 +236,8 @@ Persistence is wired through:
 
 | Method | Parameters | Returns |
 |---|---|---|
-| `call_governanceSubmitProposal` | `{proposer, proposalType, title, description}` | `{proposalId, status}` |
-| `call_governanceVote` | `{proposalId, voter, vote}` | `{status}` |
+| `call_governanceSubmitProposal` | `{proposer, proposalType, title, description, signature?}` | `{proposalId, status}` |
+| `call_governanceVote` | `{proposalId, voter, vote, signature?}` or `(id, voter, vote)` | `{status}` |
 | `call_governanceQueue` | `{proposalId}` | `{status}` |
 | `call_governanceExecute` | `{proposalId}` | `{status}` |
 | `call_governanceGetProposal` | `{proposalId}` | Proposal details |
@@ -195,55 +245,38 @@ Persistence is wired through:
 | `call_governanceEmergencyPause` | `{validatorId, reason}` | `{activated, isPaused}` |
 | `call_governanceIsPaused` | — | `{isPaused}` |
 
+### Authentication
+
+`call_governanceSubmitProposal` and `call_governanceVote` accept an optional `signature` field. When provided, the signature is verified as a secp256k1 signature over the call payload:
+
+- **SubmitProposal**: signs `keccak256(proposer ++ title ++ description)`, recovered address must match `proposer`
+- **Vote**: signs `keccak256(proposalId_be ++ voter ++ vote_string)`, recovered address must match `voter`
+
+When no signature is provided, the call proceeds (backwards compatible for devnet/testing).
+
 ---
 
-## Identified Gaps
+## Resolved Gaps
 
 ### Gap 1: `apply_proposal` only logs — no real execution callbacks
 
-**Problem**: `GovernanceManager::apply_proposal()` only emits `tracing::info!` log messages for most proposal types. No actual on-chain state changes occur:
-
-- `ParameterChange`: logs but doesn't update consensus/protocol params
-- `ProtocolUpgrade`: logs but doesn't call `ForkManager.schedule_governance_upgrade()`
-- `ValidatorSlash`: removes from governance's local validator list but doesn't slash consensus state
-- `ComplianceUpdate`: logs but doesn't update compliance engine
-- `FeeCurrencyAdd/Remove/Cap`: logs but doesn't update fee currency registry
-- `EmergencyPause`: correctly sets `emergency_pause.is_paused` (this one works)
-
-**Solution**: Introduce a `ProposalExecutor` trait (see "Execution Callbacks" section above).
-
-**Status**: Implemented. `NodeProposalExecutor` in `crates/rpc/src/handlers.rs` dispatches to fork manager. Other proposal types still log-only — `TODO` comments mark where integration is needed (consensus slash, fee registry, compliance engine, consensus params).
+**Status**: Resolved. All 9 proposal types have real side effects via `NodeProposalExecutor` (see "Execution Callbacks" table above).
 
 ### Gap 2: Governance state is in-memory only
 
-**Problem**: `GovernanceManager` is initialized as `GovernanceManager::new()` in `RpcState::new()`. All proposals, votes, deposits, and delegations are lost on node restart.
-
-**Impact**:
-- Proposals in flight are wiped
-- Votes cast are lost
-- Deposits are not recoverable
-- Emergency pause state is reset
-
-**Solution**: Add DB persistence (see "Persistence" section above).
-
-**Status**: Implemented. Governance state persists across node restarts via reth-db (MDBX). `Executor` field skipped during serialization, rewired after load.
+**Status**: Resolved. Governance state persists across node restarts via reth-db (MDBX). `Executor` and `balance_source` fields skipped during serialization, rewired after load.
 
 ### Gap 3: No ForkManager integration for `ProtocolUpgrade`
 
-**Problem**: `ProtocolUpgrade` proposals set `activation_block` but the governance module doesn't communicate this to the `ForkManager` in `crates/consensus/src/fork.rs`. The `ForkManager` already supports `schedule_governance_upgrade()` but it's never called from the governance flow.
+**Status**: Resolved. `ProposalExecutor` calls `ForkManager.schedule_governance_upgrade()` for `ProtocolUpgrade` proposals.
 
-**Solution**: Addressed by Gap 1. The `ProposalExecutor` implementation for `ProtocolUpgrade` calls:
+### Additional gaps resolved in production hardening:
 
-```rust
-ForkManager.schedule_governance_upgrade(
-    version,
-    activation_height,
-    proposal_id,
-    current_height,
-);
-```
-
-**Status**: Implemented (via Gap 1).
+- **No automatic state machine advancement**: `advance()` method auto-transitions proposals every block.
+- **Deposit uses in-memory balances**: `BalanceSource` closure reads real on-chain CALL balances.
+- **No authentication on governance RPC**: Optional secp256k1 signature verification on SubmitProposal and Vote.
+- **No fee currency registry in RpcState**: `FeeCurrencyRegistry` added to `RpcState`, wired into executor.
+- **No `register_validator` wiring**: Genesis + runtime sync into governance from consensus.
 
 ---
 
@@ -254,7 +287,7 @@ crates/governance/
 ├── Cargo.toml
 └── src/
     └── lib.rs          # GovernanceManager, ProposalType, Vote, errors,
-                        # ProposalExecutor trait, EmergencyPauseState
+                        # ProposalExecutor trait, BalanceSource, EmergencyPauseState
 ```
 
 ### Dependencies
@@ -268,7 +301,8 @@ crates/governance/
 
 | Crate | Usage |
 |---|---|
-| `call-rpc` | `GovernanceManager` in `RpcState`, RPC handlers, `NodeProposalExecutor` |
-| `call-protocol` | Test suite (`test_governance_flow.rs`) |
-| `call-node` | Integration tests (`test_fork_upgrade.rs`), DB persistence wiring |
+| `call-rpc` | `GovernanceManager` in `RpcState`, RPC handlers, `NodeProposalExecutor`, `FeeCurrencyRegistry` |
+| `call-protocol` | Test suite (`test_governance_flow.rs`), `FeeCurrencyRegistry`, `AssetRegistry` |
+| `call-node` | Integration tests, DB persistence wiring, boot sequence, block loop advance |
 | `call-storage` | `CallGovernanceState` table definition |
+| `call-consensus` | `ValidatorStateManager.remove_validator()` for slashing |

@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// External balance source for real on-chain balances.
+/// When set, deposit checks and voting power use this instead of `call_balances`.
+pub type BalanceSource = Arc<dyn Fn(Address) -> Balance + Send + Sync>;
+
 /// Total supply: 1B CALL * 10^18 (18 decimals)
 pub const TOTAL_SUPPLY: Balance = 1_000_000_000_000_000_000_000_000_000u128;
 
@@ -212,6 +216,9 @@ pub struct GovernanceManager {
     /// Optional executor for real on-chain side effects (not serialized — rewired after load)
     #[serde(skip)]
     pub executor: Option<Arc<dyn ProposalExecutor>>,
+    /// Optional external balance source for real on-chain balances (not serialized — rewired after load)
+    #[serde(skip)]
+    pub balance_source: Option<BalanceSource>,
 }
 
 impl Default for GovernanceManager {
@@ -234,6 +241,7 @@ impl GovernanceManager {
             current_block: 0,
             emergency_pause: EmergencyPauseState::default(),
             executor: None,
+            balance_source: None,
         }
     }
 
@@ -258,6 +266,16 @@ impl GovernanceManager {
         self.call_balances.insert(address, balance);
     }
 
+    /// Get voting balance for an address.
+    /// Uses external balance source if configured, falls back to internal `call_balances`.
+    pub fn get_voting_balance(&self, address: Address) -> Balance {
+        if let Some(ref source) = self.balance_source {
+            source(address)
+        } else {
+            self.call_balances.get(&address).copied().unwrap_or(0)
+        }
+    }
+
     /// Register an asset issuer
     pub fn register_asset_issuer(&mut self, asset_id: AssetId, issuer: Address) {
         self.asset_issuers.insert(asset_id, issuer);
@@ -276,14 +294,17 @@ impl GovernanceManager {
         execution_data: Vec<u8>,
     ) -> Result<u64, GovernanceError> {
         // Check deposit sufficiency
-        let proposer_balance = self.call_balances.get(&proposer).copied().unwrap_or(0);
+        let proposer_balance = self.get_voting_balance(proposer);
         if proposer_balance < PROPOSAL_DEPOSIT {
             return Err(GovernanceError::InsufficientDeposit);
         }
 
-        // Deduct deposit
-        let new_balance = proposer_balance - PROPOSAL_DEPOSIT;
-        self.call_balances.insert(proposer, new_balance);
+        // Deduct deposit (only from internal balances; external balances are tracked via deposits map)
+        let internal = self.call_balances.get(&proposer).copied().unwrap_or(0);
+        if internal > 0 {
+            let new_balance = internal - PROPOSAL_DEPOSIT.min(internal);
+            self.call_balances.insert(proposer, new_balance);
+        }
         self.deposits.insert(proposer, PROPOSAL_DEPOSIT);
 
         let id = self.next_proposal_id;
@@ -563,6 +584,93 @@ impl GovernanceManager {
         Ok(())
     }
 
+    // ── State Machine Advancement ─────────────────────────────────────
+
+    /// Advance all proposals through the state machine based on current block.
+    /// Called once per block by the block production loop.
+    ///
+    /// Transitions:
+    /// - Pending → Active (review period passed)
+    /// - Active → Queued (voting ended, quorum met, majority yes)
+    /// - Active → Defeated (voting ended, quorum failed or majority no)
+    /// - Queued → Expired (execution timeout reached, deposit confiscated)
+    /// - Queued → Executed (timelock elapsed, auto-executed)
+    pub fn advance(&mut self, current_block: u64) {
+        self.current_block = current_block;
+
+        // Collect transitions first to avoid borrow conflicts
+        let mut to_activate = Vec::new();
+        let mut to_queue = Vec::new();
+        let mut to_defeat = Vec::new();
+        let mut to_expire = Vec::new();
+        let mut to_execute = Vec::new();
+
+        for (&id, proposal) in &self.proposals {
+            match proposal.state {
+                ProposalState::Pending => {
+                    if current_block >= proposal.start_block {
+                        to_activate.push(id);
+                    }
+                }
+                ProposalState::Active => {
+                    if current_block > proposal.end_block {
+                        if proposal.has_quorum() && proposal.is_majority_yes() {
+                            to_queue.push(id);
+                        } else {
+                            to_defeat.push(id);
+                        }
+                    }
+                }
+                ProposalState::Queued => {
+                    let exec = match proposal.execution_block {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    if current_block > exec + EXECUTION_TIMEOUT_BLOCKS {
+                        to_expire.push(id);
+                    } else if current_block >= exec {
+                        to_execute.push(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Apply transitions
+        for id in to_activate {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Active;
+                tracing::info!(proposal_id = id, "proposal advanced to active");
+            }
+        }
+
+        for id in &to_queue {
+            let _ = self.queue_proposal(*id);
+        }
+
+        for id in to_defeat {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Defeated;
+                let proposer = p.proposer;
+                self.deposits.remove(&proposer);
+                tracing::info!(proposal_id = id, "proposal defeated — deposit confiscated");
+            }
+        }
+
+        for id in to_expire {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Expired;
+                let proposer = p.proposer;
+                self.deposits.remove(&proposer);
+                tracing::info!(proposal_id = id, "proposal expired — deposit confiscated");
+            }
+        }
+
+        for id in to_execute {
+            let _ = self.execute_proposal(id);
+        }
+    }
+
     // ── Emergency Pause ───────────────────────────────────────────────
 
     /// Initiate emergency pause with validator signatures (per spec §13.3)
@@ -617,7 +725,7 @@ impl GovernanceManager {
         amount: Balance,
         expires_at: u64,
     ) -> Result<(), GovernanceError> {
-        let delegator_balance = self.call_balances.get(&delegator).copied().unwrap_or(0);
+        let delegator_balance = self.get_voting_balance(delegator);
         if delegator_balance < amount {
             return Err(GovernanceError::InsufficientBalanceForDelegation);
         }
@@ -692,7 +800,7 @@ impl GovernanceManager {
             // (ParameterChange/ProtocolUpgrade/ValidatorSlash/EmergencyPause)
             // But not for EmergencyPause which is validator-signature-only
             if !matches!(proposal_type, ProposalType::EmergencyPause { .. }) {
-                let balance = self.call_balances.get(&voter).copied().unwrap_or(0);
+                let balance = self.get_voting_balance(voter);
                 let with_delegation = balance + self.get_delegated_voting_power(voter);
                 power = power.max(with_delegation);
             }
@@ -700,7 +808,7 @@ impl GovernanceManager {
 
         if proposal_type.is_balance_weighted() {
             // TreasurySpend: CALL balance weighted
-            let balance = self.call_balances.get(&voter).copied().unwrap_or(0);
+            let balance = self.get_voting_balance(voter);
             power = power.max(balance);
             // Add delegated power
             power += self.get_delegated_voting_power(voter);

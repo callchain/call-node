@@ -79,6 +79,16 @@ impl Genesis {
                 .map_err(|e| format!("failed to stake validator: {e}"))?;
         }
         consensus.refresh_proposer_subset();
+        drop(consensus);
+
+        // Register genesis validators into governance for voting
+        {
+            let mut gov = node.state.governance.write().map_err(|_| "lock poisoned")?;
+            for (i, val) in self.validators.iter().enumerate() {
+                let addr = parse_address(&val.address)?;
+                gov.register_validator(i as u32, addr);
+            }
+        }
 
         Ok(())
     }

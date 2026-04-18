@@ -3,6 +3,7 @@
 use crate::handlers::{RpcState, invalid_params, internal_error};
 use call_primitives::Address;
 use call_governance::{ProposalType, Vote as GovernanceVote};
+use call_crypto::{recover_secp256k1_signer, keccak256};
 use call_oracle::OracleSubmission;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -10,6 +11,43 @@ use std::sync::Arc;
 
 /// Register Callchain extension RPC methods
 pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(), ErrorObjectOwned> {
+    // ── Governance signature helper ──────────────────────────────
+
+    /// Verify an optional secp256k1 signature against an expected address.
+    /// If signature is provided, recover signer and verify it matches expected.
+    /// If no signature, allow (backwards compatible for devnet/testing).
+    fn verify_signature(
+        msg_hash: [u8; 32],
+        expected: Address,
+        sig_hex: Option<&str>,
+    ) -> Result<(), ErrorObjectOwned> {
+        if let Some(sig_str) = sig_hex {
+            let sig_bytes = hex::decode(sig_str.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature hex: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes (r || s || v)".into()));
+            }
+            let mut sig = [0u8; 65];
+            sig.copy_from_slice(&sig_bytes);
+            let recovered = recover_secp256k1_signer(&msg_hash, &sig)
+                .map_err(|e| invalid_params(format!("signature recovery failed: {e}")))?;
+            if recovered != expected {
+                return Err(invalid_params(format!(
+                    "signature mismatch: recovered {:?}, expected {:?}",
+                    recovered, expected
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Compute a keccak256 hash for signing.
+    fn msg_hash(message: &[u8]) -> [u8; 32] {
+        let h = keccak256(message);
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(h.as_slice());
+        arr
+    }
     // call_assetInfo
     module
         .register_async_method("call_assetInfo", |params, state, _ctx| async move {
@@ -599,6 +637,18 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .map(|s| s.as_bytes().to_vec())
                 .unwrap_or_default();
 
+            // Optional signature verification
+            let sig = call_obj.get("signature").and_then(|v| v.as_str());
+            if let Some(sig_hex) = sig {
+                // Build message hash: keccak256(proposer + title + description)
+                let mut msg = Vec::new();
+                msg.extend_from_slice(proposer.as_slice());
+                msg.extend_from_slice(title.as_bytes());
+                msg.extend_from_slice(description.as_bytes());
+                let hash = msg_hash(&msg);
+                verify_signature(hash, proposer, Some(sig_hex))?;
+            }
+
             let proposal_type = serde_json::from_value::<ProposalType>(call_obj["proposalType"].clone())
                 .map_err(|e| invalid_params(format!("invalid proposalType: {e}")))?;
 
@@ -617,22 +667,54 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_governanceVote
     module
         .register_async_method("call_governanceVote", |params, state, _ctx| async move {
-            let (proposal_id, voter_str, vote_str): (u64, String, String) =
-                params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let voter = voter_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
-            let vote = match vote_str.to_lowercase().as_str() {
+            // Accept both object params with optional signature, and positional params
+            let (proposal_id, voter, vote, sig): (u64, Address, String, Option<String>) = {
+                let raw: serde_json::Value = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+                if let Some(obj) = raw.as_object() {
+                    let proposal_id = obj.get("proposalId")
+                        .and_then(|v| v.as_u64())
+                        .ok_or_else(|| invalid_params("missing 'proposalId'".into()))?;
+                    let voter_str = obj.get("voter")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| invalid_params("missing 'voter'".into()))?;
+                    let voter = voter_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+                    let vote_str = obj.get("vote")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| invalid_params("missing 'vote'".into()))?;
+                    let sig = obj.get("signature")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    (proposal_id, voter, vote_str.to_string(), sig)
+                } else {
+                    // Fallback: parse as tuple (proposalId, voter, vote)
+                    let (pid, v_str, vote_str): (u64, String, String) =
+                        serde_json::from_value(raw).map_err(|e| invalid_params(e.to_string()))?;
+                    let v = v_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+                    (pid, v, vote_str, None)
+                }
+            };
+
+            let vote_val = match vote.to_lowercase().as_str() {
                 "yes" => GovernanceVote::Yes,
                 "no" => GovernanceVote::No,
                 "abstain" => GovernanceVote::Abstain,
                 _ => return Err(invalid_params("vote must be 'yes', 'no', or 'abstain'".into())),
             };
 
+            // Optional signature verification
+            if let Some(ref sig_hex) = sig {
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&proposal_id.to_be_bytes());
+                msg.extend_from_slice(voter.as_slice());
+                msg.extend_from_slice(vote.as_bytes());
+                let hash = msg_hash(&msg);
+                verify_signature(hash, voter, Some(sig_hex))?;
+            }
+
             let mut gov = state.governance.write().map_err(|_| internal_error("lock poisoned".into()))?;
-            match gov.vote(proposal_id, voter, vote) {
+            match gov.vote(proposal_id, voter, vote_val) {
                 Ok(()) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "proposalId": proposal_id,
-                    "voter": voter_str,
-                    "vote": vote_str,
                     "status": "recorded",
                 })),
                 Err(e) => Err(invalid_params(e.to_string())),

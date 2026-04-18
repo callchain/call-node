@@ -1047,6 +1047,22 @@ async fn block_production_loop(
         parent_hash = block.header.hash();
         state.finalize_block();
 
+        // 8b. Advance governance proposal state machine
+        {
+            let mut gov = state.governance.write().unwrap();
+            gov.set_current_block(new_height);
+            gov.advance(new_height);
+        }
+
+        // 8c. Sync validators from consensus into governance
+        {
+            let mut gov = state.governance.write().unwrap();
+            let vs = state.validator_state.read().unwrap();
+            for (id, stake) in vs.get_all_validators().iter() {
+                gov.register_validator(*id, stake.address);
+            }
+        }
+
         // 9. Persist block to disk
         if let Err(ref e) = persist_block(&db.data_dir, height, &block) {
             tracing::warn!(error = %e, "failed to persist block");

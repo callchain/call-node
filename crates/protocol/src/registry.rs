@@ -96,6 +96,11 @@ impl AssetRegistry {
         self.assets_by_id.get(&id)
     }
 
+    /// Look up an asset by its ID (mutable)
+    pub fn get_asset_mut(&mut self, id: AssetId) -> Option<&mut Asset> {
+        self.assets_by_id.get_mut(&id)
+    }
+
     /// Look up an asset by its symbol
     pub fn get_asset_by_symbol(&self, symbol: &str) -> Option<&Asset> {
         self.assets_by_symbol

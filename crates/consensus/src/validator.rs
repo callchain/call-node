@@ -194,6 +194,20 @@ impl ValidatorStateManager {
 
     // ── Slashing ──────────────────────────────────────────────────────
 
+    /// Remove a validator entirely (used by governance slash proposals).
+    pub fn remove_validator(&mut self, validator_id: ValidatorId) -> Result<(), ConsensusError> {
+        let validator = self
+            .validators
+            .remove(&validator_id)
+            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
+        tracing::info!(
+            validator_id,
+            slashed_stake = validator.staked_call,
+            "validator removed via governance slash"
+        );
+        Ok(())
+    }
+
     /// Slash for double-sign: full self-stake (per spec §12.6)
     pub fn slash_double_sign(
         &mut self,
