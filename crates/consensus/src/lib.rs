@@ -3,13 +3,19 @@
 //! Implements block structures, proposer selection, validator staking,
 //! and Simplex BFT consensus integration (per spec §2.3, §2.4, §2.5, §12.6).
 
+pub mod bft;
 pub mod block;
+pub mod block_cache;
+pub mod digest;
 pub mod fork;
 pub mod proposer;
 pub mod simplex;
 pub mod validator;
 
+pub use bft::*;
 pub use block::*;
+pub use block_cache::*;
+pub use digest::*;
 pub use fork::*;
 pub use proposer::*;
 pub use simplex::*;

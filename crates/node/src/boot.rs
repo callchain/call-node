@@ -9,6 +9,9 @@ use call_network::CommonwareConfig;
 use call_primitives::Address;
 use call_rpc::RpcConfig;
 use call_crypto::{LocalSigner, SignerRef, load_key as load_keystore_key, bls_generate, bls_public_key_bytes};
+use commonware_cryptography::ed25519;
+use commonware_codec::extensions::DecodeExt;
+use rand::rngs::OsRng;
 use serde::Deserialize;
 use std::fs;
 use std::sync::Arc;
@@ -114,6 +117,37 @@ fn parse_pubkey(s: &str) -> Result<[u8; 32], String> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Ok(arr)
+}
+
+/// Load or derive an ed25519 private key for BFT consensus.
+///
+/// Priority:
+/// 1. `identity_key` config (first 32 bytes of the 64-byte hex string)
+/// 2. Generate a random key (warns — set `identity_key` for production)
+fn load_ed25519_key(keys: &crate::config::KeysConfig) -> Result<ed25519::PrivateKey, String> {
+    if let Some(ref hex_key) = keys.identity_key {
+        let hex_clean = hex_key.trim_start_matches("0x");
+        // Accept either 64 hex chars (32 bytes) or 128 hex chars (64 bytes, use first 32)
+        let seed_hex = if hex_clean.len() == 128 {
+            &hex_clean[..64]
+        } else if hex_clean.len() == 64 {
+            hex_clean
+        } else {
+            return Err(format!(
+                "identity_key must be 64 or 128 hex chars, got {}",
+                hex_clean.len()
+            ));
+        };
+        let bytes = hex::decode(seed_hex).map_err(|e| format!("invalid identity_key hex: {e}"))?;
+        ed25519::PrivateKey::decode(&bytes[..]).map_err(|e| format!("invalid ed25519 key: {e}"))
+    } else {
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut OsRng, &mut seed);
+        let key = ed25519::PrivateKey::decode(&seed[..])
+            .map_err(|e| format!("failed to decode random ed25519 key: {e}"))?;
+        info!("generated random ed25519 consensus key — set identity_key in config for deterministic identity across restarts");
+        Ok(key)
+    }
 }
 
 /// Load validator signer from configured key source
@@ -278,8 +312,18 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     node.start_ws_rpc(rpc_config).await?;
 
     // Step 7: Start consensus block production
-    info!("step 7: starting consensus loop");
-    let _handle = node.start_consensus_loop();
+    match config.mode {
+        NodeMode::Validator => {
+            info!("step 7: starting BFT consensus engine");
+            let ed25519_key = load_ed25519_key(&config.keys)?;
+            let consensus_p2p_port = config.p2p.listen_addr.port().saturating_add(1);
+            let _handle = node.start_bft_engine(ed25519_key, consensus_p2p_port);
+        }
+        NodeMode::Full | NodeMode::Archive => {
+            info!("step 7: starting full-node consensus loop");
+            let _handle = node.start_consensus_loop();
+        }
+    }
 
     info!(
         mode = ?config.mode,

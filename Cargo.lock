@@ -1690,6 +1690,7 @@ dependencies = [
 name = "call-consensus"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "call-bridge",
  "call-crypto",
  "call-evm",
@@ -1700,12 +1701,16 @@ dependencies = [
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-math",
+ "commonware-utils",
  "ed25519-dalek",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "serde",
  "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -1822,6 +1827,13 @@ dependencies = [
  "call-storage",
  "call-transaction-pool",
  "clap",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-utils",
  "dirs",
  "fs2",
  "hex",

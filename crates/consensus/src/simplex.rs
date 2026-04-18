@@ -4,7 +4,6 @@
 //! consensus driver with proposer selection, validator management, and block lifecycle.
 
 use crate::block::{Block, BlockExecutionResult};
-use crate::fork::rollback_quorum;
 use crate::proposer::{
     derive_vrf_seed, select_proposer, select_proposer_subset, verify_proposer_in_subset,
     ConsensusParams,
@@ -213,23 +212,12 @@ impl SimplexConsensus {
         )
     }
 
-    /// Commit a block: verify QC, advance height, distribute rewards, advance round.
+    /// Commit a block: advance height, distribute rewards, advance round.
     pub fn commit_block(
         &mut self,
         block: &Block,
         result: &BlockExecutionResult,
-        qc: Option<&QuorumCertificate>,
     ) -> Result<(), ConsensusError> {
-        // Verify quorum certificate if provided
-        if let Some(qc) = qc {
-            if !qc.verify(&self.validators, rollback_quorum(self.validators.get_active_validators().len() as u32)) {
-                return Err(ConsensusError::InvalidBlock("QC verification failed".to_string()));
-            }
-            if qc.block_hash != block.header.hash() {
-                return Err(ConsensusError::InvalidBlock("QC block hash mismatch".to_string()));
-            }
-        }
-
         // Distribute validator reward
         if result.total_validator_reward > 0 {
             let proposer = block.header.proposer;
@@ -314,48 +302,6 @@ impl SimplexConsensus {
     /// Get active validator IDs for network layer.
     pub fn active_validators(&self) -> Vec<ValidatorId> {
         self.validators.get_active_validators()
-    }
-}
-
-/// Quorum Certificate — aggregates validator signatures for a block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuorumCertificate {
-    pub block_hash: BlockHash,
-    pub height: u64,
-    pub round: u64,
-    /// (validator_id, BLS12-381 signature bytes)
-    pub signatures: Vec<(ValidatorId, Vec<u8>)>,
-}
-
-impl QuorumCertificate {
-    /// Verify that the QC contains enough valid signatures from the current validator set.
-    pub fn verify(
-        &self,
-        validators: &ValidatorStateManager,
-        threshold: u32,
-    ) -> bool {
-        if self.signatures.len() < threshold as usize {
-            return false;
-        }
-        let mut valid_count = 0u32;
-        for (validator_id, signature) in &self.signatures {
-            if signature.len() != 96 {
-                continue;
-            }
-            if let Some(stake) = validators.get_validator_stake(*validator_id) {
-                if stake.bls_pubkey == [0u8; 48] {
-                    continue;
-                }
-                let pk = call_crypto::BlsPublicKey(stake.bls_pubkey);
-                let mut sig_bytes = [0u8; 96];
-                sig_bytes.copy_from_slice(signature);
-                let sig = call_crypto::BlsSignature(sig_bytes);
-                if call_crypto::bls_verify(&pk, &self.block_hash.0, &sig).is_ok() {
-                    valid_count += 1;
-                }
-            }
-        }
-        valid_count >= threshold
     }
 }
 
@@ -546,50 +492,4 @@ mod tests {
         assert_eq!(restored.proposer_subset(), consensus.proposer_subset());
     }
 
-    #[test]
-    fn test_qc_verify_threshold() {
-        let consensus = make_test_consensus(100);
-        let hash = BlockHash::repeat_byte(0xAB);
-
-        // Empty QC should fail
-        let qc = QuorumCertificate {
-            block_hash: hash,
-            height: 1,
-            round: 0,
-            signatures: vec![],
-        };
-        assert!(!qc.verify(consensus.validators(), rollback_quorum(100)));
-
-        // QC with invalid signatures should fail
-        let fake_sig = vec![0u8; 96];
-        let mut bad_sigs = vec![];
-        for i in 0..70 {
-            bad_sigs.push((i, fake_sig.clone()));
-        }
-        let qc_bad = QuorumCertificate {
-            block_hash: hash,
-            height: 1,
-            round: 0,
-            signatures: bad_sigs,
-        };
-        assert!(!qc_bad.verify(consensus.validators(), rollback_quorum(100)));
-    }
-
-    #[test]
-    fn test_commit_block_with_qc() {
-        let mut consensus = make_test_consensus(100);
-        let hash = BlockHash::repeat_byte(0xAB);
-
-        let qc = QuorumCertificate {
-            block_hash: hash,
-            height: 1,
-            round: 0,
-            signatures: vec![],
-        };
-
-        // commit_block with QC should verify it (empty QC fails for network mode)
-        // In this test we have no real signatures, so QC verification should fail
-        // when validators require quorum.
-        // For single-node testing, we pass None.
-    }
 }

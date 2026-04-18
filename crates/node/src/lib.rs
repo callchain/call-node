@@ -15,15 +15,17 @@ use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
     PersistedConsensusState,
+    bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
+    block_cache::BlockCache,
+    digest::ConsensusDigest,
 };
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, BlockProposal, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, BlockVote};
-use call_crypto::{bls_sign, bls_aggregate, bls_verify, BlsPublicKey, BlsSignature};
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission};
 use call_primitives::BlockHash;
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
 };
-use call_governance::{GovernanceManager, ProposalExecutor};
+use call_governance::GovernanceManager;
 use call_oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager, wire_governance_executor};
 use call_storage::{CallDb, open_db, PruneState, StorageError};
@@ -45,6 +47,23 @@ use jsonrpsee::server::{Server, ServerHandle};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
+use tokio::sync::mpsc;
+use commonware_codec::extensions::DecodeExt;
+
+// Commonware Simplex BFT imports
+use commonware_consensus::simplex::{Config as SimplexConfig, Engine, ForwardingPolicy};
+use commonware_consensus::simplex::elector::RoundRobin;
+use commonware_consensus::simplex::scheme::ed25519::Scheme as Ed25519Scheme;
+use commonware_consensus::types::{Epoch, ViewDelta};
+use commonware_cryptography::ed25519;
+use commonware_cryptography::Digest;
+use commonware_parallel::Sequential;
+use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
+use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
+use commonware_runtime::{Quota, Runner, Metrics};
+use commonware_runtime::buffer::paged::CacheRef;
+use commonware_utils::ordered::Set;
 
 /// Chain ID for Callchain devnet
 pub const CALLCHAIN_CHAIN_ID: u64 = 1337;
@@ -54,7 +73,6 @@ const TX_CHANNEL: u64 = 1;
 const BLOCK_CHANNEL: u64 = 2;
 const SYNC_CHANNEL: u64 = 3;
 const ORACLE_CHANNEL: u64 = 4;
-const VOTE_CHANNEL: u64 = 5;
 
 /// The Callchain node
 pub struct CallNode {
@@ -251,6 +269,153 @@ impl CallNode {
         ))
     }
 
+    /// Start the Commonware Simplex BFT consensus engine.
+    ///
+    /// Spawns a background OS thread running the BFT engine with its own
+    /// tokio runtime and commonware-p2p network. Bridges consensus events
+    /// to the main tokio runtime via channels.
+    pub fn start_bft_engine(
+        &self,
+        ed25519_private_key: ed25519::PrivateKey,
+        consensus_p2p_port: u16,
+    ) -> tokio::task::JoinHandle<()> {
+        let state = Arc::clone(&self.state);
+        let mempool = Arc::clone(&self.mempool);
+        let consensus = Arc::clone(&self.consensus);
+        let db = self.db.clone();
+        let prune_state = self.prune_state.clone();
+        let subscriptions = self.state.subscriptions.clone();
+        let parent_hash = self.parent_hash;
+        let network = self.network.clone();
+        let data_dir = self.db.data_dir.clone();
+
+        // Bridge channels (BFT engine -> tokio event loop)
+        let (propose_tx, propose_rx) = mpsc::channel::<ProposeRequest>(16);
+        let (verify_tx, verify_rx) = mpsc::channel::<VerifyRequest>(16);
+        let (finalize_tx, finalize_rx) = mpsc::channel::<FinalizationInfo>(16);
+        let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(64);
+
+        let block_cache = Arc::new(std::sync::Mutex::new(BlockCache::new(1000)));
+
+        // Build BFT trait bridges
+        let automaton = CallAutomaton::new(propose_tx, verify_tx);
+        let relay = CallRelay::new(Arc::clone(&block_cache), broadcast_tx);
+        let reporter = CallReporter::new(finalize_tx);
+
+        // Gather validator set as ed25519 public keys for the scheme
+        let participants = {
+            let vs = state.validator_state.read().unwrap();
+            let validators = vs.get_all_validators();
+            let mut keys: Vec<ed25519::PublicKey> = Vec::new();
+            for (_, stake) in validators.iter() {
+                let pk_bytes = stake.ed25519_pubkey;
+                if let Ok(pk) = ed25519::PublicKey::decode(&pk_bytes[..]) {
+                    keys.push(pk);
+                }
+            }
+            Set::from_iter_dedup(keys)
+        };
+
+        // Build signing scheme
+        let scheme = Ed25519Scheme::signer(
+            b"callchain-consensus",
+            participants.clone(),
+            ed25519_private_key.clone(),
+        )
+        .expect("ed25519 key must be in participant set");
+
+        // Spawn BFT engine in a dedicated background OS thread
+        let thread_port = consensus_p2p_port;
+        std::thread::spawn(move || {
+            let runtime_cfg = RuntimeConfig::new();
+            let runner = TokioRunner::new(runtime_cfg);
+            runner.start(|context| async move {
+                let signer = ed25519_private_key;
+                let listen_addr = std::net::SocketAddr::from(([0, 0, 0, 0], thread_port));
+
+                let p2p_cfg = P2PConfig::local(
+                    signer,
+                    b"callchain-consensus",
+                    listen_addr,
+                    10 * 1024 * 1024,
+                );
+                let (mut network, oracle) = p2p_lookup::Network::new(
+                    context.with_label("consensus-p2p"),
+                    p2p_cfg,
+                );
+
+                // Register 3 consensus channels (vote, certificate, resolver)
+                let quota = Quota::per_second(NonZeroU32::new(10000).unwrap());
+                let (vote_s, vote_r) = network.register(1, quota.clone(), 100_000);
+                let (cert_s, cert_r) = network.register(2, quota.clone(), 100_000);
+                let (resolve_s, resolve_r) = network.register(3, quota, 100_000);
+
+                // Start the p2p network
+                let _net_handle = network.start();
+
+                // Build page cache for the consensus journal
+                let page_cache = CacheRef::from_pooler(
+                    &context,
+                    NonZeroU16::new(4096).unwrap(),
+                    NonZeroUsize::new(1024).unwrap(),
+                );
+
+                // Build and start the simplex BFT engine
+                let cfg = SimplexConfig {
+                    scheme,
+                    elector: RoundRobin::<commonware_cryptography::Sha256>::default(),
+                    blocker: oracle,
+                    automaton,
+                    relay,
+                    reporter,
+                    strategy: Sequential,
+                    partition: "callchain".to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(0),
+                    replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                    write_buffer: NonZeroUsize::new(1024).unwrap(),
+                    page_cache,
+                    leader_timeout: Duration::from_millis(500),
+                    certification_timeout: Duration::from_millis(750),
+                    timeout_retry: Duration::from_millis(250),
+                    activity_timeout: ViewDelta::new(10),
+                    skip_timeout: ViewDelta::new(5),
+                    fetch_timeout: Duration::from_secs(2),
+                    fetch_concurrent: 4,
+                    forwarding: ForwardingPolicy::SilentVoters,
+                };
+
+                let engine = Engine::new(context, cfg);
+                let _engine_handle = engine.start(
+                    (vote_s, vote_r),
+                    (cert_s, cert_r),
+                    (resolve_s, resolve_r),
+                );
+
+                // Keep the background thread alive indefinitely
+                std::future::pending::<()>().await;
+            });
+        });
+
+        // Spawn the tokio-side event loop that handles BFT requests
+        tokio::spawn(bft_event_loop(
+            propose_rx,
+            verify_rx,
+            finalize_rx,
+            broadcast_rx,
+            state,
+            mempool,
+            consensus,
+            block_cache,
+            db,
+            prune_state,
+            subscriptions,
+            parent_hash,
+            network,
+            data_dir,
+        ))
+    }
+
     /// Start P2P sync: compare local height with peer height and catch up if behind.
     /// Returns a handle that performs sync then exits.
     pub fn start_sync(&self, network: Arc<dyn Network>) -> tokio::task::JoinHandle<()> {
@@ -376,7 +541,7 @@ impl CallNode {
                                             let _ = persist_block(&data_dir, height, &block);
 
                                             if let Ok(mut c) = consensus.write() {
-                                                let _ = c.commit_block(&block, &result, None);
+                                                let _ = c.commit_block(&block, &result);
                                             }
 
                                             let _ = light_client.sync_incremental(&block.header, &signatures);
@@ -1136,118 +1301,10 @@ async fn block_production_loop(
             oracle.clear_tracking();
         }
 
-        // 7. Broadcast block proposal to validators for QC assembly
-        if let Some(ref net) = network {
-            let block_data = serde_json::to_vec(&block).expect("serialize block");
-            let proposal = BlockProposal {
-                block_data,
-                height,
-                block_hash: block.header.hash(),
-                proposer,
-            };
-            let msg = serde_json::to_vec(&NetworkMessage::BlockProposal(proposal))
-                .expect("serialize block proposal");
-            net.broadcast(BLOCK_CHANNEL, msg).await;
-
-            // 7b. Wait for votes from validators (up to half the block time)
-            let vote_wait_ms = consensus.read()
-                .ok()
-                .map(|c| c.params().block_time_millis / 2)
-                .unwrap_or(125);
-            tokio::time::sleep(Duration::from_millis(vote_wait_ms)).await;
-        }
-
-        // 8. Assemble Quorum Certificate from collected votes
-        let qc = if network.is_some() {
-            let votes = {
-                let mut pending = state.pending_votes.write().unwrap();
-                std::mem::take(&mut *pending)
-            };
-
-            let block_hash = block.header.hash();
-            let validator_state = state.validator_state.read().unwrap();
-            let validator_count = validator_state.get_all_validators().len();
-            let threshold = call_consensus::rollback_quorum(validator_count as u32);
-            let mut qc_sigs: Vec<(u32, Vec<u8>)> = Vec::new();
-            let mut valid_sigs: Vec<BlsSignature> = Vec::new();
-            let mut voter_bitmap = vec![0u8; (validator_count + 7) / 8];
-
-            for vote in votes {
-                if vote.block_hash != block_hash || vote.height != height {
-                    continue;
-                }
-                if let Some(stake) = validator_state.get_validator_stake(vote.validator_id) {
-                    if stake.bls_pubkey == [0u8; 48] {
-                        continue;
-                    }
-                    let pk = BlsPublicKey(stake.bls_pubkey);
-                    let sig = BlsSignature(vote.bls_signature);
-                    if bls_verify(&pk, &block_hash.0, &sig).is_ok() {
-                        qc_sigs.push((vote.validator_id, vote.bls_signature.to_vec()));
-                        valid_sigs.push(sig);
-                        let byte_idx = (vote.validator_id / 8) as usize;
-                        let bit_idx = (vote.validator_id % 8) as u8;
-                        if byte_idx < voter_bitmap.len() {
-                            voter_bitmap[byte_idx] |= 1 << bit_idx;
-                        }
-                    }
-                }
-            }
-            drop(validator_state);
-
-            if qc_sigs.len() >= threshold as usize {
-                // Build QC and attach aggregated BLS signature to header
-                let qc = call_consensus::QuorumCertificate {
-                    block_hash,
-                    height,
-                    round: {
-                        let c = consensus.read().unwrap();
-                        c.current_round()
-                    },
-                    signatures: qc_sigs,
-                };
-
-                if valid_sigs.len() >= 2 {
-                    match bls_aggregate(&valid_sigs) {
-                        Ok(agg) => {
-                            block.header.bls_aggregate_signature = Some(agg.0.to_vec());
-                            block.header.bls_signer_bitmap = voter_bitmap;
-                            tracing::info!(
-                                height,
-                                votes = valid_sigs.len(),
-                                threshold,
-                                "assembled QC with aggregated BLS signature"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(height, error = ?e, "BLS aggregation failed");
-                        }
-                    }
-                }
-                Some(qc)
-            } else {
-                tracing::warn!(
-                    height,
-                    votes = qc_sigs.len(),
-                    threshold,
-                    "QC not reached — discarding block"
-                );
-                // Advance round without committing (empty block semantics)
-                {
-                    let mut c = consensus.write().unwrap();
-                    c.advance_round();
-                }
-                continue;
-            }
-        } else {
-            None // single-node mode, no QC needed
-        };
-
-        // 9. Commit via consensus (with QC if in network mode)
+        // 7. Commit via consensus (BFT engine handles proposal/verification)
         {
             let mut c = consensus.write().unwrap();
-            let qc_ref = qc.as_ref();
-            if let Err(e) = c.commit_block(&block, &result, qc_ref) {
+            if let Err(e) = c.commit_block(&block, &result) {
                 tracing::warn!(error = ?e, "commit failed");
                 continue;
             }
@@ -1349,6 +1406,339 @@ async fn block_production_loop(
     }
 }
 
+/// BFT event loop — handles propose / verify / finalize / broadcast from the
+/// Commonware Simplex BFT engine running in a background thread.
+async fn bft_event_loop(
+    mut propose_rx: mpsc::Receiver<ProposeRequest>,
+    mut verify_rx: mpsc::Receiver<VerifyRequest>,
+    mut finalize_rx: mpsc::Receiver<FinalizationInfo>,
+    mut broadcast_rx: mpsc::Receiver<Vec<u8>>,
+    state: Arc<RpcState>,
+    mempool: Arc<RwLock<Mempool>>,
+    consensus: Arc<RwLock<SimplexConsensus>>,
+    block_cache: Arc<std::sync::Mutex<BlockCache>>,
+    db: CallDb,
+    mut prune_state: PruneState,
+    subscriptions: SubscriptionManager,
+    mut parent_hash: BlockHash,
+    network: Option<Arc<dyn Network>>,
+    data_dir: PathBuf,
+) {
+    let mut execution_results: std::collections::HashMap<
+        ConsensusDigest,
+        call_consensus::BlockExecutionResult,
+    > = std::collections::HashMap::new();
+    let prune_config = call_storage::PruneConfig::default();
+
+    // Build a mapping from ed25519 pubkey -> validator id for propose lookups
+    let pubkey_to_id = {
+        let vs = state.validator_state.read().unwrap();
+        let mut map = std::collections::HashMap::new();
+        for (id, stake) in vs.get_all_validators().iter() {
+            if let Ok(pk) = ed25519::PublicKey::decode(&stake.ed25519_pubkey[..]) {
+                map.insert(pk, *id);
+            }
+        }
+        map
+    };
+
+    loop {
+        tokio::select! {
+            Some((context, reply_tx)) = propose_rx.recv() => {
+                // The BFT engine selected us as the leader for this view.
+                // Build a block from mempool and return its digest.
+                let selection = { mempool.write().unwrap().select_transactions() };
+
+                // Map the BFT leader pubkey to our validator id
+                let proposer = pubkey_to_id.get(&context.leader).copied().unwrap_or(0);
+                let height = {
+                    let c = consensus.read().unwrap();
+                    c.current_height()
+                };
+
+                let protocol_txs: Vec<ProtocolTransaction> = selection
+                    .protocol_txs
+                    .into_iter()
+                    .filter_map(|e| serde_json::from_slice(&e.data).ok())
+                    .collect();
+                let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
+
+                let mut block = Block::new(
+                    height,
+                    parent_hash,
+                    current_timestamp_millis(),
+                    proposer,
+                    protocol_txs,
+                    evm_txs,
+                    vec![SystemTx {
+                        kind: SystemTxKind::UpdateBaseFee,
+                        data: vec![],
+                    }],
+                    selection.bridge_ops,
+                );
+
+                // Execute the block
+                let result = {
+                    let mut balances = state.balance_state.write().unwrap();
+                    let registry = state.asset_registry.read().unwrap();
+                    let mut compliance = state.compliance_engine.write().unwrap();
+                    let mut bridge_state = state.bridge_state.write().unwrap();
+                    let mut shielded_state = state.shielded_state.write().unwrap();
+                    let mut fee_params = state.fee_params.write().unwrap();
+                    let mut evm_state = state.evm_state.write().unwrap();
+                    let mut oracle = state.oracle.write().unwrap();
+
+                    block.execute(
+                        &mut balances,
+                        &registry,
+                        &mut compliance,
+                        &mut bridge_state,
+                        &mut shielded_state,
+                        &mut fee_params,
+                        height,
+                        &mut evm_state,
+                        Some(&mut *oracle),
+                    )
+                };
+
+                match result {
+                    Ok(result) => {
+                        block.finalize(&result);
+                        let digest = ConsensusDigest::from(block.header.hash());
+
+                        // Cache block and execution result for verify/finalize
+                        block_cache.lock().unwrap().insert(digest, block);
+                        execution_results.insert(digest, result);
+
+                        let _ = reply_tx.send(digest);
+                        tracing::debug!(height, proposer, "BFT propose: block built");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, height, "BFT propose: block execution failed");
+                        let _ = reply_tx.send(ConsensusDigest::EMPTY);
+                    }
+                }
+            }
+
+            Some((_context, digest, reply_tx)) = verify_rx.recv() => {
+                // Another validator proposed this block; verify it.
+                let block = {
+                    let cache = block_cache.lock().unwrap();
+                    cache.get(&digest).cloned()
+                };
+
+                let valid = if let Some(block) = block {
+                    let height = block.header.height;
+                    let result = {
+                        let mut balances = state.balance_state.write().unwrap();
+                        let registry = state.asset_registry.read().unwrap();
+                        let mut compliance = state.compliance_engine.write().unwrap();
+                        let mut bridge_state = state.bridge_state.write().unwrap();
+                        let mut shielded_state = state.shielded_state.write().unwrap();
+                        let mut fee_params = state.fee_params.write().unwrap();
+                        let mut evm_state = state.evm_state.write().unwrap();
+                        let mut oracle = state.oracle.write().unwrap();
+
+                        block.execute(
+                            &mut balances,
+                            &registry,
+                            &mut compliance,
+                            &mut bridge_state,
+                            &mut shielded_state,
+                            &mut fee_params,
+                            height,
+                            &mut evm_state,
+                            Some(&mut *oracle),
+                        )
+                    };
+
+                    match result {
+                        Ok(r) => {
+                            execution_results.insert(digest, r);
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, digest = %digest, "BFT verify: execution failed");
+                            false
+                        }
+                    }
+                } else {
+                    tracing::warn!(digest = %digest, "BFT verify: block not in cache");
+                    false
+                };
+
+                let _ = reply_tx.send(valid);
+            }
+
+            Some(info) = finalize_rx.recv() => {
+                // Block has been finalized by BFT consensus.
+                let block = {
+                    let mut cache = block_cache.lock().unwrap();
+                    cache.remove(&info.digest)
+                };
+
+                if let Some(block) = block {
+                    let height = block.header.height;
+
+                    // Use cached execution result if available
+                    let result = execution_results.remove(&info.digest);
+                    let result = match result {
+                        Some(r) => r,
+                        None => {
+                            // Re-execute if cache missed (should be rare)
+                            let mut balances = state.balance_state.write().unwrap();
+                            let registry = state.asset_registry.read().unwrap();
+                            let mut compliance = state.compliance_engine.write().unwrap();
+                            let mut bridge_state = state.bridge_state.write().unwrap();
+                            let mut shielded_state = state.shielded_state.write().unwrap();
+                            let mut fee_params = state.fee_params.write().unwrap();
+                            let mut evm_state = state.evm_state.write().unwrap();
+                            let mut oracle = state.oracle.write().unwrap();
+
+                            match block.execute(
+                                &mut balances,
+                                &registry,
+                                &mut compliance,
+                                &mut bridge_state,
+                                &mut shielded_state,
+                                &mut fee_params,
+                                height,
+                                &mut evm_state,
+                                Some(&mut *oracle),
+                            ) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(error = ?e, height, "BFT finalize: re-execution failed");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    // Commit via consensus
+                    {
+                        let mut c = consensus.write().unwrap();
+                        if let Err(e) = c.commit_block(&block, &result) {
+                            tracing::warn!(error = ?e, height, "BFT finalize: commit failed");
+                            continue;
+                        }
+                    }
+
+                    // Advance state
+                    let new_height = height + 1;
+                    state.set_current_block(new_height);
+                    parent_hash = block.header.hash();
+                    state.finalize_block();
+
+                    // Advance governance
+                    {
+                        let mut gov = state.governance.write().unwrap();
+                        gov.set_current_block(new_height);
+                        gov.advance(new_height);
+                        for event in gov.drain_events() {
+                            let (event_str, proposal_id) = match &event {
+                                call_governance::GovernanceEvent::ProposalAdvanced { id, from, to } => {
+                                    (format!("{:?} → {:?}", from, to), *id)
+                                }
+                                call_governance::GovernanceEvent::ProposalExecuted { id, proposal_type } => {
+                                    (format!("executed: {}", proposal_type), *id)
+                                }
+                                call_governance::GovernanceEvent::ProposalExpired { id } => {
+                                    ("expired".to_string(), *id)
+                                }
+                                call_governance::GovernanceEvent::ProposalDefeated { id } => {
+                                    ("defeated".to_string(), *id)
+                                }
+                            };
+                            subscriptions.broadcast_governance(event_str, proposal_id, String::new());
+                        }
+                    }
+
+                    // Sync validators into governance
+                    {
+                        let mut gov = state.governance.write().unwrap();
+                        let vs = state.validator_state.read().unwrap();
+                        for (id, stake) in vs.get_all_validators().iter() {
+                            gov.register_validator(*id, stake.address);
+                        }
+                    }
+
+                    // Persist block to disk
+                    if let Err(e) = persist_block(&data_dir, height, &block) {
+                        tracing::warn!(error = %e, height, "BFT finalize: persist block failed");
+                    }
+
+                    // Update prune tracking
+                    prune_state.add_block_body(height, call_storage::BlockBody {
+                        block_hash: parent_hash,
+                        tx_count: result.total_tx_count() as u32,
+                        body_size: 0,
+                    });
+
+                    if let Err(e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config) {
+                        tracing::warn!(error = %e, "BFT finalize: prune check failed");
+                    }
+
+                    // Incremental state persistence
+                    if let Some(ref db_env) = db.db {
+                        if let Err(e) = persist_state_incremental(db_env, &state, &consensus) {
+                            tracing::warn!(error = %e, "BFT finalize: incremental persist failed");
+                        }
+                    }
+
+                    // Full rebuild every 1000 blocks
+                    if new_height % 1000 == 0 {
+                        if let Some(ref db_env) = db.db {
+                            if let Err(e) = persist_state_to_db(db_env, &state, &consensus) {
+                                tracing::warn!(error = %e, "BFT finalize: full persist failed");
+                            }
+                        }
+                    }
+
+                    tracing::info!(height = new_height, tx_count = result.total_tx_count(), "BFT finalized block");
+
+                    // Broadcast to WebSocket subscribers
+                    let tx_count = result.total_tx_count();
+                    subscriptions.broadcast_block(height, format!("{:?}", block.header.hash()), block.header.proposer, tx_count);
+
+                    // Broadcast block announcement via P2P
+                    if let Some(ref net) = network {
+                        let announcement = BlockAnnouncement {
+                            block_hash: parent_hash,
+                            height,
+                            proposer: block.header.proposer,
+                            timestamp_millis: block.header.timestamp_millis,
+                        };
+                        let msg = serde_json::to_vec(&NetworkMessage::BlockAnnouncement(announcement))
+                            .expect("serialize block announcement");
+                        let net_clone = Arc::clone(net);
+                        tokio::spawn(async move {
+                            net_clone.broadcast(BLOCK_CHANNEL, msg).await;
+                        });
+                    }
+                } else {
+                    tracing::warn!(digest = %info.digest, "BFT finalize: block not in cache");
+                }
+            }
+
+            Some(block_bytes) = broadcast_rx.recv() => {
+                // Relay wants us to broadcast a block via the app P2P network
+                if let Some(ref net) = network {
+                    let net_clone = Arc::clone(net);
+                    tokio::spawn(async move {
+                        net_clone.broadcast(BLOCK_CHANNEL, block_bytes).await;
+                    });
+                }
+            }
+
+            else => {
+                tracing::info!("BFT event loop: all channels closed, shutting down");
+                break;
+            }
+        }
+    }
+}
+
 fn current_timestamp_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1444,76 +1834,6 @@ fn handle_network_message(
             }
         }
         BLOCK_CHANNEL => {
-            // Handle block proposals (pre-commit) — validators vote on these
-            if let Ok(proposal) = serde_json::from_slice::<BlockProposal>(data) {
-                let local_height = state.get_current_block();
-                if proposal.height > local_height {
-                    // Peer is ahead, request sync instead of voting
-                    tracing::info!(
-                        peer_id,
-                        height = proposal.height,
-                        local = local_height,
-                        "block proposal: peer ahead, requesting sync"
-                    );
-                    let request = SyncRequest {
-                        start_height: local_height,
-                        count: 100,
-                        full_state: false,
-                    };
-                    let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
-                        .expect("serialize sync request");
-                    let peer_id_owned = peer_id.to_string();
-                    let net = Arc::clone(network);
-                    tokio::spawn(async move {
-                        net.send_to(vec![peer_id_owned], req_data).await;
-                    });
-                } else {
-                    // If this node is a validator with a BLS key, cast a vote
-                    let state_clone = Arc::clone(state);
-                    let net_clone = Arc::clone(network);
-                    tokio::spawn(async move {
-                        let bls_secret = {
-                            let sk = state_clone.bls_secret_key.read().unwrap();
-                            sk.clone()
-                        };
-                        if let Some(secret) = bls_secret {
-                            let signer_addr = {
-                                let signer = state_clone.signer.read().unwrap();
-                                signer.as_ref().map(|s| s.address())
-                            };
-                            if let Some(addr) = signer_addr {
-                                let our_id = {
-                                    let vs = state_clone.validator_state.read().unwrap();
-                                    let mut id = None;
-                                    for (vid, stake) in vs.get_all_validators().iter() {
-                                        if stake.address == addr {
-                                            id = Some(*vid);
-                                            break;
-                                        }
-                                    }
-                                    id
-                                };
-                                if let Some(validator_id) = our_id {
-                                    let block_hash_bytes = proposal.block_hash.0;
-                                    let sig = bls_sign(&secret, &block_hash_bytes);
-                                    let vote = BlockVote {
-                                        height: proposal.height,
-                                        block_hash: proposal.block_hash,
-                                        validator_id,
-                                        bls_signature: sig.0,
-                                    };
-                                    if let Ok(msg) = serde_json::to_vec(&NetworkMessage::BlockVote(vote)) {
-                                        net_clone.broadcast(VOTE_CHANNEL, msg).await;
-                                        tracing::debug!(height = proposal.height, validator_id, "broadcast BLS block vote on proposal");
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-                return;
-            }
-
             // Handle block announcements (post-commit) — trigger sync if behind
             if let Ok(announcement) = serde_json::from_slice::<BlockAnnouncement>(data) {
                 let local_height = state.get_current_block();
@@ -1614,14 +1934,6 @@ fn handle_network_message(
                         tracing::debug!(error = %e, validator_id = submission.validator_id, "oracle P2P submission rejected");
                     }
                 });
-            }
-        }
-        VOTE_CHANNEL => {
-            if let Ok(vote) = serde_json::from_slice::<BlockVote>(data) {
-                // Queue vote for the block production loop to aggregate
-                if let Ok(mut pending) = state.pending_votes.write() {
-                    pending.push(vote);
-                }
             }
         }
         _ => {}
@@ -1803,7 +2115,7 @@ mod tests {
         // Commit
         {
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, None).expect("commit");
+            consensus.commit_block(&block, &result).expect("commit");
         }
 
         let height_after = node.consensus.read().unwrap().current_height();
@@ -1887,7 +2199,7 @@ mod tests {
         // Commit
         {
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, None).expect("commit empty");
+            consensus.commit_block(&block, &result).expect("commit empty");
         }
 
         assert_eq!(node.consensus.read().unwrap().current_height(), 1);
@@ -1985,7 +2297,7 @@ mod tests {
         // Commit on node1
         {
             let mut consensus = node1.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, None).expect("commit");
+            consensus.commit_block(&block, &result).expect("commit");
         }
         assert_eq!(node1.consensus.read().unwrap().current_height(), 1, "node1 should be at height 1");
 
@@ -2089,7 +2401,7 @@ mod tests {
 
         {
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, None).expect("commit");
+            consensus.commit_block(&block, &result).expect("commit");
         }
 
         // Persist block
@@ -2191,7 +2503,7 @@ mod tests {
 
             {
                 let mut consensus = node.consensus.write().unwrap();
-                consensus.commit_block(&block, &result, None).expect("commit");
+                consensus.commit_block(&block, &result).expect("commit");
             }
 
             // Persist state to reth-db immediately

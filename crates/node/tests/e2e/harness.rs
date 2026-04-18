@@ -250,7 +250,7 @@ impl TestNode {
         // Commit
         {
             let mut consensus = self.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, None).expect("commit block");
+            consensus.commit_block(&block, &result).expect("commit block");
         }
 
         let new_height = height + 1;

@@ -347,8 +347,9 @@ impl NodeConfig {
             }
         }
         if let Some(ref key) = self.keys.identity_key {
-            if key.len() != 128 {
-                return Err("identity_key must be 64 hex bytes (128 hex chars)".into());
+            let hex_clean = key.trim_start_matches("0x");
+            if hex_clean.len() != 64 && hex_clean.len() != 128 {
+                return Err("identity_key must be 32 hex bytes (64 hex chars) or 64 hex bytes (128 hex chars)".into());
             }
         }
         if self.keys.identity_key.is_some() && self.keys.identity_keystore.is_some() {
