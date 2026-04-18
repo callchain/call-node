@@ -17,6 +17,9 @@ pub const UNBONDING_PERIOD_SECS: u64 = 7 * 24 * 3600;
 /// Proportional offline slash rate per round (0.1% per round)
 pub const OFFLINE_SLASH_RATE_PER_ROUND: u128 = 10; // basis points (0.10%)
 
+/// Grace period for rotated keys — old key remains valid for this many blocks
+pub const KEY_ROTATION_GRACE_BLOCKS: u64 = 100;
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /// Slash event record
@@ -50,6 +53,15 @@ pub struct UnbondingRequest {
     pub eligible_at_block: u64,
 }
 
+/// Key rotation record — tracks pubkey transitions with grace period
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyRotation {
+    pub validator_id: ValidatorId,
+    pub old_pubkey: Ed25519PublicKey,
+    pub new_pubkey: Ed25519PublicKey,
+    pub rotation_block: u64,
+}
+
 /// Manages all validator stakes (per spec §12.6)
 #[derive(Debug, Default)]
 pub struct ValidatorStateManager {
@@ -58,6 +70,8 @@ pub struct ValidatorStateManager {
     unbonding_requests: Vec<UnbondingRequest>,
     /// Block height used to calculate unbonding eligibility
     current_block: u64,
+    /// Key rotation history — old pubkeys remain valid during grace period
+    key_rotations: Vec<KeyRotation>,
 }
 
 impl ValidatorStateManager {
@@ -314,6 +328,80 @@ impl ValidatorStateManager {
             .checked_add(total_reward)
             .ok_or(ConsensusError::ConsensusError("reward overflow".into()))?;
         Ok(())
+    }
+
+    // ── Key Rotation ──────────────────────────────────────────────────
+
+    /// Rotate a validator's Ed25519 public key.
+    /// The old key remains valid during `KEY_ROTATION_GRACE_BLOCKS` for in-flight messages.
+    /// Returns the old key for historical record.
+    pub fn rotate_key(
+        &mut self,
+        validator_id: ValidatorId,
+        old_pubkey: Ed25519PublicKey,
+        new_pubkey: Ed25519PublicKey,
+    ) -> Result<Ed25519PublicKey, ConsensusError> {
+        let validator = self
+            .validators
+            .get_mut(&validator_id)
+            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
+
+        if validator.ed25519_pubkey != old_pubkey {
+            return Err(ConsensusError::ConsensusError(
+                "old pubkey does not match current validator key".into(),
+            ));
+        }
+
+        // Record rotation
+        self.key_rotations.push(KeyRotation {
+            validator_id,
+            old_pubkey,
+            new_pubkey,
+            rotation_block: self.current_block,
+        });
+
+        let previous = validator.ed25519_pubkey;
+        validator.ed25519_pubkey = new_pubkey;
+
+        tracing::info!(
+            validator_id,
+            rotation_block = self.current_block,
+            "validator key rotated — old key valid for {KEY_ROTATION_GRACE_BLOCKS} blocks"
+        );
+
+        Ok(previous)
+    }
+
+    /// Check if a public key is valid for a validator at the given block height.
+    /// Returns true if:
+    /// - `pubkey` is the current key, OR
+    /// - `pubkey` was rotated out within `KEY_ROTATION_GRACE_BLOCKS` of `block`
+    pub fn is_valid_pubkey(
+        &self,
+        validator_id: ValidatorId,
+        pubkey: &Ed25519PublicKey,
+        block: u64,
+    ) -> bool {
+        let Some(validator) = self.validators.get(&validator_id) else {
+            return false;
+        };
+
+        // Current key always valid
+        if &validator.ed25519_pubkey == pubkey {
+            return true;
+        }
+
+        // Check rotation history
+        for rotation in &self.key_rotations {
+            if rotation.validator_id == validator_id
+                && &rotation.old_pubkey == pubkey
+                && block <= rotation.rotation_block + KEY_ROTATION_GRACE_BLOCKS
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Get validator stake info

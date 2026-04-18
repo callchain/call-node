@@ -19,13 +19,29 @@ pub struct CliArgs {
 
     // ── Keys ──────────────────────────────────────────────────────────
 
-    /// Validator consensus key (hex-encoded Ed25519 secret key, 64 hex chars)
-    #[arg(long)]
+    /// Validator consensus key (hex-encoded, devnet only)
+    #[arg(long, hide = true)]
     pub validator_key: Option<String>,
 
-    /// P2P identity key (hex-encoded Ed25519 secret key, 64 hex chars)
+    /// Path to encrypted validator keystore file (production)
     #[arg(long)]
+    pub validator_keystore: Option<PathBuf>,
+
+    /// Passphrase for validator keystore (or CALL_KEYSTORE_PASS env var)
+    #[arg(long)]
+    pub validator_keystore_pass: Option<String>,
+
+    /// P2P identity key (hex-encoded, devnet only)
+    #[arg(long, hide = true)]
     pub identity_key: Option<String>,
+
+    /// Path to encrypted identity keystore file
+    #[arg(long)]
+    pub identity_keystore: Option<PathBuf>,
+
+    /// Passphrase for identity keystore
+    #[arg(long)]
+    pub identity_keystore_pass: Option<String>,
 
     // ── Genesis ───────────────────────────────────────────────────────
 

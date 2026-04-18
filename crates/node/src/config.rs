@@ -51,7 +51,15 @@ pub struct KeysConfig {
     #[serde(default)]
     pub validator_key: Option<String>,
     #[serde(default)]
+    pub validator_keystore: Option<PathBuf>,
+    #[serde(default)]
+    pub validator_keystore_pass: Option<String>,
+    #[serde(default)]
     pub identity_key: Option<String>,
+    #[serde(default)]
+    pub identity_keystore: Option<PathBuf>,
+    #[serde(default)]
+    pub identity_keystore_pass: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,8 +215,20 @@ impl NodeConfig {
         if args.validator_key.is_some() {
             self.keys.validator_key.clone_from(&args.validator_key);
         }
+        if args.validator_keystore.is_some() {
+            self.keys.validator_keystore.clone_from(&args.validator_keystore);
+        }
+        if args.validator_keystore_pass.is_some() {
+            self.keys.validator_keystore_pass.clone_from(&args.validator_keystore_pass);
+        }
         if args.identity_key.is_some() {
             self.keys.identity_key.clone_from(&args.identity_key);
+        }
+        if args.identity_keystore.is_some() {
+            self.keys.identity_keystore.clone_from(&args.identity_keystore);
+        }
+        if args.identity_keystore_pass.is_some() {
+            self.keys.identity_keystore_pass.clone_from(&args.identity_keystore_pass);
         }
 
         // Genesis
@@ -269,18 +289,34 @@ impl NodeConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
-        if self.mode == NodeMode::Validator && self.keys.validator_key.is_none() {
-            return Err("validator mode requires --validator-key".into());
-        }
-        if let Some(ref key) = self.keys.validator_key {
-            if key.len() != 128 {
-                return Err("validator_key must be 64 hex bytes (128 hex chars)".into());
+        if self.mode == NodeMode::Validator {
+            let has_validator_key = self.keys.validator_key.is_some();
+            let has_validator_keystore = self.keys.validator_keystore.is_some();
+
+            if !has_validator_key && !has_validator_keystore {
+                return Err("validator mode requires --validator-key or --validator-keystore".into());
+            }
+            if has_validator_key && has_validator_keystore {
+                return Err("provide either --validator-key or --validator-keystore, not both".into());
+            }
+            if let Some(ref key) = self.keys.validator_key {
+                if key.len() != 128 {
+                    return Err("validator_key must be 64 hex bytes (128 hex chars)".into());
+                }
+            }
+            if let Some(ref path) = self.keys.validator_keystore {
+                if !path.exists() {
+                    return Err(format!("validator keystore file not found: {}", path.display()));
+                }
             }
         }
         if let Some(ref key) = self.keys.identity_key {
             if key.len() != 128 {
                 return Err("identity_key must be 64 hex bytes (128 hex chars)".into());
             }
+        }
+        if self.keys.identity_key.is_some() && self.keys.identity_keystore.is_some() {
+            return Err("provide either --identity-key or --identity-keystore, not both".into());
         }
         Ok(())
     }

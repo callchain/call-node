@@ -156,6 +156,15 @@ pub enum ProposalType {
     FeeCurrencyCap {
         new_cap_bps: u32,
     },
+    /// Rotate a validator's signing key (per spec §12.7)
+    /// The old key must sign the rotation request to prove ownership.
+    ValidatorKeyRotation {
+        validator_id: ValidatorId,
+        old_pubkey: [u8; 32],
+        new_pubkey: [u8; 32],
+        /// secp256k1 signature from old key: sign(hash(old_pubkey || new_pubkey))
+        signature: Vec<u8>,
+    },
 }
 
 impl ProposalType {
@@ -167,6 +176,7 @@ impl ProposalType {
                 | ProposalType::ProtocolUpgrade { .. }
                 | ProposalType::ValidatorSlash { .. }
                 | ProposalType::EmergencyPause { .. }
+                | ProposalType::ValidatorKeyRotation { .. }
         )
     }
 
@@ -692,6 +702,10 @@ impl GovernanceManager {
                 // Update fee currency cap
                 tracing::info!(new_cap_bps, "fee currency cap updated via governance");
             }
+            ProposalType::ValidatorKeyRotation { validator_id, old_pubkey, new_pubkey, .. } => {
+                // Record rotation (actual key update is done by executor in call-rpc)
+                tracing::info!(validator_id, ?old_pubkey, ?new_pubkey, "validator key rotation scheduled");
+            }
         }
 
         Ok(())
@@ -1005,7 +1019,8 @@ impl GovernanceManager {
             }
             ProposalType::FeeCurrencyAdd { .. }
             | ProposalType::FeeCurrencyRemove { .. }
-            | ProposalType::FeeCurrencyCap { .. } => {
+            | ProposalType::FeeCurrencyCap { .. }
+            | ProposalType::ValidatorKeyRotation { .. } => {
                 self.config.simple_majority(total_validators) as Balance
             }
         };

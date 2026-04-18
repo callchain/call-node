@@ -9,6 +9,7 @@ use call_consensus::{ValidatorStateManager, ForkManager, ForkError};
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash, PublicKey};
+use call_crypto::SignerRef;
 use call_transaction_pool::Mempool;
 use alloy_consensus::{TxEnvelope, Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::Bytes;
@@ -43,6 +44,8 @@ pub struct RpcState {
     /// When true, governance RPC methods require valid secp256k1 signatures.
     /// When false (default, devnet), unsigned calls are allowed.
     pub require_governance_auth: AtomicBool,
+    /// Block signing key — None for full nodes, Some(signer) for validators.
+    pub signer: RwLock<Option<SignerRef>>,
     #[cfg(feature = "light-client-bridge")]
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
 }
@@ -88,6 +91,7 @@ impl RpcState {
             )),
             fee_currency_registry: RwLock::new(FeeCurrencyRegistry::new()),
             require_governance_auth: AtomicBool::new(false),
+            signer: RwLock::new(None),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
         }
@@ -781,6 +785,43 @@ impl ProposalExecutor for NodeProposalExecutor {
                 let mut registry = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
                 registry.stablecoin_cap_bps = *new_cap_bps;
                 tracing::info!(new_cap_bps, "fee currency cap updated via governance");
+            }
+            ProposalType::ValidatorKeyRotation { validator_id, old_pubkey, new_pubkey, signature } => {
+                // Verify the old key signed the rotation request
+                let msg = {
+                    let mut buf = Vec::with_capacity(64);
+                    buf.extend_from_slice(old_pubkey);
+                    buf.extend_from_slice(new_pubkey);
+                    buf
+                };
+                let msg_hash = call_crypto::keccak256(&msg);
+
+                // Recover signer address from signature
+                if signature.len() != 65 {
+                    return Err("rotation signature must be 65 bytes".into());
+                }
+                let sig_arr: [u8; 65] = signature.as_slice().try_into().map_err(|_| "invalid signature length")?;
+                let recovered = call_crypto::recover_secp256k1_signer(&msg_hash, &sig_arr)
+                    .map_err(|e| format!("failed to recover signer from rotation signature: {e}"))?;
+
+                // Look up the validator's current address
+                let vs = self.state.validator_state.read().map_err(|_| "validator lock poisoned".to_string())?;
+                let validator = vs.get_validator_stake(*validator_id)
+                    .ok_or_else(|| format!("validator {validator_id} not found"))?;
+
+                // The recovered address must match the validator's address
+                let validator_addr = validator.address;
+                drop(vs);
+
+                if recovered != validator_addr {
+                    return Err(format!("rotation signature from wrong address: expected {validator_addr:?}, got {recovered:?}"));
+                }
+
+                // Rotate the key in consensus
+                let mut vs = self.state.validator_state.write().map_err(|_| "validator lock poisoned".to_string())?;
+                vs.rotate_key(*validator_id, *old_pubkey, *new_pubkey)
+                    .map_err(|e| format!("key rotation failed: {e}"))?;
+                tracing::info!(validator_id, "validator key rotated via governance");
             }
         }
 

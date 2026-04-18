@@ -8,8 +8,10 @@ use crate::CallNode;
 use call_network::CommonwareConfig;
 use call_primitives::Address;
 use call_rpc::RpcConfig;
+use call_crypto::{LocalSigner, EncryptedKeystore, SignerRef, load_key as load_keystore_key};
 use serde::Deserialize;
 use std::fs;
+use std::sync::Arc;
 use tracing::info;
 
 /// Result type for boot sequence
@@ -114,6 +116,29 @@ fn parse_pubkey(s: &str) -> Result<[u8; 32], String> {
     Ok(arr)
 }
 
+/// Load validator signer from keystore or plaintext key
+fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<SignerRef, String> {
+    // Priority: keystore > plaintext hex
+    if let Some(ref path) = keys.validator_keystore {
+        let pass = keys.validator_keystore_pass
+            .clone()
+            .or_else(|| std::env::var("CALL_KEYSTORE_PASS").ok())
+            .ok_or("validator keystore passphrase required (via --validator-keystore-pass or CALL_KEYSTORE_PASS env var)")?;
+        let raw_key = load_keystore_key(path, &pass)
+            .map_err(|e| format!("failed to load validator keystore: {e}"))?;
+        let signer = LocalSigner::from_raw_key(raw_key)
+            .map_err(|e| format!("invalid validator key: {e}"))?;
+        Ok(Arc::new(signer))
+    } else if let Some(ref hex_key) = keys.validator_key {
+        let signer = LocalSigner::from_hex(hex_key)
+            .map_err(|e| format!("invalid validator key: {e}"))?;
+        info!("WARNING: using plaintext validator key — use --validator-keystore for production");
+        Ok(Arc::new(signer))
+    } else {
+        Err("validator key required (use --validator-keystore or --validator-key)".into())
+    }
+}
+
 /// Execute the full boot sequence per §21.3.
 pub async fn boot_node(config: &NodeConfig) -> BootResult {
     // Step 1: Open DB (resume from existing data if present)
@@ -131,6 +156,17 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
 
     // Wire governance auth config
     node.state.set_governance_auth(config.governance.require_auth);
+
+    // Step 2b: Load validator signing key (if validator mode)
+    if config.mode == NodeMode::Validator {
+        let signer = load_validator_signer(&config.keys)?;
+        info!(
+            address = ?signer.address(),
+            kind = ?signer.kind(),
+            "validator signing key loaded"
+        );
+        *node.state.signer.write().map_err(|_| "lock poisoned")? = Some(signer);
+    }
 
     // Step 3: Load genesis if path provided
     if let Some(ref genesis_path) = config.genesis.path {
