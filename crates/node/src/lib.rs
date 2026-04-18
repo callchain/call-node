@@ -85,6 +85,9 @@ pub struct CallNode {
     pub server_handle: Option<ServerHandle>,
     pub ws_server_handle: Option<ServerHandle>,
     pub parent_hash: BlockHash,
+    /// Shared block cache for BFT digest → block mapping.
+    /// Populated by propose, received blocks from P2P relay, and consumed by verify/finalize.
+    pub block_cache: Arc<std::sync::Mutex<BlockCache>>,
 }
 
 impl CallNode {
@@ -171,6 +174,7 @@ impl CallNode {
             server_handle: None,
             ws_server_handle: None,
             parent_hash,
+            block_cache: Arc::new(std::sync::Mutex::new(BlockCache::new(1000))),
         })
     }
 
@@ -223,6 +227,7 @@ impl CallNode {
         let mempool = Arc::clone(&self.mempool);
         let state = Arc::clone(&self.state);
         let data_dir = self.db.data_dir.clone();
+        let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
         tokio::spawn(async move {
             while let Ok((peer_id, channel, data)) = net_clone.receive().await {
@@ -235,6 +240,18 @@ impl CallNode {
                                 .expect("serialize sync response");
                             net_clone.send_to(vec![peer_id], resp_data).await;
                         }
+                    }
+                } else if channel == BLOCK_CHANNEL {
+                    // Try BlockAnnouncement first (post-commit announcements)
+                    if let Ok(_announcement) = serde_json::from_slice::<BlockAnnouncement>(&data) {
+                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone);
+                    } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
+                        // Full block received from BFT relay — insert into cache for verify
+                        let digest = ConsensusDigest::from(block.header.hash());
+                        block_cache.lock().unwrap().insert(digest, block);
+                        tracing::debug!(digest = %digest, peer_id, "BFT: relayed block received, inserted into cache");
+                    } else {
+                        tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
                 } else {
                     handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone);
@@ -295,7 +312,7 @@ impl CallNode {
         let (finalize_tx, finalize_rx) = mpsc::channel::<FinalizationInfo>(16);
         let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(64);
 
-        let block_cache = Arc::new(std::sync::Mutex::new(BlockCache::new(1000)));
+        let block_cache = Arc::clone(&self.block_cache);
 
         // Build BFT trait bridges
         let automaton = CallAutomaton::new(propose_tx, verify_tx);
@@ -1522,10 +1539,26 @@ async fn bft_event_loop(
 
             Some((_context, digest, reply_tx)) = verify_rx.recv() => {
                 // Another validator proposed this block; verify it.
-                let block = {
+                // Retry briefly to allow P2P relay delivery.
+                let mut block = {
                     let cache = block_cache.lock().unwrap();
                     cache.get(&digest).cloned()
                 };
+
+                if block.is_none() {
+                    for attempt in 1..=5 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let cache = block_cache.lock().unwrap();
+                        if let Some(b) = cache.get(&digest) {
+                            block = Some(b.clone());
+                            break;
+                        }
+                        drop(cache);
+                        if attempt == 5 {
+                            tracing::warn!(digest = %digest, "BFT verify: block not in cache after waiting");
+                        }
+                    }
+                }
 
                 let valid = if let Some(block) = block {
                     let height = block.header.height;
@@ -1563,7 +1596,6 @@ async fn bft_event_loop(
                         }
                     }
                 } else {
-                    tracing::warn!(digest = %digest, "BFT verify: block not in cache");
                     false
                 };
 
