@@ -5,7 +5,7 @@
 
 use crate::config::{NodeConfig, NodeMode, parse_bootstrap_peers};
 use crate::CallNode;
-use call_network::CommonwareConfig;
+use call_network::{CommonwareConfig, NetworkLimits, load_or_generate_identity_key};
 use call_primitives::Address;
 use call_rpc::RpcConfig;
 use call_crypto::{LocalSigner, SignerRef, load_key as load_keystore_key, bls_generate, bls_public_key_bytes};
@@ -275,18 +275,19 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     }
 
     // Step 4: Init P2P and connect seeds
-    if config.p2p.bootstrap_peers.is_some() || config.p2p.bootstrap_peers.is_none() {
-        info!(listen = %config.p2p.listen_addr, "step 4: initializing P2P");
-        let bootstrap = parse_bootstrap_peers(&config.p2p.bootstrap_peers);
-        let p2p_config = CommonwareConfig {
-            listen_addr: config.p2p.listen_addr,
-            bootstrap_peers: bootstrap,
-            max_message_size: 10 * 1024 * 1024,
-            allow_private_ips: true,
-            namespace: b"callchain".to_vec(),
-        };
-        node.start_network(p2p_config).await?;
-    }
+    info!(listen = %config.p2p.listen_addr, "step 4: initializing P2P");
+    let identity_key = load_or_generate_identity_key(&config.storage.data_dir, config.keys.identity_key.as_deref())?;
+    let bootstrap = parse_bootstrap_peers(&config.p2p.bootstrap_peers);
+    let p2p_config = CommonwareConfig {
+        listen_addr: config.p2p.listen_addr,
+        bootstrap_peers: bootstrap,
+        max_message_size: 10 * 1024 * 1024,
+        allow_private_ips: config.mode != NodeMode::Validator,
+        namespace: b"callchain".to_vec(),
+        min_healthy_peers: if config.mode == NodeMode::Validator { 1 } else { 0 },
+        limits: NetworkLimits::default(),
+    };
+    node.start_network(p2p_config, identity_key).await?;
 
     // Step 5: Init consensus (validator or full node)
     match config.mode {

@@ -268,7 +268,7 @@ impl TestNode {
                 proposer,
                 timestamp_millis: block.header.timestamp_millis,
             };
-            let msg = serde_json::to_vec(&NetworkMessage::BlockAnnouncement(announcement))
+            let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
                 .expect("serialize block announcement");
             // Spawn broadcast so it doesn't block
             let net_clone = Arc::clone(net);

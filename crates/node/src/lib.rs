@@ -216,8 +216,12 @@ impl CallNode {
     }
 
     /// Start P2P network
-    pub async fn start_network(&mut self, config: CommonwareConfig) -> Result<(), String> {
-        let network = CommonwareNetwork::new(&config)
+    pub async fn start_network(
+        &mut self,
+        config: CommonwareConfig,
+        identity_key: ed25519::PrivateKey,
+    ) -> Result<(), String> {
+        let network = CommonwareNetwork::new(&config, identity_key)
             .await
             .map_err(|e| format!("network init failed: {e}"))?;
         let network: Arc<dyn Network> = Arc::new(network);
@@ -233,10 +237,10 @@ impl CallNode {
             while let Ok((peer_id, channel, data)) = net_clone.receive().await {
                 if channel == SYNC_CHANNEL {
                     // Handle sync requests: respond with blocks
-                    if let Ok(NetworkMessage::SyncRequest(request)) = serde_json::from_slice(&data) {
+                    if let Ok(NetworkMessage::SyncRequest(request)) = bincode::deserialize(&data) {
                         tracing::debug!(peer_id, start = request.start_height, count = request.count, "sync: request from peer");
                         if let Some(response) = handle_sync_request(&data_dir, &request) {
-                            let resp_data = serde_json::to_vec(&NetworkMessage::SyncResponse(response))
+                            let resp_data = bincode::serialize(&NetworkMessage::SyncResponse(response))
                                 .expect("serialize sync response");
                             net_clone.send_to(vec![peer_id], resp_data).await;
                         }
@@ -493,7 +497,7 @@ impl CallNode {
                     count: BATCH_SIZE,
                     full_state: false,
                 };
-                let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
+                let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
                     .expect("serialize sync request");
                 network.broadcast(SYNC_CHANNEL, req_data).await;
 
@@ -509,7 +513,7 @@ impl CallNode {
 
                     if let Ok(Ok((_peer_id, channel, data))) = result {
                         if channel == SYNC_CHANNEL {
-                            if let Ok(NetworkMessage::SyncResponse(response)) = serde_json::from_slice(&data) {
+                            if let Ok(NetworkMessage::SyncResponse(response)) = bincode::deserialize(&data) {
                                 received_any = true;
                                 tracing::info!(
                                     peer_id = _peer_id,
@@ -998,7 +1002,7 @@ fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManager, String> 
 /// Save consensus state to the database.
 fn save_consensus_state_inner(db: &DatabaseEnv, consensus: &SimplexConsensus) -> Result<(), String> {
     let state = consensus.persist_state();
-    let data = serde_json::to_vec(&state).map_err(|e| format!("serialize consensus: {e}"))?;
+    let data = bincode::serialize(&state).map_err(|e| format!("serialize consensus: {e}"))?;
     db_put::<CallConsensusState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
 }
 
@@ -1266,7 +1270,7 @@ async fn block_production_loop(
                         block: height,
                         requester_id: proposer_id,
                     };
-                    let msg = serde_json::to_vec(&NetworkMessage::OraclePriceRequest(request))
+                    let msg = bincode::serialize(&NetworkMessage::OraclePriceRequest(request))
                         .expect("serialize oracle request");
                     net.broadcast(ORACLE_CHANNEL, msg).await;
                     // Configurable delay to allow validators to respond
@@ -1418,7 +1422,7 @@ async fn block_production_loop(
                 proposer,
                 timestamp_millis: block.header.timestamp_millis,
             };
-            let msg = serde_json::to_vec(&NetworkMessage::BlockAnnouncement(announcement))
+            let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
                 .expect("serialize block announcement");
             net.broadcast(BLOCK_CHANNEL, msg).await;
         }
@@ -1499,7 +1503,7 @@ async fn bft_event_loop(
                                 block: height,
                                 requester_id: proposer,
                             };
-                            let msg = serde_json::to_vec(&NetworkMessage::OraclePriceRequest(request))
+                            let msg = bincode::serialize(&NetworkMessage::OraclePriceRequest(request))
                                 .expect("serialize oracle request");
                             net.broadcast(ORACLE_CHANNEL, msg).await;
                             let delay_ms = consensus.read()
@@ -1835,7 +1839,7 @@ async fn bft_event_loop(
                             proposer: block.header.proposer,
                             timestamp_millis: block.header.timestamp_millis,
                         };
-                        let msg = serde_json::to_vec(&NetworkMessage::BlockAnnouncement(announcement))
+                        let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
                             .expect("serialize block announcement");
                         let net_clone = Arc::clone(net);
                         tokio::spawn(async move {
@@ -1932,7 +1936,7 @@ fn handle_sync_request(data_dir: &Path, request: &SyncRequest) -> Option<SyncRes
     let end = request.start_height.saturating_add(request.count);
     for h in request.start_height..end {
         if let Some(block) = load_block(data_dir, h) {
-            if let Ok(serialized) = serde_json::to_vec(&block) {
+            if let Ok(serialized) = bincode::serialize(&block) {
                 blocks.push(serialized);
             }
         } else {
@@ -1989,7 +1993,7 @@ fn handle_network_message(
                         count: 100,
                         full_state: false,
                     };
-                    let req_data = serde_json::to_vec(&NetworkMessage::SyncRequest(request))
+                    let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
                         .expect("serialize sync request");
                     let peer_id_owned = peer_id.to_string();
                     let net = Arc::clone(network);
@@ -2047,7 +2051,7 @@ fn handle_network_message(
                                     signature: [0u8; 64], // would be signed
                                     sources: vec!["local_oracle".into()],
                                 };
-                                if let Ok(msg) = serde_json::to_vec(&NetworkMessage::OraclePriceSubmission(submission)) {
+                                if let Ok(msg) = bincode::serialize(&NetworkMessage::OraclePriceSubmission(submission)) {
                                     net_clone.send_to(vec![peer_id_owned.clone()], msg).await;
                                 }
                             }
@@ -2449,16 +2453,17 @@ mod tests {
             proposer,
             timestamp_millis: block.header.timestamp_millis,
         };
-        let msg = serde_json::to_vec(&NetworkMessage::BlockAnnouncement(announcement))
+        let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
             .expect("serialize block announcement");
         shared_network.broadcast(BLOCK_CHANNEL, msg).await;
 
         // Step 4: Node2 receives the block announcement from shared network
-        let (peer_id, channel, data) = shared_network.receive().await.expect("should receive message");
+        let result = shared_network.receive().await;
+        let (peer_id, channel, data) = result.expect("should receive message");
         assert_eq!(channel, BLOCK_CHANNEL);
         assert_eq!(peer_id, "broadcast");
 
-        let received = serde_json::from_slice::<NetworkMessage>(&data).expect("parse network message");
+        let received = bincode::deserialize::<NetworkMessage>(&data).expect("parse network message");
         let announcement = match received {
             NetworkMessage::BlockAnnouncement(a) => a,
             other => panic!("expected block announcement, got {other:?}"),

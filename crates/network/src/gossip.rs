@@ -259,7 +259,7 @@ pub struct GossipManager {
     /// Known transaction hashes (dedup cache)
     pub known_txs: KnownTxsCache,
     /// Per-peer rate limiters
-    peers: HashMap<String, PeerState>,
+    pub(crate) peers: HashMap<String, PeerState>,
     /// Network limits
     limits: NetworkLimits,
     /// Pending transactions to propagate (ordered by priority)

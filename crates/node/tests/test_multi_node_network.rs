@@ -110,7 +110,7 @@ async fn test_transaction_propagation() {
     // Manually broadcast tx to network (simulating gossip)
     let tx_data = serde_json::to_vec(&make_tx(sender, 0, test_addr(2), 1_000)).unwrap();
     let tx_msg = TransactionMessage::new(tx_data, TxHash::repeat_byte(0));
-    let msg_data = serde_json::to_vec(&NetworkMessage::Transaction(tx_msg)).unwrap();
+    let msg_data = bincode::serialize(&NetworkMessage::Transaction(tx_msg)).unwrap();
     net_ref.broadcast(TX_CHANNEL, msg_data).await;
 
     // Node receives the message
@@ -118,7 +118,7 @@ async fn test_transaction_propagation() {
     assert_eq!(channel, TX_CHANNEL);
 
     // Verify it parses
-    let msg = serde_json::from_slice::<NetworkMessage>(&data).unwrap();
+    let msg = bincode::deserialize::<NetworkMessage>(&data).unwrap();
     assert!(matches!(msg, NetworkMessage::Transaction(_)));
 }
 

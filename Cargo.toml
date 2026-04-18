@@ -195,6 +195,9 @@ vergen-git2 = "1"
 
 hex = "0.4"
 
+# Binary serialization
+bincode = "1"
+
 # Testing
 test-case = "3"
 insta = "1.43"

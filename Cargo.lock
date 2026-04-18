@@ -1786,6 +1786,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-rlp",
  "async-trait",
+ "bincode",
  "call-consensus",
  "call-primitives",
  "call-protocol",
@@ -1810,6 +1811,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "axum",
+ "bincode",
  "call-agent",
  "call-bridge",
  "call-chainspec",

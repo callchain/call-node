@@ -10,12 +10,17 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use commonware_cryptography::ed25519;
 use commonware_cryptography::Signer;
 use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
 use commonware_runtime::{IoBuf, Metrics, Quota, Runner, Spawner};
 use commonware_utils::ordered::Map;
+use rand::RngCore;
+
+use crate::gossip::GossipManager;
+use crate::limits::NetworkLimits;
 
 // ── P2P Message Types (per spec §8.1, §9.1) ──────────────────────────
 
@@ -270,6 +275,11 @@ pub struct CommonwareConfig {
     pub allow_private_ips: bool,
     /// Namespace for signing (prevents replay attacks across networks)
     pub namespace: Vec<u8>,
+    /// Minimum number of peers required for the network to be considered healthy.
+    /// Set to 0 for "any peer" health; validators should set this to 1+.
+    pub min_healthy_peers: u32,
+    /// Network-level rate limiting and gossip configuration
+    pub limits: NetworkLimits,
 }
 
 impl Default for CommonwareConfig {
@@ -280,6 +290,8 @@ impl Default for CommonwareConfig {
             max_message_size: 10 * 1024 * 1024, // 10 MB
             allow_private_ips: false,
             namespace: b"callchain".to_vec(),
+            min_healthy_peers: 0,
+            limits: NetworkLimits::default(),
         }
     }
 }
@@ -293,8 +305,70 @@ impl CommonwareConfig {
             max_message_size: 10 * 1024 * 1024,
             allow_private_ips: true,
             namespace: b"callchain-local".to_vec(),
+            min_healthy_peers: 0,
+            limits: NetworkLimits::default(),
         }
     }
+}
+
+// ── Identity Key Management ──────────────────────────────────────────
+
+/// Load or generate a persistent Ed25519 identity key.
+///
+/// Priority:
+/// 1. Use the provided `key_hex` if Some (hex-encoded 32 or 64 byte key)
+/// 2. Load from `{data_dir}/node.key` if it exists
+/// 3. Generate a random key and persist to `{data_dir}/node.key`
+pub fn load_or_generate_identity_key(
+    data_dir: &std::path::Path,
+    key_hex: Option<&str>,
+) -> Result<ed25519::PrivateKey, String> {
+    let key_path = data_dir.join("node.key");
+
+    if let Some(hex_key) = key_hex {
+        let hex_clean = hex_key.trim_start_matches("0x");
+        let seed_hex = if hex_clean.len() == 128 {
+            &hex_clean[..64]
+        } else if hex_clean.len() == 64 {
+            hex_clean
+        } else {
+            return Err(format!(
+                "identity_key must be 64 or 128 hex chars, got {}",
+                hex_clean.len()
+            ));
+        };
+        let bytes = hex::decode(seed_hex).map_err(|e| format!("invalid identity_key hex: {e}"))?;
+        let key = ed25519::PrivateKey::decode(&bytes[..])
+            .map_err(|e| format!("invalid ed25519 key: {e}"))?;
+        tracing::info!(peer_id = %hex::encode(key.public_key().as_ref()), "using configured identity key");
+        return Ok(key);
+    }
+
+    if key_path.exists() {
+        let content = std::fs::read_to_string(&key_path)
+            .map_err(|e| format!("failed to read node.key: {e}"))?;
+        let hex_clean = content.trim();
+        let bytes = hex::decode(hex_clean).map_err(|e| format!("invalid node.key: {e}"))?;
+        let key = ed25519::PrivateKey::decode(&bytes[..])
+            .map_err(|e| format!("invalid ed25519 key in node.key: {e}"))?;
+        tracing::info!(peer_id = %hex::encode(key.public_key().as_ref()), path = ?key_path, "loaded persistent identity key");
+        return Ok(key);
+    }
+
+    // Generate random key and persist
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    let key = ed25519::PrivateKey::decode(&seed[..])
+        .map_err(|e| format!("failed to decode random ed25519 key: {e}"))?;
+    let hex_key = hex::encode(seed);
+    // Write atomically: write to tmp, then rename
+    let tmp_path = key_path.with_extension("key.tmp");
+    std::fs::write(&tmp_path, &hex_key)
+        .map_err(|e| format!("failed to write node.key: {e}"))?;
+    std::fs::rename(&tmp_path, &key_path)
+        .map_err(|e| format!("failed to persist node.key: {e}"))?;
+    tracing::info!(peer_id = %hex::encode(key.public_key().as_ref()), path = ?key_path, "generated and persisted new identity key");
+    Ok(key)
 }
 
 // ── Commonware Network (real P2P via commonware-p2p) ─────────────────
@@ -308,7 +382,7 @@ impl CommonwareConfig {
 /// # Usage
 /// ```ignore
 /// let config = CommonwareConfig::local("0.0.0.0:51235".parse().unwrap());
-/// let network = CommonwareNetwork::new(&config).await?;
+/// let network = CommonwareNetwork::new(&config, identity_key).await?;
 ///
 /// // Use the network
 /// network.broadcast(1, vec![1, 2, 3]).await;
@@ -332,6 +406,12 @@ pub struct CommonwareNetwork {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Background thread running the commonware runtime
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Bootstrap peer addresses for reconnection
+    bootstrap_peers: Arc<tokio::sync::RwLock<Vec<(String, SocketAddr)>>>,
+    /// Minimum healthy peer count
+    min_healthy_peers: u32,
+    /// Gossip manager for rate limiting, dedup, and peer management
+    gossip: Arc<tokio::sync::Mutex<GossipManager>>,
 }
 
 impl CommonwareNetwork {
@@ -339,26 +419,32 @@ impl CommonwareNetwork {
     ///
     /// Spawns a background thread running the commonware runtime.
     /// Returns once the network is ready to send/receive messages.
-    pub async fn new(config: &CommonwareConfig) -> Result<Self, NetworkError> {
+    ///
+    /// The `signer` is the Ed25519 keypair used for this node's identity.
+    /// Use [`load_or_generate_identity_key`] for persistent identity.
+    pub async fn new(
+        config: &CommonwareConfig,
+        signer: ed25519::PrivateKey,
+    ) -> Result<Self, NetworkError> {
         use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
 
         let listen_addr = config.listen_addr;
+        let bootstrap_peers = Arc::new(tokio::sync::RwLock::new(config.bootstrap_peers.clone()));
 
         // Channels for returning initialized components and shutdown signal
         let (tx, rx) = tokio::sync::oneshot::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         let cfg = config.clone();
+        let bootstrap_peers_clone = Arc::clone(&bootstrap_peers);
         let thread_handle = std::thread::spawn(move || {
             let runtime_cfg = RuntimeConfig::new();
             let runner = TokioRunner::new(runtime_cfg);
             runner.start(|context: commonware_runtime::tokio::Context| async move {
-                // Generate ed25519 keypair for this node
-                let signer = ed25519::PrivateKey::from_seed(0);
-                let public_key = signer.public_key();
-                let our_peer_id = hex::encode(public_key.as_ref());
+                // Save our peer ID before signer is moved into P2P config
+                let our_peer_id = hex::encode(signer.public_key().as_ref());
 
-                // Build P2P config
+                // Build P2P config with the provided signer
                 let p2p_cfg = if cfg.allow_private_ips {
                     P2PConfig::local(signer, &cfg.namespace, cfg.listen_addr, cfg.max_message_size)
                 } else {
@@ -400,7 +486,7 @@ impl CommonwareNetwork {
                     cfg.bootstrap_peers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
                 ));
 
-                // Subscribe to peer set changes
+                // Subscribe to peer set changes — use actual addresses from the update
                 let peers_clone = peers.clone();
                 let mut subscription: tokio::sync::mpsc::UnboundedReceiver<PeerSetUpdate<ed25519::PublicKey>> = oracle.subscribe().await;
                 let _subscribe_handle = context.clone().spawn(move |_ctx| async move {
@@ -409,8 +495,40 @@ impl CommonwareNetwork {
                         peers_guard.clear();
                         let all = update.all.union();
                         for pk in all.into_iter() {
-                            let pk: ed25519::PublicKey = pk;
-                            peers_guard.insert(hex::encode(pk.as_ref()), listen_addr);
+                            // Find the peer's address from the tracked bootstrap config
+                            let pk_hex = hex::encode(pk.as_ref());
+                            let addr = cfg.bootstrap_peers.iter()
+                                .find(|(id, _)| *id == pk_hex)
+                                .map(|(_, a)| *a)
+                                .unwrap_or(listen_addr);
+                            peers_guard.insert(pk_hex, addr);
+                        }
+                    }
+                });
+
+                // Periodic bootstrap peer reconnection — reconnect if bootstrap peers drop
+                let bootstrap_reconnect = bootstrap_peers_clone.clone();
+                let peers_for_reconnect = Arc::clone(&peers);
+                let mut oracle_clone = oracle.clone();
+                let _reconnect_handle = context.clone().spawn(move |_ctx| async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(30));
+                    loop {
+                        interval.tick().await;
+                        let connected_peers = {
+                            let peers = peers_for_reconnect.read().await;
+                            peers.clone()
+                        };
+                        for (peer_id, addr) in bootstrap_reconnect.read().await.iter() {
+                            if !connected_peers.contains_key(peer_id) {
+                                tracing::info!(peer_id, ?addr, "reconnecting to bootstrap peer");
+                                if let Ok(pk_bytes) = hex::decode(peer_id) {
+                                    if let Ok(pk) = ed25519::PublicKey::decode(&*pk_bytes) {
+                                        let peer_map: Map<ed25519::PublicKey, Address> =
+                                            Map::from_iter_dedup(vec![(pk, Address::Symmetric(*addr))]);
+                                        oracle_clone.track(0, peer_map).await;
+                                    }
+                                }
+                            }
                         }
                     }
                 });
@@ -444,6 +562,9 @@ impl CommonwareNetwork {
             listen_addr: components.listen_addr,
             shutdown_tx: Some(shutdown_tx),
             thread_handle: Some(thread_handle),
+            bootstrap_peers,
+            min_healthy_peers: cfg.min_healthy_peers,
+            gossip: Arc::new(tokio::sync::Mutex::new(GossipManager::new(config.limits))),
         })
     }
 
@@ -527,6 +648,25 @@ impl Network for CommonwareNetwork {
             NetworkError::NetworkError("empty message received".into())
         })?;
 
+        // Apply gossip rate limiting per peer
+        // Auto-register unknown peers (discovered via oracle, not explicit connect)
+        {
+            let mut gossip = self.gossip.lock().await;
+            if gossip.peers.contains_key(&peer_id) {
+                let peer_state = gossip.peers.get_mut(&peer_id).unwrap();
+                if let Err(e) = peer_state.record_message() {
+                    tracing::warn!(peer_id = %peer_id, "gossip rate limit hit: {e}");
+                    return Err(e);
+                }
+            } else {
+                // Auto-register peer seen for the first time
+                let _ = gossip.add_peer(peer_id.clone());
+                if let Some(peer_state) = gossip.peers.get_mut(&peer_id) {
+                    let _ = peer_state.record_message();
+                }
+            }
+        }
+
         Ok((peer_id, channel, payload.to_vec()))
     }
 
@@ -548,20 +688,47 @@ impl Network for CommonwareNetwork {
     }
 
     async fn connect(&self, address: &str) -> Result<(), NetworkError> {
-        let addr: SocketAddr = address.parse().map_err(|e| {
-            NetworkError::NetworkError(format!("invalid address '{address}': {e}"))
+        // Accept "peer_id@host:port" or just "host:port"
+        let (peer_id_hex, addr) = if let Some((id, host)) = address.split_once('@') {
+            let a: SocketAddr = host.parse().map_err(|e| {
+                NetworkError::NetworkError(format!("invalid address '{host}': {e}"))
+            })?;
+            (id.to_string(), a)
+        } else {
+            // Address-only: try to find the peer in bootstrap_peers
+            let addr: SocketAddr = address.parse().map_err(|e| {
+                NetworkError::NetworkError(format!("invalid address '{address}': {e}"))
+            })?;
+            // Find matching bootstrap peer by address
+            let peers = self.bootstrap_peers.read().await;
+            let found = peers.iter().find(|(_, a)| *a == addr).cloned();
+            drop(peers);
+            if let Some((pid, _)) = found {
+                (pid, addr)
+            } else {
+                return Err(NetworkError::NetworkError(
+                    format!("address '{address}' not in bootstrap peers — use 'peer_id@host:port' format"),
+                ));
+            }
+        };
+
+        let pk_bytes = hex::decode(&peer_id_hex).map_err(|e| {
+            NetworkError::NetworkError(format!("invalid peer_id: {e}"))
+        })?;
+        let public_key = ed25519::PublicKey::decode(&*pk_bytes).map_err(|_| {
+            NetworkError::PeerNotFound { peer_id: peer_id_hex.clone() }
         })?;
 
-        // Store the address in the peers map for bookkeeping.
-        // In commonware-p2p's authenticated model, a full connection requires
-        // the peer's public key. This is typically obtained via peer discovery
-        // or pre-configured bootstrap peers. For direct address-based connects,
-        // we record the intent here; the oracle will establish the connection
-        // once the peer is tracked with its public key.
-        self.peers.write().await.insert(
-            format!("{addr}"),
-            addr,
-        );
+        let peer_map: Map<ed25519::PublicKey, Address> =
+            Map::from_iter_dedup(vec![(public_key, Address::Symmetric(addr))]);
+        self.oracle.lock().await.track(0, peer_map).await;
+
+        // Record in peers map for bookkeeping
+        self.peers.write().await.insert(peer_id_hex.clone(), addr);
+
+        // Register peer with gossip manager for rate limiting
+        let _ = self.gossip.lock().await.add_peer(peer_id_hex);
+
         Ok(())
     }
 
@@ -577,12 +744,14 @@ impl Network for CommonwareNetwork {
         })?;
 
         oracle.block(public_key).await;
+        self.peers.write().await.remove(peer_id);
+        self.gossip.lock().await.remove_peer(peer_id);
         Ok(())
     }
 
     fn is_healthy(&self) -> bool {
-        // The network is healthy if it was successfully initialized
-        true
+        let peer_count = self.peer_count();
+        (peer_count as u32) >= self.min_healthy_peers
     }
 }
 
@@ -756,8 +925,8 @@ mod tests {
 
         // Test serialization
         let msg = NetworkMessage::OraclePriceRequest(req.clone());
-        let serialized = serde_json::to_string(&msg).unwrap();
-        let deserialized: NetworkMessage = serde_json::from_str(&serialized).unwrap();
+        let serialized = bincode::serialize(&msg).unwrap();
+        let deserialized: NetworkMessage = bincode::deserialize(&serialized).unwrap();
         assert!(matches!(deserialized, NetworkMessage::OraclePriceRequest(r) if r.block == 1000));
     }
 
@@ -777,8 +946,8 @@ mod tests {
 
         // Test serialization
         let msg = NetworkMessage::OraclePriceSubmission(sub.clone());
-        let serialized = serde_json::to_string(&msg).unwrap();
-        let deserialized: NetworkMessage = serde_json::from_str(&serialized).unwrap();
+        let serialized = bincode::serialize(&msg).unwrap();
+        let deserialized: NetworkMessage = bincode::deserialize(&serialized).unwrap();
         assert!(matches!(deserialized, NetworkMessage::OraclePriceSubmission(s) if s.price == 2_000_000));
     }
 
