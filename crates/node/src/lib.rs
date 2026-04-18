@@ -343,8 +343,10 @@ impl CallNode {
 
         // Spawn BFT engine in a dedicated background OS thread
         let thread_port = consensus_p2p_port;
+        let bft_data_dir = data_dir.join("bft_journal");
         std::thread::spawn(move || {
-            let runtime_cfg = RuntimeConfig::new();
+            std::fs::create_dir_all(&bft_data_dir).ok();
+            let runtime_cfg = RuntimeConfig::new().with_storage_directory(&bft_data_dir);
             let runner = TokioRunner::new(runtime_cfg);
             runner.start(|context| async move {
                 let signer = ed25519_private_key;
@@ -1447,6 +1449,12 @@ async fn bft_event_loop(
     > = std::collections::HashMap::new();
     let prune_config = call_storage::PruneConfig::default();
 
+    // Track validator set size to detect changes (BFT engine participant set is fixed at startup)
+    let mut validator_set_count = {
+        let vs = state.validator_state.read().unwrap();
+        vs.get_all_validators().len()
+    };
+
     // Build a mapping from ed25519 pubkey -> validator id for propose lookups
     let pubkey_to_id = {
         let vs = state.validator_state.read().unwrap();
@@ -1479,6 +1487,29 @@ async fn bft_event_loop(
                     .filter_map(|e| serde_json::from_slice(&e.data).ok())
                     .collect();
                 let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
+
+                // Request oracle price submissions at boundary intervals
+                let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
+                if is_oracle_boundary {
+                    if let Some(ref net) = network {
+                        let tracked = { state.oracle.read().unwrap().tracked_assets.clone() };
+                        if !tracked.is_empty() {
+                            let request = OraclePriceRequest {
+                                asset_ids: tracked,
+                                block: height,
+                                requester_id: proposer,
+                            };
+                            let msg = serde_json::to_vec(&NetworkMessage::OraclePriceRequest(request))
+                                .expect("serialize oracle request");
+                            net.broadcast(ORACLE_CHANNEL, msg).await;
+                            let delay_ms = consensus.read()
+                                .ok()
+                                .map(|c| c.params().oracle_request_delay_ms)
+                                .unwrap_or(200);
+                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        }
+                    }
+                }
 
                 let mut block = Block::new(
                     height,
@@ -1521,6 +1552,37 @@ async fn bft_event_loop(
                 match result {
                     Ok(result) => {
                         block.finalize(&result);
+
+                        // Handle oracle period transitions at boundary heights
+                        if is_oracle_boundary {
+                            let mut oracle = state.oracle.write().unwrap();
+                            oracle.advance_period(height);
+                            let outliers: Vec<u32> = oracle.last_outliers().to_vec();
+                            drop(oracle);
+                            if !outliers.is_empty() {
+                                let mut c = consensus.write().unwrap();
+                                for vid in &outliers {
+                                    if let Err(e) = c.handle_oracle_outlier(*vid) {
+                                        tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
+                                    }
+                                }
+                                tracing::info!(outliers = ?outliers, "slashed oracle outliers");
+                            }
+                            let contributions = {
+                                state.oracle.write().unwrap().distribute_rewards()
+                            };
+                            if !contributions.is_empty() {
+                                let mut c = consensus.write().unwrap();
+                                for (vid, amount) in &contributions {
+                                    if let Err(e) = c.distribute_oracle_reward(*vid, *amount) {
+                                        tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
+                                    }
+                                }
+                                tracing::info!(count = contributions.len(), "distributed oracle rewards");
+                            }
+                            state.oracle.write().unwrap().clear_tracking();
+                        }
+
                         let digest = ConsensusDigest::from(block.header.hash());
 
                         // Cache block and execution result for verify/finalize
@@ -1647,6 +1709,38 @@ async fn bft_event_loop(
                         }
                     };
 
+                    // Handle oracle period transitions at boundary heights
+                    // (non-proposing validators advance period but don't broadcast requests — proposer already did)
+                    let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
+                    if is_oracle_boundary {
+                        let mut oracle = state.oracle.write().unwrap();
+                        oracle.advance_period(height);
+                        let outliers: Vec<u32> = oracle.last_outliers().to_vec();
+                        drop(oracle);
+                        if !outliers.is_empty() {
+                            let mut c = consensus.write().unwrap();
+                            for vid in &outliers {
+                                if let Err(e) = c.handle_oracle_outlier(*vid) {
+                                    tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
+                                }
+                            }
+                            tracing::info!(outliers = ?outliers, "slashed oracle outliers");
+                        }
+                        let contributions = {
+                            state.oracle.write().unwrap().distribute_rewards()
+                        };
+                        if !contributions.is_empty() {
+                            let mut c = consensus.write().unwrap();
+                            for (vid, amount) in &contributions {
+                                if let Err(e) = c.distribute_oracle_reward(*vid, *amount) {
+                                    tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
+                                }
+                            }
+                            tracing::info!(count = contributions.len(), "distributed oracle rewards");
+                        }
+                        state.oracle.write().unwrap().clear_tracking();
+                    }
+
                     // Commit via consensus
                     {
                         let mut c = consensus.write().unwrap();
@@ -1748,6 +1842,20 @@ async fn bft_event_loop(
                             net_clone.broadcast(BLOCK_CHANNEL, msg).await;
                         });
                     }
+                    // Check for validator set changes — BFT engine participant set is fixed at startup
+                    let current_count = {
+                        let vs = state.validator_state.read().unwrap();
+                        vs.get_all_validators().len()
+                    };
+                    if validator_set_count != current_count {
+                        tracing::warn!(
+                            old = validator_set_count,
+                            new = current_count,
+                            "BFT: validator set changed — engine restart required"
+                        );
+                        break; // Exit event loop; caller should respawn BFT engine
+                    }
+                    validator_set_count = current_count;
                 } else {
                     tracing::warn!(digest = %info.digest, "BFT finalize: block not in cache");
                 }
