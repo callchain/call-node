@@ -1705,6 +1705,7 @@ dependencies = [
  "call-bridge",
  "call-crypto",
  "call-evm",
+ "call-governance",
  "call-oracle",
  "call-primitives",
  "call-protocol",

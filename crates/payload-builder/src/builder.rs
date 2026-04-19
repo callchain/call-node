@@ -239,6 +239,7 @@ impl PayloadBuilder {
             None,
             None,
             None,
+            None, None, None,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)

@@ -568,7 +568,7 @@ impl RpcState {
         let mut compliance_guard = self.compliance_engine.write().map_err(|_| "lock poisoned".to_string())?;
         let mut shielded_state = self.shielded_state.write().map_err(|_| "lock poisoned".to_string())?;
 
-        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender, None, &mut None) {
+        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender, None, &mut None, None) {
             Ok(results) => {
                 let status = call_primitives::ExecutionStatus::Success;
                 let gas_used = results.iter().map(|r| match r {
@@ -625,6 +625,23 @@ impl RpcState {
                 Err(format!("execution failed: {e}"))
             }
         }
+    }
+
+    /// Insert a pre-built protocol transaction into the mempool without executing.
+    /// Used for governance, bridge, and other consensus-ordered operations.
+    pub fn insert_protocol_tx(
+        &self,
+        tx: call_protocol::transaction::ProtocolTransaction,
+    ) -> Result<call_primitives::TxHash, String> {
+        let tx_hash = call_primitives::TxHash::from_slice(&tx.compute_tx_hash());
+
+        tx.verify_signature()
+            .map_err(|e| format!("signature verification failed: {e}"))?;
+
+        let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
+        let _ = mempool.insert_protocol_tx(tx);
+
+        Ok(tx_hash)
     }
 
     /// Prune expired transactions from the mempool and confirm included ones.

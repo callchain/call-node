@@ -782,6 +782,7 @@ impl CallNode {
                                                 None, None,
                                                 Some(&mut *agent_balances),
                                                 Some(&*agent_registry),
+                                                None, None, None,
                                             )
                                         };
 
@@ -1599,6 +1600,7 @@ async fn block_production_loop(
                 None,
                 Some(&mut *agent_balances),
                 Some(&*agent_registry),
+                None, None, None,
             )
         };
         let exec_duration = exec_start.elapsed().as_millis() as u64;
@@ -2098,6 +2100,7 @@ async fn bft_event_loop(
                         None,
                         Some(&mut *agent_balances),
                         Some(&*agent_registry),
+                        None, None, None,
                     )
                 };
                 telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
@@ -2204,6 +2207,7 @@ async fn bft_event_loop(
                             None,
                             Some(&mut *agent_balances),
                             Some(&*agent_registry),
+                            None, None, None,
                         )
                     };
                     telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
@@ -2265,6 +2269,7 @@ async fn bft_event_loop(
                                 None,
                                 Some(&mut *agent_balances),
                                 Some(&*agent_registry),
+                                None, None, None,
                             ) {
                                 Ok(r) => r,
                                 Err(e) => {
@@ -2915,6 +2920,9 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
             .expect("execution");
         block.finalize(&result);
@@ -2998,6 +3006,9 @@ mod tests {
                 &mut fee_params,
                 height,
                 &mut evm_state,
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -3100,7 +3111,7 @@ mod tests {
         let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -3206,7 +3217,7 @@ mod tests {
         let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -3311,7 +3322,7 @@ mod tests {
                 let mut evm_state = node.state.evm_state.write().unwrap();
 
                 block.execute(&mut balances, &registry, &mut compliance, &mut bridge_state,
-                              &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None)
+                              &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None)
                     .expect("execution")
             };
             block.finalize(&result);

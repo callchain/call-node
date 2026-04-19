@@ -16,6 +16,7 @@ call-bridge.workspace = true
 call-shielded.workspace = true
 call-evm.workspace = true
 call-agent.workspace = true
+call-governance.workspace = true
 call-crypto.workspace = true
 # commonware-consensus integration deferred to P7 (network layer)
 # These deps compile successfully on current Rust version:

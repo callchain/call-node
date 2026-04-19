@@ -217,6 +217,7 @@ impl SimplexConsensus {
             None,
             None,
             None,
+            None, None, None,
         )
     }
 

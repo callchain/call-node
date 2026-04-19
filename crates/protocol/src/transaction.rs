@@ -214,6 +214,13 @@ pub fn base_gas_units(instruction: &Instruction) -> u64 {
         Instruction::AgentPay { .. } | Instruction::AgentBatchPay { .. } => 5_000, // 0.5x base
         Instruction::AgentCall { .. } | Instruction::AgentBridgeDeposit { .. } => 5_000, // 0.5x base
         Instruction::OracleSubmit { .. } => 50_000, // oracle price submission
+        Instruction::GovernanceSubmitProposal { .. } => 50_000,
+        Instruction::GovernanceVote { .. } => 10_000,
+        Instruction::GovernanceQueue { .. } => 10_000,
+        Instruction::GovernanceExecute { .. } => 50_000,
+        Instruction::GovernanceEmergencyPause { .. } => 100_000,
+        Instruction::GovernanceEmergencyResume => 100_000,
+        Instruction::ExternalBridgeDeposit { .. } => 50_000,
     }
 }
 

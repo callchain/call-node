@@ -372,6 +372,14 @@ impl GovernanceManager {
         self.validator_addresses.insert(validator_id, address);
     }
 
+    /// Look up validator_id by address (reverse mapping)
+    pub fn validator_id_by_address(&self, address: Address) -> Option<ValidatorId> {
+        self.validator_addresses
+            .iter()
+            .find(|(_, &a)| a == address)
+            .map(|(&vid, _)| vid)
+    }
+
     /// Set CALL balance for an address (for balance-weighted voting)
     pub fn set_call_balance(&mut self, address: Address, balance: Balance) {
         self.call_balances.insert(address, balance);
@@ -430,6 +438,56 @@ impl GovernanceManager {
         self.next_proposal_id += 1;
 
         // Calculate quorum and voting windows
+        let (quorum_required, voting_start, voting_end) =
+            self.calculate_quorum_and_windows(&proposal_type);
+
+        let proposal = Proposal {
+            id,
+            proposer,
+            proposal_type,
+            title,
+            description,
+            voting_power_yes: 0,
+            voting_power_no: 0,
+            voting_power_abstain: 0,
+            start_block: voting_start,
+            end_block: voting_end,
+            execution_block: None,
+            state: ProposalState::Pending,
+            quorum_required,
+            execution_data,
+            deposit: PROPOSAL_DEPOSIT,
+        };
+
+        self.proposals.insert(id, proposal);
+        self.last_submission_block.insert(proposer, self.current_block);
+        Ok(id)
+    }
+
+    /// Submit a proposal where the deposit has already been deducted externally.
+    /// Used by instruction execution where BalanceState handles the deposit.
+    pub fn submit_proposal_with_deposit(
+        &mut self,
+        proposer: Address,
+        proposal_type: ProposalType,
+        title: String,
+        description: String,
+        execution_data: Vec<u8>,
+    ) -> Result<u64, GovernanceError> {
+        // Rate limiting
+        if let Some(&last_block) = self.last_submission_block.get(&proposer) {
+            if self.current_block.saturating_sub(last_block) < PROPOSAL_COOLDOWN_BLOCKS {
+                let remaining = PROPOSAL_COOLDOWN_BLOCKS - (self.current_block - last_block);
+                return Err(GovernanceError::ProposalRateLimited(remaining));
+            }
+        }
+
+        // Deposit already paid externally; just record it
+        self.deposits.insert(proposer, PROPOSAL_DEPOSIT);
+
+        let id = self.next_proposal_id;
+        self.next_proposal_id += 1;
+
         let (quorum_required, voting_start, voting_end) =
             self.calculate_quorum_and_windows(&proposal_type);
 

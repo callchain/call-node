@@ -8,6 +8,7 @@ use crate::balances::BalanceState;
 use crate::registry::AssetRegistry;
 use crate::compliance::ComplianceEngine;
 use call_oracle::{OracleManager, OracleSubmission};
+use call_governance::{GovernanceManager, PROPOSAL_DEPOSIT};
 use crate::{ProtocolError, ProtocolResult};
 
 // ── Instruction types ─────────────────────────────────────────────────
@@ -104,6 +105,43 @@ pub enum Instruction {
         signature: Vec<u8>,
         sources: Vec<String>,
     },
+    /// Submit a governance proposal (per spec §13.3)
+    GovernanceSubmitProposal {
+        proposal_type: call_governance::ProposalType,
+        title: String,
+        description: String,
+        execution_data: Vec<u8>,
+    },
+    /// Cast a vote on an active governance proposal
+    GovernanceVote {
+        proposal_id: u64,
+        vote: call_governance::Vote,
+    },
+    /// Queue a passed proposal for execution after timelock
+    GovernanceQueue {
+        proposal_id: u64,
+    },
+    /// Execute a queued proposal after timelock elapsed
+    GovernanceExecute {
+        proposal_id: u64,
+    },
+    /// Initiate emergency pause (requires validator threshold)
+    GovernanceEmergencyPause {
+        reason: String,
+    },
+    /// Resume from emergency pause (requires governance)
+    GovernanceEmergencyResume,
+    /// External bridge deposit claim with validator signatures
+    ExternalBridgeDeposit {
+        source_tx_hash: [u8; 32],
+        source_chain: u8,
+        source_block_number: u64,
+        external_sender: Vec<u8>,
+        recipient: Address,
+        asset_id: AssetId,
+        amount: Balance,
+        validator_signatures: Vec<(u32, Vec<u8>)>,
+    },
 }
 
 /// Payment memo with size limits per spec §3.5
@@ -195,6 +233,7 @@ pub fn execute_protocol_instructions(
     sender: Address,
     mut oracle: Option<&mut OracleManager>,
     agent_executor: &mut Option<AgentExecutor>,
+    mut governance: Option<&mut GovernanceManager>,
 ) -> ProtocolResult<Vec<InstructionResult>> {
     // Take state snapshot for rollback
     let snapshot = balances.clone();
@@ -202,7 +241,7 @@ pub fn execute_protocol_instructions(
     let mut results = Vec::with_capacity(instructions.len());
 
     for (i, instr) in instructions.iter().enumerate() {
-        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender, oracle.as_deref_mut(), agent_executor) {
+        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender, oracle.as_deref_mut(), agent_executor, governance.as_deref_mut()) {
             Ok(result) => results.push(result),
             Err(e) => {
                 // Restore state snapshot on failure
@@ -228,6 +267,7 @@ pub fn execute_instruction(
     sender: Address,
     oracle: Option<&mut OracleManager>,
     agent_executor: &mut Option<AgentExecutor>,
+    governance: Option<&mut GovernanceManager>,
 ) -> ProtocolResult<InstructionResult> {
     // Delegate agent instructions to the agent executor if provided
     if let Some(ref mut executor) = agent_executor {
@@ -483,6 +523,72 @@ pub fn execute_instruction(
                 .map_err(|e| ProtocolError::InvalidInstruction(format!("oracle: {e}")))?;
             Ok(InstructionResult::Success)
         }
+        Instruction::GovernanceSubmitProposal { proposal_type, title, description, execution_data } => {
+            let gov = governance.ok_or(ProtocolError::InvalidInstruction(
+                "governance not available".into(),
+            ))?;
+            // Deduct proposal deposit from sender's balance
+            let deposit = PROPOSAL_DEPOSIT;
+            if balances.get_balance(0, &sender) < deposit {
+                return Err(ProtocolError::InvalidInstruction(
+                    "governance: insufficient balance for proposal deposit".into(),
+                ));
+            }
+            balances.balances.deduct_balance(0, sender, deposit)
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: deposit deduction failed: {e}")))?;
+            let _id = gov.submit_proposal_with_deposit(sender, proposal_type.clone(), title.clone(), description.clone(), execution_data.clone())
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
+            // Deposit is tracked in governance's internal state
+            Ok(InstructionResult::Success)
+        }
+        Instruction::GovernanceVote { proposal_id, vote } => {
+            let gov = governance.ok_or(ProtocolError::InvalidInstruction(
+                "governance not available".into(),
+            ))?;
+            gov.vote(*proposal_id, sender, *vote)
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::GovernanceQueue { proposal_id } => {
+            let gov = governance.ok_or(ProtocolError::InvalidInstruction(
+                "governance not available".into(),
+            ))?;
+            gov.queue_proposal(*proposal_id)
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::GovernanceExecute { proposal_id } => {
+            let gov = governance.ok_or(ProtocolError::InvalidInstruction(
+                "governance not available".into(),
+            ))?;
+            gov.execute_proposal(*proposal_id)
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::GovernanceEmergencyPause { reason } => {
+            let gov = governance.ok_or(ProtocolError::InvalidInstruction(
+                "governance not available".into(),
+            ))?;
+            // Map sender address to validator_id via governance's validator registry
+            let validator_id = gov.validator_id_by_address(sender)
+                .ok_or(ProtocolError::InvalidInstruction("governance: sender not a registered validator".into()))?;
+            gov.emergency_pause_initiate(validator_id, reason.clone())
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::GovernanceEmergencyResume => {
+            let gov = governance.ok_or(ProtocolError::InvalidInstruction(
+                "governance not available".into(),
+            ))?;
+            gov.emergency_pause_resume()
+                .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::ExternalBridgeDeposit { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "ExternalBridgeDeposit must be executed inline in Block::execute".into(),
+            ))
+        }
     }
 }
 
@@ -529,6 +635,7 @@ mod tests {
             test_addr(1),
             None,
             &mut None,
+            None,
         )
         .expect("execute");
 
@@ -573,6 +680,7 @@ mod tests {
             test_addr(1),
             None,
             &mut None,
+            None,
         )
         .expect("execute");
         assert_eq!(results.len(), 1);
@@ -613,6 +721,7 @@ mod tests {
             test_addr(1),
             None,
             &mut None,
+            None,
         )
         .expect("execute");
         assert_eq!(results.len(), 2);
@@ -645,6 +754,7 @@ mod tests {
             test_addr(99), // not the issuer
             None,
             &mut None,
+            None,
         );
         assert!(result.is_err());
 
@@ -658,6 +768,7 @@ mod tests {
             test_addr(1), // the issuer
             None,
             &mut None,
+            None,
         );
         assert!(result.is_ok());
         assert_eq!(balances.get_balance(1, &test_addr(99)), 1000);
@@ -692,6 +803,7 @@ mod tests {
             test_addr(99), // not the issuer
             None,
             &mut None,
+            None,
         );
         assert!(result.is_err());
 
@@ -705,6 +817,7 @@ mod tests {
             test_addr(1), // the issuer
             None,
             &mut None,
+            None,
         );
         assert!(result.is_ok());
         assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
@@ -776,6 +889,7 @@ mod tests {
             test_addr(1),
             None,
             &mut None,
+            None,
         );
         assert!(result.is_err());
         // State should be rolled back to original
@@ -818,6 +932,7 @@ mod tests {
             test_addr(1),
             None,
             &mut None,
+            None,
         )
         .expect("execute");
         assert_eq!(results.len(), 2);

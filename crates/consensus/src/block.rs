@@ -2,9 +2,10 @@
 //!
 //! Block and BlockHeader types with hash, validation, and execution.
 
-use call_bridge::BridgeOp;
+use call_bridge::{BridgeOp, BridgeConfig};
 use call_crypto::{build_merkle_root, keccak256};
-use call_primitives::{Balance, BlockHash, Hash, ProtocolVersion};
+use call_governance::GovernanceManager;
+use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion};
 use call_protocol::balances::BalanceState;
 use call_protocol::instructions::{execute_protocol_instructions, Instruction, InstructionResult};
 use call_protocol::registry::AssetRegistry;
@@ -238,6 +239,9 @@ impl Block {
         mut agent_executor: Option<call_protocol::instructions::AgentExecutor>,
         mut agent_balances: Option<&mut call_agent::AgentBalances>,
         agent_registry: Option<&call_agent::AgentRegistry>,
+        mut governance: Option<&mut GovernanceManager>,
+        bridge_config: Option<&BridgeConfig>,
+        validators: Option<&[Address]>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -291,9 +295,13 @@ impl Block {
                 )));
             }
 
-            // Separate agent instructions from regular protocol instructions
-            let (agent_instrs, other_instrs): (Vec<_>, Vec<_>) = tx
+            // Separate instructions by type: bridge, agent, regular
+            let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
                 .instructions
+                .iter()
+                .cloned()
+                .partition(|i| is_bridge_instruction(i));
+            let (agent_instrs, other_instrs): (Vec<_>, Vec<_>) = non_bridge
                 .iter()
                 .cloned()
                 .partition(|i| is_agent_instruction(i));
@@ -305,7 +313,7 @@ impl Block {
             let mut tx_results = Vec::new();
 
             let exec_result = (|| -> Result<(), ConsensusError> {
-                // Execute regular instructions via protocol engine
+                // Execute regular instructions via protocol engine (includes governance)
                 if !other_instrs.is_empty() {
                     let results = execute_protocol_instructions(
                         &other_instrs,
@@ -316,11 +324,38 @@ impl Block {
                         tx.sender,
                         oracle.as_deref_mut(),
                         &mut agent_executor,
+                        governance.as_deref_mut(),
                     )
                     .map_err(|e| {
                         ConsensusError::InvalidBlock(format!("protocol tx: {e}"))
                     })?;
                     tx_results.extend(results);
+                }
+
+                // Execute bridge deposit instructions inline
+                if !bridge_instrs.is_empty() {
+                    let config = bridge_config.ok_or_else(|| {
+                        ConsensusError::InvalidBlock(
+                            "bridge instructions require bridge config".into(),
+                        )
+                    })?;
+                    let vals = validators.ok_or_else(|| {
+                        ConsensusError::InvalidBlock(
+                            "bridge instructions require validator set".into(),
+                        )
+                    })?;
+                    for instr in &bridge_instrs {
+                        let r = execute_bridge_instruction(
+                            instr,
+                            tx.sender,
+                            balances,
+                            bridge_state,
+                            config,
+                            vals,
+                            current_block_height,
+                        )?;
+                        tx_results.push(r);
+                    }
                 }
 
                 // Execute agent instructions inline
@@ -566,6 +601,70 @@ fn execute_agent_instruction(
             }
         }
         _ => Err(ConsensusError::InvalidBlock("not an agent instruction".into())),
+    }
+}
+
+// ── Bridge instruction helpers ────────────────────────────────────────
+
+fn is_bridge_instruction(instr: &Instruction) -> bool {
+    matches!(instr, Instruction::ExternalBridgeDeposit { .. })
+}
+
+fn execute_bridge_instruction(
+    instruction: &Instruction,
+    _sender: call_primitives::Address,
+    balances: &mut BalanceState,
+    bridge_state: &mut call_bridge::BridgeStateManager,
+    config: &call_bridge::BridgeConfig,
+    validators: &[call_primitives::Address],
+    current_block_height: u64,
+) -> Result<InstructionResult, ConsensusError> {
+    match instruction {
+        Instruction::ExternalBridgeDeposit {
+            source_tx_hash,
+            source_chain,
+            source_block_number,
+            external_sender,
+            recipient,
+            asset_id,
+            amount,
+            validator_signatures,
+        } => {
+            let chain = match *source_chain {
+                0 => call_bridge::ExternalChain::EthereumMainnet,
+                1 => call_bridge::ExternalChain::Arbitrum,
+                _ => return Err(ConsensusError::InvalidBlock("bridge: unknown source chain".into())),
+            };
+            let signatures: Vec<call_bridge::BridgeSignature> = validator_signatures
+                .iter()
+                .map(|(idx, sig)| call_bridge::BridgeSignature {
+                    validator_index: *idx,
+                    signature: sig.as_slice().try_into().unwrap_or([0u8; 65]),
+                })
+                .collect();
+            let op = call_bridge::ExternalBridgeOp::Deposit {
+                source_chain: chain,
+                source_tx_hash: call_primitives::B256::from(*source_tx_hash),
+                source_block_number: *source_block_number,
+                sender: external_sender.clone(),
+                recipient: *recipient,
+                asset_id: *asset_id,
+                amount: *amount,
+                signatures,
+            };
+            match call_bridge::process_external_deposit(
+                &op,
+                balances,
+                bridge_state,
+                config,
+                validators,
+                current_block_height,
+            ) {
+                Ok(_) => Ok(InstructionResult::Success),
+                Err(e) => Err(ConsensusError::InvalidBlock(format!("bridge deposit: {e:?}"))),
+            }
+        }
+        _ => Err(ConsensusError::InvalidBlock("not a bridge instruction".into())),
     }
 }
 
@@ -955,6 +1054,9 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 
@@ -1022,6 +1124,9 @@ mod tests {
                 &mut fee_params,
                 1,
                 &mut evm_state,
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,

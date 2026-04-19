@@ -157,6 +157,7 @@ pub fn execute_agent_tx(
         agent_evm_address,
         None,
         &mut None,
+        None,
     )
     .map_err(|e| AgentError::ExecutionFailed(format!("{:?}", e)))?;
 

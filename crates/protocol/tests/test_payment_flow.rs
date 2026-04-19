@@ -132,6 +132,7 @@ mod test_payment_flow_impl {
             holder,
             None,
             &mut None,
+            None,
         );
         assert!(result.is_err());
 
@@ -290,6 +291,7 @@ mod test_payment_flow_impl {
             sender,
             None,
             &mut None,
+            None,
         )
         .unwrap();
 

@@ -245,6 +245,9 @@ impl TestNode {
                     None,
                     None,
                     None,
+                    None,
+                    None,
+                    None,
                 )
                 .expect("block execution")
         };
