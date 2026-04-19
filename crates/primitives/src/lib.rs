@@ -1,6 +1,6 @@
 //! Callchain primitives — shared base types
 
-pub use alloy_primitives::{Address, B256, U256};
+pub use alloy_primitives::{Address, B256, U256, Bytes};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 

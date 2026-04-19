@@ -211,13 +211,15 @@ impl TxInclusionProof {
 /// receipts Merkle-Patricia Trie.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReceiptProof {
+    /// Receipt index within the block (used as the trie key, RLP-encoded)
+    pub receipt_index: u64,
     /// Proof nodes from root to leaf in the receipts trie
     pub nodes: Vec<MptProofNode>,
 }
 
 impl ReceiptProof {
-    pub fn new(nodes: Vec<MptProofNode>) -> Self {
-        Self { nodes }
+    pub fn new(receipt_index: u64, nodes: Vec<MptProofNode>) -> Self {
+        Self { receipt_index, nodes }
     }
 
     pub fn node_rlps(&self) -> Vec<Vec<u8>> {

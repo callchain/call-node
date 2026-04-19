@@ -247,6 +247,7 @@ fn test_bridge_event_parsing_from_receipt() {
 
     // Create receipt proof
     let proof = ReceiptProof {
+        receipt_index: 0,
         nodes: vec![MptProofNode {
             rlp_bytes: receipt_leaf.clone(),
         }],

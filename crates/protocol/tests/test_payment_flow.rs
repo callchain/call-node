@@ -131,6 +131,7 @@ mod test_payment_flow_impl {
             &mut ShieldedState::new(),
             holder,
             None,
+            &mut None,
         );
         assert!(result.is_err());
 
@@ -288,6 +289,7 @@ mod test_payment_flow_impl {
             &mut ShieldedState::new(),
             sender,
             None,
+            &mut None,
         )
         .unwrap();
 

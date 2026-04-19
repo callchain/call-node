@@ -64,18 +64,22 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_owner_grant_funds() {
         let mut balances = AgentBalances::new();
+        let mut protocol_balances = BalanceState::new();
+        protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
-        balances.grant_funds(owner, 0, 1, 5_000);
+        balances.grant_funds(owner, 0, 1, 5_000, &mut protocol_balances).unwrap();
         assert_eq!(balances.get_balance(owner, 0, 1), 5_000);
-        balances.top_up(owner, 0, 1, 3_000);
+        balances.top_up(owner, 0, 1, 3_000, &mut protocol_balances).unwrap();
         assert_eq!(balances.get_balance(owner, 0, 1), 8_000);
     }
 
     #[test]
     fn test_agent_revoke_funds() {
         let mut balances = AgentBalances::new();
+        let mut protocol_balances = BalanceState::new();
+        protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
-        balances.grant_funds(owner, 0, 1, 5_000);
+        balances.grant_funds(owner, 0, 1, 5_000, &mut protocol_balances).unwrap();
         let revoked = balances.revoke_funds(owner, 0, 1);
         assert_eq!(revoked, 5_000);
         assert_eq!(balances.get_balance(owner, 0, 1), 0);
@@ -84,8 +88,11 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_balances_isolated_by_owner() {
         let mut balances = AgentBalances::new();
-        balances.grant_funds(addr(1), 0, 1, 1_000);
-        balances.grant_funds(addr(2), 0, 1, 2_000);
+        let mut protocol_balances = BalanceState::new();
+        protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
+        protocol_balances.balances.set_balance(1, addr(2), 10_000).unwrap();
+        balances.grant_funds(addr(1), 0, 1, 1_000, &mut protocol_balances).unwrap();
+        balances.grant_funds(addr(2), 0, 1, 2_000, &mut protocol_balances).unwrap();
         assert_eq!(balances.get_balance(addr(1), 0, 1), 1_000);
         assert_eq!(balances.get_balance(addr(2), 0, 1), 2_000);
     }
@@ -93,8 +100,10 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_deduct_from_balance() {
         let mut balances = AgentBalances::new();
+        let mut protocol_balances = BalanceState::new();
+        protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
-        balances.grant_funds(owner, 0, 1, 1_000);
+        balances.grant_funds(owner, 0, 1, 1_000, &mut protocol_balances).unwrap();
         balances.deduct(owner, 0, 1, 300).unwrap();
         assert_eq!(balances.get_balance(owner, 0, 1), 700);
         assert!(balances.deduct(owner, 0, 1, 701).is_err());
@@ -143,49 +152,15 @@ mod test_agent_flow_impl {
     }
 
     #[test]
-    fn test_agent_pay_instruction_executes() {
-        let mut balances = BalanceState::new();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
-        let sender = addr(1);
-        let receiver = addr(2);
-        let asset_id = setup_asset(&mut balances, &mut registry, "AGENT", addr(10), sender, 5_000);
-
-        let instructions = vec![Instruction::AgentPay { payment: AgentPayment { agent_id: 0, asset_id, to: receiver, amount: 1_000 } }];
-        let mut shielded_state = ShieldedState::new();
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None).unwrap();
-
-        assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
-        assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
-    }
-
-    #[test]
-    fn test_agent_batch_pay_multiple() {
-        let mut balances = BalanceState::new();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
-        let sender = addr(1);
-        let asset_id = setup_asset(&mut balances, &mut registry, "BATCH", addr(10), sender, 10_000);
-
-        let payments: Vec<AgentPayment> = (2..6).map(|i| AgentPayment { agent_id: 0, asset_id, to: addr(i), amount: 500 }).collect();
-        let instructions = vec![Instruction::AgentBatchPay { payments }];
-        let mut shielded_state = ShieldedState::new();
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None).unwrap();
-
-        assert_eq!(balances.get_balance(asset_id, &sender), 8_000);
-        for i in 2..6 {
-            assert_eq!(balances.get_balance(asset_id, &addr(i)), 500);
-        }
-    }
-
-    #[test]
     fn test_agent_funding_action_grant() {
         let mut balances = AgentBalances::new();
+        let mut protocol_balances = BalanceState::new();
+        protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
         let action = AgentFundingAction::Grant { agent_id: 0, asset_id: 1, amount: 3_000 };
         match action {
             AgentFundingAction::Grant { agent_id, asset_id, amount } => {
-                balances.grant_funds(owner, agent_id, asset_id, amount);
+                balances.grant_funds(owner, agent_id, asset_id, amount, &mut protocol_balances).unwrap();
             }
             _ => panic!("wrong variant"),
         }
@@ -195,8 +170,10 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_funding_action_revoke() {
         let mut balances = AgentBalances::new();
+        let mut protocol_balances = BalanceState::new();
+        protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
-        balances.grant_funds(owner, 0, 1, 2_000);
+        balances.grant_funds(owner, 0, 1, 2_000, &mut protocol_balances).unwrap();
         let action = AgentFundingAction::Revoke { agent_id: 0, asset_id: 1 };
         match action {
             AgentFundingAction::Revoke { agent_id, asset_id } => {

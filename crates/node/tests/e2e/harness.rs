@@ -242,6 +242,9 @@ impl TestNode {
                     height,
                     &mut evm_state,
                     Some(&mut *oracle),
+                    None,
+                    None,
+                    None,
                 )
                 .expect("block execution")
         };

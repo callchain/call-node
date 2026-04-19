@@ -236,7 +236,9 @@ impl RpcState {
         let agent = registry.get_agent(agent_id).ok_or("agent not found".to_string())?;
         let owner = agent.owner;
         drop(registry);
-        self.agent_balances.write().map_err(|_| "lock poisoned".to_string())?.grant_funds(owner, agent_id, asset_id, amount);
+        let mut balances = self.balance_state.write().map_err(|_| "lock poisoned".to_string())?;
+        self.agent_balances.write().map_err(|_| "lock poisoned".to_string())?.grant_funds(owner, agent_id, asset_id, amount, &mut *balances)
+            .map_err(|e| format!("{:?}", e))?;
         Ok(())
     }
 
@@ -566,7 +568,7 @@ impl RpcState {
         let mut compliance_guard = self.compliance_engine.write().map_err(|_| "lock poisoned".to_string())?;
         let mut shielded_state = self.shielded_state.write().map_err(|_| "lock poisoned".to_string())?;
 
-        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender, None) {
+        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender, None, &mut None) {
             Ok(results) => {
                 let status = call_primitives::ExecutionStatus::Success;
                 let gas_used = results.iter().map(|r| match r {

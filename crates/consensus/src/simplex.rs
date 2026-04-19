@@ -214,6 +214,9 @@ impl SimplexConsensus {
             self.current_height,
             evm_state,
             None,
+            None,
+            None,
+            None,
         )
     }
 

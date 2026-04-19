@@ -239,7 +239,7 @@ mod test_shielded_flow_impl {
         let cm = note.commitment();
 
         let instructions = vec![Instruction::ShieldedDeposit { asset_id, amount: 1_000, commitment: cm.0, encrypted_note: encrypted }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None, &mut None).unwrap();
         assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
         assert_eq!(shielded_state.merkle_tree.leaf_count(), 1);
     }
@@ -259,7 +259,7 @@ mod test_shielded_flow_impl {
         let nullifier = note.nullifier();
 
         let instructions = vec![Instruction::ShieldedWithdraw { asset_id: 0, target: receiver, amount: 500, proof: vec![1u8; 200], nullifier: nullifier.0 }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None).unwrap();
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None, &mut None).unwrap();
         assert_eq!(balances.get_balance(0, &receiver), 500);
         assert!(shielded_state.nullifier_set.is_spent(&nullifier));
     }

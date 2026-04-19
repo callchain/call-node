@@ -84,7 +84,7 @@ impl EvmAccount {
 }
 
 /// EVM state database
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EvmState {
     pub(crate) accounts: HashMap<Address, EvmAccount>,
 }

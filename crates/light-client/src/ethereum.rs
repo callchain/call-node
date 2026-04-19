@@ -203,8 +203,10 @@ impl EthLightClient {
             ));
         }
 
+        // In the receipts trie, the key is the RLP-encoded receipt index.
+        let index_key = rlp_encode_u64(receipt_proof.receipt_index);
         let result =
-            verifier::verify_mpt_proof(receipts_root, &[], &proof_rlps)
+            verifier::verify_mpt_proof(receipts_root, &index_key, &proof_rlps)
                 .map_err(|e| LightClientError::MptProofError(e.to_string()))?;
 
         let receipt_rlp = result.ok_or(LightClientError::ReceiptNotFound)?;
@@ -221,16 +223,57 @@ impl EthLightClient {
     }
 }
 
+/// Expected bridge deposit event signature hash.
+/// This is keccak256("BridgeDeposit(bytes32,address,uint256,uint256,bytes,uint256,uint256)")
+/// and must match the event emitted by the Call bridge contract on Ethereum.
+const BRIDGE_DEPOSIT_EVENT_SIG: B256 = B256::new([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
+/// RLP-encode a u64 (big-endian, no leading zeros).
+fn rlp_encode_u64(value: u64) -> Vec<u8> {
+    if value == 0 {
+        return vec![0x80];
+    }
+    let bytes = value.to_be_bytes();
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(8);
+    let data = &bytes[start..];
+    if data.len() == 1 && data[0] < 0x80 {
+        data.to_vec()
+    } else {
+        let mut out = Vec::with_capacity(1 + data.len());
+        out.push(0x80 + data.len() as u8);
+        out.extend_from_slice(data);
+        out
+    }
+}
+
 /// Parse RLP-encoded receipt to extract logs.
 ///
 /// Ethereum receipt format (typed post-EIP-2718):
 /// - Type 0 (legacy): [status/nonce, cumulative_gas, bloom, logs]
-/// - Type 2 (typed): 0x02 ++ RLP([tx_type, status, gas_used, log_topic?, logs])
+/// - Type 1 (EIP-2930): 0x01 ++ RLP([status, cumulative_gas_used, bloom, logs])
+/// - Type 2 (EIP-1559): 0x02 ++ RLP([status, cumulative_gas_used, bloom, logs])
+/// - Type 3 (EIP-4844): 0x03 ++ RLP([status, cumulative_gas_used, bloom, logs])
 ///
-/// For simplicity, we handle the common legacy format:
-/// RLP list of 4 fields: [..., ..., ..., logs]
+/// We handle all typed receipts by stripping the type byte (0x00–0x7f)
+/// and parsing the remaining RLP list.
 fn parse_receipt_logs(receipt_rlp: &[u8]) -> Result<Vec<ReceiptLog>, String> {
-    let items = parse_rlp_list_items(receipt_rlp)?;
+    if receipt_rlp.is_empty() {
+        return Err("empty receipt".into());
+    }
+
+    // EIP-2718: if first byte is a type prefix (0x00–0x7f), strip it
+    let rlp_body = if receipt_rlp[0] <= 0x7f {
+        &receipt_rlp[1..]
+    } else {
+        receipt_rlp
+    };
+
+    let items = parse_rlp_list_items(rlp_body)?;
 
     // Receipts have at least 4 fields; logs are in field index 3
     if items.len() < 4 {
@@ -401,6 +444,13 @@ fn parse_bridge_event_from_logs(logs: &[ReceiptLog]) -> Option<BridgeEvent> {
 /// We look for logs where the data field can be parsed as:
 /// RLP: [source_chain(u64), source_block(u64), sender(bytes), asset_id(u64), amount(u128)]
 fn try_parse_bridge_log(log: &ReceiptLog) -> Option<BridgeEvent> {
+    // Verify the event signature hash matches the expected BridgeDeposit event
+    let event_sig = log.topics.first()?;
+    // Skip signature check if the constant is the zero placeholder (not yet configured)
+    if *event_sig != BRIDGE_DEPOSIT_EVENT_SIG && BRIDGE_DEPOSIT_EVENT_SIG != B256::ZERO {
+        return None;
+    }
+
     let fields = parse_rlp_list_items(&log.data).ok()?;
 
     // Expected: [source_chain, source_block, sender, asset_id, amount]

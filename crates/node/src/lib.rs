@@ -744,11 +744,15 @@ impl CallNode {
                                             let mut shielded_state = state.shielded_state.write().unwrap();
                                             let mut fee_params = state.fee_params.write().unwrap();
                                             let mut evm_state = state.evm_state.write().unwrap();
+                                            let mut agent_balances = state.agent_balances.write().unwrap();
+                                            let agent_registry = state.agent_registry.read().unwrap();
 
                                             block.execute(
                                                 &mut balances, &registry, &mut compliance, &mut bridge_state,
                                                 &mut shielded_state, &mut fee_params, height, &mut evm_state,
-                                                None,
+                                                None, None,
+                                                Some(&mut *agent_balances),
+                                                Some(&*agent_registry),
                                             )
                                         };
 
@@ -1543,6 +1547,8 @@ async fn block_production_loop(
             let mut fee_params = state.fee_params.write().unwrap();
             let mut evm_state = state.evm_state.write().unwrap();
             let mut oracle = state.oracle.write().unwrap();
+            let mut agent_balances = state.agent_balances.write().unwrap();
+            let agent_registry = state.agent_registry.read().unwrap();
 
             block.execute(
                 &mut balances,
@@ -1554,6 +1560,9 @@ async fn block_production_loop(
                 height,
                 &mut evm_state,
                 Some(&mut *oracle),
+                None,
+                Some(&mut *agent_balances),
+                Some(&*agent_registry),
             )
         };
         let result = match result {
@@ -1994,6 +2003,8 @@ async fn bft_event_loop(
                     let mut fee_params = state.fee_params.write().unwrap();
                     let mut evm_state = state.evm_state.write().unwrap();
                     let mut oracle = state.oracle.write().unwrap();
+                    let mut agent_balances = state.agent_balances.write().unwrap();
+                    let agent_registry = state.agent_registry.read().unwrap();
 
                     block.execute(
                         &mut balances,
@@ -2005,6 +2016,9 @@ async fn bft_event_loop(
                         height,
                         &mut evm_state,
                         Some(&mut *oracle),
+                        None,
+                        Some(&mut *agent_balances),
+                        Some(&*agent_registry),
                     )
                 };
 
@@ -2092,6 +2106,8 @@ async fn bft_event_loop(
                         let mut fee_params = state.fee_params.write().unwrap();
                         let mut evm_state = state.evm_state.write().unwrap();
                         let mut oracle = state.oracle.write().unwrap();
+                        let mut agent_balances = state.agent_balances.write().unwrap();
+                        let agent_registry = state.agent_registry.read().unwrap();
 
                         block.execute(
                             &mut balances,
@@ -2103,6 +2119,9 @@ async fn bft_event_loop(
                             height,
                             &mut evm_state,
                             Some(&mut *oracle),
+                            None,
+                            Some(&mut *agent_balances),
+                            Some(&*agent_registry),
                         )
                     };
 
@@ -2147,6 +2166,8 @@ async fn bft_event_loop(
                             let mut fee_params = state.fee_params.write().unwrap();
                             let mut evm_state = state.evm_state.write().unwrap();
                             let mut oracle = state.oracle.write().unwrap();
+                            let mut agent_balances = state.agent_balances.write().unwrap();
+                            let agent_registry = state.agent_registry.read().unwrap();
 
                             match block.execute(
                                 &mut balances,
@@ -2158,6 +2179,9 @@ async fn bft_event_loop(
                                 height,
                                 &mut evm_state,
                                 Some(&mut *oracle),
+                                None,
+                                Some(&mut *agent_balances),
+                                Some(&*agent_registry),
                             ) {
                                 Ok(r) => r,
                                 Err(e) => {
@@ -2776,6 +2800,7 @@ mod tests {
                 height,
                 &mut evm_state,
                 None,
+                None,
             )
             .expect("execution");
         block.finalize(&result);
@@ -2859,6 +2884,7 @@ mod tests {
                 &mut fee_params,
                 height,
                 &mut evm_state,
+                None,
                 None,
             )
             .expect("empty block execution");
@@ -2958,7 +2984,7 @@ mod tests {
         let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -3064,7 +3090,7 @@ mod tests {
         let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -3169,7 +3195,7 @@ mod tests {
                 let mut evm_state = node.state.evm_state.write().unwrap();
 
                 block.execute(&mut balances, &registry, &mut compliance, &mut bridge_state,
-                              &mut shielded_state, &mut fee_params, height, &mut evm_state, None)
+                              &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None)
                     .expect("execution")
             };
             block.finalize(&result);

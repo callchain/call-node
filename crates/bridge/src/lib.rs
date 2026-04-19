@@ -89,7 +89,7 @@ pub struct PendingBridgeOp {
 }
 
 /// Bridge state tracking (per spec §5.3)
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeStateManager {
     /// Pending deposit/withdraw operations awaiting completion
     pub pending_ops: Vec<PendingBridgeOp>,

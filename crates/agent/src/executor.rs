@@ -17,7 +17,7 @@ use call_bridge::{
     execute_deposit as bridge_execute_deposit,
     BridgeConfig, BridgeStateManager,
 };
-use call_evm::{EvmExecutor, EvmState};
+use call_evm::{EvmExecutor, EvmState, EvmTransaction, Bytes};
 use call_shielded::ShieldedState;
 use crate::{
     AgentBalances, AgentError, AgentFeeConfig, AgentNonces, AgentPermissions,
@@ -156,6 +156,7 @@ pub fn execute_agent_tx(
         shielded_state,
         agent_evm_address,
         None,
+        &mut None,
     )
     .map_err(|e| AgentError::ExecutionFailed(format!("{:?}", e)))?;
 
@@ -199,22 +200,24 @@ pub fn execute_agent_batch_pay(
 pub fn execute_agent_call(
     _agent_id: u64,
     target: Address,
-    _data: Vec<u8>,
+    data: Vec<u8>,
     evm_state: &mut EvmState,
     evm_executor: &EvmExecutor,
     caller: Address,
 ) -> Result<call_evm::EvmExecutionResult, AgentError> {
-    // Delegate to EVM for contract call
-    let result = evm_executor.evm_call_bridge_mint(
+    let tx = EvmTransaction {
         caller,
-        target,
-        evm_state,
-        caller,
-        alloy_primitives::U256::ZERO,
-    );
+        nonce: 0,
+        gas_limit: 1_000_000,
+        gas_price: 0,
+        to: Some(target),
+        value: alloy_primitives::U256::ZERO,
+        data: Bytes::from(data),
+        chain_id: evm_executor.chain_id,
+    };
 
-    // Re-purpose the error since we're calling bridge_mint as a proxy for a general EVM call
-    result.map_err(|e| AgentError::ExecutionFailed(format!("{:?}", e)))
+    evm_executor.execute_tx(tx, evm_state)
+        .map_err(|e| AgentError::ExecutionFailed(format!("{:?}", e)))
 }
 
 /// Execute AgentBridgeDeposit instruction helper
@@ -268,14 +271,14 @@ pub fn execute_agent_bridge_deposit(
                 Ok(())
             } else {
                 // Restore balances on failure
-                balances.credit(owner, agent_id, asset_id, amount);
+                let _ = balances.credit(owner, agent_id, asset_id, amount);
                 let _ = protocol_balances.credit_balance(asset_id, owner, amount);
                 Err(AgentError::ExecutionFailed("bridge deposit failed".into()))
             }
         }
         Err(e) => {
             // Restore balances on failure
-            balances.credit(owner, agent_id, asset_id, amount);
+            let _ = balances.credit(owner, agent_id, asset_id, amount);
             let _ = protocol_balances.credit_balance(asset_id, owner, amount);
             Err(AgentError::ExecutionFailed(format!("{:?}", e)))
         }
@@ -414,8 +417,9 @@ mod tests {
         let mut agent_balances = AgentBalances::new();
         let mut protocol_balances = BalanceState::new();
         let owner = test_addr(1);
+        protocol_balances.balances.set_balance(1, owner, 1000).unwrap();
 
-        agent_balances.grant_funds(owner, 0, 1, 1000);
+        agent_balances.grant_funds(owner, 0, 1, 1000, &mut protocol_balances).unwrap();
 
         execute_agent_pay(
             0, 1, test_addr(2), 500,
@@ -432,8 +436,9 @@ mod tests {
         let mut agent_balances = AgentBalances::new();
         let mut protocol_balances = BalanceState::new();
         let owner = test_addr(1);
+        protocol_balances.balances.set_balance(1, owner, 100).unwrap();
 
-        agent_balances.grant_funds(owner, 0, 1, 100);
+        agent_balances.grant_funds(owner, 0, 1, 100, &mut protocol_balances).unwrap();
 
         let result = execute_agent_pay(
             0, 1, test_addr(2), 200,
@@ -448,8 +453,9 @@ mod tests {
         let mut agent_balances = AgentBalances::new();
         let mut protocol_balances = BalanceState::new();
         let owner = test_addr(1);
+        protocol_balances.balances.set_balance(1, owner, 3000).unwrap();
 
-        agent_balances.grant_funds(owner, 0, 1, 3000);
+        agent_balances.grant_funds(owner, 0, 1, 3000, &mut protocol_balances).unwrap();
 
         let payments = vec![
             (1, test_addr(2), 1000),
@@ -491,7 +497,7 @@ mod tests {
         let registry = setup_registry();
         let owner = test_addr(1);
 
-        agent_balances.grant_funds(owner, 0, 1, 500);
+        agent_balances.grant_funds(owner, 0, 1, 500, &mut protocol_balances).unwrap();
 
         let target_addr = test_addr(2);
         let result = execute_agent_bridge_deposit(

@@ -6,7 +6,7 @@ use call_bridge::BridgeOp;
 use call_crypto::{build_merkle_root, keccak256};
 use call_primitives::{Balance, BlockHash, Hash, ProtocolVersion};
 use call_protocol::balances::BalanceState;
-use call_protocol::instructions::{execute_protocol_instructions, InstructionResult};
+use call_protocol::instructions::{execute_protocol_instructions, Instruction, InstructionResult};
 use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::ProtocolTransaction;
 use call_protocol::FeeParams;
@@ -235,6 +235,9 @@ impl Block {
         current_block_height: u64,
         evm_state: &mut EvmState,
         mut oracle: Option<&mut call_oracle::OracleManager>,
+        mut agent_executor: Option<call_protocol::instructions::AgentExecutor>,
+        mut agent_balances: Option<&mut call_agent::AgentBalances>,
+        agent_registry: Option<&call_agent::AgentRegistry>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -288,16 +291,77 @@ impl Block {
                 )));
             }
 
-            let tx_results = execute_protocol_instructions(
-                &tx.instructions,
-                balances,
-                registry,
-                compliance,
-                shielded_state,
-                tx.sender,
-                oracle.as_deref_mut(),
-            )
-            .map_err(|e| ConsensusError::InvalidBlock(format!("protocol tx: {e}")))?;
+            // Separate agent instructions from regular protocol instructions
+            let (agent_instrs, other_instrs): (Vec<_>, Vec<_>) = tx
+                .instructions
+                .iter()
+                .cloned()
+                .partition(|i| is_agent_instruction(i));
+
+            // Take snapshots for atomic rollback
+            let balance_snapshot = balances.clone();
+            let evm_snapshot = evm_state.clone();
+            let bridge_snapshot = bridge_state.clone();
+            let mut tx_results = Vec::new();
+
+            let exec_result = (|| -> Result<(), ConsensusError> {
+                // Execute regular instructions via protocol engine
+                if !other_instrs.is_empty() {
+                    let results = execute_protocol_instructions(
+                        &other_instrs,
+                        balances,
+                        registry,
+                        compliance,
+                        shielded_state,
+                        tx.sender,
+                        oracle.as_deref_mut(),
+                        &mut agent_executor,
+                    )
+                    .map_err(|e| {
+                        ConsensusError::InvalidBlock(format!("protocol tx: {e}"))
+                    })?;
+                    tx_results.extend(results);
+                }
+
+                // Execute agent instructions inline
+                if !agent_instrs.is_empty() {
+                    let ab = agent_balances
+                        .as_mut()
+                        .ok_or_else(|| {
+                            ConsensusError::InvalidBlock(
+                                "agent instructions require agent state".into(),
+                            )
+                        })?;
+                    let ar = agent_registry.ok_or_else(|| {
+                        ConsensusError::InvalidBlock(
+                            "agent instructions require agent registry".into(),
+                        )
+                    })?;
+                    for instr in &agent_instrs {
+                        let r = execute_agent_instruction(
+                            instr,
+                            tx.sender,
+                            ab,
+                            ar,
+                            balances,
+                            evm_state,
+                            bridge_state,
+                            registry,
+                            &executor,
+                        )?;
+                        tx_results.push(r);
+                    }
+                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = exec_result {
+                *balances = balance_snapshot;
+                *evm_state = evm_snapshot;
+                *bridge_state = bridge_snapshot;
+                return Err(e);
+            }
 
             result.protocol_tx_count += 1;
             result.instruction_results.extend(tx_results);
@@ -352,6 +416,156 @@ impl Block {
         self.header.evm_state_root = result.evm_state_root;
         self.header.bridge_root = result.bridge_root;
         self.header.receipt_root = result.receipt_root;
+    }
+}
+
+// ── Agent instruction helpers ─────────────────────────────────────────
+
+fn is_agent_instruction(instr: &Instruction) -> bool {
+    matches!(
+        instr,
+        Instruction::AgentPay { .. }
+            | Instruction::AgentBatchPay { .. }
+            | Instruction::AgentCall { .. }
+            | Instruction::AgentBridgeDeposit { .. }
+    )
+}
+
+fn execute_agent_instruction(
+    instruction: &Instruction,
+    sender: call_primitives::Address,
+    agent_balances: &mut call_agent::AgentBalances,
+    agent_registry: &call_agent::AgentRegistry,
+    balances: &mut BalanceState,
+    evm_state: &mut EvmState,
+    bridge_state: &mut call_bridge::BridgeStateManager,
+    registry: &AssetRegistry,
+    evm_executor: &EvmExecutor,
+) -> Result<InstructionResult, ConsensusError> {
+    match instruction {
+        Instruction::AgentPay { payment } => {
+            let agent = agent_registry
+                .get_agent(payment.agent_id)
+                .ok_or_else(|| ConsensusError::InvalidBlock("agent not found".into()))?;
+            if agent.owner != sender {
+                return Err(ConsensusError::InvalidBlock(
+                    "agent pay: sender is not owner".into(),
+                ));
+            }
+            agent_balances
+                .deduct(agent.owner, payment.agent_id, payment.asset_id, payment.amount)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("agent pay: {e}")))?;
+            balances
+                .credit_balance(payment.asset_id, payment.to, payment.amount)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("agent pay: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::AgentBatchPay { payments } => {
+            for payment in payments {
+                let agent = agent_registry
+                    .get_agent(payment.agent_id)
+                    .ok_or_else(|| ConsensusError::InvalidBlock("agent not found".into()))?;
+                if agent.owner != sender {
+                    return Err(ConsensusError::InvalidBlock(
+                        "agent batch pay: sender is not owner".into(),
+                    ));
+                }
+                agent_balances
+                    .deduct(agent.owner, payment.agent_id, payment.asset_id, payment.amount)
+                    .map_err(|e| {
+                        ConsensusError::InvalidBlock(format!("agent batch pay: {e}"))
+                    })?;
+                balances
+                    .credit_balance(payment.asset_id, payment.to, payment.amount)
+                    .map_err(|e| {
+                        ConsensusError::InvalidBlock(format!("agent batch pay: {e}"))
+                    })?;
+            }
+            Ok(InstructionResult::Success)
+        }
+        Instruction::AgentCall { agent_id, target, data } => {
+            let agent = agent_registry
+                .get_agent(*agent_id)
+                .ok_or_else(|| ConsensusError::InvalidBlock("agent not found".into()))?;
+            if agent.owner != sender {
+                return Err(ConsensusError::InvalidBlock(
+                    "agent call: sender is not owner".into(),
+                ));
+            }
+            let tx = EvmTransaction {
+                caller: sender,
+                nonce: 0,
+                gas_limit: 1_000_000,
+                gas_price: 0,
+                to: Some(*target),
+                value: call_primitives::U256::ZERO,
+                data: call_primitives::Bytes::from(data.clone()),
+                chain_id: evm_executor.chain_id,
+            };
+            match evm_executor.execute_tx(tx, evm_state) {
+                Ok(_) => Ok(InstructionResult::Success),
+                Err(e) => Err(ConsensusError::InvalidBlock(format!("agent call: {e:?}"))),
+            }
+        }
+        Instruction::AgentBridgeDeposit {
+            agent_id,
+            asset_id,
+            amount,
+            target_address,
+            ..
+        } => {
+            let agent = agent_registry
+                .get_agent(*agent_id)
+                .ok_or_else(|| ConsensusError::InvalidBlock("agent not found".into()))?;
+            if agent.owner != sender {
+                return Err(ConsensusError::InvalidBlock(
+                    "agent bridge deposit: sender is not owner".into(),
+                ));
+            }
+            agent_balances
+                .deduct(agent.owner, *agent_id, *asset_id, *amount)
+                .map_err(|e| {
+                    ConsensusError::InvalidBlock(format!("agent bridge deposit: {e}"))
+                })?;
+            balances
+                .deduct_balance(*asset_id, sender, *amount)
+                .map_err(|e| {
+                    ConsensusError::InvalidBlock(format!("agent bridge deposit: {e}"))
+                })?;
+
+            let config = call_bridge::BridgeConfig::default();
+            let op = call_bridge::BridgeOp::DepositToEvm {
+                asset_id: *asset_id,
+                from: sender,
+                to: call_primitives::Address::from_slice(
+                    &target_address[..target_address.len().min(20)],
+                ),
+                amount: *amount,
+            };
+            let bridge_address = call_primitives::Address::from_slice(&[0xCCu8; 20]);
+
+            match call_bridge::execute_deposit(
+                &op, balances, evm_state, evm_executor, bridge_state, &config, registry,
+                bridge_address, sender,
+            ) {
+                Ok(exec) if exec.success => Ok(InstructionResult::Success),
+                Ok(_) => {
+                    let _ = agent_balances.credit(agent.owner, *agent_id, *asset_id, *amount);
+                    let _ = balances.credit_balance(*asset_id, sender, *amount);
+                    Err(ConsensusError::InvalidBlock(
+                        "agent bridge deposit failed".into(),
+                    ))
+                }
+                Err(e) => {
+                    let _ = agent_balances.credit(agent.owner, *agent_id, *asset_id, *amount);
+                    let _ = balances.credit_balance(*asset_id, sender, *amount);
+                    Err(ConsensusError::InvalidBlock(format!(
+                        "agent bridge deposit: {e:?}"
+                    )))
+                }
+            }
+        }
+        _ => Err(ConsensusError::InvalidBlock("not an agent instruction".into())),
     }
 }
 
@@ -738,6 +952,9 @@ mod tests {
                 1,
                 &mut evm_state,
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 
@@ -805,6 +1022,9 @@ mod tests {
                 &mut fee_params,
                 1,
                 &mut evm_state,
+                None,
+                None,
+                None,
                 None,
             )
             .unwrap();

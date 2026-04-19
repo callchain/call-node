@@ -19,5 +19,7 @@ alloy-primitives.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+ureq.workspace = true
+hickory-resolver.workspace = true
 
 [dev-dependencies]

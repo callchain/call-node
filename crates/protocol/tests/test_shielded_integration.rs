@@ -67,7 +67,7 @@ mod test_shielded_integration_impl {
         }];
         let mut shielded_state2 = ShieldedState::new();
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state2, sender, None,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state2, sender, None, &mut None,
         ).unwrap();
 
         // Transparent balance should be deducted
@@ -99,7 +99,7 @@ mod test_shielded_integration_impl {
             nullifier: nullifier.0,
         }];
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None, &mut None,
         ).unwrap();
 
         // Transparent balance should be credited
@@ -134,7 +134,7 @@ mod test_shielded_integration_impl {
             encrypted_notes: vec![output_note.to_encrypted_bytes()],
         }];
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None, &mut None,
         ).unwrap();
 
         // Nullifier should be marked spent
@@ -167,7 +167,7 @@ mod test_shielded_integration_impl {
         }];
         // First transfer should succeed
         call_protocol::instructions::execute_protocol_instructions(
-            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None,
+            &instructions, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None, &mut None,
         ).unwrap();
 
         // Second transfer with same nullifier should fail
@@ -180,7 +180,7 @@ mod test_shielded_integration_impl {
             encrypted_notes: vec![output_note2.to_encrypted_bytes()],
         }];
         let result = call_protocol::instructions::execute_protocol_instructions(
-            &instructions2, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None,
+            &instructions2, &mut balances, &registry, &mut compliance, &mut shielded_state, sender, None, &mut None,
         );
         assert!(result.is_err());
     }

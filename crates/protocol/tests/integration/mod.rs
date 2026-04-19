@@ -133,6 +133,7 @@ pub fn execute_tx(
         shielded_state,
         tx.sender,
         None,
+        &mut None,
     )
     .map_err(|e| format!("exec: {e}"))?;
 

@@ -236,6 +236,9 @@ impl PayloadBuilder {
             attrs.height,
             evm_state,
             None,
+            None,
+            None,
+            None,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)

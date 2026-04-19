@@ -170,6 +170,15 @@ pub enum ComplianceStatus {
     Restricted,
 }
 
+// ── Agent Instruction Execution ───────────────────────────────────────
+
+/// Callback type for executing agent instructions.
+///
+/// The agent layer implements this to provide actual agent balance/permission logic.
+/// If the closure returns `Some(result)`, that result is used directly.
+/// If it returns `None`, the instruction falls back to default handling.
+pub type AgentExecutor<'a> = &'a mut dyn FnMut(&Instruction, Address) -> Option<ProtocolResult<InstructionResult>>;
+
 // ── Execution ─────────────────────────────────────────────────────────
 
 /// Execute a protocol transaction with atomicity.
@@ -185,6 +194,7 @@ pub fn execute_protocol_instructions(
     shielded_state: &mut ShieldedState,
     sender: Address,
     mut oracle: Option<&mut OracleManager>,
+    agent_executor: &mut Option<AgentExecutor>,
 ) -> ProtocolResult<Vec<InstructionResult>> {
     // Take state snapshot for rollback
     let snapshot = balances.clone();
@@ -192,7 +202,7 @@ pub fn execute_protocol_instructions(
     let mut results = Vec::with_capacity(instructions.len());
 
     for (i, instr) in instructions.iter().enumerate() {
-        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender, oracle.as_deref_mut()) {
+        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender, oracle.as_deref_mut(), agent_executor) {
             Ok(result) => results.push(result),
             Err(e) => {
                 // Restore state snapshot on failure
@@ -217,7 +227,15 @@ pub fn execute_instruction(
     shielded_state: &mut ShieldedState,
     sender: Address,
     oracle: Option<&mut OracleManager>,
+    agent_executor: &mut Option<AgentExecutor>,
 ) -> ProtocolResult<InstructionResult> {
+    // Delegate agent instructions to the agent executor if provided
+    if let Some(ref mut executor) = agent_executor {
+        if let Some(result) = executor(instruction, sender) {
+            return result;
+        }
+    }
+
     match instruction {
         Instruction::Transfer {
             asset_id,
@@ -292,23 +310,25 @@ pub fn execute_instruction(
             balances.burn(*asset_id, *from, *amount)?;
             Ok(InstructionResult::Success)
         }
-        Instruction::AgentPay { payment } => {
-            balances.transfer(payment.asset_id, sender, payment.to, payment.amount)?;
-            Ok(InstructionResult::Success)
+        Instruction::AgentPay { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "AgentPay requires an agent executor".into(),
+            ))
         }
-        Instruction::AgentBatchPay { payments } => {
-            for p in payments {
-                balances.transfer(p.asset_id, sender, p.to, p.amount)?;
-            }
-            Ok(InstructionResult::Success)
+        Instruction::AgentBatchPay { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "AgentBatchPay requires an agent executor".into(),
+            ))
         }
         Instruction::AgentCall { .. } => {
-            // External contract call — handled by EVM layer
-            Ok(InstructionResult::Success)
+            Err(ProtocolError::InvalidInstruction(
+                "AgentCall requires an agent executor".into(),
+            ))
         }
         Instruction::AgentBridgeDeposit { .. } => {
-            // Bridge deposit — handled by bridge layer
-            Ok(InstructionResult::Success)
+            Err(ProtocolError::InvalidInstruction(
+                "AgentBridgeDeposit requires an agent executor".into(),
+            ))
         }
         Instruction::BridgeDeposit {
             source_chain,
@@ -508,6 +528,7 @@ mod tests {
             &mut shielded_state,
             test_addr(1),
             None,
+            &mut None,
         )
         .expect("execute");
 
@@ -551,6 +572,7 @@ mod tests {
             &mut shielded_state,
             test_addr(1),
             None,
+            &mut None,
         )
         .expect("execute");
         assert_eq!(results.len(), 1);
@@ -590,6 +612,7 @@ mod tests {
             &mut shielded_state,
             test_addr(1),
             None,
+            &mut None,
         )
         .expect("execute");
         assert_eq!(results.len(), 2);
@@ -621,6 +644,7 @@ mod tests {
             &mut shielded_state,
             test_addr(99), // not the issuer
             None,
+            &mut None,
         );
         assert!(result.is_err());
 
@@ -633,6 +657,7 @@ mod tests {
             &mut shielded_state,
             test_addr(1), // the issuer
             None,
+            &mut None,
         );
         assert!(result.is_ok());
         assert_eq!(balances.get_balance(1, &test_addr(99)), 1000);
@@ -666,6 +691,7 @@ mod tests {
             &mut shielded_state,
             test_addr(99), // not the issuer
             None,
+            &mut None,
         );
         assert!(result.is_err());
 
@@ -678,6 +704,7 @@ mod tests {
             &mut shielded_state,
             test_addr(1), // the issuer
             None,
+            &mut None,
         );
         assert!(result.is_ok());
         assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
@@ -748,6 +775,7 @@ mod tests {
             &mut shielded_state,
             test_addr(1),
             None,
+            &mut None,
         );
         assert!(result.is_err());
         // State should be rolled back to original
@@ -789,6 +817,7 @@ mod tests {
             &mut shielded_state,
             test_addr(1),
             None,
+            &mut None,
         )
         .expect("execute");
         assert_eq!(results.len(), 2);

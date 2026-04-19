@@ -19,17 +19,56 @@ pub struct AgentRegistration {
 }
 
 /// Agent registry
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AgentRegistry {
     pub agents: std::collections::HashMap<u64, AgentRegistration>,
     pub agents_by_owner: std::collections::HashMap<Address, Vec<u64>>,
     pub agents_by_name: std::collections::HashMap<String, u64>,
     pub next_id: u64,
+    #[serde(skip)]
+    domain_verifier: Option<Box<dyn DomainVerifier>>,
+}
+
+impl std::fmt::Debug for AgentRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRegistry")
+            .field("agents", &self.agents)
+            .field("agents_by_owner", &self.agents_by_owner)
+            .field("agents_by_name", &self.agents_by_name)
+            .field("next_id", &self.next_id)
+            .field("domain_verifier", &self.domain_verifier.is_some())
+            .finish()
+    }
+}
+
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self {
+            agents: Default::default(),
+            agents_by_owner: Default::default(),
+            agents_by_name: Default::default(),
+            next_id: Default::default(),
+            domain_verifier: None,
+        }
+    }
 }
 
 impl AgentRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set a custom domain verifier for this registry.
+    pub fn with_verifier(mut self, verifier: Box<dyn DomainVerifier>) -> Self {
+        self.domain_verifier = Some(verifier);
+        self
+    }
+
+    fn verify_proof(&self, proof: &DomainProof) -> Result<bool, AgentError> {
+        match &self.domain_verifier {
+            Some(verifier) => verifier.verify(proof),
+            None => verify_domain_proof(proof),
+        }
     }
 
     /// Register a new agent with domain verification (per spec §6.2)
@@ -55,7 +94,7 @@ impl AgentRegistry {
 
         // 2. Verify domain proof if provided
         let domain_verified = if let Some(ref proof) = domain_proof {
-            verify_domain_proof(proof)?
+            self.verify_proof(proof)?
         } else {
             false
         };
@@ -140,12 +179,13 @@ impl AgentRegistry {
         agent_id: u64,
         proof: DomainProof,
     ) -> Result<(), AgentError> {
+        let verified = self.verify_proof(&proof)?;
+
         let agent = self
             .agents
             .get_mut(&agent_id)
             .ok_or(AgentError::AgentNotRegistered(agent_id))?;
 
-        let verified = verify_domain_proof(&proof)?;
         agent.domain_proof = Some(proof);
         agent.domain_verified = verified;
 
@@ -169,13 +209,22 @@ impl DomainVerifier for DefaultDomainVerifier {
     }
 }
 
+/// Real domain verifier that performs actual DNS TXT and HTTP file lookups.
+pub struct RealDomainVerifier;
+
+impl DomainVerifier for RealDomainVerifier {
+    fn verify(&self, proof: &DomainProof) -> Result<bool, AgentError> {
+        verify_domain_proof_network(proof)
+    }
+}
+
 /// Verify a domain proof (per spec §6.2.1)
 ///
 /// For DNS TXT: verify the domain contains the agent's address
 /// For HTTP file: verify the URL contains the expected content
 ///
 /// This function validates the proof format. For actual DNS/HTTP
-/// queries, use a custom `DomainVerifier` implementation.
+/// queries, use `RealDomainVerifier`.
 pub fn verify_domain_proof(proof: &DomainProof) -> Result<bool, AgentError> {
     verify_domain_proof_format(proof)
 }
@@ -183,23 +232,19 @@ pub fn verify_domain_proof(proof: &DomainProof) -> Result<bool, AgentError> {
 fn verify_domain_proof_format(proof: &DomainProof) -> Result<bool, AgentError> {
     match proof {
         DomainProof::DnsTxt { domain, txt_value } => {
-            // Validate domain is non-empty and reasonable
             if domain.is_empty() || domain.len() > 253 {
                 return Err(AgentError::DomainVerificationFailed(
                     "invalid domain".into(),
                 ));
             }
-            // Validate txt_value contains some proof of ownership
             if txt_value.is_empty() || txt_value.len() > 512 {
                 return Err(AgentError::DomainVerificationFailed(
                     "invalid TXT value".into(),
                 ));
             }
-            // Format is valid — actual DNS verification requires a custom DomainVerifier
             Ok(true)
         }
         DomainProof::HttpFile { url, expected_content } => {
-            // Validate URL is non-empty and starts with https
             if !url.starts_with("https://") || url.len() > 2048 {
                 return Err(AgentError::DomainVerificationFailed(
                     "invalid URL".into(),
@@ -210,8 +255,44 @@ fn verify_domain_proof_format(proof: &DomainProof) -> Result<bool, AgentError> {
                     "invalid expected content".into(),
                 ));
             }
-            // Format is valid — actual HTTP fetch requires a custom DomainVerifier
             Ok(true)
+        }
+    }
+}
+
+/// Perform real DNS TXT and HTTP verification against live network.
+fn verify_domain_proof_network(proof: &DomainProof) -> Result<bool, AgentError> {
+    match proof {
+        DomainProof::DnsTxt { domain, txt_value } => {
+            verify_domain_proof_format(proof)?;
+
+            let resolver = hickory_resolver::Resolver::from_system_conf()
+                .map_err(|e| AgentError::DomainVerificationFailed(format!("dns resolver init failed: {e}")))?;
+
+            let lookup = resolver.txt_lookup(domain.as_str())
+                .map_err(|e| AgentError::DomainVerificationFailed(format!("dns lookup failed: {e}")))?;
+
+            for record in lookup {
+                let data: String = record.iter()
+                    .map(|b| String::from_utf8_lossy(b))
+                    .collect();
+                if data.contains(txt_value) {
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
+        }
+        DomainProof::HttpFile { url, expected_content } => {
+            verify_domain_proof_format(proof)?;
+
+            let body = ureq::get(url)
+                .call()
+                .map_err(|e| AgentError::DomainVerificationFailed(format!("http fetch failed: {e}")))?
+                .into_string()
+                .map_err(|e| AgentError::DomainVerificationFailed(format!("http read failed: {e}")))?;
+
+            Ok(body.contains(expected_content))
         }
     }
 }
