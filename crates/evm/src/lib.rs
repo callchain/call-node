@@ -4,6 +4,8 @@
 
 mod executor;
 mod state;
+pub mod db;
+pub mod erc20_bytecode;
 
 pub use executor::*;
 pub use state::*;

@@ -1690,6 +1690,8 @@ dependencies = [
 name = "call-consensus"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-rlp",
  "bytes",
  "call-bridge",
  "call-crypto",
@@ -1746,9 +1748,15 @@ name = "call-evm"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
+ "call-storage",
+ "hex",
+ "reth-db",
+ "reth-db-api",
  "revm",
  "serde",
  "serde_json",

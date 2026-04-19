@@ -140,7 +140,11 @@ impl EvmExecutor {
         })
     }
 
-    /// Deploy ERC-20 template contract for an asset
+    /// Deploy ERC-20 template contract for an asset.
+    ///
+    /// Uses pre-compiled `WrappedToken.sol` bytecode with ABI-encoded
+    /// constructor arguments. The deployed contract supports `transfer`,
+    /// `approve`, `transferFrom`, `balanceOf`, `bridgeMint`, and `bridgeBurn`.
     pub fn deploy_erc20_template(
         &self,
         deployer: Address,
@@ -150,7 +154,9 @@ impl EvmExecutor {
         decimals: u8,
         initial_supply: U256,
     ) -> Result<(Address, EvmExecutionResult), EvmError> {
-        let init_code = build_erc20_init_code(name, symbol, decimals, initial_supply);
+        let init_code = crate::erc20_bytecode::build_erc20_init_code(
+            name, symbol, decimals, initial_supply,
+        );
 
         // Derive CREATE contract address from deployer + nonce
         let nonce = state.get_nonce(&deployer);
@@ -159,7 +165,7 @@ impl EvmExecutor {
         let tx = EvmTransaction {
             caller: deployer,
             nonce,
-            gas_limit: 3_000_000,
+            gas_limit: 10_000_000,
             gas_price: 10,
             to: None,
             value: U256::ZERO,
@@ -169,8 +175,11 @@ impl EvmExecutor {
 
         let result = self.execute_tx(tx, state)?;
 
-        state.set_code(contract_addr, result.output.clone());
-        state.increment_nonce(deployer);
+        // Revm already sets the deployed code via apply_from_revm_state,
+        // but we keep this as a safety net for CREATE output.
+        if !result.output.is_empty() {
+            state.set_code(contract_addr, result.output.clone());
+        }
 
         Ok((contract_addr, result))
     }
@@ -315,150 +324,6 @@ fn derive_create_address(deployer: Address, nonce: u64) -> Address {
     Address::from_slice(&hash[12..])
 }
 
-/// Build minimal ERC-20 initialization bytecode
-///
-/// This is a minimal but functional ERC-20 contract that implements:
-/// name(), symbol(), decimals(), totalSupply(), balanceOf(), transfer(),
-/// approve(), allowance(), transferFrom().
-///
-/// The init code sets up constructor values (name, symbol, decimals, initial_supply)
-/// and mints the initial supply to the deployer.
-fn build_erc20_init_code(
-    name: &str,
-    symbol: &str,
-    decimals: u8,
-    initial_supply: U256,
-) -> Bytes {
-    // Runtime bytecode for a minimal ERC-20 contract.
-    // This is hand-crafted EVM bytecode that implements the ERC-20 interface.
-    // The runtime code is embedded in the initcode prefix, followed by constructor args.
-    //
-    // Layout:
-    //   [initcode prefix] -> copies runtime to memory, returns it
-    //   [runtime bytecode] -> ERC-20 implementation
-    //   [constructor args] -> name, symbol, decimals, initial_supply (ABI encoded)
-
-    // --- Minimal ERC-20 Runtime Bytecode ---
-    // This contract uses the EVM dispatch pattern:
-    // 1. Load calldata[0:4] (function selector)
-    // 2. Compare against known selectors
-    // 3. Jump to handler or revert
-
-    // Selectors:
-    //   name():       0x06fdde03
-    //   symbol():     0x95d89b41
-    //   decimals():   0x313ce567
-    //   totalSupply(): 0x18160ddd
-    //   balanceOf(address): 0x70a08231
-    //   transfer(address,uint256): 0xa9059cbb
-    //   approve(address,uint256): 0x095ea7b3
-    //   allowance(address,address): 0xdd62ed3e
-    //   transferFrom(address,address,uint256): 0x23b872dd
-
-    // Rather than full runtime bytecode (which would be ~2KB), we use a minimal
-    // approach: the initcode deploys a contract that stores constructor args
-    // in code and has basic ERC-20 storage layout.
-
-    // --- Minimal Initcode ---
-    // This initcode deploys a contract that:
-    // 1. Stores name, symbol, decimals, totalSupply in storage at deploy time
-    // 2. Has a simple dispatch for balanceOf, totalSupply, transfer, approve
-
-    // For a production system, you'd use solc-compiled bytecode.
-    // Here we deploy a minimal working ERC-20 using EVM bytecode directly.
-
-    // Minimal ERC-20 that works with revm:
-    // PUSH init code that stores constructor values and returns runtime
-
-    let mut bytecode = Vec::new();
-
-    // Step 1: Store name string in storage slot 0 (as a hash)
-    // We'll use a simpler approach: store everything in storage at deploy time
-    // and return a minimal runtime that can read from storage.
-
-    // PUSH32: name_hash (placeholder, will be overwritten)
-    bytecode.push(0x7f); // PUSH32
-    let name_hash = keccak256(name.as_bytes());
-    bytecode.extend_from_slice(&name_hash.0);
-    bytecode.push(0x60); // PUSH1 0x00
-    bytecode.push(0x00);
-    bytecode.push(0x55); // SSTORE [0] = name_hash
-
-    // PUSH32: symbol_hash
-    bytecode.push(0x7f); // PUSH32
-    let symbol_hash = keccak256(symbol.as_bytes());
-    bytecode.extend_from_slice(&symbol_hash.0);
-    bytecode.push(0x60); // PUSH1 0x01
-    bytecode.push(0x01);
-    bytecode.push(0x55); // SSTORE [1] = symbol_hash
-
-    // PUSH1: decimals
-    bytecode.push(0x60); // PUSH1 decimals
-    bytecode.push(decimals);
-    bytecode.push(0x60); // PUSH1 0x02
-    bytecode.push(0x02);
-    bytecode.push(0x55); // SSTORE [2] = decimals
-
-    // Store totalSupply: push low 128 bits, then high 128 bits
-    let supply_bytes = initial_supply.to_be_bytes::<32>();
-    // SSTORE [3] = totalSupply (low 128 bits)
-    let low_u128 = u128::from_be_bytes(supply_bytes[16..].try_into().unwrap());
-    let high_u128 = u128::from_be_bytes(supply_bytes[..16].try_into().unwrap());
-
-    if high_u128 != 0 {
-        bytecode.push(0x7f); // PUSH32
-        bytecode.extend_from_slice(&supply_bytes);
-    } else {
-        // Use smaller push if fits
-        if low_u128 <= u64::MAX as u128 {
-            bytecode.push(0x60); // PUSH1
-            bytecode.push(low_u128 as u8);
-        } else {
-            bytecode.push(0x7f); // PUSH32
-            bytecode.extend_from_slice(&[0u8; 16]);
-            bytecode.extend_from_slice(&low_u128.to_be_bytes());
-        }
-    }
-    bytecode.push(0x60); // PUSH1 0x03
-    bytecode.push(0x03);
-    bytecode.push(0x55); // SSTORE [3] = totalSupply
-
-    // Mint initial supply to deployer: SSTORE [keccak256(deployer, 4)] = supply
-    // Storage slot for balance[deployer] = keccak256(deployer ++ 4)
-    let deployer_key = alloy_primitives::address!("0000000000000000000000000000000000000000");
-    let mut slot_buf = [0u8; 32];
-    slot_buf[0..20].copy_from_slice(deployer_key.as_slice());
-    slot_buf[31] = 4;
-    let balance_slot = keccak256(slot_buf);
-
-    // Store balance in computed slot
-    if high_u128 != 0 {
-        bytecode.push(0x7f); // PUSH32
-        bytecode.extend_from_slice(&supply_bytes);
-    } else if low_u128 <= u64::MAX as u128 && low_u128 < 128 {
-        bytecode.push(0x60); // PUSH1
-        bytecode.push(low_u128 as u8);
-    } else {
-        bytecode.push(0x7f); // PUSH32
-        bytecode.extend_from_slice(&[0u8; 16]);
-        bytecode.extend_from_slice(&low_u128.to_be_bytes());
-    }
-    // PUSH32 balance_slot
-    bytecode.push(0x7f);
-    bytecode.extend_from_slice(&balance_slot.0);
-    bytecode.push(0x55); // SSTORE
-
-    // Return the runtime code (empty for now — returns empty code after init)
-    // Minimal return: PUSH1 0x00, PUSH1 0x00, RETURN
-    bytecode.push(0x60); // PUSH1 0x00 (size)
-    bytecode.push(0x00);
-    bytecode.push(0x60); // PUSH1 0x00 (offset)
-    bytecode.push(0x00);
-    bytecode.push(0xf3); // RETURN
-
-    Bytes::from(bytecode)
-}
-
 // ── Gas Tracking ──────────────────────────────────────────────────────
 
 /// Track gas usage within a block
@@ -586,7 +451,7 @@ mod tests {
             .deploy_erc20_template(deployer, &mut state, "Test", "TST", 18, U256::from(1_000_000))
             .unwrap();
         assert_eq!(addr, expected_addr);
-        assert!(result.success);
+        assert!(result.success, "ERC-20 deploy failed: gas_used={}, output={:?}", result.gas_used, result.output);
     }
 
     #[test]

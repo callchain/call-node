@@ -135,6 +135,7 @@ alloy-rlp = { version = "0.3.13", default-features = false }
 alloy-rpc-types-eth = { version = "1.8.2" }
 alloy-serde = { version = "1.8.2", default-features = false }
 alloy-sol-types = { version = "1.5.7", default-features = false }
+alloy-trie = "0.9"
 
 # ReVM
 revm = { version = "36.0.0", default-features = false }

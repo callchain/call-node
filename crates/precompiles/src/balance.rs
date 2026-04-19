@@ -3,6 +3,7 @@
 use call_primitives::{Address, AssetId, Balance};
 use alloy_primitives::address;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub(crate) const BALANCE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000102");
@@ -24,6 +25,22 @@ impl ProtocolBalanceState {
     pub fn set_balance(&mut self, asset_id: AssetId, address: Address, amount: Balance) {
         self.balances.insert((asset_id, address), amount);
     }
+}
+
+/// Live protocol balance shared across the system
+static LIVE_BALANCE: OnceLock<Arc<RwLock<ProtocolBalanceState>>> = OnceLock::new();
+
+/// Set the live balance state (called once during node boot).
+/// Logs a warning if called more than once (the first caller wins).
+pub fn set_live_balance(balance: Arc<RwLock<ProtocolBalanceState>>) {
+    if LIVE_BALANCE.set(balance).is_err() {
+        tracing::warn!("set_live_balance called after initialization — ignoring duplicate");
+    }
+}
+
+/// Get the live balance state if initialized
+pub fn get_live_balance() -> Option<Arc<RwLock<ProtocolBalanceState>>> {
+    LIVE_BALANCE.get().cloned()
 }
 
 #[cfg(test)]

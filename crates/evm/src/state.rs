@@ -1,13 +1,22 @@
 //! EVM state management (accounts, contracts, storage).
 
 use call_primitives::Address;
-use alloy_primitives::{U256, Bytes, keccak256};
+use alloy_primitives::{U256, Bytes, keccak256, B256};
+use alloy_trie::{HashBuilder, Nibbles};
+use alloy_rlp::Encodable;
 use revm::{
     database::InMemoryDB,
     state::AccountInfo,
     bytecode::Bytecode,
 };
 use std::collections::HashMap;
+
+/// Ethereum empty trie root hash (keccak256 of RLP empty string).
+const EMPTY_ROOT: B256 = B256::new([
+    0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6,
+    0x92, 0xc0, 0xf8, 0x6e, 0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0,
+    0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
+]);
 
 /// EVM account info
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -29,10 +38,55 @@ impl Default for EvmAccount {
     }
 }
 
+impl EvmAccount {
+    /// Compute the storage trie root for this account.
+    fn storage_root(&self) -> B256 {
+        if self.storage.is_empty() {
+            return EMPTY_ROOT;
+        }
+        let mut hb = HashBuilder::default();
+        let mut slots: Vec<_> = self.storage.iter().collect();
+        slots.sort_by_key(|(k, _)| *k);
+        for (key, value) in slots {
+            let path = Nibbles::unpack(keccak256(key.to_be_bytes::<32>()));
+            let mut value_rlp = Vec::new();
+            value.encode(&mut value_rlp);
+            hb.add_leaf(path, &value_rlp);
+        }
+        hb.root()
+    }
+
+    /// RLP-encode the account as `[nonce, balance, storage_root, code_hash]`.
+    fn rlp_encode(&self, storage_root: B256) -> Vec<u8> {
+        let code_hash = if self.code.is_empty() {
+            revm::primitives::KECCAK_EMPTY
+        } else {
+            keccak256(&self.code)
+        };
+
+        // Encode payload elements first to measure length
+        let mut payload = Vec::new();
+        self.nonce.encode(&mut payload);
+        self.balance.encode(&mut payload);
+        storage_root.encode(&mut payload);
+        code_hash.encode(&mut payload);
+
+        // Prepend RLP list header
+        let mut buf = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut buf);
+        buf.extend_from_slice(&payload);
+        buf
+    }
+}
+
 /// EVM state database
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct EvmState {
-    accounts: HashMap<Address, EvmAccount>,
+    pub(crate) accounts: HashMap<Address, EvmAccount>,
 }
 
 impl EvmState {
@@ -151,29 +205,29 @@ impl EvmState {
         }
     }
 
-    /// Compute a state root hash from all account states.
-    /// This is a simple keccak256 hash of all accounts sorted by address,
-    /// analogous to the Ethereum state trie root.
-    pub fn compute_state_root(&self) -> alloy_primitives::B256 {
-        let mut data = Vec::with_capacity(256 * self.accounts.len());
-        let mut sorted_accounts: Vec<_> = self.accounts.iter().collect();
-        sorted_accounts.sort_by_key(|(addr, _)| *addr);
-        for (addr, account) in &sorted_accounts {
-            data.extend_from_slice(addr.as_slice());
-            data.extend_from_slice(&account.nonce.to_le_bytes());
-            data.extend_from_slice(&account.balance.to_le_bytes::<32>());
-            data.extend_from_slice(&keccak256(&account.code).0);
-            // Storage root: hash of all key-value pairs
-            let mut storage_data = Vec::new();
-            let mut sorted_storage: Vec<_> = account.storage.iter().collect();
-            sorted_storage.sort_by_key(|(k, _)| *k);
-            for (key, value) in &sorted_storage {
-                storage_data.extend_from_slice(&key.to_le_bytes::<32>());
-                storage_data.extend_from_slice(&value.to_le_bytes::<32>());
-            }
-            data.extend_from_slice(&keccak256(&storage_data).0);
+    /// Compute the Ethereum state trie root (Merkle Patricia Trie).
+    ///
+    /// Each account is RLP-encoded as `[nonce, balance, storage_root, code_hash]`
+    /// and inserted into the trie at path `keccak256(address)`. The storage root
+    /// for each account is itself a Merkle Patricia Trie of its storage slots.
+    pub fn compute_state_root(&self) -> B256 {
+        let mut hb = HashBuilder::default();
+        let mut accounts: Vec<_> = self
+            .accounts
+            .iter()
+            .map(|(addr, acc)| (keccak256(*addr), addr, acc))
+            .collect();
+        // HashBuilder requires leaves in ascending nibble order.
+        accounts.sort_by_key(|(hash, _, _)| *hash);
+
+        for (hash, _address, account) in accounts {
+            let storage_root = account.storage_root();
+            let account_rlp = account.rlp_encode(storage_root);
+            let path = Nibbles::unpack(hash);
+            hb.add_leaf(path, &account_rlp);
         }
-        keccak256(&data)
+
+        hb.root()
     }
 }
 

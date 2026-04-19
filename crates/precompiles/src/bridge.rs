@@ -2,6 +2,7 @@
 
 use call_primitives::{Address, AssetId, Balance, Hash};
 use alloy_primitives::address;
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub(crate) const BRIDGE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000103");
@@ -50,6 +51,22 @@ pub fn bridge_withdraw(
 ) {
     state.total_withdrawals += amount;
     state.pending_ops += 1;
+}
+
+/// Live bridge shared across the system
+static LIVE_BRIDGE: OnceLock<Arc<RwLock<BridgeState>>> = OnceLock::new();
+
+/// Set the live bridge state (called once during node boot).
+/// Logs a warning if called more than once (the first caller wins).
+pub fn set_live_bridge(bridge: Arc<RwLock<BridgeState>>) {
+    if LIVE_BRIDGE.set(bridge).is_err() {
+        tracing::warn!("set_live_bridge called after initialization — ignoring duplicate");
+    }
+}
+
+/// Get the live bridge state if initialized
+pub fn get_live_bridge() -> Option<Arc<RwLock<BridgeState>>> {
+    LIVE_BRIDGE.get().cloned()
 }
 
 #[cfg(test)]

@@ -33,3 +33,5 @@ commonware-math = "2026.4.0"
 bytes = "1"
 rand_core = "0.6"
 tokio = { workspace = true, features = ["sync"] }
+alloy-consensus = { workspace = true, features = ["k256"] }
+alloy-rlp.workspace = true

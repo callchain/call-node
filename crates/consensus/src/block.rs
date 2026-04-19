@@ -444,23 +444,58 @@ fn compute_receipt_root(result: &BlockExecutionResult) -> Hash {
 }
 
 /// Attempt to decode raw EVM transaction bytes into a structured EvmTransaction.
+/// Supports RLP-encoded Legacy and EIP-1559 transactions.
+/// Falls back to JSON deserialization for backward compatibility with test data.
 /// Returns Err if the bytes cannot be parsed as a valid EVM tx.
 fn decode_evm_tx(raw: &[u8]) -> Result<EvmTransaction, ()> {
-    // EVM transactions are RLP-encoded. We use a simple approach:
-    // If the bytes look like valid RLP with structured data, attempt deserialization.
-    // Otherwise, return an error and let the caller handle as unparseable.
+    use alloy_consensus::{Transaction, TxEnvelope};
+    use alloy_rlp::Decodable;
+
     if raw.is_empty() {
         return Err(());
     }
 
-    // Try to deserialize as EvmTransaction (uses serde via alloy-primitives)
-    // This works for transactions that were serialized with serde_json or bincode.
-    // For raw RLP-encoded txs, a proper RLP decoder would be needed.
+    // 1) Try RLP / EIP-2718 enveloped decoding (real wallet transactions)
+    if let Ok(envelope) = TxEnvelope::decode(&mut &raw[..]) {
+        match envelope {
+            TxEnvelope::Legacy(signed) => {
+                let tx = signed.tx();
+                let caller = signed.recover_signer().map_err(|_| ())?;
+                return Ok(EvmTransaction {
+                    caller,
+                    nonce: tx.nonce(),
+                    gas_limit: tx.gas_limit(),
+                    gas_price: tx.gas_price().unwrap_or(0),
+                    to: tx.to(),
+                    value: tx.value(),
+                    data: tx.input().clone(),
+                    chain_id: tx.chain_id().unwrap_or(1),
+                });
+            }
+            TxEnvelope::Eip1559(signed) => {
+                let tx = signed.tx();
+                let caller = signed.recover_signer().map_err(|_| ())?;
+                return Ok(EvmTransaction {
+                    caller,
+                    nonce: tx.nonce(),
+                    gas_limit: tx.gas_limit(),
+                    gas_price: tx.max_fee_per_gas(),
+                    to: tx.to(),
+                    value: tx.value(),
+                    data: tx.input().clone(),
+                    chain_id: tx.chain_id().unwrap_or(1),
+                });
+            }
+            // Unsupported transaction types (EIP-2930, EIP-4844, EIP-7702)
+            _ => return Err(()),
+        }
+    }
+
+    // 2) Fallback: JSON-serialized EvmTransaction (test data / internal tooling)
     if let Ok(tx) = serde_json::from_slice::<EvmTransaction>(raw) {
         return Ok(tx);
     }
 
-    // For test data (arbitrary bytes), return an error — caller handles with fallback
     Err(())
 }
 
