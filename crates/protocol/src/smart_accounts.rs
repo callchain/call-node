@@ -154,6 +154,10 @@ impl SmartAccountRegistry {
         }
     }
 
+    pub fn get_multisig_config(&self, account: &Address) -> Option<&MultiSigConfig> {
+        self.multi_sigs.get(account)
+    }
+
     pub fn verify_multisig(
         &self,
         account: &Address,

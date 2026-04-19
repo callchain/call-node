@@ -242,6 +242,7 @@ impl Block {
         mut governance: Option<&mut GovernanceManager>,
         bridge_config: Option<&BridgeConfig>,
         validators: Option<&[Address]>,
+        smart_accounts: Option<&call_protocol::smart_accounts::SmartAccountRegistry>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -288,7 +289,7 @@ impl Block {
             }
 
             // Verify transaction signature before execution
-            if let Err(e) = tx.verify_signature() {
+            if let Err(e) = tx.verify_signature_with_registry(smart_accounts) {
                 return Err(ConsensusError::InvalidBlock(format!(
                     "signature verification failed for tx from {:?}: {e}",
                     tx.sender
@@ -1057,6 +1058,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -1124,6 +1126,7 @@ mod tests {
                 &mut fee_params,
                 1,
                 &mut evm_state,
+                None,
                 None,
                 None,
                 None,

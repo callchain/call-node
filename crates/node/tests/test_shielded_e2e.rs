@@ -11,7 +11,7 @@
 //! - Full lifecycle: deposit -> transfer -> withdraw
 
 mod e2e;
-use e2e::harness::{NodeBuilder, DeterministicRuntime, SharedTxCorpus};
+use e2e::harness::{NodeBuilder, DeterministicRuntime, test_keypair, sign_tx};
 use call_primitives::{Address, FeeCurrency, Hash};
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
@@ -43,11 +43,12 @@ fn shield_note(value: u128, asset_id: u64, seed: u8) -> Note {
 }
 
 fn make_shielded_tx(
+    secret: &[u8; 32],
     sender: Address,
     nonce: u64,
     instructions: Vec<Instruction>,
 ) -> ProtocolTransaction {
-    ProtocolTransaction {
+    let tx = ProtocolTransaction {
         sender,
         nonce,
         instructions,
@@ -58,7 +59,8 @@ fn make_shielded_tx(
         auth: AuthScheme::SingleSig {
             signature: [0xAAu8; 65],
         },
-    }
+    };
+    sign_tx(secret, tx)
 }
 
 fn one_million_call() -> u128 {
@@ -69,7 +71,7 @@ fn one_million_call() -> u128 {
 
 #[test]
 fn test_e2e_shielded_deposit_flow() {
-    let sender = addr(1);
+    let (secret, sender) = test_keypair();
     let mut node = NodeBuilder::new()
         .validator(addr(10), [10u8; 32], one_million_call())
         .balance(1, sender, 10_000)
@@ -81,7 +83,7 @@ fn test_e2e_shielded_deposit_flow() {
     let encrypted = note.to_encrypted_bytes();
     let cm = note.commitment();
 
-    let tx = make_shielded_tx(sender, 1, vec![Instruction::ShieldedDeposit {
+    let tx = make_shielded_tx(&secret, sender, 1, vec![Instruction::ShieldedDeposit {
         asset_id: 1,
         amount: 1_000,
         commitment: cm.0,
@@ -99,11 +101,11 @@ fn test_e2e_shielded_deposit_flow() {
     assert!(shielded.get_note(&cm).is_some());
 }
 
-// ── E2E Shielded Withdraw Flow ──────────────────────────────────────────
+// ── E2E Shielded Withdraw Flow ─────────────────────────────────────────
 
 #[test]
 fn test_e2e_shielded_withdraw_flow() {
-    let sender = addr(1);
+    let (secret, sender) = test_keypair();
     let receiver = addr(2);
     let mut node = NodeBuilder::new()
         .validator(addr(10), [10u8; 32], one_million_call())
@@ -114,7 +116,7 @@ fn test_e2e_shielded_withdraw_flow() {
     let note = shield_note(500, 0, 1);
     let nullifier = note.nullifier();
 
-    let tx = make_shielded_tx(sender, 1, vec![Instruction::ShieldedWithdraw {
+    let tx = make_shielded_tx(&secret, sender, 1, vec![Instruction::ShieldedWithdraw {
         asset_id: 0,
         target: receiver,
         amount: 500,
@@ -138,7 +140,7 @@ fn test_e2e_shielded_withdraw_flow() {
 
 #[tokio::test]
 async fn test_e2e_shielded_double_spend_rejected() {
-    let sender = addr(1);
+    let (secret, sender) = test_keypair();
     let mut node = NodeBuilder::new()
         .validator(addr(10), [10u8; 32], one_million_call())
         .balance(1, sender, 10_000)
@@ -151,7 +153,7 @@ async fn test_e2e_shielded_double_spend_rejected() {
     let commitment = output_note.commitment();
 
     // First tx with nullifier
-    let tx1 = make_shielded_tx(sender, 1, vec![Instruction::ShieldedTransfer {
+    let tx1 = make_shielded_tx(&secret, sender, 1, vec![Instruction::ShieldedTransfer {
         asset_id: 1,
         proof: vec![1u8; 200],
         nullifiers: vec![nullifier.0],
@@ -163,7 +165,7 @@ async fn test_e2e_shielded_double_spend_rejected() {
 
     // Second tx with same nullifier
     let output_note2 = shield_note(800, 1, 3);
-    let tx2 = make_shielded_tx(sender, 2, vec![Instruction::ShieldedTransfer {
+    let tx2 = make_shielded_tx(&secret, sender, 2, vec![Instruction::ShieldedTransfer {
         asset_id: 1,
         proof: vec![1u8; 200],
         nullifiers: vec![nullifier.0],
@@ -183,7 +185,7 @@ async fn test_e2e_shielded_double_spend_rejected() {
 
 #[tokio::test]
 async fn test_e2e_shielded_invalid_proof_rejected() {
-    let sender = addr(1);
+    let (secret, sender) = test_keypair();
     let mut node = NodeBuilder::new()
         .validator(addr(10), [10u8; 32], one_million_call())
         .balance(1, sender, 10_000)
@@ -191,7 +193,7 @@ async fn test_e2e_shielded_invalid_proof_rejected() {
         .build();
 
     // Empty proof should be rejected
-    let tx = make_shielded_tx(sender, 1, vec![Instruction::ShieldedTransfer {
+    let tx = make_shielded_tx(&secret, sender, 1, vec![Instruction::ShieldedTransfer {
         asset_id: 1,
         proof: vec![], // empty proof
         nullifiers: vec![shield_hash(1)],
@@ -244,7 +246,7 @@ async fn test_e2e_shielded_multi_node_consensus() {
 
 #[test]
 fn test_e2e_shielded_lifecycle() {
-    let sender = addr(1);
+    let (secret, sender) = test_keypair();
     let receiver = addr(2);
     let mut node = NodeBuilder::new()
         .validator(addr(10), [10u8; 32], one_million_call())
@@ -257,7 +259,7 @@ fn test_e2e_shielded_lifecycle() {
     let encrypted = note.to_encrypted_bytes();
     let cm = note.commitment();
 
-    let tx = make_shielded_tx(sender, 1, vec![Instruction::ShieldedDeposit {
+    let tx = make_shielded_tx(&secret, sender, 1, vec![Instruction::ShieldedDeposit {
         asset_id: 1,
         amount: 1_000,
         commitment: cm.0,
@@ -276,7 +278,7 @@ fn test_e2e_shielded_lifecycle() {
     let note2 = shield_note(500, 0, 2);
     let nullifier = note2.nullifier();
 
-    let tx2 = make_shielded_tx(sender, 2, vec![Instruction::ShieldedWithdraw {
+    let tx2 = make_shielded_tx(&secret, sender, 2, vec![Instruction::ShieldedWithdraw {
         asset_id: 0,
         target: receiver,
         amount: 500,

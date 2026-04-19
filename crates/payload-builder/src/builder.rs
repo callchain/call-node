@@ -239,7 +239,7 @@ impl PayloadBuilder {
             None,
             None,
             None,
-            None, None, None,
+            None, None, None, None,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)
@@ -351,9 +351,33 @@ mod tests {
         Address::repeat_byte(n)
     }
 
+    fn test_keypair() -> &'static ([u8; 32], Address) {
+        use std::sync::OnceLock;
+        static PAIR: OnceLock<([u8; 32], Address)> = OnceLock::new();
+        PAIR.get_or_init(|| {
+            let (secret, _) = call_crypto::generate_keypair();
+            let msg_hash = [0u8; 32];
+            let sig = call_crypto::secp256k1_sign(&secret, &msg_hash);
+            let addr = call_crypto::recover_secp256k1_signer(&msg_hash, &sig).unwrap();
+            (secret, addr)
+        })
+    }
+
+    fn sign_tx(mut tx: ProtocolTransaction) -> ProtocolTransaction {
+        let (secret, _) = test_keypair();
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+        tx
+    }
+
+    fn test_sender() -> Address {
+        test_keypair().1
+    }
+
     fn make_test_tx(nonce: u64) -> ProtocolTransaction {
-        ProtocolTransaction {
-            sender: test_addr(1),
+        let tx = ProtocolTransaction {
+            sender: test_sender(),
             nonce,
             instructions: vec![Instruction::Transfer {
                 asset_id: 1,
@@ -368,13 +392,14 @@ mod tests {
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
             },
-        }
+        };
+        sign_tx(tx)
     }
 
     /// Create a serialized EVM transaction for testing.
     fn make_evm_tx_bytes(gas_limit: u64) -> Vec<u8> {
         let tx = call_evm::EvmTransaction {
-            caller: test_addr(1),
+            caller: test_sender(),
             nonce: 0,
             gas_limit,
             gas_price: 1_000_000_000,
@@ -397,7 +422,7 @@ mod tests {
         let bridge_ops: Vec<BridgeOp> = vec![];
 
         let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -440,7 +465,7 @@ mod tests {
         let bridge_ops: Vec<BridgeOp> = vec![];
 
         let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_addr(1), 100_000).unwrap();
+        balances.balances.set_balance(1, test_sender(), 100_000).unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -480,15 +505,13 @@ mod tests {
 
         // Regular transfers that will execute successfully
         let protocol_txs = vec![
-            make_test_tx_with_sender(test_addr(1), 1, 0),
-            make_test_tx_with_sender(test_addr(2), 1, 0),
-            make_test_tx_with_sender(test_addr(3), 1, 0),
+            make_test_tx_with_sender(test_sender(), 1, 0),
+            make_test_tx_with_sender(test_sender(), 1, 1),
+            make_test_tx_with_sender(test_sender(), 1, 2),
         ];
 
         let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
-        balances.balances.set_balance(1, test_addr(2), 10_000).unwrap();
-        balances.balances.set_balance(1, test_addr(3), 10_000).unwrap();
+        balances.balances.set_balance(1, test_sender(), 30_000).unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -513,9 +536,9 @@ mod tests {
         assert_eq!(payload.block.protocol_txs.len(), 3);
     }
 
-    fn make_test_tx_with_sender(sender: Address, asset_id: u64, nonce: u64) -> ProtocolTransaction {
-        ProtocolTransaction {
-            sender,
+    fn make_test_tx_with_sender(_sender: Address, asset_id: u64, nonce: u64) -> ProtocolTransaction {
+        let tx = ProtocolTransaction {
+            sender: test_sender(),
             nonce,
             instructions: vec![Instruction::Transfer {
                 asset_id,
@@ -530,7 +553,8 @@ mod tests {
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
             },
-        }
+        };
+        sign_tx(tx)
     }
 
     #[test]
@@ -543,19 +567,19 @@ mod tests {
         let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
         let bridge_ops = vec![BridgeOp::DepositToEvm {
             asset_id: 1,
-            from: test_addr(1),
+            from: test_sender(),
             to: test_addr(2),
             amount: 500,
         }];
 
         let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
-        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
 
         let payload = builder.build(
             &attrs,
@@ -589,7 +613,7 @@ mod tests {
         let bridge_ops: Vec<BridgeOp> = vec![];
 
         let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -643,7 +667,7 @@ mod tests {
             evm_txs: vec![call_transaction_pool::MempoolEntry {
                 data: evm_tx_raw.clone(),
                 hash: call_primitives::TxHash::ZERO,
-                sender: test_addr(1),
+                sender: test_sender(),
                 nonce: 0,
                 score: 1_000_000,
                 kind: call_transaction_pool::PoolKind::Evm,
@@ -654,13 +678,13 @@ mod tests {
         };
 
         let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
-        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
 
         let payload = builder.build_from_mempool(
             &attrs,
@@ -691,8 +715,8 @@ mod tests {
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
 
         // First tx exceeds instruction limit (6 > 5)
-        let tx_over = ProtocolTransaction {
-            sender: test_addr(1),
+        let tx_over = sign_tx(ProtocolTransaction {
+            sender: test_sender(),
             nonce: 0,
             instructions: (0..6).map(|_| Instruction::Transfer {
                 asset_id: 1,
@@ -707,11 +731,11 @@ mod tests {
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
             },
-        };
+        });
         let tx_ok = make_test_tx(1);
 
         let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();

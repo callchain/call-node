@@ -7,7 +7,7 @@ use call_protocol::transaction::ProtocolTransaction;
 use call_bridge::BridgeOp;
 use call_crypto::keccak256;
 use call_evm::EvmTransaction;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::priority::{
         protocol_priority_score, MempoolEntry, PoolKind, PoolLimits, PriorityPool,
@@ -59,6 +59,44 @@ pub enum MempoolError {
     Generic(String),
 }
 
+// ── Memo size helper ─────────────────────────────────────────────────
+
+/// Compute total memo bytes across all instructions in a transaction.
+fn total_memo_bytes(instructions: &[call_protocol::instructions::Instruction]) -> usize {
+    use call_protocol::instructions::Instruction;
+    let mut total = 0usize;
+    for instr in instructions {
+        match instr {
+            Instruction::Transfer { memo, .. } => {
+                if let Some(m) = memo {
+                    total += m.message.len();
+                    if let Some(ref r) = m.reference {
+                        total += r.len();
+                    }
+                    if let Some(ref md) = m.metadata {
+                        total += md.len();
+                    }
+                }
+            }
+            Instruction::BatchTransfer { payments, .. } => {
+                for p in payments {
+                    if let Some(m) = &p.memo {
+                        total += m.message.len();
+                        if let Some(ref r) = m.reference {
+                            total += r.len();
+                        }
+                        if let Some(ref md) = m.metadata {
+                            total += md.len();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
 // ── Mempool (per spec §17.1) ─────────────────────────────────────────
 
 /// The main mempool structure managing all transaction pools.
@@ -86,6 +124,8 @@ pub struct Mempool {
     pub current_block: u64,
     /// Base fee (for priority scoring)
     pub base_fee: u128,
+    /// Gap 2 — Expected next nonce per sender address
+    pub expected_nonces: HashMap<Address, u64>,
 }
 
 /// A bridge operation entry
@@ -107,6 +147,7 @@ impl Mempool {
             config: MempoolConfig::default(),
             current_block: 0,
             base_fee: 1,
+            expected_nonces: HashMap::new(),
         }
     }
 
@@ -135,7 +176,52 @@ impl Mempool {
             return Err(MempoolError::Duplicate(hash));
         }
 
-        // Validate fee
+        // Gap 2 — Sequential nonce enforcement
+        // Accept tx if nonce >= expected; block builder only executes the exact next nonce.
+        let expected = self.expected_nonces.get(&tx.sender).copied().unwrap_or(0);
+        if tx.nonce < expected {
+            return Err(MempoolError::InvalidNonce {
+                expected,
+                got: tx.nonce,
+            });
+        }
+
+        // Gap 9 — Instruction count limit
+        use call_protocol::transaction::MAX_INSTRUCTIONS_PER_TX;
+        if tx.instructions.len() > MAX_INSTRUCTIONS_PER_TX {
+            return Err(MempoolError::Generic(format!(
+                "instruction count {} exceeds max {}",
+                tx.instructions.len(),
+                MAX_INSTRUCTIONS_PER_TX
+            )));
+        }
+
+        // Gap 10 — Memo size limit
+        use call_protocol::transaction::MAX_TOTAL_MEMO_BYTES;
+        let memo_bytes = total_memo_bytes(&tx.instructions);
+        if memo_bytes > MAX_TOTAL_MEMO_BYTES {
+            return Err(MempoolError::Generic(format!(
+                "total memo size {} bytes exceeds limit {}",
+                memo_bytes, MAX_TOTAL_MEMO_BYTES
+            )));
+        }
+
+        // Gap 3 — Reject unimplemented sponsor configs
+        match tx.gas_config {
+            call_protocol::transaction::GasConfig::PoolSponsor => {
+                return Err(MempoolError::Generic(
+                    "PoolSponsor not yet enabled".into(),
+                ));
+            }
+            call_protocol::transaction::GasConfig::PerTxSponsor { .. } => {
+                return Err(MempoolError::Generic(
+                    "PerTxSponsor not yet enabled".into(),
+                ));
+            }
+            _ => {}
+        }
+
+        // Gap 5 — Validate fee with priority component
         let score = protocol_priority_score(&tx, self.base_fee);
         if score < self.config.min_fee {
             return Err(MempoolError::FeeTooLow {
@@ -328,12 +414,22 @@ impl Mempool {
     }
 
     /// Remove transactions confirmed in a block (by hash).
+    /// Also increments expected nonces for included senders.
     pub fn confirm_transactions(&mut self, hashes: &[TxHash]) {
         for hash in hashes {
-            self.protocol_pool.remove(hash);
+            if let Some(entry) = self.protocol_pool.remove(hash) {
+                let next = entry.nonce.saturating_add(1);
+                self.expected_nonces.insert(entry.sender, next);
+            }
             self.evm_pool.remove(hash);
             self.known_txs.remove(hash);
         }
+    }
+
+    /// Increment expected nonce for a sender after their tx is included in a block.
+    pub fn increment_nonce(&mut self, sender: Address) {
+        let current = self.expected_nonces.get(&sender).copied().unwrap_or(0);
+        self.expected_nonces.insert(sender, current.saturating_add(1));
     }
 
     /// Get total number of pending transactions

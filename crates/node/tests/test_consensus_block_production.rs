@@ -18,8 +18,8 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    ProtocolTransaction {
+fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
+    let tx = ProtocolTransaction {
         sender,
         nonce,
         instructions: vec![Instruction::Transfer {
@@ -33,7 +33,8 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
         gas_limit: 100_000,
         max_fee: 1_000_000,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    }
+    };
+    sign_tx(secret, tx)
 }
 
 /// Single validator produces blocks continuously.
@@ -41,7 +42,7 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
 async fn test_single_validator_block_production() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -53,7 +54,7 @@ async fn test_single_validator_block_production() {
 
     // Produce 100 blocks with transactions
     for i in 0..100 {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -73,7 +74,7 @@ async fn test_single_validator_block_production() {
 async fn test_base_fee_dynamics() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -87,7 +88,7 @@ async fn test_base_fee_dynamics() {
 
     // Produce blocks with transactions (gas usage) — fee should change
     for i in 0..50 {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -128,8 +129,8 @@ async fn test_empty_block_production() {
 async fn test_validator_reward_accumulation() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
-    let val_addr = test_addr(1);
+    let (secret, sender) = test_keypair();
+    let val_addr = sender;
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(val_addr, [1u8; 32], one_million_call()).unwrap();
@@ -141,7 +142,7 @@ async fn test_validator_reward_accumulation() {
 
     // Produce blocks with transactions to generate fees
     for i in 0..30 {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(60 + (i % 5) as u8), 50));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(60 + (i % 5) as u8), 50));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -157,7 +158,7 @@ async fn test_validator_reward_accumulation() {
 async fn test_block_state_roots() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -167,7 +168,7 @@ async fn test_block_state_roots() {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
     }
 
-    node.insert_tx(make_tx(sender, 0, test_addr(2), 1_000));
+    node.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
     let block = node.produce_block(1_000_000).expect("produce block");
 
     // After execution, payment root should be non-zero (balances exist)

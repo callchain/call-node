@@ -5,6 +5,7 @@
 use call_primitives::{Address, FeeCurrency, TxHash};
 use crate::balances::BalanceState;
 use crate::instructions::Instruction;
+use crate::sponsor::{GasSponsorAuth, SponsorRegistry};
 use crate::{ProtocolError, ProtocolResult};
 use std::collections::HashSet;
 
@@ -70,9 +71,9 @@ pub enum AuthScheme {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum GasConfig {
     SelfPay,
-    AuthorizedSponsor,
+    AuthorizedSponsor { sponsor: Address },
     PoolSponsor,
-    PerTxSponsor,
+    PerTxSponsor { sponsor: Address, sponsor_signature: Vec<u8> },
 }
 
 /// A protocol transaction (per spec §3.5)
@@ -100,13 +101,23 @@ impl ProtocolTransaction {
         preimage.extend_from_slice(&self.nonce.to_be_bytes());
         let instr_bytes = serde_json::to_vec(&self.instructions).unwrap_or_default();
         preimage.extend_from_slice(&instr_bytes);
-        let gas_config_byte: u8 = match self.gas_config {
-            GasConfig::SelfPay => 0,
-            GasConfig::AuthorizedSponsor => 1,
-            GasConfig::PoolSponsor => 2,
-            GasConfig::PerTxSponsor => 3,
-        };
-        preimage.push(gas_config_byte);
+        match &self.gas_config {
+            GasConfig::SelfPay => {
+                preimage.push(0);
+            }
+            GasConfig::AuthorizedSponsor { sponsor } => {
+                preimage.push(1);
+                preimage.extend_from_slice(sponsor.as_slice());
+            }
+            GasConfig::PoolSponsor => {
+                preimage.push(2);
+            }
+            GasConfig::PerTxSponsor { sponsor, sponsor_signature } => {
+                preimage.push(3);
+                preimage.extend_from_slice(sponsor.as_slice());
+                preimage.extend_from_slice(sponsor_signature);
+            }
+        }
         let fee_currency_bytes: Vec<u8> = match self.fee_currency {
             call_primitives::FeeCurrency::Call => vec![0],
             call_primitives::FeeCurrency::Stablecoin(id) => {
@@ -125,9 +136,18 @@ impl ProtocolTransaction {
     /// Verify the transaction's secp256k1 signature(s).
     ///
     /// - `SingleSig`: recovers signer and checks it matches `self.sender`
-    /// - `MultiSig`: recovers each signer and checks at least 2 unique signers
+    /// - `MultiSig`: recovers each signer and checks against threshold (from
+    ///   `registry` if provided, otherwise defaults to 2)
     /// - `SessionKey`: recovers signer and checks it matches the session key
     pub fn verify_signature(&self) -> Result<(), crate::ProtocolError> {
+        self.verify_signature_with_registry(None)
+    }
+
+    /// Verify signature with optional smart-account registry for MultiSig threshold.
+    pub fn verify_signature_with_registry(
+        &self,
+        registry: Option<&crate::smart_accounts::SmartAccountRegistry>,
+    ) -> Result<(), crate::ProtocolError> {
         use call_crypto::recover_secp256k1_signer;
         let tx_hash = self.compute_tx_hash();
         match &self.auth {
@@ -148,10 +168,14 @@ impl ProtocolTransaction {
                         .map_err(|e| crate::ProtocolError::InvalidSignature(format!("{e:?}")))?;
                     unique_signers.insert(recovered);
                 }
-                if unique_signers.len() < 2 {
-                    return Err(crate::ProtocolError::InvalidSignature(
-                        "multisig requires at least 2 unique signers".into(),
-                    ));
+                let threshold = registry
+                    .and_then(|r| r.get_multisig_config(&self.sender))
+                    .map(|c| c.threshold as usize)
+                    .unwrap_or(2);
+                if unique_signers.len() < threshold {
+                    return Err(crate::ProtocolError::InvalidSignature(format!(
+                        "multisig requires at least {threshold} unique signers"
+                    )));
                 }
                 Ok(())
             }
@@ -327,11 +351,17 @@ pub fn deduct_gas(
     fee: u128,
     sender: Address,
     _tx_hash: TxHash,
+    sponsor_registry: &mut SponsorRegistry,
+    current_day: u64,
 ) -> ProtocolResult<()> {
     match fee_currency {
-        FeeCurrency::Call => deduct_call_from_payer(balances, config, fee, sender),
+        FeeCurrency::Call => {
+            deduct_call_from_payer(balances, config, fee, sender, sponsor_registry, current_day)
+        }
         FeeCurrency::Stablecoin(asset_id) => {
-            deduct_stablecoin_from_payer(balances, config, *asset_id, fee, sender)
+            deduct_stablecoin_from_payer(
+                balances, config, *asset_id, fee, sender, sponsor_registry, current_day,
+            )
         }
     }
 }
@@ -342,14 +372,23 @@ fn deduct_call_from_payer(
     config: &GasConfig,
     fee: u128,
     sender: Address,
+    sponsor_registry: &mut SponsorRegistry,
+    current_day: u64,
 ) -> ProtocolResult<()> {
     match config {
         GasConfig::SelfPay => balances.deduct_balance(0, sender, fee),
-        GasConfig::AuthorizedSponsor
-        | GasConfig::PoolSponsor
-        | GasConfig::PerTxSponsor => {
-            // Sponsor deduction handled by sponsor module
-            Ok(())
+        GasConfig::AuthorizedSponsor { sponsor } => {
+            sponsor_registry.verify_and_deduct_authorized_sponsor(
+                sponsor, &sender, fee, current_day, balances,
+            )
+        }
+        GasConfig::PoolSponsor => {
+            Err(ProtocolError::SponsorError(
+                "PoolSponsor not yet implemented in production".into(),
+            ))
+        }
+        GasConfig::PerTxSponsor { sponsor, .. } => {
+            sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, balances)
         }
     }
 }
@@ -358,15 +397,27 @@ fn deduct_call_from_payer(
 fn deduct_stablecoin_from_payer(
     balances: &mut BalanceState,
     config: &GasConfig,
-    _asset_id: u64,
+    asset_id: u64,
     fee: u128,
     sender: Address,
+    sponsor_registry: &mut SponsorRegistry,
+    current_day: u64,
 ) -> ProtocolResult<()> {
     match config {
-        GasConfig::SelfPay => balances.deduct_balance(0, sender, fee),
-        GasConfig::AuthorizedSponsor
-        | GasConfig::PoolSponsor
-        | GasConfig::PerTxSponsor => Ok(()),
+        GasConfig::SelfPay => balances.deduct_balance(asset_id, sender, fee),
+        GasConfig::AuthorizedSponsor { sponsor } => {
+            sponsor_registry.verify_and_deduct_authorized_sponsor(
+                sponsor, &sender, fee, current_day, balances,
+            )
+        }
+        GasConfig::PoolSponsor => {
+            Err(ProtocolError::SponsorError(
+                "PoolSponsor not yet implemented in production".into(),
+            ))
+        }
+        GasConfig::PerTxSponsor { sponsor, .. } => {
+            sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, balances)
+        }
     }
 }
 
@@ -423,6 +474,17 @@ pub fn convert_fee_to_stablecoin(
     scaled.div_ceil(divisor)
 }
 
+// ── Limits ────────────────────────────────────────────────────────────
+
+/// Maximum instructions per transaction (Gap 9 — DoS prevention)
+pub const MAX_INSTRUCTIONS_PER_TX: usize = 100;
+
+/// Maximum total memo size per transaction in bytes (Gap 10 — memory DoS)
+pub const MAX_TOTAL_MEMO_BYTES: usize = 1024;
+
+/// Minimum priority fee per gas unit (Gap 5 — ensure fee market works)
+pub const MIN_PRIORITY_FEE_PER_GAS: u128 = 1;
+
 // ── Mempool acceptance (per spec §12.2.7) ────────────────────────────
 
 #[derive(Debug)]
@@ -440,15 +502,93 @@ impl Default for MempoolConfig {
     }
 }
 
+/// Compute total memo bytes across all instructions in a transaction.
+fn total_memo_bytes(instructions: &[Instruction]) -> usize {
+    let mut total = 0usize;
+    for instr in instructions {
+        match instr {
+            Instruction::Transfer { memo, .. } => {
+                if let Some(m) = memo {
+                    total += m.message.len();
+                    if let Some(ref r) = m.reference {
+                        total += r.len();
+                    }
+                    if let Some(ref md) = m.metadata {
+                        total += md.len();
+                    }
+                }
+            }
+            Instruction::BatchTransfer { payments, .. } => {
+                for p in payments {
+                    if let Some(m) = &p.memo {
+                        total += m.message.len();
+                        if let Some(ref r) = m.reference {
+                            total += r.len();
+                        }
+                        if let Some(ref md) = m.metadata {
+                            total += md.len();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
 pub fn accept_to_mempool(
     tx: &ProtocolTransaction,
     balances: &BalanceState,
     fee_params: &FeeParams,
-    nonces: &HashSet<(Address, u64)>,
+    seen_nonces: &HashSet<(Address, u64)>,
+    expected_nonces: &std::collections::HashMap<Address, u64>,
 ) -> ProtocolResult<()> {
-    // Check nonce uniqueness
-    if nonces.contains(&(tx.sender, tx.nonce)) {
+    // Gap 2 — Sequential nonce enforcement
+    let expected = expected_nonces.get(&tx.sender).copied().unwrap_or(0);
+    if tx.nonce < expected {
+        return Err(ProtocolError::NonceError(format!(
+            "nonce {} already used (expected >= {expected})",
+            tx.nonce
+        )));
+    }
+
+    // Check nonce uniqueness (still needed for within-mempool dedup)
+    if seen_nonces.contains(&(tx.sender, tx.nonce)) {
         return Err(ProtocolError::NonceError("duplicate nonce".into()));
+    }
+
+    // Gap 9 — Instruction count limit
+    if tx.instructions.len() > MAX_INSTRUCTIONS_PER_TX {
+        return Err(ProtocolError::InvalidInstruction(format!(
+            "too many instructions: {} > {}",
+            tx.instructions.len(),
+            MAX_INSTRUCTIONS_PER_TX
+        )));
+    }
+
+    // Gap 10 — Memo size limit
+    let memo_bytes = total_memo_bytes(&tx.instructions);
+    if memo_bytes > MAX_TOTAL_MEMO_BYTES {
+        return Err(ProtocolError::InvalidInstruction(format!(
+            "total memo size {} bytes exceeds limit {}",
+            memo_bytes, MAX_TOTAL_MEMO_BYTES
+        )));
+    }
+
+    // Gap 3 — Reject unimplemented sponsor configs at mempool boundary
+    match tx.gas_config {
+        GasConfig::PoolSponsor => {
+            return Err(ProtocolError::SponsorError(
+                "PoolSponsor not yet enabled".into(),
+            ));
+        }
+        GasConfig::PerTxSponsor { .. } => {
+            return Err(ProtocolError::SponsorError(
+                "PerTxSponsor not yet enabled".into(),
+            ));
+        }
+        _ => {}
     }
 
     // Check gas limit
@@ -456,11 +596,14 @@ pub fn accept_to_mempool(
         return Err(ProtocolError::GasError("gas limit too high".into()));
     }
 
-    // Check fee sufficiency
+    // Gap 5 — Fee sufficiency includes priority fee
     let gas_units = calculate_gas_units(&tx.instructions);
-    let required_fee = compute_fee(gas_units, 0, fee_params.base_fee);
+    let required_fee = compute_fee(gas_units, MIN_PRIORITY_FEE_PER_GAS, fee_params.base_fee);
     if tx.max_fee < required_fee {
-        return Err(ProtocolError::GasError("max fee too low".into()));
+        return Err(ProtocolError::GasError(format!(
+            "max fee {} < required {}",
+            tx.max_fee, required_fee
+        )));
     }
 
     // Check balance in the correct fee currency
@@ -480,6 +623,7 @@ pub fn accept_to_mempool(
 mod tests {
     use super::*;
     use call_primitives::Hash;
+    use crate::instructions::PaymentMemo;
     use crate::FeeCurrencyRegistry;
 
     fn test_addr(n: u8) -> Address {
@@ -548,6 +692,7 @@ mod tests {
     fn test_deduct_gas_self_pay() {
         let mut balances = BalanceState::new();
         balances.balances.set_balance(0, test_addr(1), 1000).unwrap();
+        let mut sponsors = SponsorRegistry::new();
         deduct_gas(
             &mut balances,
             &GasConfig::SelfPay,
@@ -555,6 +700,8 @@ mod tests {
             500,
             test_addr(1),
             Hash::ZERO,
+            &mut sponsors,
+            0,
         )
         .unwrap();
         assert_eq!(balances.get_balance(0, &test_addr(1)), 500);
@@ -563,21 +710,35 @@ mod tests {
     #[test]
     fn test_deduct_gas_authorized_sponsor() {
         let mut balances = BalanceState::new();
-        // Sponsor pays — balance layer OK
+        balances.balances.set_balance(0, test_addr(2), 1000).unwrap();
+        let mut sponsors = SponsorRegistry::new();
+        let auth = GasSponsorAuth {
+            sponsor: test_addr(2),
+            allowed_senders: vec![test_addr(1)],
+            max_daily: 10_000,
+            expires_at: 1000,
+            sponsor_signature: [0u8; 65],
+        };
+        sponsors.register_sponsor_auth(auth).unwrap();
+
         let result = deduct_gas(
             &mut balances,
-            &GasConfig::AuthorizedSponsor,
+            &GasConfig::AuthorizedSponsor { sponsor: test_addr(2) },
             &FeeCurrency::Call,
             500,
             test_addr(1),
             Hash::ZERO,
+            &mut sponsors,
+            10,
         );
         assert!(result.is_ok());
+        assert_eq!(balances.get_balance(0, &test_addr(2)), 500);
     }
 
     #[test]
-    fn test_deduct_gas_pool_sponsor() {
+    fn test_deduct_gas_pool_sponsor_rejected() {
         let mut balances = BalanceState::new();
+        let mut sponsors = SponsorRegistry::new();
         let result = deduct_gas(
             &mut balances,
             &GasConfig::PoolSponsor,
@@ -585,22 +746,32 @@ mod tests {
             500,
             test_addr(1),
             Hash::ZERO,
+            &mut sponsors,
+            10,
         );
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_deduct_gas_per_tx_sponsor() {
         let mut balances = BalanceState::new();
+        balances.balances.set_balance(0, test_addr(2), 1000).unwrap();
+        let mut sponsors = SponsorRegistry::new();
         let result = deduct_gas(
             &mut balances,
-            &GasConfig::PerTxSponsor,
+            &GasConfig::PerTxSponsor {
+                sponsor: test_addr(2),
+                sponsor_signature: vec![0u8; 65],
+            },
             &FeeCurrency::Call,
             500,
             test_addr(1),
             Hash::ZERO,
+            &mut sponsors,
+            10,
         );
         assert!(result.is_ok());
+        assert_eq!(balances.get_balance(0, &test_addr(2)), 500);
     }
 
     #[test]
@@ -624,7 +795,7 @@ mod tests {
     fn test_mempool_accept_low_fee_rejected() {
         let tx = ProtocolTransaction {
             sender: test_addr(1),
-            nonce: 1,
+            nonce: 0,
             instructions: vec![make_transfer()],
             gas_config: GasConfig::SelfPay,
             fee_currency: FeeCurrency::Call,
@@ -638,8 +809,9 @@ mod tests {
         balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
+        let expected_nonces = std::collections::HashMap::new();
 
-        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces);
+        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
         assert!(result.is_err());
     }
 
@@ -647,7 +819,35 @@ mod tests {
     fn test_mempool_accept_sufficient_balance() {
         let tx = ProtocolTransaction {
             sender: test_addr(1),
-            nonce: 1,
+            nonce: 0,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 20_000,
+            max_fee: 1_000_000,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let fee_params = FeeParams::default();
+        let nonces = HashSet::new();
+        let expected_nonces = std::collections::HashMap::new();
+
+        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mempool_reject_stale_nonce() {
+        // Nonce 0 is already used (expected=1)
+        let mut expected_nonces = std::collections::HashMap::new();
+        expected_nonces.insert(test_addr(1), 1);
+
+        let tx = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 0, // already used
             instructions: vec![make_transfer()],
             gas_config: GasConfig::SelfPay,
             fee_currency: FeeCurrency::Call,
@@ -662,7 +862,65 @@ mod tests {
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
 
-        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces);
-        assert!(result.is_ok());
+        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mempool_reject_too_many_instructions() {
+        let tx = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 0,
+            instructions: vec![make_transfer(); MAX_INSTRUCTIONS_PER_TX + 1],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 20_000,
+            max_fee: 1_000_000,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let fee_params = FeeParams::default();
+        let nonces = HashSet::new();
+        let expected_nonces = std::collections::HashMap::new();
+
+        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mempool_reject_oversized_memo() {
+        let big_memo = PaymentMemo {
+            message: "a".repeat(MAX_TOTAL_MEMO_BYTES + 1),
+            reference: None,
+            metadata: None,
+        };
+        let tx = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 0,
+            instructions: vec![Instruction::Transfer {
+                asset_id: 1,
+                to: test_addr(2),
+                amount: 100,
+                memo: Some(big_memo),
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 20_000,
+            max_fee: 1_000_000,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let fee_params = FeeParams::default();
+        let nonces = HashSet::new();
+        let expected_nonces = std::collections::HashMap::new();
+
+        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        assert!(result.is_err());
     }
 }

@@ -24,8 +24,8 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    ProtocolTransaction {
+fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
+    let tx = ProtocolTransaction {
         sender,
         nonce,
         instructions: vec![Instruction::Transfer {
@@ -39,7 +39,8 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
         gas_limit: 100_000,
         max_fee: 1_000_000,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    }
+    };
+    sign_tx(secret, tx)
 }
 
 /// High throughput: inject many transactions and produce blocks.
@@ -47,7 +48,7 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
 async fn test_high_throughput_many_transactions() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -60,7 +61,7 @@ async fn test_high_throughput_many_transactions() {
     // Inject 1000 transactions
     let tx_count = 1000;
     for i in 0..tx_count {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(50 + (i % 50) as u8), 100));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 50) as u8), 100));
     }
 
     // Produce blocks until mempool is drained
@@ -90,17 +91,18 @@ fn test_mempool_capacity_under_pressure() {
 
     // Use multiple senders to exceed per-address limit (256)
     let num_senders = 3;
-    for s in 0..num_senders {
-        let addr = test_addr(10 + s as u8);
-        node.state.balance_state.write().unwrap().balances.set_balance(1, addr, 10_000_000).unwrap();
+    let mut sender_keys: Vec<([u8; 32], Address)> = Vec::new();
+    for _ in 0..num_senders {
+        let kp = test_keypair();
+        node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 10_000_000).unwrap();
+        sender_keys.push(kp);
     }
 
     // Fill mempool: ~170 txs per sender × 3 senders = 510 total
     let mut count = 0;
-    for s in 0..num_senders {
-        let sender_addr = test_addr(10 + s as u8);
+    for (secret, sender_addr) in &sender_keys {
         for i in 0..170 {
-            node.insert_tx(make_tx(sender_addr, i as u64, test_addr(50 + (count % 20) as u8), 50));
+            node.insert_tx(make_tx(secret, *sender_addr, i as u64, test_addr(50 + (count % 20) as u8), 50));
             count += 1;
         }
     }
@@ -113,9 +115,9 @@ fn test_mempool_capacity_under_pressure() {
 #[test]
 fn test_mempool_duplicate_tx_rejected() {
     let node = TestNode::new();
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
 
-    let tx = make_tx(sender, 0, test_addr(2), 100);
+    let tx = make_tx(&secret, sender, 0, test_addr(2), 100);
     node.insert_tx(tx.clone());
 
     // Same tx again (same sender + nonce)
@@ -130,7 +132,7 @@ fn test_mempool_duplicate_tx_rejected() {
 async fn test_base_fee_under_sustained_load() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -143,7 +145,7 @@ async fn test_base_fee_under_sustained_load() {
 
     // Produce many blocks with transactions (sustained gas usage)
     for i in 0..200 {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -158,7 +160,7 @@ async fn test_base_fee_under_sustained_load() {
 async fn test_no_double_spend_concurrent_nonce() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -168,8 +170,8 @@ async fn test_no_double_spend_concurrent_nonce() {
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
 
     // Two txs with same nonce — second should be rejected during execution
-    node.insert_tx(make_tx(sender, 0, test_addr(10), 500));
-    node.insert_tx(make_tx(sender, 0, test_addr(20), 500));
+    node.insert_tx(make_tx(&secret, sender, 0, test_addr(10), 500));
+    node.insert_tx(make_tx(&secret, sender, 0, test_addr(20), 500));
 
     // Produce a block
     node.produce_block(1_000_000);
@@ -188,7 +190,7 @@ async fn test_no_double_spend_concurrent_nonce() {
 async fn test_final_state_consistency_after_load() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -203,7 +205,7 @@ async fn test_final_state_consistency_after_load() {
 
     // Send 100 transfers
     for i in 0..num_txs {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(50 + (i % 20) as u8), transfer_amount));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 20) as u8), transfer_amount));
     }
 
     // Produce a block (drains all pending txs)
@@ -237,16 +239,17 @@ async fn test_multi_sender_stress() {
     }
 
     // Fund 20 senders
-    for i in 0..20 {
-        let addr = test_addr(10 + i as u8);
-        node.state.balance_state.write().unwrap().balances.set_balance(1, addr, 50_000).unwrap();
+    let mut sender_keys: Vec<([u8; 32], Address)> = Vec::new();
+    for _ in 0..20 {
+        let kp = test_keypair();
+        node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 50_000).unwrap();
+        sender_keys.push(kp);
     }
 
     // Each sender submits 10 transactions
-    for i in 0..20 {
-        let sender_addr = test_addr(10 + i as u8);
+    for (secret, sender_addr) in &sender_keys {
         for j in 0..10 {
-            node.insert_tx(make_tx(sender_addr, j as u64, test_addr(200 + i as u8), 100));
+            node.insert_tx(make_tx(secret, *sender_addr, j as u64, test_addr(200), 100));
         }
     }
 
@@ -257,13 +260,7 @@ async fn test_multi_sender_stress() {
 
     // Verify some recipients received funds
     let state = node.state.balance_state.read().unwrap();
-    let mut any_received = false;
-    for i in 0..20 {
-        if state.get_balance(1, &test_addr(200 + i as u8)) > 0 {
-            any_received = true;
-            break;
-        }
-    }
+    let any_received = state.get_balance(1, &test_addr(200)) > 0;
     assert!(any_received, "at least some recipients should have received funds");
 }
 
@@ -272,7 +269,7 @@ async fn test_multi_sender_stress() {
 async fn test_high_volume_block_production() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -284,7 +281,7 @@ async fn test_high_volume_block_production() {
     // Inject many transactions
     let tx_count = 500;
     for i in 0..tx_count {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(50 + (i % 50) as u8), 10));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 50) as u8), 10));
     }
 
     // Produce one block (drains all)
@@ -311,7 +308,7 @@ async fn test_high_volume_block_production() {
 async fn test_rapid_block_production() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -322,7 +319,7 @@ async fn test_rapid_block_production() {
 
     // Produce 500 blocks rapidly (no real delay)
     for i in 0..500 {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(99), 1));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(99), 1));
         node.produce_block(1_000_000 + i); // 1ms apart timestamps
     }
 

@@ -272,7 +272,7 @@ mod test_payment_flow_impl {
             sender,
             1,
             vec![make_transfer(1, receiver, 100)],
-            GasConfig::AuthorizedSponsor,
+            GasConfig::AuthorizedSponsor { sponsor: sponsor_addr },
         );
 
         let gas_units = calculate_gas_units(&tx.instructions);

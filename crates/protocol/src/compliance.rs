@@ -25,7 +25,7 @@ pub enum CompliancePolicy {
 pub use crate::instructions::ComplianceStatus;
 
 /// Per-address compliance state keyed by (address, policy_id)
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 struct AddressComplianceState {
     status: ComplianceStatus,
 }
@@ -39,6 +39,23 @@ pub struct ComplianceEngine {
     custom_handlers: HashMap<u8, Box<dyn CustomComplianceHandler + Send + Sync>>,
     /// Per-address compliance status: (address, policy_id) → state
     address_states: HashMap<(Address, u8), AddressComplianceState>,
+}
+
+impl Clone for ComplianceEngine {
+    fn clone(&self) -> Self {
+        Self {
+            sanctioned: self.sanctioned.clone(),
+            kyc_verified: self.kyc_verified.clone(),
+            whitelisted: self.whitelisted.clone(),
+            // Custom handlers are registration-time only; they don't change
+            // during transaction execution, so we can share them via pointer.
+            // For simplicity we clear them in the clone — handlers are re-registered
+            // on engine reconstruction. This is a temporary measure until
+            // ComplianceEngine persistence is implemented (Gap 7).
+            custom_handlers: HashMap::new(),
+            address_states: self.address_states.clone(),
+        }
+    }
 }
 
 /// Trait for custom compliance handlers
@@ -87,8 +104,25 @@ impl ComplianceEngine {
                 }
             }
             CompliancePolicy::Custom => {
-                // Custom handler always passes; actual logic via callback
-                Ok(())
+                // Gap 8 — Invoke registered custom handler if one exists
+                if self.custom_handlers.is_empty() {
+                    // No handlers registered: default to pass (backward compat)
+                    Ok(())
+                } else {
+                    // Use policy_id to look up the handler; policy_id 4 = Custom
+                    // The handler id is derived from the asset's compliance_policy field
+                    // which maps to the handler id in the registry.
+                    // For simplicity, we check all registered handlers;
+                    // an address passes only if ALL registered custom handlers approve.
+                    for (id, handler) in &self.custom_handlers {
+                        if !handler.check(address) {
+                            return Err(ProtocolError::Compliance(
+                                format!("custom compliance handler {id} rejected address",)
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
             }
         }
     }

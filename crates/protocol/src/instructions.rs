@@ -235,8 +235,10 @@ pub fn execute_protocol_instructions(
     agent_executor: &mut Option<AgentExecutor>,
     mut governance: Option<&mut GovernanceManager>,
 ) -> ProtocolResult<Vec<InstructionResult>> {
-    // Take state snapshot for rollback
-    let snapshot = balances.clone();
+    // Gap 1 — Take state snapshots for atomic rollback
+    let balance_snapshot = balances.clone();
+    let compliance_snapshot = compliance.clone();
+    let shielded_snapshot = shielded_state.clone();
 
     let mut results = Vec::with_capacity(instructions.len());
 
@@ -244,8 +246,10 @@ pub fn execute_protocol_instructions(
         match execute_instruction(instr, balances, registry, compliance, shielded_state, sender, oracle.as_deref_mut(), agent_executor, governance.as_deref_mut()) {
             Ok(result) => results.push(result),
             Err(e) => {
-                // Restore state snapshot on failure
-                *balances = snapshot;
+                // Gap 1 — Restore all state snapshots on failure
+                *balances = balance_snapshot;
+                *compliance = compliance_snapshot;
+                *shielded_state = shielded_snapshot;
                 return Err(ProtocolError::InvalidInstruction(format!(
                     "instruction {} failed: {e}",
                     i
@@ -286,16 +290,22 @@ pub fn execute_instruction(
             if let Some(m) = memo {
                 m.validate()?;
             }
-            // Check compliance before transfer
-            compliance.check_compliance_by_policy_id(&sender, registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0))?;
+            // Gap 6 — Check compliance for both sender and recipient
+            let policy_id = registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0);
+            compliance.check_compliance_by_policy_id(&sender, policy_id)?;
+            compliance.check_compliance_by_policy_id(to, policy_id)?;
             balances.transfer(*asset_id, sender, *to, *amount)?;
             Ok(InstructionResult::Success)
         }
         Instruction::BatchTransfer { asset_id, payments } => {
+            let policy_id = registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0);
+            compliance.check_compliance_by_policy_id(&sender, policy_id)?;
             for p in payments {
                 if let Some(m) = &p.memo {
                     m.validate()?;
                 }
+                // Gap 6 — Check recipient compliance
+                compliance.check_compliance_by_policy_id(&p.to, policy_id)?;
                 balances.transfer(*asset_id, sender, p.to, p.amount)?;
             }
             Ok(InstructionResult::Success)
@@ -314,6 +324,11 @@ pub fn execute_instruction(
             to,
             amount,
         } => {
+            // Gap 6 — Check compliance for sender (spender), from, and to
+            let policy_id = registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0);
+            compliance.check_compliance_by_policy_id(&sender, policy_id)?;
+            compliance.check_compliance_by_policy_id(from, policy_id)?;
+            compliance.check_compliance_by_policy_id(to, policy_id)?;
             balances.allowances.spend_allowance(*asset_id, *from, sender, *amount)?;
             balances.transfer(*asset_id, *from, *to, *amount)?;
             Ok(InstructionResult::Success)

@@ -26,8 +26,8 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    ProtocolTransaction {
+fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
+    let tx = ProtocolTransaction {
         sender,
         nonce,
         instructions: vec![Instruction::Transfer {
@@ -41,7 +41,8 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
         gas_limit: 100_000,
         max_fee: 1_000_000,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    }
+    };
+    sign_tx(secret, tx)
 }
 
 /// Double-sign detection slashes the validator's full stake.
@@ -65,11 +66,11 @@ async fn test_double_sign_slash() {
     let slashed = consensus.handle_double_sign(val_id).unwrap();
     assert_eq!(slashed, one_million_call());
 
-    // Stake should be zero after double-sign slash
-    let stake_after = consensus.validators().get_validator_stake(val_id).unwrap();
-    assert_eq!(stake_after.self_stake, 0);
-    assert_eq!(stake_after.slash_history.len(), 1);
-    assert_eq!(stake_after.slash_history[0].reason, "double sign");
+    // Validator should be removed after double-sign slash
+    assert!(
+        consensus.validators().get_validator_stake(val_id).is_none(),
+        "validator should be removed after double-sign"
+    );
 }
 
 /// Offline detection slashes proportionally.
@@ -79,20 +80,21 @@ async fn test_offline_penalty() {
 
     let val_addr = test_addr(1);
     let mut consensus = node.consensus.write().unwrap();
-    let val_id: ValidatorId = consensus.stake_validator(val_addr, [1u8; 32], one_million_call()).unwrap();
+    let stake = one_million_call() * 2;
+    let val_id: ValidatorId = consensus.stake_validator(val_addr, [1u8; 32], stake).unwrap();
     consensus.refresh_proposer_subset();
 
     // Simulate 5 rounds offline
     let slashed = consensus.handle_offline(val_id, 5).unwrap();
 
     // 5 rounds * 0.10% = 0.5% of stake
-    let expected = (one_million_call() * 5 * 10) / 10_000;
+    let expected = (stake * 5 * 10) / 10_000;
     assert_eq!(slashed, expected);
 
-    // Stake reduced but not zero
+    // Stake reduced but validator still active (above min_self_stake)
     let stake_after = consensus.validators().get_validator_stake(val_id).unwrap();
     assert!(stake_after.self_stake > 0);
-    assert!(stake_after.self_stake < one_million_call());
+    assert!(stake_after.self_stake < stake);
 }
 
 /// Invalid transaction (insufficient balance) causes block execution to fail.
@@ -104,7 +106,7 @@ async fn test_invalid_tx_causes_block_failure() {
     // Here we verify the TestNode harness handles it by checking
     // that a valid tx works fine.
     let mut node = TestNode::new();
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -116,7 +118,7 @@ async fn test_invalid_tx_causes_block_failure() {
     }
 
     // Valid tx should work
-    node.insert_tx(make_tx(sender, 0, test_addr(2), 1_000));
+    node.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
     let block = node.produce_block(1_000_000);
     assert!(block.is_some());
     assert_eq!(node.balance(1, &test_addr(2)), 1_000);
@@ -128,7 +130,7 @@ async fn test_invalid_tx_causes_block_failure() {
 async fn test_double_nonce_rejected() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -139,8 +141,8 @@ async fn test_double_nonce_rejected() {
     }
 
     // Two txs with same nonce but different content
-    node.insert_tx(make_tx(sender, 0, test_addr(2), 1_000));
-    node.insert_tx(make_tx(sender, 0, test_addr(3), 2_000));
+    node.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
+    node.insert_tx(make_tx(&secret, sender, 0, test_addr(3), 2_000));
 
     // Only the first should execute; second is rejected for duplicate nonce
     let _ = node.produce_block(1_000_000);
@@ -160,7 +162,8 @@ async fn test_cumulative_offline_penalty() {
     );
 
     let val_addr = test_addr(1);
-    let val_id: ValidatorId = consensus.stake_validator(val_addr, [1u8; 32], one_million_call()).unwrap();
+    let stake = one_million_call() * 2;
+    let val_id: ValidatorId = consensus.stake_validator(val_addr, [1u8; 32], stake).unwrap();
 
     // First offense: 10 rounds
     let slash1 = consensus.handle_offline(val_id, 10).unwrap();
@@ -169,8 +172,8 @@ async fn test_cumulative_offline_penalty() {
 
     // Total slashed
     let total_slashed = slash1 + slash2;
-    let stake = consensus.validators().get_validator_stake(val_id).unwrap();
-    assert_eq!(stake.slash_history.len(), 2);
+    let stake_info = consensus.validators().get_validator_stake(val_id).unwrap();
+    assert_eq!(stake_info.slash_history.len(), 2);
     assert!(total_slashed > 0);
 }
 

@@ -17,7 +17,7 @@ use call_protocol::transaction::{
 };
 use call_protocol::ProtocolTransaction;
 use call_shielded::ShieldedState;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -106,7 +106,8 @@ pub fn execute_tx(
 ) -> Result<(), String> {
     // Mempool acceptance
     let nonces = HashSet::new();
-    accept_to_mempool(tx, balances, fee_params, &nonces)
+    let expected_nonces = HashMap::new();
+    accept_to_mempool(tx, balances, fee_params, &nonces, &expected_nonces)
         .map_err(|e| format!("mempool reject: {e}"))?;
 
     // Gas calculation
@@ -114,6 +115,7 @@ pub fn execute_tx(
     let fee = compute_fee(gas_units, 0, fee_params.base_fee);
 
     // Deduct gas
+    let mut sponsor_registry = SponsorRegistry::new();
     deduct_gas(
         balances,
         &tx.gas_config,
@@ -121,6 +123,8 @@ pub fn execute_tx(
         fee,
         tx.sender,
         hash_byte(0x01),
+        &mut sponsor_registry,
+        0,
     )
     .map_err(|e| format!("gas deduct: {e}"))?;
 

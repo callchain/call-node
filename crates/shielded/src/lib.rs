@@ -177,7 +177,7 @@ impl ShieldedTransfer {
 }
 
 /// Shielded pool state
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShieldedState {
     #[serde(serialize_with = "serialize_merkle", deserialize_with = "deserialize_merkle")]
     pub merkle_tree: IncrementalMerkleTree,

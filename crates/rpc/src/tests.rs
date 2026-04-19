@@ -140,6 +140,9 @@ mod tests {
         let owner = test_addr(1);
         let pubkey = [1u8; 64];
 
+        // Give owner sufficient balance for grants
+        state.balance_state.write().unwrap().balances.set_balance(1, owner, 50000).unwrap();
+
         let agent_id = state.register_agent(owner, pubkey, "balance-agent".into(), "https://a.com".into(), [0u8; 32]).unwrap();
 
         // Grant balance

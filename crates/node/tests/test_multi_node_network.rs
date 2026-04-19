@@ -22,8 +22,8 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    ProtocolTransaction {
+fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
+    let tx = ProtocolTransaction {
         sender,
         nonce,
         instructions: vec![Instruction::Transfer {
@@ -37,7 +37,8 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
         gas_limit: 100_000,
         max_fee: 1_000_000,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    }
+    };
+    sign_tx(secret, tx)
 }
 
 /// Two nodes connected via shared network — node1 produces blocks and broadcasts.
@@ -45,7 +46,7 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
 async fn test_two_nodes_block_propagation() {
     let mut sim = NetworkSimulator::new();
 
-    let val_addr = test_addr(1);
+    let (secret, val_addr) = test_keypair();
 
     let node1 = NodeBuilder::new()
         .validator(val_addr, [1u8; 32], one_million_call())
@@ -60,7 +61,7 @@ async fn test_two_nodes_block_propagation() {
     {
         let mut n = node0.write().unwrap();
         for i in 0..5 {
-            n.insert_tx(make_tx(val_addr, i, test_addr(20 + i as u8), 100));
+            n.insert_tx(make_tx(&secret, val_addr, i, test_addr(20 + i as u8), 100));
             n.produce_block(1_000_000 + i * 250);
         }
     }
@@ -86,7 +87,7 @@ async fn test_two_nodes_block_propagation() {
 async fn test_transaction_propagation() {
     let mut sim = NetworkSimulator::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     let node1 = NodeBuilder::new()
         .validator(sender, [1u8; 32], one_million_call())
         .balance(1, sender, 10_000)
@@ -103,12 +104,12 @@ async fn test_transaction_propagation() {
     {
         let n = node0.read().unwrap();
         assert_eq!(n.mempool_size(), 0);
-        n.insert_tx(make_tx(sender, 0, test_addr(2), 1_000));
+        n.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
         assert_eq!(n.mempool_size(), 1);
     }
 
     // Manually broadcast tx to network (simulating gossip)
-    let tx_data = serde_json::to_vec(&make_tx(sender, 0, test_addr(2), 1_000)).unwrap();
+    let tx_data = serde_json::to_vec(&make_tx(&secret, sender, 0, test_addr(2), 1_000)).unwrap();
     let tx_msg = TransactionMessage::new(tx_data, TxHash::repeat_byte(0));
     let msg_data = bincode::serialize(&NetworkMessage::Transaction(tx_msg)).unwrap();
     net_ref.broadcast(TX_CHANNEL, msg_data).await;
@@ -127,10 +128,13 @@ async fn test_transaction_propagation() {
 async fn test_multiple_nodes_produce_blocks() {
     let mut sim = NetworkSimulator::new();
 
+    let (secret1, addr1) = test_keypair();
+
     for i in 1..=3 {
         let node = NodeBuilder::new()
             .validator(test_addr(i), [i as u8; 32], one_million_call())
             .balance(1, test_addr(i), 100_000)
+            .balance(1, addr1, 100_000)
             .build();
         sim.add_node(node);
     }
@@ -140,7 +144,7 @@ async fn test_multiple_nodes_produce_blocks() {
     {
         let mut n = node0.write().unwrap();
         for i in 0..10 {
-            n.insert_tx(make_tx(test_addr(1), i, test_addr(50 + i as u8), 100));
+            n.insert_tx(make_tx(&secret1, addr1, i, test_addr(50 + i as u8), 100));
             n.produce_block(1_000_000 + i * 250);
         }
     }

@@ -1,6 +1,6 @@
 //! E2E test: Full node lifecycle
 //!
-//! Fresh node → genesis → sync → process txs → restart → recovery
+//! Fresh node -> genesis -> sync -> process txs -> restart -> recovery
 
 #[path = "e2e/mod.rs"]
 mod e2e;
@@ -18,8 +18,8 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    ProtocolTransaction {
+fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
+    let tx = ProtocolTransaction {
         sender,
         nonce,
         instructions: vec![Instruction::Transfer {
@@ -33,7 +33,8 @@ fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTr
         gas_limit: 100_000,
         max_fee: 1_000_000,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    }
+    };
+    sign_tx(secret, tx)
 }
 
 /// Fresh node starts at height 0, produces genesis block, advances.
@@ -63,12 +64,12 @@ async fn test_node_starts_at_genesis() {
     assert_eq!(node.height, 1);
 }
 
-/// Node processes transactions through mempool → block → balance update.
+/// Node processes transactions through mempool -> block -> balance update.
 #[tokio::test]
 async fn test_node_process_transactions() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     let receiver = test_addr(2);
 
     // Stake validator
@@ -84,7 +85,7 @@ async fn test_node_process_transactions() {
     }
 
     // Insert tx
-    node.insert_tx(make_tx(sender, 0, receiver, 3_000));
+    node.insert_tx(make_tx(&secret, sender, 0, receiver, 3_000));
     assert_eq!(node.mempool_size(), 1);
 
     // Produce block
@@ -102,7 +103,7 @@ async fn test_node_process_transactions() {
 async fn test_node_persist_and_recover() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -113,13 +114,13 @@ async fn test_node_persist_and_recover() {
     }
 
     // Produce 3 blocks
-    node.insert_tx(make_tx(sender, 0, test_addr(2), 1_000));
+    node.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
     node.produce_block(1_000_000);
 
-    node.insert_tx(make_tx(sender, 1, test_addr(3), 2_000));
+    node.insert_tx(make_tx(&secret, sender, 1, test_addr(3), 2_000));
     node.produce_block(1_000_250);
 
-    node.insert_tx(make_tx(sender, 2, test_addr(4), 500));
+    node.insert_tx(make_tx(&secret, sender, 2, test_addr(4), 500));
     node.produce_block(1_000_500);
 
     assert_eq!(node.consensus_height(), 3);
@@ -152,7 +153,7 @@ async fn test_node_persist_and_recover() {
 async fn test_block_chain_continuity() {
     let mut node = TestNode::new();
 
-    let sender = test_addr(1);
+    let (secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -164,7 +165,7 @@ async fn test_block_chain_continuity() {
 
     let mut prev_hash = BlockHash::ZERO;
     for i in 0..10 {
-        node.insert_tx(make_tx(sender, i as u64, test_addr(10 + i as u8), 100));
+        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(10 + i as u8), 100));
         let block = node.produce_block(1_000_000 + i * 250).expect("produce block");
         assert_eq!(block.header.parent_hash, prev_hash);
         assert_eq!(block.header.height, i);

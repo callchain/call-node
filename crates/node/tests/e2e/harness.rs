@@ -17,6 +17,25 @@ use call_rpc::RpcState;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+// ── Signing helpers for E2E tests ─────────────────────────────────────
+
+/// Generate a random secp256k1 keypair and derive the Ethereum address.
+pub fn test_keypair() -> ([u8; 32], Address) {
+    let (secret, _) = call_crypto::generate_keypair();
+    let msg_hash = [0u8; 32];
+    let sig = call_crypto::secp256k1_sign(&secret, &msg_hash);
+    let addr = call_crypto::recover_secp256k1_signer(&msg_hash, &sig).unwrap();
+    (secret, addr)
+}
+
+/// Sign a protocol transaction with the given secp256k1 secret key.
+pub fn sign_tx(secret: &[u8; 32], mut tx: ProtocolTransaction) -> ProtocolTransaction {
+    let tx_hash = tx.compute_tx_hash();
+    let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
+    tx.auth = AuthScheme::SingleSig { signature };
+    tx
+}
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 const TX_CHANNEL: u64 = 1;
@@ -242,6 +261,7 @@ impl TestNode {
                     height,
                     &mut evm_state,
                     Some(&mut *oracle),
+                    None,
                     None,
                     None,
                     None,
