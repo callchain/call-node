@@ -6,7 +6,7 @@ use call_primitives::{Address, FeeCurrency, Hash, TxHash};
 use call_primitives::ExecutionStatus;
 
 /// Log entry in a receipt (per spec §18.4)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogEntry {
     pub address: Address,
     pub topics: Vec<Hash>,
@@ -14,7 +14,7 @@ pub struct LogEntry {
 }
 
 /// State change type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChangeType {
     Balance,
     Allowance,
@@ -22,7 +22,7 @@ pub enum ChangeType {
 }
 
 /// Record of a state change
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateChange {
     pub change_type: ChangeType,
     pub key: Vec<u8>,
@@ -31,14 +31,14 @@ pub struct StateChange {
 }
 
 /// Memo entry in a receipt
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoEntry {
     pub content: String,
     pub reference: Option<String>,
 }
 
 /// Result of executing a single instruction (used in receipt)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstructionExecResult {
     pub success: bool,
     pub gas_used: u64,
@@ -46,7 +46,7 @@ pub struct InstructionExecResult {
 }
 
 /// Protocol transaction receipt (per spec §18.4)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProtocolReceipt {
     pub tx_hash: TxHash,
     pub status: ExecutionStatus,

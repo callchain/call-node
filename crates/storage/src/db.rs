@@ -1,7 +1,7 @@
 //! Database initialization with reth-db (MDBX) persistence.
 //!
-//! Uses reth-db as the primary persistence backend for all state types.
-//! JSON file fallback is retained for testing scenarios without MDBX.
+//! MDBX is the sole persistence backend. Initialization failure is fatal —
+//! there is no JSON fallback. All state types are stored in MDBX tables.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,83 +12,41 @@ use crate::StorageError;
 use crate::prune::PruneState;
 use crate::reth_db::{init_call_db, load_prune_state as db_load_prune, save_prune_state as db_save_prune};
 
-/// Database handle with reth-db persistence.
+/// Database handle with mandatory reth-db (MDBX) persistence.
 #[derive(Clone)]
 pub struct CallDb {
     pub data_dir: PathBuf,
-    /// Directory for state snapshots and persistence files (JSON fallback)
-    pub state_dir: PathBuf,
-    /// Directory for prune state persistence (JSON fallback)
-    pub prune_dir: PathBuf,
-    /// reth-db environment (MDBX) — Some when initialized successfully
-    pub db: Option<Arc<DatabaseEnv>>,
+    /// reth-db environment (MDBX) — always present after successful open
+    pub db: Arc<DatabaseEnv>,
 }
 
 impl CallDb {
-    /// Persist the current prune state to disk.
-    /// Uses reth-db if available, falls back to JSON.
+    /// Persist the current prune state to MDBX.
     pub fn save_prune_state(&self, state: &PruneState) -> Result<(), StorageError> {
-        if let Some(ref db) = self.db {
-            return db_save_prune(db, state);
-        }
-        // JSON fallback
-        let data = serde_json::to_vec_pretty(state)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        let path = self.prune_dir.join("prune_state.json");
-        std::fs::write(&path, data)
-            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
-        Ok(())
+        db_save_prune(&self.db, state)
     }
 
-    /// Load prune state from disk, or return a fresh instance.
-    /// Uses reth-db if available, falls back to JSON.
+    /// Load prune state from MDBX, or return a fresh instance.
     pub fn load_prune_state(&self) -> Result<PruneState, StorageError> {
-        if let Some(ref db) = self.db {
-            return db_load_prune(db);
-        }
-        // JSON fallback
-        let path = self.prune_dir.join("prune_state.json");
-        if !path.exists() {
-            return Ok(PruneState::new());
-        }
-        let data = std::fs::read(&path)
-            .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
-        serde_json::from_slice(&data)
-            .map_err(|e| StorageError::Serialization(e.to_string()))
+        db_load_prune(&self.db)
     }
 }
 
 /// Open or create the Callchain database at the given path.
 ///
-/// Initializes reth-db (MDBX) as the primary persistence backend.
-/// If reth-db initialization fails, falls back to JSON file persistence.
+/// Initializes reth-db (MDBX). If initialization fails, returns an error
+/// immediately — there is no fallback.
 pub fn open_db(data_dir: PathBuf) -> Result<CallDb, StorageError> {
     std::fs::create_dir_all(&data_dir).map_err(|e| {
         StorageError::IoError(std::io::Error::other(e.to_string()))
     })?;
 
-    let state_dir = data_dir.join("state");
-    let prune_dir = data_dir.join("prune");
-    std::fs::create_dir_all(&state_dir).map_err(|e| {
-        StorageError::IoError(std::io::Error::other(e.to_string()))
-    })?;
-    std::fs::create_dir_all(&prune_dir).map_err(|e| {
-        StorageError::IoError(std::io::Error::other(e.to_string()))
-    })?;
+    let db = init_call_db(&data_dir)?;
 
-    // Try to initialize reth-db
-    let db = match init_call_db(&data_dir) {
-        Ok(db_env) => Some(db_env),
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to initialize reth-db, falling back to JSON persistence");
-            None
-        }
-    };
-
-    Ok(CallDb { data_dir, state_dir, prune_dir, db })
+    Ok(CallDb { data_dir, db })
 }
 
-/// Create a temporary database for testing (JSON fallback mode).
+/// Create a temporary database for testing.
 pub fn open_test_db() -> Result<CallDb, StorageError> {
     let tmp = std::env::temp_dir().join(format!("call-db-test-{}", std::process::id()));
     open_db(tmp)
@@ -108,8 +66,6 @@ mod tests {
         ));
         let db = open_db(tmp.clone()).expect("open db");
         assert!(db.data_dir.exists());
-        assert!(db.state_dir.exists());
-        assert!(db.prune_dir.exists());
         let _ = std::fs::remove_dir_all(&db.data_dir);
     }
 

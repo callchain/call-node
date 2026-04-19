@@ -14,7 +14,7 @@ pub mod wallet;
 use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
     Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
-    PersistedConsensusState,
+    PersistedConsensusState, ForkManager,
     bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
     block_cache::BlockCache,
     digest::ConsensusDigest,
@@ -33,11 +33,14 @@ use call_storage::{CallDb, open_db, PruneState, StorageError};
 use call_storage::reth_db::{
     save_balances as db_save_balances, load_balances as db_load_balances,
     save_prune_state as db_save_prune,
-    db_put, db_batch_put, db_clear, db_iter_all, db_get,
+    db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
     CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
     CallGovernanceState, CallConsensusState,
+    CallReceipts, CallAgentBalances, CallForkState, CallCheckpoint,
 };
+use call_protocol::ProtocolReceipt;
+use call_primitives::TxHash;
 use reth_db::DatabaseEnv;
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
@@ -112,25 +115,62 @@ impl CallNode {
         let prune_state = db.load_prune_state()
             .map_err(|e| format!("failed to load prune state: {e}"))?;
 
-        // Load persisted state from reth-db if available
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager, governance_manager) =
-            if let Some(ref db_env) = db.db {
-                let loaded = load_state_from_db(db_env);
-                // Try to load oracle state from disk
-                let oracle = load_oracle_state(db_env)
-                    .map_err(|e| format!("failed to load oracle state: {e}"))?;
-                // Try to load governance state from disk
-                let governance = load_governance_state(db_env)
-                    .map_err(|e| format!("failed to load governance state: {e}"))?;
-                (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle, governance)
-            } else {
-                (BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
-                 ShieldedState::new(), ValidatorStateManager::default(),
-                 AgentRegistry::new(), AgentBalances::new(), OracleManager::default(), GovernanceManager::new())
+        let db_env = &db.db;
+
+        // Crash recovery: if a pending checkpoint exists, state may be inconsistent.
+        // Clear the marker and start from genesis (safe — partial state is ignored).
+        let recovery_needed = check_recovery_needed(db_env)
+            .map_err(|e| format!("checkpoint check failed: {e}"))?;
+        if recovery_needed {
+            tracing::warn!("pending checkpoint detected — previous shutdown was unclean; starting from genesis");
+            let _ = clear_checkpoint(db_env);
+        }
+
+        // Load persisted state from reth-db (skip if recovery needed)
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager, governance_manager, receipts, fork_manager) = if recovery_needed {
+            (
+                BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
+                ShieldedState::new(), ValidatorStateManager::default(),
+                AgentRegistry::new(), AgentBalances::new(), OracleManager::default(),
+                GovernanceManager::new(), std::collections::HashMap::new(),
+                ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1),
+            )
+        } else {
+            let loaded = load_state_from_db(db_env);
+            let oracle = load_oracle_state(db_env)
+                .map_err(|e| format!("failed to load oracle state: {e}"))?;
+            let governance = load_governance_state(db_env)
+                .map_err(|e| format!("failed to load governance state: {e}"))?;
+            let receipts = match load_receipts(db_env) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load receipts");
+                    std::collections::HashMap::new()
+                }
             };
+            let fork_manager = match load_fork_state(db_env) {
+                Ok(Some(fm)) => fm,
+                Ok(None) => {
+                    ForkManager::new(
+                        call_primitives::ProtocolVersion::new(1, 0, 0),
+                        loaded.4.get_all_validators().len() as u32,
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load fork state");
+                    ForkManager::new(
+                        call_primitives::ProtocolVersion::new(1, 0, 0),
+                        loaded.4.get_all_validators().len() as u32,
+                    )
+                }
+            };
+            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle, governance, receipts, fork_manager)
+        };
 
         // Try to load persisted consensus state; fall back to genesis
-        let consensus = if let Some(ref db_env) = db.db {
+        let consensus = if recovery_needed {
+            SimplexConsensus::new(ConsensusParams::default(), consensus_validators.clone())
+        } else {
             match load_consensus_state_inner(db_env, &consensus_validators) {
                 Ok(consensus) => {
                     tracing::info!(
@@ -142,11 +182,9 @@ impl CallNode {
                 }
                 Err(e) => {
                     tracing::info!(error = %e, "no persisted consensus state, starting from genesis");
-                    SimplexConsensus::new(ConsensusParams::default(), consensus_validators)
+                    SimplexConsensus::new(ConsensusParams::default(), consensus_validators.clone())
                 }
             }
-        } else {
-            SimplexConsensus::new(ConsensusParams::default(), consensus_validators)
         };
 
         let state = Arc::new(RpcState::new(
@@ -163,6 +201,12 @@ impl CallNode {
             CALLCHAIN_CHAIN_ID,
             oracle_manager,
         ));
+
+        // Inject loaded receipts
+        *state.receipts.write().unwrap() = receipts;
+
+        // Inject loaded fork state
+        *state.fork_manager.write().unwrap() = fork_manager;
 
         // Wire live oracle into precompiles so EVM contracts can read prices
         call_precompiles::set_live_oracle(Arc::clone(&state.oracle));
@@ -722,10 +766,8 @@ impl CallNode {
 
                                             // Periodically save consensus state during sync
                                             if local_height % 100 == 0 {
-                                                if let Some(ref db_env) = db_env {
-                                                    if let Ok(c) = consensus.read() {
-                                                        let _ = save_consensus_state_inner(db_env, &c);
-                                                    }
+                                                if let Ok(c) = consensus.read() {
+                                                    let _ = save_consensus_state_inner(&db_env, &c);
                                                 }
                                             }
                                         }
@@ -765,11 +807,9 @@ impl CallNode {
             }
 
             // Save recovered consensus state after sync
-            if let Some(ref db_env) = db_env {
-                let c = consensus.read().unwrap();
-                if let Err(e) = save_consensus_state_inner(db_env, &c) {
-                    tracing::warn!(error = %e, "sync: failed to save consensus state after sync");
-                }
+            let c = consensus.read().unwrap();
+            if let Err(e) = save_consensus_state_inner(&db_env, &c) {
+                tracing::warn!(error = %e, "sync: failed to save consensus state after sync");
             }
         })
     }
@@ -783,22 +823,21 @@ impl CallNode {
             let _ = handle.stop();
         }
         // Flush final state to reth-db
-        if let Some(ref db_env) = self.db.db {
-            if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus) {
-                tracing::warn!(error = %e, "failed to flush state on shutdown");
-            }
-            if let Err(e) = db_save_prune(db_env, &self.prune_state) {
-                tracing::warn!(error = %e, "failed to flush prune state on shutdown");
-            }
-            // Save consensus state explicitly
-            {
-                let c = self.consensus.read().unwrap();
-                if let Err(e) = save_consensus_state_inner(db_env, &c) {
-                    tracing::warn!(error = %e, "failed to flush consensus state on shutdown");
-                }
-            }
-            tracing::info!("flushed state to reth-db on shutdown");
+        let db_env = &self.db.db;
+        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus) {
+            tracing::warn!(error = %e, "failed to flush state on shutdown");
         }
+        if let Err(e) = db_save_prune(db_env, &self.prune_state) {
+            tracing::warn!(error = %e, "failed to flush prune state on shutdown");
+        }
+        // Save consensus state explicitly
+        {
+            let c = self.consensus.read().unwrap();
+            if let Err(e) = save_consensus_state_inner(db_env, &c) {
+                tracing::warn!(error = %e, "failed to flush consensus state on shutdown");
+            }
+        }
+        tracing::info!("flushed state to reth-db on shutdown");
         Ok(())
     }
 
@@ -899,11 +938,20 @@ fn load_state_from_db(
 }
 
 /// Persist all state types to the reth-db database.
+/// Uses a checkpoint marker to detect incomplete writes on crash recovery.
 fn persist_state_to_db(
     db_env: &Arc<DatabaseEnv>,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
 ) -> Result<(), String> {
+    // 1. Write pending checkpoint marker
+    let checkpoint_hash = {
+        let c = consensus.read().unwrap();
+        c.last_block_hash().0
+    };
+    write_checkpoint_pending(db_env, checkpoint_hash)
+        .map_err(|e| format!("write checkpoint: {e}"))?;
+
     // Persist balances
     {
         let bs = state.balance_state.read().unwrap();
@@ -967,6 +1015,24 @@ fn persist_state_to_db(
         save_consensus_state_inner(db_env, &c)
             .map_err(|e| format!("save consensus: {e}"))?;
     }
+
+    // Persist receipts
+    {
+        let receipts = state.receipts.read().unwrap();
+        save_receipts(db_env, &receipts)
+            .map_err(|e| format!("save receipts: {e}"))?;
+    }
+
+    // Persist fork state
+    {
+        let fork_manager = state.fork_manager.read().unwrap();
+        save_fork_state(db_env, &fork_manager)
+            .map_err(|e| format!("save fork state: {e}"))?;
+    }
+
+    // 3. Clear checkpoint marker — state is now consistent
+    clear_checkpoint(db_env)
+        .map_err(|e| format!("clear checkpoint: {e}"))?;
 
     Ok(())
 }
@@ -1104,11 +1170,20 @@ fn load_agent_state_inner(db: &DatabaseEnv) -> Result<(AgentRegistry, AgentBalan
     }
     registry.next_id = next_id;
 
-    Ok((registry, AgentBalances::new()))
+    // Load agent balances
+    let balances = match load_agent_balances_inner(db) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load agent balances");
+            AgentBalances::new()
+        }
+    };
+
+    Ok((registry, balances))
 }
 
 /// Save agent state to DB
-fn save_agent_state_inner(db: &DatabaseEnv, registry: &AgentRegistry, _balances: &AgentBalances) -> Result<(), String> {
+fn save_agent_state_inner(db: &DatabaseEnv, registry: &AgentRegistry, balances: &AgentBalances) -> Result<(), String> {
     let entries: Vec<(Vec<u8>, Vec<u8>)> = registry
         .agents
         .iter()
@@ -1116,6 +1191,7 @@ fn save_agent_state_inner(db: &DatabaseEnv, registry: &AgentRegistry, _balances:
         .collect();
     db_clear::<CallAgents>(db).map_err(|e: StorageError| e.to_string())?;
     db_batch_put::<CallAgents>(db, entries).map_err(|e: StorageError| e.to_string())?;
+    save_agent_balances_inner(db, balances)?;
     Ok(())
 }
 
@@ -1144,6 +1220,94 @@ fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManager, String> 
     match db_get::<CallGovernanceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize governance: {e}")),
         None => Ok(GovernanceManager::new()),
+    }
+}
+
+// ── Agent balances persistence ────────────────────────────────────────
+
+fn save_agent_balances_inner(db: &DatabaseEnv, balances: &AgentBalances) -> Result<(), String> {
+    let data = serde_json::to_vec(balances).map_err(|e| format!("serialize agent balances: {e}"))?;
+    db_put::<CallAgentBalances>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+fn load_agent_balances_inner(db: &DatabaseEnv) -> Result<AgentBalances, String> {
+    match db_get::<CallAgentBalances>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize agent balances: {e}")),
+        None => Ok(AgentBalances::new()),
+    }
+}
+
+// ── Receipt persistence ───────────────────────────────────────────────
+
+fn save_receipts(db: &DatabaseEnv, receipts: &std::collections::HashMap<TxHash, ProtocolReceipt>) -> Result<(), String> {
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = receipts
+        .iter()
+        .map(|(k, v)| {
+            let key: Vec<u8> = k.as_slice().to_vec();
+            let value: Vec<u8> = serde_json::to_vec(v).unwrap();
+            (key, value)
+        })
+        .collect();
+    db_clear::<CallReceipts>(db).map_err(|e: StorageError| e.to_string())?;
+    db_batch_put::<CallReceipts>(db, entries).map_err(|e: StorageError| e.to_string())
+}
+
+fn load_receipts(db: &DatabaseEnv) -> Result<std::collections::HashMap<TxHash, ProtocolReceipt>, String> {
+    let data = db_iter_all::<CallReceipts>(db).map_err(|e: StorageError| e.to_string())?;
+    let mut receipts = std::collections::HashMap::new();
+    for (k, v) in data {
+        let key = call_primitives::TxHash::from_slice(&k);
+        let receipt: ProtocolReceipt = serde_json::from_slice(&v).map_err(|e| format!("deserialize receipt: {e}"))?;
+        receipts.insert(key, receipt);
+    }
+    Ok(receipts)
+}
+
+fn delete_receipts_by_block(db: &DatabaseEnv, block_number: u64) -> Result<(), String> {
+    let all = db_iter_all::<CallReceipts>(db).map_err(|e: StorageError| e.to_string())?;
+    for (k, v) in all {
+        let receipt: ProtocolReceipt = serde_json::from_slice(&v).map_err(|e| format!("deserialize receipt: {e}"))?;
+        if receipt.block_number == block_number {
+            db_del::<CallReceipts>(db, &k).map_err(|e: StorageError| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+// ── Checkpoint / WAL persistence ──────────────────────────────────────
+
+/// Write a checkpoint marker to signal that a state write is in progress.
+/// If the node crashes while this marker exists, state may be inconsistent.
+fn write_checkpoint_pending(db: &DatabaseEnv, state_hash: [u8; 32]) -> Result<(), String> {
+    db_put::<CallCheckpoint>(db, b"pending".to_vec(), state_hash.to_vec())
+        .map_err(|e: StorageError| e.to_string())
+}
+
+/// Clear the checkpoint marker after a successful state write.
+fn clear_checkpoint(db: &DatabaseEnv) -> Result<(), String> {
+    db_del::<CallCheckpoint>(db, b"pending")
+        .map_err(|e: StorageError| e.to_string())
+}
+
+/// Check if a pending checkpoint marker exists (indicates potential crash).
+fn check_recovery_needed(db: &DatabaseEnv) -> Result<bool, String> {
+    match db_get::<CallCheckpoint>(db, b"pending").map_err(|e: StorageError| e.to_string())? {
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
+}
+
+// ── Fork state persistence ────────────────────────────────────────────
+
+fn save_fork_state(db: &DatabaseEnv, fork_manager: &ForkManager) -> Result<(), String> {
+    let data = serde_json::to_vec(fork_manager).map_err(|e| format!("serialize fork state: {e}"))?;
+    db_put::<CallForkState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+fn load_fork_state(db: &DatabaseEnv) -> Result<Option<ForkManager>, String> {
+    match db_get::<CallForkState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize fork state: {e}")).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -1254,6 +1418,20 @@ fn persist_state_incremental(
         let c = consensus.read().map_err(|_| "consensus lock poisoned".to_string())?;
         save_consensus_state_inner(db_env, &c)
             .map_err(|e| format!("save consensus: {e}"))?;
+    }
+
+    // Persist receipts (overwrite)
+    {
+        let receipts = state.receipts.read().map_err(|_| "receipt lock poisoned".to_string())?;
+        save_receipts(db_env, &receipts)
+            .map_err(|e| format!("save receipts: {e}"))?;
+    }
+
+    // Persist fork state (overwrite)
+    {
+        let fork_manager = state.fork_manager.read().map_err(|_| "fork lock poisoned".to_string())?;
+        save_fork_state(db_env, &fork_manager)
+            .map_err(|e| format!("save fork state: {e}"))?;
     }
 
     Ok(())
@@ -1534,23 +1712,21 @@ async fn block_production_loop(
         });
 
         // 13. Run periodic prune checks
-        if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config) {
+        if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config, Some(&db.db)) {
             tracing::warn!(error = %e, "prune check failed");
         }
 
         // 14. Incrementally persist state changes after every block
-        if let Some(ref db_env) = db.db {
-            if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
-                tracing::warn!(error = %e, "failed to incrementally persist state");
-            }
+        let db_env = &db.db;
+        if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
+            tracing::warn!(error = %e, "failed to incrementally persist state");
         }
 
         // 15. Full table rebuild every 1000 blocks as safety net
         if new_height % 1000 == 0 {
-            if let Some(ref db_env) = db.db {
-                if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
-                    tracing::warn!(error = %e, "failed to full-rebuild persist state");
-                }
+            let db_env = &db.db;
+            if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
+                tracing::warn!(error = %e, "failed to full-rebuild persist state");
             }
         }
 
@@ -1955,23 +2131,23 @@ async fn bft_event_loop(
                         body_size: 0,
                     });
 
-                    if let Err(e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config) {
+                    if let Err(e) = call_storage::maybe_prune(
+                        &mut prune_state, new_height, &prune_config, Some(&db.db)
+                    ) {
                         tracing::warn!(error = %e, "BFT finalize: prune check failed");
                     }
 
                     // Incremental state persistence
-                    if let Some(ref db_env) = db.db {
-                        if let Err(e) = persist_state_incremental(db_env, &state, &consensus) {
-                            tracing::warn!(error = %e, "BFT finalize: incremental persist failed");
-                        }
+                    let db_env = &db.db;
+                    if let Err(e) = persist_state_incremental(db_env, &state, &consensus) {
+                        tracing::warn!(error = %e, "BFT finalize: incremental persist failed");
                     }
 
                     // Full rebuild every 1000 blocks
                     if new_height % 1000 == 0 {
-                        if let Some(ref db_env) = db.db {
-                            if let Err(e) = persist_state_to_db(db_env, &state, &consensus) {
-                                tracing::warn!(error = %e, "BFT finalize: full persist failed");
-                            }
+                        let db_env = &db.db;
+                        if let Err(e) = persist_state_to_db(db_env, &state, &consensus) {
+                            tracing::warn!(error = %e, "BFT finalize: full persist failed");
                         }
                     }
 
@@ -2842,13 +3018,15 @@ mod tests {
             }
 
             // Persist state to reth-db immediately
-            if let Some(ref db_env) = node.db.db {
-                persist_state_to_db(db_env, &node.state, &node.consensus)
-                    .expect("persist state");
-            }
+            let db_env = &node.db.db;
+            persist_state_to_db(db_env, &node.state, &node.consensus)
+                .expect("persist state");
 
             // Node is dropped here, simulating shutdown
         }
+
+        // Give MDBX a moment to release file locks before reopening
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
         // === Phase 2: Create new node from same data dir, verify state ===
         {

@@ -155,6 +155,268 @@ impl Table for CallConsensusState {
     type Value = Vec<u8>;
 }
 
+// ── Missing tables (added for full 34-table coverage) ─────────────────
+
+/// Protocol assets: serialized asset_id -> serialized AssetEntry
+#[derive(Debug)]
+pub struct CallProtocolAssets;
+impl Table for CallProtocolAssets {
+    const NAME: &'static str = "call_protocol_assets";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Shielded Merkle tree: serialized node_index -> serialized node_hash
+#[derive(Debug)]
+pub struct CallShieldedMerkleTree;
+impl Table for CallShieldedMerkleTree {
+    const NAME: &'static str = "call_shielded_merkle_tree";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Shielded viewing keys: serialized address -> encrypted key material
+#[derive(Debug)]
+pub struct CallShieldedViewingKeys;
+impl Table for CallShieldedViewingKeys {
+    const NAME: &'static str = "call_shielded_viewing_keys";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Agent balances: serialized (owner, agent_id, asset_id) -> serialized balance
+#[derive(Debug)]
+pub struct CallAgentBalances;
+impl Table for CallAgentBalances {
+    const NAME: &'static str = "call_agent_balances";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Agent nonces: serialized (owner, agent_id) -> serialized nonce
+#[derive(Debug)]
+pub struct CallAgentNonces;
+impl Table for CallAgentNonces {
+    const NAME: &'static str = "call_agent_nonces";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// EVM contracts: serialized address -> serialized bytecode
+#[derive(Debug)]
+pub struct CallEvmContracts;
+impl Table for CallEvmContracts {
+    const NAME: &'static str = "call_evm_contracts";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Consensus blocks: serialized height -> serialized Block
+#[derive(Debug)]
+pub struct CallConsensusBlocks;
+impl Table for CallConsensusBlocks {
+    const NAME: &'static str = "call_consensus_blocks";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Metadata chain id: single entry () -> chain_id
+#[derive(Debug)]
+pub struct CallMetadataChainId;
+impl Table for CallMetadataChainId {
+    const NAME: &'static str = "call_metadata_chain_id";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Metadata compliance: serialized asset_id -> serialized compliance policy
+#[derive(Debug)]
+pub struct CallMetadataCompliance;
+impl Table for CallMetadataCompliance {
+    const NAME: &'static str = "call_metadata_compliance";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Metadata agents: serialized agent_id -> serialized status
+#[derive(Debug)]
+pub struct CallMetadataAgents;
+impl Table for CallMetadataAgents {
+    const NAME: &'static str = "call_metadata_agents";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Receipts: serialized tx_hash -> serialized ProtocolReceipt
+#[derive(Debug)]
+pub struct CallReceipts;
+impl Table for CallReceipts {
+    const NAME: &'static str = "call_receipts";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Logs: serialized (block_number, log_index) -> serialized LogEntry
+#[derive(Debug)]
+pub struct CallLogs;
+impl Table for CallLogs {
+    const NAME: &'static str = "call_logs";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Memos: serialized tx_hash -> serialized memo data
+#[derive(Debug)]
+pub struct CallMemos;
+impl Table for CallMemos {
+    const NAME: &'static str = "call_memos";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Fee currency registry: serialized asset_id -> serialized FeeCurrencyEntry
+#[derive(Debug)]
+pub struct CallFeeCurrencyRegistry;
+impl Table for CallFeeCurrencyRegistry {
+    const NAME: &'static str = "call_fee_currency_registry";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Oracle prices: serialized (asset_id, block_number) -> serialized price
+#[derive(Debug)]
+pub struct CallOraclePrices;
+impl Table for CallOraclePrices {
+    const NAME: &'static str = "call_oracle_prices";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Oracle validator info: serialized validator_id -> serialized oracle status
+#[derive(Debug)]
+pub struct CallOracleValidatorInfo;
+impl Table for CallOracleValidatorInfo {
+    const NAME: &'static str = "call_oracle_validator_info";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Governance proposals: serialized proposal_id -> serialized proposal
+#[derive(Debug)]
+pub struct CallGovernanceProposals;
+impl Table for CallGovernanceProposals {
+    const NAME: &'static str = "call_governance_proposals";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Vote delegations: serialized (delegator, validator_id) -> serialized delegation
+#[derive(Debug)]
+pub struct CallVoteDelegations;
+impl Table for CallVoteDelegations {
+    const NAME: &'static str = "call_vote_delegations";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Sponsor auths: serialized (owner, sponsor) -> serialized authorization
+#[derive(Debug)]
+pub struct CallSponsorAuths;
+impl Table for CallSponsorAuths {
+    const NAME: &'static str = "call_sponsor_auths";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Sponsor pools: serialized sponsor_address -> serialized pool balance
+#[derive(Debug)]
+pub struct CallSponsorPools;
+impl Table for CallSponsorPools {
+    const NAME: &'static str = "call_sponsor_pools";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Sponsor daily usage: serialized (sponsor_address, day) -> serialized usage
+#[derive(Debug)]
+pub struct CallSponsorDailyUsage;
+impl Table for CallSponsorDailyUsage {
+    const NAME: &'static str = "call_sponsor_daily_usage";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Session keys: serialized session_key -> serialized (owner, expiry)
+#[derive(Debug)]
+pub struct CallSessionKeys;
+impl Table for CallSessionKeys {
+    const NAME: &'static str = "call_session_keys";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Multi-sig configs: serialized address -> serialized MultiSigConfig
+#[derive(Debug)]
+pub struct CallMultiSigConfigs;
+impl Table for CallMultiSigConfigs {
+    const NAME: &'static str = "call_multi_sig_configs";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Social recovery configs: serialized address -> serialized RecoveryConfig
+#[derive(Debug)]
+pub struct CallSocialRecoveryConfigs;
+impl Table for CallSocialRecoveryConfigs {
+    const NAME: &'static str = "call_social_recovery_configs";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Fork state: single entry () -> serialized ForkManager
+#[derive(Debug)]
+pub struct CallForkState;
+impl Table for CallForkState {
+    const NAME: &'static str = "call_fork_state";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Checkpoint marker: single entry "pending" -> state_hash for crash recovery
+#[derive(Debug)]
+pub struct CallCheckpoint;
+impl Table for CallCheckpoint {
+    const NAME: &'static str = "call_checkpoint";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// All Callchain tables
 pub struct CallTables;
 impl TableSet for CallTables {
@@ -164,19 +426,45 @@ impl TableSet for CallTables {
         }
         Box::new(
             [
+                box_info::<CallProtocolAssets>,
                 box_info::<CallProtocolBalances>,
                 box_info::<CallProtocolAllowances>,
-                box_info::<CallEvmAccounts>,
-                box_info::<CallEvmStorage>,
-                box_info::<CallBridgeOps>,
+                box_info::<CallShieldedMerkleTree>,
                 box_info::<CallShieldedNullifiers>,
                 box_info::<CallShieldedCommitments>,
-                box_info::<CallValidators>,
+                box_info::<CallShieldedViewingKeys>,
                 box_info::<CallAgents>,
-                box_info::<CallOracleState>,
+                box_info::<CallAgentBalances>,
+                box_info::<CallAgentNonces>,
+                box_info::<CallEvmAccounts>,
+                box_info::<CallEvmContracts>,
+                box_info::<CallEvmStorage>,
+                box_info::<CallBridgeOps>,
+                box_info::<CallConsensusBlocks>,
+                box_info::<CallConsensusState>,
+                box_info::<CallMetadataChainId>,
+                box_info::<CallValidators>,
+                box_info::<CallMetadataCompliance>,
+                box_info::<CallMetadataAgents>,
+                box_info::<CallReceipts>,
+                box_info::<CallLogs>,
+                box_info::<CallMemos>,
+                box_info::<CallFeeCurrencyRegistry>,
+                box_info::<CallOraclePrices>,
+                box_info::<CallOracleValidatorInfo>,
+                box_info::<CallGovernanceProposals>,
+                box_info::<CallVoteDelegations>,
+                box_info::<CallSponsorAuths>,
+                box_info::<CallSponsorPools>,
+                box_info::<CallSponsorDailyUsage>,
+                box_info::<CallSessionKeys>,
+                box_info::<CallMultiSigConfigs>,
+                box_info::<CallSocialRecoveryConfigs>,
+                box_info::<CallForkState>,
+                box_info::<CallCheckpoint>,
                 box_info::<CallPruneState>,
                 box_info::<CallGovernanceState>,
-                box_info::<CallConsensusState>,
+                box_info::<CallOracleState>,
             ]
             .into_iter()
             .map(|f| f()),

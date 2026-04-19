@@ -21,7 +21,7 @@ pub const MIN_TIMELOCK_BLOCKS: u64 = 100;
 // ─── Types ─────────────────────────────────────────────────────────────
 
 /// A height-activated protocol upgrade entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UpgradeEntry {
     pub version: ProtocolVersion,
     pub activation_height: u64,
@@ -34,33 +34,33 @@ pub struct UpgradeEntry {
 }
 
 /// Emergency rollback state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EmergencyRollback {
     /// Target height to roll back to
     pub target_height: u64,
     /// Target version to roll back to
     pub target_version: ProtocolVersion,
     /// Validator signatures collected so far
-    pub signatures: HashMap<ValidatorId, [u8; 64]>,
+    pub signatures: HashMap<ValidatorId, Vec<u8>>,
     /// Total validator weight represented (simplified: 1 vote per validator)
     pub total_validators: u32,
 }
 
 /// Fork manager state
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ForkManager {
     /// Current protocol version
-    current_version: ProtocolVersion,
+    pub current_version: ProtocolVersion,
     /// Scheduled upgrades sorted by activation height
-    scheduled_upgrades: Vec<UpgradeEntry>,
+    pub scheduled_upgrades: Vec<UpgradeEntry>,
     /// Active emergency rollback (if any)
-    active_rollback: Option<EmergencyRollback>,
+    pub active_rollback: Option<EmergencyRollback>,
     /// Total number of registered validators
-    total_validators: u32,
+    pub total_validators: u32,
     /// Validator public keys for signature verification
-    validator_keys: HashMap<ValidatorId, Ed25519PublicKey>,
+    pub validator_keys: HashMap<ValidatorId, Ed25519PublicKey>,
     /// Timelock duration in blocks
-    timelock_blocks: u64,
+    pub timelock_blocks: u64,
 }
 
 impl ForkManager {
@@ -202,7 +202,7 @@ impl ForkManager {
             return Err(ForkError::DuplicateRollbackSignature);
         }
 
-        rollback.signatures.insert(validator_id, signature);
+        rollback.signatures.insert(validator_id, signature.to_vec());
 
         // Check quorum: 2/3 of validators
         let sig_count = rollback.signatures.len() as u32;

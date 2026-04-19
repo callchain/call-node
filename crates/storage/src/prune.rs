@@ -252,41 +252,109 @@ impl PruneState {
 
 // ── Pruning functions ─────────────────────────────────────────────────
 
+use crate::reth_db::{db_del, CallConsensusBlocks, CallReceipts, CallConsensusState};
+use reth_db::DatabaseEnv;
+
+fn height_key(height: u64) -> Vec<u8> {
+    height.to_be_bytes().to_vec()
+}
+
 /// Prune execution traces older than the given height boundary.
+/// If `db` is provided, also deletes the corresponding entries from MDBX.
 pub fn prune_execution_traces(
     state: &mut PruneState,
     prune_boundary: u64,
+    db: Option<&DatabaseEnv>,
 ) -> Result<usize, StorageError> {
     let before = state.trace_count();
-    state.execution_traces.retain(|height, _| *height >= prune_boundary);
+    let to_prune: Vec<u64> = state.execution_traces
+        .keys()
+        .filter(|h| **h < prune_boundary)
+        .copied()
+        .collect();
+    for h in &to_prune {
+        state.execution_traces.remove(h);
+    }
+    if let Some(db_env) = db {
+        for h in &to_prune {
+            let _ = db_del::<CallConsensusBlocks>(db_env, &height_key(*h));
+        }
+    }
     let pruned = before.saturating_sub(state.trace_count());
     state.traces_pruned += pruned as u64;
     Ok(pruned)
 }
 
 /// Prune receipts older than the given height boundary.
-pub fn prune_receipts(state: &mut PruneState, prune_boundary: u64) -> Result<usize, StorageError> {
+/// If `db` is provided, also deletes the corresponding entries from MDBX.
+pub fn prune_receipts(
+    state: &mut PruneState,
+    prune_boundary: u64,
+    db: Option<&DatabaseEnv>,
+) -> Result<usize, StorageError> {
     let before = state.receipt_count();
-    state.receipts.retain(|height, _| *height >= prune_boundary);
+    let to_prune: Vec<u64> = state.receipts
+        .keys()
+        .filter(|h| **h < prune_boundary)
+        .copied()
+        .collect();
+    for h in &to_prune {
+        state.receipts.remove(h);
+    }
+    if let Some(db_env) = db {
+        for h in &to_prune {
+            let _ = db_del::<CallReceipts>(db_env, &height_key(*h));
+        }
+    }
     let pruned = before.saturating_sub(state.receipt_count());
     state.receipts_pruned += pruned as u64;
     Ok(pruned)
 }
 
 /// Prune block bodies older than the given boundary, keeping only block headers.
-pub fn prune_block_bodies(state: &mut PruneState, prune_boundary: u64) -> Result<usize, StorageError> {
+/// If `db` is provided, also deletes the corresponding entries from MDBX.
+pub fn prune_block_bodies(
+    state: &mut PruneState,
+    prune_boundary: u64,
+    db: Option<&DatabaseEnv>,
+) -> Result<usize, StorageError> {
     let before = state.body_count();
-    state.block_bodies.retain(|height, _| *height >= prune_boundary);
+    let to_prune: Vec<u64> = state.block_bodies
+        .keys()
+        .filter(|h| **h < prune_boundary)
+        .copied()
+        .collect();
+    for h in &to_prune {
+        state.block_bodies.remove(h);
+    }
+    if let Some(db_env) = db {
+        for h in &to_prune {
+            let _ = db_del::<CallConsensusBlocks>(db_env, &height_key(*h));
+        }
+    }
     let pruned = before.saturating_sub(state.body_count());
     state.bodies_pruned += pruned as u64;
     Ok(pruned)
 }
 
 /// Remove snapshots beyond the retention limit (keep most recent N).
-pub fn prune_old_snapshots(state: &mut PruneState, keep: u64) -> Result<usize, StorageError> {
+/// If `db` is provided, also deletes the corresponding entries from MDBX.
+pub fn prune_old_snapshots(
+    state: &mut PruneState,
+    keep: u64,
+    db: Option<&DatabaseEnv>,
+) -> Result<usize, StorageError> {
     let before = state.snapshot_count();
+    let mut to_prune = Vec::new();
     while state.snapshots.len() > keep as usize {
-        state.snapshots.pop_front();
+        if let Some(snap) = state.snapshots.pop_front() {
+            to_prune.push(snap.height);
+        }
+    }
+    if let Some(db_env) = db {
+        for h in &to_prune {
+            let _ = db_del::<CallConsensusState>(db_env, &height_key(*h));
+        }
     }
     let pruned = before.saturating_sub(state.snapshot_count());
     state.snapshots_pruned += pruned as u64;
@@ -301,20 +369,22 @@ pub fn compact_database(state: &mut PruneState) -> Result<(), StorageError> {
 }
 
 /// Run periodic prune checks based on the current height and config.
+/// If `db` is provided, also deletes pruned entries from MDBX.
 pub fn maybe_prune(
     state: &mut PruneState,
     current_height: u64,
     config: &PruneConfig,
+    db: Option<&DatabaseEnv>,
 ) -> Result<(), StorageError> {
     if !current_height.is_multiple_of(config.prune_interval) {
         return Ok(());
     }
 
     let prune_boundary = current_height.saturating_sub(config.keep_recent);
-    prune_execution_traces(state, prune_boundary)?;
-    prune_receipts(state, current_height.saturating_sub(config.keep_receipt))?;
-    prune_block_bodies(state, current_height.saturating_sub(config.keep_block_body))?;
-    prune_old_snapshots(state, config.snapshot_keep)?;
+    prune_execution_traces(state, prune_boundary, db)?;
+    prune_receipts(state, current_height.saturating_sub(config.keep_receipt), db)?;
+    prune_block_bodies(state, current_height.saturating_sub(config.keep_block_body), db)?;
+    prune_old_snapshots(state, config.snapshot_keep, db)?;
     compact_database(state)?;
 
     Ok(())
@@ -534,7 +604,7 @@ mod tests {
         assert_eq!(state.trace_count(), 3);
 
         // Prune boundary at 250 should remove height 100 and 200
-        let pruned = prune_execution_traces(&mut state, 250).unwrap();
+        let pruned = prune_execution_traces(&mut state, 250, None).unwrap();
         assert_eq!(pruned, 2);
         assert_eq!(state.trace_count(), 1);
     }
@@ -548,7 +618,7 @@ mod tests {
         }
         assert_eq!(state.receipt_count(), 4);
 
-        let pruned = prune_receipts(&mut state, 1000).unwrap();
+        let pruned = prune_receipts(&mut state, 1000, None).unwrap();
         assert_eq!(pruned, 2);
         assert_eq!(state.receipt_count(), 2);
     }
@@ -566,7 +636,7 @@ mod tests {
         }
         assert_eq!(state.body_count(), 5);
 
-        let pruned = prune_block_bodies(&mut state, 300).unwrap();
+        let pruned = prune_block_bodies(&mut state, 300, None).unwrap();
         assert_eq!(pruned, 2);
         assert_eq!(state.body_count(), 3);
     }
@@ -589,7 +659,7 @@ mod tests {
         }
         assert_eq!(state.snapshot_count(), 5);
 
-        let pruned = prune_old_snapshots(&mut state, 3).unwrap();
+        let pruned = prune_old_snapshots(&mut state, 3, None).unwrap();
         assert_eq!(pruned, 2);
         assert_eq!(state.snapshot_count(), 3);
         // Oldest snapshots removed
@@ -613,7 +683,7 @@ mod tests {
         let config = PruneConfig::default();
         // Height 5000 is not a multiple of prune_interval (10000)
         let before = state.trace_count();
-        assert!(maybe_prune(&mut state, 5000, &config).is_ok());
+        assert!(maybe_prune(&mut state, 5000, &config, None).is_ok());
         assert_eq!(state.trace_count(), before);
     }
 
@@ -629,7 +699,7 @@ mod tests {
         assert_eq!(state.trace_count(), 3);
 
         // Height 10000 is a multiple of prune_interval
-        assert!(maybe_prune(&mut state, 10_000, &config).is_ok());
+        assert!(maybe_prune(&mut state, 10_000, &config, None).is_ok());
 
         // Boundary = 10000 - 50000 = 0 (keep_recent = 50_000), so nothing pruned yet
         // because all heights >= 0
@@ -659,7 +729,7 @@ mod tests {
         assert_eq!(state.body_count(), 3);
 
         // At height 100_000, prune_interval = 10_000, so pruning runs
-        assert!(maybe_prune(&mut state, 100_000, &config).is_ok());
+        assert!(maybe_prune(&mut state, 100_000, &config, None).is_ok());
 
         // keep_recent = 50_000, boundary = 100_000 - 50_000 = 50_000
         // Traces at 10_000 should be pruned, 50_000 and 60_000 kept
@@ -689,12 +759,12 @@ mod tests {
         // Add and prune traces multiple times
         state.add_execution_trace(100, ExecutionTrace { tx_index: 0, gas_used: 1, success: true });
         state.add_execution_trace(200, ExecutionTrace { tx_index: 1, gas_used: 1, success: true });
-        prune_execution_traces(&mut state, 150).unwrap();
+        prune_execution_traces(&mut state, 150, None).unwrap();
         assert_eq!(state.traces_pruned, 1);
 
         state.add_execution_trace(300, ExecutionTrace { tx_index: 2, gas_used: 1, success: true });
         state.add_execution_trace(400, ExecutionTrace { tx_index: 3, gas_used: 1, success: true });
-        prune_execution_traces(&mut state, 350).unwrap();
+        prune_execution_traces(&mut state, 350, None).unwrap();
         assert_eq!(state.traces_pruned, 3); // 1 + 2
     }
 }
