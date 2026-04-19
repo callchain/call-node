@@ -115,7 +115,6 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 |---|-----|--------|---------|
 | 1 | **Protocol instruction signatures not verified** | Protocol | `execute_protocol_instructions()` skips secp256k1 signature verification. Anyone can craft a valid-looking transaction and have it executed. |
 | 2 | **RPC has no authentication/authorization** | RPC | No API keys, JWT, or IP allowlist. Anyone can call governance, emergency pause, oracle submit, bridge deposit. |
-| 3 | **Oracle signatures not verified** | RPC/Oracle | `call_oracleSubmitPrice` accepts any 64-byte blob. Fake price submissions pass. |
 | 4 | **Bridge deposit signatures not verified** | RPC/Bridge | `verify_bridge_signatures` counts signatures but does not cryptographically verify them. Fake deposits pass. |
 | 5 | **Light client block header signatures not verified** | RPC/Light | `call_lightVerifyBlockHeader` counts Ed25519 signatures without verification. Fake headers pass. |
 | 6 | **Light client balance proofs are fake** | RPC/Light | `call_lightGetBalanceProof` hashes a string instead of computing a real Merkle proof. |

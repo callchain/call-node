@@ -24,7 +24,7 @@ The RPC layer is the primary interface for users, dApps, validators, and operato
 │  │ Standard RPC        │  │ Callchain Extension RPC       │  │
 │  │ eth_getBalance      │  │ call_sendPayment              │  │
 │  │ eth_call            │  │ call_governanceSubmitProposal │  │
-│  │ eth_sendRawTx       │  │ call_oracleSubmitPrice        │  │
+│  │ eth_sendRawTx       │  │ call_oracleGetPrice           │  │
 │  │ eth_getReceipt      │  │ call_bridgeSubmitDeposit      │  │
 │  │ eth_blockNumber     │  │ call_agentRegister            │  │
 │  │ eth_getLogs         │  │ call_shielded*                │  │
@@ -119,12 +119,6 @@ Registers a new asset in the `AssetRegistry`.
 Signature verification with replay protection (block-window nonces) is implemented for all three endpoints. `require_governance_auth` flag controls whether signatures are mandatory.
 
 **Gap #17 — `call_governanceExecute` signature check is weak:** It verifies the signature format but uses `Address::default()` as the expected signer, meaning any valid signature (from any key) passes. The actual executor permission is checked inside `gov.execute_proposal()` but the RPC-level signature binding is broken.
-
-#### Oracle (`call_oracleSubmitPrice`)
-
-Accepts price submissions from validators with an Ed25519-like 64-byte signature.
-
-**Gap #18 — Oracle signature verification not implemented:** The `OracleSubmission` stores a 64-byte signature but `oracle.submit_price()` does not verify it. The RPC endpoint accepts any 64-byte blob.
 
 #### Bridge (`call_bridgeSubmitDeposit`, `call_lightClientBridgeDeposit`)
 
@@ -228,7 +222,6 @@ pub struct RpcState {
 | 14 | **Light client balance proofs are fake** | Critical | `call_lightGetBalanceProof` hashes a string, not a real Merkle proof. |
 | 15 | **Light client shielded validation inverted** | High | Partially spent transactions return `valid = true`. |
 | 16 | **Governance execute signature binding broken** | High | `call_governanceExecute` verifies signature format against `Address::default()`, not the proposer. |
-| 17 | **Oracle signatures not verified** | High | `call_oracleSubmitPrice` accepts any 64-byte signature. Fake price submissions pass. |
 | 18 | **Bridge deposit signatures not verified** | Critical | `verify_bridge_signatures` counts but does not verify signatures. Fake deposits pass. |
 | 19 | **Receipts in-memory only** | High | All transaction receipts are lost on node restart. No DB persistence. |
 | 20 | **Receipt pruning hardcoded** | Low | 1000-block retention is not configurable. |

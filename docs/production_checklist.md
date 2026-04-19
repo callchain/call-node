@@ -11,7 +11,6 @@ These gaps allow arbitrary state manipulation with no cryptographic barriers.
 | Priority | Action | Files |
 |----------|--------|-------|
 | **P0** | Wire secp256k1 signature verification into `execute_protocol_instructions` | `crates/protocol/src/transaction.rs`, `executor.rs` |
-| **P0** | Implement Ed25519 signature verification for `call_oracleSubmitPrice` | `crates/rpc/src/callchain.rs`, `crates/oracle/src/lib.rs` |
 | **P0** | Implement multi-sig verification for `call_bridgeSubmitDeposit` | `crates/bridge/src/external.rs`, `rpc/src/callchain.rs` |
 | **P0** | Fix `call_lightVerifyBlockHeader` — verify Ed25519 signatures instead of counting hex lengths | `crates/rpc/src/callchain.rs` |
 | **P0** | Fix `verify_snapshot()` — cryptographically verify validator signatures | `crates/storage/src/prune.rs` |

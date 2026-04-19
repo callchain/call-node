@@ -4,7 +4,6 @@ use crate::handlers::{RpcState, invalid_params, internal_error};
 use call_primitives::Address;
 use call_governance::{ProposalType, Vote as GovernanceVote};
 use call_crypto::{recover_secp256k1_signer, keccak256};
-use call_oracle::OracleSubmission;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
 use std::sync::Arc;
@@ -1139,62 +1138,6 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         .map_err(|e| internal_error(e.to_string()))?;
 
     // ── Oracle RPC Methods ──────────────────────────────────────────
-
-    // call_oracleSubmitPrice
-    module
-        .register_async_method("call_oracleSubmitPrice", |params, state, _ctx| async move {
-            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
-
-            let validator_id = call_obj.get("validatorId")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| invalid_params("missing 'validatorId' field".into()))? as u32;
-            let asset_id = call_obj.get("assetId")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
-            let price = call_obj.get("price")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| invalid_params("missing 'price' field".into()))? as u128;
-            let sig_hex = call_obj.get("signature")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
-            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
-                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
-            let mut signature = [0u8; 64];
-            signature.copy_from_slice(&sig_bytes);
-
-            let block_number = state.get_current_block();
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let submission = OracleSubmission {
-                validator_id,
-                asset_id,
-                price,
-                block_number,
-                timestamp,
-                signature,
-                sources: call_obj.get("sources")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-            };
-
-            let mut oracle = state.oracle.write().map_err(|_| internal_error("lock poisoned".into()))?;
-            match oracle.submit_price(submission) {
-                Ok(()) => {
-                    let agg = oracle.get_price(asset_id);
-                    Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                        "status": "accepted",
-                        "assetId": asset_id,
-                        "currentPrice": agg.map(|a| a.median_price.to_string()),
-                    }))
-                }
-                Err(e) => Err(invalid_params(e.to_string())),
-            }
-        })
-        .map_err(|e| internal_error(e.to_string()))?;
 
     // call_oracleGetPrice
     module
