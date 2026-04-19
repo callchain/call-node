@@ -123,16 +123,15 @@ Multi-pool structure with separate lanes:
 | `pending_bridges` | `BridgeOp` | FIFO | Entry order |
 
 **Admission checks** (`insert_protocol_tx`):
-1. Signature verification — `tx.verify_signature()` (or `verify_signature_with_registry()`)
-2. Deduplication — reject duplicate `(sender, nonce)`
-3. Sequential nonce — reject `nonce < expected_nonce`
-4. Instruction count — `instructions.len() <= MAX_INSTRUCTIONS_PER_TX` (100)
-5. Memo size — `total_memo_bytes <= MAX_TOTAL_MEMO_BYTES` (1KB)
-6. Sponsor check — `PoolSponsor` and `PerTxSponsor` rejected until implemented
-7. Fee check — `score >= min_fee` where `score = max_fee - gas_units * base_fee`
-8. Gas limit — `gas_limit <= max_gas_limit`
-9. Per-address limit — max txs per sender
-10. Capacity — evict lowest-score entry if full
+1. Deduplication — reject duplicate `(sender, nonce)`
+2. Sequential nonce — reject `nonce < expected_nonce`
+3. Instruction count — `instructions.len() <= MAX_INSTRUCTIONS_PER_TX` (100)
+4. Memo size — `total_memo_bytes <= MAX_TOTAL_MEMO_BYTES` (1KB)
+5. Sponsor check — `PoolSponsor` and `PerTxSponsor` rejected until implemented
+6. Fee check — `score >= min_fee` where `score = max_fee - gas_units * base_fee`
+7. Gas limit — `gas_limit <= max_gas_limit`
+8. Per-address limit — max txs per sender
+9. Capacity — evict lowest-score entry if full
 
 **Maintenance**:
 - `prune_expired()` — remove txs older than 72 blocks
@@ -142,11 +141,13 @@ Multi-pool structure with separate lanes:
 ### Execution Pipeline
 
 1. **Block production** calls `select_transactions()` to get ordered txs
-2. For each `ProtocolTransaction`, call `execute_protocol_instructions()`:
-   - Clone `BalanceState`, `ComplianceEngine`, and `ShieldedState` snapshots before execution
-   - Execute each instruction in order
-   - If any instruction fails, restore all snapshots (rollback)
-   - On success, deduct gas fee and emit receipt
+2. For each `ProtocolTransaction` in the block:
+   - **Signature verification** — `tx.verify_signature_with_registry(smart_accounts)` checks SingleSig/MultiSig/SessionKey; for MultiSig, threshold is read from `SmartAccountRegistry`
+   - Call `execute_protocol_instructions()`:
+     - Clone `BalanceState`, `ComplianceEngine`, and `ShieldedState` snapshots before execution
+     - Execute each instruction in order
+     - If any instruction fails, restore all snapshots (rollback)
+     - On success, deduct gas fee and emit receipt
 3. EVM transactions are executed via `revm` in the same block
 4. Block fees are allocated to validator reward pool / treasury / burn
 
@@ -158,7 +159,7 @@ Multi-pool structure with separate lanes:
 
 | Component | Status | Details |
 |---|---|---|
-| **Signature verification** | Ready | `verify_signature()` covers SingleSig, MultiSig, SessionKey; enforced at mempool insertion via `insert_protocol_tx()` |
+| **Signature verification** | Ready | `verify_signature()` covers SingleSig, MultiSig, SessionKey; enforced during block execution via `Block::execute()` |
 | **Balance management** | Ready | `checked_add`/`checked_sub` arithmetic; snapshot-based rollback for `BalanceState` |
 | **Mempool structure** | Ready | Multi-pool with capacity limits, eviction, per-address caps, dedup, fee filtering |
 | **Base fee dynamics** | Ready | EIP-1559-style adjustment with min/max bounds |
@@ -172,18 +173,18 @@ Multi-pool structure with separate lanes:
 |---|---|---|
 | Governance → Instruction pipeline | `84b2151` | Governance operations now flow through `ProtocolTransaction` + mempool + consensus |
 | Bridge → Instruction pipeline | `84b2151` | Bridge deposits submitted as `Instruction::ExternalBridgeDeposit` |
-| Signature verification in mempool | — | `insert_protocol_tx()` now calls `tx.verify_signature()` before admission |
+| Signature verification in block execution | — | `Block::execute()` calls `tx.verify_signature_with_registry()` before executing each protocol transaction |
 | Economic constants governable | `38c2a4c` | `proposal_deposit`, `min_self_stake`, `base_fee`, etc. mutable via governance |
-| Atomic rollback (Gap 1) | — | `ComplianceEngine` and `ShieldedState` now cloned for snapshot-based rollback alongside `BalanceState` |
-| Sequential nonce enforcement (Gap 2) | — | Mempool tracks `expected_nonces` per sender; rejects old nonces |
-| Gas sponsor stubs (Gap 3) | — | `AuthorizedSponsor` fully implemented via `SponsorRegistry`; `PoolSponsor` and `PerTxSponsor` rejected at mempool |
-| Stablecoin fee deduction (Gap 4) | — | `deduct_stablecoin_from_payer()` now uses correct `asset_id` instead of hard-coded CALL |
-| Priority fee scoring (Gap 5) | — | `protocol_priority_score()` computes `max_fee - gas_cost` and is enforced at mempool admission |
-| Compliance recipient checks (Gap 6) | — | `Transfer`, `BatchTransfer`, `TransferFrom` now check both sender and recipient compliance |
-| Custom compliance policy (Gap 8) | — | `CompliancePolicy::Custom` now invokes registered handlers from `ComplianceEngine::custom_handlers` |
-| Instruction count limit (Gap 9) | — | `MAX_INSTRUCTIONS_PER_TX` enforced at mempool admission and in payload builder |
-| Memo size enforcement (Gap 10) | — | `MAX_TOTAL_MEMO_BYTES` enforced at mempool admission |
-| MultiSig threshold (Gap 11) | — | `verify_signature_with_registry()` reads threshold from `SmartAccountRegistry`; falls back to 2 |
+| Atomic rollback (Gap 1) | `1d742f7` | `ComplianceEngine` and `ShieldedState` now cloned for snapshot-based rollback alongside `BalanceState` |
+| Sequential nonce enforcement (Gap 2) | `1d742f7` | Mempool tracks `expected_nonces` per sender; rejects old nonces |
+| Gas sponsor stubs (Gap 3) | `1d742f7` | `AuthorizedSponsor` fully implemented via `SponsorRegistry`; `PoolSponsor` and `PerTxSponsor` rejected at mempool |
+| Stablecoin fee deduction (Gap 4) | `1d742f7` | `deduct_stablecoin_from_payer()` now uses correct `asset_id` instead of hard-coded CALL |
+| Priority fee scoring (Gap 5) | `1d742f7` | `protocol_priority_score()` computes `max_fee - gas_cost` and is enforced at mempool admission |
+| Compliance recipient checks (Gap 6) | `1d742f7` | `Transfer`, `BatchTransfer`, `TransferFrom` now check both sender and recipient compliance |
+| Custom compliance policy (Gap 8) | `1d742f7` | `CompliancePolicy::Custom` now invokes registered handlers from `ComplianceEngine::custom_handlers` |
+| Instruction count limit (Gap 9) | `1d742f7` | `MAX_INSTRUCTIONS_PER_TX` enforced at mempool admission and in payload builder |
+| Memo size enforcement (Gap 10) | `1d742f7` | `MAX_TOTAL_MEMO_BYTES` enforced at mempool admission |
+| MultiSig threshold (Gap 11) | `1d742f7` | `verify_signature_with_registry()` reads threshold from `SmartAccountRegistry`; falls back to 2 |
 
 ---
 
