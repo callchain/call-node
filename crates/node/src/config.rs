@@ -117,6 +117,18 @@ pub struct RpcConfig {
     pub ws_addr: SocketAddr,
     #[serde(default = "RpcConfig::default_max_connections")]
     pub max_connections: u32,
+    /// Path to TLS certificate (PEM). Both cert and key must be set to enable TLS.
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS private key (PEM, PKCS#8).
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
+    /// Max requests per IP per window. None = no rate limiting.
+    #[serde(default)]
+    pub rate_limit_rps: Option<u64>,
+    /// Rate-limit window in seconds.
+    #[serde(default = "RpcConfig::default_rate_limit_window_secs")]
+    pub rate_limit_window_secs: u64,
 }
 
 impl Default for RpcConfig {
@@ -125,6 +137,10 @@ impl Default for RpcConfig {
             http_addr: Self::default_http_addr(),
             ws_addr: Self::default_ws_addr(),
             max_connections: Self::default_max_connections(),
+            tls_cert_path: None,
+            tls_key_path: None,
+            rate_limit_rps: None,
+            rate_limit_window_secs: Self::default_rate_limit_window_secs(),
         }
     }
 }
@@ -133,6 +149,7 @@ impl RpcConfig {
     fn default_http_addr() -> SocketAddr { "127.0.0.1:8545".parse().unwrap() }
     fn default_ws_addr() -> SocketAddr { "127.0.0.1:8546".parse().unwrap() }
     fn default_max_connections() -> u32 { 100 }
+    fn default_rate_limit_window_secs() -> u64 { 60 }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -276,6 +293,18 @@ impl NodeConfig {
         }
         if let Some(max_conn) = args.rpc_max_connections {
             self.rpc.max_connections = max_conn;
+        }
+        if args.tls_cert_path.is_some() {
+            self.rpc.tls_cert_path.clone_from(&args.tls_cert_path);
+        }
+        if args.tls_key_path.is_some() {
+            self.rpc.tls_key_path.clone_from(&args.tls_key_path);
+        }
+        if args.rate_limit_rps.is_some() {
+            self.rpc.rate_limit_rps = args.rate_limit_rps;
+        }
+        if args.rate_limit_window_secs != 60 {
+            self.rpc.rate_limit_window_secs = args.rate_limit_window_secs;
         }
 
         // Storage

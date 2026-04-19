@@ -308,6 +308,10 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         http_addr: config.rpc.http_addr,
         ws_addr: config.rpc.ws_addr,
         max_connections: config.rpc.max_connections,
+        tls_cert_path: config.rpc.tls_cert_path.clone(),
+        tls_key_path: config.rpc.tls_key_path.clone(),
+        rate_limit_rps: config.rpc.rate_limit_rps,
+        rate_limit_window_secs: config.rpc.rate_limit_window_secs,
     };
     node.start_rpc(rpc_config.clone()).await?;
     node.start_ws_rpc(rpc_config).await?;

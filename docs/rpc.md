@@ -51,11 +51,11 @@ The RPC layer is the primary interface for users, dApps, validators, and operato
 
 `build_rpc_module()` combines standard + callchain + WebSocket subscriptions into a single `RpcModule`.
 
-**Gap #1 — No TLS/HTTPS support:** RPC servers bind to plain HTTP. In production, sensitive operations (governance, payments) would traverse the network unencrypted.
+**Gap #1 — TLS/HTTPS:** Supported via `tokio-rustls`. Configure `tls_cert_path` and `tls_key_path` in `[rpc]` section of config. Both HTTP and WebSocket servers will serve over TLS when both paths are provided.
 
 **Gap #2 — No authentication/authorization:** There is no API key, JWT, or IP allowlist. Anyone with network access can call any endpoint including governance and emergency pause.
 
-**Gap #3 — No rate limiting:** `max_connections` caps concurrent connections but does not limit requests per second per client. A single connection can flood the server.
+**Gap #3 — Rate limiting:** Per-IP sliding-window rate limiter at connection level. Configure `rate_limit_rps` and `rate_limit_window_secs` in `[rpc]` section. Connections exceeding the limit are dropped before request processing begins.
 
 ### 2. Standard Ethereum RPC (`standard.rs`)
 
@@ -198,7 +198,7 @@ pub struct RpcState {
 | Shielded RPC | 🔴 Not ready | Proving unavailable, balance query returns 0 |
 | Light client RPC | 🔴 Not ready | Signature verification skipped, fake balance proofs |
 | WebSocket subscriptions | 🟡 Partial | Works but no auth, silent lag |
-| Security | 🔴 Not ready | No TLS, no auth, no rate limiting |
+| Security | 🟡 Partial | TLS and rate limiting implemented; auth (JWT/API key) still missing |
 
 ---
 
@@ -206,9 +206,9 @@ pub struct RpcState {
 
 | # | Gap | Severity | Details |
 |---|-----|----------|---------|
-| 1 | **No TLS/HTTPS** | High | All RPC traffic is unencrypted. Sensitive operations exposed over plain HTTP. |
-| 2 | **No authentication/authorization** | Critical | No API keys, JWT, or IP allowlist. Anyone can call governance, emergency pause, oracle submit. |
-| 3 | **No rate limiting** | High | `max_connections` only caps connections. No per-client request throttling. DoS vector. |
+| 1 | ~~No TLS/HTTPS~~ | — | **Resolved.** TLS via `tokio-rustls`. Configure `tls_cert_path` + `tls_key_path` in `[rpc]`. |
+| 2 | **No authentication/authorization** | Critical | No API keys, JWT, or IP allowlist. Anyone can call governance, emergency pause. |
+| 3 | ~~No rate limiting~~ | — | **Resolved.** Per-IP sliding-window rate limiter at connection level. Configurable via `rate_limit_rps` + `rate_limit_window_secs`. |
 | 4 | **`eth_getLogs` is O(n)** | High | Scans all receipts linearly. Will degrade severely with chain growth. |
 | 5 | **`eth_getProof` stubbed** | Medium | Always returns empty proof. Breaks light client compatibility. |
 | 6 | **EVM txs execute immediately** | High | Bypass block production pipeline. No consensus ordering, no block inclusion. |
@@ -235,4 +235,4 @@ pub struct RpcState {
 ## Test Status
 
 - `cargo test -p call-rpc` — unit tests cover RPC module building, subscription registration, handler state operations
-- Missing: TLS tests, auth tests, rate limit tests, `eth_getLogs` performance tests, light client verification tests, bridge signature verification tests, WebSocket lag handling tests
+- Missing: auth tests, `eth_getLogs` performance tests, light client verification tests, bridge signature verification tests, WebSocket lag handling tests

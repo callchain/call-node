@@ -47,7 +47,7 @@ use call_evm::EvmState;
 use call_bridge::BridgeStateManager;
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
-use jsonrpsee::server::{Server, ServerHandle};
+use jsonrpsee::server::ServerHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -252,19 +252,14 @@ impl CallNode {
         })
     }
 
-    /// Start the HTTP RPC server
+    /// Start the HTTP RPC server (HTTP or HTTPS depending on TLS config)
     pub async fn start_rpc(&mut self, config: RpcConfig) -> Result<(), String> {
         let module = build_rpc_module(Arc::clone(&self.state))
             .map_err(|e| format!("failed to build RPC module: {e}"))?;
 
-        let server = Server::builder()
-            .max_connections(config.max_connections)
-            .build(config.http_addr)
+        let handle = call_rpc::start_http_server(config, module)
             .await
-            .map_err(|e| format!("bind failed: {e}"))?;
-
-        let handle = server.start(module);
-        tracing::info!("HTTP RPC server started on {}", config.http_addr);
+            .map_err(|e| format!("HTTP server start failed: {e}"))?;
 
         self.server_handle = Some(handle);
         Ok(())
@@ -277,15 +272,11 @@ impl CallNode {
         let module = build_rpc_module(Arc::clone(&self.state))
             .map_err(|e| format!("failed to build WS module: {e}"))?;
 
-        let server = Server::builder()
-            .build(config.ws_addr)
+        let handle = call_rpc::start_ws_server(config, module)
             .await
-            .map_err(|e| format!("WS bind failed: {e}"))?;
+            .map_err(|e| format!("WS server start failed: {e}"))?;
 
-        let handle = server.start(module);
         self.ws_server_handle = Some(handle);
-        tracing::info!("WebSocket RPC server started on {}", config.ws_addr);
-
         Ok(())
     }
 

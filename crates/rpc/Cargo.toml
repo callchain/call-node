@@ -32,6 +32,10 @@ tracing.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 hex = "0.4"
+dashmap.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
 call-light-client = { workspace = true, optional = true }
 
 [features]

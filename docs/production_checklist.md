@@ -42,9 +42,9 @@ The RPC is the primary external interface and currently has no guards.
 | Priority | Action | Files |
 |----------|--------|-------|
 | **P2** | Add JWT or API-key authentication to sensitive endpoints (governance, oracle, bridge, pause) | `crates/rpc/src/lib.rs`, `handlers.rs` |
-| **P2** | Add per-client rate limiting (requests/sec per connection) | `crates/rpc/src/lib.rs` |
-| **P2** | Add TLS/HTTPS support (or document reverse-proxy requirement) | `crates/rpc/src/lib.rs` |
-| **P2** | Fix `call_governanceExecute` — verify signature against actual proposer, not `Address::default()` | `crates/rpc/src/callchain.rs` |
+| ~~P2~~ | ~~Add per-client rate limiting~~ | ~~`crates/rpc/src/lib.rs`~~ | **Done.** Per-IP sliding-window rate limiter at connection level (`RateLimiter`). Configurable via `rate_limit_rps` / `rate_limit_window_secs`. |
+| ~~P2~~ | ~~Add TLS/HTTPS support~~ | ~~`crates/rpc/src/lib.rs`~~ | **Done.** Both HTTP and WS servers support TLS via `tokio-rustls`. Configured via `tls_cert_path` / `tls_key_path`. |
+| ~~P2~~ | ~~Fix `call_governanceExecute` signature binding~~ | ~~`crates/rpc/src/callchain.rs`~~ | **Done.** Refactored to transaction submission; signature verified by `ProtocolTransaction::verify_signature()` against actual sender. |
 
 ---
 

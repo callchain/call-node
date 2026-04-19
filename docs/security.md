@@ -125,8 +125,8 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 
 | # | Gap | Module | Details |
 |---|-----|--------|---------|
-| 9 | **RPC has no TLS/HTTPS** | RPC | All traffic over plain HTTP. Sensitive operations exposed unencrypted. |
-| 10 | **RPC has no rate limiting** | RPC | `max_connections` only caps connections. No per-client request throttling. DoS vector. |
+| 9 | ~~RPC has no TLS/HTTPS~~ | RPC | **Resolved.** Both HTTP and WS servers support TLS via `tokio-rustls`. Configured via `tls_cert_path` / `tls_key_path`. |
+| 10 | ~~RPC has no rate limiting~~ | RPC | **Resolved.** Per-IP sliding-window rate limiter at connection level (`RateLimiter`). Configurable via `rate_limit_rps` / `rate_limit_window_secs`. |
 | 11 | **Default agent permissions are wide open** | Agent | `allowed_assets = []` means ALL assets allowed. `daily_limit = MAX`. Unlimited scope by default. |
 | 12 | **Domain verification is format-only** | Agent | `verify_domain_proof()` only checks URL syntax. No DNS or HTTP verification. |
 | 13 | **Governance execute signature binding broken** | RPC/Gov | `call_governanceExecute` verifies signature format against `Address::default()`, not the actual proposer. |
@@ -170,7 +170,7 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 | P2P defense | Partial | Library exists, not wired to actual P2P handlers |
 | Consensus defense (double-sign) | Partial | Detection works, no economic penalty or persistence |
 | MEV protection | Not ready | Commit-reveal library exists, not integrated |
-| RPC security | Not ready | No TLS, no auth, no rate limiting |
+| RPC security | Partial | TLS + rate limiting implemented; auth (JWT/API key) still missing |
 | Signature verification (protocol) | Not ready | `execute_protocol_instructions` skips verification |
 | Signature verification (oracle) | Not ready | Oracle submissions not verified |
 | Signature verification (bridge) | Not ready | Bridge signatures counted but not verified |
@@ -183,4 +183,4 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 
 - `cargo test -p call-protocol` (security tests) — covers block limits, mempool rate limiting, address saturation, replay protection, shielded per-block limits, nullifier double-spend, P2P rate limiting, consensus double-sign detection
 - `cargo test -p call-network` (limits tests) — covers default limits, custom limits, validation bounds
-- Missing: integration of defense layers into actual RPC/network paths, economic slashing tests, MEV commit-reveal integration tests, auth/TLS tests, signature verification tests for oracle/bridge/light-client paths
+- Missing: integration of defense layers into actual RPC/network paths, economic slashing tests, MEV commit-reveal integration tests, auth tests, signature verification tests for oracle/bridge/light-client paths

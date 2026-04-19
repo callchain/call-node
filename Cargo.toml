@@ -194,6 +194,12 @@ jiff = { version = "0.2", features = ["std"] }
 # JSON-RPC
 jsonrpsee = { version = "0.24", features = ["server", "ws-client"] }
 
+# RPC rate limiting & TLS
+dashmap = "6"
+tokio-rustls = "0.24"
+rustls = "0.21"
+rustls-pemfile = "1"
+
 # Build
 vergen = "9"
 vergen-git2 = "1"

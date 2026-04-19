@@ -93,6 +93,22 @@ pub struct CliArgs {
     #[arg(long)]
     pub rpc_max_connections: Option<u32>,
 
+    /// Path to TLS certificate (PEM) for HTTPS RPC
+    #[arg(long)]
+    pub tls_cert_path: Option<String>,
+
+    /// Path to TLS private key (PEM, PKCS#8) for HTTPS RPC
+    #[arg(long)]
+    pub tls_key_path: Option<String>,
+
+    /// Per-IP rate limit: max requests per window (default: disabled)
+    #[arg(long)]
+    pub rate_limit_rps: Option<u64>,
+
+    /// Per-IP rate limit window in seconds (default: 60)
+    #[arg(long, default_value_t = 60)]
+    pub rate_limit_window_secs: u64,
+
     // ── Storage ───────────────────────────────────────────────────────
 
     /// Data directory for block/chain storage
