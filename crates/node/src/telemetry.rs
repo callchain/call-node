@@ -4,7 +4,7 @@
 //! `/metrics` endpoint on `:9090`. Alert rules for operational monitoring.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -53,6 +53,10 @@ pub struct TelemetryRegistry {
     pub p2p_peers: AtomicU64,
     pub p2p_bytes_sent: AtomicU64,
     pub p2p_bytes_received: AtomicU64,
+    // Latency histograms (rolling window, durations in milliseconds)
+    pub block_latency_ms: RwLock<Vec<u64>>,
+    pub tx_latency_ms: RwLock<Vec<u64>>,
+    pub p2p_latency_ms: RwLock<Vec<u64>>,
 }
 
 impl TelemetryRegistry {
@@ -72,6 +76,9 @@ impl TelemetryRegistry {
             p2p_peers: AtomicU64::new(0),
             p2p_bytes_sent: AtomicU64::new(0),
             p2p_bytes_received: AtomicU64::new(0),
+            block_latency_ms: RwLock::new(Vec::new()),
+            tx_latency_ms: RwLock::new(Vec::new()),
+            p2p_latency_ms: RwLock::new(Vec::new()),
         }
     }
 
@@ -161,6 +168,42 @@ impl TelemetryRegistry {
         self.p2p_bytes_received.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    /// Record block production latency in milliseconds
+    pub fn record_block_latency(&self, duration_ms: u64) {
+        let mut h = self.block_latency_ms.write().unwrap();
+        h.push(duration_ms);
+        if h.len() > 10_000 {
+            h.remove(0);
+        }
+    }
+
+    /// Record transaction execution latency in milliseconds
+    pub fn record_tx_latency(&self, duration_ms: u64) {
+        let mut h = self.tx_latency_ms.write().unwrap();
+        h.push(duration_ms);
+        if h.len() > 10_000 {
+            h.remove(0);
+        }
+    }
+
+    /// Record P2P operation latency in milliseconds
+    pub fn record_p2p_latency(&self, duration_ms: u64) {
+        let mut h = self.p2p_latency_ms.write().unwrap();
+        h.push(duration_ms);
+        if h.len() > 10_000 {
+            h.remove(0);
+        }
+    }
+
+    /// Compute quantiles (p50, p95, p99) from a sorted slice
+    fn quantile(sorted: &[u64], q: f64) -> u64 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        let idx = ((sorted.len() as f64 - 1.0) * q) as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
     /// Generate Prometheus text format output
     pub fn prometheus_output(&self) -> String {
         let mut output = String::new();
@@ -210,6 +253,35 @@ impl TelemetryRegistry {
             "# HELP node_uptime_seconds Node uptime in seconds\n# TYPE node_uptime_seconds gauge\nnode_uptime_seconds {:.0}\n",
             self.uptime().as_secs_f64()
         ));
+
+        // Histograms
+        {
+            let mut block_lat = self.block_latency_ms.write().unwrap();
+            block_lat.sort_unstable();
+            output.push_str("# HELP block_latency_ms Block production latency in milliseconds\n# TYPE block_latency_ms summary\n");
+            output.push_str(&format!("block_latency_ms{{quantile=\"0.5\"}} {}\n", Self::quantile(&block_lat, 0.5)));
+            output.push_str(&format!("block_latency_ms{{quantile=\"0.95\"}} {}\n", Self::quantile(&block_lat, 0.95)));
+            output.push_str(&format!("block_latency_ms{{quantile=\"0.99\"}} {}\n", Self::quantile(&block_lat, 0.99)));
+            output.push_str(&format!("block_latency_ms_count {}\n", block_lat.len()));
+        }
+        {
+            let mut tx_lat = self.tx_latency_ms.write().unwrap();
+            tx_lat.sort_unstable();
+            output.push_str("# HELP tx_latency_ms Transaction execution latency in milliseconds\n# TYPE tx_latency_ms summary\n");
+            output.push_str(&format!("tx_latency_ms{{quantile=\"0.5\"}} {}\n", Self::quantile(&tx_lat, 0.5)));
+            output.push_str(&format!("tx_latency_ms{{quantile=\"0.95\"}} {}\n", Self::quantile(&tx_lat, 0.95)));
+            output.push_str(&format!("tx_latency_ms{{quantile=\"0.99\"}} {}\n", Self::quantile(&tx_lat, 0.99)));
+            output.push_str(&format!("tx_latency_ms_count {}\n", tx_lat.len()));
+        }
+        {
+            let mut p2p_lat = self.p2p_latency_ms.write().unwrap();
+            p2p_lat.sort_unstable();
+            output.push_str("# HELP p2p_latency_ms P2P operation latency in milliseconds\n# TYPE p2p_latency_ms summary\n");
+            output.push_str(&format!("p2p_latency_ms{{quantile=\"0.5\"}} {}\n", Self::quantile(&p2p_lat, 0.5)));
+            output.push_str(&format!("p2p_latency_ms{{quantile=\"0.95\"}} {}\n", Self::quantile(&p2p_lat, 0.95)));
+            output.push_str(&format!("p2p_latency_ms{{quantile=\"0.99\"}} {}\n", Self::quantile(&p2p_lat, 0.99)));
+            output.push_str(&format!("p2p_latency_ms_count {}\n", p2p_lat.len()));
+        }
 
         // Registered metrics
         let metrics = self.metrics.read().unwrap();
@@ -379,6 +451,119 @@ pub fn default_alert_rules() -> Vec<AlertRule> {
     ]
 }
 
+// ── Health Endpoint ──────────────────────────────────────────────────
+
+/// Subsystem health state passed to the /health handler
+#[derive(Clone)]
+pub struct HealthState {
+    pub db: std::sync::Arc<reth_db::DatabaseEnv>,
+    pub network: Option<std::sync::Arc<dyn call_network::Network>>,
+    pub consensus: std::sync::Arc<std::sync::RwLock<call_consensus::SimplexConsensus>>,
+}
+
+/// Lightweight DB heartbeat: write and immediately delete a test key
+fn db_heartbeat(db: &reth_db::DatabaseEnv) -> Result<(), String> {
+    use call_storage::reth_db::{db_del, db_put};
+    use call_storage::reth_db::CallMetadataChainId;
+    let key = b"__health_check__".to_vec();
+    db_put::<CallMetadataChainId>(db, key.clone(), b"1".to_vec())
+        .map_err(|e| format!("db write failed: {e}"))?;
+    db_del::<CallMetadataChainId>(db, &key)
+        .map_err(|e| format!("db delete failed: {e}"))?;
+    Ok(())
+}
+
+// ── Alert Dispatcher ─────────────────────────────────────────────────
+
+/// Dispatches triggered alerts to webhook and/or Slack
+pub struct AlertDispatcher {
+    pub webhook_url: Option<String>,
+    pub slack_webhook_url: Option<String>,
+    pub last_alert_names: RwLock<HashSet<String>>,
+}
+
+impl AlertDispatcher {
+    pub fn new(webhook_url: Option<String>, slack_webhook_url: Option<String>) -> Self {
+        Self {
+            webhook_url,
+            slack_webhook_url,
+            last_alert_names: RwLock::new(HashSet::new()),
+        }
+    }
+
+    pub async fn dispatch(&self, alert: &Alert) {
+        if let Some(url) = &self.webhook_url {
+            let _ = self.send_webhook(url, alert).await;
+        }
+        if let Some(url) = &self.slack_webhook_url {
+            let _ = self.send_slack(url, alert).await;
+        }
+    }
+
+    async fn send_webhook(&self, url: &str, alert: &Alert) -> Result<(), reqwest::Error> {
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "alert": alert.name,
+            "severity": format!("{:?}", alert.severity),
+            "message": alert.message,
+            "time": format!("{:?}", alert.triggered_at),
+        });
+        let body = serde_json::to_string(&payload).unwrap_or_default();
+        client.post(url).header("Content-Type", "application/json").body(body).send().await?;
+        Ok(())
+    }
+
+    async fn send_slack(&self, url: &str, alert: &Alert) -> Result<(), reqwest::Error> {
+        let color = match alert.severity {
+            AlertSeverity::Critical => "danger",
+            AlertSeverity::Warning => "warning",
+            AlertSeverity::Info => "good",
+        };
+        let ts = alert
+            .triggered_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let payload = serde_json::json!({
+            "attachments": [{
+                "color": color,
+                "title": format!("Callchain Alert: {}", alert.name),
+                "text": alert.message,
+                "footer": "callchain-telemetry",
+                "ts": ts,
+            }]
+        });
+        let body = serde_json::to_string(&payload).unwrap_or_default();
+        reqwest::Client::new().post(url).header("Content-Type", "application/json").body(body).send().await?;
+        Ok(())
+    }
+}
+
+/// Start a background task that evaluates alert rules every 30 seconds
+pub fn start_alert_task(
+    registry: std::sync::Arc<TelemetryRegistry>,
+    dispatcher: AlertDispatcher,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let rules = default_alert_rules();
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let alerts = evaluate_alerts(&registry, &rules);
+            let last_names = dispatcher.last_alert_names.read().unwrap().clone();
+            for alert in &alerts {
+                if !last_names.contains(&alert.name) {
+                    tracing::warn!(alert = %alert.name, severity = ?alert.severity, "ALERT triggered");
+                    dispatcher.dispatch(alert).await;
+                }
+            }
+            let mut names = dispatcher.last_alert_names.write().unwrap();
+            names.clear();
+            names.extend(alerts.iter().map(|a| a.name.clone()));
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,12 +725,16 @@ use tokio::net::TcpListener;
 /// Returns the bound address once the server is listening.
 pub async fn start_metrics_server(
     registry: Arc<TelemetryRegistry>,
+    health: HealthState,
     listen_addr: SocketAddr,
 ) -> Result<SocketAddr, std::io::Error> {
-    let app = Router::new()
+    let metrics_app = Router::new()
         .route("/metrics", axum::routing::get(metrics_handler))
-        .with_state(registry)
-        .route("/health", axum::routing::get(health_handler));
+        .with_state(registry);
+    let health_app = Router::new()
+        .route("/health", axum::routing::get(health_handler))
+        .with_state(health);
+    let app = metrics_app.merge(health_app);
 
     let listener = TcpListener::bind(listen_addr).await?;
     let bound = listener.local_addr()?;
@@ -571,8 +760,55 @@ async fn metrics_handler(
         .into_response()
 }
 
-async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+async fn health_handler(
+    State(state): State<HealthState>,
+) -> impl IntoResponse {
+    use axum::Json;
+    let mut checks: HashMap<&str, String> = HashMap::new();
+    let mut healthy = true;
+
+    // DB check
+    match db_heartbeat(&state.db) {
+        Ok(()) => {
+            checks.insert("db", "ok".to_string());
+        }
+        Err(e) => {
+            healthy = false;
+            checks.insert("db", e);
+        }
+    }
+
+    // P2P check
+    match &state.network {
+        Some(net) if net.is_healthy() => {
+            checks.insert("p2p", "ok".to_string());
+        }
+        Some(_) => {
+            healthy = false;
+            checks.insert("p2p", "no_peers".to_string());
+        }
+        None => {
+            checks.insert("p2p", "disabled".to_string());
+        }
+    }
+
+    // Sync check
+    let height = state.consensus.read().unwrap().current_height();
+    if height > 0 {
+        checks.insert("sync", "ok".to_string());
+    } else {
+        healthy = false;
+        checks.insert("sync", "not_started".to_string());
+    }
+
+    let status = if healthy { "healthy" } else { "degraded" };
+    let body = serde_json::json!({ "status": status, "checks": checks });
+    let code = if healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(body))
 }
 
 // ── OpenTelemetry Tracing Integration ──────────────────────────────
@@ -721,20 +957,41 @@ mod integration_tests {
     use super::*;
     use axum::http::StatusCode;
 
+    fn dummy_health() -> HealthState {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-health-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = call_storage::open_db(tmp).unwrap();
+        HealthState {
+            db: db.db,
+            network: None,
+            consensus: std::sync::Arc::new(std::sync::RwLock::new(
+                call_consensus::SimplexConsensus::new(
+                    call_consensus::ConsensusParams::default(),
+                    call_consensus::ValidatorStateManager::default(),
+                ),
+            )),
+        }
+    }
+
     #[tokio::test]
     async fn test_metrics_http_server() {
         let registry = Arc::new(TelemetryRegistry::new(std::env::temp_dir()));
         registry.record_block_produced();
         registry.set_p2p_peers(5);
 
-        let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
+        let addr = start_metrics_server(registry, dummy_health(), "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
 
         // Give server a moment to start
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let resp = client
             .get(format!("http://{addr}/metrics"))
             .send()
@@ -750,33 +1007,39 @@ mod integration_tests {
     #[tokio::test]
     async fn test_health_endpoint() {
         let registry = Arc::new(TelemetryRegistry::new(std::env::temp_dir()));
-        let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
+        let addr = start_metrics_server(registry, dummy_health(), "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let resp = client
             .get(format!("http://{addr}/health"))
             .send()
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(resp.text().await.unwrap(), "ok");
+        // With no network and height=0, should be degraded (503)
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body_text = resp.text().await.unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body_text).unwrap();
+        assert_eq!(body["status"], "degraded");
+        assert!(body["checks"]["db"].as_str().unwrap().contains("ok"));
+        assert_eq!(body["checks"]["p2p"], "disabled");
+        assert_eq!(body["checks"]["sync"], "not_started");
     }
 
     #[tokio::test]
     async fn test_metrics_content_type() {
         let registry = Arc::new(TelemetryRegistry::new(std::env::temp_dir()));
-        let addr = start_metrics_server(registry, "127.0.0.1:0".parse().unwrap())
+        let addr = start_metrics_server(registry, dummy_health(), "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let resp = client
             .get(format!("http://{addr}/metrics"))
             .send()

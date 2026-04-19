@@ -50,7 +50,7 @@ use call_shielded::ShieldedState;
 use jsonrpsee::server::{Server, ServerHandle};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -104,13 +104,17 @@ pub struct CallNode {
     /// Shared block cache for BFT digest → block mapping.
     /// Populated by propose, received blocks from P2P relay, and consumed by verify/finalize.
     pub block_cache: Arc<std::sync::Mutex<BlockCache>>,
+    /// Telemetry registry for metrics, alerts, and latency histograms
+    pub telemetry: Arc<crate::telemetry::TelemetryRegistry>,
+    /// Append-only audit log for compliance and tamper evidence
+    pub audit_log: Arc<RwLock<crate::logging::AuditLog>>,
 }
 
 impl CallNode {
     /// Create a new node with default state
     pub fn new(data_dir: PathBuf) -> Result<Self, String> {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
-        let db = open_db(data_dir).map_err(|e| format!("failed to open db: {e}"))?;
+        let db = open_db(data_dir.clone()).map_err(|e| format!("failed to open db: {e}"))?;
 
         // Restore prune state from disk if previously persisted
         let prune_state = db.load_prune_state()
@@ -221,6 +225,14 @@ impl CallNode {
         // Set parent_hash to the last committed block hash from persisted state
         let parent_hash = consensus.last_block_hash();
 
+        // Initialize telemetry and audit log
+        let telemetry = Arc::new(crate::telemetry::TelemetryRegistry::new(data_dir.clone()));
+        let audit_path = data_dir.join("audit.log");
+        let audit_log = Arc::new(RwLock::new(
+            crate::logging::AuditLog::open_file(&audit_path)
+                .map_err(|e| format!("failed to open audit log: {e}"))?,
+        ));
+
         Ok(Self {
             state,
             mempool,
@@ -232,6 +244,8 @@ impl CallNode {
             ws_server_handle: None,
             parent_hash,
             block_cache: Arc::new(std::sync::Mutex::new(BlockCache::new(1000))),
+            telemetry,
+            audit_log,
         })
     }
 
@@ -290,8 +304,11 @@ impl CallNode {
         let data_dir = self.db.data_dir.clone();
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
+        let telemetry = Arc::clone(&self.telemetry);
         tokio::spawn(async move {
             while let Ok((peer_id, channel, data)) = net_clone.receive().await {
+                telemetry.record_p2p_bytes_received(data.len());
+                telemetry.set_p2p_peers(net_clone.peer_count());
                 if channel == SYNC_CHANNEL {
                     // Handle sync requests: respond with blocks
                     if let Ok(NetworkMessage::SyncRequest(request)) = bincode::deserialize(&data) {
@@ -332,6 +349,8 @@ impl CallNode {
         let parent_hash = self.parent_hash;
         let db = self.db.clone();
         let prune_state = self.prune_state.clone();
+        let telemetry = Arc::clone(&self.telemetry);
+        let audit_log = Arc::clone(&self.audit_log);
 
         let subscriptions = self.state.subscriptions.clone();
 
@@ -344,6 +363,8 @@ impl CallNode {
             db,
             prune_state,
             subscriptions,
+            telemetry,
+            audit_log,
         ))
     }
 
@@ -366,6 +387,8 @@ impl CallNode {
         let network = self.network.clone();
         let data_dir = self.db.data_dir.clone();
         let block_cache = Arc::clone(&self.block_cache);
+        let telemetry = Arc::clone(&self.telemetry);
+        let audit_log = Arc::clone(&self.audit_log);
 
         tokio::spawn(async move {
             let mut epoch_number: u64 = 0;
@@ -424,6 +447,8 @@ impl CallNode {
                         block_cache.clone(),
                         network.clone(),
                         data_dir.clone(),
+                        telemetry.clone(),
+                        audit_log.clone(),
                         &subset,
                         epoch_number,
                         parent_hash,
@@ -486,6 +511,8 @@ impl CallNode {
         block_cache: Arc<std::sync::Mutex<BlockCache>>,
         network: Option<Arc<dyn Network>>,
         data_dir: PathBuf,
+        telemetry: Arc<crate::telemetry::TelemetryRegistry>,
+        audit_log: Arc<RwLock<crate::logging::AuditLog>>,
         subset: &[call_primitives::ValidatorId],
         epoch_number: u64,
         parent_hash: BlockHash,
@@ -618,6 +645,8 @@ impl CallNode {
             parent_hash,
             network,
             data_dir,
+            telemetry,
+            audit_log,
             epoch_number,
             exit_tx,
         ));
@@ -1491,6 +1520,8 @@ async fn block_production_loop(
     db: CallDb,
     mut prune_state: PruneState,
     subscriptions: SubscriptionManager,
+    telemetry: Arc<crate::telemetry::TelemetryRegistry>,
+    audit_log: Arc<RwLock<crate::logging::AuditLog>>,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -1504,6 +1535,8 @@ async fn block_production_loop(
 
         // 1. Select transactions from mempool
         let selection = { mempool.write().unwrap().select_transactions() };
+        telemetry.set_mempool_size(selection.protocol_txs.len() + selection.evm_txs.len());
+        telemetry.set_bridge_pending(selection.bridge_ops.len());
 
         // 2. Build block
         let (proposer, height) = {
@@ -1513,6 +1546,8 @@ async fn block_production_loop(
         let Some(proposer) = proposer else {
             continue; // not our turn, skip this round
         };
+
+        let block_start = Instant::now();
 
         // Deserialize protocol txs from mempool data
         let protocol_txs: Vec<ProtocolTransaction> = selection
@@ -1538,6 +1573,7 @@ async fn block_production_loop(
         );
 
         // 3. Execute block
+        let exec_start = Instant::now();
         let result = {
             let mut balances = state.balance_state.write().unwrap();
             let registry = state.asset_registry.read().unwrap();
@@ -1565,6 +1601,8 @@ async fn block_production_loop(
                 Some(&*agent_registry),
             )
         };
+        let exec_duration = exec_start.elapsed().as_millis() as u64;
+        telemetry.record_tx_latency(exec_duration);
         let result = match result {
             Ok(r) => r,
             Err(e) => {
@@ -1668,6 +1706,38 @@ async fn block_production_loop(
                 continue;
             }
         }
+        telemetry.record_block_produced();
+        telemetry.record_block_committed();
+        let block_duration = block_start.elapsed().as_millis() as u64;
+        telemetry.record_block_latency(block_duration);
+
+        // Append audit entries for each protocol transaction
+        {
+            let mut audit = audit_log.write().unwrap();
+            for (tx_idx, tx) in block.protocol_txs.iter().enumerate() {
+                let tx_hash = {
+                    let data = serde_json::to_vec(tx).unwrap_or_default();
+                    call_crypto::keccak256(&data)
+                };
+                for instr in &tx.instructions {
+                    let entry = crate::logging::AuditEntry {
+                        block_height: block.header.height,
+                        tx_index: tx_idx as u32,
+                        tx_type: format!("{:?}", std::mem::discriminant(instr)),
+                        action: format!("{:?}", instr),
+                        agent_id: None,
+                        fee_payer: Some(tx.sender),
+                        before_state: serde_json::Value::Null,
+                        after_state: serde_json::Value::Null,
+                        tx_hash,
+                        shielded_details: None,
+                    };
+                    if let Err(e) = audit.append(entry) {
+                        tracing::warn!(error = %e, "audit log append failed");
+                    }
+                }
+            }
+        }
 
         // 7a. Check and apply any scheduled protocol upgrades at this height
         {
@@ -1766,7 +1836,10 @@ async fn block_production_loop(
             };
             let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
                 .expect("serialize block announcement");
-            net.broadcast(BLOCK_CHANNEL, msg).await;
+            let broadcast_start = Instant::now();
+            net.broadcast(BLOCK_CHANNEL, msg.clone()).await;
+            telemetry.record_p2p_latency(broadcast_start.elapsed().as_millis() as u64);
+            telemetry.record_p2p_bytes_sent(msg.len());
 
             // 17a. Gossip scheduled upgrade announcement if one exists
             let upgrade = {
@@ -1781,7 +1854,10 @@ async fn block_production_loop(
                 tracing::debug!(activation_height = upgrade.activation_height, ?upgrade.version, "broadcast upgrade announcement");
                 let msg = bincode::serialize(&NetworkMessage::UpgradeAnnouncement(upgrade))
                     .expect("serialize upgrade announcement");
-                net.broadcast(UPGRADE_CHANNEL, msg).await;
+                let broadcast_start = Instant::now();
+                net.broadcast(UPGRADE_CHANNEL, msg.clone()).await;
+                telemetry.record_p2p_latency(broadcast_start.elapsed().as_millis() as u64);
+                telemetry.record_p2p_bytes_sent(msg.len());
             }
         }
     }
@@ -1903,6 +1979,8 @@ async fn bft_event_loop(
     mut parent_hash: BlockHash,
     network: Option<Arc<dyn Network>>,
     data_dir: PathBuf,
+    telemetry: Arc<crate::telemetry::TelemetryRegistry>,
+    audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     epoch_number: u64,
     exit_tx: oneshot::Sender<EpochRotationReason>,
 ) {
@@ -1994,6 +2072,7 @@ async fn bft_event_loop(
                 );
 
                 // Execute the block
+                let exec_start = Instant::now();
                 let result = {
                     let mut balances = state.balance_state.write().unwrap();
                     let registry = state.asset_registry.read().unwrap();
@@ -2021,10 +2100,12 @@ async fn bft_event_loop(
                         Some(&*agent_registry),
                     )
                 };
+                telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
 
                 match result {
                     Ok(result) => {
                         block.finalize(&result);
+                        telemetry.record_block_produced();
 
                         // Handle oracle period transitions at boundary heights
                         if is_oracle_boundary {
@@ -2097,6 +2178,7 @@ async fn bft_event_loop(
 
                 let valid = if let Some(block) = block {
                     let height = block.header.height;
+                    let exec_start = Instant::now();
                     let result = {
                         let mut balances = state.balance_state.write().unwrap();
                         let registry = state.asset_registry.read().unwrap();
@@ -2124,6 +2206,7 @@ async fn bft_event_loop(
                             Some(&*agent_registry),
                         )
                     };
+                    telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
 
                     match result {
                         Ok(r) => {
@@ -2230,6 +2313,35 @@ async fn bft_event_loop(
                         if let Err(e) = c.commit_block(&block, &result) {
                             tracing::warn!(error = ?e, height, "BFT finalize: commit failed");
                             continue;
+                        }
+                    }
+                    telemetry.record_block_committed();
+
+                    // Append audit entries for each protocol transaction
+                    {
+                        let mut audit = audit_log.write().unwrap();
+                        for (tx_idx, tx) in block.protocol_txs.iter().enumerate() {
+                            let tx_hash = {
+                                let data = serde_json::to_vec(tx).unwrap_or_default();
+                                call_crypto::keccak256(&data)
+                            };
+                            for instr in &tx.instructions {
+                                let entry = crate::logging::AuditEntry {
+                                    block_height: block.header.height,
+                                    tx_index: tx_idx as u32,
+                                    tx_type: format!("{:?}", std::mem::discriminant(instr)),
+                                    action: format!("{:?}", instr),
+                                    agent_id: None,
+                                    fee_payer: Some(tx.sender),
+                                    before_state: serde_json::Value::Null,
+                                    after_state: serde_json::Value::Null,
+                                    tx_hash,
+                                    shielded_details: None,
+                                };
+                                if let Err(e) = audit.append(entry) {
+                                    tracing::warn!(error = %e, "audit log append failed");
+                                }
+                            }
                         }
                     }
 
@@ -2801,6 +2913,8 @@ mod tests {
                 &mut evm_state,
                 None,
                 None,
+                None,
+                None,
             )
             .expect("execution");
         block.finalize(&result);
@@ -2884,6 +2998,8 @@ mod tests {
                 &mut fee_params,
                 height,
                 &mut evm_state,
+                None,
+                None,
                 None,
                 None,
             )
@@ -2984,7 +3100,7 @@ mod tests {
         let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -3090,7 +3206,7 @@ mod tests {
         let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None)
+            .execute(&mut balances, &registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None)
             .expect("execution");
         block.finalize(&result);
 

@@ -6,7 +6,7 @@
 use call_node::boot::boot_node;
 use call_node::cli::{CliArgs, Commands, WalletCommand};
 use call_node::config::NodeConfig;
-use call_node::telemetry::{init_opentelemetry_tracing, start_metrics_server, TelemetryRegistry};
+use call_node::telemetry::{init_opentelemetry_tracing, start_alert_task, start_metrics_server, AlertDispatcher, HealthState, TelemetryRegistry};
 use call_node::wallet;
 use clap::Parser;
 use std::sync::Arc;
@@ -46,9 +46,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut node = boot_node(&config).await?;
 
     // Start Prometheus /metrics HTTP server (per spec §20)
-    let registry = Arc::new(TelemetryRegistry::new(config.storage.data_dir.clone()));
-    let metrics_addr = start_metrics_server(Arc::clone(&registry), config.metrics.addr).await?;
+    let registry = Arc::clone(&node.telemetry);
+    let health = HealthState {
+        db: Arc::clone(&node.db.db),
+        network: node.network.clone(),
+        consensus: Arc::clone(&node.consensus),
+    };
+    let metrics_addr = start_metrics_server(Arc::clone(&registry), health, config.metrics.addr).await?;
     tracing::info!("  Metrics server started on http://{metrics_addr}");
+
+    // Start background alert evaluation task
+    let dispatcher = AlertDispatcher::new(None, None);
+    let _alert_handle = start_alert_task(registry, dispatcher);
+    tracing::info!("  Alert evaluation task started");
 
     tracing::info!("Callchain node running. Press Ctrl+C to stop.");
 
