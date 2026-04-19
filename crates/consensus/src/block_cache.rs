@@ -61,6 +61,12 @@ impl BlockCache {
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
+
+    /// Clear all blocks from the cache.
+    pub fn clear(&mut self) {
+        self.blocks.clear();
+        self.order.clear();
+    }
 }
 
 #[cfg(test)]

@@ -42,6 +42,8 @@ pub enum NetworkMessage {
     OraclePriceRequest(OraclePriceRequest),
     /// Oracle price submission response from validator
     OraclePriceSubmission(OraclePriceSubmission),
+    /// Protocol upgrade announcement
+    UpgradeAnnouncement(UpgradeAnnouncement),
 }
 
 /// Transaction message for gossipsub propagation
@@ -127,6 +129,17 @@ pub struct OraclePriceRequest {
     pub block: u64,
     /// Validator ID of the requesting proposer
     pub requester_id: u32,
+}
+
+/// Upgrade announcement — broadcast by any node when a protocol upgrade is scheduled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeAnnouncement {
+    /// Protocol version to activate
+    pub version: call_primitives::ProtocolVersion,
+    /// Block height at which the upgrade activates
+    pub activation_height: u64,
+    /// Governance proposal ID that triggered this upgrade, if any
+    pub proposal_id: Option<u64>,
 }
 
 /// Oracle price submission — signed price data from a validator
@@ -217,6 +230,11 @@ pub enum NetworkEvent {
     OraclePriceSubmissionReceived {
         peer_id: String,
         submission: OraclePriceSubmission,
+    },
+    /// Protocol upgrade announcement received
+    UpgradeAnnouncementReceived {
+        peer_id: String,
+        announcement: UpgradeAnnouncement,
     },
 }
 

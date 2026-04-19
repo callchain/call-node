@@ -115,6 +115,11 @@ impl SimplexConsensus {
         self.current_height
     }
 
+    /// Set the current height (used during emergency rollback).
+    pub fn set_current_height(&mut self, height: u64) {
+        self.current_height = height;
+    }
+
     /// Get the current round number.
     pub fn current_round(&self) -> u64 {
         self.current_round
@@ -429,9 +434,8 @@ mod tests {
         let slashed = consensus.handle_double_sign(validator_id).unwrap();
         assert_eq!(slashed, one_million_call());
 
-        // Validator should now be unbonding/slashed
-        assert!(consensus.validators().is_unbonding(validator_id)
-            || consensus.validators().get_validator_stake(validator_id).is_some_and(|v| v.self_stake == 0));
+        // Validator should be removed from the active set after double-sign slash
+        assert!(consensus.validators().get_validator_stake(validator_id).is_none());
     }
 
     #[test]

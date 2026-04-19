@@ -248,6 +248,14 @@ impl PruneState {
     pub fn clear_compaction_pending(&mut self) {
         self.compaction_pending = false;
     }
+
+    /// Remove all entries above the given height (used during emergency rollback).
+    pub fn retain_up_to(&mut self, height: u64) {
+        self.execution_traces.retain(|h, _| *h <= height);
+        self.receipts.retain(|h, _| *h <= height);
+        self.block_bodies.retain(|h, _| *h <= height);
+        self.snapshots.retain(|s| s.height <= height);
+    }
 }
 
 // ── Pruning functions ─────────────────────────────────────────────────

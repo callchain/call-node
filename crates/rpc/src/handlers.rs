@@ -5,7 +5,7 @@ use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_oracle::OracleManager;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
-use call_consensus::{ValidatorStateManager, ForkManager, ForkError};
+use call_consensus::{ValidatorStateManager, ForkManager, ForkError, RollbackPlan};
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash, PublicKey};
@@ -49,6 +49,8 @@ pub struct RpcState {
     pub bls_secret_key: RwLock<Option<call_crypto::BlsSecretKey>>,
     #[cfg(feature = "light-client-bridge")]
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
+    /// Pending rollback plan to be applied by the node loop
+    pub pending_rollback: RwLock<Option<RollbackPlan>>,
 }
 
 impl RpcState {
@@ -96,6 +98,7 @@ impl RpcState {
             bls_secret_key: RwLock::new(None),
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
+            pending_rollback: RwLock::new(None),
         }
     }
 

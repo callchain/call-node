@@ -20,7 +20,7 @@ use call_consensus::{
     digest::ConsensusDigest,
     proposer::{derive_vrf_seed, select_proposer_subset, EPOCH_LENGTH},
 };
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission};
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, UpgradeAnnouncement};
 use call_primitives::BlockHash;
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
@@ -88,6 +88,7 @@ const TX_CHANNEL: u64 = 1;
 const BLOCK_CHANNEL: u64 = 2;
 const SYNC_CHANNEL: u64 = 3;
 const ORACLE_CHANNEL: u64 = 4;
+const UPGRADE_CHANNEL: u64 = 5;
 
 /// The Callchain node
 pub struct CallNode {
@@ -1659,6 +1660,14 @@ async fn block_production_loop(
             }
         }
 
+        // 7a. Check and apply any scheduled protocol upgrades at this height
+        {
+            let mut fm = state.fork_manager.write().unwrap();
+            if let Some(new_version) = fm.check_upgrades_at_height(height) {
+                tracing::info!(height, ?new_version, "protocol upgrade activated");
+            }
+        }
+
         // 10. Update state
         let new_height = height + 1;
         state.set_current_block(new_height);
@@ -1749,8 +1758,123 @@ async fn block_production_loop(
             let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
                 .expect("serialize block announcement");
             net.broadcast(BLOCK_CHANNEL, msg).await;
+
+            // 17a. Gossip scheduled upgrade announcement if one exists
+            let upgrade = {
+                let fm = state.fork_manager.read().unwrap();
+                fm.next_upgrade(height).map(|entry| UpgradeAnnouncement {
+                    version: entry.version,
+                    activation_height: entry.activation_height,
+                    proposal_id: entry.proposal_id,
+                })
+            };
+            if let Some(upgrade) = upgrade {
+                tracing::debug!(activation_height = upgrade.activation_height, ?upgrade.version, "broadcast upgrade announcement");
+                let msg = bincode::serialize(&NetworkMessage::UpgradeAnnouncement(upgrade))
+                    .expect("serialize upgrade announcement");
+                net.broadcast(UPGRADE_CHANNEL, msg).await;
+            }
         }
     }
+}
+
+/// Apply an emergency rollback plan: revert structural state to target height.
+/// This resets block heights, clears caches, and removes blocks above target.
+/// Full state reversion (balances, EVM, etc.) requires reloading from the
+/// last snapshot or resyncing — this function performs the safe structural
+/// subset that prevents the node from continuing on the invalid chain.
+fn apply_rollback_plan(
+    plan: &call_consensus::RollbackPlan,
+    state: &Arc<RpcState>,
+    consensus: &Arc<RwLock<SimplexConsensus>>,
+    block_cache: &Arc<std::sync::Mutex<BlockCache>>,
+    parent_hash: &mut BlockHash,
+    prune_state: &mut PruneState,
+    data_dir: &std::path::Path,
+    db_env: &Arc<DatabaseEnv>,
+) {
+    tracing::warn!(
+        target_height = plan.target_height,
+        target_version = ?plan.target_version,
+        "applying emergency rollback"
+    );
+
+    // 1. Reset in-memory block height
+    {
+        let mut current_block = state.current_block.write().unwrap();
+        *current_block = plan.target_height;
+    }
+
+    // 2. Reset consensus height
+    {
+        let mut c = consensus.write().unwrap();
+        c.set_current_height(plan.target_height);
+    }
+
+    // 3. Clear block cache
+    {
+        let mut cache = block_cache.lock().unwrap();
+        cache.clear();
+    }
+
+    // 4. Clear execution results above target (via prune helper)
+    {
+        let mut receipts = state.receipts.write().unwrap();
+        receipts.retain(|_, r| r.block_number <= plan.target_height);
+    }
+
+    // 5. Reset governance block
+    {
+        let mut gov = state.governance.write().unwrap();
+        gov.set_current_block(plan.target_height);
+    }
+
+    // 6. Reset oracle block tracking
+    {
+        let mut oracle = state.oracle.write().unwrap();
+        oracle.set_current_block(plan.target_height);
+    }
+
+    // 7. Reset validator state block
+    {
+        let mut vs = state.validator_state.write().unwrap();
+        vs.set_current_block(plan.target_height);
+    }
+
+    // 8. Delete block files above target height
+    let blocks_dir = data_dir.join("blocks");
+    if blocks_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&blocks_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if let Some(height_str) = name.strip_prefix("block-").and_then(|s| s.strip_suffix(".json")) {
+                        if let Ok(height) = height_str.parse::<u64>() {
+                            if height > plan.target_height {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 9. Load parent hash of the target block (or genesis if unavailable)
+    *parent_hash = load_block(data_dir, plan.target_height)
+        .map(|b| b.header.hash())
+        .unwrap_or_else(|| BlockHash::ZERO);
+
+    // 10. Clear prune state entries above target
+    prune_state.retain_up_to(plan.target_height);
+
+    // 11. Persist the structural rollback marker to DB
+    let _ = save_fork_state(db_env, &state.fork_manager.read().unwrap());
+
+    tracing::info!(
+        target_height = plan.target_height,
+        parent_hash = ?parent_hash,
+        "emergency rollback applied — restart recommended for full state consistency"
+    );
 }
 
 /// BFT event loop — handles propose / verify / finalize / broadcast from the
@@ -1798,6 +1922,11 @@ async fn bft_event_loop(
     };
 
     loop {
+        // Check for pending emergency rollback and apply if present
+        if let Some(plan) = state.pending_rollback.write().unwrap().take() {
+            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db);
+        }
+
         tokio::select! {
             Some((context, reply_tx)) = propose_rx.recv() => {
                 // The BFT engine selected us as the leader for this view.
@@ -2417,6 +2546,39 @@ fn handle_network_message(
                     let mut oracle = state_clone.oracle.write().unwrap();
                     if let Err(e) = oracle.submit_price(oracle_submission) {
                         tracing::debug!(error = %e, validator_id = submission.validator_id, "oracle P2P submission rejected");
+                    }
+                });
+            }
+        }
+        UPGRADE_CHANNEL => {
+            if let Ok(announcement) = serde_json::from_slice::<UpgradeAnnouncement>(data) {
+                tracing::info!(
+                    peer_id,
+                    version = ?announcement.version,
+                    activation_height = announcement.activation_height,
+                    "upgrade announcement received"
+                );
+                let state_clone = Arc::clone(state);
+                tokio::spawn(async move {
+                    let mut fm = state_clone.fork_manager.write().unwrap();
+                    // Only schedule if we don't already have this exact upgrade pending
+                    let already_scheduled = fm.scheduled_upgrades.iter().any(|e| {
+                        e.version == announcement.version
+                            && e.activation_height == announcement.activation_height
+                    });
+                    if !already_scheduled {
+                        fm.schedule_upgrade(call_consensus::UpgradeEntry {
+                            version: announcement.version,
+                            activation_height: announcement.activation_height,
+                            applied: false,
+                            proposal_id: announcement.proposal_id,
+                            approved_at_height: None,
+                        });
+                        tracing::info!(
+                            version = ?announcement.version,
+                            activation_height = announcement.activation_height,
+                            "scheduled upgrade from peer announcement"
+                        );
                     }
                 });
             }

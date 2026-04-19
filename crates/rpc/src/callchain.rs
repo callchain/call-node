@@ -481,6 +481,110 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // call_submitRollbackSignature
+    module
+        .register_async_method("call_submitRollbackSignature", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let validator_id = call_obj.get("validatorId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'validatorId' field".into()))? as u32;
+            let target_height = call_obj.get("targetHeight")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'targetHeight' field".into()))?;
+            let major = call_obj.get("targetVersionMajor")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as u16;
+            let minor = call_obj.get("targetVersionMinor")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u16;
+            let patch = call_obj.get("targetVersionPatch")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u16;
+            let nonce = call_obj.get("nonce")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let sig_hex = call_obj.get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 64 {
+                return Err(invalid_params("signature must be 64 bytes (Ed25519)".into()));
+            }
+            let mut signature = [0u8; 64];
+            signature.copy_from_slice(&sig_bytes);
+
+            let target_version = call_primitives::ProtocolVersion::new(major, minor, patch);
+
+            let mut fm = state.fork_manager.write().map_err(|_| internal_error("lock poisoned".into()))?;
+            match fm.submit_rollback_signature(validator_id, target_height, target_version, nonce, signature) {
+                Ok(None) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "status": "collected",
+                    "progress": fm.rollback_progress(),
+                })),
+                Ok(Some(result)) => {
+                    let current_block = *state.current_block.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                    let plan = fm.execute_rollback(result, current_block);
+                    // Store the plan so the node loop can apply structural reversion
+                    *state.pending_rollback.write().map_err(|_| internal_error("lock poisoned".into()))? = Some(plan.clone());
+                    Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                        "status": "quorum_reached",
+                        "targetHeight": plan.target_height,
+                        "targetVersion": format!("{}.{}.{}", plan.target_version.major, plan.target_version.minor, plan.target_version.patch),
+                        "signatureCount": plan.signature_count,
+                    }))
+                }
+                Err(e) => Err(invalid_params(e.to_string())),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_getRollbackHistory
+    module
+        .register_async_method("call_getRollbackHistory", |_params, state, _ctx| async move {
+            let fm = state.fork_manager.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let history: Vec<serde_json::Value> = fm.rollback_history()
+                .iter()
+                .map(|r| serde_json::json!({
+                    "targetHeight": r.target_height,
+                    "targetVersion": format!("{}.{}.{}", r.target_version.major, r.target_version.minor, r.target_version.patch),
+                    "signatureCount": r.signature_count,
+                    "totalValidators": r.total_validators,
+                    "executedAtHeight": r.executed_at_height,
+                }))
+                .collect();
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "history": history }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_getScheduledUpgrades
+    module
+        .register_async_method("call_getScheduledUpgrades", |_params, state, _ctx| async move {
+            let fm = state.fork_manager.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let current_block = *state.current_block.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let upgrades: Vec<serde_json::Value> = fm.scheduled_upgrades()
+                .iter()
+                .filter(|u| !u.applied)
+                .map(|u| serde_json::json!({
+                    "version": format!("{}.{}.{}", u.version.major, u.version.minor, u.version.patch),
+                    "activationHeight": u.activation_height,
+                    "proposalId": u.proposal_id,
+                    "approvedAtHeight": u.approved_at_height,
+                }))
+                .collect();
+            let next = fm.next_upgrade(current_block).map(|u| serde_json::json!({
+                "version": format!("{}.{}.{}", u.version.major, u.version.minor, u.version.patch),
+                "activationHeight": u.activation_height,
+            }));
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "upgrades": upgrades,
+                "nextUpgrade": next,
+                "currentVersion": format!("{}.{}.{}", fm.current_version.major, fm.current_version.minor, fm.current_version.patch),
+            }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
     // ── Light Client RPC Methods ────────────────────────────────────
 
     // call_lightVerifyBlockHeader

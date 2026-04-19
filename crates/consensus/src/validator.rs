@@ -265,28 +265,39 @@ impl ValidatorStateManager {
         Ok(slashed_self)
     }
 
-    /// Slash for double-sign: full self-stake (per spec §12.6)
+    /// Slash for double-sign: full self-stake, validator removed from active set (per spec §12.6)
     pub fn slash_double_sign(
         &mut self,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
         let validator = self
             .validators
-            .get_mut(&validator_id)
-            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
+            .get(&validator_id)
+            .ok_or(ConsensusError::ValidatorNotFound(validator_id))?
+            .clone();
 
         let slashed = validator.self_stake;
-        validator.slash_history.push(SlashEvent {
+        let mut slash_record = validator.clone();
+        slash_record.slash_history.push(SlashEvent {
             reason: "double sign".into(),
             amount_slashed: slashed,
             block: self.current_block,
         });
-        validator.self_stake = 0;
-        validator.staked_call = validator.staked_call.saturating_sub(slashed);
+
+        // Remove from active set — double-signing is unrecoverable
+        self.validators.remove(&validator_id);
+
+        tracing::warn!(
+            validator_id,
+            slashed,
+            "validator removed after double-sign slash"
+        );
+
         Ok(slashed)
     }
 
-    /// Slash for being offline: proportional to rounds offline (per spec §12.6)
+    /// Slash for being offline: proportional to rounds offline (per spec §12.6).
+    /// Validator is removed from the active set if self-stake drops below MIN_SELF_STAKE.
     pub fn slash_offline(
         &mut self,
         validator_id: ValidatorId,
@@ -308,6 +319,17 @@ impl ValidatorStateManager {
         });
         validator.self_stake = validator.self_stake.saturating_sub(slashed);
         validator.staked_call = validator.staked_call.saturating_sub(slashed);
+
+        let remaining = validator.self_stake;
+        if remaining < MIN_SELF_STAKE {
+            self.validators.remove(&validator_id);
+            tracing::warn!(
+                validator_id,
+                remaining_stake = remaining,
+                "validator removed after offline slash dropped self-stake below minimum"
+            );
+        }
+
         Ok(slashed)
     }
 
@@ -329,6 +351,17 @@ impl ValidatorStateManager {
         });
         validator.self_stake = validator.self_stake.saturating_sub(slashed);
         validator.staked_call = validator.staked_call.saturating_sub(slashed);
+
+        let remaining = validator.self_stake;
+        if remaining < MIN_SELF_STAKE {
+            self.validators.remove(&validator_id);
+            tracing::warn!(
+                validator_id,
+                remaining_stake = remaining,
+                "validator removed after oracle outlier slash dropped self-stake below minimum"
+            );
+        }
+
         Ok(slashed)
     }
 
@@ -581,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn test_slash_double_sign_full_loss() {
+    fn test_slash_double_sign_removes_validator() {
         let mut state = ValidatorStateManager::new();
         let id = state
             .stake(test_addr(1), test_pubkey(1), one_million_call())
@@ -593,17 +626,16 @@ mod tests {
         let slashed = state.slash_double_sign(id).unwrap();
         assert_eq!(slashed, one_million_call());
 
-        let stake = state.get_validator_stake(id).unwrap();
-        assert_eq!(stake.self_stake, 0);
-        // Only self_stake is slashed, delegation remains
-        assert_eq!(stake.slash_history.len(), 1);
-        assert_eq!(stake.slash_history[0].reason, "double sign");
+        // Validator should be removed from the active set after double-sign
+        assert!(state.get_validator_stake(id).is_none());
+        assert!(!state.get_all_validator_ids().contains(&id));
     }
 
     #[test]
     fn test_slash_offline_proportional() {
         let mut state = ValidatorStateManager::new();
-        let stake_amount = one_million_call();
+        // Use 100x minimum stake so a 1% slash stays above MIN_SELF_STAKE
+        let stake_amount = one_million_call() * 100;
         let id = state
             .stake(test_addr(1), test_pubkey(1), stake_amount)
             .unwrap();
@@ -619,9 +651,27 @@ mod tests {
     }
 
     #[test]
+    fn test_slash_offline_removes_validator_when_below_minimum() {
+        let mut state = ValidatorStateManager::new();
+        let stake_amount = one_million_call();
+        let id = state
+            .stake(test_addr(1), test_pubkey(1), stake_amount)
+            .unwrap();
+
+        // 10 rounds offline at 0.10% per round = 1% total = 10,000 CALL
+        // Remaining = 990,000 CALL < MIN_SELF_STAKE (1,000,000)
+        let slashed = state.slash_offline(id, 10).unwrap();
+        assert!(slashed > 0);
+
+        // Validator removed because self-stake dropped below minimum
+        assert!(state.get_validator_stake(id).is_none());
+    }
+
+    #[test]
     fn test_slash_oracle_outlier() {
         let mut state = ValidatorStateManager::new();
-        let stake_amount = MIN_SELF_STAKE;
+        // Use 100x minimum stake so a 0.1% slash stays above MIN_SELF_STAKE
+        let stake_amount = MIN_SELF_STAKE * 100;
         let id = state
             .stake(test_addr(1), test_pubkey(1), stake_amount)
             .unwrap();
@@ -634,6 +684,22 @@ mod tests {
         assert_eq!(stake.self_stake, stake_amount.saturating_sub(expected));
         assert_eq!(stake.slash_history.len(), 1);
         assert_eq!(stake.slash_history[0].reason, "oracle outlier");
+    }
+
+    #[test]
+    fn test_slash_oracle_outlier_removes_validator_when_below_minimum() {
+        let mut state = ValidatorStateManager::new();
+        let stake_amount = MIN_SELF_STAKE;
+        let id = state
+            .stake(test_addr(1), test_pubkey(1), stake_amount)
+            .unwrap();
+
+        // 0.1% slash on exactly MIN_SELF_STAKE drops below minimum
+        let slashed = state.slash_oracle_outlier(id).unwrap();
+        assert!(slashed > 0);
+
+        // Validator removed because self-stake dropped below minimum
+        assert!(state.get_validator_stake(id).is_none());
     }
 
     #[test]
