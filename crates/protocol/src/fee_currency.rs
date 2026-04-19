@@ -21,12 +21,14 @@ pub struct FeeCurrencyEntry {
 pub struct FeeCurrencyRegistry {
     pub allowed_currencies: Vec<FeeCurrencyEntry>,
     pub stablecoin_cap_bps: u32, // default 5000 = 50%
+    /// Minimum market cap in USD for fee currency eligibility
+    pub min_market_cap_usd: u128,
     current_stablecoin_used: Balance,
     block_gas_limit: Balance,
 }
 
-/// Governance minimum market cap (100M USD)
-pub const MIN_MARKET_CAP_USD: u128 = 100_000_000;
+/// Default minimum market cap for fee currency eligibility (100M USD)
+pub const DEFAULT_MIN_MARKET_CAP_USD: u128 = 100_000_000;
 /// Oracle strikes before auto-disable
 pub const ORACLE_STRIKES_BEFORE_DISABLE: u32 = 10;
 /// Default grace period for FeeCurrencyRemove (86400 blocks ≈ 1 day)
@@ -43,6 +45,7 @@ impl FeeCurrencyRegistry {
         Self {
             allowed_currencies: Vec::new(),
             stablecoin_cap_bps: 5000, // 50%
+            min_market_cap_usd: DEFAULT_MIN_MARKET_CAP_USD,
             current_stablecoin_used: 0,
             block_gas_limit: 20_000_000,
         }

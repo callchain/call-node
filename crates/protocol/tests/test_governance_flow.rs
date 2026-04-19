@@ -6,7 +6,7 @@ mod test_governance_flow_impl {
     use call_primitives::{Address, ValidatorId};
     use call_governance::{
         GovernanceManager, ProposalType, ProposalState, Vote,
-        PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS,
+        DEFAULT_PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS,
         TIMELOCK_PERIOD_BLOCKS, EXECUTION_TIMEOUT_BLOCKS,
     };
 
@@ -31,7 +31,7 @@ mod test_governance_flow_impl {
     fn test_parameter_change_full_lifecycle() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -57,7 +57,7 @@ mod test_governance_flow_impl {
     fn test_proposal_defeated_confiscate_deposit() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -75,7 +75,7 @@ mod test_governance_flow_impl {
     fn test_proposal_expire_confiscate() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -124,7 +124,7 @@ mod test_governance_flow_impl {
     fn test_emergency_pause_skips_timelock() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -192,7 +192,7 @@ mod test_governance_flow_impl {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
         let big_holder = test_addr(20);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
         mgr.set_call_balance(big_holder, call_protocol::economics::TOTAL_SUPPLY / 4);
 
         let id = mgr.submit_proposal(
@@ -211,10 +211,10 @@ mod test_governance_flow_impl {
     fn test_compliance_update_issuer_weight() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
         let issuer = test_addr(20);
         mgr.register_asset_issuer(1, issuer);
-        mgr.set_call_balance(issuer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(issuer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             issuer,
@@ -231,7 +231,7 @@ mod test_governance_flow_impl {
     fn test_fee_currency_add_quorum() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -246,7 +246,7 @@ mod test_governance_flow_impl {
     fn test_protocol_upgrade_dual_quorum() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -261,7 +261,7 @@ mod test_governance_flow_impl {
     fn test_insufficient_deposit_rejected() {
         let mut mgr = GovernanceManager::new();
         let proposer = test_addr(1);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT - 1);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT - 1);
         let result = mgr.submit_proposal(
             proposer,
             ProposalType::ParameterChange { param_id: "test".into(), new_value: "1".into() },
@@ -274,7 +274,7 @@ mod test_governance_flow_impl {
     fn test_voting_before_review_rejected() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -290,7 +290,7 @@ mod test_governance_flow_impl {
     fn test_validator_slash_1_1_voting() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,
@@ -308,7 +308,7 @@ mod test_governance_flow_impl {
     fn test_state_machine_full_path() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, DEFAULT_PROPOSAL_DEPOSIT * 2);
 
         let id = mgr.submit_proposal(
             proposer,

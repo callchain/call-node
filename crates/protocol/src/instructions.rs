@@ -8,7 +8,7 @@ use crate::balances::BalanceState;
 use crate::registry::AssetRegistry;
 use crate::compliance::ComplianceEngine;
 use call_oracle::{OracleManager, OracleSubmission};
-use call_governance::{GovernanceManager, PROPOSAL_DEPOSIT};
+use call_governance::GovernanceManager;
 use crate::{ProtocolError, ProtocolResult};
 
 // ── Instruction types ─────────────────────────────────────────────────
@@ -528,7 +528,7 @@ pub fn execute_instruction(
                 "governance not available".into(),
             ))?;
             // Deduct proposal deposit from sender's balance
-            let deposit = PROPOSAL_DEPOSIT;
+            let deposit = gov.config.proposal_deposit;
             if balances.get_balance(0, &sender) < deposit {
                 return Err(ProtocolError::InvalidInstruction(
                     "governance: insufficient balance for proposal deposit".into(),

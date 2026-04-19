@@ -115,7 +115,7 @@ impl Default for OracleConfig {
 /// Full oracle state manager
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OracleManager {
-    config: OracleConfig,
+    pub config: OracleConfig,
     validators: HashMap<u32, OracleValidatorInfo>,
     /// Reverse lookup: validator address -> validator_id
     validator_ids_by_address: HashMap<Address, u32>,
@@ -160,6 +160,11 @@ impl OracleManager {
             current_contributors: Vec::new(),
             last_outliers: Vec::new(),
         }
+    }
+
+    /// Update the oracle configuration
+    pub fn update_config(&mut self, config: OracleConfig) {
+        self.config = config;
     }
 
     /// Register a validator for oracle submissions

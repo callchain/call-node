@@ -3370,7 +3370,7 @@ mod tests {
 
     #[test]
     fn test_governance_full_cycle() {
-        use call_governance::{ProposalType, GovernanceEvent, PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS, TIMELOCK_PERIOD_BLOCKS, EXECUTION_TIMEOUT_BLOCKS};
+        use call_governance::{ProposalType, GovernanceEvent, DEFAULT_PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS, TIMELOCK_PERIOD_BLOCKS, EXECUTION_TIMEOUT_BLOCKS};
 
         let tmp = std::env::temp_dir().join("call_gov_cycle_test");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -3381,7 +3381,7 @@ mod tests {
         {
             let mut balances = node.state.balance_state.write().unwrap();
             let proposer = call_primitives::Address::repeat_byte(0xAA);
-            balances.balances.credit_balance(0, proposer, PROPOSAL_DEPOSIT * 5).expect("fund proposer");
+            balances.balances.credit_balance(0, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5).expect("fund proposer");
         }
 
         let proposer = call_primitives::Address::repeat_byte(0xAA);

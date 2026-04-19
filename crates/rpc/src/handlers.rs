@@ -722,6 +722,12 @@ impl ProposalExecutor for NodeProposalExecutor {
                             if let Some(v) = val.get("execution_timeout_blocks").and_then(|v| v.as_u64()) {
                                 gov.config.execution_timeout_blocks = v;
                             }
+                            if let Some(v) = val.get("proposal_deposit").and_then(|v| v.as_u64()) {
+                                gov.config.proposal_deposit = v as u128;
+                            }
+                            if let Some(v) = val.get("asset_registration_fee").and_then(|v| v.as_u64()) {
+                                gov.config.asset_registration_fee = v as u128;
+                            }
                             tracing::info!(param_id, new_value, "governance config updated via executor");
                         } else if param_id.starts_with("consensus.") {
                             let mut cp = self.state.consensus_params.write().map_err(|_| "consensus params lock poisoned".to_string())?;
@@ -744,6 +750,53 @@ impl ProposalExecutor for NodeProposalExecutor {
                                 cp.epoch_length = v;
                             }
                             tracing::info!(param_id, new_value, "consensus params updated via executor");
+                        } else if param_id.starts_with("validator.") {
+                            let mut vs = self.state.validator_state.write().map_err(|_| "validator state lock poisoned".to_string())?;
+                            if let Some(v) = val.get("min_self_stake").and_then(|v| v.as_u64()) {
+                                vs.min_self_stake = v as u128;
+                            }
+                            if let Some(v) = val.get("offline_slash_rate_bps").and_then(|v| v.as_u64()) {
+                                vs.offline_slash_rate_bps = v as u128;
+                            }
+                            tracing::info!(param_id, new_value, "validator params updated via executor");
+                        } else if param_id.starts_with("oracle.") {
+                            let mut oracle = self.state.oracle.write().map_err(|_| "oracle lock poisoned".to_string())?;
+                            let mut config = oracle.config.clone();
+                            if let Some(v) = val.get("update_interval").and_then(|v| v.as_u64()) {
+                                config.update_interval = v;
+                            }
+                            if let Some(v) = val.get("outlier_threshold_bps").and_then(|v| v.as_u64()) {
+                                config.outlier_threshold_bps = v;
+                            }
+                            if let Some(v) = val.get("outlier_tolerance").and_then(|v| v.as_u64()) {
+                                config.outlier_tolerance = v as u32;
+                            }
+                            if let Some(v) = val.get("twap_window_secs").and_then(|v| v.as_u64()) {
+                                config.twap_window_secs = v;
+                            }
+                            if let Some(v) = val.get("staleness_secs").and_then(|v| v.as_u64()) {
+                                config.staleness_secs = v;
+                            }
+                            if let Some(v) = val.get("min_data_sources").and_then(|v| v.as_u64()) {
+                                config.min_data_sources = v as usize;
+                            }
+                            oracle.update_config(config);
+                            tracing::info!(param_id, new_value, "oracle config updated via executor");
+                        } else if param_id.starts_with("protocol.") {
+                            let mut gov = self.state.governance.write().map_err(|_| "governance lock poisoned".to_string())?;
+                            if let Some(v) = val.get("asset_registration_fee").and_then(|v| v.as_u64()) {
+                                gov.config.asset_registration_fee = v as u128;
+                            }
+                            tracing::info!(param_id, new_value, "protocol params updated via executor");
+                        } else if param_id.starts_with("fee_currency.") {
+                            let mut fcr = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
+                            if let Some(v) = val.get("min_market_cap_usd").and_then(|v| v.as_u64()) {
+                                fcr.min_market_cap_usd = v as u128;
+                            }
+                            if let Some(v) = val.get("stablecoin_cap_bps").and_then(|v| v.as_u64()) {
+                                fcr.stablecoin_cap_bps = v as u32;
+                            }
+                            tracing::info!(param_id, new_value, "fee currency params updated via executor");
                         } else {
                             // Standard fee params updates
                             let mut fp = self.state.fee_params.write().map_err(|_| "fee params lock poisoned".to_string())?;

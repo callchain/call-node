@@ -28,9 +28,6 @@ pub struct Asset {
     pub registered_at: u64,
 }
 
-/// Fee required to register a new asset
-pub const ASSET_REGISTRATION_FEE: Balance = 10_000_000_000_000_000_000u128; // 10 CALL
-
 /// Asset registry state
 #[derive(Debug, Default)]
 pub struct AssetRegistry {

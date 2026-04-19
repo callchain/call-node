@@ -70,7 +70,7 @@ pub struct KeyRotation {
 }
 
 /// Manages all validator stakes (per spec §12.6)
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ValidatorStateManager {
     validators: HashMap<ValidatorId, ValidatorStake>,
     next_validator_id: ValidatorId,
@@ -79,12 +79,40 @@ pub struct ValidatorStateManager {
     current_block: u64,
     /// Key rotation history — old pubkeys remain valid during grace period
     key_rotations: Vec<KeyRotation>,
+    /// Minimum self-stake required to become a validator
+    pub min_self_stake: u128,
+    /// Offline slash rate per round in basis points
+    pub offline_slash_rate_bps: u128,
+}
+
+impl Default for ValidatorStateManager {
+    fn default() -> Self {
+        Self {
+            validators: HashMap::new(),
+            next_validator_id: 0,
+            unbonding_requests: Vec::new(),
+            current_block: 0,
+            key_rotations: Vec::new(),
+            min_self_stake: MIN_SELF_STAKE,
+            offline_slash_rate_bps: OFFLINE_SLASH_RATE_PER_ROUND,
+        }
+    }
 }
 
 impl ValidatorStateManager {
     /// Create a new validator state manager
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Update minimum self-stake requirement
+    pub fn set_min_self_stake(&mut self, min_self_stake: u128) {
+        self.min_self_stake = min_self_stake;
+    }
+
+    /// Update offline slash rate
+    pub fn set_offline_slash_rate_bps(&mut self, rate: u128) {
+        self.offline_slash_rate_bps = rate;
     }
 
     /// Set current block height (for unbonding calculations)
@@ -116,7 +144,7 @@ impl ValidatorStateManager {
         ed25519_pubkey: Ed25519PublicKey,
         self_stake: u128,
     ) -> Result<ValidatorId, ConsensusError> {
-        if self_stake < MIN_SELF_STAKE {
+        if self_stake < self.min_self_stake {
             return Err(ConsensusError::InsufficientStake);
         }
 
@@ -297,7 +325,7 @@ impl ValidatorStateManager {
     }
 
     /// Slash for being offline: proportional to rounds offline (per spec §12.6).
-    /// Validator is removed from the active set if self-stake drops below MIN_SELF_STAKE.
+    /// Validator is removed from the active set if self-stake drops below min_self_stake.
     pub fn slash_offline(
         &mut self,
         validator_id: ValidatorId,
@@ -309,7 +337,7 @@ impl ValidatorStateManager {
             .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
 
         // Proportional slash: rounds * rate% of self_stake
-        let rate_total = OFFLINE_SLASH_RATE_PER_ROUND * rounds_offline as u128;
+        let rate_total = self.offline_slash_rate_bps * rounds_offline as u128;
         let slashed = (validator.self_stake * rate_total) / 10_000; // basis points
 
         validator.slash_history.push(SlashEvent {
@@ -321,7 +349,7 @@ impl ValidatorStateManager {
         validator.staked_call = validator.staked_call.saturating_sub(slashed);
 
         let remaining = validator.self_stake;
-        if remaining < MIN_SELF_STAKE {
+        if remaining < self.min_self_stake {
             self.validators.remove(&validator_id);
             tracing::warn!(
                 validator_id,
@@ -353,7 +381,7 @@ impl ValidatorStateManager {
         validator.staked_call = validator.staked_call.saturating_sub(slashed);
 
         let remaining = validator.self_stake;
-        if remaining < MIN_SELF_STAKE {
+        if remaining < self.min_self_stake {
             self.validators.remove(&validator_id);
             tracing::warn!(
                 validator_id,
@@ -482,7 +510,7 @@ impl ValidatorStateManager {
     pub fn get_qualified_validators(&self) -> Vec<ValidatorId> {
         self.validators
             .values()
-            .filter(|v| v.unbonding_start.is_none() && v.staked_call >= MIN_SELF_STAKE)
+            .filter(|v| v.unbonding_start.is_none() && v.staked_call >= self.min_self_stake)
             .map(|v| v.validator_id)
             .collect()
     }

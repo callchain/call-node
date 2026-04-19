@@ -47,6 +47,10 @@ pub struct GovernanceConfig {
     pub timelock_period_blocks: u64,
     /// Execution timeout in blocks (~30 days)
     pub execution_timeout_blocks: u64,
+    /// Proposal deposit amount (default: 10,000 CALL)
+    pub proposal_deposit: Balance,
+    /// Asset registration fee (default: 10 CALL)
+    pub asset_registration_fee: Balance,
 }
 
 impl Default for GovernanceConfig {
@@ -61,6 +65,8 @@ impl Default for GovernanceConfig {
             voting_period_blocks: VOTING_PERIOD_BLOCKS,
             timelock_period_blocks: TIMELOCK_PERIOD_BLOCKS,
             execution_timeout_blocks: EXECUTION_TIMEOUT_BLOCKS,
+            proposal_deposit: DEFAULT_PROPOSAL_DEPOSIT,
+            asset_registration_fee: DEFAULT_ASSET_REGISTRATION_FEE,
         }
     }
 }
@@ -94,8 +100,10 @@ impl GovernanceConfig {
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-/// Proposal deposit: 10,000 CALL
-pub const PROPOSAL_DEPOSIT: Balance = 10_000 * 10u128.pow(18);
+/// Default proposal deposit: 10,000 CALL
+pub const DEFAULT_PROPOSAL_DEPOSIT: Balance = 10_000 * 10u128.pow(18);
+/// Default asset registration fee: 10 CALL
+pub const DEFAULT_ASSET_REGISTRATION_FEE: Balance = 10_000_000_000_000_000_000u128;
 
 /// Minimum blocks between proposal submissions by the same address (~1 day at 250ms)
 pub const PROPOSAL_COOLDOWN_BLOCKS: u64 = 345_600;
@@ -421,18 +429,19 @@ impl GovernanceManager {
         }
 
         // Check deposit sufficiency
+        let deposit = self.config.proposal_deposit;
         let proposer_balance = self.get_voting_balance(proposer);
-        if proposer_balance < PROPOSAL_DEPOSIT {
+        if proposer_balance < deposit {
             return Err(GovernanceError::InsufficientDeposit);
         }
 
         // Deduct deposit (only from internal balances; external balances are tracked via deposits map)
         let internal = self.call_balances.get(&proposer).copied().unwrap_or(0);
         if internal > 0 {
-            let new_balance = internal - PROPOSAL_DEPOSIT.min(internal);
+            let new_balance = internal - deposit.min(internal);
             self.call_balances.insert(proposer, new_balance);
         }
-        self.deposits.insert(proposer, PROPOSAL_DEPOSIT);
+        self.deposits.insert(proposer, deposit);
 
         let id = self.next_proposal_id;
         self.next_proposal_id += 1;
@@ -456,7 +465,7 @@ impl GovernanceManager {
             state: ProposalState::Pending,
             quorum_required,
             execution_data,
-            deposit: PROPOSAL_DEPOSIT,
+            deposit,
         };
 
         self.proposals.insert(id, proposal);
@@ -483,7 +492,8 @@ impl GovernanceManager {
         }
 
         // Deposit already paid externally; just record it
-        self.deposits.insert(proposer, PROPOSAL_DEPOSIT);
+        let deposit = self.config.proposal_deposit;
+        self.deposits.insert(proposer, deposit);
 
         let id = self.next_proposal_id;
         self.next_proposal_id += 1;
@@ -506,7 +516,7 @@ impl GovernanceManager {
             state: ProposalState::Pending,
             quorum_required,
             execution_data,
-            deposit: PROPOSAL_DEPOSIT,
+            deposit,
         };
 
         self.proposals.insert(id, proposal);
@@ -1161,7 +1171,7 @@ mod tests {
 
         // Give proposer enough balance for deposit
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1180,7 +1190,7 @@ mod tests {
 
         // Deposit was deducted
         let balance = mgr.call_balances.get(&proposer).unwrap();
-        assert_eq!(*balance, PROPOSAL_DEPOSIT);
+        assert_eq!(*balance, mgr.config.proposal_deposit);
 
         // Advance to voting period
         mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
@@ -1202,7 +1212,7 @@ mod tests {
         let mut mgr = make_manager_with_validators(3);
 
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1241,7 +1251,7 @@ mod tests {
         let mut mgr = make_manager_with_validators(3);
 
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1273,7 +1283,7 @@ mod tests {
         let mut mgr = make_manager_with_validators(3);
 
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1310,7 +1320,7 @@ mod tests {
 
         // Deposit returned to proposer
         let balance = mgr.call_balances.get(&proposer).unwrap();
-        assert_eq!(*balance, PROPOSAL_DEPOSIT * 2 - PROPOSAL_DEPOSIT + PROPOSAL_DEPOSIT); // deposit deducted then restored
+        assert_eq!(*balance, mgr.config.proposal_deposit * 2 - mgr.config.proposal_deposit + mgr.config.proposal_deposit); // deposit deducted then restored
     }
 
     // ── Proposal Expire ───────────────────────────────────────────────
@@ -1320,7 +1330,7 @@ mod tests {
         let mut mgr = make_manager_with_validators(3);
 
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1363,7 +1373,7 @@ mod tests {
         let mut mgr = make_manager_with_validators(3);
 
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1396,7 +1406,7 @@ mod tests {
 
         let proposer = test_addr(10);
         let big_holder = test_addr(20);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
         mgr.set_call_balance(big_holder, TOTAL_SUPPLY / 4); // 25% of supply
 
         let id = mgr
@@ -1483,12 +1493,12 @@ mod tests {
         let mut mgr = make_manager_with_validators(3);
 
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         // Register an issuer
         let issuer = test_addr(20);
         mgr.register_asset_issuer(1, issuer);
-        mgr.set_call_balance(issuer, PROPOSAL_DEPOSIT);
+        mgr.set_call_balance(issuer, mgr.config.proposal_deposit);
 
         let id = mgr
             .submit_proposal(
@@ -1523,7 +1533,7 @@ mod tests {
     fn test_proposal_insufficient_deposit() {
         let mut mgr = GovernanceManager::new();
         let proposer = test_addr(1);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT - 1);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit - 1);
 
         let result = mgr.submit_proposal(
             proposer,
@@ -1544,7 +1554,7 @@ mod tests {
     fn test_voting_before_period_rejected() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1570,7 +1580,7 @@ mod tests {
     fn test_fee_currency_proposal_lifecycle() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         // FeeCurrencyAdd proposal
         let id = mgr
@@ -1598,7 +1608,7 @@ mod tests {
     fn test_proposal_state_machine_full() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1650,7 +1660,7 @@ mod tests {
     fn test_voter_cannot_vote_twice_same_proposal() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1683,7 +1693,7 @@ mod tests {
     fn test_protocol_upgrade_dual_quorum() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1710,7 +1720,7 @@ mod tests {
     fn test_advance_auto_transitions() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1753,7 +1763,7 @@ mod tests {
     fn test_advance_auto_defeat() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1784,7 +1794,7 @@ mod tests {
     fn test_advance_auto_expire() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1823,7 +1833,7 @@ mod tests {
     fn test_advance_emits_events() {
         let mut mgr = make_manager_with_validators(3);
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1910,7 +1920,7 @@ mod tests {
 
         let mut mgr = GovernanceManager::new().with_config(config.clone());
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         let id = mgr
             .submit_proposal(
@@ -1936,7 +1946,7 @@ mod tests {
     fn test_proposal_rate_limiting() {
         let mut mgr = GovernanceManager::new();
         let proposer = test_addr(1);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 10);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 10);
 
         // First proposal should succeed
         let id = mgr
@@ -2002,7 +2012,7 @@ mod tests {
         let mut mgr = GovernanceManager::new()
             .with_executor(Arc::new(TestExecutor { executed_count: AtomicU64::new(0) }));
         let proposer = test_addr(10);
-        mgr.set_call_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
 
         // Register validators
         for i in 1u8..=3 {
