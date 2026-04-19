@@ -88,6 +88,87 @@ pub struct ProtocolTransaction {
     pub auth: AuthScheme,
 }
 
+impl ProtocolTransaction {
+    /// Compute the canonical transaction hash for signature verification.
+    ///
+    /// The hash covers all fields except `auth` (the signature itself),
+    /// preventing signature malleability attacks.
+    pub fn compute_tx_hash(&self) -> [u8; 32] {
+        use call_crypto::keccak256;
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(self.sender.as_slice());
+        preimage.extend_from_slice(&self.nonce.to_be_bytes());
+        let instr_bytes = serde_json::to_vec(&self.instructions).unwrap_or_default();
+        preimage.extend_from_slice(&instr_bytes);
+        let gas_config_byte: u8 = match self.gas_config {
+            GasConfig::SelfPay => 0,
+            GasConfig::AuthorizedSponsor => 1,
+            GasConfig::PoolSponsor => 2,
+            GasConfig::PerTxSponsor => 3,
+        };
+        preimage.push(gas_config_byte);
+        let fee_currency_bytes: Vec<u8> = match self.fee_currency {
+            call_primitives::FeeCurrency::Call => vec![0],
+            call_primitives::FeeCurrency::Stablecoin(id) => {
+                let mut v = vec![1];
+                v.extend_from_slice(&id.to_be_bytes());
+                v
+            }
+        };
+        preimage.extend_from_slice(&fee_currency_bytes);
+        preimage.extend_from_slice(&self.gas_limit.to_be_bytes());
+        preimage.extend_from_slice(&self.max_fee.to_be_bytes());
+        let h = keccak256(&preimage);
+        h.0
+    }
+
+    /// Verify the transaction's secp256k1 signature(s).
+    ///
+    /// - `SingleSig`: recovers signer and checks it matches `self.sender`
+    /// - `MultiSig`: recovers each signer and checks at least 2 unique signers
+    /// - `SessionKey`: recovers signer and checks it matches the session key
+    pub fn verify_signature(&self) -> Result<(), crate::ProtocolError> {
+        use call_crypto::recover_secp256k1_signer;
+        let tx_hash = self.compute_tx_hash();
+        match &self.auth {
+            AuthScheme::SingleSig { signature } => {
+                let recovered = recover_secp256k1_signer(&tx_hash, signature)
+                    .map_err(|e| crate::ProtocolError::InvalidSignature(format!("{e:?}")))?;
+                if recovered != self.sender {
+                    return Err(crate::ProtocolError::InvalidSignature(
+                        "signature does not match sender".into(),
+                    ));
+                }
+                Ok(())
+            }
+            AuthScheme::MultiSig { signatures } => {
+                let mut unique_signers = std::collections::HashSet::new();
+                for sig in signatures {
+                    let recovered = recover_secp256k1_signer(&tx_hash, sig)
+                        .map_err(|e| crate::ProtocolError::InvalidSignature(format!("{e:?}")))?;
+                    unique_signers.insert(recovered);
+                }
+                if unique_signers.len() < 2 {
+                    return Err(crate::ProtocolError::InvalidSignature(
+                        "multisig requires at least 2 unique signers".into(),
+                    ));
+                }
+                Ok(())
+            }
+            AuthScheme::SessionKey { key, signature } => {
+                let recovered = recover_secp256k1_signer(&tx_hash, signature)
+                    .map_err(|e| crate::ProtocolError::InvalidSignature(format!("{e:?}")))?;
+                if recovered != *key {
+                    return Err(crate::ProtocolError::InvalidSignature(
+                        "signature does not match session key".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 // ── Gas unit table (per spec §12.2.1) ─────────────────────────────────
 
 /// Base gas units per instruction type

@@ -138,19 +138,32 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let mut signature = [0u8; 65];
             signature.copy_from_slice(&sig_bytes);
 
+            // Build the canonical ProtocolTransaction to compute the tx hash that the client signed
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender: from,
+                nonce,
+                instructions: vec![call_protocol::Instruction::Transfer {
+                    asset_id,
+                    to,
+                    amount,
+                    memo: memo.as_ref().map(|m| call_protocol::PaymentMemo {
+                        message: m.clone(),
+                        reference: None,
+                        metadata: None,
+                    }),
+                }],
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit,
+                max_fee,
+                auth: call_protocol::transaction::AuthScheme::SingleSig {
+                    signature,
+                },
+            };
+            let tx_hash = tx.compute_tx_hash();
+
             // Recover signer address from signature and verify it matches sender
-            // Include all tx fields in preimage (like Ethereum EIP-155/EIP-1559) to prevent
-            // signature malleability — changing any field invalidates the signature
-            let mut preimage = Vec::new();
-            preimage.extend_from_slice(from.as_slice());
-            preimage.extend_from_slice(&nonce.to_be_bytes());
-            preimage.extend_from_slice(&asset_id.to_be_bytes());
-            preimage.extend_from_slice(to.as_slice());
-            preimage.extend_from_slice(&amount.to_be_bytes());
-            preimage.extend_from_slice(&gas_limit.to_be_bytes());
-            preimage.extend_from_slice(&max_fee.to_be_bytes());
-            let tx_hash_preimage = call_crypto::keccak256(&preimage);
-            let recovered = call_crypto::recover_secp256k1_signer(&tx_hash_preimage.0, &signature)
+            let recovered = call_crypto::recover_secp256k1_signer(&tx_hash, &signature)
                 .map_err(|e| invalid_params(format!("signature recovery failed: {e:?}")))?;
             if recovered != from {
                 return Err(invalid_params("signature does not match sender address".into()));
@@ -496,16 +509,25 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let total = validators.len() as u32;
             let quorum = (2 * total as usize).div_ceil(3).max(1);
 
-            // Count valid signatures
+            // Verify Ed25519 signatures on the block hash
+            let block_hash_bytes = block_hash.as_slice();
             let mut valid_count = 0;
             for entry in sigs_array {
                 if let Some(validator_id) = entry.get(0).and_then(|v| v.as_u64()) {
-                    if let Some(expected_pubkey) = validators.get(&(validator_id as u32)) {
-                        if let Some(pubkey_hex) = entry.get(1).and_then(|v| v.as_str()) {
-                            if pubkey_hex.len() == 64 {
-                                // Simple match — in production would verify Ed25519 sig
-                                let _ = expected_pubkey; // used for validation
-                                valid_count += 1;
+                    if let Some(validator_stake) = validators.get(&(validator_id as u32)) {
+                        if let Some(sig_hex) = entry.get(2).and_then(|v| v.as_str()) {
+                            if let Ok(sig_bytes) = hex::decode(sig_hex.trim_start_matches("0x")) {
+                                if sig_bytes.len() == 64 {
+                                    let mut sig = [0u8; 64];
+                                    sig.copy_from_slice(&sig_bytes);
+                                    if call_crypto::ed25519_verify(
+                                        &validator_stake.ed25519_pubkey,
+                                        &sig,
+                                        block_hash_bytes,
+                                    ).is_ok() {
+                                        valid_count += 1;
+                                    }
+                                }
                             }
                         }
                     }

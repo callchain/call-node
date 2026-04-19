@@ -528,18 +528,8 @@ impl RpcState {
             }),
         }];
 
-        // Build tx hash preimage — include all fields to prevent malleability
-        let mut preimage = Vec::new();
-        preimage.extend_from_slice(sender.as_slice());
-        preimage.extend_from_slice(&nonce.to_be_bytes());
-        preimage.extend_from_slice(&asset_id.to_be_bytes());
-        preimage.extend_from_slice(to.as_slice());
-        preimage.extend_from_slice(&amount.to_be_bytes());
-        preimage.extend_from_slice(&gas_limit.to_be_bytes());
-        preimage.extend_from_slice(&max_fee.to_be_bytes());
-        let tx_hash = TxHash::from_slice(&call_crypto::keccak256(&preimage).0);
-
         // Build protocol transaction
+        let sig = signature.ok_or_else(|| "signature required for payment".to_string())?;
         let tx = call_protocol::transaction::ProtocolTransaction {
             sender,
             nonce,
@@ -549,15 +539,17 @@ impl RpcState {
             gas_limit,
             max_fee,
             auth: call_protocol::transaction::AuthScheme::SingleSig {
-                signature: signature.unwrap_or_else(|| {
-                    // Derive a deterministic placeholder signature from tx hash preimage
-                    let hash = call_crypto::keccak256(&preimage);
-                    let mut sig = [0u8; 65];
-                    sig[..32].copy_from_slice(&hash.0[..32]);
-                    sig
-                }),
+                signature: sig,
             },
         };
+
+        // Canonical tx hash — must match what the client signed
+        let tx_hash = TxHash::from_slice(&tx.compute_tx_hash());
+
+        // Verify signature before execution (defense in depth — RPC layer already verified,
+        // but re-verifying here ensures no internal bypass)
+        tx.verify_signature()
+            .map_err(|e| format!("signature verification failed: {e}"))?;
 
         // Insert into mempool (for tracking/dedup)
         {

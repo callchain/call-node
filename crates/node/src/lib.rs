@@ -2262,6 +2262,7 @@ mod tests {
     use call_primitives::{Address, Ed25519PublicKey};
     use call_protocol::instructions::Instruction;
     use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
+    use std::sync::OnceLock;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -2273,9 +2274,24 @@ mod tests {
         key
     }
 
+    /// Lazily-generated secp256k1 keypair for test transactions.
+    /// All signed test transactions reuse this sender so balance setup stays simple.
+    static TEST_SENDER: OnceLock<(Address, [u8; 32])> = OnceLock::new();
+
+    fn test_sender() -> &'static Address {
+        &TEST_SENDER
+            .get_or_init(|| {
+                let (secret, pubkey) = call_crypto::generate_keypair();
+                let addr = call_crypto::pubkey_to_address(&pubkey);
+                (addr, secret)
+            })
+            .0
+    }
+
     fn make_test_tx(nonce: u64) -> ProtocolTransaction {
-        ProtocolTransaction {
-            sender: test_addr(1),
+        let sender = *test_sender();
+        let mut tx = ProtocolTransaction {
+            sender,
             nonce,
             instructions: vec![Instruction::Transfer {
                 asset_id: 1,
@@ -2290,7 +2306,12 @@ mod tests {
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
             },
-        }
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let secret = &TEST_SENDER.get().expect("TEST_SENDER initialized").1;
+        let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+        tx
     }
 
     fn one_million_call() -> u128 {
@@ -2359,7 +2380,7 @@ mod tests {
         // Fund sender balance
         {
             let mut balances = node.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+            balances.balances.set_balance(1, *test_sender(), 10_000).unwrap();
         }
 
         // Insert a protocol tx into mempool
@@ -2548,7 +2569,7 @@ mod tests {
         // Fund sender balance on node1
         {
             let mut balances = node1.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+            balances.balances.set_balance(1, *test_sender(), 10_000).unwrap();
         }
 
         // Verify initial state
@@ -2661,7 +2682,7 @@ mod tests {
         // Fund balance
         {
             let mut balances = node.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, test_addr(1), 10_000).unwrap();
+            balances.balances.set_balance(1, *test_sender(), 10_000).unwrap();
         }
 
         // Insert tx
@@ -2753,12 +2774,12 @@ mod tests {
             // Fund sender balance
             {
                 let mut balances = node.state.balance_state.write().unwrap();
-                balances.balances.set_balance(1, test_addr(1), initial_balance).unwrap();
+                balances.balances.set_balance(1, *test_sender(), initial_balance).unwrap();
             }
 
             // Insert a transfer tx
-            let tx = ProtocolTransaction {
-                sender: test_addr(1),
+            let mut tx = ProtocolTransaction {
+                sender: *test_sender(),
                 nonce: 0,
                 instructions: vec![Instruction::Transfer {
                     asset_id: 1,
@@ -2774,6 +2795,10 @@ mod tests {
                     signature: [0u8; 65],
                 },
             };
+            let tx_hash = tx.compute_tx_hash();
+            let secret = &TEST_SENDER.get().expect("TEST_SENDER initialized").1;
+            let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
+            tx.auth = AuthScheme::SingleSig { signature };
             {
                 let mut mempool = node.mempool.write().unwrap();
                 let _ = mempool.insert_protocol_tx(tx);
@@ -2832,7 +2857,7 @@ mod tests {
             // Verify balance was recovered
             let sender_balance = {
                 let balances = node2.state.balance_state.read().unwrap();
-                balances.balances.get_balance(1, &test_addr(1))
+                balances.balances.get_balance(1, test_sender())
             };
 
             // Balance should be less than initial (transfer + fees deducted)

@@ -12,10 +12,28 @@ mod tests {
     use call_shielded::ShieldedState;
     use call_transaction_pool::Mempool;
     use crate::handlers::RpcState;
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, RwLock, OnceLock};
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
+    }
+
+    /// Lazily-generated secp256k1 keypair for test transactions.
+    static TEST_SENDER: OnceLock<(Address, [u8; 32])> = OnceLock::new();
+
+    fn test_sender() -> &'static Address {
+        &TEST_SENDER
+            .get_or_init(|| {
+                let (secret, pubkey) = call_crypto::generate_keypair();
+                let addr = call_crypto::pubkey_to_address(&pubkey);
+                (addr, secret)
+            })
+            .0
+    }
+
+    fn sign_tx_hash(tx_hash: &[u8; 32]) -> [u8; 65] {
+        let secret = &TEST_SENDER.get().expect("TEST_SENDER initialized").1;
+        call_crypto::secp256k1_sign(secret, tx_hash)
     }
 
     fn make_test_state() -> RpcState {
@@ -281,18 +299,42 @@ mod tests {
     #[test]
     fn test_rpc_submit_payment_success() {
         let state = make_test_state();
-        let sender = test_addr(1);
+        let sender = *test_sender();
         let to = test_addr(2);
         let asset_id: AssetId = 1;
 
         // Set up protocol balance
         state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 10_000).unwrap();
 
+        // Build tx to compute canonical hash for signing
+        let tx = call_protocol::transaction::ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![call_protocol::Instruction::Transfer {
+                asset_id,
+                to,
+                amount: 5_000,
+                memo: Some(call_protocol::PaymentMemo {
+                    message: "test payment".into(),
+                    reference: None,
+                    metadata: None,
+                }),
+            }],
+            gas_config: call_protocol::transaction::GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            auth: call_protocol::transaction::AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let signature = sign_tx_hash(&tx.compute_tx_hash());
+
         let tx_hash = state.submit_payment(
             sender, 1, asset_id, to, 5_000,
             Some("test payment".into()),
             100_000, 1_000_000,
-            None,
+            Some(signature),
         ).unwrap();
 
         assert_eq!(tx_hash.as_slice().len(), 32);
@@ -313,16 +355,36 @@ mod tests {
     #[test]
     fn test_rpc_submit_payment_insufficient_balance() {
         let state = make_test_state();
-        let sender = test_addr(1);
+        let sender = *test_sender();
         let to = test_addr(2);
         let asset_id: AssetId = 1;
 
         state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 100).unwrap();
 
+        // Build tx and sign it (signature is valid, but balance is insufficient)
+        let tx = call_protocol::transaction::ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![call_protocol::Instruction::Transfer {
+                asset_id,
+                to,
+                amount: 5_000,
+                memo: None,
+            }],
+            gas_config: call_protocol::transaction::GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            auth: call_protocol::transaction::AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let signature = sign_tx_hash(&tx.compute_tx_hash());
+
         let result = state.submit_payment(
             sender, 1, asset_id, to, 5_000,
             None, 100_000, 1_000_000,
-            None,
+            Some(signature),
         );
         assert!(result.is_err());
     }

@@ -280,6 +280,14 @@ impl Block {
                 continue; // duplicate nonce
             }
 
+            // Verify transaction signature before execution
+            if let Err(e) = tx.verify_signature() {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "signature verification failed for tx from {:?}: {e}",
+                    tx.sender
+                )));
+            }
+
             let tx_results = execute_protocol_instructions(
                 &tx.instructions,
                 balances,
@@ -546,6 +554,34 @@ mod tests {
         }
     }
 
+    /// Create a protocol transaction with a valid secp256k1 signature.
+    /// Returns the transaction and the sender address (derived from the signing key).
+    fn make_signed_test_tx() -> (ProtocolTransaction, Address) {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![Instruction::Transfer {
+                asset_id: 1,
+                to: test_addr(2),
+                amount: 100,
+                memo: None,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+        (tx, sender)
+    }
+
     #[test]
     fn test_block_structure_serialization() {
         let block = Block::new(
@@ -653,12 +689,13 @@ mod tests {
     fn test_block_execution_order() {
         let evm_tx = make_test_evm_tx();
         let evm_bytes = serde_json::to_vec(&evm_tx).unwrap();
+        let (protocol_tx, sender) = make_signed_test_tx();
         let mut block = Block::new(
             1,
             BlockHash::ZERO,
             1000,
             1,
-            vec![make_test_tx()],
+            vec![protocol_tx],
             vec![evm_bytes],
             vec![SystemTx {
                 kind: SystemTxKind::ValidatorReward {
@@ -669,7 +706,7 @@ mod tests {
             }],
             vec![BridgeOp::DepositToEvm {
                 asset_id: 1,
-                from: test_addr(1),
+                from: sender,
                 to: test_addr(2),
                 amount: 500,
             }],
@@ -679,7 +716,7 @@ mod tests {
         let mut balances = BalanceState::new();
         balances
             .balances
-            .set_balance(1, test_addr(1), 10_000)
+            .set_balance(1, sender, 10_000)
             .unwrap();
         let registry = AssetRegistry::new();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
@@ -687,6 +724,7 @@ mod tests {
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
         let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000_000u128));
         evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
         let result = block

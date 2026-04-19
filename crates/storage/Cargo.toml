@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+call-crypto.workspace = true
 call-primitives.workspace = true
 call-serialization.workspace = true
 serde = { workspace = true }

@@ -58,6 +58,8 @@ pub enum ProtocolError {
     Recovery(String),
     #[error("session key error: {0}")]
     SessionKey(String),
+    #[error("invalid signature: {0}")]
+    InvalidSignature(String),
 }
 
 /// Result type alias for protocol operations

@@ -88,29 +88,43 @@ pub struct StateSnapshot {
     pub validator_signatures: Vec<ValidatorSignature>,
 }
 
-/// A validator's signature on a state snapshot.
+/// A validator's Ed25519 signature on a state snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorSignature {
     pub validator_id: u32,
     #[serde(with = "serde_bytes")]
-    pub signature: [u8; 65],
+    pub signature: [u8; 64],
 }
 
 mod serde_bytes {
     use serde::{Deserialize, Serializer, Deserializer};
-    pub(super) fn serialize<S>(sig: &[u8; 65], serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(sig: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
         serializer.serialize_bytes(sig.as_slice())
     }
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 65], D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
     where D: Deserializer<'de> {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
         let len = bytes.len();
-        let arr: [u8; 65] = bytes.try_into().map_err(|_| {
-            serde::de::Error::custom(format!("expected 65 bytes, got {len}"))
+        let arr: [u8; 64] = bytes.try_into().map_err(|_| {
+            serde::de::Error::custom(format!("expected 64 bytes, got {len}"))
         })?;
         Ok(arr)
     }
+}
+
+/// Compute the canonical message hash that validators sign for a snapshot.
+pub fn snapshot_message_hash(snapshot: &StateSnapshot) -> [u8; 32] {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&snapshot.height.to_be_bytes());
+    buf.extend_from_slice(snapshot.protocol_root.as_slice());
+    buf.extend_from_slice(snapshot.evm_root.as_slice());
+    buf.extend_from_slice(snapshot.shielded_root.as_slice());
+    buf.extend_from_slice(snapshot.agent_root.as_slice());
+    buf.extend_from_slice(snapshot.consensus_root.as_slice());
+    buf.extend_from_slice(&snapshot.total_size.to_be_bytes());
+    let h = call_crypto::keccak256(&buf);
+    h.0
 }
 
 // ── PruneState — in-memory tracking of prunable data ──────────────────
@@ -306,10 +320,31 @@ pub fn maybe_prune(
     Ok(())
 }
 
-/// Verify a state snapshot: check that at least 2/3 of validators signed.
-pub fn verify_snapshot(snapshot: &StateSnapshot, total_validators: u32) -> bool {
+/// Verify a state snapshot: cryptographically validate Ed25519 signatures
+/// from validators and check that at least 2/3 of the validator set signed.
+pub fn verify_snapshot(
+    snapshot: &StateSnapshot,
+    total_validators: u32,
+    validator_pubkeys: &std::collections::HashMap<u32, call_primitives::Ed25519PublicKey>,
+) -> bool {
     let quorum = (2 * total_validators).div_ceil(3); // ceiling of 2/3
-    snapshot.validator_signatures.len() as u32 >= quorum
+
+    // If no pubkeys provided, fall back to count-only (not safe for production)
+    if validator_pubkeys.is_empty() {
+        return snapshot.validator_signatures.len() as u32 >= quorum;
+    }
+
+    let message = snapshot_message_hash(snapshot);
+    let mut valid_count = 0;
+    for vs in &snapshot.validator_signatures {
+        if let Some(pubkey) = validator_pubkeys.get(&vs.validator_id) {
+            if call_crypto::ed25519_verify(pubkey, &vs.signature, &message).is_ok() {
+                valid_count += 1;
+            }
+        }
+    }
+
+    valid_count as u32 >= quorum
 }
 
 /// Fast sync flow per spec §10.3.5:
@@ -364,7 +399,14 @@ impl FastSyncFlow {
 
     /// Step 1-2: Download and verify a snapshot from the network.
     /// In a file-based setup, this loads the most recent verified snapshot from disk.
-    pub fn download_and_verify(dir: &Path, peers: &[String]) -> Result<StateSnapshot, StorageError> {
+    ///
+    /// `validator_pubkeys` maps validator_id -> Ed25519PublicKey for cryptographic
+    /// signature verification. Pass an empty map to skip crypto verification (tests only).
+    pub fn download_and_verify(
+        dir: &Path,
+        peers: &[String],
+        validator_pubkeys: &std::collections::HashMap<u32, call_primitives::Ed25519PublicKey>,
+    ) -> Result<StateSnapshot, StorageError> {
         if peers.is_empty() {
             return Err(StorageError::NotFound("no peers available".into()));
         }
@@ -372,7 +414,8 @@ impl FastSyncFlow {
         let latest = heights.last()
             .ok_or_else(|| StorageError::NotFound("no snapshots on disk".into()))?;
         let snapshot = Self::load_snapshot(dir, *latest)?;
-        if !verify_snapshot(&snapshot, peers.len() as u32 + 1) {
+        let total_validators = validator_pubkeys.len() as u32;
+        if !verify_snapshot(&snapshot, total_validators.max(peers.len() as u32 + 1), validator_pubkeys) {
             return Err(StorageError::Validation("insufficient validator signatures".into()));
         }
         Ok(snapshot)
@@ -398,8 +441,12 @@ impl FastSyncFlow {
     }
 
     /// Full fast sync pipeline.
-    pub fn run(dir: &Path, peers: &[String]) -> Result<u64, StorageError> {
-        let snapshot = Self::download_and_verify(dir, peers)?;
+    pub fn run(
+        dir: &Path,
+        peers: &[String],
+        validator_pubkeys: &std::collections::HashMap<u32, call_primitives::Ed25519PublicKey>,
+    ) -> Result<u64, StorageError> {
+        let snapshot = Self::download_and_verify(dir, peers, validator_pubkeys)?;
         let height = snapshot.height;
         Self::restore_snapshot(dir, &snapshot)?;
         let synced_to = Self::incremental_sync(height, height)?;
@@ -437,7 +484,8 @@ mod tests {
         let total_validators = 216u32;
         let quorum = (2 * total_validators + 2) / 3; // = 144
 
-        // Snapshot with enough signatures
+        // Snapshot with enough signatures (no pubkeys = count-only mode for tests)
+        let empty_pubkeys = std::collections::HashMap::new();
         let snapshot_ok = StateSnapshot {
             height: 1000,
             protocol_root: Hash::ZERO,
@@ -449,11 +497,11 @@ mod tests {
             validator_signatures: (0..quorum)
                 .map(|i| ValidatorSignature {
                     validator_id: i,
-                    signature: [0u8; 65],
+                    signature: [0u8; 64],
                 })
                 .collect(),
         };
-        assert!(verify_snapshot(&snapshot_ok, total_validators));
+        assert!(verify_snapshot(&snapshot_ok, total_validators, &empty_pubkeys));
 
         // Snapshot with too few signatures
         let snapshot_bad = StateSnapshot {
@@ -467,11 +515,11 @@ mod tests {
             validator_signatures: (0..quorum - 1)
                 .map(|i| ValidatorSignature {
                     validator_id: i,
-                    signature: [0u8; 65],
+                    signature: [0u8; 64],
                 })
                 .collect(),
         };
-        assert!(!verify_snapshot(&snapshot_bad, total_validators));
+        assert!(!verify_snapshot(&snapshot_bad, total_validators, &empty_pubkeys));
     }
 
     #[test]
@@ -630,7 +678,7 @@ mod tests {
     fn test_fast_sync_returns_error_when_no_peers() {
         // Should return NotFound when no peers available
         let tmp = std::env::temp_dir().join(format!("call-sync-test-{}", std::process::id()));
-        let result = FastSyncFlow::download_and_verify(&tmp, &[]);
+        let result = FastSyncFlow::download_and_verify(&tmp, &[], &std::collections::HashMap::new());
         assert!(result.is_err());
     }
 

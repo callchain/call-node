@@ -2032,6 +2032,7 @@ dependencies = [
 name = "call-storage"
 version = "0.1.0"
 dependencies = [
+ "call-crypto",
  "call-primitives",
  "call-serialization",
  "reth-codecs",
