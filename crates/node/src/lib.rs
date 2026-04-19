@@ -222,6 +222,9 @@ impl CallNode {
         // Wire governance executor so proposals can trigger real side effects
         wire_governance_executor(&state);
 
+        // Sync consensus params from SimplexConsensus into RpcState for governance updates
+        *state.consensus_params.write().unwrap() = *consensus.params();
+
         // Set parent_hash to the last committed block hash from persisted state
         let parent_hash = consensus.last_block_hash();
 
@@ -409,7 +412,7 @@ impl CallNode {
                         .iter()
                         .map(|(id, stake)| (*id, stake.ed25519_pubkey))
                         .collect();
-                    let params = c.params();
+                    let params = state.consensus_params.read().unwrap();
                     let subset =
                         select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
 
@@ -474,7 +477,7 @@ impl CallNode {
                 } else {
                     // Not selected — wait until next epoch boundary
                     let epoch_length = {
-                        consensus.read().unwrap().params().epoch_length
+                        state.consensus_params.read().unwrap().epoch_length
                     };
                     let current_height = {
                         consensus.read().unwrap().current_height()
@@ -1528,7 +1531,7 @@ async fn block_production_loop(
     let prune_config = call_storage::PruneConfig::default();
 
     let mut interval = tokio::time::interval(Duration::from_millis(
-        consensus.read().ok().map(|c| c.params().block_time_millis).unwrap_or(250),
+        state.consensus_params.read().ok().map(|p| p.block_time_millis).unwrap_or(250),
     ));
 
     loop {
@@ -1650,9 +1653,9 @@ async fn block_production_loop(
                         .expect("serialize oracle request");
                     net.broadcast(ORACLE_CHANNEL, msg).await;
                     // Configurable delay to allow validators to respond
-                    let delay_ms = consensus.read()
+                    let delay_ms = state.consensus_params.read()
                         .ok()
-                        .map(|c| c.params().oracle_request_delay_ms)
+                        .map(|p| p.oracle_request_delay_ms)
                         .unwrap_or(200);
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
@@ -2050,9 +2053,9 @@ async fn bft_event_loop(
                             let msg = bincode::serialize(&NetworkMessage::OraclePriceRequest(request))
                                 .expect("serialize oracle request");
                             net.broadcast(ORACLE_CHANNEL, msg).await;
-                            let delay_ms = consensus.read()
+                            let delay_ms = state.consensus_params.read()
                                 .ok()
-                                .map(|c| c.params().oracle_request_delay_ms)
+                                .map(|p| p.oracle_request_delay_ms)
                                 .unwrap_or(200);
                             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         }
@@ -2443,7 +2446,7 @@ async fn bft_event_loop(
                         });
                     }
                     // Check for epoch boundary
-                    let epoch_length = consensus.read().unwrap().params().epoch_length;
+                    let epoch_length = state.consensus_params.read().unwrap().epoch_length;
                     let new_height = height + 1;
                     if new_height % epoch_length == 0 {
                         tracing::info!(

@@ -5,7 +5,7 @@ use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_oracle::OracleManager;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
-use call_consensus::{ValidatorStateManager, ForkManager, ForkError, RollbackPlan};
+use call_consensus::{ValidatorStateManager, ForkManager, ForkError, RollbackPlan, ConsensusParams};
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash, PublicKey};
@@ -33,6 +33,7 @@ pub struct RpcState {
     pub receipts: RwLock<HashMap<TxHash, ProtocolReceipt>>,
     pub current_block: RwLock<u64>,
     pub fee_params: RwLock<FeeParams>,
+    pub consensus_params: RwLock<ConsensusParams>,
     pub mempool: Arc<RwLock<Mempool>>,
     pub chain_id: u64,
     pub subscriptions: SubscriptionManager,
@@ -83,6 +84,7 @@ impl RpcState {
             receipts: RwLock::new(HashMap::new()),
             current_block: RwLock::new(0),
             fee_params: RwLock::new(FeeParams::default()),
+            consensus_params: RwLock::new(ConsensusParams::default()),
             mempool,
             chain_id,
             subscriptions: SubscriptionManager::new(),
@@ -721,6 +723,27 @@ impl ProposalExecutor for NodeProposalExecutor {
                                 gov.config.execution_timeout_blocks = v;
                             }
                             tracing::info!(param_id, new_value, "governance config updated via executor");
+                        } else if param_id.starts_with("consensus.") {
+                            let mut cp = self.state.consensus_params.write().map_err(|_| "consensus params lock poisoned".to_string())?;
+                            if let Some(v) = val.get("max_validators").and_then(|v| v.as_u64()) {
+                                cp.max_validators = v as u32;
+                            }
+                            if let Some(v) = val.get("subset_size").and_then(|v| v.as_u64()) {
+                                cp.subset_size = v as u32;
+                            }
+                            if let Some(v) = val.get("block_time_millis").and_then(|v| v.as_u64()) {
+                                cp.block_time_millis = v;
+                            }
+                            if let Some(v) = val.get("slashing_window").and_then(|v| v.as_u64()) {
+                                cp.slashing_window = v;
+                            }
+                            if let Some(v) = val.get("oracle_request_delay_ms").and_then(|v| v.as_u64()) {
+                                cp.oracle_request_delay_ms = v;
+                            }
+                            if let Some(v) = val.get("epoch_length").and_then(|v| v.as_u64()) {
+                                cp.epoch_length = v;
+                            }
+                            tracing::info!(param_id, new_value, "consensus params updated via executor");
                         } else {
                             // Standard fee params updates
                             let mut fp = self.state.fee_params.write().map_err(|_| "fee params lock poisoned".to_string())?;
