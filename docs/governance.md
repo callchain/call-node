@@ -37,12 +37,12 @@ The CallChain governance system enables decentralized decision-making for protoc
               │ (trait impl)         │
               └────────┬────────────┘
                        │
-      ┌────────────────┼────────────────┬──────────────┐
-      ▼                ▼                ▼              ▼
- ForkManager      ValidatorState    FeeCurrencyReg   AssetRegistry
- (upgrade)        (slash/remove)    (add/remove/cap) (compliance)
-                                    FeeParams
-                                    (params)
+      ┌────────────────┼────────────────┬──────────────┬─────────────┬──────────────┐
+      ▼                ▼                ▼              ▼             ▼              ▼
+ ForkManager      ValidatorState    FeeCurrencyReg   AssetRegistry  OracleManager  ConsensusParams
+ (upgrade)        (slash/remove)    (add/remove/cap) (compliance)   (config)       (params)
+                                    FeeParams        GovernanceConfig
+                                    (fee params)     (governance params)
 ```
 
 ---
@@ -78,6 +78,7 @@ The CallChain governance system enables decentralized decision-making for protoc
 | `FeeCurrencyAdd` | 1=1 validator | Simple majority | Register new fee currency |
 | `FeeCurrencyRemove` | 1=1 validator | Simple majority | Remove fee currency (with grace period) |
 | `FeeCurrencyCap` | 1=1 validator | Simple majority | Change fee currency cap (BPS) |
+| `ValidatorKeyRotation` | 1=1 validator | Simple majority | Rotate validator Ed25519 key |
 
 ### Voting Weights
 
@@ -119,14 +120,49 @@ Pending ──(review period passes)──► Active ──(voting period passes
 
 ### Constants
 
+**Hardcoded** (require code change):
+
 | Constant | Value | Description |
 |---|---|---|
-| `PROPOSAL_DEPOSIT` | 10,000 CALL (10^22) | Required deposit to submit proposal |
 | `REVIEW_PERIOD_BLOCKS` | 691,200 | ~2 days before voting opens |
 | `VOTING_PERIOD_BLOCKS` | 2,419,200 | ~7 days voting window |
 | `TIMELOCK_PERIOD_BLOCKS` | 2,419,200 | ~7 days timelock after passing |
 | `EXECUTION_TIMEOUT_BLOCKS` | 10,368,000 | ~30 days max time to execute after queuing |
+| `PROPOSAL_COOLDOWN_BLOCKS` | 345,600 | ~1 day between proposals by same address |
 | `TOTAL_SUPPLY` | 1B CALL (10^27) | Total token supply |
+
+**Governable** (mutable via `ParameterChange` proposal):
+
+| Field | Default | Config Location | `param_id` Prefix |
+|---|---|---|---|
+| `proposal_deposit` | 10,000 CALL | `GovernanceConfig` | `governance.proposal_deposit` |
+| `asset_registration_fee` | 10 CALL | `GovernanceConfig` | `governance.asset_registration_fee` |
+| `min_self_stake` | 1,000,000 CALL | `ValidatorStateManager` | `validator.min_self_stake` |
+| `offline_slash_rate_bps` | 10 (0.1%) | `ValidatorStateManager` | `validator.offline_slash_rate_bps` |
+| `min_market_cap_usd` | 100,000,000 | `FeeCurrencyRegistry` | `fee_currency.min_market_cap_usd` |
+| `stablecoin_cap_bps` | 5000 (50%) | `FeeCurrencyRegistry` | `fee_currency.stablecoin_cap_bps` |
+| `validator_quorum_bps` | 6667 (2/3) | `GovernanceConfig` | `governance.validator_quorum_bps` |
+| `supply_quorum_bps` | 2000 (20%) | `GovernanceConfig` | `governance.supply_quorum_bps` |
+| `treasury_quorum_bps` | 2000 (20%) | `GovernanceConfig` | `governance.treasury_quorum_bps` |
+| `simple_majority_bps` | 5001 (50%+1) | `GovernanceConfig` | `governance.simple_majority_bps` |
+| `review_period_blocks` | 691,200 | `GovernanceConfig` | `governance.review_period_blocks` |
+| `voting_period_blocks` | 2,419,200 | `GovernanceConfig` | `governance.voting_period_blocks` |
+| `timelock_period_blocks` | 2,419,200 | `GovernanceConfig` | `governance.timelock_period_blocks` |
+| `execution_timeout_blocks` | 10,368,000 | `GovernanceConfig` | `governance.execution_timeout_blocks` |
+| `base_fee` | 10 | `FeeParams` | `fee.base_fee` |
+| `target_gas_per_block` | 10,000,000 | `FeeParams` | `fee.target_gas_per_block` |
+| `max_gas_per_block` | 20,000,000 | `FeeParams` | `fee.max_gas_per_block` |
+| `oracle_fee_share_bps` | 100 (1%) | `FeeParams` | `fee.oracle_fee_share_bps` |
+| `max_validators` | 1000 | `ConsensusParams` | `consensus.max_validators` |
+| `subset_size` | 21 | `ConsensusParams` | `consensus.subset_size` |
+| `block_time_millis` | 250 | `ConsensusParams` | `consensus.block_time_millis` |
+| `epoch_length` | 1000 | `ConsensusParams` | `consensus.epoch_length` |
+| `update_interval` | 1000 | `OracleConfig` | `oracle.update_interval` |
+| `outlier_threshold_bps` | 500 (5%) | `OracleConfig` | `oracle.outlier_threshold_bps` |
+| `outlier_tolerance` | 10 | `OracleConfig` | `oracle.outlier_tolerance` |
+| `twap_window_secs` | 86,400 (24h) | `OracleConfig` | `oracle.twap_window_secs` |
+| `staleness_secs` | 900 (15min) | `OracleConfig` | `oracle.staleness_secs` |
+| `min_data_sources` | 2 | `OracleConfig` | `oracle.min_data_sources` |
 
 ### Vote Delegation
 
@@ -152,9 +188,10 @@ Two independent mechanisms can pause the chain:
 
 ### Economic Incentives
 
-- **Deposit requirement**: 10,000 CALL to submit a proposal (prevents spam)
+- **Deposit requirement**: `proposal_deposit` CALL to submit a proposal (default 10,000 CALL; prevents spam)
 - **Deposit return**: Returned to proposer upon successful execution
 - **Deposit confiscation**: Lost if proposal is defeated (fails quorum) or expires (not executed within timeout)
+- **All economic constants are governable**: The deposit amount, stake minimums, slash rates, and fee parameters can be changed via `ParameterChange` proposals without a code upgrade.
 
 ### Balance Source
 
@@ -191,12 +228,29 @@ pub trait ProposalExecutor: Send + Sync {
 | `ProtocolUpgrade` | `ForkManager.schedule_governance_upgrade(version, activation_block, proposal_id, current_height)` |
 | `ValidatorSlash` | `ValidatorStateManager.remove_validator(validator_id)` — removes from consensus |
 | `EmergencyPause` | Already handled by `apply_proposal` (sets `is_paused`) |
-| `ParameterChange` | Parses JSON from `execution_data`, updates `FeeParams` fields (`base_fee`, `target_gas_per_block`, `max_gas_per_block`, `oracle_fee_share_bps`) |
+| `ParameterChange` | Routes by `param_id` prefix (see below) |
 | `ComplianceUpdate` | Maps `new_policy` u8 to `CompliancePolicy`, updates `AssetRegistry.compliance_policy` for the asset |
 | `FeeCurrencyAdd` | `FeeCurrencyRegistry.add_fee_currency(entry, proposal_id)` with decoded oracle key |
 | `FeeCurrencyRemove` | `FeeCurrencyRegistry.remove_fee_currency(asset_id, grace_period_blocks)` |
 | `FeeCurrencyCap` | `FeeCurrencyRegistry.stablecoin_cap_bps = new_cap_bps` |
 | `TreasurySpend` | Handled in `apply_proposal` (in-memory transfer, confirmed by executor) |
+| `ValidatorKeyRotation` | Verifies old-key signature, calls `ValidatorStateManager.rotate_key()` |
+
+#### ParameterChange Prefix Routing
+
+`ParameterChange` proposals use a `param_id` prefix system to route updates to the correct subsystem. The `new_value` field is parsed as JSON. Supported prefixes:
+
+| Prefix | Target Subsystem | Example `param_id` | Example `new_value` |
+|---|---|---|---|
+| `governance.*` | `GovernanceConfig` | `governance.proposal_deposit` | `{"proposal_deposit": 5000000000000000000000}` |
+| `consensus.*` | `ConsensusParams` | `consensus.subset_size` | `{"subset_size": 31}` |
+| `validator.*` | `ValidatorStateManager` | `validator.min_self_stake` | `{"min_self_stake": 500000000000000000000000}` |
+| `oracle.*` | `OracleConfig` | `oracle.outlier_threshold_bps` | `{"outlier_threshold_bps": 300}` |
+| `protocol.*` | `GovernanceConfig` (protocol-level) | `protocol.asset_registration_fee` | `{"asset_registration_fee": 5000000000000000000}` |
+| `fee_currency.*` | `FeeCurrencyRegistry` | `fee_currency.min_market_cap_usd` | `{"min_market_cap_usd": 50000000}` |
+| (no prefix / `fee.*`) | `FeeParams` | `base_fee` | `{"base_fee": 20}` |
+
+All parameter changes take effect immediately upon proposal execution (no restart required).
 
 ### Validator Registration
 
@@ -277,6 +331,7 @@ When no signature is provided, the call proceeds (backwards compatible for devne
 - **No authentication on governance RPC**: Optional secp256k1 signature verification on SubmitProposal and Vote.
 - **No fee currency registry in RpcState**: `FeeCurrencyRegistry` added to `RpcState`, wired into executor.
 - **No `register_validator` wiring**: Genesis + runtime sync into governance from consensus.
+- **Economic constants hardcoded**: `proposal_deposit`, `min_self_stake`, `offline_slash_rate_bps`, `asset_registration_fee`, `min_market_cap_usd`, and oracle config are now live fields updateable via `ParameterChange` proposals.
 
 ---
 
