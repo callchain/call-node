@@ -1580,32 +1580,52 @@ Both `MockProver` and `Groth16Prover` implement this trait. When migrating to Ha
 | Merkle tree hash | keccak256 | Poseidon (for circuit) |
 | Proof data | `[u8; 200]` dummy bytes | Serialized G1/G2 points |
 
-### 14.3 What's NOT Implemented Yet
+### 14.3 Implementation Status (Updated 2026-04-20)
 
-1. **arkworks integration** — No ark-groth16, ark-r1cs-std, ark-bn254 dependencies
-2. **Real ConstraintSynthesizer** — Current circuit uses plaintext constraint checks
-3. **Poseidon hash gadget** — Currently uses keccak256 (too expensive in R1CS)
-4. **Trusted setup** — No CRS generation, no powers of tau
-5. **Proof serialization** — No G1/G2 point serialization to/from bytes
-6. **Solidity verifier** — No on-chain verification contract
-7. **Deposit circuit** — Spec defined (~350 constraints), not implemented
-8. **Withdraw circuit** — Spec defined (~3,551 constraints), not implemented
+#### Implemented
 
-### 14.4 Estimated Effort
+| Component | Status | Notes |
+|-----------|--------|-------|
+| arkworks integration | **Complete** | `ark-groth16`, `ark-r1cs-std`, `ark-bn254`, `ark-serialize` all wired |
+| Real ConstraintSynthesizer | **Complete** | `ShieldedTransfer`, `ShieldedWithdraw`, `ShieldedDeposit` circuits with full R1CS constraints |
+| Poseidon hash gadget | **Complete** | `poseidon.rs` + `merkle_poseidon.rs` for circuit-friendly hashing |
+| Proof serialization | **Complete** | `proof_ser.rs` — G1/G2 point serialization (128 bytes compressed) |
+| Deposit circuit | **Complete** | ~350 constraints, tested with `test_real_prover_deposit_proof_cycle` |
+| Withdraw circuit | **Complete** | ~3,551 constraints, tested with `test_real_prover_withdraw_proof_cycle` |
+| Transfer circuit | **Complete** | ~7,800 constraints, tested with `test_real_prover_transfer_proof_cycle` |
+| RealProver | **Complete** | Groth16 prove/verify for all 3 circuits, `global()` singleton |
+| Production key loading | **Complete** | `ceremony.rs` — `ProductionKeys::load_with_verification()` with genesis hash check |
+| R1CS export | **Complete** | `export_r1cs.rs` binary exports `.r1cs` files for snarkjs Phase 2 |
+| PoT ceremony scripts | **Complete** | `download_pot.sh`, `run_ceremony.sh`, `phase2_derive.sh` |
 
-| Task | Lines of Code | Complexity | Effort |
-|------|--------------|------------|--------|
-| arkworks dependencies | ~50 | Low | 0.5 day |
-| Poseidon hash integration | ~300 | Medium | 2 days |
-| ShieldedTransfer ConstraintSynthesizer | ~800 | High | 5 days |
-| ShieldedWithdraw ConstraintSynthesizer | ~400 | Medium | 3 days |
-| ShieldedDeposit ConstraintSynthesizer | ~200 | Low | 1 day |
-| RealProver integration (3 circuits) | ~500 | Medium | 3 days |
-| Proof serialization | ~200 | Medium | 2 days |
-| Integration tests (all 3 circuits) | ~700 | Medium | 4 days |
-| CRS generation (dev) | ~100 | Low | 1 day |
-| Solidity verifier (3 contracts) | Generated | Low | 2 days |
-| **Total** | **~3,250** | | **~23 days** |
+#### Remaining Before Mainnet
+
+| Task | Why It Matters | Effort |
+|------|---------------|--------|
+| **Execute PoT ceremony** | Generate actual `pot_final.ptau` and `circuit_keys/` from real Perpetual PoT | ~2 hours |
+| **Enable `production-keys` feature in production builds** | `call-node` has the feature; enable it in release builds | ~5 minutes |
+| **Distribute proving keys to clients** | Clients need `*_pk.bin` to generate proofs; validators only need `*_vk.bin` | Process |
+| **Solidity verifier deployment** | `phase2_derive.sh` generates `Verifier_*.sol`; needs deployment on Callchain EVM | Process |
+
+#### Dev vs Production
+
+```
+Dev build (default features):
+  RealProver::global() -> circuit_specific_setup()  --  unsafe for production
+
+Production build (--features production-keys):
+  RealProver::global() -> ProductionKeys::load("/var/lib/callchain/shielded_keys")
+                          --  keys from Perpetual Powers of Tau + Phase 2
+```
+
+### 14.4 Effort Retrospective
+
+The original estimate was ~23 days. Actual implementation took significantly less because:
+
+- arkworks ecosystem is mature and well-documented
+- Poseidon parameters for BN254 are publicly available
+- `export_r1cs.rs` bridges arkworks and snarkjs cleanly
+- The `Prover` trait abstraction allowed incremental migration from `MockProver` to `RealProver`
 
 **Effort breakdown by circuit**:
 

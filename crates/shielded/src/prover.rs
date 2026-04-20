@@ -159,11 +159,31 @@ mod real_prover_impl {
 
     impl RealProver {
         /// Global singleton RealProver instance.
-        /// Lazily initializes via trusted setup on first access.
+        ///
+        /// With the `production-keys` feature enabled, this first attempts to load
+        /// ceremony-derived keys from `/var/lib/callchain/shielded_keys`. If the
+        /// directory does not exist or the keys are invalid, it falls back to the
+        /// dev-only `circuit_specific_setup` path (which prints a warning).
+        ///
+        /// Without `production-keys`, this always uses the dev trusted-setup path.
         pub fn global() -> &'static Self {
             use std::sync::OnceLock;
             static INSTANCE: OnceLock<RealProver> = OnceLock::new();
-            INSTANCE.get_or_init(|| Self::setup())
+            INSTANCE.get_or_init(|| {
+                #[cfg(feature = "production-keys")]
+                {
+                    match Self::from_production_dir("/var/lib/callchain/shielded_keys") {
+                        Ok(prover) => return prover,
+                        Err(e) => {
+                            eprintln!(
+                                "WARNING: production ZK keys not found at /var/lib/callchain/shielded_keys: {e}. \
+                                 Falling back to dev trusted setup. Run the PoT ceremony before mainnet deployment."
+                            );
+                        }
+                    }
+                }
+                Self::setup()
+            })
         }
 
         /// Run circuit-specific trusted setup for all three circuit types.

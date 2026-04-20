@@ -32,7 +32,7 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 ### Critical
 
 1. **No tagged release** — version is `0.1.0`, changelog is all `[Unreleased]`, no git releases
-2. **ZK trusted setup missing** — uses `circuit_specific_setup` (dev/dummy CRS). Production requires a Powers of Tau ceremony with MPC participants. Without this, shielded proofs have no trust assumptions.
+2. **ZK trusted setup** — ~~uses `circuit_specific_setup` (dev/dummy CRS). Production requires a Powers of Tau ceremony with MPC participants~~. **Partially fixed**: `PoT_ceremony/` has complete tooling (download Perpetual PoT, run custom ceremony, Phase 2 key derivation). `crates/shielded/src/ceremony.rs` implements `ProductionKeys::load_with_verification()` with genesis hash checking. `RealProver::global()` auto-switches to production keys when `production-keys` feature is enabled. `export_r1cs.rs` exports arkworks circuits to snarkjs format. Remaining: execute the ceremony, generate `circuit_keys/`, and enable `production-keys` in production builds.
 3. **No third-party security audit** — no audit report from a reputable firm (Trail of Bits, OpenZeppelin, etc.). Given the financial nature of the system, this is a prerequisite.
 4. **Mainnet genesis config absent** — no production genesis with real validator set, token distribution, initial parameters, and chain ID.
 

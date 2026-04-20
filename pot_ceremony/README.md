@@ -214,6 +214,105 @@ snarkjs zkey verify circuit_keys/transfer.r1cs pot_transcript/pot_final.ptau cir
 | Test with production keys | 1 day | Verify proofs against ceremony-derived VKs |
 | **Total** | **~2-3 days** | Assuming R1CS export is straightforward |
 
+---
+
+## Production Readiness Checklist
+
+Before mainnet deployment, complete these steps to switch from dev CRS to production ceremony-derived keys.
+
+### Step 1: Prerequisites
+
+```bash
+# Install snarkjs (requires Node.js)
+npm install -g snarkjs
+
+# Ensure Rust toolchain is up to date
+rustup update
+```
+
+### Step 2: Download Perpetual Powers of Tau
+
+```bash
+cd PoT_ceremony
+./download_pot.sh 25   # ~2GB download, 2^25 = 33M constraints
+```
+
+### Step 3: Export R1CS from arkworks circuits
+
+```bash
+cd ..
+cargo run --release --features real-prover --bin export_r1cs
+# Outputs: r1cs/deposit.r1cs, r1cs/withdraw.r1cs, r1cs/transfer.r1cs
+```
+
+### Step 4: Derive circuit-specific keys
+
+```bash
+cd PoT_ceremony
+./phase2_derive.sh ./pot_transcript/pot_final.ptau
+# Outputs: circuit_keys/*_final.zkey, circuit_keys/*_vk.json, circuit_keys/Verifier_*.sol
+```
+
+### Step 5: Copy verifying keys to the node
+
+```bash
+mkdir -p /var/lib/callchain/shielded_keys
+cp circuit_keys/deposit_vk.bin /var/lib/callchain/shielded_keys/
+cp circuit_keys/withdraw_vk.bin /var/lib/callchain/shielded_keys/
+cp circuit_keys/transfer_vk.bin /var/lib/callchain/shielded_keys/
+
+# Optional: copy proving keys for client-side proof generation
+cp circuit_keys/deposit_pk.bin /var/lib/callchain/shielded_keys/
+cp circuit_keys/withdraw_pk.bin /var/lib/callchain/shielded_keys/
+cp circuit_keys/transfer_pk.bin /var/lib/callchain/shielded_keys/
+```
+
+### Step 6: Embed VK hashes in genesis config
+
+Add to `chainspec/mainnet.json`:
+
+```json
+{
+  "shielded": {
+    "deposit_vk_hash":  "<sha256 of deposit_vk.bin>",
+    "withdraw_vk_hash": "<sha256 of withdraw_vk.bin>",
+    "transfer_vk_hash": "<sha256 of transfer_vk.bin>"
+  }
+}
+```
+
+Compute hashes:
+```bash
+sha256sum /var/lib/callchain/shielded_keys/*_vk.bin
+```
+
+### Step 7: Build with production keys
+
+```bash
+# Production build — uses ceremony-derived keys instead of circuit_specific_setup
+cargo build --release --features production-keys -p call-node
+```
+
+### Step 8: Verify
+
+```bash
+# Run a testnet node and check logs for "shielded prover ready"
+./target/release/calld --config /etc/callchain/config.toml
+```
+
+Expected log output:
+```
+INFO initializing shielded prover
+INFO shielded prover ready
+```
+
+If production keys are missing, `RealProver::global()` falls back to dev setup with a warning:
+```
+WARNING: production ZK keys not found at /var/lib/callchain/shielded_keys
+```
+
+---
+
 ## References
 
 - [Perpetual Powers of Tau](https://github.com/privacy-scaling-explorations/perpetualpowersoftau)

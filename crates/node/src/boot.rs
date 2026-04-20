@@ -218,7 +218,15 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     // Wire governance auth config
     node.state.set_governance_auth(config.governance.require_auth);
 
-    // Step 2b: Load validator signing key (if validator mode)
+    // Step 2b: Initialize shielded ZK prover (production keys if compiled with production-keys feature)
+    #[cfg(feature = "production-keys")]
+    {
+        info!("initializing shielded prover");
+        let _ = call_shielded::RealProver::global();
+        info!("shielded prover ready");
+    }
+
+    // Step 2c: Load validator signing key (if validator mode)
     if config.mode == NodeMode::Validator {
         let signer = load_validator_signer(&config.keys).await?;
         info!(
