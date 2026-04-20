@@ -25,6 +25,7 @@ use call_primitives::BlockHash;
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
+    security::P2PDefense,
 };
 use call_governance::GovernanceManager;
 use call_oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
@@ -44,7 +45,7 @@ use call_primitives::TxHash;
 use reth_db::DatabaseEnv;
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
-use call_bridge::BridgeStateManager;
+use call_bridge::{BridgeStateManager, BridgeConfig};
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use jsonrpsee::server::ServerHandle;
@@ -299,8 +300,18 @@ impl CallNode {
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
         let telemetry = Arc::clone(&self.telemetry);
+        let p2p_defense = std::sync::Mutex::new(P2PDefense::new(100, 1000, 10 * 1024 * 1024));
         tokio::spawn(async move {
             while let Ok((peer_id, channel, data)) = net_clone.receive().await {
+                // P2P defense: rate limiting + max message size
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if let Err(e) = p2p_defense.lock().unwrap().validate_message(peer_id.clone(), data.len(), now_ms) {
+                    tracing::warn!(peer_id, error = %e, size = data.len(), "p2p: message rejected by defense");
+                    continue;
+                }
                 telemetry.record_p2p_bytes_received(data.len());
                 telemetry.set_p2p_peers(net_clone.peer_count());
                 if channel == SYNC_CHANNEL {
@@ -332,6 +343,46 @@ impl CallNode {
         });
 
         Ok(())
+    }
+
+    /// Start compliance data source sync task (background fetch of OFAC/KYC lists)
+    pub fn start_compliance_sync(
+        &self,
+        data_url: Option<String>,
+        interval_secs: u64,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let data_url = data_url?;
+        let state = Arc::clone(&self.state);
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                match reqwest::get(&data_url).await {
+                    Ok(resp) => match resp.json::<Vec<String>>().await {
+                        Ok(addresses) => {
+                            let mut engine = state.compliance_engine.write().unwrap();
+                            let mut added = 0;
+                            for addr_str in addresses {
+                                if let Ok(bytes) = hex::decode(addr_str.trim_start_matches("0x")) {
+                                    if bytes.len() == 20 {
+                                        let addr = call_primitives::Address::from_slice(&bytes);
+                                        engine.add_to_blacklist(addr);
+                                        added += 1;
+                                    }
+                                }
+                            }
+                            tracing::info!(added, url = %data_url, "compliance: synced sanctioned addresses");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "compliance: failed to parse address list");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "compliance: failed to fetch address list");
+                    }
+                }
+            }
+        }))
     }
 
     /// Start the consensus block production loop
@@ -1644,6 +1695,29 @@ async fn block_production_loop(
             }
         };
         block.finalize(&result);
+
+        // 3c. Finalize bridge deposits whose challenge period has expired
+        {
+            let mut balances = state.balance_state.write().unwrap();
+            let mut bridge_state = state.bridge_state.write().unwrap();
+            let config = BridgeConfig::default();
+            let finalized = bridge_state.finalize_pending_external_deposits(
+                height,
+                config.challenge_period_blocks,
+            );
+            for deposit in finalized {
+                if let Err(e) = balances.mint(deposit.asset_id, &call_primitives::Address::ZERO, deposit.recipient, deposit.amount) {
+                    tracing::warn!(error = %e, "bridge: failed to credit finalized deposit");
+                } else {
+                    tracing::info!(
+                        tx_hash = %deposit.source_tx_hash,
+                        recipient = %deposit.recipient,
+                        amount = deposit.amount,
+                        "bridge: deposit finalized and credited"
+                    );
+                }
+            }
+        }
 
         // 3b. Sign the block (if validator with signing key)
         {

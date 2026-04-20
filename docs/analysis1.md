@@ -38,15 +38,15 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 
 ### High
 
-5. **Bridge security model** — external bridge relies on 14/21 validator signatures with no fraud proofs, challenge period, or light client verification. A validator key compromise could mint infinite tokens.
+5. **Bridge security model** — ~~external bridge relies on 14/21 validator signatures with no fraud proofs, challenge period, or light client verification~~. **Partially fixed**: challenge period is now ~7 days (2,419,200 blocks at 250ms), `light-client-bridge` feature enabled by default, and bridge deposits are automatically finalized during block production. Fraud proof mechanism exists (`revoke_pending_external_deposit`) but needs a dedicated instruction/RPC endpoint for permissionless challenges.
 6. **Oracle system lacks real data sources** — price feeds are structural/mock. No Chainlink, Pyth, or other production oracle integration. Fee conversion and multi-currency payments depend on this.
 7. **Key management** — validator keys stored on-disk locally. No HSM/KMS integration, no threshold signature scheme, no key rotation protocol.
-8. **Network security** — no TLS mentioned, no authenticated P2P handshakes documented, no infra-level DoS protection. Commonware-p2p provides transport but the security posture isn't documented.
+8. **Network security** — ~~no TLS mentioned, no authenticated P2P handshakes documented, no infra-level DoS protection~~. **Fixed**: TLS/HTTPS + per-IP rate limiting added to RPC layer. `P2PDefense` is now wired into the P2P message receive loop enforcing per-peer rate limits (100 msg/sec) and max message size (10 MB). Infra-level DoS protection still needs documentation.
 
 ### Medium
 
-9. **Compliance engine has no real data** — OFAC blacklist, KYC registry, whitelist are in-memory structures with no real data source integration.
-10. **Governance timelock too short** — 1000 blocks (~4 minutes at 250ms block time) is dangerously short for production parameter changes. Should be days or weeks.
+9. **Compliance engine has no real data** — ~~OFAC blacklist, KYC registry, whitelist are in-memory structures with no real data source integration~~. **Fixed**: Background `compliance_data_sync` task fetches sanctioned address lists from a configurable URL (`CALL_COMPLIANCE_DATA_URL` env var) every 5 minutes and updates the `ComplianceEngine` blacklist. KYC/whitelist data sources still need integration.
+10. **Governance timelock** — `TIMELOCK_PERIOD_BLOCKS` is 2,419,200 blocks (~7 days at 250ms block time). This is appropriate for production. The 1000-block value only appears in test configs.
 11. **Stress testing unverified** — E2E stress tests claim 10K tx/sec targets but this needs real benchmarking on production hardware with realistic network conditions (latency, packet loss, geographic distribution).
 12. **No bug bounty program** — SECURITY.md describes responsible disclosure but there's no mention of a bounty program (Immunefi, HackerOne) to incentivize white-hat research.
 
@@ -66,15 +66,15 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 | EVM layer | Medium | Moderate | Revm integration solid, ERC-20 template needs audit |
 | Consensus (Simplex BFT) | Medium | High | Via commonware — battle-tested but not at this scale |
 | ZK shielded | Low-Medium | Critical | Real prover works but dev CRS only; no production trusted setup |
-| External bridge | Low | Critical | 14/21 sig threshold, no challenge period, no fraud proofs |
+| External bridge | Medium | High | Challenge period (~7 days) and light-client verification enabled; auto-finalization in block production; fraud proof revoke exists but needs dedicated challenge endpoint |
 | Oracle system | Low | High | No real price feed integration |
-| Governance | Medium | Moderate | Logic complete, parameters not tuned for prod |
+| Governance | Medium | Moderate | Logic complete, timelock at ~7 days is production-appropriate |
 | Mempool | High | Low | Well-structured with anti-spam measures |
 | RPC layer | High | Low | JSON-RPC + WebSocket, good defaults |
 | Node/CLI | High | Low | Well-structured, good defaults |
 | Telemetry | High | Low | Prometheus + OpenTelemetry, alert rules defined |
 | Light client | Medium | Low | Implemented, needs real-world testing |
-| Network/P2P | Medium | Moderate | Commonware-p2p, rate limiting in place |
+| Network/P2P | Medium-High | Low-Moderate | Commonware-p2p with Noise auth; P2PDefense wired for per-peer rate limiting and message size caps |
 | State storage | High | Low | reth-db (MDBX), prune strategy defined |
 
 ---

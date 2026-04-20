@@ -22,4 +22,5 @@ thiserror.workspace = true
 [dev-dependencies]
 
 [features]
+default = ["light-client-bridge"]
 light-client-bridge = ["call-light-client"]

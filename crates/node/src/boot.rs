@@ -330,6 +330,13 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         }
     }
 
+    // Step 8: Start compliance data sync (if URL configured)
+    let compliance_url = std::env::var("CALL_COMPLIANCE_DATA_URL").ok();
+    if compliance_url.is_some() {
+        info!("step 8: starting compliance data sync");
+    }
+    let _compliance_handle = node.start_compliance_sync(compliance_url, 300); // 5 min interval
+
     info!(
         mode = ?config.mode,
         http = %config.rpc.http_addr,

@@ -329,7 +329,7 @@ impl Default for BridgeConfig {
             allowed_assets: vec![1], // CALL
             signature_timeout_secs: 300,
             min_validator_signatures: 14,
-            challenge_period_blocks: 10_080, // ~7 days at 1 block/min
+            challenge_period_blocks: 2_419_200, // ~7 days at 250ms block time
             max_external_withdraw_per_period: 5_000_000_000_000_000_000_000u128, // 5K tokens per period
         }
     }
