@@ -37,11 +37,14 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 │  └────────────────────┘  │ - agent_id, nonce, sig       │  │
 │                          │ - owner_public_key             │  │
 │  ┌────────────────────┐  └──────────────────────────────┘  │
-│  │ AgentFeeConfig     │                                     │
-│  │ - fee_payer        │  verify_agent_tx (5-step)          │
-│  │ - require_owner_   │  execute_agent_tx (0.5x gas)       │
-│  │   signature_above  │                                     │
-│  └────────────────────┘                                     │
+│  │ AgentFeeConfig     │  ┌──────────────────────────────┐  │
+│  │ - fee_payer        │  │ AgentEvents                  │  │
+│  │ - require_owner_   │  │ - event_type, agent_id       │  │
+│  │   signature_above  │  │ - asset_id, amount           │  │
+│  └────────────────────┘  │ - block_height               │  │
+│                          └──────────────────────────────┘  │
+│                          verify_agent_tx (5-step)          │
+│                          execute_agent_tx (0.5x gas)       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -129,13 +132,26 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 
 **Gap #9 — Gas fee asset is hardcoded to asset_id=1:** ~~`execute_agent_tx()` always deducts gas fees using asset_id=1.~~ **FIXED** — Fee asset is resolved from `protocol_tx.fee_currency`: `FeeCurrency::Call` → asset_id=1, `FeeCurrency::Stablecoin(id)` → asset_id=id.
 
-**Gap #10 — `max_fee` used as expiry proxy:** The expiry check uses `protocol_tx.max_fee as u64` as the block number proxy. This conflates fee economics with time validity. A high `max_fee` means a long expiry.
+**Gap #10 — `max_fee` used as expiry proxy:** ~~The expiry check uses `protocol_tx.max_fee as u64` as the block number proxy. This conflates fee economics with time validity. A high `max_fee` means a long expiry.~~ **FIXED** — `ProtocolTransaction` now has independent `expires_at: u64` field. `verify_agent_tx()` checks `protocol_tx.expires_at` instead of `max_fee`. `Block::execute` rejects expired txs at block boundary. `compute_tx_hash()` and `compute_agent_tx_hash()` include `expires_at` in preimage.
 
 **Gap #11 — `execute_agent_call` is broken:** ~~It calls `evm_executor.evm_call_bridge_mint()` with the target address.~~ **FIXED** — `execute_agent_call()` now constructs a proper `EvmTransaction` with the target address and data, and executes it via `evm_executor.execute_tx()`.
 
 **Gap #12 — Agent transactions are not integrated into block production:** ~~There is no `Instruction::Agent*` execution path in the block execution pipeline.~~ **FIXED** — `Block::execute` already had `execute_agent_instruction()` for `AgentPay`, `AgentBatchPay`, `AgentCall`, and `AgentBridgeDeposit`. Added `verify_agent_instruction_permissions()` which checks `allowed_assets`, `per_tx_limit`, `expires_at`, and `allowed_protocols` (for `AgentCall`) inline during block execution.
 
 **Gap #13 — Agent state is not persisted:** ~~`AgentBalances`, `AgentNonces`, and `AgentRegistry` are in-memory only.~~ **FIXED** — `AgentRegistry` and `AgentBalances` are persisted to MDBX (`CallAgents` / `CallAgentBalances` tables). `AgentNonces` is now also persisted (`CallAgentNonces` table) via `save_agent_nonces_inner` / `load_agent_nonces_inner` in the node's persistence loop.
+
+### 5. Agent Activity Audit Trail (`lib.rs`, `block.rs`)
+
+`AgentEventType` enum:
+- `AgentPay`, `AgentBatchPay`, `AgentCall`, `AgentBridgeDeposit`
+- `AgentRegistered`, `AgentRevoked`
+
+`AgentEvent` struct:
+- `event_type`, `agent_id`, `tx_hash`, `asset_id`, `amount`, `recipient`, `block_height`
+
+Emitted during `Block::execute` by `execute_agent_instruction()` for every successful agent instruction. Included in `BlockExecutionResult::agent_events` and hashed into `compute_receipt_root()`.
+
+**Gap #14 — No agent activity audit trail:** ~~No receipts or events track agent-mediated transactions distinctly.~~ **FIXED** — `AgentEvent` / `AgentEventType` types added to `call-agent`. `BlockExecutionResult` carries `agent_events: Vec<AgentEvent>`. `execute_agent_instruction()` emits events for `AgentPay`, `AgentBatchPay`, `AgentCall`, and `AgentBridgeDeposit`. `compute_receipt_root()` hashes agent events into the receipt root.
 
 ---
 
