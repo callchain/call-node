@@ -69,11 +69,6 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 - Update config (name, URL, metadata)
 - Update domain proof
 
-**Gap #1 — Domain verification is format-only:** ~~`verify_domain_proof()` and `DefaultDomainVerifier` only check that the domain/URL string is well-formed.~~ **FIXED** — `AgentRegistry::new()` now uses `RealDomainVerifier` by default, which performs actual DNS TXT lookups (`hickory_resolver`) and HTTP fetches (`ureq`). `new_with_format_verifier()` is available for testing.
-
-**Gap #2 — No registration fee or stake requirement:** ~~Anyone can register an agent at zero cost. There is no economic barrier to agent spam.~~ **FIXED** — `AgentRegistry` now supports `registration_fee` and `fee_asset_id`. `register_agent()` accepts an optional `balances: &mut BalanceState` and deducts the fee before creating the registration. `with_registration_fee(fee, asset_id)` builder is available.
-
-**Gap #3 — No agent revocation/removal:** ~~Once registered, an agent cannot be removed from the registry.~~ **FIXED** — `AgentRegistry::unregister_agent(agent_id)` removes the agent from all indexes (`agents`, `agents_by_name`, `agents_by_owner`).
 
 ### 2. Agent Permissions (`permissions.rs`)
 
@@ -96,11 +91,6 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 5. Daily limit (with auto-reset every 86,400,000 ms = 24 hours, timestamp-based)
 6. Owner daily fee limit
 
-**Gap #4 — Default permissions are wide open:** ~~`AgentPermissions::default()` sets `allowed_assets = []` (meaning ALL assets allowed), `daily_limit = MAX`, `per_tx_limit = MAX`.~~ **FIXED** — Defaults are now restrictive: `allowed_assets = [1]` (only CALL), `daily_limit = 10_000`, `per_tx_limit = 1_000`.
-
-**Gap #5 — Daily reset is block-based, not time-based:** ~~`BLOCKS_PER_DAY = 86400` assumes 250ms block times. If block times change, the "day" duration changes.~~ **FIXED** — `AgentDailyUsage` now uses `last_reset_time: u64` (ms) and `MS_PER_DAY = 86400000`. `verify_agent_permissions()` takes both `current_block` (for expiry) and `current_time` (for daily reset).
-
-**Gap #6 — BatchTransfer only checks first payment:** ~~`extract_instruction_details()` for `BatchTransfer` returns only the first payment's details.~~ **FIXED** — `extract_instruction_details()` now returns `Vec<(AssetId, Address, u128)>`. `BatchTransfer` and `AgentBatchPay` enumerate **all** payments, and `verify_agent_tx()` iterates over every entry.
 
 ### 3. Agent Balances (`balances.rs`)
 
@@ -112,9 +102,6 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 - `deduct()`: Subtracts with underflow check
 - `credit()`: Adds with `checked_add` overflow protection
 
-**Gap #7 — Grant does not deduct from owner:** ~~`grant_funds()` simply credits the agent balance. The owner's protocol balance is not reduced.~~ **FIXED** — `grant_funds()` now calls `protocol_balances.deduct_balance()` before crediting the agent.
-
-**Gap #8 — No overflow protection on credit:** ~~`credit()` uses `balance + amount` without `checked_add`.~~ **FIXED** — `credit()` uses `checked_add` and returns `AgentError::ExecutionFailed("agent balance overflow")` on overflow.
 
 ### 4. Agent Transaction Verification (`executor.rs`)
 
@@ -130,15 +117,6 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 2. Deducts fee from agent balance using the transaction's `fee_currency`
 3. Executes instructions via `execute_protocol_instructions()`
 
-**Gap #9 — Gas fee asset is hardcoded to asset_id=1:** ~~`execute_agent_tx()` always deducts gas fees using asset_id=1.~~ **FIXED** — Fee asset is resolved from `protocol_tx.fee_currency`: `FeeCurrency::Call` → asset_id=1, `FeeCurrency::Stablecoin(id)` → asset_id=id.
-
-**Gap #10 — `max_fee` used as expiry proxy:** ~~The expiry check uses `protocol_tx.max_fee as u64` as the block number proxy. This conflates fee economics with time validity. A high `max_fee` means a long expiry.~~ **FIXED** — `ProtocolTransaction` now has independent `expires_at: u64` field. `verify_agent_tx()` checks `protocol_tx.expires_at` instead of `max_fee`. `Block::execute` rejects expired txs at block boundary. `compute_tx_hash()` and `compute_agent_tx_hash()` include `expires_at` in preimage.
-
-**Gap #11 — `execute_agent_call` is broken:** ~~It calls `evm_executor.evm_call_bridge_mint()` with the target address.~~ **FIXED** — `execute_agent_call()` now constructs a proper `EvmTransaction` with the target address and data, and executes it via `evm_executor.execute_tx()`.
-
-**Gap #12 — Agent transactions are not integrated into block production:** ~~There is no `Instruction::Agent*` execution path in the block execution pipeline.~~ **FIXED** — `Block::execute` already had `execute_agent_instruction()` for `AgentPay`, `AgentBatchPay`, `AgentCall`, and `AgentBridgeDeposit`. Added `verify_agent_instruction_permissions()` which checks `allowed_assets`, `per_tx_limit`, `expires_at`, and `allowed_protocols` (for `AgentCall`) inline during block execution.
-
-**Gap #13 — Agent state is not persisted:** ~~`AgentBalances`, `AgentNonces`, and `AgentRegistry` are in-memory only.~~ **FIXED** — `AgentRegistry` and `AgentBalances` are persisted to MDBX (`CallAgents` / `CallAgentBalances` tables). `AgentNonces` is now also persisted (`CallAgentNonces` table) via `save_agent_nonces_inner` / `load_agent_nonces_inner` in the node's persistence loop.
 
 ### 5. Agent Activity Audit Trail (`lib.rs`, `block.rs`)
 
@@ -151,7 +129,6 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 
 Emitted during `Block::execute` by `execute_agent_instruction()` for every successful agent instruction. Included in `BlockExecutionResult::agent_events` and hashed into `compute_receipt_root()`.
 
-**Gap #14 — No agent activity audit trail:** ~~No receipts or events track agent-mediated transactions distinctly.~~ **FIXED** — `AgentEvent` / `AgentEventType` types added to `call-agent`. `BlockExecutionResult` carries `agent_events: Vec<AgentEvent>`. `execute_agent_instruction()` emits events for `AgentPay`, `AgentBatchPay`, `AgentCall`, and `AgentBridgeDeposit`. `compute_receipt_root()` hashes agent events into the receipt root.
 
 ---
 
