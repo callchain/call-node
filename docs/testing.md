@@ -143,8 +143,10 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 
 1. **Fuzz tests**: Transaction RLP decoding, MPT proof parsing, instruction deserialization.
 2. **Chaos tests**: Random node restarts, network delays, message drops.
-3. **Load tests**: Sustained 1000 TPS for 1 hour, memory profiling.
-4. **Audit log integrity tests**: Tamper detection, Merkle proof verification for audit entries.
+3. **Load tests**: Sustained 1000 TPS for 1 hour, memory profiling. Validate on real hardware with cross-region latency (50-200ms) and packet loss simulation.
+4. **Real-network light client tests**: Connect to live Ethereum RPC for 7+ days. Verify header chain submission, receipt proofs, reorg handling.
+5. **Heterogeneous fork upgrade tests**: Mixed-version testnet (50% old / 50% new). Verify upgrade activation, backward/forward compatibility, no consensus split.
+6. **Audit log integrity tests**: Tamper detection, Merkle proof verification for audit entries.
 
 ---
 
@@ -154,7 +156,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 |---|-----|----------|
 | 1 | **No CI/CD pipeline configuration** | Tests are run manually. No automated test execution on PRs. |
 | 2 | **No code coverage tracking** | No `cargo tarpaulin` or `llvm-cov` integration. Unknown actual coverage percentage. |
-| 3 | **No benchmark suite** | No `criterion.rs` benchmarks for hot paths (MPT verification, proof generation, block production). |
+| 3 | **No benchmark suite** (Gap 11) | No `criterion.rs` benchmarks for hot paths (MPT verification, proof generation, block production). E2E `test_stress.rs` runs in-memory; no real-network latency/packet-loss validation. |
 | 4 | **No property-based testing** | No `proptest` or `quickcheck` for invariant-based testing. |
-| 5 | **No testnet environment** | E2E tests run in-memory. No long-running testnet for soak testing. |
+| 5 | **No testnet environment** (Gap 13, 14, 11) | E2E tests run in-memory. No long-running testnet for soak testing, light client real-network validation, or heterogeneous fork upgrade testing. |
 | 6 | **No mutation testing** | No `cargo-mutants` to verify test suite effectiveness. |
