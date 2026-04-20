@@ -89,11 +89,11 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 | `expires_at` | `0` (never) | Permission expiry block |
 
 `verify_agent_permissions()` checks:
-1. Expiration
+1. Expiration (block-number based)
 2. Asset allowed
 3. Counterparty allowed
 4. Per-tx limit
-5. Daily limit (with auto-reset every 86,400 blocks)
+5. Daily limit (with auto-reset every 86,400,000 ms = 24 hours, timestamp-based)
 6. Owner daily fee limit
 
 **Gap #4 — Default permissions are wide open:** ~~`AgentPermissions::default()` sets `allowed_assets = []` (meaning ALL assets allowed), `daily_limit = MAX`, `per_tx_limit = MAX`.~~ **FIXED** — Defaults are now restrictive: `allowed_assets = [1]` (only CALL), `daily_limit = 10_000`, `per_tx_limit = 1_000`.
@@ -171,7 +171,7 @@ Emitted during `Block::execute` by `execute_agent_instruction()` for every succe
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Agent registration | 🟢 Ready | Name uniqueness, metadata storage, real DNS/HTTP domain verification, agent revocation |
+| Agent registration | 🟢 Ready | Name uniqueness, metadata storage, real DNS/HTTP domain verification, agent revocation, configurable registration fee |
 | Permissions | 🟢 Ready | Restrictive defaults, full per-instruction checking including all batch payments |
 | Balance management | 🟢 Ready | Grant deducts from owner, overflow-protected credit, underflow-protected deduct |
 | Transaction verification | 🟢 Ready | 5-step validation with independent `expires_at` field, no longer conflates fee with time |
