@@ -28,6 +28,10 @@ pub struct AgentRegistry {
     pub agents_by_owner: std::collections::HashMap<Address, Vec<u64>>,
     pub agents_by_name: std::collections::HashMap<String, u64>,
     pub next_id: u64,
+    /// Registration fee (in fee_asset_id units). 0 = free registration.
+    pub registration_fee: u128,
+    /// Asset ID for registration fee (default: 1 = CALL).
+    pub fee_asset_id: call_primitives::AssetId,
     #[serde(skip)]
     domain_verifier: Option<Box<dyn DomainVerifier>>,
 }
@@ -39,6 +43,8 @@ impl std::fmt::Debug for AgentRegistry {
             .field("agents_by_owner", &self.agents_by_owner)
             .field("agents_by_name", &self.agents_by_name)
             .field("next_id", &self.next_id)
+            .field("registration_fee", &self.registration_fee)
+            .field("fee_asset_id", &self.fee_asset_id)
             .field("domain_verifier", &self.domain_verifier.is_some())
             .finish()
     }
@@ -51,6 +57,8 @@ impl Default for AgentRegistry {
             agents_by_owner: Default::default(),
             agents_by_name: Default::default(),
             next_id: Default::default(),
+            registration_fee: 0,
+            fee_asset_id: 1,
             domain_verifier: None,
         }
     }
@@ -64,6 +72,8 @@ impl AgentRegistry {
             agents_by_owner: Default::default(),
             agents_by_name: Default::default(),
             next_id: Default::default(),
+            registration_fee: 0,
+            fee_asset_id: 1,
             domain_verifier: Some(Box::new(RealDomainVerifier)),
         }
     }
@@ -71,6 +81,13 @@ impl AgentRegistry {
     /// Create a registry with format-only domain verification (for testing).
     pub fn new_with_format_verifier() -> Self {
         Self::default()
+    }
+
+    /// Set the registration fee (in fee_asset_id units).
+    pub fn with_registration_fee(mut self, fee: u128, asset_id: call_primitives::AssetId) -> Self {
+        self.registration_fee = fee;
+        self.fee_asset_id = asset_id;
+        self
     }
 
     /// Set a custom domain verifier for this registry.
@@ -86,12 +103,13 @@ impl AgentRegistry {
         }
     }
 
-    /// Register a new agent with domain verification (per spec §6.2)
+    /// Register a new agent with domain verification and optional fee (per spec §6.2)
     ///
     /// Steps:
     /// 1. Validate name uniqueness
-    /// 2. Verify domain proof if provided
-    /// 3. Create registration record
+    /// 2. Deduct registration fee if set
+    /// 3. Verify domain proof if provided
+    /// 4. Create registration record
     pub fn register_agent(
         &mut self,
         owner: Address,
@@ -101,20 +119,32 @@ impl AgentRegistry {
         metadata_hash: [u8; 32],
         domain_proof: Option<DomainProof>,
         current_block: u64,
+        balances: Option<&mut call_protocol::balances::BalanceState>,
     ) -> Result<u64, AgentError> {
         // 1. Validate name uniqueness
         if self.agents_by_name.contains_key(&name) {
             return Err(AgentError::AgentAlreadyRegistered(0));
         }
 
-        // 2. Verify domain proof if provided
+        // 2. Deduct registration fee if configured
+        if self.registration_fee > 0 {
+            if let Some(balances) = balances {
+                balances
+                    .deduct_balance(self.fee_asset_id, owner, self.registration_fee)
+                    .map_err(|_| AgentError::InsufficientBalanceForRegistration(self.registration_fee))?;
+            } else {
+                return Err(AgentError::InsufficientBalanceForRegistration(self.registration_fee));
+            }
+        }
+
+        // 3. Verify domain proof if provided
         let domain_verified = if let Some(ref proof) = domain_proof {
             self.verify_proof(proof)?
         } else {
             false
         };
 
-        // 3. Create registration
+        // 4. Create registration
         let agent_id = self.next_id;
         self.next_id += 1;
 
@@ -340,7 +370,8 @@ mod tests {
         let metadata = [2u8; 32];
 
         let id = registry
-            .register_agent(owner, pubkey, "test-agent".into(), "https://agent.example.com".into(), metadata, None, 100)
+            .register_agent(owner, pubkey, "test-agent".into(), "https://agent.example.com".into(), metadata, None, 100,
+                None)
             .expect("register");
 
         assert_eq!(id, 0);
@@ -368,6 +399,7 @@ mod tests {
                 metadata,
                 Some(proof),
                 100,
+                None
             )
             .expect("register with DNS proof");
 
@@ -393,6 +425,7 @@ mod tests {
                 metadata,
                 Some(proof),
                 100,
+                None
             )
             .expect("register with HTTP proof");
 
@@ -414,6 +447,7 @@ mod tests {
                 metadata,
                 None,
                 100,
+                None
             )
             .expect("first register");
 
@@ -425,6 +459,7 @@ mod tests {
             metadata,
             None,
             101,
+            None,
         );
         assert!(matches!(result, Err(AgentError::AgentAlreadyRegistered(_))));
     }
@@ -443,6 +478,7 @@ mod tests {
                 metadata,
                 None,
                 100,
+                None
             )
             .unwrap();
 
@@ -458,10 +494,12 @@ mod tests {
         let metadata = [0u8; 32];
 
         registry
-            .register_agent(owner, [1u8; 64], "agent-a".into(), "https://a.com".into(), metadata, None, 100)
+            .register_agent(owner, [1u8; 64], "agent-a".into(), "https://a.com".into(), metadata, None, 100,
+                None)
             .unwrap();
         registry
-            .register_agent(owner, [2u8; 64], "agent-b".into(), "https://b.com".into(), metadata, None, 101)
+            .register_agent(owner, [2u8; 64], "agent-b".into(), "https://b.com".into(), metadata, None, 101,
+                None)
             .unwrap();
 
         let owned = registry.get_agents_by_owner(&owner);
@@ -474,7 +512,8 @@ mod tests {
         let metadata = [0u8; 32];
 
         let id = registry
-            .register_agent(test_addr(1), [1u8; 64], "old-name".into(), "https://old.com".into(), metadata, None, 100)
+            .register_agent(test_addr(1), [1u8; 64], "old-name".into(), "https://old.com".into(), metadata, None, 100,
+                None)
             .unwrap();
 
         registry.update_agent_config(id, Some("new-name".into()), Some("https://new.com".into()), Some([3u8; 32])).unwrap();
@@ -491,7 +530,8 @@ mod tests {
         let metadata = [0u8; 32];
 
         let id = registry
-            .register_agent(test_addr(1), [1u8; 64], "agent".into(), "https://agent.com".into(), metadata, None, 100)
+            .register_agent(test_addr(1), [1u8; 64], "agent".into(), "https://agent.com".into(), metadata, None, 100,
+                None)
             .unwrap();
 
         let proof = DomainProof::DnsTxt {
@@ -502,5 +542,53 @@ mod tests {
 
         let agent = registry.get_agent(id).unwrap();
         assert!(agent.domain_verified);
+    }
+
+    #[test]
+    fn test_agent_register_with_fee_success() {
+        let mut registry = AgentRegistry::new_with_format_verifier()
+            .with_registration_fee(500, 1);
+        let mut balances = call_protocol::balances::BalanceState::new();
+        balances.balances.set_balance(1, test_addr(1), 1000).unwrap();
+
+        let id = registry
+            .register_agent(
+                test_addr(1), [1u8; 64], "fee-agent".into(), "https://fee.com".into(), [0u8; 32], None, 100,
+                Some(&mut balances),
+            )
+            .unwrap();
+
+        assert_eq!(id, 0);
+        assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
+    }
+
+    #[test]
+    fn test_agent_register_with_fee_insufficient_balance() {
+        let mut registry = AgentRegistry::new_with_format_verifier()
+            .with_registration_fee(500, 1);
+        let mut balances = call_protocol::balances::BalanceState::new();
+        balances.balances.set_balance(1, test_addr(1), 100).unwrap();
+
+        let result = registry.register_agent(
+            test_addr(1), [1u8; 64], "fee-agent".into(), "https://fee.com".into(), [0u8; 32], None, 100,
+            Some(&mut balances),
+        );
+
+        assert!(matches!(result, Err(AgentError::InsufficientBalanceForRegistration(500))));
+        // Balance unchanged
+        assert_eq!(balances.get_balance(1, &test_addr(1)), 100);
+    }
+
+    #[test]
+    fn test_agent_register_with_fee_no_balances() {
+        let mut registry = AgentRegistry::new_with_format_verifier()
+            .with_registration_fee(500, 1);
+
+        let result = registry.register_agent(
+            test_addr(1), [1u8; 64], "fee-agent".into(), "https://fee.com".into(), [0u8; 32], None, 100,
+            None,
+        );
+
+        assert!(matches!(result, Err(AgentError::InsufficientBalanceForRegistration(500))));
     }
 }

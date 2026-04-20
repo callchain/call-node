@@ -119,6 +119,8 @@ pub enum AgentError {
     InvalidFundingAction(String),
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
+    #[error("insufficient balance for registration: need {0}")]
+    InsufficientBalanceForRegistration(u128),
 }
 
 /// Agent event type for audit trail indexing

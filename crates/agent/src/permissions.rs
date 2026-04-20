@@ -86,18 +86,18 @@ pub struct AgentDailyUsage {
     pub total_fee_today: u128,
     /// Total transaction amount today
     pub total_amount_today: u128,
-    /// Block number when usage was last reset
-    pub last_reset_block: u64,
+    /// Unix timestamp (ms) when usage was last reset
+    pub last_reset_time: u64,
 }
 
 impl AgentDailyUsage {
-    /// Check if usage should be reset (new day = 86400 blocks ≈ 1 day at 250ms blocks)
-    pub fn maybe_reset(&mut self, current_block: u64) {
-        const BLOCKS_PER_DAY: u64 = 86400; // ~1 day at 250ms/block
-        if current_block >= self.last_reset_block + BLOCKS_PER_DAY {
+    /// Check if usage should be reset (new day = 86400000 ms = 24 hours)
+    pub fn maybe_reset(&mut self, current_time: u64) {
+        const MS_PER_DAY: u64 = 86400000; // 24 hours in milliseconds
+        if current_time >= self.last_reset_time + MS_PER_DAY {
             self.total_fee_today = 0;
             self.total_amount_today = 0;
-            self.last_reset_block = current_block;
+            self.last_reset_time = current_time;
         }
     }
 }
@@ -111,6 +111,9 @@ pub fn requires_owner_signature(
 }
 
 /// Verify agent permissions for a transaction
+///
+/// `current_block` is used for permission expiry (block-number based).
+/// `current_time` is used for daily usage reset (timestamp based, ms).
 pub fn verify_agent_permissions(
     permissions: &AgentPermissions,
     daily_usage: &mut AgentDailyUsage,
@@ -120,6 +123,7 @@ pub fn verify_agent_permissions(
     amount: u128,
     fee: u128,
     current_block: u64,
+    current_time: u64,
 ) -> Result<(), AgentError> {
     // 1. Check expiration
     if permissions.is_expired(current_block) {
@@ -143,8 +147,8 @@ pub fn verify_agent_permissions(
     // 4. Check per-tx limit
     permissions.check_per_tx_limit(amount)?;
 
-    // 5. Reset daily usage if needed
-    daily_usage.maybe_reset(current_block);
+    // 5. Reset daily usage if needed (time-based, not block-based)
+    daily_usage.maybe_reset(current_time);
 
     // 6. Check daily limit
     permissions.check_daily_limit(daily_usage.total_amount_today, amount)?;
@@ -252,6 +256,7 @@ mod tests {
             500,      // amount
             10,       // fee
             100,      // current_block
+            1000,     // current_time (ms)
         ).is_ok());
 
         assert_eq!(usage.total_amount_today, 500);
@@ -273,6 +278,7 @@ mod tests {
             500,
             10,
             100,
+            1000,
         );
         assert!(matches!(result, Err(AgentError::PermissionDenied(_))));
     }
@@ -292,6 +298,7 @@ mod tests {
             2000,   // exceeds per_tx_limit of 1000
             10,
             100,
+            1000,
         );
         assert!(matches!(result, Err(AgentError::PermissionDenied(_))));
     }
@@ -315,6 +322,7 @@ mod tests {
             500,
             10,
             100,    // past expiry
+            1000,
         );
         assert!(matches!(result, Err(AgentError::PermissionDenied(_))));
     }
@@ -334,6 +342,7 @@ mod tests {
             500,
             10,
             100,
+            1000,
         );
         assert!(matches!(result, Err(AgentError::PermissionDenied(_))));
     }

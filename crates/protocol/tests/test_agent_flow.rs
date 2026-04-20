@@ -19,7 +19,7 @@ mod test_agent_flow_impl {
         let owner = addr(1);
         let pubkey = [1u8; 64];
         let metadata = [2u8; 32];
-        let id = registry.register_agent(owner, pubkey, "test-agent".into(), "https://agent.example.com".into(), metadata, None, 100).unwrap();
+        let id = registry.register_agent(owner, pubkey, "test-agent".into(), "https://agent.example.com".into(), metadata, None, 100, None).unwrap();
         assert_eq!(id, 0);
         let agent = registry.get_agent(0).unwrap();
         assert_eq!(agent.owner, owner);
@@ -30,7 +30,7 @@ mod test_agent_flow_impl {
     fn test_agent_register_with_dns_proof() {
         let mut registry = AgentRegistry::new_with_format_verifier();
         let proof = DomainProof::DnsTxt { domain: "agent.example.com".into(), txt_value: "call-agent=0x1234".into() };
-        let id = registry.register_agent(addr(1), [1u8; 64], "dns-agent".into(), "https://agent.example.com".into(), [0u8; 32], Some(proof), 100).unwrap();
+        let id = registry.register_agent(addr(1), [1u8; 64], "dns-agent".into(), "https://agent.example.com".into(), [0u8; 32], Some(proof), 100, None).unwrap();
         assert!(registry.get_agent(id).unwrap().domain_verified);
     }
 
@@ -38,7 +38,7 @@ mod test_agent_flow_impl {
     fn test_agent_register_with_http_proof() {
         let mut registry = AgentRegistry::new_with_format_verifier();
         let proof = DomainProof::HttpFile { url: "https://agent.example.com/.well-known/call-agent".into(), expected_content: "agent=0x1234".into() };
-        let id = registry.register_agent(addr(1), [1u8; 64], "http-agent".into(), "https://agent.example.com".into(), [0u8; 32], Some(proof), 100).unwrap();
+        let id = registry.register_agent(addr(1), [1u8; 64], "http-agent".into(), "https://agent.example.com".into(), [0u8; 32], Some(proof), 100, None).unwrap();
         assert!(registry.get_agent(id).unwrap().domain_verified);
     }
 
@@ -47,8 +47,8 @@ mod test_agent_flow_impl {
         let mut registry = AgentRegistry::new();
         let owner = addr(5);
         let metadata = [0u8; 32];
-        registry.register_agent(owner, [1u8; 64], "agent-a".into(), "https://a.com".into(), metadata, None, 100).unwrap();
-        registry.register_agent(owner, [2u8; 64], "agent-b".into(), "https://b.com".into(), metadata, None, 101).unwrap();
+        registry.register_agent(owner, [1u8; 64], "agent-a".into(), "https://a.com".into(), metadata, None, 100, None).unwrap();
+        registry.register_agent(owner, [2u8; 64], "agent-b".into(), "https://b.com".into(), metadata, None, 101, None).unwrap();
         assert_eq!(registry.get_agents_by_owner(&owner).len(), 2);
     }
 
@@ -56,8 +56,8 @@ mod test_agent_flow_impl {
     fn test_agent_duplicate_name_rejected() {
         let mut registry = AgentRegistry::new();
         let metadata = [0u8; 32];
-        registry.register_agent(addr(1), [1u8; 64], "dup".into(), "https://a.com".into(), metadata, None, 100).unwrap();
-        let result = registry.register_agent(addr(2), [2u8; 64], "dup".into(), "https://b.com".into(), metadata, None, 101);
+        registry.register_agent(addr(1), [1u8; 64], "dup".into(), "https://a.com".into(), metadata, None, 100, None).unwrap();
+        let result = registry.register_agent(addr(2), [2u8; 64], "dup".into(), "https://b.com".into(), metadata, None, 101, None);
         assert!(matches!(result, Err(AgentError::AgentAlreadyRegistered(_))));
     }
 
@@ -187,7 +187,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_update_config() {
         let mut registry = AgentRegistry::new();
-        let id = registry.register_agent(addr(1), [1u8; 64], "old".into(), "https://old.com".into(), [0u8; 32], None, 100).unwrap();
+        let id = registry.register_agent(addr(1), [1u8; 64], "old".into(), "https://old.com".into(), [0u8; 32], None, 100, None).unwrap();
         registry.update_agent_config(id, Some("new".into()), Some("https://new.com".into()), Some([3u8; 32])).unwrap();
         let agent = registry.get_agent(id).unwrap();
         assert_eq!(agent.name, "new");
@@ -197,7 +197,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_update_domain_proof() {
         let mut registry = AgentRegistry::new_with_format_verifier();
-        let id = registry.register_agent(addr(1), [1u8; 64], "agent".into(), "https://agent.com".into(), [0u8; 32], None, 100).unwrap();
+        let id = registry.register_agent(addr(1), [1u8; 64], "agent".into(), "https://agent.com".into(), [0u8; 32], None, 100, None).unwrap();
         assert!(!registry.get_agent(id).unwrap().domain_verified);
         let proof = DomainProof::DnsTxt { domain: "agent.com".into(), txt_value: "call-agent=verified".into() };
         registry.update_domain_proof(id, proof).unwrap();

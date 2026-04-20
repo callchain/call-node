@@ -207,7 +207,7 @@ impl RpcState {
         let current_block = self.get_current_block();
         let mut registry = self.agent_registry.write().map_err(|_| "lock poisoned".to_string())?;
         registry
-            .register_agent(owner, pubkey, name, url, metadata_hash, None, current_block)
+            .register_agent(owner, pubkey, name, url, metadata_hash, None, current_block, None)
             .map_err(|e| e.to_string())
     }
 

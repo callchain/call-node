@@ -1471,6 +1471,7 @@ mod tests {
                 [0u8; 32],
                 None,
                 1,
+                None,
             )
             .unwrap();
 

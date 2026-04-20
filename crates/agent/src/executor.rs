@@ -52,6 +52,7 @@ pub fn verify_agent_tx(
     fee_config: &AgentFeeConfig,
     owner_public_key: PublicKey,
     current_block: u64,
+    current_time: u64,
 ) -> Result<(), AgentError> {
     let protocol_tx = &signed_tx.protocol_tx;
 
@@ -81,6 +82,7 @@ pub fn verify_agent_tx(
                 amount,
                 protocol_tx.gas_limit as u128, // approximate fee
                 current_block,
+                current_time,
             )?;
         }
     }

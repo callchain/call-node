@@ -71,7 +71,7 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 
 **Gap #1 — Domain verification is format-only:** ~~`verify_domain_proof()` and `DefaultDomainVerifier` only check that the domain/URL string is well-formed.~~ **FIXED** — `AgentRegistry::new()` now uses `RealDomainVerifier` by default, which performs actual DNS TXT lookups (`hickory_resolver`) and HTTP fetches (`ureq`). `new_with_format_verifier()` is available for testing.
 
-**Gap #2 — No registration fee or stake requirement:** Anyone can register an agent at zero cost. There is no economic barrier to agent spam.
+**Gap #2 — No registration fee or stake requirement:** ~~Anyone can register an agent at zero cost. There is no economic barrier to agent spam.~~ **FIXED** — `AgentRegistry` now supports `registration_fee` and `fee_asset_id`. `register_agent()` accepts an optional `balances: &mut BalanceState` and deducts the fee before creating the registration. `with_registration_fee(fee, asset_id)` builder is available.
 
 **Gap #3 — No agent revocation/removal:** ~~Once registered, an agent cannot be removed from the registry.~~ **FIXED** — `AgentRegistry::unregister_agent(agent_id)` removes the agent from all indexes (`agents`, `agents_by_name`, `agents_by_owner`).
 
@@ -98,7 +98,7 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 
 **Gap #4 — Default permissions are wide open:** ~~`AgentPermissions::default()` sets `allowed_assets = []` (meaning ALL assets allowed), `daily_limit = MAX`, `per_tx_limit = MAX`.~~ **FIXED** — Defaults are now restrictive: `allowed_assets = [1]` (only CALL), `daily_limit = 10_000`, `per_tx_limit = 1_000`.
 
-**Gap #5 — Daily reset is block-based, not time-based:** `BLOCKS_PER_DAY = 86400` assumes 250ms block times. If block times change, the "day" duration changes.
+**Gap #5 — Daily reset is block-based, not time-based:** ~~`BLOCKS_PER_DAY = 86400` assumes 250ms block times. If block times change, the "day" duration changes.~~ **FIXED** — `AgentDailyUsage` now uses `last_reset_time: u64` (ms) and `MS_PER_DAY = 86400000`. `verify_agent_permissions()` takes both `current_block` (for expiry) and `current_time` (for daily reset).
 
 **Gap #6 — BatchTransfer only checks first payment:** ~~`extract_instruction_details()` for `BatchTransfer` returns only the first payment's details.~~ **FIXED** — `extract_instruction_details()` now returns `Vec<(AssetId, Address, u128)>`. `BatchTransfer` and `AgentBatchPay` enumerate **all** payments, and `verify_agent_tx()` iterates over every entry.
 
@@ -185,10 +185,10 @@ Emitted during `Block::execute` by `execute_agent_instruction()` for every succe
 | # | Gap | Severity | Status | Details |
 |---|-----|----------|--------|---------|
 | 1 | **Domain verification is format-only** | High | ✅ Fixed | `RealDomainVerifier` performs actual DNS TXT and HTTP lookups. `new_with_format_verifier()` for tests. |
-| 2 | **No registration fee or stake** | Medium | Open | Zero-cost agent creation enables spam. |
+| 2 | **No registration fee or stake** | Medium | ✅ Fixed | `AgentRegistry::register_agent()` deducts `registration_fee` from `BalanceState` when configured via `with_registration_fee()`. |
 | 3 | **No agent revocation/removal** | Medium | ✅ Fixed | `AgentRegistry::unregister_agent()` removes from all indexes. |
 | 4 | **Default permissions are wide open** | High | ✅ Fixed | Defaults now: `allowed_assets = [1]`, `daily_limit = 10_000`, `per_tx_limit = 1_000`. |
-| 5 | **Daily reset is block-based** | Low | Open | 86,400 blocks assumes 250ms block time. Not robust to timing changes. |
+| 5 | **Daily reset is block-based** | Low | ✅ Fixed | `AgentDailyUsage` uses `last_reset_time` (ms) and `MS_PER_DAY = 86400000`. `verify_agent_permissions()` takes `current_time` for daily reset. |
 | 6 | **BatchTransfer only checks first payment** | High | ✅ Fixed | `extract_instruction_details()` returns `Vec`; all payments are permission-checked. |
 | 7 | **Grant does not deduct from owner** | Critical | ✅ Fixed | `grant_funds()` now deducts from `protocol_balances` before crediting agent. |
 | 8 | **No overflow protection on credit** | Medium | ✅ Fixed | `credit()` uses `checked_add`. |
@@ -203,7 +203,7 @@ Emitted during `Block::execute` by `execute_agent_instruction()` for every succe
 
 ## Test Status
 
-- `cargo test -p call-agent` — 43 unit tests covering registration, domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, instruction extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
+- `cargo test -p call-agent` — 46 unit tests covering registration (including fee deduction, insufficient balance rejection), domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, instruction extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
 - `cargo test -p call-consensus` — block execution order test verifies `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` execute correctly during `Block::execute`; `test_agent_instruction_emits_event` verifies `AgentEvent` emission and receipt root inclusion; `test_expired_transaction_rejected` verifies `expires_at` enforcement
 - `cargo test -p call-node --lib` — node startup and state persistence tests verify agent registry, balances, and nonces are saved/loaded to MDBX correctly
 - `cargo test -p call-protocol --test test_agent_flow` — integration tests covering registration, domain proof, balance operations, nonce sequential/stale rejection
