@@ -26,6 +26,8 @@ pub struct Asset {
     pub status: AssetStatus,
     pub compliance_policy: u8,
     pub registered_at: u64,
+    /// EVM contract address for the wrapped ERC-20 token (set after bridge deployment)
+    pub evm_contract_address: Option<Address>,
 }
 
 /// Asset registry state
@@ -80,6 +82,7 @@ impl AssetRegistry {
             status: AssetStatus::Active,
             compliance_policy,
             registered_at: 0, // set by caller with current block
+            evm_contract_address: None,
         };
 
         self.assets_by_id.insert(id, asset);
@@ -194,6 +197,19 @@ impl AssetRegistry {
         }
         asset.compliance_policy = new_policy;
         Ok(())
+    }
+
+    /// Set the EVM contract address for a wrapped ERC-20 token.
+    /// This is called after the bridge deploys the wrapped token contract.
+    pub fn set_evm_contract_address(&mut self, id: AssetId, addr: Address) {
+        if let Some(asset) = self.assets_by_id.get_mut(&id) {
+            asset.evm_contract_address = Some(addr);
+        }
+    }
+
+    /// Get the EVM contract address for a wrapped ERC-20 token, if set.
+    pub fn get_evm_contract_address(&self, id: AssetId) -> Option<Address> {
+        self.assets_by_id.get(&id).and_then(|a| a.evm_contract_address)
     }
 }
 

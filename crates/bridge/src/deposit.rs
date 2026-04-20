@@ -29,6 +29,7 @@ pub fn execute_deposit(
     asset_registry: &AssetRegistry,
     bridge_address: Address, // 0xCC bridge operator address
     _protocol_bridge_caller: Address, // caller for bridgeMint (bridge operator)
+    current_block: u64,
 ) -> Result<EvmExecutionResult, BridgeError> {
     let BridgeOp::DepositToEvm {
         asset_id,
@@ -53,8 +54,8 @@ pub fn execute_deposit(
     // 3. Check per-tx limit
     bridge_state.check_per_tx_limit(*amount, config.max_per_tx)?;
 
-    // 4. Check daily limit
-    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset)?;
+    // 4. Check daily limit (auto-resets when a new day starts)
+    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
 
     // 5. Check protocol balance is sufficient
     let protocol_balance = protocol_balances.get_balance(*asset_id, from);
@@ -171,9 +172,67 @@ mod tests {
             &registry,
             bridge_addr,
             test_addr(0xFF),
+            100,
         );
         // EVM mint will fail because no contract at address, but protocol balance check passes
         assert!(result.is_err() || result.as_ref().is_ok_and(|r| r.success));
+    }
+
+    #[test]
+    fn test_deposit_success_with_contract() {
+        let mut protocol_balances = BalanceState::new();
+        protocol_balances
+            .balances
+            .set_balance(1, test_addr(1), 10_000)
+            .unwrap();
+
+        let mut evm_state = EvmState::new();
+        evm_state.set_balance(test_addr(1), U256::from(100_000_000_000_000u128));
+
+        let evm_executor = EvmExecutor::new(1);
+        let mut bridge_state = BridgeStateManager::default();
+        let config = BridgeConfig::default();
+        let mut registry = setup_registry();
+
+        // Deploy wrapped token contract for asset 1
+        let (contract_addr, deploy_result) = evm_executor
+            .deploy_erc20_template(
+                test_addr(1),
+                &mut evm_state,
+                "CALL",
+                "CALL",
+                18,
+                U256::ZERO,
+            )
+            .unwrap();
+        assert!(deploy_result.success);
+        registry.set_evm_contract_address(1, contract_addr);
+
+        let op = BridgeOp::DepositToEvm {
+            asset_id: 1,
+            from: test_addr(1),
+            to: test_addr(2),
+            amount: 500,
+        };
+
+        let result = execute_deposit(
+            &op,
+            &mut protocol_balances,
+            &mut evm_state,
+            &evm_executor,
+            &mut bridge_state,
+            &config,
+            &registry,
+            contract_addr,
+            test_addr(1),
+            100,
+        );
+
+        assert!(result.is_ok(), "deposit failed: {:?}", result);
+        assert!(result.unwrap().success);
+
+        // Protocol balance deducted
+        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 9_500);
     }
 
     #[test]

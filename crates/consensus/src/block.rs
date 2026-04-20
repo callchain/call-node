@@ -384,6 +384,7 @@ impl Block {
                             bridge_state,
                             registry,
                             &executor,
+                            current_block_height,
                         )?;
                         tx_results.push(r);
                     }
@@ -404,9 +405,58 @@ impl Block {
         }
 
         // Step 3: Bridge operations
-        for op in &self.bridge_operations {
-            bridge_state.add_pending_op(op.clone(), current_block_height);
-            result.bridge_op_count += 1;
+        // Execute internal bridge deposits/withdrawals atomically.
+        // Each operation deducts/credits protocol balances and mints/burns
+        // wrapped ERC-20 tokens in the EVM layer.
+        if let Some(config) = bridge_config {
+            for op in &self.bridge_operations {
+                let asset_id = op.asset_id();
+                let Some(contract_addr) = registry.get_evm_contract_address(asset_id) else {
+                    // Asset has no deployed wrapped token — skip
+                    continue;
+                };
+
+                let exec_result = match op {
+                    BridgeOp::DepositToEvm { from, .. } => {
+                        call_bridge::execute_deposit(
+                            op,
+                            balances,
+                            evm_state,
+                            &executor,
+                            bridge_state,
+                            config,
+                            registry,
+                            contract_addr,
+                            *from,
+                            current_block_height,
+                        )
+                    }
+                    BridgeOp::WithdrawToProtocol { from, .. } => {
+                        call_bridge::execute_withdraw(
+                            op,
+                            balances,
+                            evm_state,
+                            &executor,
+                            bridge_state,
+                            config,
+                            registry,
+                            contract_addr,
+                            *from,
+                            current_block_height,
+                        )
+                    }
+                };
+
+                match exec_result {
+                    Ok(_) => {
+                        bridge_state.add_pending_op(op.clone(), current_block_height);
+                        result.bridge_op_count += 1;
+                    }
+                    Err(_) => {
+                        // Skip failed bridge ops (same pattern as EVM txs)
+                    }
+                }
+            }
         }
 
         // Step 4: System transactions
@@ -424,6 +474,15 @@ impl Block {
                 }
             }
             result.system_tx_count += 1;
+        }
+
+        // Step 4.5: Auto-finalize pending external deposits and bridge maintenance
+        if let Some(config) = bridge_config {
+            bridge_state.on_block_finalized(
+                current_block_height,
+                config.challenge_period_blocks,
+                config.processed_tx_retention_blocks,
+            );
         }
 
         // Step 5: Oracle reward pool allocation from block fees
@@ -477,6 +536,7 @@ fn execute_agent_instruction(
     bridge_state: &mut call_bridge::BridgeStateManager,
     registry: &AssetRegistry,
     evm_executor: &EvmExecutor,
+    current_block_height: u64,
 ) -> Result<InstructionResult, ConsensusError> {
     match instruction {
         Instruction::AgentPay { payment } => {
@@ -578,11 +638,13 @@ fn execute_agent_instruction(
                 ),
                 amount: *amount,
             };
-            let bridge_address = call_primitives::Address::from_slice(&[0xCCu8; 20]);
+            let bridge_address = registry
+                .get_evm_contract_address(*asset_id)
+                .unwrap_or_else(|| call_primitives::Address::from_slice(&[0xCCu8; 20]));
 
             match call_bridge::execute_deposit(
                 &op, balances, evm_state, evm_executor, bridge_state, &config, registry,
-                bridge_address, sender,
+                bridge_address, sender, current_block_height,
             ) {
                 Ok(exec) if exec.success => Ok(InstructionResult::Success),
                 Ok(_) => {
@@ -608,7 +670,7 @@ fn execute_agent_instruction(
 // ── Bridge instruction helpers ────────────────────────────────────────
 
 fn is_bridge_instruction(instr: &Instruction) -> bool {
-    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ChallengeBridgeDeposit { .. })
+    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. })
 }
 
 fn execute_bridge_instruction(
@@ -660,6 +722,58 @@ fn execute_bridge_instruction(
                 config,
                 validators,
                 current_block_height,
+                None, // source_contract: not provided in ExternalBridgeDeposit; registry check used
+            ) {
+                Ok(_) => Ok(InstructionResult::Success),
+                Err(e) => Err(ConsensusError::InvalidBlock(format!("bridge deposit: {e:?}"))),
+            }
+        }
+        Instruction::BridgeDeposit {
+            source_chain,
+            target_address,
+            amount,
+            asset_id,
+            proof,
+        } => {
+            // Legacy BridgeDeposit: proof must contain a serialized BridgeDepositProof
+            if proof.is_empty() {
+                return Err(ConsensusError::InvalidBlock(
+                    "bridge deposit: empty proof".into(),
+                ));
+            }
+            let deposit_proof: call_bridge::BridgeDepositProof = serde_json::from_slice(proof)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("bridge deposit: invalid proof format: {e}")))?;
+
+            let chain = match *source_chain as u8 {
+                0 => call_bridge::ExternalChain::EthereumMainnet,
+                1 => call_bridge::ExternalChain::Arbitrum,
+                _ => return Err(ConsensusError::InvalidBlock("bridge: unknown source chain".into())),
+            };
+            let signatures: Vec<call_bridge::BridgeSignature> = deposit_proof.signatures
+                .iter()
+                .map(|(idx, sig)| call_bridge::BridgeSignature {
+                    validator_index: *idx,
+                    signature: sig.as_slice().try_into().unwrap_or([0u8; 65]),
+                })
+                .collect();
+            let op = call_bridge::ExternalBridgeOp::Deposit {
+                source_chain: chain,
+                source_tx_hash: call_primitives::B256::from(deposit_proof.source_tx_hash),
+                source_block_number: deposit_proof.source_block_number,
+                sender: deposit_proof.external_sender,
+                recipient: *target_address,
+                asset_id: *asset_id,
+                amount: *amount,
+                signatures,
+            };
+            match call_bridge::process_external_deposit(
+                &op,
+                balances,
+                bridge_state,
+                config,
+                validators,
+                current_block_height,
+                None,
             ) {
                 Ok(_) => Ok(InstructionResult::Success),
                 Err(e) => Err(ConsensusError::InvalidBlock(format!("bridge deposit: {e:?}"))),
@@ -675,8 +789,10 @@ fn execute_bridge_instruction(
                     "bridge challenge: proof cannot be empty".into(),
                 ));
             }
-            let revoked = bridge_state.revoke_pending_external_deposit(
+            let revoked = call_bridge::challenge_pending_deposit(
+                bridge_state,
                 &call_primitives::B256::from(*source_tx_hash),
+                current_block_height,
             );
             if revoked {
                 Ok(InstructionResult::Success)
@@ -1053,14 +1169,34 @@ mod tests {
             .balances
             .set_balance(1, sender, 10_000)
             .unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0)
+            .unwrap();
+        let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000_000u128));
+        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
+
+        // Deploy wrapped token contract for asset 1
+        let deploy_executor = call_evm::EvmExecutor::new(1);
+        let (contract_addr, deploy_result) = deploy_executor
+            .deploy_erc20_template(
+                sender,
+                &mut evm_state,
+                "CALL",
+                "CALL",
+                18,
+                call_primitives::U256::ZERO,
+            )
+            .unwrap();
+        assert!(deploy_result.success, "ERC-20 deploy failed");
+        registry.set_evm_contract_address(1, contract_addr);
+
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
-        let mut evm_state = call_evm::EvmState::new();
-        evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000_000u128));
-        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
+        let bridge_config = call_bridge::BridgeConfig::default();
 
         let result = block
             .execute(
@@ -1077,7 +1213,7 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
+                Some(&bridge_config),
                 None,
                 None,
             )
@@ -1136,6 +1272,7 @@ mod tests {
         let mut shielded_state = call_shielded::ShieldedState::new();
         let mut fee_params = FeeParams::default();
         let mut evm_state = call_evm::EvmState::new();
+        let bridge_config = call_bridge::BridgeConfig::default();
 
         let result = block
             .execute(
@@ -1152,7 +1289,7 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
+                Some(&bridge_config),
                 None,
                 None,
             )

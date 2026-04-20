@@ -45,10 +45,16 @@ impl EvmAccount {
             return EMPTY_ROOT;
         }
         let mut hb = HashBuilder::default();
-        let mut slots: Vec<_> = self.storage.iter().collect();
-        slots.sort_by_key(|(k, _)| *k);
-        for (key, value) in slots {
-            let path = Nibbles::unpack(keccak256(key.to_be_bytes::<32>()));
+        // HashBuilder requires leaves in ascending nibble order.
+        // The trie path is keccak256(key), so we must sort by hash — not by raw key.
+        let mut slots: Vec<_> = self
+            .storage
+            .iter()
+            .map(|(k, v)| (keccak256(k.to_be_bytes::<32>()), v))
+            .collect();
+        slots.sort_by_key(|(hash, _)| *hash);
+        for (hash, value) in slots {
+            let path = Nibbles::unpack(hash);
             let mut value_rlp = Vec::new();
             value.encode(&mut value_rlp);
             hb.add_leaf(path, &value_rlp);

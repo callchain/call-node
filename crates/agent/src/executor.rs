@@ -237,6 +237,7 @@ pub fn execute_agent_bridge_deposit(
     config: &BridgeConfig,
     registry: &AssetRegistry,
     bridge_address: Address,
+    current_block: u64,
 ) -> Result<(), AgentError> {
     // 1. Deduct from agent balance
     balances.deduct(owner, agent_id, asset_id, amount)?;
@@ -264,6 +265,7 @@ pub fn execute_agent_bridge_deposit(
         registry,
         bridge_address,
         owner,
+        current_block,
     );
 
     match result {
@@ -509,6 +511,7 @@ mod tests {
             &mut evm_state, &evm_executor,
             &mut bridge_state, &config, &registry,
             test_addr(0xCC),
+            100,
         );
 
         // EVM bridge will fail (no contract at address), but agent balance should be restored

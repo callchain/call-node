@@ -28,6 +28,7 @@ pub fn execute_withdraw(
     asset_registry: &AssetRegistry,
     bridge_address: Address, // 0xCC bridge operator address
     protocol_bridge_caller: Address, // caller for bridgeBurn
+    current_block: u64,
 ) -> Result<EvmExecutionResult, BridgeError> {
     let BridgeOp::WithdrawToProtocol {
         asset_id,
@@ -52,8 +53,8 @@ pub fn execute_withdraw(
     // 3. Check per-tx limit
     bridge_state.check_per_tx_limit(*amount, config.max_per_tx)?;
 
-    // 4. Check daily limit
-    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset)?;
+    // 4. Check daily limit (auto-resets when a new day starts)
+    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
 
     // 5. Check EVM balance is sufficient
     let evm_balance = evm_state.get_balance(from);
@@ -165,8 +166,71 @@ mod tests {
             &registry,
             bridge_addr,
             test_addr(0xFF),
+            100,
         );
         // EVM burn will fail (no contract), but the flow is correct
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_withdraw_success_with_contract() {
+        let mut protocol_balances = BalanceState::new();
+        let mut evm_state = EvmState::new();
+        evm_state.set_balance(test_addr(1), U256::from(100_000_000_000_000u128));
+
+        let evm_executor = EvmExecutor::new(1);
+        let mut bridge_state = BridgeStateManager::default();
+        let config = BridgeConfig::default();
+        let mut registry = setup_registry();
+
+        // Deploy wrapped token contract for asset 1
+        let (contract_addr, deploy_result) = evm_executor
+            .deploy_erc20_template(
+                test_addr(1),
+                &mut evm_state,
+                "CALL",
+                "CALL",
+                18,
+                U256::ZERO,
+            )
+            .unwrap();
+        assert!(deploy_result.success);
+        registry.set_evm_contract_address(1, contract_addr);
+
+        // Mint 1_000 tokens to test_addr(1) in EVM
+        let mint_result = evm_executor.evm_call_bridge_mint(
+            test_addr(1),
+            contract_addr,
+            &mut evm_state,
+            test_addr(1),
+            U256::from(1_000),
+        );
+        assert!(mint_result.is_ok() && mint_result.unwrap().success);
+
+        let op = BridgeOp::WithdrawToProtocol {
+            asset_id: 1,
+            from: test_addr(1),
+            to: test_addr(1),
+            amount: 500,
+        };
+
+        let result = execute_withdraw(
+            &op,
+            &mut protocol_balances,
+            &mut evm_state,
+            &evm_executor,
+            &mut bridge_state,
+            &config,
+            &registry,
+            contract_addr,
+            test_addr(1),
+            100,
+        );
+
+        assert!(result.is_ok(), "withdraw failed: {:?}", result);
+        assert!(result.unwrap().success);
+
+        // Protocol balance credited
+        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 500);
     }
 }

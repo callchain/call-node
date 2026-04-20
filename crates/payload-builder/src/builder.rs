@@ -103,6 +103,7 @@ impl PayloadBuilder {
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         evm_state_root: Hash,
+        bridge_config: Option<&call_bridge::BridgeConfig>,
     ) -> Result<BuiltPayload, BuilderError> {
         let mut selected_protocol = Vec::new();
         let mut selected_evm = Vec::new();
@@ -239,7 +240,7 @@ impl PayloadBuilder {
             None,
             None,
             None,
-            None, None, None, None,
+            None, bridge_config, None, None,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)
@@ -286,6 +287,7 @@ impl PayloadBuilder {
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         evm_state_root: Hash,
+        bridge_config: Option<&call_bridge::BridgeConfig>,
     ) -> Result<BuiltPayload, BuilderError> {
         let protocol_txs: Vec<ProtocolTransaction> = selection
             .protocol_txs
@@ -307,6 +309,7 @@ impl PayloadBuilder {
             shielded_state,
             evm_state,
             evm_state_root,
+            bridge_config,
         )
     }
 }
@@ -441,6 +444,7 @@ mod tests {
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
+            None,
         ).unwrap();
 
         assert_eq!(payload.block.header.height, 1);
@@ -484,6 +488,7 @@ mod tests {
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
+            None,
         ).unwrap();
 
         assert_eq!(payload.tx_count, 3);
@@ -530,6 +535,7 @@ mod tests {
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
+            None,
         ).unwrap();
 
         // All 3 regular txs should be included (no shielded txs to limit)
@@ -564,7 +570,19 @@ mod tests {
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
 
         let protocol_txs = vec![make_test_tx(0)];
-        let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
+        let evm_txs: Vec<Vec<u8>> = vec![{
+            let tx = call_evm::EvmTransaction {
+                caller: test_addr(1),
+                nonce: 0,
+                gas_limit: 21_000,
+                gas_price: 1_000_000_000,
+                to: Some(test_addr(2)),
+                value: call_primitives::U256::from(100),
+                data: call_evm::Bytes::default(),
+                chain_id: 1,
+            };
+            serde_json::to_vec(&tx).unwrap()
+        }];
         let bridge_ops = vec![BridgeOp::DepositToEvm {
             asset_id: 1,
             from: test_sender(),
@@ -574,12 +592,31 @@ mod tests {
 
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
+        registry.register_asset("CALL".into(), "Callchain".into(), 18, test_sender(), 0).unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
+
+        // Deploy wrapped token contract for asset 1
+        let deploy_executor = call_evm::EvmExecutor::new(1);
+        let (contract_addr, deploy_result) = deploy_executor
+            .deploy_erc20_template(
+                test_sender(),
+                &mut evm_state,
+                "CALL",
+                "CALL",
+                18,
+                call_primitives::U256::ZERO,
+            )
+            .unwrap();
+        assert!(deploy_result.success);
+        registry.set_evm_contract_address(1, contract_addr);
+
+        let bridge_config = call_bridge::BridgeConfig::default();
 
         let payload = builder.build(
             &attrs,
@@ -593,6 +630,7 @@ mod tests {
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
+            Some(&bridge_config),
         ).unwrap();
 
         // Execution order: EVM(1) → Protocol(1) → Bridge(1) → System(2)
@@ -633,6 +671,7 @@ mod tests {
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO, // ZERO expected - should pass
+            None,
         );
 
         assert!(result.is_ok());
@@ -696,6 +735,7 @@ mod tests {
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
+            None,
         ).unwrap();
 
         assert_eq!(payload.block.header.height, 1);
@@ -754,6 +794,7 @@ mod tests {
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
+            None,
         ).unwrap();
 
         // Only the valid tx should be included

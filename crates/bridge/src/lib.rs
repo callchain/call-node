@@ -29,6 +29,8 @@ pub enum BridgeError {
     AssetNotRegistered(AssetId),
     #[error("bridge paused for asset: {0}")]
     BridgePaused(AssetId),
+    #[error("external bridge globally paused")]
+    ExternalBridgePaused,
     #[error("exceeds max per tx: asset={0}, amount={1}, limit={2}")]
     ExceedsMaxPerTx(AssetId, u128, u128),
     #[error("exceeds daily limit: asset={0}, daily_used={1}, limit={2}")]
@@ -41,6 +43,10 @@ pub enum BridgeError {
     SignatureTimeout(Option<String>),
     #[error("external bridge asset not allowed: {0}")]
     ExternalAssetNotAllowed(AssetId),
+    #[error("unauthorized bridge contract: chain={0}, contract={1}")]
+    UnauthorizedBridgeContract(u64, Address),
+    #[error("bridge fee exceeds amount: fee={0}, amount={1}")]
+    BridgeFeeExceedsAmount(u128, u128),
     #[error("EVM execution failed: {0}")]
     EvmExecutionFailed(String),
     #[error("MPT proof verification failed: {0}")]
@@ -88,6 +94,29 @@ pub struct PendingBridgeOp {
     pub confirmations: u64,
 }
 
+/// Bridge event type for indexing
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum BridgeEventType {
+    ExternalDepositQueued,
+    ExternalDepositFinalized,
+    ExternalDepositChallenged,
+    ExternalWithdraw,
+    InternalDeposit,
+    InternalWithdraw,
+}
+
+/// Indexed bridge event for audit and verification
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BridgeEvent {
+    pub event_type: BridgeEventType,
+    pub source_tx_hash: Option<B256>,
+    pub asset_id: AssetId,
+    pub amount: u128,
+    pub fee: u128,
+    pub recipient: Option<Address>,
+    pub block_height: u64,
+}
+
 /// Bridge state tracking (per spec §5.3)
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeStateManager {
@@ -99,16 +128,25 @@ pub struct BridgeStateManager {
     pub total_withdrawals: std::collections::HashMap<AssetId, u128>,
     /// Daily usage per asset: AssetId -> total used today
     pub daily_usage: std::collections::HashMap<AssetId, u128>,
+    /// Block height when daily_usage was last reset
+    pub daily_usage_reset_at: u64,
     /// Bridge paused assets
     pub paused_assets: std::collections::HashSet<AssetId>,
-    /// Processed external tx hashes (replay protection, persisted)
-    pub processed_external_txs: std::collections::HashSet<B256>,
+    /// Processed external tx hashes (replay protection, persisted).
+    /// Maps tx_hash -> block_height when processed, for pruning.
+    pub processed_external_txs: std::collections::HashMap<B256, u64>,
     /// External deposits in challenge period (not yet finalized)
     pub pending_external_deposits: Vec<PendingExternalDeposit>,
     /// External withdrawals per challenge period: AssetId -> total withdrawn
     pub external_withdrawals_per_period: std::collections::HashMap<AssetId, u128>,
     /// Block number when the current withdrawal period started
     pub withdrawal_period_start_block: u64,
+    /// Indexed bridge events for audit and verification
+    pub bridge_events: Vec<BridgeEvent>,
+    /// Total fees collected per asset
+    pub total_fees_collected: std::collections::HashMap<AssetId, u128>,
+    /// Global external bridge pause (all external deposits/withdrawals)
+    pub external_paused: bool,
 }
 
 /// Pending external deposit awaiting challenge period expiration.
@@ -148,13 +186,22 @@ impl BridgeStateManager {
         Ok(())
     }
 
-    /// Check daily limit and update usage
+    /// Check daily limit and update usage.
+    /// Auto-resets daily usage if a new day (blocks_per_day) has elapsed.
     pub fn check_and_update_daily_limit(
         &mut self,
         asset_id: AssetId,
         amount: u128,
         daily_limit: u128,
+        current_block: u64,
+        blocks_per_day: u64,
     ) -> Result<(), BridgeError> {
+        // Auto-reset daily usage when a new day starts
+        if current_block >= self.daily_usage_reset_at + blocks_per_day {
+            self.daily_usage.clear();
+            self.daily_usage_reset_at = current_block;
+        }
+
         let used = self.daily_usage.get(&asset_id).copied().unwrap_or(0);
         if used + amount > daily_limit {
             return Err(BridgeError::ExceedsDailyLimit(asset_id, used, daily_limit));
@@ -196,12 +243,35 @@ impl BridgeStateManager {
 
     /// Check if an external tx was already processed (replay protection)
     pub fn is_external_tx_processed(&self, tx_hash: &B256) -> bool {
-        self.processed_external_txs.contains(tx_hash)
+        self.processed_external_txs.contains_key(tx_hash)
     }
 
-    /// Mark an external tx as processed
-    pub fn mark_external_tx_processed(&mut self, tx_hash: B256) {
-        self.processed_external_txs.insert(tx_hash);
+    /// Mark an external tx as processed, recording the block height.
+    pub fn mark_external_tx_processed(&mut self, tx_hash: B256, block_height: u64) {
+        self.processed_external_txs.insert(tx_hash, block_height);
+    }
+
+    /// Prune processed external tx records older than `before_block`.
+    /// Should be called periodically (e.g. during block finalization).
+    pub fn prune_processed_external_txs(&mut self, before_block: u64) {
+        self.processed_external_txs.retain(|_, block| *block >= before_block);
+    }
+
+    /// Called at the end of each block to auto-finalize bridge maintenance:
+    /// 1. Finalize pending external deposits past challenge period.
+    /// 2. Prune old processed tx hashes.
+    pub fn on_block_finalized(
+        &mut self,
+        current_block: u64,
+        challenge_period_blocks: u64,
+        processed_tx_retention_blocks: u64,
+    ) -> Vec<PendingExternalDeposit> {
+        // Prune old processed tx records
+        let prune_before = current_block.saturating_sub(processed_tx_retention_blocks);
+        self.prune_processed_external_txs(prune_before);
+
+        // Finalize deposits whose challenge period has expired
+        self.finalize_pending_external_deposits(current_block, challenge_period_blocks)
     }
 
     /// Queue an external deposit for the challenge period.
@@ -257,6 +327,49 @@ impl BridgeStateManager {
         self.pending_external_deposits
             .iter()
             .any(|d| &d.source_tx_hash == source_tx_hash)
+    }
+
+    /// Record a bridge event for indexing
+    pub fn record_bridge_event(
+        &mut self,
+        event_type: BridgeEventType,
+        source_tx_hash: Option<B256>,
+        asset_id: AssetId,
+        amount: u128,
+        fee: u128,
+        recipient: Option<Address>,
+        block_height: u64,
+    ) {
+        self.bridge_events.push(BridgeEvent {
+            event_type,
+            source_tx_hash,
+            asset_id,
+            amount,
+            fee,
+            recipient,
+            block_height,
+        });
+    }
+
+    /// Record collected bridge fee
+    pub fn record_fee(&mut self, asset_id: AssetId, fee: u128) {
+        let total = self.total_fees_collected.get(&asset_id).copied().unwrap_or(0);
+        self.total_fees_collected.insert(asset_id, total + fee);
+    }
+
+    /// Check if external bridge is globally paused
+    pub fn is_external_paused(&self) -> bool {
+        self.external_paused
+    }
+
+    /// Pause all external bridge operations (global emergency)
+    pub fn pause_external_bridge(&mut self) {
+        self.external_paused = true;
+    }
+
+    /// Resume all external bridge operations
+    pub fn resume_external_bridge(&mut self) {
+        self.external_paused = false;
     }
 
     /// Check and update external withdrawal limit per challenge period.
@@ -317,10 +430,29 @@ pub struct BridgeConfig {
     /// Max external withdraw per asset per challenge period.
     /// Limits blast radius if validator keys are compromised.
     pub max_external_withdraw_per_period: u128,
+    /// Blocks per day for daily limit auto-reset.
+    /// Default: 345_600 ≈ 1 day at 250ms block time (4 blocks/sec).
+    pub blocks_per_day: u64,
+    /// Retention period for processed external tx hashes (replay protection pruning).
+    /// Default: 4_838_400 ≈ 14 days at 250ms block time.
+    /// Must be > challenge_period_blocks to prevent accidental replay.
+    pub processed_tx_retention_blocks: u64,
+    /// Authorized bridge contracts per external chain (chain_id -> contract addresses).
+    /// Deposits must originate from one of these contracts.
+    pub authorized_contracts: std::collections::HashMap<u64, Vec<Address>>,
 }
 
 impl Default for BridgeConfig {
     fn default() -> Self {
+        let mut authorized = std::collections::HashMap::new();
+        // Default authorized bridge contract on Ethereum mainnet (placeholder)
+        authorized.insert(
+            1u64, // Ethereum mainnet chain_id
+            vec![Address::from_slice(&[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ])],
+        );
         Self {
             max_per_tx: 1_000_000_000_000_000_000_000u128, // 1000 tokens (18 decimals)
             daily_limit_per_asset: 10_000_000_000_000_000_000_000u128, // 10K tokens
@@ -331,6 +463,9 @@ impl Default for BridgeConfig {
             min_validator_signatures: 14,
             challenge_period_blocks: 2_419_200, // ~7 days at 250ms block time
             max_external_withdraw_per_period: 5_000_000_000_000_000_000_000u128, // 5K tokens per period
+            blocks_per_day: 345_600, // ~1 day at 250ms block time
+            processed_tx_retention_blocks: 4_838_400, // ~14 days at 250ms block time
+            authorized_contracts: authorized,
         }
     }
 }
@@ -389,10 +524,41 @@ mod tests {
     #[test]
     fn test_bridge_daily_limit() {
         let mut state = BridgeStateManager::default();
-        assert!(state.check_and_update_daily_limit(1, 100, 500).is_ok());
-        assert!(state.check_and_update_daily_limit(1, 200, 500).is_ok());
+        assert!(state.check_and_update_daily_limit(1, 100, 500, 100, 10).is_ok());
+        assert!(state.check_and_update_daily_limit(1, 200, 500, 100, 10).is_ok());
         // 100 + 200 = 300, next 300 would exceed 500
-        assert!(state.check_and_update_daily_limit(1, 300, 500).is_err());
+        assert!(state.check_and_update_daily_limit(1, 300, 500, 100, 10).is_err());
+    }
+
+    #[test]
+    fn test_bridge_daily_limit_auto_reset() {
+        let mut state = BridgeStateManager::default();
+        // Use up 400 of 500 limit at block 100
+        assert!(state.check_and_update_daily_limit(1, 400, 500, 100, 10).is_ok());
+        // At block 109 (same day), remaining limit is 100
+        assert!(state.check_and_update_daily_limit(1, 101, 500, 109, 10).is_err());
+        // At block 110 (new day), limit auto-resets
+        assert!(state.check_and_update_daily_limit(1, 400, 500, 110, 10).is_ok());
+        assert_eq!(state.daily_usage.get(&1), Some(&400));
+    }
+
+    #[test]
+    fn test_processed_tx_pruning() {
+        let mut state = BridgeStateManager::default();
+        state.mark_external_tx_processed(B256::from([1u8; 32]), 100);
+        state.mark_external_tx_processed(B256::from([2u8; 32]), 200);
+        state.mark_external_tx_processed(B256::from([3u8; 32]), 300);
+
+        assert!(state.is_external_tx_processed(&B256::from([1u8; 32])));
+        assert!(state.is_external_tx_processed(&B256::from([2u8; 32])));
+        assert!(state.is_external_tx_processed(&B256::from([3u8; 32])));
+
+        // Prune txs older than block 150
+        state.prune_processed_external_txs(150);
+
+        assert!(!state.is_external_tx_processed(&B256::from([1u8; 32])));
+        assert!(state.is_external_tx_processed(&B256::from([2u8; 32])));
+        assert!(state.is_external_tx_processed(&B256::from([3u8; 32])));
     }
 
     #[test]

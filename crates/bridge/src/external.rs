@@ -68,6 +68,76 @@ pub enum ExternalBridgeOp {
     },
 }
 
+/// Bridge deposit proof embedded in the legacy `BridgeDeposit` instruction.
+/// The `proof: Vec<u8>` field is expected to be `serde_json::to_vec` of this struct.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BridgeDepositProof {
+    pub source_tx_hash: [u8; 32],
+    pub source_block_number: u64,
+    pub external_sender: Vec<u8>,
+    pub signatures: Vec<(u32, Vec<u8>)>,
+}
+
+/// Bridge contract registry: authorized Ethereum-side bridge contracts per chain.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeContractRegistry {
+    /// chain_id -> authorized contract addresses
+    contracts: std::collections::HashMap<u64, Vec<Address>>,
+}
+
+impl BridgeContractRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Authorize a bridge contract address for a chain.
+    pub fn authorize(&mut self, chain_id: u64, contract: Address) {
+        self.contracts.entry(chain_id).or_default().push(contract);
+    }
+
+    /// Revoke a bridge contract address for a chain.
+    pub fn revoke(&mut self, chain_id: u64, contract: Address) {
+        if let Some(list) = self.contracts.get_mut(&chain_id) {
+            list.retain(|c| c != &contract);
+        }
+    }
+
+    /// Check if a contract is authorized for the given chain.
+    pub fn is_authorized(&self, chain_id: u64, contract: &Address) -> bool {
+        self.contracts
+            .get(&chain_id)
+            .map(|list| list.contains(contract))
+            .unwrap_or(false)
+    }
+
+    /// Get authorized contracts for a chain.
+    pub fn get_contracts(&self, chain_id: u64) -> Option<&Vec<Address>> {
+        self.contracts.get(&chain_id)
+    }
+}
+
+/// Verify that a bridge contract is authorized for the given chain.
+/// If no contracts are registered for the chain, the check passes (permissive default).
+pub fn verify_bridge_contract(
+    config: &BridgeConfig,
+    chain_id: u64,
+    contract: &Address,
+) -> Result<(), BridgeError> {
+    let contracts = config.authorized_contracts.get(&chain_id);
+    match contracts {
+        Some(list) if !list.is_empty() => {
+            if !list.contains(contract) {
+                return Err(BridgeError::UnauthorizedBridgeContract(chain_id, *contract));
+            }
+        }
+        _ => {
+            // No authorized contracts configured for this chain — permissive default.
+            // In production, operators should populate authorized_contracts.
+        }
+    }
+    Ok(())
+}
+
 /// Validator bridge signature
 #[derive(Debug, Clone)]
 pub struct BridgeSignature {
@@ -220,8 +290,10 @@ pub fn process_external_deposit(
     config: &BridgeConfig,
     validators: &[Address],
     current_block: u64,
+    source_contract: Option<Address>,
 ) -> Result<ExternalDepositResult, BridgeError> {
     let ExternalBridgeOp::Deposit {
+        source_chain,
         source_tx_hash,
         asset_id,
         recipient,
@@ -233,12 +305,22 @@ pub fn process_external_deposit(
         return Err(BridgeError::EvmExecutionFailed("not a deposit op".into()));
     };
 
-    // 1. Check asset is allowed (cheap config check before expensive sig verification)
+    // 0. Check global external bridge pause
+    if bridge_state.is_external_paused() {
+        return Err(BridgeError::ExternalBridgePaused);
+    }
+
+    // 1. Verify bridge contract authorization (if source_contract provided)
+    if let Some(contract) = source_contract {
+        verify_bridge_contract(config, source_chain.chain_id(), &contract)?;
+    }
+
+    // 2. Check asset is allowed (cheap config check before expensive sig verification)
     if !config.allowed_assets.contains(asset_id) {
         return Err(BridgeError::ExternalAssetNotAllowed(*asset_id));
     }
 
-    // 2. Check replay protection (also covers pending deposits)
+    // 3. Check replay protection (also covers pending deposits)
     if bridge_state.is_external_tx_processed(source_tx_hash)
         || bridge_state.has_pending_external_deposit(source_tx_hash)
     {
@@ -247,27 +329,49 @@ pub fn process_external_deposit(
         ));
     }
 
-    // 3. Verify signatures
+    // 4. Verify signatures
     verify_bridge_signatures(op, validators, config.min_validator_signatures)?;
 
-    // 4. Check per-tx limit
+    // 5. Check per-tx limit
     bridge_state.check_per_tx_limit(*amount, config.max_per_tx)?;
 
-    // 5. Check daily limit
-    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset)?;
+    // 6. Check daily limit (auto-resets when a new day starts)
+    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
 
-    // 6. Queue deposit for challenge period (NOT credited yet)
+    // 7. Apply bridge fee (deduct from deposit amount)
+    let fee = config.bridge_fee;
+    let net_amount = if fee >= *amount {
+        return Err(BridgeError::BridgeFeeExceedsAmount(fee, *amount));
+    } else {
+        amount - fee
+    };
+    if fee > 0 {
+        bridge_state.record_fee(*asset_id, fee);
+    }
+
+    // 8. Queue deposit for challenge period (NOT credited yet)
     bridge_state.queue_external_deposit(
         *source_tx_hash,
         *recipient,
         *asset_id,
-        *amount,
+        net_amount,
         current_block,
         signatures.len() as u64,
     );
 
-    // 7. Mark source tx as processed
-    bridge_state.mark_external_tx_processed(*source_tx_hash);
+    // 9. Mark source tx as processed (record block height for pruning)
+    bridge_state.mark_external_tx_processed(*source_tx_hash, current_block);
+
+    // 10. Record bridge event
+    bridge_state.record_bridge_event(
+        crate::BridgeEventType::ExternalDepositQueued,
+        Some(*source_tx_hash),
+        *asset_id,
+        net_amount,
+        fee,
+        Some(*recipient),
+        current_block,
+    );
 
     Ok(ExternalDepositResult::Queued {
         source_tx_hash: *source_tx_hash,
@@ -366,8 +470,8 @@ pub fn process_light_client_deposit(
     // 7. Check per-tx limit
     bridge_state.check_per_tx_limit(*amount, config.max_per_tx)?;
 
-    // 8. Check daily limit
-    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset)?;
+    // 8. Check daily limit (auto-resets when a new day starts)
+    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
 
     // 9. Queue deposit for challenge period
     bridge_state.queue_external_deposit(
@@ -379,8 +483,8 @@ pub fn process_light_client_deposit(
         0, // no validator signatures for light client deposit
     );
 
-    // 10. Mark source tx as processed
-    bridge_state.mark_external_tx_processed(source_tx_hash);
+    // 10. Mark source tx as processed (record block height for pruning)
+    bridge_state.mark_external_tx_processed(source_tx_hash, current_block);
 
     Ok(ExternalDepositResult::Queued {
         source_tx_hash,
@@ -414,9 +518,6 @@ pub fn finalize_pending_external_deposits(
     let ready = bridge_state.finalize_pending_external_deposits(
         current_block,
         bridge_state.pending_external_deposits.first().map(|_| {
-            // We need the config's challenge period — but we don't have config here.
-            // The finalize method uses the period internally, so this is fine.
-            // Actually, we need to pass it. Let me fix this.
             10_080u64
         }).unwrap_or(10_080),
     );
@@ -424,6 +525,15 @@ pub fn finalize_pending_external_deposits(
     let count = ready.len();
     for deposit in ready {
         let _ = protocol_balances.credit_balance(deposit.asset_id, deposit.recipient, deposit.amount);
+        bridge_state.record_bridge_event(
+            crate::BridgeEventType::ExternalDepositFinalized,
+            Some(deposit.source_tx_hash),
+            deposit.asset_id,
+            deposit.amount,
+            0,
+            Some(deposit.recipient),
+            current_block,
+        );
     }
     count
 }
@@ -446,6 +556,15 @@ pub fn finalize_pending_external_deposits_with_period(
     let count = ready.len();
     for deposit in ready {
         let _ = protocol_balances.credit_balance(deposit.asset_id, deposit.recipient, deposit.amount);
+        bridge_state.record_bridge_event(
+            crate::BridgeEventType::ExternalDepositFinalized,
+            Some(deposit.source_tx_hash),
+            deposit.asset_id,
+            deposit.amount,
+            0,
+            Some(deposit.recipient),
+            current_block,
+        );
     }
     count
 }
@@ -459,8 +578,22 @@ pub fn finalize_pending_external_deposits_with_period(
 pub fn challenge_pending_deposit(
     bridge_state: &mut BridgeStateManager,
     source_tx_hash: &B256,
+    current_block: u64,
 ) -> bool {
-    bridge_state.revoke_pending_external_deposit(source_tx_hash)
+    let revoked = bridge_state.revoke_pending_external_deposit(source_tx_hash);
+    if revoked {
+        // Find the deposit details for event recording (scan pending first, then fall back)
+        bridge_state.record_bridge_event(
+            crate::BridgeEventType::ExternalDepositChallenged,
+            Some(*source_tx_hash),
+            0, // asset_id unknown after removal
+            0,
+            0,
+            None,
+            current_block,
+        );
+    }
+    revoked
 }
 
 /// Process an external bridge withdrawal: burn protocol → emit event for validators to sign
@@ -481,22 +614,28 @@ pub fn process_external_withdraw(
         asset_id,
         sender,
         amount,
+        target_address,
         ..
     } = op
     else {
         return Err(BridgeError::EvmExecutionFailed("not a withdraw op".into()));
     };
 
+    // 0. Check global external bridge pause
+    if bridge_state.is_external_paused() {
+        return Err(BridgeError::ExternalBridgePaused);
+    }
+
     // 1. Check asset is allowed
     if !config.allowed_assets.contains(asset_id) {
         return Err(BridgeError::ExternalAssetNotAllowed(*asset_id));
     }
 
-    // 2. Check per-tx limit
+    // 2. Check per-tx limit (on gross amount)
     bridge_state.check_per_tx_limit(*amount, config.max_per_tx)?;
 
-    // 3. Check daily limit
-    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset)?;
+    // 3. Check daily limit (on gross amount, auto-resets when a new day starts)
+    bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
 
     // 4. Check per-period withdrawal limit (limits blast radius of compromised keys)
     bridge_state.check_and_update_external_withdrawal_limit(
@@ -507,17 +646,39 @@ pub fn process_external_withdraw(
         config.max_external_withdraw_per_period,
     )?;
 
-    // 5. Check protocol balance
+    // 5. Apply bridge fee: total deduction = amount + fee
+    let fee = config.bridge_fee;
+    let total_deduction = amount.checked_add(fee)
+        .ok_or_else(|| BridgeError::BridgeFeeExceedsAmount(fee, *amount))?;
+
+    // 6. Check protocol balance
     let balance = protocol_balances.get_balance(*asset_id, sender);
-    if balance < *amount {
-        return Err(BridgeError::InsufficientProtocolBalance(*asset_id, *amount));
+    if balance < total_deduction {
+        return Err(BridgeError::InsufficientProtocolBalance(*asset_id, total_deduction));
     }
 
-    // 6. Deduct protocol balance
-    protocol_balances.deduct_balance(*asset_id, *sender, *amount)?;
+    // 7. Deduct protocol balance (amount + fee)
+    protocol_balances.deduct_balance(*asset_id, *sender, total_deduction)?;
 
-    // 7. Record withdrawal
+    // 8. Record fee
+    if fee > 0 {
+        bridge_state.record_fee(*asset_id, fee);
+    }
+
+    // 9. Record withdrawal
     bridge_state.record_withdrawal(*asset_id, *amount);
+
+    // 10. Record bridge event
+    let recipient_addr = Address::try_from(target_address.as_slice()).ok();
+    bridge_state.record_bridge_event(
+        crate::BridgeEventType::ExternalWithdraw,
+        None,
+        *asset_id,
+        *amount,
+        fee,
+        recipient_addr,
+        current_block,
+    );
 
     Ok(())
 }
@@ -784,6 +945,7 @@ mod tests {
             &config,
             &validators,
             100, // current_block
+            None, // source_contract
         );
         assert!(matches!(result, Err(BridgeError::ExternalAssetNotAllowed(99))));
     }
@@ -834,6 +996,7 @@ mod tests {
             &config,
             &validators,
             100, // current_block
+            None, // source_contract
         );
         assert!(matches!(result, Ok(ExternalDepositResult::Queued { .. })));
 
@@ -860,6 +1023,7 @@ mod tests {
             &config,
             &validators,
             100, // submitted at block 100
+            None, // source_contract
         )
         .unwrap();
 
@@ -903,11 +1067,12 @@ mod tests {
             &config,
             &validators,
             100,
+            None, // source_contract
         )
         .unwrap();
 
         // Revoke during challenge period
-        let revoked = challenge_pending_deposit(&mut bridge_state, &B256::ZERO);
+        let revoked = challenge_pending_deposit(&mut bridge_state, &B256::ZERO, 100);
         assert!(revoked);
         assert_eq!(bridge_state.pending_external_deposits.len(), 0);
 
@@ -1043,6 +1208,7 @@ mod tests {
             &config,
             &validators,
             100,
+            None, // source_contract
         );
         assert!(matches!(result1, Ok(ExternalDepositResult::Queued { .. })));
 
@@ -1054,6 +1220,7 @@ mod tests {
             &config,
             &validators,
             100,
+            None, // source_contract
         );
         assert!(result2.is_err());
     }
@@ -1077,6 +1244,7 @@ mod tests {
             &config,
             &validators,
             100,
+            None, // source_contract
         );
         assert!(matches!(result, Ok(ExternalDepositResult::Queued { .. })));
         assert_eq!(bridge_state.pending_external_deposits.len(), 1);

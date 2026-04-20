@@ -90,9 +90,9 @@ mod test_bridge_flow_impl {
         };
         assert!(bridge_state.check_per_tx_limit(500, config.max_per_tx).is_ok());
         assert!(bridge_state.check_per_tx_limit(1_001, config.max_per_tx).is_err());
-        assert!(bridge_state.check_and_update_daily_limit(1, 2_000, config.daily_limit_per_asset).is_ok());
-        assert!(bridge_state.check_and_update_daily_limit(1, 2_000, config.daily_limit_per_asset).is_ok());
-        assert!(bridge_state.check_and_update_daily_limit(1, 2_000, config.daily_limit_per_asset).is_err());
+        assert!(bridge_state.check_and_update_daily_limit(1, 2_000, config.daily_limit_per_asset, 100, config.blocks_per_day).is_ok());
+        assert!(bridge_state.check_and_update_daily_limit(1, 2_000, config.daily_limit_per_asset, 100, config.blocks_per_day).is_ok());
+        assert!(bridge_state.check_and_update_daily_limit(1, 2_000, config.daily_limit_per_asset, 100, config.blocks_per_day).is_err());
     }
 
     #[test]
@@ -129,7 +129,7 @@ mod test_bridge_flow_impl {
         assert_eq!(bridge_state.total_deposits.get(&1), Some(&1_500));
         bridge_state.record_withdrawal(1, 300);
         assert_eq!(bridge_state.total_withdrawals.get(&1), Some(&300));
-        bridge_state.check_and_update_daily_limit(1, 200, 10_000).unwrap();
+        bridge_state.check_and_update_daily_limit(1, 200, 10_000, 100, 10).unwrap();
         assert_eq!(bridge_state.daily_usage.get(&1), Some(&200));
         bridge_state.reset_daily_usage();
         assert!(bridge_state.daily_usage.is_empty());
@@ -187,7 +187,7 @@ mod test_bridge_flow_impl {
         let (secrets, validators) = generate_bridge_validators(21);
 
         let op = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 100).unwrap();
+        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 100, None).unwrap();
         assert!(matches!(result, call_bridge::ExternalDepositResult::Queued { .. }));
 
         // Deposit is queued, not credited yet (challenge period)
@@ -206,7 +206,7 @@ mod test_bridge_flow_impl {
         }
 
         // Replay protection
-        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 200);
+        let result = process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 200, None);
         assert!(result.is_err());
     }
 
@@ -223,7 +223,7 @@ mod test_bridge_flow_impl {
             asset_id: 99, amount: 1000, signatures: vec![],
         };
         assert!(matches!(
-            process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 100),
+            process_external_deposit(&op, &mut balances, &mut bridge_state, &config, &validators, 100, None),
             Err(call_bridge::BridgeError::ExternalAssetNotAllowed(99))
         ));
     }
@@ -284,7 +284,7 @@ mod test_bridge_flow_impl {
         let (secrets, validators) = generate_bridge_validators(21);
 
         let op1 = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        let result1 = process_external_deposit(&op1, &mut balances, &mut bridge_state, &config, &validators, 100);
+        let result1 = process_external_deposit(&op1, &mut balances, &mut bridge_state, &config, &validators, 100, None);
         assert!(result1.is_ok());
 
         // Second deposit would exceed daily limit
@@ -298,7 +298,7 @@ mod test_bridge_flow_impl {
                 signature: sign_bridge_event(&secrets[i], &ExternalChain::EthereumMainnet, B256::from_slice(&[1u8; 32]), 101, &[0u8; 32], addr(2), 1, 600),
             }).collect(),
         };
-        let result = process_external_deposit(&op2, &mut balances, &mut bridge_state, &config, &validators, 100);
+        let result = process_external_deposit(&op2, &mut balances, &mut bridge_state, &config, &validators, 100, None);
         assert!(result.is_err());
     }
 }
