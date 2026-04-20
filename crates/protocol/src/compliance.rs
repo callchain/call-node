@@ -6,6 +6,23 @@ use call_primitives::Address;
 use crate::{ProtocolError, ProtocolResult};
 use std::collections::{HashMap, HashSet};
 
+/// Serializable snapshot of ComplianceEngine state.
+/// Custom handlers are runtime-only and must be re-registered after load.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ComplianceEngineSnapshot {
+    sanctioned: Vec<Address>,
+    kyc_verified: Vec<Address>,
+    whitelisted: Vec<Address>,
+    address_states: Vec<ComplianceAddressStateEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ComplianceAddressStateEntry {
+    address: Address,
+    policy_id: u8,
+    status: ComplianceStatus,
+}
+
 /// Compliance policy types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompliancePolicy {
@@ -184,6 +201,45 @@ impl ComplianceEngine {
             .get(&id)
             .map(|h| h.check(address))
             .unwrap_or(false)
+    }
+
+    // ── Snapshot / Restore ──
+
+    /// Create a serializable snapshot of all compliance state.
+    /// Custom handlers are NOT included and must be re-registered after load.
+    pub fn snapshot(&self) -> ComplianceEngineSnapshot {
+        ComplianceEngineSnapshot {
+            sanctioned: self.sanctioned.iter().copied().collect(),
+            kyc_verified: self.kyc_verified.iter().copied().collect(),
+            whitelisted: self.whitelisted.iter().copied().collect(),
+            address_states: self
+                .address_states
+                .iter()
+                .map(|((address, policy_id), state)| ComplianceAddressStateEntry {
+                    address: *address,
+                    policy_id: *policy_id,
+                    status: state.status,
+                })
+                .collect(),
+        }
+    }
+
+    /// Restore compliance state from a snapshot.
+    /// Clears existing state before restoring. Custom handlers are preserved.
+    pub fn restore_from_snapshot(&mut self, snapshot: &ComplianceEngineSnapshot) {
+        self.sanctioned = snapshot.sanctioned.iter().copied().collect();
+        self.kyc_verified = snapshot.kyc_verified.iter().copied().collect();
+        self.whitelisted = snapshot.whitelisted.iter().copied().collect();
+        self.address_states = snapshot
+            .address_states
+            .iter()
+            .map(|entry| {
+                (
+                    (entry.address, entry.policy_id),
+                    AddressComplianceState { status: entry.status },
+                )
+            })
+            .collect();
     }
 
     // ── Per-address compliance status ──

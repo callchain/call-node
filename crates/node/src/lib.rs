@@ -36,7 +36,7 @@ use call_storage::reth_db::{
     db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
     CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
-    CallGovernanceState, CallConsensusState,
+    CallGovernanceState, CallComplianceState, CallConsensusState,
     CallReceipts, CallAgentBalances, CallForkState, CallCheckpoint,
 };
 use call_protocol::ProtocolReceipt;
@@ -132,12 +132,12 @@ impl CallNode {
         }
 
         // Load persisted state from reth-db (skip if recovery needed)
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager, governance_manager, receipts, fork_manager) = if recovery_needed {
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager, governance_manager, compliance_engine, receipts, fork_manager) = if recovery_needed {
             (
                 BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
                 ShieldedState::new(), ValidatorStateManager::default(),
                 AgentRegistry::new(), AgentBalances::new(), OracleManager::default(),
-                GovernanceManager::new(), std::collections::HashMap::new(),
+                GovernanceManager::new(), ComplianceEngine::new(), std::collections::HashMap::new(),
                 ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1),
             )
         } else {
@@ -169,7 +169,7 @@ impl CallNode {
                     )
                 }
             };
-            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle, governance, receipts, fork_manager)
+            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle, governance, loaded.8, receipts, fork_manager)
         };
 
         // Try to load persisted consensus state; fall back to genesis
@@ -195,7 +195,7 @@ impl CallNode {
         let state = Arc::new(RpcState::new(
             balance_state,
             AssetRegistry::new(),
-            ComplianceEngine::new(),
+            compliance_engine,
             evm_state,
             bridge_state,
             ValidatorStateManager::default(),
@@ -892,7 +892,7 @@ impl CallNode {
 fn load_state_from_db(
     db_env: &Arc<DatabaseEnv>,
 ) -> (BalanceState, EvmState, BridgeStateManager, ShieldedState,
-      ValidatorStateManager, AgentRegistry, AgentBalances, GovernanceManager) {
+      ValidatorStateManager, AgentRegistry, AgentBalances, GovernanceManager, ComplianceEngine) {
     // Load balances
     let (balances, allowances) = match db_load_balances(db_env) {
         Ok(b) => b,
@@ -963,7 +963,16 @@ fn load_state_from_db(
         }
     };
 
-    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, governance)
+    // Load compliance state
+    let compliance = match load_compliance_state(db_env) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load compliance state");
+            ComplianceEngine::new()
+        }
+    };
+
+    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, governance, compliance)
 }
 
 /// Persist all state types to the reth-db database.
@@ -1036,6 +1045,13 @@ fn persist_state_to_db(
         let governance = state.governance.read().unwrap();
         save_governance_state(db_env, &governance)
             .map_err(|e| format!("save governance: {e}"))?;
+    }
+
+    // Persist compliance state
+    {
+        let compliance = state.compliance_engine.read().unwrap();
+        save_compliance_state(db_env, &compliance)
+            .map_err(|e| format!("save compliance: {e}"))?;
     }
 
     // Persist consensus state
@@ -1249,6 +1265,27 @@ fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManager, String> 
     match db_get::<CallGovernanceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize governance: {e}")),
         None => Ok(GovernanceManager::new()),
+    }
+}
+
+/// Save compliance state to the database.
+fn save_compliance_state(db: &DatabaseEnv, state: &ComplianceEngine) -> Result<(), String> {
+    let snapshot = state.snapshot();
+    let data = serde_json::to_vec(&snapshot).map_err(|e| format!("serialize compliance: {e}"))?;
+    db_put::<CallComplianceState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+/// Load compliance state from the database.
+fn load_compliance_state(db: &DatabaseEnv) -> Result<ComplianceEngine, String> {
+    match db_get::<CallComplianceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => {
+            let snapshot: call_protocol::ComplianceEngineSnapshot =
+                serde_json::from_slice(&data).map_err(|e| format!("deserialize compliance: {e}"))?;
+            let mut engine = ComplianceEngine::new();
+            engine.restore_from_snapshot(&snapshot);
+            Ok(engine)
+        }
+        None => Ok(ComplianceEngine::new()),
     }
 }
 

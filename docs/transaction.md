@@ -181,6 +181,7 @@ Multi-pool structure with separate lanes:
 | Stablecoin fee deduction (Gap 4) | `1d742f7` | `deduct_stablecoin_from_payer()` now uses correct `asset_id` instead of hard-coded CALL |
 | Priority fee scoring (Gap 5) | `1d742f7` | `protocol_priority_score()` computes `max_fee - gas_cost` and is enforced at mempool admission |
 | Compliance recipient checks (Gap 6) | `1d742f7` | `Transfer`, `BatchTransfer`, `TransferFrom` now check both sender and recipient compliance |
+| Compliance state persistence (Gap 7) | current | `ComplianceEngineSnapshot` with serde JSON blob persistence; `CallComplianceState` MDBX table; wired in `load_state_from_db`/`persist_state_to_db` |
 | Custom compliance policy (Gap 8) | `1d742f7` | `CompliancePolicy::Custom` now invokes registered handlers from `ComplianceEngine::custom_handlers` |
 | Instruction count limit (Gap 9) | `1d742f7` | `MAX_INSTRUCTIONS_PER_TX` enforced at mempool admission and in payload builder |
 | Memo size enforcement (Gap 10) | `1d742f7` | `MAX_TOTAL_MEMO_BYTES` enforced at mempool admission |
@@ -192,16 +193,7 @@ Multi-pool structure with separate lanes:
 
 ### Critical / High Severity
 
-#### Gap 7: Compliance State Not Persisted
-
-**Problem**: `ComplianceEngine` is held in `RpcState` in memory only. There is no DB schema for sanctioned addresses, KYC status, or per-address compliance states. On node restart, all compliance data is lost.
-
-**Impact**: After restart, previously blacklisted addresses can transact freely.
-
-**Suggestion**: Add MDBX tables for compliance state:
-- `CallCompliancePolicy { asset_id, policy }`
-- `CallComplianceStatus { address, policy_id, status }`
-Wire load/save in `CallNode::new()` and `persist_state_to_db()`.
+No open critical/high severity gaps remain.
 
 ---
 
@@ -211,6 +203,7 @@ The following gaps have been fixed and are documented here for reference:
 
 | Gap | Status | Resolution |
 |---|---|---|
+| **Gap 7**: Compliance State Not Persisted | **Fixed** | `ComplianceEngineSnapshot` added with `serde::Serialize`/`Deserialize`; `CallComplianceState` MDBX table; `save_compliance_state`/`load_compliance_state` wired in `persist_state_to_db`/`load_state_from_db` |
 | **Gap 1**: Incomplete Atomic Rollback | **Fixed** | `ComplianceEngine` and `ShieldedState` now implement `Clone`; `execute_protocol_instructions()` snapshots all three mutable states and restores on failure |
 | **Gap 2**: No Sequential Nonce Enforcement | **Fixed** | Mempool maintains `expected_nonces: HashMap<Address, u64>`; rejects `nonce < expected` at admission |
 | **Gap 3**: Gas Sponsors Are Stubs | **Fixed** | `AuthorizedSponsor` fully wired through `SponsorRegistry`; `PoolSponsor` and `PerTxSponsor` explicitly rejected at mempool with descriptive error |
@@ -233,11 +226,11 @@ The following gaps have been fixed and are documented here for reference:
 | Mempool structure | Ready | None |
 | Gas/fee model | Ready | None |
 | Instruction execution | Ready | None |
-| Compliance | Partial | State persistence (Gap 7) |
+| Compliance | Ready | None |
 
 ## Recommended Fix Order
 
-1. **Compliance state persistence** (Gap 7) — requires MDBX schema + node boot/shutdown wiring
+No remaining transaction system gaps.
 
 ---
 
