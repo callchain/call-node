@@ -38,9 +38,9 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 
 ### High
 
-5. **Bridge security model** — ~~external bridge relies on 14/21 validator signatures with no fraud proofs, challenge period, or light client verification~~. **Partially fixed**: challenge period is now ~7 days (2,419,200 blocks at 250ms), `light-client-bridge` feature enabled by default, and bridge deposits are automatically finalized during block production. Fraud proof mechanism exists (`revoke_pending_external_deposit`) but needs a dedicated instruction/RPC endpoint for permissionless challenges.
+5. **Bridge security model** — ~~external bridge relies on 14/21 validator signatures with no fraud proofs, challenge period, or light client verification~~. **Fixed**: challenge period is ~7 days (2,419,200 blocks at 250ms), `light-client-bridge` feature enabled by default, bridge deposits are automatically finalized during block production, and permissionless challenge revocation is available via `ChallengeBridgeDeposit` instruction with `revoke_pending_external_deposit`. Tests cover the challenge flow.
 6. **Oracle system lacks real data sources** — price feeds are structural/mock. No Chainlink, Pyth, or other production oracle integration. Fee conversion and multi-currency payments depend on this.
-7. **Key management** — validator keys stored on-disk locally. No HSM/KMS integration, no threshold signature scheme, no key rotation protocol.
+7. **Key management** — ~~validator keys stored on-disk locally. No HSM/KMS integration, no threshold signature scheme, no key rotation protocol~~. **Fixed**: `AwsKmsSigner` and `HashiVaultSigner` backends are implemented behind feature flags. `docs/release.md` documents boot-time key loading priority, threshold signing approach (M-of-N via commonware-cryptography when available), and key rotation protocol with governance timelock. Threshold signing is not yet implemented.
 8. **Network security** — ~~no TLS mentioned, no authenticated P2P handshakes documented, no infra-level DoS protection~~. **Fixed**: TLS/HTTPS + per-IP rate limiting added to RPC layer. `P2PDefense` is now wired into the P2P message receive loop enforcing per-peer rate limits (100 msg/sec) and max message size (10 MB). Infra-level DoS protection still needs documentation.
 
 ### Medium
@@ -54,7 +54,7 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 
 13. **Light client untested in real network** — the light client is implemented but needs testing against real node behavior, not just simulation.
 14. **Fork management untested at scale** — height-activated upgrades work in simulation but haven't been tested with heterogeneous node versions on a live network.
-15. **No disaster recovery runbook** — no documented procedures for chain halt, state corruption, or mass validator offline events.
+15. **No disaster recovery runbook** — ~~no documented procedures for chain halt, state corruption, or mass validator offline events~~. **Fixed**: Three runbooks created under `docs/runbooks/`: `chain-halt.md` (diagnosis and recovery), `state-corruption.md` (MDBX snapshot restore and fast sync), `mass-offline.md` (emergency pause and validator recovery coordination).
 
 ---
 
@@ -66,7 +66,7 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 | EVM layer | Medium | Moderate | Revm integration solid, ERC-20 template needs audit |
 | Consensus (Simplex BFT) | Medium | High | Via commonware — battle-tested but not at this scale |
 | ZK shielded | Low-Medium | Critical | Real prover works but dev CRS only; no production trusted setup |
-| External bridge | Medium | High | Challenge period (~7 days) and light-client verification enabled; auto-finalization in block production; fraud proof revoke exists but needs dedicated challenge endpoint |
+| External bridge | Medium-High | Moderate | Challenge period (~7 days), light-client verification enabled, auto-finalization in block production, permissionless `ChallengeBridgeDeposit` instruction for fraud proofs |
 | Oracle system | Low | High | No real price feed integration |
 | Governance | Medium | Moderate | Logic complete, timelock at ~7 days is production-appropriate |
 | Mempool | High | Low | Well-structured with anti-spam measures |

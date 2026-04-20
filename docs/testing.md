@@ -24,7 +24,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | `call-network` | ~78 | P2P message handling, gossip, peer limits, identity, limits validation |
 | `call-storage` | ~46 | Pruning, snapshots, node modes, table descriptors, expiration |
 | `call-rpc` | ~33 | Module building, subscription registration, handler state |
-| `call-bridge` | ~34 | Deposit flow, external tracking, challenge period, withdrawal |
+| `call-bridge` | ~35 | Deposit flow, external tracking, challenge period, withdrawal, permissionless challenge revocation |
 | `call-shielded` | ~160 | Circuit deposit/transfer/withdraw, Merkle tree, Poseidon hash, notes, nullifiers, proof serialization, keygen, compliance |
 | `call-light-client` | ~26 | MPT proof verification (leaf, extension, branch, tampered hash), header chain submission, compact encoding |
 | `call-agent` | ~105 | Registration, permissions, balances, nonces, instruction extraction, transaction verification, execution |
@@ -43,7 +43,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | Test File | Coverage |
 |-----------|----------|
 | `test_payment_flow.rs` | Transfer, batch transfer, fee deduction, insufficient balance, memo, allowance |
-| `test_bridge_flow.rs` | Deposit, external tracking, challenge period, completion, withdrawal |
+| `test_bridge_flow.rs` | Deposit, external tracking, challenge period, completion, withdrawal, permissionless challenge revocation |
 | `test_governance_flow.rs` | Proposal creation, voting, execution, timelock, delegation |
 | `test_agent_flow.rs` | Registration, permission checks, balance operations, transaction execution, nonce tracking |
 | `test_shielded_flow.rs` | Deposit, transfer, withdrawal, note management, nullifier tracking |
@@ -110,6 +110,14 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | 28 | **No P2P ban enforcement tests** | `NetworkLimits` defines ban duration but no test verifies peer banning works in practice. |
 | 29 | **No mempool eviction under memory pressure tests** | `ReplayProtector` evicts 25% when over limit but no test verifies correctness during eviction. |
 | 30 | **No cross-crate integration test for light client bridge deposit** | `call_lightClientBridgeDeposit` is feature-gated. No integration test covers the full flow. |
+
+### Resolved Gaps — Recently Fixed
+
+| # | Gap | Resolution |
+|---|---|---|
+| R1 | ~~**No bridge challenge instruction tests**~~ | `test_challenge_deposit_revoke_pending` verifies permissionless challenge revocation of pending bridge deposits. |
+| R2 | ~~**No P2P defense integration tests**~~ | `P2PDefense` is now wired into the P2P receive loop. Network-level tests exercise oversized message rejection and rate limiting. |
+| R3 | ~~**No compliance state persistence tests**~~ | `ComplianceEngineSnapshot` serialization/deserialization and MDBX load/save are covered in protocol and storage tests. |
 
 ---
 

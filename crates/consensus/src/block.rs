@@ -608,7 +608,7 @@ fn execute_agent_instruction(
 // ── Bridge instruction helpers ────────────────────────────────────────
 
 fn is_bridge_instruction(instr: &Instruction) -> bool {
-    matches!(instr, Instruction::ExternalBridgeDeposit { .. })
+    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ChallengeBridgeDeposit { .. })
 }
 
 fn execute_bridge_instruction(
@@ -663,6 +663,27 @@ fn execute_bridge_instruction(
             ) {
                 Ok(_) => Ok(InstructionResult::Success),
                 Err(e) => Err(ConsensusError::InvalidBlock(format!("bridge deposit: {e:?}"))),
+            }
+        }
+        Instruction::ChallengeBridgeDeposit {
+            source_tx_hash,
+            proof,
+        } => {
+            // Permissionless challenge: anyone can submit proof during challenge period
+            if proof.is_empty() {
+                return Err(ConsensusError::InvalidBlock(
+                    "bridge challenge: proof cannot be empty".into(),
+                ));
+            }
+            let revoked = bridge_state.revoke_pending_external_deposit(
+                &call_primitives::B256::from(*source_tx_hash),
+            );
+            if revoked {
+                Ok(InstructionResult::Success)
+            } else {
+                Err(ConsensusError::InvalidBlock(
+                    "bridge challenge: no pending deposit found for source_tx_hash".into(),
+                ))
             }
         }
         _ => Err(ConsensusError::InvalidBlock("not a bridge instruction".into())),

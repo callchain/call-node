@@ -1057,4 +1057,43 @@ mod tests {
         );
         assert!(result2.is_err());
     }
+
+    #[test]
+    fn test_challenge_deposit_revoke_pending() {
+        let mut protocol_balances = BalanceState::new();
+        let mut bridge_state = BridgeStateManager::default();
+        let config = BridgeConfig {
+            challenge_period_blocks: 10,
+            ..Default::default()
+        };
+        let (secrets, validators) = generate_validators(21);
+        let op = build_signed_deposit(&secrets, &validators, &(0..14).collect::<Vec<_>>());
+
+        // Deposit is queued
+        let result = process_external_deposit(
+            &op,
+            &mut protocol_balances,
+            &mut bridge_state,
+            &config,
+            &validators,
+            100,
+        );
+        assert!(matches!(result, Ok(ExternalDepositResult::Queued { .. })));
+        assert_eq!(bridge_state.pending_external_deposits.len(), 1);
+
+        // Get the source tx hash
+        let source_tx_hash = match &op {
+            ExternalBridgeOp::Deposit { source_tx_hash, .. } => *source_tx_hash,
+            _ => unreachable!(),
+        };
+
+        // Challenge revokes the pending deposit
+        let revoked = bridge_state.revoke_pending_external_deposit(&source_tx_hash);
+        assert!(revoked);
+        assert_eq!(bridge_state.pending_external_deposits.len(), 0);
+
+        // Second challenge on same tx hash fails
+        let revoked2 = bridge_state.revoke_pending_external_deposit(&source_tx_hash);
+        assert!(!revoked2);
+    }
 }

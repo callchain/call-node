@@ -142,6 +142,13 @@ pub enum Instruction {
         amount: Balance,
         validator_signatures: Vec<(u32, Vec<u8>)>,
     },
+    /// Challenge a pending bridge deposit during the challenge period.
+    /// Permissionless — anyone can submit proof that a deposit is fraudulent
+    /// (e.g. source tx was reorged, or signatures are from slashed validators).
+    ChallengeBridgeDeposit {
+        source_tx_hash: [u8; 32],
+        proof: Vec<u8>,
+    },
 }
 
 /// Payment memo with size limits per spec §3.5
@@ -602,6 +609,11 @@ pub fn execute_instruction(
         Instruction::ExternalBridgeDeposit { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ExternalBridgeDeposit must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::ChallengeBridgeDeposit { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "ChallengeBridgeDeposit must be executed inline in Block::execute".into(),
             ))
         }
     }
