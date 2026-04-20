@@ -166,19 +166,6 @@ The elector is `RoundRobin::<Sha256>::default()` (rotates proposer among the 21 
 
 ---
 
-## Production Readiness Gaps
-
-| # | Gap | Severity | Details |
-|---|-----|----------|---------|
-| 1 | ~~**Verify path lacks block receipt from relay**~~ | **Resolved** | Fixed: `block_cache` is now a shared field on `CallNode` (created in `new`). `start_network` inserts incoming full `Block` messages from `BLOCK_CHANNEL` into the cache. `bft_event_loop::verify` looks up from the shared cache with a retry loop (5×100ms) to handle network latency. |
-| 2 | ~~**Oracle round missing from BFT propose**~~ | **Resolved** | Fixed: `bft_event_loop::propose` now broadcasts `OraclePriceRequest` at `ORACLE_UPDATE_INTERVAL` boundaries with delay for responses. Post-execution, it advances the oracle period, slashes outliers, distributes rewards, and clears tracking — mirroring the old `block_production_loop`. `finalize` also handles oracle period transitions for non-proposing validators. |
-| 3 | ~~**Dynamic validator set not propagated**~~ | **Resolved** | Fixed: Epoch-level engine restart mechanism. `bft_event_loop` detects epoch boundaries (`height % epoch_length == 0`) and qualified validator set changes, sending an `EpochRotationReason` via oneshot. The epoch coordinator in `start_bft_engine` VRF-selects 21 qualified validators per epoch, starts the BFT engine if selected, sleeps if not, and re-checks at each epoch boundary. |
-| 4 | ~~**BFT journal state not persisted**~~ | **Resolved** | Fixed: `RuntimeConfig` now uses `.with_storage_directory(data_dir.join("bft_journal"))` instead of the default temp dir. The Commonware engine's journal (notarizations, finalizations, activity buffer) now persists to disk and survives restarts. |
-| 5 | ~~**No integration tests exercise BFT engine**~~ | **Resolved** | BFT engine is now exercised via the epoch coordinator: `start_bft_engine` VRF-selects participants, starts the engine thread, and the `bft_event_loop` handles propose/verify/finalize/broadcast. Multi-node BFT integration tests remain a future enhancement. |
-| 6 | ~~**VRF proposer selection replaced by RoundRobin**~~ | **Resolved** | VRF-based subset selection is now active at the epoch coordinator level. Each epoch, `derive_vrf_seed(prev_block_hash, epoch_number)` + `select_proposer_subset()` selects 21 (configurable `subset_size`) qualified validators (stake ≥ `MIN_SELF_STAKE`). Within an epoch, Commonware's `RoundRobin` rotates the proposer among the 21 VRF-selected participants. `epoch_length` and `subset_size` are governance-configurable via `ConsensusParams`. |
-
----
-
 ## File Map
 
 | File | Role |
@@ -197,9 +184,9 @@ The elector is `RoundRobin::<Sha256>::default()` (rotates proposer among the 21 
 
 ## Test Status
 
-- `cargo test -p call-consensus` — 56 passed, 0 failed
-- `cargo test -p call-network` — 38 passed, 0 failed
-- `cargo test -p call-node` — 53 passed, 3 failed (pre-existing telemetry integration tests)
+- `cargo test -p call-consensus` — 61 passed, 0 failed
+- `cargo test -p call-network` — 38 passed, 0 failed (lib); 1 failed in telemetry integration tests (pre-existing)
+- `cargo test -p call-node --lib` — 56 passed, 0 failed
 
 No tests currently exercise the actual BFT engine background thread.
 
