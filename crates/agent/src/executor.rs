@@ -86,12 +86,13 @@ pub fn verify_agent_tx(
     }
 
     // 4. Expiry check
-    if current_block > signed_tx.protocol_tx.max_fee as u64 {
-        // Using max_fee field as expiry proxy (in production would be separate field)
-        // For now, just check that the tx hasn't expired based on agent permissions
-        if permissions.is_expired(current_block) {
-            return Err(AgentError::TransactionExpired);
-        }
+    let expires_at = signed_tx.protocol_tx.expires_at;
+    if expires_at != 0 && current_block > expires_at {
+        return Err(AgentError::TransactionExpired);
+    }
+    // Also check agent-level permission expiry
+    if permissions.is_expired(current_block) {
+        return Err(AgentError::TransactionExpired);
     }
 
     // 5. Owner signature threshold
@@ -316,6 +317,7 @@ fn compute_agent_tx_hash(
     buf.extend_from_slice(&tx.nonce.to_be_bytes());
     buf.extend_from_slice(&tx.gas_limit.to_be_bytes());
     buf.extend_from_slice(&tx.max_fee.to_be_bytes());
+    buf.extend_from_slice(&tx.expires_at.to_be_bytes());
     keccak256(&buf).0
 }
 
@@ -567,6 +569,7 @@ mod tests {
                 amount: 100,
                 memo: None,
             }],
+            expires_at: 0,
             auth: call_protocol::AuthScheme::SingleSig { signature: [0u8; 65] },
             gas_config: call_protocol::GasConfig::SelfPay,
             fee_currency: call_primitives::FeeCurrency::Call,

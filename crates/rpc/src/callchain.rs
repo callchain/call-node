@@ -155,6 +155,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit,
                 max_fee,
+                expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig {
                     signature,
                 },
@@ -814,6 +815,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit: 200_000,
                 max_fee: 200_000 * 10,
+            expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 
@@ -876,6 +878,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit: 50_000,
                 max_fee: 50_000 * 10,
+            expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 
@@ -926,6 +929,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit: 50_000,
                 max_fee: 50_000 * 10,
+            expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 
@@ -976,6 +980,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit: 100_000,
                 max_fee: 100_000 * 10,
+            expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 
@@ -1070,6 +1075,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit: 200_000,
                 max_fee: 200_000 * 10,
+            expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 
@@ -1116,6 +1122,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit: 200_000,
                 max_fee: 200_000 * 10,
+            expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 
@@ -1302,6 +1309,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 fee_currency: call_primitives::FeeCurrency::Call,
                 gas_limit: 200_000,
                 max_fee: 200_000 * 10,
+            expires_at: 0,
                 auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 

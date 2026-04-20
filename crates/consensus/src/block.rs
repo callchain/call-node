@@ -296,6 +296,14 @@ impl Block {
                 )));
             }
 
+            // Check transaction expiry
+            if tx.expires_at != 0 && current_block_height > tx.expires_at {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "transaction from {:?} expired at block {} (current: {})",
+                    tx.sender, tx.expires_at, current_block_height
+                )));
+            }
+
             // Separate instructions by type: bridge, agent, regular
             let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
                 .instructions
@@ -312,6 +320,7 @@ impl Block {
             let evm_snapshot = evm_state.clone();
             let bridge_snapshot = bridge_state.clone();
             let mut tx_results = Vec::new();
+            let mut tx_agent_events = Vec::new();
 
             let exec_result = (|| -> Result<(), ConsensusError> {
                 // Execute regular instructions via protocol engine (includes governance)
@@ -385,6 +394,7 @@ impl Block {
                             registry,
                             &executor,
                             current_block_height,
+                            &mut tx_agent_events,
                         )?;
                         tx_results.push(r);
                     }
@@ -402,6 +412,7 @@ impl Block {
 
             result.protocol_tx_count += 1;
             result.instruction_results.extend(tx_results);
+            result.agent_events.extend(tx_agent_events);
         }
 
         // Step 3: Bridge operations
@@ -566,6 +577,7 @@ fn execute_agent_instruction(
     registry: &AssetRegistry,
     evm_executor: &EvmExecutor,
     current_block_height: u64,
+    agent_events: &mut Vec<call_agent::AgentEvent>,
 ) -> Result<InstructionResult, ConsensusError> {
     match instruction {
         Instruction::AgentPay { payment } => {
@@ -589,6 +601,15 @@ fn execute_agent_instruction(
             balances
                 .credit_balance(payment.asset_id, payment.to, payment.amount)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("agent pay: {e}")))?;
+            agent_events.push(call_agent::AgentEvent {
+                event_type: call_agent::AgentEventType::AgentPay,
+                agent_id: payment.agent_id,
+                tx_hash: None,
+                asset_id: payment.asset_id,
+                amount: payment.amount,
+                recipient: Some(payment.to),
+                block_height: current_block_height,
+            });
             Ok(InstructionResult::Success)
         }
         Instruction::AgentBatchPay { payments } => {
@@ -617,6 +638,15 @@ fn execute_agent_instruction(
                     .map_err(|e| {
                         ConsensusError::InvalidBlock(format!("agent batch pay: {e}"))
                     })?;
+                agent_events.push(call_agent::AgentEvent {
+                    event_type: call_agent::AgentEventType::AgentBatchPay,
+                    agent_id: payment.agent_id,
+                    tx_hash: None,
+                    asset_id: payment.asset_id,
+                    amount: payment.amount,
+                    recipient: Some(payment.to),
+                    block_height: current_block_height,
+                });
             }
             Ok(InstructionResult::Success)
         }
@@ -651,7 +681,18 @@ fn execute_agent_instruction(
                 chain_id: evm_executor.chain_id,
             };
             match evm_executor.execute_tx(tx, evm_state) {
-                Ok(_) => Ok(InstructionResult::Success),
+                Ok(_) => {
+                    agent_events.push(call_agent::AgentEvent {
+                        event_type: call_agent::AgentEventType::AgentCall,
+                        agent_id: *agent_id,
+                        tx_hash: None,
+                        asset_id: 0,
+                        amount: 0,
+                        recipient: Some(*target),
+                        block_height: current_block_height,
+                    });
+                    Ok(InstructionResult::Success)
+                }
                 Err(e) => Err(ConsensusError::InvalidBlock(format!("agent call: {e:?}"))),
             }
         }
@@ -704,7 +745,20 @@ fn execute_agent_instruction(
                 &op, balances, evm_state, evm_executor, bridge_state, &config, registry,
                 bridge_address, sender, current_block_height,
             ) {
-                Ok(exec) if exec.success => Ok(InstructionResult::Success),
+                Ok(exec) if exec.success => {
+                    agent_events.push(call_agent::AgentEvent {
+                        event_type: call_agent::AgentEventType::AgentBridgeDeposit,
+                        agent_id: *agent_id,
+                        tx_hash: None,
+                        asset_id: *asset_id,
+                        amount: *amount,
+                        recipient: Some(call_primitives::Address::from_slice(
+                            &target_address[..target_address.len().min(20)],
+                        )),
+                        block_height: current_block_height,
+                    });
+                    Ok(InstructionResult::Success)
+                }
                 Ok(_) => {
                     let _ = agent_balances.credit(agent.owner, *agent_id, *asset_id, *amount);
                     let _ = balances.credit_balance(*asset_id, sender, *amount);
@@ -881,6 +935,8 @@ pub struct BlockExecutionResult {
     pub total_validator_reward: Balance,
     /// Total gas used by EVM transactions
     pub evm_gas_used: u64,
+    /// Agent activity events emitted during block execution
+    pub agent_events: Vec<call_agent::AgentEvent>,
 }
 
 impl BlockExecutionResult {
@@ -956,6 +1012,12 @@ fn compute_receipt_root(result: &BlockExecutionResult) -> Hash {
                 data.extend_from_slice(reason.as_bytes());
             }
         }
+    }
+    for event in &result.agent_events {
+        data.extend_from_slice(&event.agent_id.to_be_bytes());
+        data.extend_from_slice(&event.asset_id.to_be_bytes());
+        data.extend_from_slice(&event.amount.to_be_bytes());
+        data.extend_from_slice(&event.block_height.to_be_bytes());
     }
     keccak256(&data)
 }
@@ -1057,6 +1119,7 @@ mod tests {
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit: 100_000,
             max_fee: 1_000_000,
+            expires_at: 0,
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
             },
@@ -1081,6 +1144,7 @@ mod tests {
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit: 100_000,
             max_fee: 1_000_000,
+            expires_at: 0,
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
             },
@@ -1386,5 +1450,190 @@ mod tests {
         };
 
         assert_eq!(result.total_tx_count(), 18);
+    }
+
+    #[test]
+    fn test_agent_instruction_emits_event() {
+        use call_agent::{AgentBalances, AgentEventType, AgentRegistry};
+        use call_protocol::instructions::AgentPayment;
+
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        // Register agent
+        let mut agent_registry = AgentRegistry::new_with_format_verifier();
+        let agent_id = agent_registry
+            .register_agent(
+                sender,
+                pubkey,
+                "test-agent".into(),
+                "https://test.com".into(),
+                [0u8; 32],
+                None,
+                1,
+            )
+            .unwrap();
+
+        // Fund owner and grant to agent
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(1, sender, 10_000).unwrap();
+        let mut agent_balances = AgentBalances::new();
+        agent_balances
+            .grant_funds(sender, agent_id, 1, 5_000, &mut balances)
+            .unwrap();
+
+        // Build signed AgentPay transaction
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![Instruction::AgentPay {
+                payment: AgentPayment {
+                    agent_id,
+                    asset_id: 1,
+                    to: test_addr(2),
+                    amount: 1_000,
+                },
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 100,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0)
+            .unwrap();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
+        let bridge_config = call_bridge::BridgeConfig::default();
+
+        let result = block
+            .execute(
+                &mut balances,
+                &registry,
+                &mut compliance,
+                &mut bridge_state,
+                &mut shielded_state,
+                &mut fee_params,
+                50, // current_block_height < expires_at
+                &mut evm_state,
+                None,
+                None,
+                Some(&mut agent_balances),
+                Some(&agent_registry),
+                None,
+                Some(&bridge_config),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Verify agent event was emitted
+        assert_eq!(result.agent_events.len(), 1);
+        let event = &result.agent_events[0];
+        assert!(matches!(event.event_type, AgentEventType::AgentPay));
+        assert_eq!(event.agent_id, agent_id);
+        assert_eq!(event.asset_id, 1);
+        assert_eq!(event.amount, 1_000);
+        assert_eq!(event.recipient, Some(test_addr(2)));
+        assert_eq!(event.block_height, 50);
+
+        // Verify receipt root includes agent events
+        let receipt_root = compute_receipt_root(&result);
+        assert_ne!(receipt_root, Hash::ZERO);
+    }
+
+    #[test]
+    fn test_expired_transaction_rejected() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![Instruction::Transfer {
+                asset_id: 1,
+                to: test_addr(2),
+                amount: 100,
+                memo: None,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 50, // expires at block 50
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(1, sender, 10_000).unwrap();
+        let registry = AssetRegistry::new();
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
+        let bridge_config = call_bridge::BridgeConfig::default();
+
+        let result = block.execute(
+            &mut balances,
+            &registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            51, // current_block_height > expires_at
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&bridge_config),
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("expired"), "expected expiry error, got: {err_msg}");
     }
 }

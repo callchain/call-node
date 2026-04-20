@@ -121,6 +121,29 @@ pub enum AgentError {
     ExecutionFailed(String),
 }
 
+/// Agent event type for audit trail indexing
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum AgentEventType {
+    AgentPay,
+    AgentBatchPay,
+    AgentCall,
+    AgentBridgeDeposit,
+    AgentRegistered,
+    AgentRevoked,
+}
+
+/// Indexed agent event for audit and verification
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentEvent {
+    pub event_type: AgentEventType,
+    pub agent_id: u64,
+    pub tx_hash: Option<call_primitives::TxHash>,
+    pub asset_id: call_primitives::AssetId,
+    pub amount: u128,
+    pub recipient: Option<Address>,
+    pub block_height: u64,
+}
+
 #[cfg(test)]
 pub mod test_utils {
     use call_primitives::Address;

@@ -119,7 +119,7 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 1. Agent signature verification (secp256k1)
 2. Nonce check (sequential, no gaps)
 3. Per-instruction permission checks (all payments in a batch)
-4. Expiry check (uses `max_fee` as expiry proxy)
+4. Expiry check (uses `protocol_tx.expires_at` as block deadline)
 5. Owner signature threshold for large amounts
 
 `execute_agent_tx()`:
@@ -143,7 +143,7 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 
 | File | Role |
 |------|------|
-| `lib.rs` | `AgentError`, `AgentFeeConfig`, `FeePayer`, `SignedAgentTx`, `DomainProof` |
+| `lib.rs` | `AgentError`, `AgentFeeConfig`, `FeePayer`, `SignedAgentTx`, `DomainProof`, `AgentEvent`, `AgentEventType` |
 | `registry.rs` | `AgentRegistration`, `AgentRegistry`, domain proof handling |
 | `permissions.rs` | `AgentPermissions`, `AgentDailyUsage`, permission verification |
 | `balances.rs` | `AgentBalances`, `AgentNonces` |
@@ -158,7 +158,7 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 | Agent registration | 🟢 Ready | Name uniqueness, metadata storage, real DNS/HTTP domain verification, agent revocation |
 | Permissions | 🟢 Ready | Restrictive defaults, full per-instruction checking including all batch payments |
 | Balance management | 🟢 Ready | Grant deducts from owner, overflow-protected credit, underflow-protected deduct |
-| Transaction verification | 🟡 Partial | 5-step validation present, but expiry still uses max_fee proxy |
+| Transaction verification | 🟢 Ready | 5-step validation with independent `expires_at` field, no longer conflates fee with time |
 | Transaction execution | 🟢 Ready | Proper EVM call execution, wired into block production with inline permission checks, fee_currency-aware gas deduction |
 | Persistence | 🟢 Ready | AgentRegistry, AgentBalances, and AgentNonces all persisted to MDBX |
 
@@ -177,18 +177,17 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 | 7 | **Grant does not deduct from owner** | Critical | ✅ Fixed | `grant_funds()` now deducts from `protocol_balances` before crediting agent. |
 | 8 | **No overflow protection on credit** | Medium | ✅ Fixed | `credit()` uses `checked_add`. |
 | 9 | **Gas fee asset hardcoded to asset_id=1** | High | ✅ Fixed | Resolved from `protocol_tx.fee_currency` (`Call`→1, `Stablecoin(id)`→id). |
-| 10 | **`max_fee` used as expiry proxy** | Medium | Open | Expiry logic conflates fee with time. Unexpected behavior. |
+| 10 | **`max_fee` used as expiry proxy** | Medium | ✅ Fixed | `ProtocolTransaction` now has independent `expires_at: u64` field. `verify_agent_tx()` checks `protocol_tx.expires_at` instead of `max_fee`. `Block::execute` rejects expired txs at block boundary. `compute_tx_hash()` and `compute_agent_tx_hash()` include `expires_at` in preimage. |
 | 11 | **`execute_agent_call` is broken** | High | ✅ Fixed | Now constructs a proper `EvmTransaction` and executes via `evm_executor.execute_tx()`. |
 | 12 | **Not integrated into block production** | Critical | ✅ Fixed | `execute_agent_instruction()` in `Block::execute` with inline `verify_agent_instruction_permissions()`. |
 | 13 | **Agent state not persisted** | High | ✅ Fixed | `AgentRegistry`, `AgentBalances`, and `AgentNonces` all persisted to MDBX. |
-| 14 | **No agent activity audit trail** | Low | Open | No receipts or events track agent-mediated transactions distinctly. |
+| 14 | **No agent activity audit trail** | Low | ✅ Fixed | `AgentEvent` / `AgentEventType` types added to `call-agent`. `BlockExecutionResult` carries `agent_events: Vec<AgentEvent>`. `execute_agent_instruction()` emits events for `AgentPay`, `AgentBatchPay`, `AgentCall`, and `AgentBridgeDeposit`. `compute_receipt_root()` hashes agent events into the receipt root. |
 
 ---
 
 ## Test Status
 
 - `cargo test -p call-agent` — 43 unit tests covering registration, domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, instruction extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
-- `cargo test -p call-consensus` — block execution order test verifies `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` execute correctly during `Block::execute`
+- `cargo test -p call-consensus` — block execution order test verifies `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` execute correctly during `Block::execute`; `test_agent_instruction_emits_event` verifies `AgentEvent` emission and receipt root inclusion; `test_expired_transaction_rejected` verifies `expires_at` enforcement
 - `cargo test -p call-node --lib` — node startup and state persistence tests verify agent registry, balances, and nonces are saved/loaded to MDBX correctly
 - `cargo test -p call-protocol --test test_agent_flow` — integration tests covering registration, domain proof, balance operations, nonce sequential/stale rejection
-- Missing: agent activity audit trail tests
