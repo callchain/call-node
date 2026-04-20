@@ -65,7 +65,7 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 | Protocol payments | Medium-High | Moderate | Core logic implemented, needs audit |
 | EVM layer | Medium | Moderate | Revm integration solid, ERC-20 template needs audit |
 | Consensus (Simplex BFT) | Medium | High | Via commonware — battle-tested but not at this scale |
-| ZK shielded | Low-Medium | Critical | Real prover works but dev CRS only; no production trusted setup |
+| ZK shielded | Medium | Moderate-High | Real prover with 3 circuits (Deposit/Transfer/Withdraw) implemented; `production-keys` feature auto-loads ceremony-derived keys; PoT ceremony tooling complete; remaining: execute ceremony and enable feature in production builds |
 | External bridge | Medium-High | Moderate | Challenge period (~7 days), light-client verification enabled, auto-finalization in block production, permissionless `ChallengeBridgeDeposit` instruction for fraud proofs |
 | Oracle system | Low | High | No real price feed integration |
 | Governance | Medium | Moderate | Logic complete, timelock at ~7 days is production-appropriate |
@@ -91,15 +91,15 @@ This is a well-architected testnet/devnet candidate. The codebase demonstrates s
 - Commission a third-party security audit
 - Run Powers of Tau ceremony for ZK circuits
 - Integrate production oracle feeds (Chainlink/Pyth)
-- Implement HSM/KMS key management
-- Launch a bug bounty program
+- ~~Implement HSM/KMS key management~~ → Enable HSM/KMS in production config (code implemented, feature-gated)
+- Launch a bug bounty program (docs drafted in `docs/release.md`)
 - Tune governance parameters (longer timelocks, higher deposits)
 
 ### Phase 3: Mainnet
 - Deploy with audited code and production CRS
 - Start with limited total value (gradual token release)
 - Monitor for 30-90 days before full capacity
-- Establish incident response procedures and runbooks
+- ~~Establish incident response procedures and runbooks~~ → Runbooks created under `docs/runbooks/`
 
 ---
 
