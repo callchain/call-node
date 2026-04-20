@@ -180,27 +180,6 @@ Emitted during `Block::execute` by `execute_agent_instruction()` for every succe
 
 ---
 
-## Production Readiness Gaps
-
-| # | Gap | Severity | Status | Details |
-|---|-----|----------|--------|---------|
-| 1 | **Domain verification is format-only** | High | ✅ Fixed | `RealDomainVerifier` performs actual DNS TXT and HTTP lookups. `new_with_format_verifier()` for tests. |
-| 2 | **No registration fee or stake** | Medium | ✅ Fixed | `AgentRegistry::register_agent()` deducts `registration_fee` from `BalanceState` when configured via `with_registration_fee()`. |
-| 3 | **No agent revocation/removal** | Medium | ✅ Fixed | `AgentRegistry::unregister_agent()` removes from all indexes. |
-| 4 | **Default permissions are wide open** | High | ✅ Fixed | Defaults now: `allowed_assets = [1]`, `daily_limit = 10_000`, `per_tx_limit = 1_000`. |
-| 5 | **Daily reset is block-based** | Low | ✅ Fixed | `AgentDailyUsage` uses `last_reset_time` (ms) and `MS_PER_DAY = 86400000`. `verify_agent_permissions()` takes `current_time` for daily reset. |
-| 6 | **BatchTransfer only checks first payment** | High | ✅ Fixed | `extract_instruction_details()` returns `Vec`; all payments are permission-checked. |
-| 7 | **Grant does not deduct from owner** | Critical | ✅ Fixed | `grant_funds()` now deducts from `protocol_balances` before crediting agent. |
-| 8 | **No overflow protection on credit** | Medium | ✅ Fixed | `credit()` uses `checked_add`. |
-| 9 | **Gas fee asset hardcoded to asset_id=1** | High | ✅ Fixed | Resolved from `protocol_tx.fee_currency` (`Call`→1, `Stablecoin(id)`→id). |
-| 10 | **`max_fee` used as expiry proxy** | Medium | ✅ Fixed | `ProtocolTransaction` now has independent `expires_at: u64` field. `verify_agent_tx()` checks `protocol_tx.expires_at` instead of `max_fee`. `Block::execute` rejects expired txs at block boundary. `compute_tx_hash()` and `compute_agent_tx_hash()` include `expires_at` in preimage. |
-| 11 | **`execute_agent_call` is broken** | High | ✅ Fixed | Now constructs a proper `EvmTransaction` and executes via `evm_executor.execute_tx()`. |
-| 12 | **Not integrated into block production** | Critical | ✅ Fixed | `execute_agent_instruction()` in `Block::execute` with inline `verify_agent_instruction_permissions()`. |
-| 13 | **Agent state not persisted** | High | ✅ Fixed | `AgentRegistry`, `AgentBalances`, and `AgentNonces` all persisted to MDBX. |
-| 14 | **No agent activity audit trail** | Low | ✅ Fixed | `AgentEvent` / `AgentEventType` types added to `call-agent`. `BlockExecutionResult` carries `agent_events: Vec<AgentEvent>`. `execute_agent_instruction()` emits events for `AgentPay`, `AgentBatchPay`, `AgentCall`, and `AgentBridgeDeposit`. `compute_receipt_root()` hashes agent events into the receipt root. |
-
----
-
 ## Test Status
 
 - `cargo test -p call-agent` — 46 unit tests covering registration (including fee deduction, insufficient balance rejection), domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, instruction extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
