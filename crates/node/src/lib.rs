@@ -38,7 +38,7 @@ use call_storage::reth_db::{
     CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
     CallGovernanceState, CallComplianceState, CallConsensusState,
-    CallReceipts, CallAgentBalances, CallForkState, CallCheckpoint,
+    CallReceipts, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
 };
 use call_protocol::ProtocolReceipt;
 use call_primitives::TxHash;
@@ -133,12 +133,13 @@ impl CallNode {
         }
 
         // Load persisted state from reth-db (skip if recovery needed)
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, oracle_manager, governance_manager, compliance_engine, receipts, fork_manager) = if recovery_needed {
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, receipts, fork_manager) = if recovery_needed {
             (
                 BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
                 ShieldedState::new(), ValidatorStateManager::default(),
-                AgentRegistry::new(), AgentBalances::new(), OracleManager::default(),
-                GovernanceManager::new(), ComplianceEngine::new(), std::collections::HashMap::new(),
+                AgentRegistry::new(), AgentBalances::new(), call_agent::AgentNonces::new(),
+                OracleManager::default(), GovernanceManager::new(), ComplianceEngine::new(),
+                std::collections::HashMap::new(),
                 ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1),
             )
         } else {
@@ -170,7 +171,7 @@ impl CallNode {
                     )
                 }
             };
-            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, oracle, governance, loaded.8, receipts, fork_manager)
+            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, loaded.7, oracle, governance, loaded.9, receipts, fork_manager)
         };
 
         // Try to load persisted consensus state; fall back to genesis
@@ -202,6 +203,7 @@ impl CallNode {
             ValidatorStateManager::default(),
             registry,
             agent_balances,
+            agent_nonces,
             shielded_state,
             mempool.clone(),
             CALLCHAIN_CHAIN_ID,
@@ -943,7 +945,7 @@ impl CallNode {
 fn load_state_from_db(
     db_env: &Arc<DatabaseEnv>,
 ) -> (BalanceState, EvmState, BridgeStateManager, ShieldedState,
-      ValidatorStateManager, AgentRegistry, AgentBalances, GovernanceManager, ComplianceEngine) {
+      ValidatorStateManager, AgentRegistry, AgentBalances, call_agent::AgentNonces, GovernanceManager, ComplianceEngine) {
     // Load balances
     let (balances, allowances) = match db_load_balances(db_env) {
         Ok(b) => b,
@@ -1005,6 +1007,15 @@ fn load_state_from_db(
         }
     };
 
+    // Load agent nonces
+    let agent_nonces = match load_agent_nonces_inner(db_env) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load agent nonces");
+            call_agent::AgentNonces::new()
+        }
+    };
+
     // Load governance state
     let governance = match load_governance_state(db_env) {
         Ok(g) => g,
@@ -1023,7 +1034,7 @@ fn load_state_from_db(
         }
     };
 
-    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, governance, compliance)
+    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, agent_nonces, governance, compliance)
 }
 
 /// Persist all state types to the reth-db database.
@@ -1080,8 +1091,11 @@ fn persist_state_to_db(
     {
         let registry = state.agent_registry.read().unwrap();
         let agent_balances = state.agent_balances.read().unwrap();
+        let agent_nonces = state.agent_nonces.read().unwrap();
         save_agent_state_inner(db_env, &registry, &agent_balances)
             .map_err(|e| format!("save agents: {e}"))?;
+        save_agent_nonces_inner(db_env, &agent_nonces)
+            .map_err(|e| format!("save agent nonces: {e}"))?;
     }
 
     // Persist oracle state
@@ -1351,6 +1365,20 @@ fn load_agent_balances_inner(db: &DatabaseEnv) -> Result<AgentBalances, String> 
     match db_get::<CallAgentBalances>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize agent balances: {e}")),
         None => Ok(AgentBalances::new()),
+    }
+}
+
+// ── Agent nonces persistence ──────────────────────────────────────────
+
+fn save_agent_nonces_inner(db: &DatabaseEnv, nonces: &call_agent::AgentNonces) -> Result<(), String> {
+    let data = serde_json::to_vec(nonces).map_err(|e| format!("serialize agent nonces: {e}"))?;
+    db_put::<CallAgentNonces>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+fn load_agent_nonces_inner(db: &DatabaseEnv) -> Result<call_agent::AgentNonces, String> {
+    match db_get::<CallAgentNonces>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize agent nonces: {e}")),
+        None => Ok(call_agent::AgentNonces::new()),
     }
 }
 

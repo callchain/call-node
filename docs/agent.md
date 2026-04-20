@@ -66,11 +66,11 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 - Update config (name, URL, metadata)
 - Update domain proof
 
-**Gap #1 — Domain verification is format-only:** `verify_domain_proof()` and `DefaultDomainVerifier` only check that the domain/URL string is well-formed (non-empty, starts with `https://`). They do **not** make actual DNS queries or HTTP requests. Any domain can be "verified" by providing a syntactically valid proof.
+**Gap #1 — Domain verification is format-only:** ~~`verify_domain_proof()` and `DefaultDomainVerifier` only check that the domain/URL string is well-formed.~~ **FIXED** — `AgentRegistry::new()` now uses `RealDomainVerifier` by default, which performs actual DNS TXT lookups (`hickory_resolver`) and HTTP fetches (`ureq`). `new_with_format_verifier()` is available for testing.
 
 **Gap #2 — No registration fee or stake requirement:** Anyone can register an agent at zero cost. There is no economic barrier to agent spam.
 
-**Gap #3 — No agent revocation/removal:** Once registered, an agent cannot be removed from the registry. `agents` HashMap only grows. A compromised agent remains valid forever.
+**Gap #3 — No agent revocation/removal:** ~~Once registered, an agent cannot be removed from the registry.~~ **FIXED** — `AgentRegistry::unregister_agent(agent_id)` removes the agent from all indexes (`agents`, `agents_by_name`, `agents_by_owner`).
 
 ### 2. Agent Permissions (`permissions.rs`)
 
@@ -78,9 +78,9 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 
 | Field | Default | Behavior |
 |-------|---------|----------|
-| `allowed_assets` | `[]` (empty = all) | Asset whitelist |
-| `daily_limit` | `u128::MAX` | Daily cumulative amount |
-| `per_tx_limit` | `u128::MAX` | Per-transaction cap |
+| `allowed_assets` | `[1]` (only CALL) | Asset whitelist |
+| `daily_limit` | `10_000` | Daily cumulative amount |
+| `per_tx_limit` | `1_000` | Per-transaction cap |
 | `allowed_counterparties` | `[]` (empty = all) | Recipient whitelist |
 | `allowed_protocols` | `[]` (empty = none) | EVM contract whitelist |
 | `expires_at` | `0` (never) | Permission expiry block |
@@ -93,48 +93,49 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 5. Daily limit (with auto-reset every 86,400 blocks)
 6. Owner daily fee limit
 
-**Gap #4 — Default permissions are wide open:** `AgentPermissions::default()` sets `allowed_assets = []` (meaning ALL assets allowed), `daily_limit = MAX`, `per_tx_limit = MAX`. An agent with default permissions has unlimited scope.
+**Gap #4 — Default permissions are wide open:** ~~`AgentPermissions::default()` sets `allowed_assets = []` (meaning ALL assets allowed), `daily_limit = MAX`, `per_tx_limit = MAX`.~~ **FIXED** — Defaults are now restrictive: `allowed_assets = [1]` (only CALL), `daily_limit = 10_000`, `per_tx_limit = 1_000`.
 
 **Gap #5 — Daily reset is block-based, not time-based:** `BLOCKS_PER_DAY = 86400` assumes 250ms block times. If block times change, the "day" duration changes.
 
-**Gap #6 — BatchTransfer only checks first payment:** `extract_instruction_details()` for `BatchTransfer` returns only the first payment's details. The remaining payments in the batch are not permission-checked.
+**Gap #6 — BatchTransfer only checks first payment:** ~~`extract_instruction_details()` for `BatchTransfer` returns only the first payment's details.~~ **FIXED** — `extract_instruction_details()` now returns `Vec<(AssetId, Address, u128)>`. `BatchTransfer` and `AgentBatchPay` enumerate **all** payments, and `verify_agent_tx()` iterates over every entry.
 
 ### 3. Agent Balances (`balances.rs`)
 
 `AgentBalances`: `HashMap<(owner, agent_id, asset_id), u128>`
 
-- `grant_funds()`: Owner credits agent balance (no deduction from owner balance)
+- `grant_funds()`: Deducts from owner's protocol balance, then credits agent
 - `top_up()`: Same as grant (semantic alias)
 - `revoke_funds()`: Removes all balance for an agent, returns amount
 - `deduct()`: Subtracts with underflow check
+- `credit()`: Adds with `checked_add` overflow protection
 
-**Gap #7 — Grant does not deduct from owner:** `grant_funds()` simply credits the agent balance. The owner's protocol balance is not reduced. This means agents can be funded with "phantom" money.
+**Gap #7 — Grant does not deduct from owner:** ~~`grant_funds()` simply credits the agent balance. The owner's protocol balance is not reduced.~~ **FIXED** — `grant_funds()` now calls `protocol_balances.deduct_balance()` before crediting the agent.
 
-**Gap #8 — No overflow protection on credit:** `credit()` uses `balance + amount` without `checked_add`. Overflow would wrap around.
+**Gap #8 — No overflow protection on credit:** ~~`credit()` uses `balance + amount` without `checked_add`.~~ **FIXED** — `credit()` uses `checked_add` and returns `AgentError::ExecutionFailed("agent balance overflow")` on overflow.
 
 ### 4. Agent Transaction Verification (`executor.rs`)
 
 `verify_agent_tx()` performs 5-step validation:
 1. Agent signature verification (secp256k1)
 2. Nonce check (sequential, no gaps)
-3. Per-instruction permission checks
+3. Per-instruction permission checks (all payments in a batch)
 4. Expiry check (uses `max_fee` as expiry proxy)
 5. Owner signature threshold for large amounts
 
 `execute_agent_tx()`:
 1. Calculates gas with 0.5x discount
-2. Deducts fee from agent balance (asset_id = 1, hardcoded)
+2. Deducts fee from agent balance using the transaction's `fee_currency`
 3. Executes instructions via `execute_protocol_instructions()`
 
-**Gap #9 — Gas fee asset is hardcoded to asset_id=1:** `execute_agent_tx()` always deducts gas fees using asset_id=1, regardless of what the transaction actually uses or what the fee currency is.
+**Gap #9 — Gas fee asset is hardcoded to asset_id=1:** ~~`execute_agent_tx()` always deducts gas fees using asset_id=1.~~ **FIXED** — Fee asset is resolved from `protocol_tx.fee_currency`: `FeeCurrency::Call` → asset_id=1, `FeeCurrency::Stablecoin(id)` → asset_id=id.
 
 **Gap #10 — `max_fee` used as expiry proxy:** The expiry check uses `protocol_tx.max_fee as u64` as the block number proxy. This conflates fee economics with time validity. A high `max_fee` means a long expiry.
 
-**Gap #11 — `execute_agent_call` is broken:** It calls `evm_executor.evm_call_bridge_mint()` with the target address, which is a bridge-specific function repurposed as a general EVM call proxy. This will not execute arbitrary contract calls correctly.
+**Gap #11 — `execute_agent_call` is broken:** ~~It calls `evm_executor.evm_call_bridge_mint()` with the target address.~~ **FIXED** — `execute_agent_call()` now constructs a proper `EvmTransaction` with the target address and data, and executes it via `evm_executor.execute_tx()`.
 
-**Gap #12 — Agent transactions are not integrated into block production:** There is no `Instruction::Agent*` execution path in the block execution pipeline. Agent transactions exist as a library but are not wired into consensus.
+**Gap #12 — Agent transactions are not integrated into block production:** ~~There is no `Instruction::Agent*` execution path in the block execution pipeline.~~ **FIXED** — `Block::execute` already had `execute_agent_instruction()` for `AgentPay`, `AgentBatchPay`, `AgentCall`, and `AgentBridgeDeposit`. Added `verify_agent_instruction_permissions()` which checks `allowed_assets`, `per_tx_limit`, `expires_at`, and `allowed_protocols` (for `AgentCall`) inline during block execution.
 
-**Gap #13 — Agent state is not persisted:** `AgentBalances`, `AgentNonces`, and `AgentRegistry` are in-memory only. On node restart, all agent state is lost.
+**Gap #13 — Agent state is not persisted:** ~~`AgentBalances`, `AgentNonces`, and `AgentRegistry` are in-memory only.~~ **FIXED** — `AgentRegistry` and `AgentBalances` are persisted to MDBX (`CallAgents` / `CallAgentBalances` tables). `AgentNonces` is now also persisted (`CallAgentNonces` table) via `save_agent_nonces_inner` / `load_agent_nonces_inner` in the node's persistence loop.
 
 ---
 
@@ -154,37 +155,40 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Agent registration | 🟡 Partial | Name uniqueness, metadata storage work, but domain verification is fake |
-| Permissions | 🟡 Partial | Checks exist but defaults are wide open |
-| Balance management | 🟡 Partial | HashMap wrappers, but grant doesn't deduct from owner, no overflow check |
-| Transaction verification | 🟡 Partial | 5-step validation present, but expiry uses max_fee proxy |
-| Transaction execution | 🔴 Not ready | AgentCall is broken, not wired to block production, gas asset hardcoded |
-| Persistence | 🔴 Not ready | All agent state is in-memory only |
+| Agent registration | 🟢 Ready | Name uniqueness, metadata storage, real DNS/HTTP domain verification, agent revocation |
+| Permissions | 🟢 Ready | Restrictive defaults, full per-instruction checking including all batch payments |
+| Balance management | 🟢 Ready | Grant deducts from owner, overflow-protected credit, underflow-protected deduct |
+| Transaction verification | 🟡 Partial | 5-step validation present, but expiry still uses max_fee proxy |
+| Transaction execution | 🟢 Ready | Proper EVM call execution, wired into block production with inline permission checks, fee_currency-aware gas deduction |
+| Persistence | 🟢 Ready | AgentRegistry, AgentBalances, and AgentNonces all persisted to MDBX |
 
 ---
 
 ## Production Readiness Gaps
 
-| # | Gap | Severity | Details |
-|---|-----|----------|---------|
-| 1 | **Domain verification is format-only** | High | No actual DNS or HTTP verification. Any domain can be "verified." |
-| 2 | **No registration fee or stake** | Medium | Zero-cost agent creation enables spam. |
-| 3 | **No agent revocation/removal** | Medium | Compromised agents cannot be deregistered. Registry grows forever. |
-| 4 | **Default permissions are wide open** | High | Empty `allowed_assets` means all assets allowed. `MAX` limits. |
-| 5 | **Daily reset is block-based** | Low | 86,400 blocks assumes 250ms block time. Not robust to timing changes. |
-| 6 | **BatchTransfer only checks first payment** | High | Subsequent payments in a batch bypass permission checks. |
-| 7 | **Grant does not deduct from owner** | Critical | Agent balances can be created without owner funds being reduced. |
-| 8 | **No overflow protection on credit** | Medium | `credit()` uses naive addition. Could wrap on overflow. |
-| 9 | **Gas fee asset hardcoded to asset_id=1** | High | Fee deduction always uses asset_id=1, ignoring actual fee currency. |
-| 10 | **`max_fee` used as expiry proxy** | Medium | Expiry logic conflates fee with time. Unexpected behavior. |
-| 11 | **`execute_agent_call` is broken** | High | Calls bridge mint function instead of general EVM call. |
-| 12 | **Not integrated into block production** | Critical | Agent instructions exist but are not executed during block validation. |
-| 13 | **Agent state not persisted** | High | All balances, nonces, and registrations are lost on restart. |
-| 14 | **No agent activity audit trail** | Low | No receipts or events track agent-mediated transactions distinctly. |
+| # | Gap | Severity | Status | Details |
+|---|-----|----------|--------|---------|
+| 1 | **Domain verification is format-only** | High | ✅ Fixed | `RealDomainVerifier` performs actual DNS TXT and HTTP lookups. `new_with_format_verifier()` for tests. |
+| 2 | **No registration fee or stake** | Medium | Open | Zero-cost agent creation enables spam. |
+| 3 | **No agent revocation/removal** | Medium | ✅ Fixed | `AgentRegistry::unregister_agent()` removes from all indexes. |
+| 4 | **Default permissions are wide open** | High | ✅ Fixed | Defaults now: `allowed_assets = [1]`, `daily_limit = 10_000`, `per_tx_limit = 1_000`. |
+| 5 | **Daily reset is block-based** | Low | Open | 86,400 blocks assumes 250ms block time. Not robust to timing changes. |
+| 6 | **BatchTransfer only checks first payment** | High | ✅ Fixed | `extract_instruction_details()` returns `Vec`; all payments are permission-checked. |
+| 7 | **Grant does not deduct from owner** | Critical | ✅ Fixed | `grant_funds()` now deducts from `protocol_balances` before crediting agent. |
+| 8 | **No overflow protection on credit** | Medium | ✅ Fixed | `credit()` uses `checked_add`. |
+| 9 | **Gas fee asset hardcoded to asset_id=1** | High | ✅ Fixed | Resolved from `protocol_tx.fee_currency` (`Call`→1, `Stablecoin(id)`→id). |
+| 10 | **`max_fee` used as expiry proxy** | Medium | Open | Expiry logic conflates fee with time. Unexpected behavior. |
+| 11 | **`execute_agent_call` is broken** | High | ✅ Fixed | Now constructs a proper `EvmTransaction` and executes via `evm_executor.execute_tx()`. |
+| 12 | **Not integrated into block production** | Critical | ✅ Fixed | `execute_agent_instruction()` in `Block::execute` with inline `verify_agent_instruction_permissions()`. |
+| 13 | **Agent state not persisted** | High | ✅ Fixed | `AgentRegistry`, `AgentBalances`, and `AgentNonces` all persisted to MDBX. |
+| 14 | **No agent activity audit trail** | Low | Open | No receipts or events track agent-mediated transactions distinctly. |
 
 ---
 
 ## Test Status
 
-- `cargo test -p call-agent` — unit tests cover registration, domain proof format, balance operations, nonce tracking, permission checks, instruction extraction, agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
-- Missing: actual DNS/HTTP domain verification tests, batch transfer multi-payment permission tests, overflow tests, integration with block production tests, persistence tests
+- `cargo test -p call-agent` — 43 unit tests covering registration, domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, instruction extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
+- `cargo test -p call-consensus` — block execution order test verifies `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` execute correctly during `Block::execute`
+- `cargo test -p call-node --lib` — node startup and state persistence tests verify agent registry, balances, and nonces are saved/loaded to MDBX correctly
+- `cargo test -p call-protocol --test test_agent_flow` — integration tests covering registration, domain proof, balance operations, nonce sequential/stale rejection
+- Missing: agent activity audit trail tests

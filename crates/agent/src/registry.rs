@@ -1,7 +1,7 @@
 //! Agent registration with domain verification (per spec §6.2)
 
 use call_primitives::{Address, PublicKey};
-use crate::{AgentError, DomainProof};
+use crate::{AgentError, DomainProof, AgentPermissions};
 
 /// Agent registration record (per spec §6.2)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -16,6 +16,9 @@ pub struct AgentRegistration {
     pub domain_proof: Option<DomainProof>,
     pub domain_verified: bool,
     pub registered_at: u64,
+    /// Agent permissions (controls what the agent can do)
+    #[serde(default)]
+    pub permissions: AgentPermissions,
 }
 
 /// Agent registry
@@ -54,7 +57,19 @@ impl Default for AgentRegistry {
 }
 
 impl AgentRegistry {
+    /// Create a new registry with real domain verification by default.
     pub fn new() -> Self {
+        Self {
+            agents: Default::default(),
+            agents_by_owner: Default::default(),
+            agents_by_name: Default::default(),
+            next_id: Default::default(),
+            domain_verifier: Some(Box::new(RealDomainVerifier)),
+        }
+    }
+
+    /// Create a registry with format-only domain verification (for testing).
+    pub fn new_with_format_verifier() -> Self {
         Self::default()
     }
 
@@ -113,6 +128,7 @@ impl AgentRegistry {
             domain_proof,
             domain_verified,
             registered_at: current_block,
+            permissions: AgentPermissions::default(),
         };
 
         self.agents.insert(agent_id, registration);
@@ -120,6 +136,20 @@ impl AgentRegistry {
         self.agents_by_name.insert(name, agent_id);
 
         Ok(agent_id)
+    }
+
+    /// Unregister an agent (removes from all indexes).
+    /// Returns the removed registration if found.
+    pub fn unregister_agent(&mut self, agent_id: u64) -> Option<AgentRegistration> {
+        let reg = self.agents.remove(&agent_id)?;
+        self.agents_by_name.remove(&reg.name);
+        if let Some(list) = self.agents_by_owner.get_mut(&reg.owner) {
+            list.retain(|&id| id != agent_id);
+            if list.is_empty() {
+                self.agents_by_owner.remove(&reg.owner);
+            }
+        }
+        Some(reg)
     }
 
     /// Get agent by ID
@@ -304,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_agent_register_success() {
-        let mut registry = AgentRegistry::new();
+        let mut registry = AgentRegistry::new_with_format_verifier();
         let owner = test_addr(1);
         let pubkey = [1u8; 64];
         let metadata = [2u8; 32];
@@ -322,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_agent_domain_proof_dns() {
-        let mut registry = AgentRegistry::new();
+        let mut registry = AgentRegistry::new_with_format_verifier();
         let proof = DomainProof::DnsTxt {
             domain: "agent.example.com".into(),
             txt_value: "call-agent=0x1234567890abcdef".into(),
@@ -347,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_agent_domain_proof_http() {
-        let mut registry = AgentRegistry::new();
+        let mut registry = AgentRegistry::new_with_format_verifier();
         let proof = DomainProof::HttpFile {
             url: "https://agent.example.com/.well-known/call-agent".into(),
             expected_content: "agent=0x1234567890abcdef".into(),
@@ -457,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_agent_update_domain_proof() {
-        let mut registry = AgentRegistry::new();
+        let mut registry = AgentRegistry::new_with_format_verifier();
         let metadata = [0u8; 32];
 
         let id = registry

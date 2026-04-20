@@ -526,6 +526,35 @@ fn is_agent_instruction(instr: &Instruction) -> bool {
     )
 }
 
+/// Verify agent permissions for a single instruction.
+fn verify_agent_instruction_permissions(
+    agent: &call_agent::AgentRegistration,
+    asset_id: call_primitives::AssetId,
+    amount: u128,
+    current_block: u64,
+) -> Result<(), ConsensusError> {
+    let perms = &agent.permissions;
+    if !perms.is_asset_allowed(asset_id) {
+        return Err(ConsensusError::InvalidBlock(format!(
+            "agent {}: asset {} not allowed",
+            agent.agent_id, asset_id
+        )));
+    }
+    if amount > perms.per_tx_limit {
+        return Err(ConsensusError::InvalidBlock(format!(
+            "agent {}: amount {} exceeds per-tx limit {}",
+            agent.agent_id, amount, perms.per_tx_limit
+        )));
+    }
+    if perms.is_expired(current_block) {
+        return Err(ConsensusError::InvalidBlock(format!(
+            "agent {}: permissions expired",
+            agent.agent_id
+        )));
+    }
+    Ok(())
+}
+
 fn execute_agent_instruction(
     instruction: &Instruction,
     sender: call_primitives::Address,
@@ -548,6 +577,12 @@ fn execute_agent_instruction(
                     "agent pay: sender is not owner".into(),
                 ));
             }
+            verify_agent_instruction_permissions(
+                agent,
+                payment.asset_id,
+                payment.amount,
+                current_block_height,
+            )?;
             agent_balances
                 .deduct(agent.owner, payment.agent_id, payment.asset_id, payment.amount)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("agent pay: {e}")))?;
@@ -566,6 +601,12 @@ fn execute_agent_instruction(
                         "agent batch pay: sender is not owner".into(),
                     ));
                 }
+                verify_agent_instruction_permissions(
+                    agent,
+                    payment.asset_id,
+                    payment.amount,
+                    current_block_height,
+                )?;
                 agent_balances
                     .deduct(agent.owner, payment.agent_id, payment.asset_id, payment.amount)
                     .map_err(|e| {
@@ -586,6 +627,17 @@ fn execute_agent_instruction(
             if agent.owner != sender {
                 return Err(ConsensusError::InvalidBlock(
                     "agent call: sender is not owner".into(),
+                ));
+            }
+            if !agent.permissions.is_protocol_allowed(target) {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "agent {}: target {:?} not in allowed protocols",
+                    agent.agent_id, target
+                )));
+            }
+            if agent.permissions.is_expired(current_block_height) {
+                return Err(ConsensusError::InvalidBlock(
+                    "agent call: permissions expired".into(),
                 ));
             }
             let tx = EvmTransaction {
@@ -618,6 +670,12 @@ fn execute_agent_instruction(
                     "agent bridge deposit: sender is not owner".into(),
                 ));
             }
+            verify_agent_instruction_permissions(
+                agent,
+                *asset_id,
+                *amount,
+                current_block_height,
+            )?;
             agent_balances
                 .deduct(agent.owner, *agent_id, *asset_id, *amount)
                 .map_err(|e| {

@@ -4,7 +4,7 @@ use call_primitives::{Address, AssetId};
 use crate::{AgentError, AgentFeeConfig};
 
 /// Agent permissions (per spec §6.3)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentPermissions {
     /// Allowed asset IDs for transactions
     pub allowed_assets: Vec<AssetId>,
@@ -23,11 +23,11 @@ pub struct AgentPermissions {
 impl Default for AgentPermissions {
     fn default() -> Self {
         Self {
-            allowed_assets: vec![],
-            daily_limit: u128::MAX,
-            per_tx_limit: u128::MAX,
-            allowed_counterparties: vec![],
-            allowed_protocols: vec![],
+            allowed_assets: vec![1], // Only CALL allowed by default (was: empty = all allowed)
+            daily_limit: 10_000,     // Was: u128::MAX (unlimited)
+            per_tx_limit: 1_000,     // Was: u128::MAX (unlimited)
+            allowed_counterparties: vec![], // Empty = all allowed (unchanged semantics)
+            allowed_protocols: vec![],      // Empty = none (unchanged semantics)
             expires_at: 0,
         }
     }
@@ -187,9 +187,10 @@ mod tests {
         assert!(perms.is_asset_allowed(2));
         assert!(!perms.is_asset_allowed(99));
 
-        // Empty allowed_assets = all allowed
-        let open_perms = AgentPermissions::default();
-        assert!(open_perms.is_asset_allowed(999));
+        // Default permissions only allow asset 1 (CALL)
+        let default_perms = AgentPermissions::default();
+        assert!(default_perms.is_asset_allowed(1));
+        assert!(!default_perms.is_asset_allowed(999));
     }
 
     #[test]

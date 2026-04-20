@@ -28,7 +28,7 @@ mod test_agent_flow_impl {
 
     #[test]
     fn test_agent_register_with_dns_proof() {
-        let mut registry = AgentRegistry::new();
+        let mut registry = AgentRegistry::new_with_format_verifier();
         let proof = DomainProof::DnsTxt { domain: "agent.example.com".into(), txt_value: "call-agent=0x1234".into() };
         let id = registry.register_agent(addr(1), [1u8; 64], "dns-agent".into(), "https://agent.example.com".into(), [0u8; 32], Some(proof), 100).unwrap();
         assert!(registry.get_agent(id).unwrap().domain_verified);
@@ -36,7 +36,7 @@ mod test_agent_flow_impl {
 
     #[test]
     fn test_agent_register_with_http_proof() {
-        let mut registry = AgentRegistry::new();
+        let mut registry = AgentRegistry::new_with_format_verifier();
         let proof = DomainProof::HttpFile { url: "https://agent.example.com/.well-known/call-agent".into(), expected_content: "agent=0x1234".into() };
         let id = registry.register_agent(addr(1), [1u8; 64], "http-agent".into(), "https://agent.example.com".into(), [0u8; 32], Some(proof), 100).unwrap();
         assert!(registry.get_agent(id).unwrap().domain_verified);
@@ -196,7 +196,7 @@ mod test_agent_flow_impl {
 
     #[test]
     fn test_agent_update_domain_proof() {
-        let mut registry = AgentRegistry::new();
+        let mut registry = AgentRegistry::new_with_format_verifier();
         let id = registry.register_agent(addr(1), [1u8; 64], "agent".into(), "https://agent.com".into(), [0u8; 32], None, 100).unwrap();
         assert!(!registry.get_agent(id).unwrap().domain_verified);
         let proof = DomainProof::DnsTxt { domain: "agent.com".into(), txt_value: "call-agent=verified".into() };

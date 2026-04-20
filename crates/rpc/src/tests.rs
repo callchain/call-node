@@ -47,6 +47,7 @@ mod tests {
             ValidatorStateManager::default(),
             AgentRegistry::new(),
             AgentBalances::new(),
+            call_agent::AgentNonces::new(),
             ShieldedState::new(),
             mempool,
             1,

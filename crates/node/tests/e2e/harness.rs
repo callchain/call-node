@@ -133,6 +133,7 @@ impl NodeBuilder {
             call_consensus::ValidatorStateManager::default(),
             call_agent::AgentRegistry::new(),
             call_agent::AgentBalances::new(),
+            call_agent::AgentNonces::new(),
             call_shielded::ShieldedState::new(),
             mempool.clone(),
             self.chain_id,

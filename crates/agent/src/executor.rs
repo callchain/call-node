@@ -67,19 +67,22 @@ pub fn verify_agent_tx(
 
     // 3. Per-instruction permissions: assets, counterparties, per_tx_limit
     for instr in &protocol_tx.instructions {
-        let (asset_id, counterparty, amount) = extract_instruction_details(instr)
-            .ok_or_else(|| AgentError::PermissionDenied("unsupported instruction".into()))?;
-
-        verify_agent_permissions(
-            permissions,
-            daily_usage,
-            fee_config,
-            asset_id,
-            &counterparty,
-            amount,
-            protocol_tx.gas_limit as u128, // approximate fee
-            current_block,
-        )?;
+        let details = extract_instruction_details(instr);
+        if details.is_empty() {
+            return Err(AgentError::PermissionDenied("unsupported instruction".into()));
+        }
+        for (asset_id, counterparty, amount) in details {
+            verify_agent_permissions(
+                permissions,
+                daily_usage,
+                fee_config,
+                asset_id,
+                &counterparty,
+                amount,
+                protocol_tx.gas_limit as u128, // approximate fee
+                current_block,
+            )?;
+        }
     }
 
     // 4. Expiry check
@@ -95,7 +98,8 @@ pub fn verify_agent_tx(
     let total_amount: u128 = protocol_tx
         .instructions
         .iter()
-        .filter_map(|i| extract_instruction_details(i).map(|(_, _, a)| a))
+        .flat_map(|i| extract_instruction_details(i))
+        .map(|(_, _, a)| a)
         .sum();
 
     if requires_owner_signature(total_amount, fee_config) {
@@ -139,13 +143,17 @@ pub fn execute_agent_tx(
     let gas_units = calculate_gas_units(&protocol_tx.instructions);
     let agent_gas_units = gas_units / 2; // Agent discount
 
-    // Deduct gas fee from agent balance
+    // Deduct gas fee from agent balance using the transaction's fee currency
+    let fee_asset_id = match protocol_tx.fee_currency {
+        call_primitives::FeeCurrency::Call => 1,
+        call_primitives::FeeCurrency::Stablecoin(id) => id,
+    };
     let fee = agent_gas_units as u128 * protocol_tx.max_fee;
-    let agent_balance = balances.get_balance(agent.owner, agent.agent_id, 1);
+    let agent_balance = balances.get_balance(agent.owner, agent.agent_id, fee_asset_id);
     if agent_balance < fee {
         return Err(AgentError::InsufficientAgentBalance(agent.agent_id, fee));
     }
-    balances.deduct(agent.owner, agent.agent_id, 1, fee)?;
+    balances.deduct(agent.owner, agent.agent_id, fee_asset_id, fee)?;
 
     // Execute instructions via protocol engine
     let results = execute_protocol_instructions(
@@ -311,19 +319,20 @@ fn compute_agent_tx_hash(
     keccak256(&buf).0
 }
 
-/// Extract asset_id, counterparty, amount from an instruction
-fn extract_instruction_details(instr: &Instruction) -> Option<(AssetId, Address, u128)> {
+/// Extract asset_id, counterparty, amount from an instruction.
+/// Returns a Vec so that multi-payment instructions (BatchTransfer, AgentBatchPay)
+/// are fully checked.
+fn extract_instruction_details(instr: &Instruction) -> Vec<(AssetId, Address, u128)> {
     match instr {
-        Instruction::Transfer { asset_id, to, amount, .. } => Some((*asset_id, *to, *amount)),
+        Instruction::Transfer { asset_id, to, amount, .. } => vec![(*asset_id, *to, *amount)],
         Instruction::BatchTransfer { asset_id, payments, .. } => {
-            // Use first payment as the primary check
-            payments.first().map(|p| (*asset_id, p.to, p.amount))
+            payments.iter().map(|p| (*asset_id, p.to, p.amount)).collect()
         }
-        Instruction::Approve { asset_id, spender, amount } => Some((*asset_id, *spender, *amount)),
-        Instruction::TransferFrom { asset_id, from, to: _, amount } => Some((*asset_id, *from, *amount)),
-        Instruction::AgentPay { payment } => Some((payment.asset_id, payment.to, payment.amount)),
+        Instruction::Approve { asset_id, spender, amount } => vec![(*asset_id, *spender, *amount)],
+        Instruction::TransferFrom { asset_id, from, to: _, amount } => vec![(*asset_id, *from, *amount)],
+        Instruction::AgentPay { payment } => vec![(payment.asset_id, payment.to, payment.amount)],
         Instruction::AgentBatchPay { payments } => {
-            payments.first().map(|p| (p.asset_id, p.to, p.amount))
+            payments.iter().map(|p| (p.asset_id, p.to, p.amount)).collect()
         }
         Instruction::AgentBridgeDeposit { asset_id, amount, target_address, .. } => {
             // For bridge deposit, use target chain address as counterparty proxy
@@ -332,9 +341,9 @@ fn extract_instruction_details(instr: &Instruction) -> Option<(AssetId, Address,
             } else {
                 Address::ZERO
             };
-            Some((*asset_id, addr, *amount))
+            vec![(*asset_id, addr, *amount)]
         }
-        _ => None,
+        _ => vec![],
     }
 }
 
@@ -366,6 +375,7 @@ mod tests {
             domain_proof: None,
             domain_verified: false,
             registered_at: 0,
+            permissions: AgentPermissions::default(),
         }
     }
 
@@ -377,7 +387,9 @@ mod tests {
             amount: 500,
             memo: None,
         };
-        let (asset_id, counterparty, amount) = extract_instruction_details(&instr).unwrap();
+        let details = extract_instruction_details(&instr);
+        assert_eq!(details.len(), 1);
+        let (asset_id, counterparty, amount) = details[0];
         assert_eq!(asset_id, 1);
         assert_eq!(counterparty, test_addr(2));
         assert_eq!(amount, 500);
@@ -393,7 +405,9 @@ mod tests {
                 amount: 200,
             },
         };
-        let (asset_id, counterparty, amount) = extract_instruction_details(&instr).unwrap();
+        let details = extract_instruction_details(&instr);
+        assert_eq!(details.len(), 1);
+        let (asset_id, counterparty, amount) = details[0];
         assert_eq!(asset_id, 1);
         assert_eq!(counterparty, test_addr(3));
         assert_eq!(amount, 200);
@@ -409,10 +423,29 @@ mod tests {
             target_chain: 1,
             target_address: target_addr.as_slice().to_vec(),
         };
-        let (asset_id, counterparty, amount) = extract_instruction_details(&instr).unwrap();
+        let details = extract_instruction_details(&instr);
+        assert_eq!(details.len(), 1);
+        let (asset_id, counterparty, amount) = details[0];
         assert_eq!(asset_id, 1);
         assert_eq!(counterparty, target_addr);
         assert_eq!(amount, 100);
+    }
+
+    #[test]
+    fn test_extract_instruction_details_batch_transfer_all_payments() {
+        let instr = Instruction::BatchTransfer {
+            asset_id: 1,
+            payments: vec![
+                call_protocol::instructions::PaymentEntry { to: test_addr(2), amount: 100, memo: None },
+                call_protocol::instructions::PaymentEntry { to: test_addr(3), amount: 200, memo: None },
+                call_protocol::instructions::PaymentEntry { to: test_addr(4), amount: 300, memo: None },
+            ],
+        };
+        let details = extract_instruction_details(&instr);
+        assert_eq!(details.len(), 3);
+        assert_eq!(details[0], (1, test_addr(2), 100));
+        assert_eq!(details[1], (1, test_addr(3), 200));
+        assert_eq!(details[2], (1, test_addr(4), 300));
     }
 
     #[test]
