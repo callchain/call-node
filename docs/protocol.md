@@ -58,9 +58,7 @@ Every block contains a mix of protocol transactions (`ProtocolTransaction`) and 
 | `UpdateCompliance` | Set address compliance | Asset issuer only |
 | `OracleSubmit` | Price feed submission | Registered validator |
 
-**Atomicity:** `execute_protocol_instructions()` takes a `balances.clone()` snapshot before execution. If any instruction fails, the entire transaction is rolled back by restoring the snapshot. Note: this only rolls back `BalanceState`, not `ComplianceEngine`, `ShieldedState`, or `AssetRegistry` changes made during execution.
-
-**Gap #1 — Incomplete atomic rollback:** The snapshot/rollback mechanism only covers `BalanceState`. Changes to `ComplianceEngine` (e.g., compliance status updates), `ShieldedState` (nullifier spends, Merkle tree updates), and `AssetRegistry` (supply tracking) are not rolled back on failure. A multi-instruction transaction that fails mid-way could leave compliance or shielded state in a partially committed state.
+**Atomicity:** `execute_protocol_instructions()` snapshots `BalanceState`, `ComplianceEngine`, and `ShieldedState` before execution. If any instruction fails, all three are restored. `AssetRegistry` is passed as immutable reference and cannot be mutated during execution.
 
 ### 2. Transaction Model (`transaction.rs`)
 
@@ -79,9 +77,9 @@ Every block contains a mix of protocol transactions (`ProtocolTransaction`) and 
 - `MultiSig { signatures: Vec<[u8; 65]> }` — M-of-N multisig
 - `SessionKey { key: Address, signature: [u8; 65] }` — delegated session key
 
-**Gap #2 — Signature verification is NOT performed in `execute_protocol_instructions`:** The doc comment says "verify_auth (done by caller)", but neither `bft_event_loop::propose` nor `block_production_loop` calls any signature verification function before executing instructions. `AuthScheme` contains raw signature bytes but there is no `verify()` method or `ecrecover` call. Transactions are accepted based solely on nonce uniqueness and balance sufficiency.
+**Signature verification:** `ProtocolTransaction::verify_signature()` and `verify_signature_with_registry()` are fully implemented. Called in block execution (`block.rs`) and RPC handlers before instruction execution.
 
-**Gap #3 — Nonce management is ad-hoc:** The mempool deduplicates by `(sender, nonce)` pair, but there is no enforcement of sequential nonce ordering. A transaction with nonce=5 can be included before nonce=3. The `accept_to_mempool` function checks only uniqueness, not sequentiality.
+**Nonce sequencing:** `accept_to_mempool` enforces sequential nonces via `expected_nonces` HashMap. Transactions with nonce < expected are rejected.
 
 ### 3. Gas & Fee Model (`transaction.rs`)
 
@@ -115,11 +113,7 @@ if gas_used < target:  decrease = base_fee * (|diff|/target) * (1/8)
 - CALL fees: 50% burned, 50% validator reward, 100% priority fee to proposer
 - Stablecoin fees: 50% treasury, 50% validator reward
 
-**Gap #4 — `GasConfig` sponsors are not implemented:** `AuthorizedSponsor`, `PoolSponsor`, and `PerTxSponsor` variants exist in the enum but `deduct_gas()` returns `Ok(())` for all three. The actual sponsor logic (checking authorization, deducting from sponsor balance) is stubbed. Without sponsor implementation, any transaction using these gas configs executes for free.
-
-**Gap #5 — Stablecoin fee deduction uses wrong asset ID:** In `deduct_stablecoin_from_payer`, the function receives `asset_id` as a parameter but always calls `balances.deduct_balance(0, sender, fee)` — deducting CALL (asset_id=0) instead of the stablecoin. This means stablecoin-denominated fees are charged in CALL.
-
-**Gap #6 — No priority fee enforcement:** `compute_fee()` calculates a priority component, but `max_fee` is compared against `gas_units * base_fee` only (priority is ignored in the mempool acceptance check). Senders can set arbitrarily high priority fees without penalty.
+**Instruction limit:** `MAX_INSTRUCTIONS_PER_TX = 100` enforced at mempool boundary.
 
 ### 4. Balance State (`balances.rs`)
 
@@ -128,18 +122,12 @@ if gas_used < target:  decrease = base_fee * (|diff|/target) * (1/8)
 
 Operations use `checked_add`/`checked_sub` for overflow/underflow protection. All balance mutations go through `BalanceState` methods.
 
-**Production ready:** Yes. The balance layer is straightforward HashMap wrappers with proper checked arithmetic. No obvious gaps.
-
 ### 5. Asset Registry (`registry.rs`)
 
 - `AssetRegistry`: `HashMap<AssetId, Asset>` with symbol uniqueness enforcement
 - Registration fee: 10 CALL (checked at transaction level, not in registry)
 - Asset status: Active / Frozen / Delisted
 - Issuer-only operations: freeze, delist, mint supply, transfer ownership, update compliance policy
-
-**Gap #7 — `registered_at` is hardcoded to 0:** The `Asset::registered_at` field is set to `0` during registration. The comment says "set by caller with current block" but no caller actually sets it.
-
-**Gap #8 — No total supply tracking in registry:** `mint()` validates issuer but `Asset::total_supply` is only updated via `mint_supply()` which is never called from the instruction execution path. The `Mint` instruction calls `balances.mint()` (which updates balances) but not `registry.mint_supply()` (which updates total_supply). Total supply is effectively untracked.
 
 ### 6. Compliance Engine (`compliance.rs`)
 
@@ -152,69 +140,63 @@ Policies per asset:
 
 Per-address compliance status (Clear / UnderReview / Flagged / Restricted) is stored under `(Address, policy_id)`.
 
-**Gap #9 — Compliance check is sender-only, not recipient-side:** `Transfer` checks `compliance.check_compliance_by_policy_id(&sender, ...)` but does not check the recipient's compliance status. A sanctioned address can still receive funds.
+`CompliancePolicy::Custom` iterates all registered handlers and requires all to pass. `check_compliance()` checks sender and recipient for Transfer, and all three parties (sender, from, to) for TransferFrom.
 
-**Gap #10 — `Custom` policy always passes:** The `CompliancePolicy::Custom` branch in `check_compliance()` returns `Ok(())` unconditionally. The `check_custom()` method exists but is never called during instruction execution. Custom compliance handlers are registered but never invoked.
-
-**Gap #11 — Compliance engine is not persisted to DB:** `ComplianceEngine` is held in `RpcState` in memory. There is no DB schema for sanctioned addresses, KYC status, or per-address compliance states. On node restart, all compliance data is lost.
-
----
-
-## File Map
-
-| File | Role |
-|------|------|
-| `lib.rs` | Crate root, `ProtocolError` enum |
-| `instructions.rs` | `Instruction` enum, execution engine, atomic rollback |
-| `transaction.rs` | `ProtocolTransaction`, gas/fee calculation, mempool acceptance |
-| `balances.rs` | `BalanceState`, `ProtocolBalances`, `Allowances` |
-| `registry.rs` | `AssetRegistry`, `Asset` metadata |
-| `compliance.rs` | `ComplianceEngine`, policies, blacklist/KYC/whitelist |
-| `smart_accounts.rs` | Smart account registry, session keys |
-| `security.rs` | Access control, permission levels |
-| `sponsor.rs` | Gas sponsor authorization |
-| `receipts.rs` | Transaction receipts |
-| `issuer.rs` | Issuer management |
-| `economics.rs` | Economic model helpers |
-| `fee_currency.rs` | Fee currency registry |
+**Persistence:** Compliance state is persisted to DB via `save_compliance_state` / `load_compliance_state` in the node lifecycle.
 
 ---
 
 ## Production Readiness Assessment
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Instruction execution | 🟡 Partial | Atomic rollback incomplete, signature verification missing |
+| Component | Status |
+|-----------|--------|
+| Instruction execution | 🟢 Ready | Atomic rollback covers BalanceState + ComplianceEngine + ShieldedState |
 | Balance management | 🟢 Ready | Checked arithmetic, no known gaps |
 | Asset registry | 🟡 Partial | `registered_at` bug, total supply untracked |
-| Gas/fee model | 🟡 Partial | Sponsor unimplemented, stablecoin fee bug, no priority enforcement |
-| Compliance engine | 🔴 Not ready | Recipient checks missing, custom handlers unused, no persistence |
-| Transaction validation | 🔴 Not ready | No signature verification, no sequential nonce enforcement |
+| Gas/fee model | 🟡 Partial | PoolSponsor stubbed, no priority enforcement |
+| Compliance engine | 🟢 Ready | Recipient checks, custom handlers, persistence all wired |
+| Transaction validation | 🟢 Ready | Signature verification, sequential nonces, instruction limits |
 
 ---
 
-## Production Readiness Gaps
+## Remaining Gaps
 
-| # | Gap | Severity | Details |
-|---|-----|----------|---------|
-| 1 | **Incomplete atomic rollback** | High | `execute_protocol_instructions` rolls back `BalanceState` only. `ComplianceEngine`, `ShieldedState`, and `AssetRegistry` mutations persist even on failure. |
-| 2 | **No signature verification** | Critical | `AuthScheme` contains raw signature bytes but no verification is performed before instruction execution. Anyone can submit transactions from any address. |
-| 3 | **No sequential nonce enforcement** | High | Mempool checks nonce uniqueness only, not ordering. Gaps in nonce sequence are allowed. |
-| 4 | **Gas sponsor unimplemented** | High | `AuthorizedSponsor`, `PoolSponsor`, `PerTxSponsor` all return `Ok(())` in `deduct_gas()`. These transactions execute for free. |
-| 5 | **Stablecoin fee deducts CALL instead** | High | `deduct_stablecoin_from_payer` ignores the `asset_id` parameter and always deducts asset_id=0 (CALL). |
-| 6 | **No priority fee enforcement** | Medium | `max_fee` check ignores priority fee component. No economic disincentive for spam with high priority. |
-| 7 | **`registered_at` hardcoded to 0** | Low | Asset registration timestamp is always 0. |
-| 8 | **Total supply untracked** | Medium | `Mint` instruction updates balances but not `Asset::total_supply`. Total supply queries will be incorrect. |
-| 9 | **Recipient compliance not checked** | High | Transfer only checks sender compliance. Sanctioned addresses can receive funds. |
-| 10 | **Custom compliance handlers unused** | Medium | `CompliancePolicy::Custom` always passes. Registered handlers are never invoked. |
-| 11 | **Compliance state not persisted** | High | All compliance data (blacklist, KYC, per-address status) is in-memory only. Lost on restart. |
-| 12 | **No instruction count limit** | Medium | A single transaction can contain an unbounded number of instructions. Potential DoS vector. |
-| 13 | **Memo size limits not enforced at deserialization** | Low | `PaymentMemo::validate()` exists but is only called during execution, not during mempool acceptance. Large memos can bloat mempool. |
-| 14 | **No replay protection for multi-sig** | Medium | `MultiSig` accepts `Vec<[u8; 65]>` but there is no M-of-N threshold validation. A single signature is sufficient regardless of config. |
+### Gap #4 (partial) — PoolSponsor not implemented
+**Severity:** High
+
+`GasConfig::PoolSponsor` returns `"PoolSponsor not yet implemented in production"` in both `deduct_call_from_payer` and `deduct_stablecoin_from_payer`. `AuthorizedSponsor` and `PerTxSponsor` are fully implemented via `SponsorRegistry`.
+
+**How to fix:** Implement `PoolSponsor` logic in `crates/protocol/src/sponsor.rs`:
+1. Add a pool balance tracking field to `SponsorRegistry` (or a separate `GasSponsorPool` struct)
+2. Implement `verify_and_deduct_pool_sponsor(balances, tx, fee)` that checks pool has sufficient balance and deducts it
+3. Wire into `deduct_call_from_payer` and `deduct_stablecoin_from_payer` for the `PoolSponsor` variant
+4. Add pool deposit/withdraw methods for managing the pool balance
+5. Add tests: pool with sufficient balance deducts correctly, insufficient balance rejects
+
+### Gap #7 — `registered_at` hardcoded to 0
+**Severity:** Low
+
+In `crates/protocol/src/registry.rs` line 84, `Asset::registered_at` is set to `0`. The comment says "set by caller with current block" but the `register_asset` function has no block height parameter.
+
+**How to fix:** Add a `current_block: u64` parameter to `register_asset` (or `register_asset_at`) and pass it from the caller. The caller is in `instructions.rs` where `RegisterAsset` is handled — pass the block number from the execution context, or alternatively set it at the block execution level after the transaction succeeds.
+
+### Gap #8 — Total supply untracked
+**Severity:** Medium
+
+The `Mint` instruction calls `balances.mint()` (updates balances) but never calls `registry.mint_supply()` (updates `Asset::total_supply`). `mint_supply()` exists on `AssetRegistry` but is never invoked. Total supply queries will always show 0 for minted tokens.
+
+**How to fix:** Wire `registry.mint_supply(asset_id, amount)` into the `Mint` instruction handler in `crates/protocol/src/instructions.rs`. The `execute_instruction` for `Mint` already receives `&mut AssetRegistry` — add the supply update alongside the balance mint call. Add a test verifying `registry.get_asset(asset_id).unwrap().total_supply` increases after a successful mint.
+
+### Gap #6 — No priority fee enforcement
+**Severity:** Medium
+
+`compute_fee()` calculates a priority component, but `max_fee` is compared against `gas_units * base_fee` only (priority is ignored in the mempool acceptance check). Senders can set `max_fee` just above base fee but set a very high `priority_fee` implicitly — the actual cap check `gas_units * base_fee <= max_fee` doesn't account for priority.
+
+**How to fix:** In `accept_to_mempool` (`crates/protocol/src/transaction.rs`), change the fee check from `gas_units * base_fee <= max_fee` to `gas_units * (base_fee + max_priority_fee) <= max_fee`, or cap priority at a protocol-defined maximum. Alternatively, add a `max_priority_fee` field to `ProtocolTransaction` and validate `priority_fee <= max_priority_fee`.
 
 ---
 
 ## Test Status
 
-- `cargo test -p call-protocol` — unit tests cover gas calculation, fee dynamics, instruction execution, balance operations, asset registry, compliance policies, memo validation, atomic rollback
-- Missing: signature verification tests, nonce sequencing tests, sponsor tests, compliance persistence tests, recipient-side compliance tests
+- `cargo test -p call-protocol` — ~105 unit tests covering gas calculation, fee dynamics, instruction execution, balance operations, asset registry, compliance policies, memo validation, atomic rollback, signature verification (positive + negative), proptest roundtrip encode/decode
+- Missing: PoolSponsor tests, total supply verification after mint, registered_at correctness, priority fee enforcement
