@@ -62,6 +62,8 @@ pub struct TelemetryRegistry {
     pub block_latency_ms: RwLock<Vec<u64>>,
     pub tx_latency_ms: RwLock<Vec<u64>>,
     pub p2p_latency_ms: RwLock<Vec<u64>>,
+    // When the last block was committed (for stall detection)
+    last_block_committed_at: RwLock<Option<Instant>>,
 }
 
 impl TelemetryRegistry {
@@ -88,6 +90,7 @@ impl TelemetryRegistry {
             block_latency_ms: RwLock::new(Vec::new()),
             tx_latency_ms: RwLock::new(Vec::new()),
             p2p_latency_ms: RwLock::new(Vec::new()),
+            last_block_committed_at: RwLock::new(None),
         }
     }
 
@@ -140,6 +143,29 @@ impl TelemetryRegistry {
     /// Record a consensus block committed
     pub fn record_block_committed(&self) {
         self.consensus_blocks_committed.fetch_add(1, Ordering::Relaxed);
+        *self.last_block_committed_at.write().unwrap() = Some(Instant::now());
+    }
+
+    /// Seconds since the last committed block, or `None` if no block has been committed.
+    pub fn seconds_since_last_block(&self) -> Option<u64> {
+        self.last_block_committed_at
+            .read()
+            .unwrap()
+            .map(|inst| inst.elapsed().as_secs())
+    }
+
+    /// Directly set seconds-since-last-block for testing.
+    #[cfg(test)]
+    pub fn set_seconds_since_last_block_for_test(&self, secs: u64) {
+        // Store an Instant that is `secs` seconds in the past.
+        // Instant doesn't support subtraction, so we use start_time as reference.
+        let past = self.start_time
+            .checked_sub(Duration::from_secs(secs))
+            .unwrap_or_else(|| {
+                // If start_time can't go back that far, use a very old reference.
+                Instant::now() - Duration::from_secs(secs)
+            });
+        *self.last_block_committed_at.write().unwrap() = Some(past);
     }
 
     /// Record a consensus timeout
@@ -416,15 +442,14 @@ pub fn evaluate_alerts(registry: &TelemetryRegistry, rules: &[AlertRule]) -> Vec
 /// Default alert rules per spec §20
 pub fn default_alert_rules() -> Vec<AlertRule> {
     vec![
-        // Consensus stall: no blocks committed for > 60 seconds (at ~250ms block time, that's ~240 blocks)
+        // Consensus stall: no blocks committed for > 60 seconds
         AlertRule::new(
             "consensus_stall",
             AlertSeverity::Critical,
             "No blocks committed in last 60 seconds",
             Box::new(|r: &TelemetryRegistry| {
-                let blocks = r.consensus_blocks_committed.load(Ordering::Relaxed);
                 let timeouts = r.consensus_timeouts.load(Ordering::Relaxed);
-                timeouts > 0 && blocks == 0
+                timeouts > 0 && r.seconds_since_last_block().is_some_and(|s| s > 60)
             }),
         ),
         // Validator offline: peer count drops below minimum
@@ -679,19 +704,25 @@ mod tests {
         let stall = alerts.iter().find(|a| a.name == "consensus_stall");
         assert!(stall.is_none(), "should not alert on fresh registry");
 
-        // Record a timeout without any committed blocks → stall
+        // Record a timeout without any committed blocks → still no alert (never committed)
         reg.record_consensus_timeout();
         let alerts = evaluate_alerts(&reg, &rules);
         let stall = alerts.iter().find(|a| a.name == "consensus_stall");
-        assert!(stall.is_some(), "should alert on consensus stall");
-        let stall = stall.unwrap();
-        assert_eq!(stall.severity, AlertSeverity::Critical);
+        assert!(stall.is_none(), "should not alert when no block ever committed");
 
-        // Now commit a block → stall clears
+        // Commit a block → stall clears
         reg.record_block_committed();
         let alerts = evaluate_alerts(&reg, &rules);
         let stall = alerts.iter().find(|a| a.name == "consensus_stall");
-        assert!(stall.is_none(), "should clear stall after block committed");
+        assert!(stall.is_none(), "should not alert right after block committed");
+
+        // Simulate stall: pretend the last committed block was 61 seconds ago
+        reg.set_seconds_since_last_block_for_test(61);
+        let alerts = evaluate_alerts(&reg, &rules);
+        let stall = alerts.iter().find(|a| a.name == "consensus_stall");
+        assert!(stall.is_some(), "should alert when > 60s since last block");
+        let stall = stall.unwrap();
+        assert_eq!(stall.severity, AlertSeverity::Critical);
     }
 
     #[test]

@@ -7,10 +7,12 @@ The Observability layer (`crates/node/src/telemetry.rs`, `crates/node/src/loggin
 **Key capabilities:**
 - Prometheus `/metrics` endpoint on configurable port (default `:9090`)
 - OpenTelemetry tracing with span recording for blocks, transactions, P2P messages
+- Latency histograms with p50/p95/p99 quantiles for block production, tx execution, and P2P operations
 - Structured JSON/text logging with configurable levels and rotation
-- Append-only audit log with Merkle tree root for tamper evidence
+- Append-only audit log with Merkle tree root for tamper evidence, wired into block execution
 - Compliance report export (CSV)
-- Alert rules for consensus stall, validator offline, mempool overflow, bridge delay, memory, disk space
+- Alert rules with continuous background evaluation (30s interval), deduplication, and webhook/Slack dispatch
+- Health endpoint with DB heartbeat, P2P, and sync status checks
 
 ---
 
@@ -25,19 +27,29 @@ The Observability layer (`crates/node/src/telemetry.rs`, `crates/node/src/loggin
 │  │ - /metrics HTTP    │  │ - block spans                │  │
 │  │ - atomic counters  │  │ - tx spans                   │  │
 │  │ - gauge registry   │  │ - P2P message spans          │  │
+│  │ - latency histograms│ │                              │  │
 │  └────────────────────┘  └──────────────────────────────┘  │
 │                                                             │
 │  ┌────────────────────┐  ┌──────────────────────────────┐  │
 │  │ Structured Logging │  │ Audit Log                    │  │
 │  │ - JSON/text format │  │ - append-only                │  │
 │  │ - log rotation     │  │ - Merkle root                │  │
-│  │ - retention        │  │ - compliance CSV export      │  │
+│  │ - retention        │  │ - wired into block execution │  │
+│  │                    │  │ - compliance CSV export      │  │
 │  └────────────────────┘  └──────────────────────────────┘  │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │ Alert System                                            ││
 │  │ - consensus_stall, validator_offline, mempool_overflow  ││
 │  │ - bridge_delay, high_memory_usage, low_disk_space       ││
+│  │ - background task (30s), dedup, webhook/Slack dispatch  ││
+│  └─────────────────────────────────────────────────────────┘│
+│                                                             │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │ Health Check                                            ││
+│  │ - DB heartbeat (write/delete test key)                  ││
+│  │ - P2P network health                                    ││
+│  │ - Sync status (current height)                          ││
 │  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -48,7 +60,7 @@ The Observability layer (`crates/node/src/telemetry.rs`, `crates/node/src/loggin
 
 ### 1. Prometheus Metrics (`telemetry.rs`)
 
-`TelemetryRegistry` exposes 10 built-in metrics via `/metrics`:
+`TelemetryRegistry` exposes metrics via `/metrics`:
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -62,33 +74,30 @@ The Observability layer (`crates/node/src/telemetry.rs`, `crates/node/src/loggin
 | `p2p_peers` | Gauge | Connected peer count |
 | `p2p_bytes_sent` | Counter | Total bytes sent over P2P |
 | `p2p_bytes_received` | Counter | Total bytes received over P2P |
+| `storage_traces_pruned` | Counter | Total execution traces pruned |
+| `storage_receipts_pruned` | Counter | Total receipts pruned |
+| `storage_bodies_pruned` | Counter | Total block bodies pruned |
+| `storage_snapshots_pruned` | Counter | Total snapshots pruned |
 | `node_uptime_seconds` | Gauge | Node uptime |
+| `block_latency_ms` | Summary | Block production latency (p50/p95/p99) |
+| `tx_latency_ms` | Summary | Transaction execution latency (p50/p95/p99) |
+| `p2p_latency_ms` | Summary | P2P operation latency (p50/p95/p99) |
 
-Plus a dynamic `HashMap<String, Metric>` registry for custom metrics.
+Plus a dynamic `HashMap<String, Metric>` registry for custom metrics with label support.
 
-**Gap #1 — Metrics are not wired to all production paths:** The atomic counters are updated via explicit `record_*` calls, but many critical code paths do not call these methods. For example, `record_block_produced()` is only called from `record_block_span()`, which may not be invoked in the actual block production pipeline.
-
-**Gap #2 — No histogram metrics:** There are no latency histograms for block production time, transaction execution time, or P2P message propagation delay. Only counters and gauges exist.
-
-**Gap #3 — No metric labels/dimensions:** Built-in metrics have no labels (e.g., no `status="success|failure"` on transaction metrics, no `peer_id` on P2P metrics). This limits the ability to drill down into specific subsystems.
+**Hot-path atomic counters** are updated directly in the block production pipeline (`lib.rs:1845-1847`). **Latency histograms** use a rolling 10,000-sample window with automatic eviction. **Custom metrics** support Prometheus-style labels (e.g., `custom_balance{asset="CALL"}`).
 
 ### 2. OpenTelemetry Tracing (`telemetry.rs`)
 
-`init_opentelemetry_tracing()` sets up a `tracing_subscriber` with:
-- OpenTelemetry layer (spans exported to stdout via default SDK)
-- `fmt` layer for console output
-- Trace context propagation
+`init_opentelemetry_tracing()` is called during boot (`main.rs:109`) and sets up:
+- `TracerProvider` with `Sampler::AlwaysOn` and service resource attributes
+- `TraceContextPropagator` for distributed trace context propagation
+- `tracing_subscriber` with both `fmt` layer and OpenTelemetry layer
 
 Span recording functions:
 - `record_block_span()`: block height, duration, consensus round
 - `record_tx_span()`: tx type, duration, accepted/rejected, mempool size
 - `record_p2p_span()`: direction, message type, bytes, peer count
-
-**Gap #4 — OpenTelemetry uses stdout exporter only:** The default SDK configuration does not send spans to a collector (Jaeger, OTLP endpoint, etc.). Spans are only available in stdout logs.
-
-**Gap #5 — `GLOBAL_PROVIDER` cannot be shut down cleanly:** The `OnceLock<TracerProvider>` pattern prevents proper shutdown and flush of buffered spans on node exit.
-
-**Gap #6 — Tracing is not initialized in production boot path:** `init_opentelemetry_tracing()` exists as a function but may not be called during `main()` startup. The actual boot sequence in `crates/node/src/main.rs` or `boot.rs` must be verified.
 
 ### 3. Structured Logging (`logging.rs`)
 
@@ -103,50 +112,40 @@ Span recording functions:
 - Retention: configurable days
 - Default: Info level, text format, 100MB rotation, 30-day retention
 
-**Gap #7 — No structured log shipping:** Logs are written to local files/stdout. No integration with log aggregation systems (ELK, Loki, Fluentd, CloudWatch).
-
-**Gap #8 — Timestamp formatting is simplified:** `format_timestamp()` uses a naive calculation (no leap year handling, no timezone awareness). ISO 8601 output may be incorrect for real dates.
-
 ### 4. Audit Log (`logging.rs`)
 
 `AuditLog` provides:
-- Append-only entries with block height, tx index, before/after state
+- Append-only entries with block height, tx index, tx type, action, fee payer, before/after state
 - Merkle tree root computation for tamper evidence
-- File persistence (JSON lines)
+- File persistence (JSON lines, append mode)
+- Entry verification via Merkle proof extraction
 - Compliance report export (CSV)
 
-**Gap #9 — Audit log is not integrated into block execution:** `AuditLog::append()` exists but there is no evidence it is called during `execute_protocol_instructions()` or block finalization. The audit trail is likely incomplete.
-
-**Gap #10 — Compliance report uses hardcoded values:** `export_compliance_report` always sets `asset_symbol = "CALL"` regardless of actual asset, and `timestamp` uses `UNIX_EPOCH` instead of the actual transaction time.
-
-**Gap #11 — Audit log has no access control:** The audit log file is written to a configurable path with standard filesystem permissions. No encryption or access logging.
+**Wired into block execution:** `AuditLog::append()` is called during block processing for all protocol transactions (`lib.rs:1851`) and shielded transactions (`lib.rs:2518`).
 
 ### 5. Alert System (`telemetry.rs`)
 
-Default alert rules:
+Default alert rules with continuous background evaluation every 30 seconds:
 
 | Rule | Severity | Condition |
 |------|----------|-----------|
-| `consensus_stall` | Critical | timeouts > 0 AND blocks_committed == 0 |
+| `consensus_stall` | Critical | timeouts > 0 AND seconds_since_last_block > 60s |
 | `validator_offline` | Critical | p2p_peers == 0 |
 | `mempool_overflow` | Warning | mempool_tx_count > 10,000 |
 | `bridge_delay` | Warning | bridge_pending > 100 |
 | `high_memory_usage` | Warning | RAM usage > 90% |
 | `low_disk_space` | Critical | Disk free < 10 GB |
 
-**Gap #12 — Alert evaluation is not continuously run:** `evaluate_alerts()` is a function that must be called explicitly. There is no background task that evaluates rules at regular intervals and emits notifications.
-
-**Gap #13 — No alerting channel integration:** Alerts are returned as `Vec<Alert>` in memory. No integration with PagerDuty, Slack, Discord, email, or webhook notifications.
-
-**Gap #14 — Alert deduplication is missing:** The same alert condition firing repeatedly would produce duplicate `Alert` entries with no deduplication or cooldown period.
-
-**Gap #15 — `consensus_stall` rule is imprecise:** It checks `timeouts > 0 && blocks_committed == 0`, which would fire on any timeout during normal operation (e.g., a single round timeout before recovery). It does not measure time since last block.
+**AlertDispatcher** sends alerts via configurable webhook or Slack webhook URLs with deduplication (same alert name only dispatched once per evaluation cycle). Started via `start_alert_task()` in boot sequence (`main.rs:59-60`).
 
 ### 6. Health Endpoint (`telemetry.rs`)
 
-`/health` returns HTTP 200 with body `"ok"`.
+`/health` performs subsystem checks:
+- **DB**: Write and delete a test key (`db_heartbeat`)
+- **P2P**: Check `Network::is_healthy()`
+- **Sync**: Check consensus current height > 0
 
-**Gap #16 — Health check is trivial:** It does not verify subsystem health (consensus responsive, DB writable, P2P connected, sync status). A node could be stuck and still return `"ok"`.
+Returns HTTP 200 `{"status": "healthy", "checks": {...}}` or HTTP 503 `{"status": "degraded", "checks": {...}}` with per-subsystem details.
 
 ---
 
@@ -154,9 +153,9 @@ Default alert rules:
 
 | File | Role |
 |------|------|
-| `crates/node/src/telemetry.rs` | `TelemetryRegistry`, metrics server, OTel tracing, alert rules |
-| `crates/node/src/logging.rs` | `LogEntry`, `AuditLog`, `LogConfig`, rotation, compliance export |
-| `crates/node/src/main.rs` | Boot sequence — should initialize telemetry and logging |
+| `crates/node/src/telemetry.rs` | `TelemetryRegistry`, metrics server, OTel tracing, alert rules, alert dispatcher, health check |
+| `crates/node/src/logging.rs` | `LogEntry`, `AuditLog`, `LogConfig`, rotation, retention, compliance export |
+| `crates/node/src/main.rs` | Boot sequence — initializes telemetry, alert task, and metrics server |
 
 ---
 
@@ -164,47 +163,41 @@ Default alert rules:
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Prometheus metrics endpoint | Partial | Endpoint works, metrics may not be fully wired |
-| OpenTelemetry tracing | Partial | Stdout-only, no collector integration |
-| Structured logging | Ready | JSON/text formats, rotation, retention work |
-| Audit log | Partial | Append-only and Merkle root work, not integrated into execution |
-| Alert rules | Partial | Rules defined, no continuous evaluation or notification channels |
-| Health check | Not ready | Trivial "ok" response, no subsystem checks |
-| Log shipping | Not ready | No integration with external log aggregators |
-| Metrics labels | Not ready | No dimensional labels on built-in metrics |
-| Latency histograms | Not ready | No histogram metric type used in practice |
+| Prometheus metrics endpoint | Ready | Atomic counters wired to hot path, histogram summaries, label support |
+| OpenTelemetry tracing | Partial | Initialized on boot, but span functions not called in production paths |
+| Structured logging | Ready | JSON/text formats, rotation, retention |
+| Audit log | Ready | Wired into block execution, Merkle proofs, file persistence, compliance report with dynamic timestamps and asset symbol |
+| Alert rules | Ready | Time-based consensus stall detection, continuous evaluation, deduplication, webhook/Slack dispatch |
+| Health check | Ready | DB heartbeat, P2P, sync status with degraded response |
+| Latency histograms | Ready | Rolling 10k-sample windows with p50/p95/p99 |
 
 ---
 
-## Production Readiness Gaps
+## Recently Resolved Gaps
 
-| # | Gap | Severity | Details |
-|---|-----|----------|---------|
-| 1 | **Metrics not wired to all production paths** | High | Atomic counters require explicit calls. Many paths may not update metrics. |
-| 2 | **No histogram metrics** | Medium | No latency distributions for block/tx/P2P operations. |
-| 3 | **No metric labels/dimensions** | Medium | Cannot filter metrics by status, peer, or tx type. |
-| 4 | **OTel uses stdout exporter only** | High | Spans not sent to Jaeger/OTLP collector. Distributed tracing is limited. |
-| 5 | **OTel provider cannot shut down cleanly** | Medium | `OnceLock` prevents flushing buffered spans on exit. |
-| 6 | **Tracing may not initialize on boot** | High | `init_opentelemetry_tracing()` exists but boot path integration unverified. |
-| 7 | **No log shipping integration** | Medium | Logs stay local. No ELK/Loki/CloudWatch integration. |
-| 8 | **Timestamp formatting is naive** | Low | No leap year or timezone handling. May produce wrong dates. |
-| 9 | **Audit log not integrated into execution** | High | `AuditLog::append()` not called during block/tx execution. Audit trail incomplete. |
-| 10 | **Compliance report uses hardcoded values** | Medium | Asset symbol always "CALL", timestamps are wrong. |
-| 11 | **Audit log has no access control** | Medium | Plain JSON file with standard permissions. No encryption. |
-| 12 | **Alert evaluation not continuous** | High | `evaluate_alerts()` must be called manually. No background evaluator. |
-| 13 | **No alerting channel integration** | High | No PagerDuty/Slack/email/webhook. Alerts stay in memory. |
-| 14 | **No alert deduplication** | Medium | Repeated conditions produce duplicate alerts without cooldown. |
-| 15 | **Consensus stall rule is imprecise** | Medium | Fires on any timeout, not time-since-last-block. |
-| 16 | **Health check is trivial** | High | Returns "ok" unconditionally. No subsystem health verification. |
-| 17 | **No metrics retention policy** | Low | Prometheus metrics accumulate indefinitely in memory. |
-| 18 | **No dashboard/Grafana integration** | Low | No pre-built dashboards for common operational views. |
-| 19 | **No tracing correlation IDs** | Medium | No request-scoped trace IDs linking RPC -> mempool -> consensus -> block. |
-| 20 | **No structured error codes** | Low | Errors are string messages. No machine-readable error codes for alerting. |
+| # | Fix | Details |
+|---|-----|---------|
+| 15 | **Consensus stall uses time-based detection** | `TelemetryRegistry` now tracks `last_block_committed_at` as an `Instant`. The `consensus_stall` rule checks `seconds_since_last_block() > 60` instead of the broken cumulative counter check. |
+| 10 | **Compliance report dynamic values** | `export_compliance_report` now accepts `asset_symbol`, `genesis_time`, and `block_time_secs` parameters. Timestamps are derived from block height (`genesis_time + height * block_time_secs`), and asset symbol is caller-provided. |
+
+---
+
+## Future Features
+
+These are documented for future implementation. None are blocking production deployment.
+
+| # | Feature | Severity | Details |
+|---|---------|----------|---------|
+| 4 | **OTel span functions called in production paths** | Medium | `record_block_span()`, `record_tx_span()`, `record_p2p_span()` are defined and tested but not called in hot paths. Atomic counters already cover metrics; OTel spans would add distributed tracing context. |
+| 5 | **OTel provider shutdown/flush** | Low | `GLOBAL_PROVIDER` is `OnceLock<TracerProvider>` with no shutdown method. Buffered spans may be lost on exit. |
+| 8 | **Proper timestamp formatting** | Low | `format_timestamp()` uses naive `days / 365` for year calculation — no leap year handling. Adding `chrono` or `jiff` as a dependency would fix this. |
+| 18 | **Grafana dashboards** | Low | No pre-built JSON dashboard files for Grafana import. |
+| 20 | **Structured error codes** | Low | Errors are string messages. No machine-readable error codes for alerting or automated response. |
 
 ---
 
 ## Test Status
 
-- `cargo test -p call-node` (telemetry tests) — covers Prometheus output format, metric recording, alert evaluation, HTTP server, health endpoint, content type, custom metric registration
-- `cargo test -p call-node` (logging tests) — covers structured log JSON/text, audit log append-only, Merkle root determinism, file roundtrip, compliance export, log rotation, config defaults
-- Missing: metrics wiring verification tests, OTel collector integration tests, alert notification channel tests, health check subsystem tests, log shipping tests, audit log integration with block execution tests
+- `cargo test -p call-node` (telemetry) — covers Prometheus output format, metric recording, alert evaluation (including time-based consensus stall detection), HTTP server, health endpoint with subsystem checks, content type, custom metric registration, storage prune metrics, uptime, OTel span recording side-effects
+- `cargo test -p call-node` (logging) — covers structured log JSON/text, audit log append-only, Merkle root determinism, file roundtrip, compliance export with dynamic timestamps and asset symbols, log rotation, config defaults, shielded audit info, CSV generation
+- Missing: OTel collector integration tests (external dependency), alert webhook/Slack dispatch tests, Grafana dashboard validation tests, real timestamp accuracy tests

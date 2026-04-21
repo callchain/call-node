@@ -374,10 +374,17 @@ pub struct ComplianceReportEntry {
     pub compliance_status: String,
 }
 
-/// Generate compliance CSV report for an asset and address range
+/// Generate compliance CSV report for an asset and address range.
+///
+/// `genesis_time` is the chain genesis Unix timestamp; `block_time_secs` is
+/// the per-block interval used to derive a block's approximate timestamp.
+/// `asset_symbol` is the human-readable symbol for the asset (e.g. "CALL").
 pub fn export_compliance_report(
     audit_log: &AuditLog,
     asset_id: AssetId,
+    asset_symbol: &str,
+    genesis_time: u64,
+    block_time_secs: u64,
     address_filter: Option<Address>,
 ) -> Vec<ComplianceReportEntry> {
     let mut entries = Vec::new();
@@ -407,16 +414,23 @@ pub fn export_compliance_report(
             .unwrap_or(0)
             .saturating_sub(before_asset.and_then(|v| v.as_u64()).unwrap_or(0));
 
+        // Derive block timestamp from block height
+        let block_timestamp = genesis_time
+            .checked_add(audit.block_height.saturating_mul(block_time_secs))
+            .unwrap_or(genesis_time);
+
+        let timestamp = SystemTime::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(block_timestamp))
+            .map(|t| format_timestamp_for_compliance(&t))
+            .unwrap_or_default();
+
         entries.push(ComplianceReportEntry {
-            timestamp: SystemTime::UNIX_EPOCH
-                .checked_add(std::time::Duration::from_secs(0))
-                .map(|t| format_timestamp_for_compliance(&t))
-                .unwrap_or_default(),
+            timestamp,
             block_height: audit.block_height,
             tx_hash: format!("{:?}", audit.tx_hash),
             tx_type: audit.tx_type.clone(),
             asset_id,
-            asset_symbol: "CALL".into(),
+            asset_symbol: asset_symbol.into(),
             from_address: audit
                 .fee_payer
                 .map(|a| format!("{a:?}"))
@@ -720,8 +734,13 @@ mod tests {
         log.append(make_audit_entry(1, 1)).unwrap();
         log.append(make_audit_entry(2, 0)).unwrap();
 
-        let report = export_compliance_report(&log, 1, None);
+        let report = export_compliance_report(&log, 1, "CALL", 1_700_000_000, 2, None);
         assert!(!report.is_empty());
+
+        // Timestamps should be derived from block height, not epoch zero
+        // block 1 → 1_700_000_000 + 1*2 = 1_700_000_002
+        // block 2 → 1_700_000_000 + 2*2 = 1_700_000_004
+        assert!(report[0].timestamp.contains("2023"), "timestamp should be in 2023, got {}", report[0].timestamp);
 
         // Check CSV output
         let csv = report_to_csv(&report);
