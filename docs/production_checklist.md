@@ -43,12 +43,7 @@ Health checks, alerting, metrics, histograms, audit log — all wired.
 
 ## Phase 6: Test Coverage
 
-| Priority | Action |
-|----------|--------|
-| **P6** | Byzantine consensus tests: network partitions, equivocation, delayed messages |
-| **P6** | Load test: sustained 1000 TPS for 1 hour + memory profiling |
-
-Fixed in this phase: signature negative tests (7), proptest roundtrip (2), MDBX integration tests (7), CI coverage job.
+Tracked in `docs/testing.md` — 2 gaps remaining (byzantine consensus tests, load test).
 
 ---
 

@@ -121,6 +121,17 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 
 ---
 
+## Remaining Production Gaps
+
+Only two test gaps remain after all fixes:
+
+| # | Gap | Scope |
+|---|-----|-------|
+| 1 | **Byzantine consensus tests**: network partitions, equivocation, delayed messages | `crates/node/tests/` |
+| 2 | **Load test**: sustained 1000 TPS for 1 hour + memory profiling | `crates/node/tests/` |
+
+---
+
 ## Recommended Test Additions
 
 ### Phase 1 — Critical (Before Mainnet)
