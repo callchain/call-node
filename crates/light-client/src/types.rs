@@ -289,4 +289,10 @@ pub enum LightClientError {
     BeforeAnchor(u64),
     #[error("duplicate header at block {0}")]
     DuplicateHeader(u64),
+    #[error("cannot reorg below finalized block {0}")]
+    BeforeFinalized(u64),
+    #[error("gap buffer is full")]
+    BufferFull,
+    #[error("block {0} not yet verified, cannot advance anchor")]
+    AnchorNotVerified(u64),
 }

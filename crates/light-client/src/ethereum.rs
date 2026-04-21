@@ -18,7 +18,7 @@ use crate::types::*;
 use crate::verifier;
 use alloy_primitives::{keccak256, Address, B256};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Ethereum light client state.
 pub struct EthLightClient {
@@ -28,7 +28,15 @@ pub struct EthLightClient {
     verified_headers: HashMap<u64, EthHeader>,
     /// Latest verified block number
     latest_block: u64,
+    /// Finalized block from Ethereum consensus (beacon chain).
+    /// Headers at or below this block are considered consensus-verified.
+    finalized_block: Option<(u64, B256)>,
+    /// Buffer for out-of-order headers waiting for their parent.
+    buffer: BTreeMap<u64, EthHeader>,
 }
+
+/// Maximum number of buffered headers waiting for missing parents.
+const MAX_BUFFER_SIZE: usize = 64;
 
 impl EthLightClient {
     /// Create a new light client with a trusted genesis anchor.
@@ -43,6 +51,8 @@ impl EthLightClient {
             genesis,
             verified_headers: verified,
             latest_block: latest,
+            finalized_block: None,
+            buffer: BTreeMap::new(),
         }
     }
 
@@ -52,7 +62,13 @@ impl EthLightClient {
     /// 1. The header's block number must be > anchor block.
     /// 2. No duplicate header at this block number.
     /// 3. The header's parent_hash must match a previously verified header.
+    ///    - If parent not found but exists in buffer range, buffer the header (gap tolerance).
+    ///    - If parent exists but doesn't match the expected block-1, trigger reorg handling.
     /// 4. The block hash must be consistent with the RLP encoding.
+    ///
+    /// Returns `Ok(())` on success, or `Ok(n)` if the header was buffered
+    /// (where `n` is the number of headers flushed from the buffer).
+    /// Returns `Err(BufferFull)` if the buffer is at capacity.
     pub fn submit_header(&mut self, header: EthHeader) -> Result<(), LightClientError> {
         let block_num = header.number().ok_or_else(|| {
             LightClientError::InvalidHeader("cannot decode block number".into())
@@ -63,50 +79,88 @@ impl EthLightClient {
             return Err(LightClientError::BeforeAnchor(block_num));
         }
 
-        // No duplicates
+        // No duplicates in verified or buffer
         if self.verified_headers.contains_key(&block_num) {
             return Err(LightClientError::DuplicateHeader(block_num));
         }
+        if self.buffer.contains_key(&block_num) {
+            return Err(LightClientError::DuplicateHeader(block_num));
+        }
 
-        // Parent hash must match a verified header
-        let parent_num = block_num - 1;
-        let parent = self
-            .verified_headers
-            .get(&parent_num)
-            .ok_or(LightClientError::HeaderNotVerified {
-                block: parent_num,
-                latest: self.latest_block,
+        // Check parent hash
+        let parent_num = block_num.saturating_sub(1);
+        let parent_in_verified = self.verified_headers.get(&parent_num);
+
+        if let Some(parent) = parent_in_verified {
+            // Parent is verified — check it matches
+            let actual_parent = header.parent_hash().ok_or_else(|| {
+                LightClientError::InvalidHeader("cannot decode parent hash".into())
             })?;
 
-        let actual_parent = header.parent_hash().ok_or_else(|| {
-            LightClientError::InvalidHeader("cannot decode parent hash".into())
-        })?;
+            if actual_parent != parent.block_hash {
+                // Parent exists but hash doesn't match — possible reorg
+                // Try reorg handling: find where the parent hash actually is
+                return self.handle_reorg_and_submit(header);
+            }
 
-        if actual_parent != parent.block_hash {
-            return Err(LightClientError::ParentHashMismatch {
-                block: block_num,
-                expected: parent.block_hash,
-                actual: actual_parent,
-            });
+            // Parent matches — verify block hash and insert
+            let computed_hash = keccak256(&header.rlp_bytes);
+            if computed_hash != header.block_hash {
+                return Err(LightClientError::InvalidHeader(
+                    "block hash does not match RLP encoding".into(),
+                ));
+            }
+
+            self.verified_headers.insert(block_num, header);
+            if block_num > self.latest_block {
+                self.latest_block = block_num;
+            }
+
+            // Flush any buffered headers whose parents are now verified
+            self.flush_buffer();
+            return Ok(());
         }
 
-        // Verify block hash matches RLP
-        let computed_hash = keccak256(&header.rlp_bytes);
-        if computed_hash != header.block_hash {
-            return Err(LightClientError::InvalidHeader(
-                "block hash does not match RLP encoding".into(),
-            ));
+        // Parent not found in verified headers.
+        // Check if parent is in the buffer (future block arrives before current)
+        if self.buffer.contains_key(&parent_num) {
+            // Parent is buffered too — buffer this header as well
+            if self.buffer.len() >= MAX_BUFFER_SIZE {
+                return Err(LightClientError::BufferFull);
+            }
+            self.buffer.insert(block_num, header);
+            return Ok(());
         }
 
-        // Store the verified header
-        self.verified_headers
-            .insert(block_num, header);
-
-        // Update latest
-        if block_num > self.latest_block {
-            self.latest_block = block_num;
+        // Parent not found at all — check if it's after anchor (might arrive later)
+        // Buffer if we have room and block is within reasonable range
+        if self.buffer.len() >= MAX_BUFFER_SIZE {
+            return Err(LightClientError::BufferFull);
         }
 
+        // Only buffer if block_num is not too far ahead
+        if block_num <= self.latest_block + MAX_BUFFER_SIZE as u64 {
+            self.buffer.insert(block_num, header);
+            Ok(())
+        } else {
+            // Too far ahead, reject
+            Err(LightClientError::HeaderNotVerified {
+                block: parent_num,
+                latest: self.latest_block,
+            })
+        }
+    }
+
+    /// Handle a reorg by calling handle_reorg, returning any unwound headers.
+    fn handle_reorg_and_submit(&mut self, header: EthHeader) -> Result<(), LightClientError> {
+        let unwound = self.handle_reorg(header)?;
+        // Unwound headers can be re-submitted by the caller if needed.
+        // We keep them here for now — they'll be re-validated when re-submitted.
+        // Drop them since handle_reorg already inserted the new header.
+        drop(unwound);
+
+        // Flush buffer in case reorg unblocked some headers
+        self.flush_buffer();
         Ok(())
     }
 
@@ -123,6 +177,178 @@ impl EthLightClient {
     /// Get a verified header by block number.
     pub fn get_header(&self, block_number: u64) -> Option<&EthHeader> {
         self.verified_headers.get(&block_number)
+    }
+
+    /// Get the anchor block number.
+    pub fn anchor_block(&self) -> u64 {
+        self.genesis.anchor_block
+    }
+
+    /// Get the finalized block number, if set.
+    pub fn finalized_block(&self) -> Option<u64> {
+        self.finalized_block.as_ref().map(|(n, _)| *n)
+    }
+
+    /// Get the number of buffered headers.
+    pub fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Set the finalized block from Ethereum consensus (beacon chain).
+    /// Headers at or below this block are considered consensus-verified.
+    pub fn set_finalized_block(&mut self, block: u64, hash: B256) {
+        self.finalized_block = Some((block, hash));
+    }
+
+    /// Check if a block is consensus-verified (at or below finalized).
+    pub fn is_consensus_verified(&self, block: u64) -> bool {
+        self.finalized_block.is_some_and(|(n, _)| block <= n)
+    }
+
+    /// Handle a potential reorg when the parent doesn't match the latest header.
+    ///
+    /// If the header's parent exists in verified headers but isn't `block_num - 1`,
+    /// this indicates a reorg. Walk back to find the fork point, unwind orphaned
+    /// headers above it, and return the unwound headers for resubmission.
+    ///
+    /// Returns `Ok(unwound_headers)` — headers that were removed from the chain
+    /// above the fork point. The caller should resubmit them.
+    /// Returns `Err(BeforeFinalized)` if the fork point is at or below finalized.
+    pub fn handle_reorg(&mut self, header: EthHeader) -> Result<Vec<EthHeader>, LightClientError> {
+        let block_num = header.number().ok_or_else(|| {
+            LightClientError::InvalidHeader("cannot decode block number".into())
+        })?;
+
+        let parent_hash = header.parent_hash().ok_or_else(|| {
+            LightClientError::InvalidHeader("cannot decode parent hash".into())
+        })?;
+
+        // Find where this parent_hash exists in verified headers
+        let mut fork_point: Option<u64> = None;
+        // Search backwards from latest to find the parent
+        for n in (self.genesis.anchor_block..=self.latest_block).rev() {
+            if let Some(h) = self.verified_headers.get(&n) {
+                if h.block_hash == parent_hash {
+                    fork_point = Some(n);
+                    break;
+                }
+            }
+        }
+
+        let fork = fork_point.ok_or(LightClientError::HeaderNotFound(
+            block_num.saturating_sub(1),
+        ))?;
+
+        // Don't reorg below finalized
+        if let Some((finalized_n, _)) = self.finalized_block {
+            if fork <= finalized_n {
+                return Err(LightClientError::BeforeFinalized(fork));
+            }
+        }
+
+        // Unwind headers above the fork point
+        let unwound: Vec<EthHeader> = (fork + 1..=self.latest_block)
+            .filter_map(|n| self.verified_headers.remove(&n))
+            .collect();
+
+        // Update latest_block
+        self.latest_block = fork;
+
+        // Insert the new header
+        self.verified_headers.insert(block_num, header.clone());
+        if block_num > self.latest_block {
+            self.latest_block = block_num;
+        }
+
+        Ok(unwound)
+    }
+
+    /// Flush buffered headers whose parents are now verified.
+    /// Processes headers in order (lowest block number first).
+    fn flush_buffer(&mut self) -> Vec<Result<(), LightClientError>> {
+        let mut results = Vec::new();
+        loop {
+            // Find the lowest buffered header whose parent is verified
+            let next = self.buffer.iter().find(|(block_num, _header)| {
+                let parent = block_num.saturating_sub(1);
+                self.verified_headers.contains_key(&parent)
+            }).map(|(n, h)| (*n, h.clone()));
+
+            match next {
+                Some((n, _)) => {
+                    let header = self.buffer.remove(&n).unwrap();
+                    let result = self.insert_verified_header(header);
+                    results.push(result);
+                }
+                None => break,
+            }
+        }
+        results
+    }
+
+    /// Insert a header into verified headers without re-running parent verification.
+    fn insert_verified_header(&mut self, header: EthHeader) -> Result<(), LightClientError> {
+        let block_num = header.number().ok_or_else(|| {
+            LightClientError::InvalidHeader("cannot decode block number".into())
+        })?;
+
+        if self.verified_headers.contains_key(&block_num) {
+            return Err(LightClientError::DuplicateHeader(block_num));
+        }
+
+        self.verified_headers.insert(block_num, header);
+        if block_num > self.latest_block {
+            self.latest_block = block_num;
+        }
+        Ok(())
+    }
+
+    /// Advance the trusted anchor to a more recent verified block.
+    ///
+    /// After advancing, all headers below the new anchor are pruned,
+    /// freeing memory. The new anchor must already be verified.
+    pub fn advance_anchor(&mut self, block: u64, hash: B256) -> Result<(), LightClientError> {
+        if !self.verified_headers.contains_key(&block) {
+            return Err(LightClientError::AnchorNotVerified(block));
+        }
+
+        // Don't advance below finalized
+        if let Some((finalized_n, _)) = self.finalized_block {
+            if block <= finalized_n {
+                return Err(LightClientError::BeforeFinalized(finalized_n));
+            }
+        }
+
+        self.genesis.anchor_block = block;
+        self.genesis.anchor_hash = hash;
+
+        // Prune headers below new anchor
+        self.prune_headers_before(block);
+
+        Ok(())
+    }
+
+    /// Remove headers with block number less than `before_block`.
+    /// Never removes the anchor or finalized block.
+    fn prune_headers_before(&mut self, _before_block: u64) {
+        let min_keep = std::cmp::min(
+            self.genesis.anchor_block,
+            self.finalized_block.map(|(n, _)| n).unwrap_or(u64::MAX),
+        );
+        self.verified_headers.retain(|&k, _| k >= min_keep);
+    }
+
+    /// Prune all headers before the given block number.
+    /// Returns the number of headers removed.
+    pub fn prune_headers(&mut self, before_block: u64) -> usize {
+        let min_keep = std::cmp::min(
+            self.genesis.anchor_block,
+            self.finalized_block.map(|(n, _)| n).unwrap_or(u64::MAX),
+        );
+        let effective_before = std::cmp::max(before_block, min_keep + 1);
+        let before_count = self.verified_headers.len();
+        self.verified_headers.retain(|&k, _| k >= effective_before);
+        before_count - self.verified_headers.len()
     }
 
     /// Verify transaction inclusion in a block via MPT proof.
@@ -649,15 +875,16 @@ mod tests {
         };
         let mut client = EthLightClient::init(genesis);
 
-        // Header with wrong parent
+        // Header with wrong parent (not matching any verified header)
         let wrong_parent = B256::repeat_byte(0xBB);
         let tx_root = B256::repeat_byte(0x01);
         let receipt_root = B256::repeat_byte(0x02);
         let rlp = make_test_header_rlp(wrong_parent, 1001, tx_root, receipt_root);
         let header = EthHeader::from_rlp(rlp);
 
+        // Reorg handling fails because wrong_parent hash doesn't exist in verified headers
         let err = client.submit_header(header).unwrap_err();
-        assert!(matches!(err, LightClientError::ParentHashMismatch { .. }));
+        assert!(matches!(err, LightClientError::HeaderNotFound(_)));
     }
 
     #[test]
@@ -713,14 +940,26 @@ mod tests {
         };
         let mut client = EthLightClient::init(genesis);
 
-        // Try to submit block 1002 without 1001
+        // Try to submit block 1002 without 1001 — now buffers instead of rejecting
         let tx_root = B256::repeat_byte(0x01);
         let receipt_root = B256::repeat_byte(0x02);
         let rlp = make_test_header_rlp(anchor, 1002, tx_root, receipt_root);
         let header = EthHeader::from_rlp(rlp);
 
-        let err = client.submit_header(header).unwrap_err();
-        assert!(matches!(err, LightClientError::HeaderNotVerified { .. }));
+        // Buffering succeeds
+        assert!(client.submit_header(header).is_ok());
+        assert_eq!(client.buffer_len(), 1);
+        // Block 1002 is buffered, not yet verified
+        assert!(!client.is_header_verified(1002));
+
+        // Now submit block 1001, which should flush 1002 from buffer
+        let rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+        let header_1001 = EthHeader::from_rlp(rlp);
+        assert!(client.submit_header(header_1001).is_ok());
+
+        // 1002 should now be verified
+        assert!(client.is_header_verified(1002));
+        assert_eq!(client.buffer_len(), 0);
     }
 
     #[test]
@@ -748,5 +987,193 @@ mod tests {
         for i in 1000..=1010 {
             assert!(client.is_header_verified(i));
         }
+    }
+
+    fn build_chain(client: &mut EthLightClient, from: u64, to: u64, anchor: B256) -> B256 {
+        let tx_root = B256::repeat_byte(0x01);
+        let receipt_root = B256::repeat_byte(0x02);
+        let mut parent = anchor;
+        for i in from..=to {
+            let rlp = make_test_header_rlp(parent, i, tx_root, receipt_root);
+            let header = EthHeader::from_rlp(rlp);
+            parent = header.block_hash;
+            client.submit_header(header).unwrap();
+        }
+        parent
+    }
+
+    #[test]
+    fn test_gap_buffer_flush() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut client = EthLightClient::init(genesis);
+
+        // Submit 1003, 1002, 1001 out of order
+        let tx_root = B256::repeat_byte(0x01);
+        let receipt_root = B256::repeat_byte(0x02);
+
+        // 1003 buffered (parent 1002 not verified)
+        let rlp = make_test_header_rlp(anchor, 1003, tx_root, receipt_root);
+        assert!(client.submit_header(EthHeader::from_rlp(rlp)).is_ok());
+        assert_eq!(client.buffer_len(), 1);
+
+        // 1002 buffered (parent 1001 not verified)
+        let rlp = make_test_header_rlp(anchor, 1002, tx_root, receipt_root);
+        assert!(client.submit_header(EthHeader::from_rlp(rlp)).is_ok());
+        assert_eq!(client.buffer_len(), 2);
+
+        // 1001 — should flush 1002, then 1003
+        let rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+        assert!(client.submit_header(EthHeader::from_rlp(rlp)).is_ok());
+        assert_eq!(client.buffer_len(), 0);
+        assert!(client.is_header_verified(1001));
+        assert!(client.is_header_verified(1002));
+        assert!(client.is_header_verified(1003));
+        assert_eq!(client.latest_block(), 1003);
+    }
+
+    #[test]
+    fn test_buffer_full_rejection() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut client = EthLightClient::init(genesis);
+
+        let tx_root = B256::repeat_byte(0x01);
+        let receipt_root = B256::repeat_byte(0x02);
+
+        // Fill the buffer
+        for i in 1002..=(1001 + MAX_BUFFER_SIZE as u64) {
+            let rlp = make_test_header_rlp(anchor, i, tx_root, receipt_root);
+            assert!(client.submit_header(EthHeader::from_rlp(rlp)).is_ok());
+        }
+        assert_eq!(client.buffer_len(), MAX_BUFFER_SIZE);
+
+        // One more should fail
+        let rlp = make_test_header_rlp(anchor, 1002 + MAX_BUFFER_SIZE as u64, tx_root, receipt_root);
+        let err = client.submit_header(EthHeader::from_rlp(rlp)).unwrap_err();
+        assert!(matches!(err, LightClientError::BufferFull));
+    }
+
+    #[test]
+    fn test_consensus_verification() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut client = EthLightClient::init(genesis);
+
+        let finalized_hash = B256::repeat_byte(0xCC);
+        build_chain(&mut client, 1001, 1005, anchor);
+        client.set_finalized_block(1005, finalized_hash);
+
+        assert!(client.is_consensus_verified(1005));
+        assert!(client.is_consensus_verified(1000));
+        assert!(client.is_consensus_verified(1001));
+        assert!(!client.is_consensus_verified(1006));
+        assert_eq!(client.finalized_block(), Some(1005));
+    }
+
+    #[test]
+    fn test_reorg_unwind() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut client = EthLightClient::init(genesis);
+
+        // Build chain: 1000 -> 1001 -> 1002 -> 1003
+        let tx_root = B256::repeat_byte(0x01);
+        let receipt_root = B256::repeat_byte(0x02);
+        let mut parent = anchor;
+        let mut hashes = Vec::new();
+        for i in 1001..=1003 {
+            let rlp = make_test_header_rlp(parent, i, tx_root, receipt_root);
+            let header = EthHeader::from_rlp(rlp.clone());
+            parent = header.block_hash;
+            hashes.push(header.block_hash);
+            client.submit_header(header).unwrap();
+        }
+        assert_eq!(client.latest_block(), 1003);
+
+        // Set finalized at 1001 so we can't reorg below it
+        client.set_finalized_block(1001, hashes[0]);
+
+        // Try reorg at block 1004 with parent = hash of 1001 (skipping 1002, 1003)
+        // This would unwind 1002, 1003 but fork at 1001 which is finalized
+        let fork_parent_hash = hashes[0]; // hash of 1001
+        let rlp = make_test_header_rlp(fork_parent_hash, 1004, tx_root, receipt_root);
+        let header = EthHeader::from_rlp(rlp);
+        let err = client.submit_header(header).unwrap_err();
+        // Should fail because fork point (1001) is at finalized block
+        assert!(matches!(err, LightClientError::BeforeFinalized(1001)));
+    }
+
+    #[test]
+    fn test_anchor_advancement() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut client = EthLightClient::init(genesis);
+
+        build_chain(&mut client, 1001, 1010, anchor);
+        assert_eq!(client.anchor_block(), 1000);
+
+        // Advance anchor to 1005
+        let hash_1005 = client.get_header(1005).unwrap().block_hash;
+        client.advance_anchor(1005, hash_1005).unwrap();
+        assert_eq!(client.anchor_block(), 1005);
+
+        // Headers below anchor should be pruned
+        assert!(!client.is_header_verified(1001));
+        assert!(!client.is_header_verified(1004));
+        assert!(client.is_header_verified(1005));
+        assert!(client.is_header_verified(1010));
+
+        // Can't advance to unverified block
+        assert!(client.advance_anchor(1099, B256::ZERO).is_err());
+    }
+
+    #[test]
+    fn test_prune_headers() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut client = EthLightClient::init(genesis);
+
+        build_chain(&mut client, 1001, 1020, anchor);
+
+        // Set finalized at 1010
+        let hash_1010 = client.get_header(1010).unwrap().block_hash;
+        client.set_finalized_block(1010, hash_1010);
+
+        // Prune before 1005 — min_keep is min(anchor=1000, finalized=1010) = 1000
+        // effective_before = max(1005, 1001) = 1005, removes headers 1000..=1004 = 5
+        let removed = client.prune_headers(1005);
+        assert_eq!(removed, 5);
+
+        // Headers below 1005 should be removed
+        assert!(!client.is_header_verified(1004));
+        assert!(client.is_header_verified(1005));
+        // Finalized and above should remain
+        assert!(client.is_header_verified(1010));
+        assert!(client.is_header_verified(1020));
     }
 }

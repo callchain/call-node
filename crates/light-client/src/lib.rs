@@ -32,5 +32,8 @@ pub use ethereum::EthLightClient;
 pub use types::*;
 pub use verifier::{bytes_to_nibbles, verify_mpt_proof};
 
+#[cfg(feature = "eth-sync")]
+pub mod sync;
+
 #[cfg(test)]
 mod tests;

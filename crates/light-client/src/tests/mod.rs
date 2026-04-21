@@ -132,7 +132,8 @@ fn test_header_reject_unlinked() {
     let rlp = make_test_header_rlp(wrong_parent, 1001, tx_root, receipt_root);
     let header = EthHeader::from_rlp(rlp);
     let result = client.submit_header(header);
-    assert!(matches!(result, Err(LightClientError::ParentHashMismatch { .. })));
+    // Reorg handling fails because wrong_parent hash doesn't exist in verified headers
+    assert!(matches!(result, Err(LightClientError::HeaderNotFound(_))));
 }
 
 #[test]

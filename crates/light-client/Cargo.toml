@@ -17,5 +17,10 @@ alloy-consensus.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 hex.workspace = true
+ureq = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+eth-sync = ["dep:ureq", "dep:serde_json"]
 
 [dev-dependencies]
