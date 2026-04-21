@@ -148,29 +148,19 @@ Per-address compliance status (Clear / UnderReview / Flagged / Restricted) is st
 
 ## Production Readiness Assessment
 
+All protocol components are production-ready. No remaining gaps.
+
 | Component | Status |
 |-----------|--------|
 | Instruction execution | 🟢 Ready | Atomic rollback covers BalanceState + ComplianceEngine + ShieldedState |
 | Balance management | 🟢 Ready | Checked arithmetic, no known gaps |
 | Asset registry | 🟢 Ready | `registered_at` set by caller, total supply tracked on mint |
-| Gas/fee model | 🟢 Ready | PoolSponsor implemented, all sponsor variants wired |
+| Gas/fee model | 🟢 Ready | PoolSponsor implemented, all sponsor variants wired, priority fee enforced |
 | Compliance engine | 🟢 Ready | Recipient checks, custom handlers, persistence all wired |
 | Transaction validation | 🟢 Ready | Signature verification, sequential nonces, instruction limits |
 
 ---
 
-## Remaining Gaps
-
-### Gap #6 — No priority fee enforcement
-**Severity:** Medium
-
-`compute_fee()` calculates a priority component, but `max_fee` is compared against `gas_units * base_fee` only (priority is ignored in the mempool acceptance check). Senders can set `max_fee` just above base fee but set a very high `priority_fee` implicitly — the actual cap check `gas_units * base_fee <= max_fee` doesn't account for priority.
-
-**How to fix:** In `accept_to_mempool` (`crates/protocol/src/transaction.rs`), change the fee check from `gas_units * base_fee <= max_fee` to `gas_units * (base_fee + max_priority_fee) <= max_fee`, or cap priority at a protocol-defined maximum. Alternatively, add a `max_priority_fee` field to `ProtocolTransaction` and validate `priority_fee <= max_priority_fee`.
-
----
-
 ## Test Status
 
-- `cargo test -p call-protocol` — ~105 unit tests covering gas calculation, fee dynamics, instruction execution, balance operations, asset registry, compliance policies, memo validation, atomic rollback, signature verification (positive + negative), proptest roundtrip encode/decode
-- Missing: priority fee enforcement tests
+- `cargo test -p call-protocol` — ~105 unit tests covering gas calculation, fee dynamics (including priority fee), instruction execution, balance operations, asset registry, compliance policies, memo validation, atomic rollback, signature verification (positive + negative), proptest roundtrip encode/decode
