@@ -173,15 +173,6 @@ Returns HTTP 200 `{"status": "healthy", "checks": {...}}` or HTTP 503 `{"status"
 
 ---
 
-## Recently Resolved Gaps
-
-| # | Fix | Details |
-|---|-----|---------|
-| 15 | **Consensus stall uses time-based detection** | `TelemetryRegistry` now tracks `last_block_committed_at` as an `Instant`. The `consensus_stall` rule checks `seconds_since_last_block() > 60` instead of the broken cumulative counter check. |
-| 10 | **Compliance report dynamic values** | `export_compliance_report` now accepts `asset_symbol`, `genesis_time`, and `block_time_secs` parameters. Timestamps are derived from block height (`genesis_time + height * block_time_secs`), and asset symbol is caller-provided. |
-
----
-
 ## Future Features
 
 These are documented for future implementation. None are blocking production deployment.
