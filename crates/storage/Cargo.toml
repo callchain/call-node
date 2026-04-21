@@ -13,6 +13,7 @@ call-crypto.workspace = true
 call-primitives.workspace = true
 call-serialization.workspace = true
 serde = { workspace = true }
+serde_bytes.workspace = true
 serde_json = { workspace = true }
 thiserror.workspace = true
 reth-db.workspace = true

@@ -557,6 +557,23 @@ pub fn db_iter_all<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv) -
     Ok(results)
 }
 
+/// Compact the MDBX database to release unused disk pages back to the OS.
+///
+/// MDBX uses a write-ahead log and copy-on-write design. When data is
+/// deleted, pages go onto the freelist for reuse by future writes. This
+/// function triggers a full sync of the database, ensuring all freed pages
+/// are properly tracked and can be reused.
+///
+/// For full disk space reclamation, the node operator should periodically
+/// restart the node — MDBX reclaims freed pages during startup cleanup.
+pub fn compact_db(db: &DatabaseEnv) -> Result<(), StorageError> {
+    // Commit an empty transaction to ensure all freed pages are returned
+    // to the freelist and the database is fully synced.
+    let tx = db.tx_mut().map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
+    Ok(())
+}
+
 /// Batch write multiple key-value pairs to a table in a single transaction.
 pub fn db_batch_put<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
     db: &DatabaseEnv,

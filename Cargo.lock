@@ -2060,6 +2060,7 @@ dependencies = [
  "reth-db",
  "reth-db-api",
  "serde",
+ "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",

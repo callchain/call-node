@@ -53,6 +53,11 @@ pub struct TelemetryRegistry {
     pub p2p_peers: AtomicU64,
     pub p2p_bytes_sent: AtomicU64,
     pub p2p_bytes_received: AtomicU64,
+    // Storage prune counters
+    pub storage_traces_pruned: AtomicU64,
+    pub storage_receipts_pruned: AtomicU64,
+    pub storage_bodies_pruned: AtomicU64,
+    pub storage_snapshots_pruned: AtomicU64,
     // Latency histograms (rolling window, durations in milliseconds)
     pub block_latency_ms: RwLock<Vec<u64>>,
     pub tx_latency_ms: RwLock<Vec<u64>>,
@@ -76,6 +81,10 @@ impl TelemetryRegistry {
             p2p_peers: AtomicU64::new(0),
             p2p_bytes_sent: AtomicU64::new(0),
             p2p_bytes_received: AtomicU64::new(0),
+            storage_traces_pruned: AtomicU64::new(0),
+            storage_receipts_pruned: AtomicU64::new(0),
+            storage_bodies_pruned: AtomicU64::new(0),
+            storage_snapshots_pruned: AtomicU64::new(0),
             block_latency_ms: RwLock::new(Vec::new()),
             tx_latency_ms: RwLock::new(Vec::new()),
             p2p_latency_ms: RwLock::new(Vec::new()),
@@ -195,6 +204,14 @@ impl TelemetryRegistry {
         }
     }
 
+    /// Record cumulative storage prune counters
+    pub fn record_storage_prune(&self, traces: u64, receipts: u64, bodies: u64, snapshots: u64) {
+        self.storage_traces_pruned.store(traces, Ordering::Relaxed);
+        self.storage_receipts_pruned.store(receipts, Ordering::Relaxed);
+        self.storage_bodies_pruned.store(bodies, Ordering::Relaxed);
+        self.storage_snapshots_pruned.store(snapshots, Ordering::Relaxed);
+    }
+
     /// Compute quantiles (p50, p95, p99) from a sorted slice
     fn quantile(sorted: &[u64], q: f64) -> u64 {
         if sorted.is_empty() {
@@ -248,6 +265,22 @@ impl TelemetryRegistry {
         output.push_str(&format!(
             "# HELP p2p_bytes_received Total bytes received over P2P\n# TYPE p2p_bytes_received counter\np2p_bytes_received {}\n",
             self.p2p_bytes_received.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "# HELP storage_traces_pruned Total execution traces pruned\n# TYPE storage_traces_pruned counter\nstorage_traces_pruned {}\n",
+            self.storage_traces_pruned.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "# HELP storage_receipts_pruned Total receipts pruned\n# TYPE storage_receipts_pruned counter\nstorage_receipts_pruned {}\n",
+            self.storage_receipts_pruned.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "# HELP storage_bodies_pruned Total block bodies pruned\n# TYPE storage_bodies_pruned counter\nstorage_bodies_pruned {}\n",
+            self.storage_bodies_pruned.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "# HELP storage_snapshots_pruned Total snapshots pruned\n# TYPE storage_snapshots_pruned counter\nstorage_snapshots_pruned {}\n",
+            self.storage_snapshots_pruned.load(Ordering::Relaxed)
         ));
         output.push_str(&format!(
             "# HELP node_uptime_seconds Node uptime in seconds\n# TYPE node_uptime_seconds gauge\nnode_uptime_seconds {:.0}\n",
@@ -684,6 +717,37 @@ mod tests {
         assert_eq!(reg.consensus_blocks_produced.load(Ordering::Relaxed), 0);
         assert_eq!(reg.p2p_peers.load(Ordering::Relaxed), 0);
         assert!(reg.uptime() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_storage_prune_metrics() {
+        let reg = TelemetryRegistry::new(std::env::temp_dir());
+
+        // Initially zero
+        assert_eq!(reg.storage_traces_pruned.load(Ordering::Relaxed), 0);
+        assert_eq!(reg.storage_receipts_pruned.load(Ordering::Relaxed), 0);
+        assert_eq!(reg.storage_bodies_pruned.load(Ordering::Relaxed), 0);
+        assert_eq!(reg.storage_snapshots_pruned.load(Ordering::Relaxed), 0);
+
+        // Record prune counters (cumulative from PruneState)
+        reg.record_storage_prune(1_500, 3_000, 800, 2);
+        assert_eq!(reg.storage_traces_pruned.load(Ordering::Relaxed), 1_500);
+        assert_eq!(reg.storage_receipts_pruned.load(Ordering::Relaxed), 3_000);
+        assert_eq!(reg.storage_bodies_pruned.load(Ordering::Relaxed), 800);
+        assert_eq!(reg.storage_snapshots_pruned.load(Ordering::Relaxed), 2);
+
+        // Update to new cumulative values
+        reg.record_storage_prune(3_000, 6_000, 1_600, 5);
+        assert_eq!(reg.storage_traces_pruned.load(Ordering::Relaxed), 3_000);
+        assert_eq!(reg.storage_receipts_pruned.load(Ordering::Relaxed), 6_000);
+        assert_eq!(reg.storage_bodies_pruned.load(Ordering::Relaxed), 1_600);
+        assert_eq!(reg.storage_snapshots_pruned.load(Ordering::Relaxed), 5);
+
+        let output = reg.prometheus_output();
+        assert!(output.contains("storage_traces_pruned 3000"));
+        assert!(output.contains("storage_receipts_pruned 6000"));
+        assert!(output.contains("storage_bodies_pruned 1600"));
+        assert!(output.contains("storage_snapshots_pruned 5"));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use call_consensus::{
     proposer::{derive_vrf_seed, select_proposer_subset, EPOCH_LENGTH},
 };
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, UpgradeAnnouncement};
-use call_primitives::BlockHash;
+use call_primitives::{BlockHash, Hash, Address};
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
@@ -30,7 +30,7 @@ use call_protocol::{
 use call_governance::GovernanceManager;
 use call_oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager, wire_governance_executor};
-use call_storage::{CallDb, open_db, PruneState, StorageError};
+use call_storage::{CallDb, open_db, PruneState, StorageError, StateRoots, produce_state_snapshot};
 use call_storage::reth_db::{
     save_balances as db_save_balances, load_balances as db_load_balances,
     save_prune_state as db_save_prune,
@@ -1938,6 +1938,64 @@ async fn block_production_loop(
         if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config, Some(&db.db)) {
             tracing::warn!(error = %e, "prune check failed");
         }
+        telemetry.record_storage_prune(
+            prune_state.traces_pruned,
+            prune_state.receipts_pruned,
+            prune_state.bodies_pruned,
+            prune_state.snapshots_pruned,
+        );
+
+        // 13a. Produce state snapshot at snapshot interval boundaries
+        if new_height % prune_config.snapshot_interval == 0 {
+            let balance_state = state.balance_state.read().unwrap();
+            let protocol_root = call_storage::compute_protocol_root(
+                balance_state.balances.balances_map(),
+                balance_state.allowances.allowances_map(),
+            );
+            drop(balance_state);
+
+            let evm_root = {
+                let evm_state = state.evm_state.read().unwrap();
+                let root = evm_state.compute_state_root();
+                Hash::from(root.0)
+            };
+
+            let shielded_root = {
+                let shielded_state = state.shielded_state.read().unwrap();
+                shielded_state.merkle_root()
+            };
+
+            let agent_root = {
+                let registry = state.agent_registry.read().unwrap();
+                let agents: std::collections::HashMap<u64, (Address, String, u64)> = registry
+                    .agents
+                    .iter()
+                    .map(|(id, reg)| (*id, (reg.owner, reg.name.clone(), reg.registered_at)))
+                    .collect();
+                call_storage::compute_agent_root(&agents)
+            };
+
+            let consensus_root = {
+                let validator_state = state.validator_state.read().unwrap();
+                let validators: std::collections::HashMap<u32, (Address, u128)> = validator_state
+                    .get_all_validators()
+                    .iter()
+                    .map(|(id, stake)| (*id, (stake.address, stake.staked_call)))
+                    .collect();
+                call_storage::compute_consensus_root(&validators)
+            };
+
+            let roots = StateRoots { protocol_root, evm_root, shielded_root, agent_root, consensus_root };
+            let snapshot_dir = db.data_dir.join("snapshots");
+            match produce_state_snapshot(&mut prune_state, roots, new_height, Some(&snapshot_dir)) {
+                Ok(_) => {
+                    tracing::info!(height = new_height, "state snapshot produced");
+                }
+                Err(ref e) => {
+                    tracing::warn!(error = %e, "snapshot production failed");
+                }
+            }
+        }
 
         // 14. Incrementally persist state changes after every block
         let db_env = &db.db;
@@ -2538,6 +2596,64 @@ async fn bft_event_loop(
                         &mut prune_state, new_height, &prune_config, Some(&db.db)
                     ) {
                         tracing::warn!(error = %e, "BFT finalize: prune check failed");
+                    }
+                    telemetry.record_storage_prune(
+                        prune_state.traces_pruned,
+                        prune_state.receipts_pruned,
+                        prune_state.bodies_pruned,
+                        prune_state.snapshots_pruned,
+                    );
+
+                    // Produce state snapshot at snapshot interval boundaries
+                    if new_height % prune_config.snapshot_interval == 0 {
+                        let balance_state = state.balance_state.read().unwrap();
+                        let protocol_root = call_storage::compute_protocol_root(
+                            balance_state.balances.balances_map(),
+                            balance_state.allowances.allowances_map(),
+                        );
+                        drop(balance_state);
+
+                        let evm_root = {
+                            let evm_state = state.evm_state.read().unwrap();
+                            let root = evm_state.compute_state_root();
+                            Hash::from(root.0)
+                        };
+
+                        let shielded_root = {
+                            let shielded_state = state.shielded_state.read().unwrap();
+                            shielded_state.merkle_root()
+                        };
+
+                        let agent_root = {
+                            let registry = state.agent_registry.read().unwrap();
+                            let agents: std::collections::HashMap<u64, (Address, String, u64)> = registry
+                                .agents
+                                .iter()
+                                .map(|(id, reg)| (*id, (reg.owner, reg.name.clone(), reg.registered_at)))
+                                .collect();
+                            call_storage::compute_agent_root(&agents)
+                        };
+
+                        let consensus_root = {
+                            let validator_state = state.validator_state.read().unwrap();
+                            let validators: std::collections::HashMap<u32, (Address, u128)> = validator_state
+                                .get_all_validators()
+                                .iter()
+                                .map(|(id, stake)| (*id, (stake.address, stake.staked_call)))
+                                .collect();
+                            call_storage::compute_consensus_root(&validators)
+                        };
+
+                        let roots = StateRoots { protocol_root, evm_root, shielded_root, agent_root, consensus_root };
+                        let snapshot_dir = db.data_dir.join("snapshots");
+                        match produce_state_snapshot(&mut prune_state, roots, new_height, Some(&snapshot_dir)) {
+                            Ok(_) => {
+                                tracing::info!(height = new_height, "BFT finalize: state snapshot produced");
+                            }
+                            Err(ref e) => {
+                                tracing::warn!(error = %e, "BFT finalize: snapshot production failed");
+                            }
+                        }
                     }
 
                     // Incremental state persistence

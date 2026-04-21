@@ -1,7 +1,6 @@
 //! Callchain storage layer — table definitions, prune config, state snapshots.
 //!
-//! reth-db (MDBX) integration is deferred until the reth dependency
-//! supports our Rust toolchain. All types, tables, and prune logic are defined.
+//! Uses reth-db (MDBX) as the sole persistence backend — no JSON fallback.
 
 mod db;
 mod expiration;

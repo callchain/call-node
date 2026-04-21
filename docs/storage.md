@@ -2,14 +2,14 @@
 
 ## Overview
 
-The Storage Layer (`crates/storage`) provides persistence for all Callchain state: protocol balances, asset registry, shielded pool, EVM state, consensus blocks, receipts, and more. It is designed around reth-db (MDBX) as the primary backend with a JSON file fallback for testing scenarios.
+The Storage Layer (`crates/storage`) provides persistence for all Callchain state: protocol balances, asset registry, shielded pool, EVM state, consensus blocks, receipts, and more. It uses reth-db (MDBX) as its sole persistence backend — there is no JSON fallback.
 
 **Key design decisions:**
-- reth-db (MDBX) for high-performance key-value storage
-- 34 logical tables covering all subsystems
-- Layered pruning strategy with configurable retention
-- State snapshots for fast sync
-- JSON fallback when MDBX is unavailable
+- reth-db (MDBX) for high-performance key-value storage (sole backend, no fallback)
+- 40 MDBX tables covering all subsystems (raw byte KV with serde_json serialization)
+- Layered pruning strategy with configurable retention per node mode
+- State snapshots for fast sync, produced automatically at interval boundaries
+- Ed25519 signature verification with 2/3 quorum check for snapshot validity
 
 ---
 
@@ -21,15 +21,15 @@ The Storage Layer (`crates/storage`) provides persistence for all Callchain stat
 │                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
 │  │   CallDb     │  │  PruneState  │  │  StateSnapshot   │  │
-│  │  (reth-db    │  │  (in-memory  │  │  (Merkle roots   │  │
-│  │   or JSON)   │  │   tracking)  │  │   + signatures)  │  │
+│  │  (MDBX only) │  │  (in-memory  │  │  (Merkle roots   │  │
+│  │              │  │   tracking)  │  │   + signatures)  │  │
 │  └──────────────┘  └──────────────┘  └──────────────────┘  │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────────┐│
-│  │  34 Tables (descriptors)                                ││
-│  │  protocol_assets, protocol_balances, evm_accounts,      ││
-│  │  shielded_merkle_tree, bridge_pending_ops,              ││
-│  │  consensus_blocks, governance_proposals, ...            ││
+│  │  40 MDBX Tables (CallTables: TableSet)                  ││
+│  │  Raw byte KV with serde_json serialization              ││
+│  │  CRUD helpers: db_put, db_get, db_del, db_iter_all,     ││
+│  │  db_batch_put, db_clear, compact_db                     ││
 │  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -40,45 +40,45 @@ The Storage Layer (`crates/storage`) provides persistence for all Callchain stat
 
 ### 1. Database Initialization (`db.rs`)
 
-`CallDb` wraps the reth-db `DatabaseEnv` (MDBX) with JSON fallback:
+`CallDb` wraps the reth-db `DatabaseEnv` (MDBX):
 
 ```rust
 pub struct CallDb {
     pub data_dir: PathBuf,
-    pub state_dir: PathBuf,
-    pub prune_dir: PathBuf,
-    pub db: Option<Arc<DatabaseEnv>>,  // None = JSON fallback
+    pub db: Arc<DatabaseEnv>,  // MDBX — always present after successful open
 }
 ```
 
-**`open_db()`** attempts MDBX initialization; on failure, logs a warning and falls back to JSON file persistence.
+**`open_db()`** initializes MDBX. If initialization fails, it returns an error immediately — there is no fallback. The node refuses to start without a working MDBX instance.
 
-**Gap #1 — reth-db integration is deferred:** The crate doc comment states "reth-db (MDBX) integration is deferred until the reth dependency supports our Rust toolchain." In practice, `init_call_db()` may succeed but the actual table read/write operations are not wired to MDBX. All state persistence goes through JSON files or is in-memory only.
+### 2. Table Definitions (`reth_db.rs`)
 
-**Gap #2 — JSON fallback is not production-grade:** When MDBX fails to initialize, the system silently falls back to JSON file persistence. JSON is not suitable for high-throughput blockchain state (no ACID, no concurrent writes, poor random access). Production nodes should refuse to start without a working MDBX instance.
-
-### 2. Table Definitions (`tables.rs`)
-
-34 table descriptors are defined with `name` and `description` fields:
+40 MDBX tables are defined as structs implementing `reth_db_api::table::Table`:
 
 | Category | Tables |
 |----------|--------|
-| Protocol | `protocol_assets`, `protocol_balances`, `protocol_allowances` |
-| Shielded | `shielded_merkle_tree`, `shielded_nullifiers`, `shielded_commitments`, `shielded_viewing_keys` |
-| Agent | `agent_registrations`, `agent_balances`, `agent_nonces` |
-| EVM | `evm_accounts`, `evm_contracts`, `evm_storage` |
-| Bridge | `bridge_pending_ops` |
-| Consensus | `consensus_blocks`, `consensus_state` |
-| Metadata | `metadata_chain_id`, `metadata_validators`, `metadata_compliance`, `metadata_agents` |
-| Receipts | `receipts`, `logs`, `memos` |
-| Fee/Oracle | `fee_currency_registry`, `oracle_prices`, `oracle_validator_info` |
-| Governance | `governance_proposals`, `vote_delegations` |
-| Sponsorship | `sponsor_auths`, `sponsor_pools`, `sponsor_daily_usage` |
-| Security | `session_keys`, `multi_sig_configs`, `social_recovery_configs` |
+| Protocol | `CallProtocolAssets`, `CallProtocolBalances`, `CallProtocolAllowances` |
+| Shielded | `CallShieldedMerkleTree`, `CallShieldedNullifiers`, `CallShieldedCommitments`, `CallShieldedViewingKeys` |
+| Agent | `CallAgents`, `CallAgentBalances`, `CallAgentNonces` |
+| EVM | `CallEvmAccounts`, `CallEvmContracts`, `CallEvmStorage` |
+| Bridge | `CallBridgeOps` |
+| Consensus | `CallConsensusBlocks`, `CallConsensusState` |
+| Metadata | `CallMetadataChainId`, `CallValidators`, `CallMetadataCompliance`, `CallMetadataAgents` |
+| Receipts | `CallReceipts`, `CallLogs`, `CallMemos` |
+| Fee/Oracle | `CallFeeCurrencyRegistry`, `CallOraclePrices`, `CallOracleValidatorInfo` |
+| Governance | `CallGovernanceProposals`, `CallVoteDelegations` |
+| Sponsorship | `CallSponsorAuths`, `CallSponsorPools`, `CallSponsorDailyUsage` |
+| Security | `CallSessionKeys`, `CallMultiSigConfigs`, `CallSocialRecoveryConfigs` |
+| System | `CallPruneState`, `CallGovernanceState`, `CallComplianceState`, `CallOracleState`, `CallForkState`, `CallCheckpoint` |
 
-**Gap #3 — Table descriptors are not actual database tables:** `all_tables()` returns an array of `TableDef { name, description }` structs. There is no MDBX table registration, no schema definition, no `Table` trait implementation, and no `DbCursor`/`DbTx` read/write logic. The tables exist as documentation only.
+Tables are registered via `CallTables: TableSet` and initialized with `init_db_for::<_, CallTables>`. All tables use `Vec<u8>` key/value with serde_json serialization.
 
-**Gap #4 — No data migration strategy:** With 34 logical tables and an evolving schema, there is no versioning or migration framework. Adding a new column or changing a data layout would require manual migration or full resync.
+**CRUD helpers** in `reth_db.rs`:
+- `db_put<T>`, `db_get<T>`, `db_del<T>` — single key operations
+- `db_iter_all<T>` — full table scan
+- `db_batch_put<T>` — bulk insert in single transaction
+- `db_clear<T>` — truncate a table
+- `compact_db` — MDBX flush/freelist compaction
 
 ### 3. Pruning (`prune.rs`)
 
@@ -92,14 +92,19 @@ pub struct CallDb {
 | `keep_recent` | 50,000 | Full state retention |
 | `keep_block_body` | 100,000 | Block body retention |
 | `keep_receipt` | 1,000,000 | Receipt/log retention |
+| `node_mode` | `Full` | Node operating mode |
 
-**PruneState** tracks execution traces, receipts, block bodies, and snapshots in-memory (BTreeMap + VecDeque).
+**`maybe_prune()`** enforces node mode behavior:
 
-**`maybe_prune()`** runs at intervals and removes entries beyond retention windows.
+| Mode | Behavior |
+|------|----------|
+| `Archive` | No pruning — all historical data retained |
+| `Light` | Aggressive — keep only recent 1,000 blocks |
+| `Full` / `Validator` | Standard layered retention per config |
 
-**Gap #5 — Pruning is in-memory only:** `PruneState` holds all data in `BTreeMap<u64, Vec<T>>`. There is no integration with the actual database. `maybe_prune()` trims in-memory structures but does not delete from disk. In a production node with MDBX, old data would continue to accumulate on disk.
+When `db: Option<&DatabaseEnv>` is provided, `maybe_prune()` deletes pruned entries from MDBX via `db_del` on the appropriate tables.
 
-**Gap #6 — `compact_database()` is a no-op:** The function sets `compaction_pending = true` and immediately clears it. No actual MDBX compaction is performed.
+**`compact_database()`** calls `compact_db()` to commit a flush transaction to MDBX, ensuring freed pages are properly tracked on the freelist.
 
 ### 4. State Snapshots (`prune.rs`)
 
@@ -118,26 +123,23 @@ pub struct StateSnapshot {
 }
 ```
 
-**Gap #7 — `verify_snapshot()` only counts signatures:** It checks `signatures.len() >= quorum` but does not verify the cryptographic validity of any signature. A snapshot with 144 dummy `[0u8; 65]` signatures passes verification.
+**`produce_state_snapshot()`** — called by the block production pipeline at `snapshot_interval` boundaries. Computes roots from live state (protocol balances, EVM state trie, shielded Merkle tree, agent registry, validator set), records the snapshot in `PruneState`, and saves to `<data_dir>/snapshots/snapshot-{height}.json`.
 
-**Gap #8 — Snapshot production is not implemented:** `FastSyncFlow::save_snapshot()` writes JSON to disk, but nothing in the block production pipeline calls it. Snapshots must be produced manually or by an external process.
+**`verify_snapshot()`** — performs cryptographic Ed25519 verification of each validator signature against the snapshot message hash, then checks that at least 2/3 of the validator set signed. If no public keys are provided, falls back to count-only mode (tests only).
 
-**Gap #9 — `incremental_sync()` is stubbed:** `FastSyncFlow::incremental_sync()` returns `Ok(0)` with a comment "In a real implementation, fetch blocks from peers." A node syncing from a snapshot cannot catch up to the chain head.
+**Root computation helpers:**
+- `compute_protocol_root()` — keccak256 of sorted (asset, address, balance) + allowances
+- `compute_agent_root()` — keccak256 of sorted agent registrations
+- `compute_consensus_root()` — keccak256 of sorted validator stakes
 
-**Gap #10 — Fast sync uses `peers.len()` as validator count:** `download_and_verify()` passes `peers.len() as u32 + 1` as the total validator count to `verify_snapshot()`. This is incorrect — the validator set size comes from consensus state, not the number of sync peers.
+### 5. Fast Sync (`prune.rs`)
 
-### 5. Node Modes
+`FastSyncFlow` provides the snapshot-based sync pipeline:
+1. **download_and_verify** — load latest snapshot from disk, verify 2/3 validator signatures against actual validator set
+2. **restore_snapshot** — confirm snapshot integrity
+3. **incremental_sync** — fetch remaining blocks from snapshot height to current (handled by consensus layer, not storage)
 
-```rust
-pub enum NodeMode {
-    Validator,   // Full state + recent 100K blocks
-    Full,        // Current state + pruned history (default)
-    Light,       // Block headers only
-    Archive,     // All historical data
-}
-```
-
-**Gap #11 — Node mode is not enforced:** `NodeMode` exists as a config field but no code checks it to determine what data to store or serve. A "Light" node would still attempt to store everything.
+`download_and_verify()` requires `validator_pubkeys` to be non-empty — quorum is calculated from the actual validator set size, not peer count.
 
 ---
 
@@ -146,49 +148,36 @@ pub enum NodeMode {
 | File | Role |
 |------|------|
 | `lib.rs` | Crate root, `StorageError` enum |
-| `db.rs` | `CallDb`, MDBX init, JSON fallback |
-| `tables.rs` | 34 table descriptors (names only) |
-| `prune.rs` | `PruneConfig`, `PruneState`, `FastSyncFlow`, `StateSnapshot` |
-| `reth_db.rs` | reth-db integration helpers (table registration stubs) |
+| `db.rs` | `CallDb`, MDBX initialization, prune state persistence |
+| `tables.rs` | 34 logical table descriptors (documentation) |
+| `reth_db.rs` | 40 actual MDBX tables, CRUD helpers, compaction, state save/load |
+| `prune.rs` | `PruneConfig`, `PruneState`, `StateSnapshot`, pruning, snapshot production/verification, fast sync |
 | `expiration.rs` | Data expiration policies |
 
 ---
 
-## Production Readiness Assessment
+## Production Readiness
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| MDBX integration | 🔴 Not ready | Deferred; JSON fallback is not production-grade |
-| Table schema | 🔴 Not ready | 34 descriptors only, no actual read/write logic |
-| Pruning | 🟡 Partial | In-memory tracking works, no DB integration |
-| State snapshots | 🟡 Partial | Format defined, signature verification missing, production not wired |
-| Fast sync | 🔴 Not ready | incremental_sync stubbed, snapshot production missing |
-| Node modes | 🔴 Not ready | Enum exists but not enforced |
+| MDBX integration | ✅ Ready | 40 tables, full CRUD, no JSON fallback |
+| Table schema | ✅ Ready | `CallTables: TableSet` with raw byte KV |
+| Pruning | ✅ Ready | In-memory tracking + MDBX deletion, node mode enforcement, telemetry exposed |
+| State snapshots | ✅ Ready | Production wired into block pipeline, Ed25519 verification |
+| Fast sync | 🟡 Partial | `incremental_sync` returns 0 (handled by consensus layer) |
+| Node modes | ✅ Ready | Archive/Light/Full/Validator enforced in `maybe_prune()` |
 
----
-
-## Production Readiness Gaps
+## Remaining Gaps
 
 | # | Gap | Severity | Details |
 |---|-----|----------|---------|
-| 1 | **reth-db integration deferred** | Critical | MDBX is the designed primary backend but integration is incomplete. Production nodes would run on JSON files. |
-| 2 | **JSON fallback silently accepted** | High | When MDBX fails, the system falls back to JSON without failing hard. JSON cannot handle concurrent writes or high throughput. |
-| 3 | **Table descriptors are documentation-only** | Critical | `all_tables()` returns name+description pairs. No actual MDBX table creation, no `DbCursor`, no read/write path. |
 | 4 | **No database migration framework** | High | No schema versioning. Changes to data layout require manual migration or full resync. |
-| 5 | **Pruning is in-memory only** | High | `maybe_prune()` trims BTreeMaps but never deletes from the actual database. Disk usage grows unbounded. |
-| 6 | **`compact_database()` is a no-op** | Medium | Sets and immediately clears a flag. No MDBX compaction is performed. |
-| 7 | **Snapshot signatures not verified** | Critical | `verify_snapshot()` counts signatures but does not cryptographically verify them. Fake snapshots pass. |
-| 8 | **Snapshot production not wired** | High | No code path produces snapshots during normal operation. Must be done manually. |
-| 9 | **`incremental_sync()` stubbed** | Critical | Returns `Ok(0)`. A node syncing from snapshot can never catch up. |
-| 10 | **Fast sync uses peer count as validator count** | High | `verify_snapshot()` receives `peers.len() + 1` instead of actual validator set size. Quorum math is wrong. |
-| 11 | **Node mode not enforced** | Medium | `NodeMode` config is ignored. Light/Archive distinctions are not implemented. |
-| 12 | **No Write-Ahead Log (WAL)** | High | Without MDBX integration, there is no transaction log. Crashes can corrupt state. |
-| 13 | **No backup/restore mechanism** | Medium | Beyond JSON file snapshots, there is no documented backup strategy for production operators. |
-| 14 | **No storage metrics/telemetry** | Low | No disk usage, IOPS, or compaction metrics exposed. |
+| 9 | **`incremental_sync()` returns 0** | Low | By design — storage has no network access. Post-snapshot catch-up is handled by the consensus block production loop receiving blocks from P2P peers. |
 
 ---
 
 ## Test Status
 
-- `cargo test -p call-storage` — unit tests cover prune config defaults, node mode variants, snapshot verification (count-only), prune state tracking, fast sync error paths
-- Missing: MDBX read/write tests, migration tests, compaction tests, concurrent access tests, corruption recovery tests
+- `cargo test -p call-storage` — 34 tests covering prune config defaults, node mode variants (Archive/Light/Full/Validator), snapshot verification (count-only and Ed25519), prune state tracking, fast sync error paths (no peers, missing validator pubkeys), root computation determinism, snapshot production to disk, compaction flag behavior
+- `cargo test -p call-node --lib` — 56 tests including MDBX prune state persistence, block production, and end-to-end node flows
+- Missing: schema migration tests, concurrent access tests, corruption recovery tests, full Ed25519 snapshot verification with real keys

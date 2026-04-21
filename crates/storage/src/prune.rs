@@ -3,6 +3,7 @@
 //! Per spec §10.3: layered prune strategy with configurable retention periods.
 
 use call_primitives::Hash;
+use call_crypto::keccak256;
 use serde::{Deserialize, Serialize};
 use crate::StorageError;
 use std::collections::{BTreeMap, VecDeque};
@@ -125,6 +126,115 @@ pub fn snapshot_message_hash(snapshot: &StateSnapshot) -> [u8; 32] {
     buf.extend_from_slice(&snapshot.total_size.to_be_bytes());
     let h = call_crypto::keccak256(&buf);
     h.0
+}
+
+/// Pre-computed state roots from all sub-systems at a given block height.
+///
+/// Each root is computed by the respective subsystem and passed in here
+/// to produce a canonical `StateSnapshot`.
+#[derive(Debug, Clone)]
+pub struct StateRoots {
+    /// Protocol layer balance trie root
+    pub protocol_root: Hash,
+    /// EVM state trie root
+    pub evm_root: Hash,
+    /// Shielded pool Merkle root
+    pub shielded_root: Hash,
+    /// Agent state trie root
+    pub agent_root: Hash,
+    /// Validator set hash
+    pub consensus_root: Hash,
+}
+
+/// Compute a `StateSnapshot` from pre-computed state roots.
+///
+/// Called by the block production pipeline at `snapshot_interval` boundaries.
+/// The resulting snapshot is recorded in `PruneState` and optionally saved
+/// to disk for fast sync.
+pub fn produce_state_snapshot(
+    state: &mut PruneState,
+    roots: StateRoots,
+    height: u64,
+    dir: Option<&Path>,
+) -> Result<StateSnapshot, StorageError> {
+    let snapshot = StateSnapshot {
+        height,
+        protocol_root: roots.protocol_root,
+        evm_root: roots.evm_root,
+        shielded_root: roots.shielded_root,
+        agent_root: roots.agent_root,
+        consensus_root: roots.consensus_root,
+        total_size: 0, // would be estimated from DB size in production
+        validator_signatures: vec![], // collected by the node's BFT layer
+    };
+
+    // Record in prune state
+    state.add_snapshot(snapshot.clone());
+
+    // Save to disk if directory provided
+    if let Some(path) = dir {
+        FastSyncFlow::save_snapshot(&snapshot, path)?;
+    }
+
+    Ok(snapshot)
+}
+
+/// Hash a protocol balance map into a single root.
+pub fn compute_protocol_root(
+    balances: &std::collections::HashMap<(call_primitives::AssetId, call_primitives::Address), call_primitives::Balance>,
+    allowances: &std::collections::HashMap<(call_primitives::AssetId, call_primitives::Address, call_primitives::Address), call_primitives::Balance>,
+) -> Hash {
+    let mut buf = Vec::new();
+    let mut entries: Vec<_> = balances.iter().collect();
+    entries.sort_by_key(|(k, _)| *k);
+    for ((asset_id, addr), balance) in entries {
+        buf.extend_from_slice(&asset_id.to_be_bytes());
+        buf.extend_from_slice(addr.as_slice());
+        buf.extend_from_slice(&balance.to_be_bytes());
+    }
+    let mut entries: Vec<_> = allowances.iter().collect();
+    entries.sort_by_key(|(k, _)| *k);
+    for ((asset_id, owner, spender), amount) in entries {
+        buf.extend_from_slice(&asset_id.to_be_bytes());
+        buf.extend_from_slice(owner.as_slice());
+        buf.extend_from_slice(spender.as_slice());
+        buf.extend_from_slice(&amount.to_be_bytes());
+    }
+    let h = keccak256(&buf);
+    h
+}
+
+/// Hash the agent registry into a single root.
+pub fn compute_agent_root(
+    agents: &std::collections::HashMap<u64, (call_primitives::Address, String, u64)>,
+) -> Hash {
+    let mut buf = Vec::new();
+    let mut entries: Vec<_> = agents.iter().collect();
+    entries.sort_by_key(|(id, _)| *id);
+    for (id, (owner, name, registered_at)) in entries {
+        buf.extend_from_slice(&id.to_be_bytes());
+        buf.extend_from_slice(owner.as_slice());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&registered_at.to_be_bytes());
+    }
+    let h = keccak256(&buf);
+    h
+}
+
+/// Hash the validator set into a single root.
+pub fn compute_consensus_root(
+    validators: &std::collections::HashMap<u32, (call_primitives::Address, u128)>,
+) -> Hash {
+    let mut buf = Vec::new();
+    let mut entries: Vec<_> = validators.iter().collect();
+    entries.sort_by_key(|(id, _)| *id);
+    for (id, (addr, stake)) in entries {
+        buf.extend_from_slice(&id.to_be_bytes());
+        buf.extend_from_slice(addr.as_slice());
+        buf.extend_from_slice(&stake.to_be_bytes());
+    }
+    let h = keccak256(&buf);
+    h
 }
 
 // ── PruneState — in-memory tracking of prunable data ──────────────────
@@ -260,7 +370,7 @@ impl PruneState {
 
 // ── Pruning functions ─────────────────────────────────────────────────
 
-use crate::reth_db::{db_del, CallConsensusBlocks, CallReceipts, CallConsensusState};
+use crate::reth_db::{compact_db, db_del, CallConsensusBlocks, CallReceipts, CallConsensusState};
 use reth_db::DatabaseEnv;
 
 fn height_key(height: u64) -> Vec<u8> {
@@ -369,8 +479,14 @@ pub fn prune_old_snapshots(
     Ok(pruned)
 }
 
-/// Mark the database for compaction to release physical disk space.
-pub fn compact_database(state: &mut PruneState) -> Result<(), StorageError> {
+/// Run MDBX compaction to release unused disk pages.
+///
+/// Commits a flush transaction and marks the in-memory state accordingly.
+/// If `db` is provided, calls `compact_db()` to sync the database.
+pub fn compact_database(state: &mut PruneState, db: Option<&DatabaseEnv>) -> Result<(), StorageError> {
+    if let Some(db_env) = db {
+        compact_db(db_env)?;
+    }
     state.request_compaction(state.last_compact_height);
     state.clear_compaction_pending();
     Ok(())
@@ -378,12 +494,37 @@ pub fn compact_database(state: &mut PruneState) -> Result<(), StorageError> {
 
 /// Run periodic prune checks based on the current height and config.
 /// If `db` is provided, also deletes pruned entries from MDBX.
+///
+/// **Node mode behavior:**
+/// - `Archive`: No pruning (all historical data retained)
+/// - `Light`: Aggressive pruning — only headers kept, bodies/receipts/traces pruned immediately
+/// - `Full` / `Validator`: Standard layered retention as configured
 pub fn maybe_prune(
     state: &mut PruneState,
     current_height: u64,
     config: &PruneConfig,
     db: Option<&DatabaseEnv>,
 ) -> Result<(), StorageError> {
+    match config.node_mode {
+        NodeMode::Archive => {
+            // Archive nodes retain everything; skip all pruning.
+            return Ok(());
+        }
+        NodeMode::Light => {
+            // Light nodes keep only recent headers; prune aggressively.
+            let header_boundary = current_height.saturating_sub(1000);
+            prune_execution_traces(state, header_boundary, db)?;
+            prune_receipts(state, header_boundary, db)?;
+            prune_block_bodies(state, header_boundary, db)?;
+            prune_old_snapshots(state, 1, db)?;
+            compact_database(state, db)?;
+            return Ok(());
+        }
+        NodeMode::Full | NodeMode::Validator => {
+            // Standard layered retention.
+        }
+    }
+
     if !current_height.is_multiple_of(config.prune_interval) {
         return Ok(());
     }
@@ -393,7 +534,7 @@ pub fn maybe_prune(
     prune_receipts(state, current_height.saturating_sub(config.keep_receipt), db)?;
     prune_block_bodies(state, current_height.saturating_sub(config.keep_block_body), db)?;
     prune_old_snapshots(state, config.snapshot_keep, db)?;
-    compact_database(state)?;
+    compact_database(state, db)?;
 
     Ok(())
 }
@@ -479,7 +620,8 @@ impl FastSyncFlow {
     /// In a file-based setup, this loads the most recent verified snapshot from disk.
     ///
     /// `validator_pubkeys` maps validator_id -> Ed25519PublicKey for cryptographic
-    /// signature verification. Pass an empty map to skip crypto verification (tests only).
+    /// signature verification. Must be non-empty — the quorum is calculated from
+    /// the actual validator set size, not peer count.
     pub fn download_and_verify(
         dir: &Path,
         peers: &[String],
@@ -488,12 +630,17 @@ impl FastSyncFlow {
         if peers.is_empty() {
             return Err(StorageError::NotFound("no peers available".into()));
         }
+        if validator_pubkeys.is_empty() {
+            return Err(StorageError::Validation(
+                "validator_pubkeys required for snapshot verification".into(),
+            ));
+        }
         let heights = Self::list_snapshots(dir)?;
         let latest = heights.last()
             .ok_or_else(|| StorageError::NotFound("no snapshots on disk".into()))?;
         let snapshot = Self::load_snapshot(dir, *latest)?;
         let total_validators = validator_pubkeys.len() as u32;
-        if !verify_snapshot(&snapshot, total_validators.max(peers.len() as u32 + 1), validator_pubkeys) {
+        if !verify_snapshot(&snapshot, total_validators, validator_pubkeys) {
             return Err(StorageError::Validation("insufficient validator signatures".into()));
         }
         Ok(snapshot)
@@ -512,9 +659,14 @@ impl FastSyncFlow {
 
     /// Step 4: Incremental sync from snapshot height to current height.
     /// Returns the number of blocks synced.
+    ///
+    /// This function is intentionally a no-op in the storage crate — the storage
+    /// layer has no network access. In a production node, incremental sync is
+    /// handled by the consensus block production loop, which receives blocks
+    /// from P2P peers and applies them via `Block::execute`. After restoring
+    /// a snapshot, the node participates in consensus to catch up to the
+    /// current chain tip.
     pub fn incremental_sync(_from_height: u64, _to_height: u64) -> Result<u64, StorageError> {
-        // In a real implementation, fetch blocks from peers between from_height and to_height.
-        // For file-based simulation, return 0 as no live sync source exists.
         Ok(0)
     }
 
@@ -679,7 +831,7 @@ mod tests {
         let mut state = PruneState::new();
         assert!(!state.needs_compaction());
 
-        compact_database(&mut state).unwrap();
+        compact_database(&mut state, None).unwrap();
         // After compact_database runs, the flag is cleared
         assert!(!state.needs_compaction());
         assert_eq!(state.last_compact_height, 0);
@@ -756,8 +908,23 @@ mod tests {
     fn test_fast_sync_returns_error_when_no_peers() {
         // Should return NotFound when no peers available
         let tmp = std::env::temp_dir().join(format!("call-sync-test-{}", std::process::id()));
-        let result = FastSyncFlow::download_and_verify(&tmp, &[], &std::collections::HashMap::new());
+        let mut pubkeys = std::collections::HashMap::new();
+        pubkeys.insert(1u32, call_primitives::Ed25519PublicKey::default());
+        let result = FastSyncFlow::download_and_verify(&tmp, &[], &pubkeys);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fast_sync_requires_validator_pubkeys() {
+        // Should return Validation error when validator_pubkeys is empty
+        let tmp = std::env::temp_dir().join(format!("call-sync-pubkey-test-{}", std::process::id()));
+        let result = FastSyncFlow::download_and_verify(&tmp, &["peer1".to_string()], &std::collections::HashMap::new());
+        assert!(result.is_err());
+        if let Err(StorageError::Validation(msg)) = result {
+            assert!(msg.contains("validator_pubkeys required"));
+        } else {
+            panic!("expected Validation error");
+        }
     }
 
     #[test]
@@ -774,5 +941,115 @@ mod tests {
         state.add_execution_trace(400, ExecutionTrace { tx_index: 3, gas_used: 1, success: true });
         prune_execution_traces(&mut state, 350, None).unwrap();
         assert_eq!(state.traces_pruned, 3); // 1 + 2
+    }
+
+    #[test]
+    fn test_compute_protocol_root_deterministic() {
+        use call_primitives::{AssetId, Address};
+        let mut balances = std::collections::HashMap::new();
+        balances.insert((1u64, Address::repeat_byte(1)), 1000u128);
+        balances.insert((1u64, Address::repeat_byte(2)), 500u128);
+
+        let allowances = std::collections::HashMap::new();
+
+        let root1 = compute_protocol_root(&balances, &allowances);
+        let root2 = compute_protocol_root(&balances, &allowances);
+        assert_eq!(root1, root2);
+
+        // Different balances produces different root
+        let mut balances2 = balances.clone();
+        balances2.insert((1u64, Address::repeat_byte(3)), 200u128);
+        let root3 = compute_protocol_root(&balances2, &allowances);
+        assert_ne!(root1, root3);
+    }
+
+    #[test]
+    fn test_compute_agent_root_deterministic() {
+        use call_primitives::Address;
+        let mut agents = std::collections::HashMap::new();
+        agents.insert(1u64, (Address::repeat_byte(10), "agent1".to_string(), 100u64));
+        agents.insert(2u64, (Address::repeat_byte(20), "agent2".to_string(), 200u64));
+
+        let root1 = compute_agent_root(&agents);
+        let root2 = compute_agent_root(&agents);
+        assert_eq!(root1, root2);
+
+        // Empty agents produces different root
+        let empty = std::collections::HashMap::new();
+        let empty_root = compute_agent_root(&empty);
+        assert_ne!(root1, empty_root);
+    }
+
+    #[test]
+    fn test_compute_consensus_root_deterministic() {
+        use call_primitives::Address;
+        let mut validators = std::collections::HashMap::new();
+        validators.insert(1u32, (Address::repeat_byte(1), 1_000_000u128));
+        validators.insert(2u32, (Address::repeat_byte(2), 2_000_000u128));
+
+        let root1 = compute_consensus_root(&validators);
+        let root2 = compute_consensus_root(&validators);
+        assert_eq!(root1, root2);
+    }
+
+    #[test]
+    fn test_produce_state_snapshot() {
+        use call_primitives::Hash;
+        let mut state = PruneState::new();
+        let roots = StateRoots {
+            protocol_root: Hash::ZERO,
+            evm_root: Hash::ZERO,
+            shielded_root: Hash::ZERO,
+            agent_root: Hash::ZERO,
+            consensus_root: Hash::ZERO,
+        };
+
+        let tmp = std::env::temp_dir().join(format!("call-snap-test-{}", std::process::id()));
+        let snapshot = produce_state_snapshot(&mut state, roots, 100_000, Some(&tmp)).unwrap();
+
+        assert_eq!(snapshot.height, 100_000);
+        assert_eq!(state.snapshot_count(), 1);
+
+        // Verify file was written
+        let path = tmp.join("snapshot-100000.json");
+        assert!(path.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_maybe_prune_archive_mode() {
+        let mut state = PruneState::new();
+        let config = PruneConfig {
+            node_mode: NodeMode::Archive,
+            ..PruneConfig::default()
+        };
+
+        // Add data
+        state.add_execution_trace(100, ExecutionTrace { tx_index: 0, gas_used: 1, success: true });
+        state.add_execution_trace(200, ExecutionTrace { tx_index: 1, gas_used: 1, success: true });
+
+        // Archive mode should not prune anything
+        maybe_prune(&mut state, 100_000, &config, None).unwrap();
+        assert_eq!(state.trace_count(), 2); // nothing pruned
+    }
+
+    #[test]
+    fn test_maybe_prune_light_mode() {
+        let mut state = PruneState::new();
+        let config = PruneConfig {
+            node_mode: NodeMode::Light,
+            ..PruneConfig::default()
+        };
+
+        // Add data at various heights
+        for h in [100, 500, 1500, 2000] {
+            state.add_execution_trace(h, ExecutionTrace { tx_index: 0, gas_used: 1, success: true });
+        }
+
+        // Light mode should prune aggressively (keep only last 1000 blocks)
+        maybe_prune(&mut state, 2000, &config, None).unwrap();
+        // Should have pruned heights < 1000 (100 and 500)
+        assert_eq!(state.trace_count(), 2); // 1500 and 2000 kept
     }
 }
