@@ -782,7 +782,7 @@ fn execute_agent_instruction(
 // ── Bridge instruction helpers ────────────────────────────────────────
 
 fn is_bridge_instruction(instr: &Instruction) -> bool {
-    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. })
+    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ExternalBridgeWithdraw { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. })
 }
 
 fn execute_bridge_instruction(
@@ -838,6 +838,36 @@ fn execute_bridge_instruction(
             ) {
                 Ok(_) => Ok(InstructionResult::Success),
                 Err(e) => Err(ConsensusError::InvalidBlock(format!("bridge deposit: {e:?}"))),
+            }
+        }
+        Instruction::ExternalBridgeWithdraw {
+            target_chain,
+            target_address,
+            asset_id,
+            sender,
+            amount,
+        } => {
+            let chain = match *target_chain {
+                0 => call_bridge::ExternalChain::EthereumMainnet,
+                1 => call_bridge::ExternalChain::Arbitrum,
+                _ => return Err(ConsensusError::InvalidBlock("bridge: unknown target chain".into())),
+            };
+            let op = call_bridge::ExternalBridgeOp::Withdraw {
+                target_chain: chain,
+                target_address: target_address.clone(),
+                asset_id: *asset_id,
+                sender: *sender,
+                amount: *amount,
+            };
+            match call_bridge::process_external_withdraw(
+                &op,
+                balances,
+                bridge_state,
+                config,
+                current_block_height,
+            ) {
+                Ok(_) => Ok(InstructionResult::Success),
+                Err(e) => Err(ConsensusError::InvalidBlock(format!("bridge withdraw: {e:?}"))),
             }
         }
         Instruction::BridgeDeposit {

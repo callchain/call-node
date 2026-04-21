@@ -24,6 +24,8 @@ pub enum WsEvent {
     ShieldedDeposit { commitment: String },
     ShieldedWithdrawal { nullifier: String },
     GovernanceEvent { event: String, proposal_id: u64, details: String },
+    /// Sent when a subscriber falls behind and missed events.
+    Lagged { dropped: u64 },
 }
 
 // ── Subscription Manager ─────────────────────────────────────────────
@@ -135,7 +137,12 @@ fn register_subscription(
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(subscription = subscribe_name, lagged = n, "subscriber lagged");
+                                tracing::warn!(subscription = subscribe_name, lagged = n, "subscriber lagged, sending lag notification");
+                                let lag_msg = SubscriptionMessage::from_json(&WsEvent::Lagged { dropped: n })
+                                    .map_err(|e| format!("json serialize failed: {e}"))?;
+                                if sink.send(lag_msg).await.is_err() {
+                                    break;
+                                }
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }

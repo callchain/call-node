@@ -142,6 +142,16 @@ pub enum Instruction {
         amount: Balance,
         validator_signatures: Vec<(u32, Vec<u8>)>,
     },
+    /// External bridge withdrawal to an external chain address.
+    /// The protocol burns the sender's balance and emits a withdrawal event
+    /// for validators to sign and relay to the target chain.
+    ExternalBridgeWithdraw {
+        target_chain: u8,
+        target_address: Vec<u8>,
+        asset_id: AssetId,
+        sender: Address,
+        amount: Balance,
+    },
     /// Challenge a pending bridge deposit during the challenge period.
     /// Permissionless — anyone can submit proof that a deposit is fraudulent
     /// (e.g. source tx was reorged, or signatures are from slashed validators).
@@ -609,6 +619,11 @@ pub fn execute_instruction(
         Instruction::ExternalBridgeDeposit { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ExternalBridgeDeposit must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::ExternalBridgeWithdraw { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "ExternalBridgeWithdraw must be executed inline in Block::execute".into(),
             ))
         }
         Instruction::ChallengeBridgeDeposit { .. } => {

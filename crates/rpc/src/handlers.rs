@@ -53,6 +53,8 @@ pub struct RpcState {
     pub light_client: RwLock<Option<call_light_client::EthLightClient>>,
     /// Pending rollback plan to be applied by the node loop
     pub pending_rollback: RwLock<Option<RollbackPlan>>,
+    /// Address → (block, tx_hash, log_index) for efficient eth_getLogs queries.
+    pub log_index: RwLock<HashMap<Address, Vec<(u64, TxHash, usize)>>>,
 }
 
 impl RpcState {
@@ -104,6 +106,7 @@ impl RpcState {
             #[cfg(feature = "light-client-bridge")]
             light_client: RwLock::new(None),
             pending_rollback: RwLock::new(None),
+            log_index: RwLock::new(HashMap::new()),
         }
     }
 
@@ -143,9 +146,41 @@ impl RpcState {
     }
 
     pub fn store_receipt(&self, tx_hash: TxHash, receipt: ProtocolReceipt) {
+        // Index logs by address for efficient eth_getLogs queries
+        for (idx, log) in receipt.logs.iter().enumerate() {
+            if let Ok(mut index) = self.log_index.write() {
+                index
+                    .entry(log.address)
+                    .or_insert_with(Vec::new)
+                    .push((receipt.block_number, tx_hash, idx));
+            }
+        }
         if let Ok(mut receipts) = self.receipts.write() {
             receipts.insert(tx_hash, receipt);
         }
+    }
+
+    /// Look up logs by address filter. Returns (block, tx_hash, log_index) tuples.
+    /// When no address filter is given, returns None to signal caller to fall back
+    /// to full receipt scan.
+    pub fn lookup_logs_by_address(
+        &self,
+        addresses: &[Address],
+    ) -> Option<Vec<(u64, TxHash, usize)>> {
+        if addresses.is_empty() {
+            return None;
+        }
+        let index = match self.log_index.read() {
+            Ok(idx) => idx,
+            Err(_) => return None,
+        };
+        let mut result = Vec::new();
+        for addr in addresses {
+            if let Some(entries) = index.get(addr) {
+                result.extend(entries.iter().cloned());
+            }
+        }
+        Some(result)
     }
 
     /// Prune receipts older than the given block number.
@@ -473,7 +508,7 @@ impl RpcState {
             gas_payer: caller,
             fee_currency: call_primitives::FeeCurrency::Call,
             fee_amount: result.gas_used as u128 * gas_price,
-            block_number: self.get_current_block(),
+            block_number: 0, // pending — not yet included in a finalized block
             instruction_results: vec![InstructionExecResult {
                 success: result.success,
                 gas_used: result.gas_used,
@@ -555,12 +590,20 @@ impl RpcState {
         };
 
         // Canonical tx hash — must match what the client signed
-        let tx_hash = TxHash::from_slice(&tx.compute_tx_hash());
+        let raw_tx_hash = tx.compute_tx_hash();
+        let tx_hash = TxHash::from_slice(&raw_tx_hash);
 
-        // Verify signature before execution (defense in depth — RPC layer already verified,
-        // but re-verifying here ensures no internal bypass)
-        tx.verify_signature()
+        // Verify signature using EIP-191 personal_sign (matching call_sendPayment RPC handler)
+        let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
+        let mut eip191_msg = Vec::with_capacity(eip191_prefix.len() + 32);
+        eip191_msg.extend_from_slice(eip191_prefix);
+        eip191_msg.extend_from_slice(&raw_tx_hash);
+        let eip191_hash = call_crypto::keccak256(&eip191_msg);
+        let recovered = call_crypto::recover_secp256k1_signer(&eip191_hash, &sig)
             .map_err(|e| format!("signature verification failed: {e}"))?;
+        if recovered != sender {
+            return Err(format!("signature does not match sender: recovered {:?}, expected {:?}", recovered, sender));
+        }
 
         // Insert into mempool (for tracking/dedup)
         {
@@ -588,7 +631,7 @@ impl RpcState {
                     gas_payer: sender,
                     fee_currency: call_primitives::FeeCurrency::Call,
                     fee_amount: gas_used as u128 * 10,
-                    block_number: self.get_current_block(),
+                    block_number: 0, // pending — not yet included in a finalized block
                     instruction_results: results.into_iter().map(|r| InstructionExecResult {
                         success: matches!(r, call_protocol::InstructionResult::Success),
                         gas_used: 10_000,
@@ -620,7 +663,7 @@ impl RpcState {
                     gas_payer: sender,
                     fee_currency: call_primitives::FeeCurrency::Call,
                     fee_amount: 0,
-                    block_number: self.get_current_block(),
+                    block_number: 0, // pending — not yet included in a finalized block
                     instruction_results: vec![],
                     logs: vec![],
                     memos: vec![],

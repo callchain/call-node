@@ -1981,6 +1981,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "call-prover"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254 0.4.0",
+ "axum",
+ "call-crypto",
+ "call-shielded",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "call-rpc"
 version = "0.1.0"
 dependencies = [

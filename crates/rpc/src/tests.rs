@@ -333,7 +333,14 @@ mod tests {
                 signature: [0u8; 65],
             },
         };
-        let signature = sign_tx_hash(&tx.compute_tx_hash());
+        let tx_hash = tx.compute_tx_hash();
+        // Sign with EIP-191 personal_sign prefix (matching call_sendPayment handler)
+        let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
+        let mut eip191_msg = Vec::with_capacity(eip191_prefix.len() + 32);
+        eip191_msg.extend_from_slice(eip191_prefix);
+        eip191_msg.extend_from_slice(&tx_hash);
+        let eip191_hash = call_crypto::keccak256(&eip191_msg);
+        let signature = sign_tx_hash(&eip191_hash.0);
 
         let tx_hash = state.submit_payment(
             sender, 1, asset_id, to, 5_000,

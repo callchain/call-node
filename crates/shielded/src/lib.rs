@@ -11,7 +11,7 @@ mod merkle;
 mod notes;
 mod nullifiers;
 mod circuit;
-mod prover;
+pub mod prover;
 mod compliance;
 
 #[cfg(feature = "real-prover")]
@@ -324,6 +324,17 @@ impl ShieldedState {
     /// Look up a note by commitment
     pub fn get_note(&self, cm: &NoteCommitment) -> Option<&Note> {
         self.note_registry.get(cm)
+    }
+
+    /// Compute the total shielded balance visible by a viewing key.
+    /// Iterates all notes in the registry and sums values for notes
+    /// the viewing key can decrypt.
+    pub fn balance_for_viewing_key(&self, vk: &ViewingKey) -> Balance {
+        self.note_registry
+            .values()
+            .filter(|note| vk.can_decrypt(note.rcm()))
+            .map(|note| note.value)
+            .sum()
     }
 }
 

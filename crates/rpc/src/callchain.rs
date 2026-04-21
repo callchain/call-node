@@ -162,8 +162,20 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             };
             let tx_hash = tx.compute_tx_hash();
 
-            // Recover signer address from signature and verify it matches sender
-            let recovered = call_crypto::recover_secp256k1_signer(&tx_hash, &signature)
+            // Apply EIP-191 personal_sign prefix: keccak256("\x19Ethereum Signed Message:\n32" || tx_hash)
+            let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
+            let mut eip191_msg = Vec::with_capacity(eip191_prefix.len() + 32);
+            eip191_msg.extend_from_slice(eip191_prefix);
+            eip191_msg.extend_from_slice(&tx_hash);
+            let eip191_hash: [u8; 32] = {
+                let h = call_crypto::keccak256(&eip191_msg);
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(h.as_slice());
+                arr
+            };
+
+            // Recover signer address from EIP-191 wrapped hash and verify it matches sender
+            let recovered = call_crypto::recover_secp256k1_signer(&eip191_hash, &signature)
                 .map_err(|e| invalid_params(format!("signature recovery failed: {e:?}")))?;
             if recovered != from {
                 return Err(invalid_params("signature does not match sender address".into()));
@@ -185,12 +197,32 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let (symbol, name, decimals, issuer): (String, String, u8, String) =
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let issuer_addr = issuer.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            // Check and collect asset registration fee
+            let fee = {
+                let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                gov.config.asset_registration_fee
+            };
+            if fee > 0 {
+                let issuer_balance = state.get_balance(0, &issuer_addr); // asset 0 = CALL
+                if issuer_balance < fee {
+                    return Err(invalid_params(format!(
+                        "insufficient CALL balance for registration fee: need {fee}, have {issuer_balance}"
+                    )));
+                }
+                state.balance_state.write()
+                    .map_err(|_| internal_error("lock poisoned".into()))?
+                    .deduct_balance(0, issuer_addr, fee)
+                    .map_err(|e| internal_error(format!("fee deduction failed: {e:?}")))?;
+            }
+
             let mut registry = state.asset_registry.write().map_err(|_| internal_error("lock poisoned".into()))?;
             let id = registry.register_asset(symbol.clone(), name, decimals, issuer_addr, 0, 0)
                 .map_err(|e| invalid_params(e.to_string()))?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": id,
                 "symbol": symbol,
+                "feePaid": fee.to_string(),
                 "status": "registered",
             }))
         })
@@ -231,12 +263,31 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .try_into()
                 .map_err(|_| invalid_params("pubkey must be 64 bytes (128 hex chars)".into()))?;
             let metadata_hash = [0u8; 32];
+
+            // Check and collect agent registration fee (base_fee)
+            let fee = state.fee_params.read()
+                .map_err(|_| internal_error("lock poisoned".into()))?
+                .base_fee;
+            if fee > 0 {
+                let owner_balance = state.get_balance(0, &owner_addr); // asset 0 = CALL
+                if owner_balance < fee {
+                    return Err(invalid_params(format!(
+                        "insufficient CALL balance for agent registration fee: need {fee}, have {owner_balance}"
+                    )));
+                }
+                state.balance_state.write()
+                    .map_err(|_| internal_error("lock poisoned".into()))?
+                    .deduct_balance(0, owner_addr, fee)
+                    .map_err(|e| internal_error(format!("fee deduction failed: {e:?}")))?;
+            }
+
             match state.register_agent(owner_addr, pubkey, name.clone(), url.clone(), metadata_hash) {
                 Ok(agent_id) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "agentId": agent_id,
                     "owner": owner,
                     "name": name,
                     "url": url,
+                    "feePaid": fee.to_string(),
                     "status": "registered",
                 })),
                 Err(e) => Err(invalid_params(e)),
@@ -357,24 +408,60 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_shieldedDepositProve
     module
         .register_async_method("call_shieldedDepositProve", |_params, _state, _ctx| async move {
-            Err::<serde_json::Value, _>(internal_error(
-                "shielded deposit proving requires a local prover — use the CLI wallet or a dedicated proving service".into()))
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "shielded deposit proving requires a local prover — use `call-cli shielded deposit-prove <args>` or run a dedicated proving service with `--prover-mode deposit`",
+                None::<()>,
+            ))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
     // call_shieldedTransferProve
     module
         .register_async_method("call_shieldedTransferProve", |_params, _state, _ctx| async move {
-            Err::<serde_json::Value, _>(internal_error(
-                "shielded transfer proving requires a local prover — use the CLI wallet or a dedicated proving service".into()))
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "shielded transfer proving requires a local prover — use `call-cli shielded transfer-prove <args>` or run a dedicated proving service with `--prover-mode transfer`",
+                None::<()>,
+            ))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
     // call_shieldedBalance
     module
-        .register_async_method("call_shieldedBalance", |_params, _state, _ctx| async move {
+        .register_async_method("call_shieldedBalance", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let vk_hex = call_obj.get("viewingKey")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'viewingKey' field".into()))?;
+            let vk_bytes = hex::decode(vk_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid viewing key: {e}")))?;
+            if vk_bytes.len() < 32 {
+                return Err(invalid_params("viewing key must be at least 32 bytes".into()));
+            }
+            let mut ivk = [0u8; 32];
+            ivk.copy_from_slice(&vk_bytes[..32]);
+            let fvk = if vk_bytes.len() >= 64 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&vk_bytes[32..64]);
+                arr
+            } else {
+                [0u8; 32]
+            };
+            let vk = call_shielded::ViewingKey {
+                incoming_view_key: ivk,
+                full_view_key: fvk,
+            };
+            let shielded = state.shielded_state.read()
+                .map_err(|_| internal_error("lock poisoned".into()))?;
+            let balance = shielded.balance_for_viewing_key(&vk);
+            let note_count = shielded.note_registry.values()
+                .filter(|note| vk.can_decrypt(note.rcm()))
+                .count();
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "balance": "0",
+                "balance": balance.to_string(),
+                "noteCount": note_count,
+                "merkleRoot": format!("{:?}", shielded.merkle_root()),
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -657,13 +744,43 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let address = address_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
             let balance = state.get_balance(asset_id, &address);
 
-            // Generate a simple Merkle proof from the balance state
-            let leaf_hash = call_crypto::keccak256(format!("{asset_id}:{address:?}:{balance}").as_bytes());
+            let shielded = state.shielded_state.read()
+                .map_err(|_| internal_error("lock poisoned".into()))?;
+            let merkle_root = shielded.merkle_root();
+            let leaf_count = shielded.merkle_tree.leaf_count();
+
+            // Build a real Merkle proof from the shielded note commitment tree.
+            // For each note belonging to the address (by matching commitment prefix),
+            // generate a Merkle inclusion proof.
+            let mut proof_entries: Vec<serde_json::Value> = Vec::new();
+            for (i, (cm, note)) in shielded.note_registry.iter().enumerate() {
+                if note.asset_id == asset_id {
+                    let proof = shielded.merkle_tree.proof_for_index(i);
+                    let proof_serialized: Vec<serde_json::Value> = proof.iter()
+                        .map(|(sibling, is_right)| serde_json::json!({
+                            "sibling": format!("0x{}", hex::encode(sibling.as_slice())),
+                            "is_right": is_right,
+                        }))
+                        .collect();
+                    proof_entries.push(serde_json::json!({
+                        "commitment": format!("0x{}", hex::encode(cm.0.as_slice())),
+                        "value": note.value.to_string(),
+                        "proof": proof_serialized,
+                    }));
+                }
+            }
+
+            // Build a state commitment leaf for the transparent balance
+            let state_leaf = call_crypto::keccak256(format!("{asset_id}:{address:?}:{balance}").as_bytes());
+
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": asset_id,
                 "address": address_str,
                 "balance": balance.to_string(),
-                "leafHash": format!("0x{}", hex::encode(leaf_hash)),
+                "stateCommitment": format!("0x{}", hex::encode(state_leaf)),
+                "merkleRoot": format!("0x{}", hex::encode(merkle_root.as_slice())),
+                "leafCount": leaf_count,
+                "noteProofs": proof_entries,
                 "blockNumber": state.get_current_block(),
             }))
         })
@@ -720,7 +837,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             }
 
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "valid": spent.is_empty() || spent.len() < nullifiers.len(),
+                "valid": spent.is_empty(),
                 "nullifierCount": nullifiers.len(),
                 "commitmentCount": commitments.len(),
                 "alreadySpent": spent,
@@ -1326,14 +1443,138 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_bridgeGetDepositStatus
     module
         .register_async_method("call_bridgeGetDepositStatus", |params, state, _ctx| async move {
-            let source_tx_hash: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let source_tx_hash_str: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let tx_hash_clean = source_tx_hash_str.trim_start_matches("0x");
+            let tx_hash_bytes = hex::decode(tx_hash_clean)
+                .map_err(|e| invalid_params(format!("invalid sourceTxHash: {e}")))?;
+            if tx_hash_bytes.len() != 32 {
+                return Err(invalid_params("sourceTxHash must be 32 bytes".into()));
+            }
+            let mut tx_hash_arr = [0u8; 32];
+            tx_hash_arr.copy_from_slice(&tx_hash_bytes);
+            let tx_hash = alloy_primitives::B256::from(tx_hash_arr);
+
             let bridge = state.bridge_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            // Return aggregate bridge stats (in production, track per-deposit status)
+
+            // Look up per-deposit status from bridge events and pending deposits
+            let status = if let Some(pending) = bridge.pending_external_deposits.iter().find(|d| d.source_tx_hash == tx_hash) {
+                serde_json::json!({
+                    "status": "pending",
+                    "stage": "challenge_period",
+                    "sourceTxHash": source_tx_hash_str,
+                    "recipient": format!("{:?}", pending.recipient),
+                    "assetId": pending.asset_id,
+                    "amount": pending.amount.to_string(),
+                    "signaturesCount": pending.signatures_count,
+                    "submittedAtBlock": pending.submitted_at_block,
+                })
+            } else if let Some(event) = bridge.bridge_events.iter().find(|e| {
+                e.source_tx_hash == Some(tx_hash)
+            }) {
+                use call_bridge::BridgeEventType;
+                let (status_label, stage) = match event.event_type {
+                    BridgeEventType::ExternalDepositQueued => ("queued", "challenge_period"),
+                    BridgeEventType::ExternalDepositFinalized => ("finalized", "complete"),
+                    BridgeEventType::ExternalDepositChallenged => ("challenged", "revoked"),
+                    _ => ("unknown", "unknown"),
+                };
+                serde_json::json!({
+                    "status": status_label,
+                    "stage": stage,
+                    "sourceTxHash": source_tx_hash_str,
+                    "recipient": event.recipient.map(|a| format!("{:?}", a)),
+                    "assetId": event.asset_id,
+                    "amount": event.amount.to_string(),
+                    "fee": event.fee.to_string(),
+                    "blockHeight": event.block_height,
+                })
+            } else {
+                serde_json::json!({
+                    "status": "not_found",
+                    "sourceTxHash": source_tx_hash_str,
+                })
+            };
+
+            Ok::<_, ErrorObjectOwned>(status)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_bridgeSubmitWithdraw
+    module
+        .register_async_method("call_bridgeSubmitWithdraw", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            let target_chain = match call_obj.get("targetChain")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'targetChain' field".into()))?
+                .to_lowercase()
+                .as_str()
+            {
+                "ethereum" | "ethereummainnet" => 0u8,
+                "arbitrum" => 1u8,
+                _ => return Err(invalid_params("unknown target chain".into())),
+            };
+
+            let target_address_hex = call_obj.get("targetAddress")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'targetAddress' field".into()))?;
+            let target_address = hex::decode(target_address_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid targetAddress: {e}")))?;
+
+            let asset_id = call_obj.get("assetId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
+            let amount_str = call_obj.get("amount")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'amount' field (must be string)".into()))?;
+            let amount: u128 = amount_str
+                .parse()
+                .map_err(|_| invalid_params("invalid amount: must be a numeric string".into()))?;
+
+            let sig_hex = call_obj.get("signature").and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes".into()));
+            }
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
+
+            let nonce = call_obj.get("nonce").and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+
+            let instructions = vec![call_protocol::Instruction::ExternalBridgeWithdraw {
+                target_chain,
+                target_address,
+                asset_id,
+                sender,
+                amount,
+            }];
+
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 200_000,
+                max_fee: 200_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "sourceTxHash": source_tx_hash,
-                "totalDeposits": bridge.total_deposits,
-                "totalWithdrawals": bridge.total_withdrawals,
-                "pendingOps": bridge.pending_ops.len(),
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
+                "status": "pending",
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;

@@ -37,6 +37,8 @@ pub struct RpcConfig {
     pub rate_limit_rps: Option<u64>,
     /// Rate-limit window in seconds (default: 60).
     pub rate_limit_window_secs: u64,
+    /// CORS allowed origins. Empty = deny all non-localhost. `["*"]` = allow all.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for RpcConfig {
@@ -49,6 +51,7 @@ impl Default for RpcConfig {
             tls_key_path: None,
             rate_limit_rps: None,
             rate_limit_window_secs: 60,
+            cors_allowed_origins: vec![],
         }
     }
 }
@@ -126,7 +129,15 @@ where
 
     let is_https = tls_acceptor.is_some();
     let protocol = if is_https { "HTTPS" } else { "HTTP" };
-    tracing::info!("{} RPC server started on {} ({})", label, addr, protocol);
+    tracing::info!(
+        label,
+        addr = %addr,
+        protocol,
+        max_connections = config.max_connections,
+        rate_limit_rps = config.rate_limit_rps,
+        cors_origins = ?config.cors_allowed_origins,
+        "{} RPC server started on {} ({})", label, addr, protocol
+    );
 
     tokio::spawn(async move {
         loop {

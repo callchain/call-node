@@ -129,6 +129,9 @@ pub struct RpcConfig {
     /// Rate-limit window in seconds.
     #[serde(default = "RpcConfig::default_rate_limit_window_secs")]
     pub rate_limit_window_secs: u64,
+    /// CORS allowed origins. Empty = deny all non-localhost. `["*"]` = allow all.
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for RpcConfig {
@@ -141,6 +144,7 @@ impl Default for RpcConfig {
             tls_key_path: None,
             rate_limit_rps: None,
             rate_limit_window_secs: Self::default_rate_limit_window_secs(),
+            cors_allowed_origins: vec![],
         }
     }
 }

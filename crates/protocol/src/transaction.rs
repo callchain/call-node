@@ -250,6 +250,7 @@ pub fn base_gas_units(instruction: &Instruction) -> u64 {
         Instruction::GovernanceEmergencyPause { .. } => 100_000,
         Instruction::GovernanceEmergencyResume => 100_000,
         Instruction::ExternalBridgeDeposit { .. } => 50_000,
+        Instruction::ExternalBridgeWithdraw { .. } => 50_000,
         Instruction::ChallengeBridgeDeposit { .. } => 10_000,
     }
 }

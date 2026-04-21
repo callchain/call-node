@@ -21,6 +21,7 @@ members = [
     "crates/light-client",
     "crates/oracle",
     "crates/governance",
+    "crates/prover",
     "xtask",
 ]
 resolver = "2"

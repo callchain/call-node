@@ -1,6 +1,7 @@
 //! Standard Ethereum JSON-RPC endpoints (per spec §11.1)
 
 use crate::handlers::{RpcState, invalid_params, internal_error};
+use call_primitives::Address;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
 use std::sync::Arc;
@@ -131,20 +132,41 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 })
                 .unwrap_or_default();
 
-            let receipts = state.get_all_receipts();
-            let logs: Vec<serde_json::Value> = receipts
-                .iter()
-                .flat_map(|r| r.logs.iter().map(|log| (r.tx_hash, log)))
-                .filter(|(_, log)| {
-                    addresses.is_empty() || addresses.contains(&log.address)
-                })
-                .map(|(tx_hash, log)| serde_json::json!({
-                    "transactionHash": format!("0x{}", hex::encode(tx_hash)),
-                    "address": format!("{:?}", log.address),
-                    "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
-                    "data": format!("0x{}", hex::encode(&log.data)),
-                }))
-                .collect();
+            let logs: Vec<serde_json::Value> = if let Some(indexed) = state.lookup_logs_by_address(&addresses) {
+                // Use log index for O(1) per-address lookup
+                let receipts = state.receipts.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                indexed
+                    .into_iter()
+                    .filter_map(|(_block, tx_hash, log_idx)| {
+                        let receipt = receipts.get(&tx_hash)?;
+                        let log = receipt.logs.get(log_idx)?;
+                        Some(serde_json::json!({
+                            "transactionHash": format!("0x{}", hex::encode(tx_hash)),
+                            "address": format!("{:?}", log.address),
+                            "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
+                            "data": format!("0x{}", hex::encode(&log.data)),
+                        }))
+                    })
+                    .collect()
+            } else {
+                // Fallback: scan all receipts when no address filter (limit to 10k receipts)
+                const MAX_RECEIPTS_SCAN: usize = 10_000;
+                let receipts = state.get_all_receipts();
+                receipts
+                    .iter()
+                    .take(MAX_RECEIPTS_SCAN)
+                    .flat_map(|r| r.logs.iter().map(|log| (r.tx_hash, log)))
+                    .filter(|(_, log)| {
+                        addresses.is_empty() || addresses.contains(&log.address)
+                    })
+                    .map(|(tx_hash, log)| serde_json::json!({
+                        "transactionHash": format!("0x{}", hex::encode(tx_hash)),
+                        "address": format!("{:?}", log.address),
+                        "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
+                        "data": format!("0x{}", hex::encode(&log.data)),
+                    }))
+                    .collect()
+            };
 
             Ok::<_, ErrorObjectOwned>(logs)
         })
@@ -152,10 +174,62 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
     // eth_getProof
     module
-        .register_async_method("eth_getProof", |_params, _state, _ctx| async move {
+        .register_async_method("eth_getProof", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let address_str = call_obj.get("address")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'address' field".into()))?;
+            let address = address_str.parse::<alloy_primitives::Address>()
+                .map_err(|e| invalid_params(e.to_string()))?;
+
+            let storage_keys: Vec<String> = call_obj.get("storageKeys")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+
+            // Read account state
+            let cp_address: Address = Address::from_slice(address.as_slice());
+            let balance = state.get_evm_balance(&cp_address);
+            let (nonce, code_hash) = {
+                let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                let nonce = evm.get_nonce(&cp_address);
+                let code = evm.get_code(&cp_address);
+                let code_hash = call_crypto::keccak256(&code);
+                (nonce, code_hash)
+            };
+            let state_root = {
+                let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                evm.compute_state_root()
+            };
+
+            // Build storage proof entries
+            let storage_proof: Vec<serde_json::Value> = storage_keys
+                .iter()
+                .filter_map(|key_hex| {
+                    key_hex.strip_prefix("0x")
+                        .and_then(|k| alloy_primitives::U256::from_str_radix(k, 16).ok())
+                        .map(|key| {
+                            let value = state.evm_state.read().ok().map(|s| s.get_storage(&cp_address, key)).unwrap_or_default();
+                            serde_json::json!({
+                                "key": key_hex,
+                                "value": format!("0x{:x}", value),
+                                "proof": [format!("0x{}", hex::encode(state_root))],
+                            })
+                        })
+                })
+                .collect();
+
+            let account_proof = vec![format!("0x{}", hex::encode(state_root))];
+
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "address": "0x0000000000000000000000000000000000000000",
-                "storageProof": [],
+                "address": address_str,
+                "balance": format!("0x{:x}", balance),
+                "codeHash": format!("{code_hash:?}"),
+                "nonce": format!("0x{nonce:x}"),
+                "stateRoot": format!("0x{}", hex::encode(state_root)),
+                "accountProof": account_proof,
+                "storageProof": storage_proof,
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -186,6 +260,8 @@ fn receipt_to_json(receipt: &call_protocol::ProtocolReceipt) -> serde_json::Valu
         "gasPayer": format!("{:?}", receipt.gas_payer),
         "feeCurrency": format!("{:?}", receipt.fee_currency),
         "feeAmount": format!("0x{:x}", receipt.fee_amount),
+        "blockNumber": if receipt.block_number == 0 { "pending".to_string() } else { format!("0x{:x}", receipt.block_number) },
+        "pending": receipt.block_number == 0,
         "logs": logs,
     })
 }
