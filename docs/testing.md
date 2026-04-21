@@ -110,6 +110,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | 28 | **No P2P ban enforcement tests** | `NetworkLimits` defines ban duration but no test verifies peer banning works in practice. |
 | 29 | **No mempool eviction under memory pressure tests** | `ReplayProtector` evicts 25% when over limit but no test verifies correctness during eviction. |
 | 30 | **No cross-crate integration test for light client bridge deposit** | `call_lightClientBridgeDeposit` is feature-gated. No integration test covers the full flow. |
+| 31 | **No MPT proof verification tests** | Bridge MPT proof verification is behind `light-client-bridge` feature flag. No tests validate tx inclusion or receipt proof verification against Ethereum headers. |
 
 ### Resolved Gaps — Recently Fixed
 

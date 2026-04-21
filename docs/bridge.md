@@ -202,4 +202,3 @@ All documented gaps have been resolved.
 - `cargo test -p call-consensus` — `test_block_execution_order` verifies bridge ops execute atomically during block processing (deploy contract → deposit → verify protocol balance deduction)
 - `cargo test -p call-payload-builder` — `test_payload_execution_order` verifies bridge ops are included and executed correctly during payload construction
 - `cargo test -p call-protocol --test test_bridge_flow` — integration tests covering external deposit end-to-end, withdrawal end-to-end, daily limit enforcement, insufficient signatures, duplicate validator rejection, asset allowlisting, insufficient balance, chain IDs, event hash determinism
-- Missing: MPT proof tests (requires `light-client-bridge` feature) |
