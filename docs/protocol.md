@@ -58,7 +58,7 @@ Every block contains a mix of protocol transactions (`ProtocolTransaction`) and 
 | `UpdateCompliance` | Set address compliance | Asset issuer only |
 | `OracleSubmit` | Price feed submission | Registered validator |
 
-**Atomicity:** `execute_protocol_instructions()` snapshots `BalanceState`, `ComplianceEngine`, and `ShieldedState` before execution. If any instruction fails, all three are restored. `AssetRegistry` is passed as immutable reference and cannot be mutated during execution.
+**Atomicity:** `execute_protocol_instructions()` snapshots `BalanceState`, `ComplianceEngine`, and `ShieldedState` before execution. If any instruction fails, all three are restored. `AssetRegistry` is passed as mutable reference and can be mutated during execution (e.g., supply tracking on Mint).
 
 ### 2. Transaction Model (`transaction.rs`)
 
@@ -152,40 +152,14 @@ Per-address compliance status (Clear / UnderReview / Flagged / Restricted) is st
 |-----------|--------|
 | Instruction execution | 🟢 Ready | Atomic rollback covers BalanceState + ComplianceEngine + ShieldedState |
 | Balance management | 🟢 Ready | Checked arithmetic, no known gaps |
-| Asset registry | 🟡 Partial | `registered_at` bug, total supply untracked |
-| Gas/fee model | 🟡 Partial | PoolSponsor stubbed, no priority enforcement |
+| Asset registry | 🟢 Ready | `registered_at` set by caller, total supply tracked on mint |
+| Gas/fee model | 🟢 Ready | PoolSponsor implemented, all sponsor variants wired |
 | Compliance engine | 🟢 Ready | Recipient checks, custom handlers, persistence all wired |
 | Transaction validation | 🟢 Ready | Signature verification, sequential nonces, instruction limits |
 
 ---
 
 ## Remaining Gaps
-
-### Gap #4 (partial) — PoolSponsor not implemented
-**Severity:** High
-
-`GasConfig::PoolSponsor` returns `"PoolSponsor not yet implemented in production"` in both `deduct_call_from_payer` and `deduct_stablecoin_from_payer`. `AuthorizedSponsor` and `PerTxSponsor` are fully implemented via `SponsorRegistry`.
-
-**How to fix:** Implement `PoolSponsor` logic in `crates/protocol/src/sponsor.rs`:
-1. Add a pool balance tracking field to `SponsorRegistry` (or a separate `GasSponsorPool` struct)
-2. Implement `verify_and_deduct_pool_sponsor(balances, tx, fee)` that checks pool has sufficient balance and deducts it
-3. Wire into `deduct_call_from_payer` and `deduct_stablecoin_from_payer` for the `PoolSponsor` variant
-4. Add pool deposit/withdraw methods for managing the pool balance
-5. Add tests: pool with sufficient balance deducts correctly, insufficient balance rejects
-
-### Gap #7 — `registered_at` hardcoded to 0
-**Severity:** Low
-
-In `crates/protocol/src/registry.rs` line 84, `Asset::registered_at` is set to `0`. The comment says "set by caller with current block" but the `register_asset` function has no block height parameter.
-
-**How to fix:** Add a `current_block: u64` parameter to `register_asset` (or `register_asset_at`) and pass it from the caller. The caller is in `instructions.rs` where `RegisterAsset` is handled — pass the block number from the execution context, or alternatively set it at the block execution level after the transaction succeeds.
-
-### Gap #8 — Total supply untracked
-**Severity:** Medium
-
-The `Mint` instruction calls `balances.mint()` (updates balances) but never calls `registry.mint_supply()` (updates `Asset::total_supply`). `mint_supply()` exists on `AssetRegistry` but is never invoked. Total supply queries will always show 0 for minted tokens.
-
-**How to fix:** Wire `registry.mint_supply(asset_id, amount)` into the `Mint` instruction handler in `crates/protocol/src/instructions.rs`. The `execute_instruction` for `Mint` already receives `&mut AssetRegistry` — add the supply update alongside the balance mint call. Add a test verifying `registry.get_asset(asset_id).unwrap().total_supply` increases after a successful mint.
 
 ### Gap #6 — No priority fee enforcement
 **Severity:** Medium
@@ -199,4 +173,4 @@ The `Mint` instruction calls `balances.mint()` (updates balances) but never call
 ## Test Status
 
 - `cargo test -p call-protocol` — ~105 unit tests covering gas calculation, fee dynamics, instruction execution, balance operations, asset registry, compliance policies, memo validation, atomic rollback, signature verification (positive + negative), proptest roundtrip encode/decode
-- Missing: PoolSponsor tests, total supply verification after mint, registered_at correctness, priority fee enforcement
+- Missing: priority fee enforcement tests

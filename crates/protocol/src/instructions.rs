@@ -234,7 +234,7 @@ pub type AgentExecutor<'a> = &'a mut dyn FnMut(&Instruction, Address) -> Option<
 pub fn execute_protocol_instructions(
     instructions: &[Instruction],
     balances: &mut BalanceState,
-    registry: &AssetRegistry,
+    registry: &mut AssetRegistry,
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     sender: Address,
@@ -272,7 +272,7 @@ pub fn execute_protocol_instructions(
 pub fn execute_instruction(
     instruction: &Instruction,
     balances: &mut BalanceState,
-    registry: &AssetRegistry,
+    registry: &mut AssetRegistry,
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     sender: Address,
@@ -353,7 +353,7 @@ pub fn execute_instruction(
                 return Err(ProtocolError::Unauthorized);
             }
             // Update total supply in registry
-            let _ = registry; // registry is immutable here; supply update done at block level
+            registry.mint_supply(*asset_id, &sender, *amount)?;
             balances.mint(*asset_id, &sender, *to, *amount)?;
             Ok(InstructionResult::Success)
         }
@@ -642,7 +642,7 @@ mod tests {
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -656,7 +656,7 @@ mod tests {
         let results = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
@@ -678,7 +678,7 @@ mod tests {
             .balances
             .set_balance(1, test_addr(1), 3000)
             .unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -701,7 +701,7 @@ mod tests {
         let results = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
@@ -721,7 +721,7 @@ mod tests {
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -742,7 +742,7 @@ mod tests {
         let results = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
@@ -761,7 +761,7 @@ mod tests {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0)
+            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100)
             .unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
@@ -775,7 +775,7 @@ mod tests {
         let result = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(99), // not the issuer
@@ -789,7 +789,7 @@ mod tests {
         let result = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(1), // the issuer
@@ -806,7 +806,7 @@ mod tests {
         let mut balances = BalanceState::new();
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0)
+            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100)
             .unwrap();
         balances
             .balances
@@ -824,7 +824,7 @@ mod tests {
         let result = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(99), // not the issuer
@@ -838,7 +838,7 @@ mod tests {
         let result = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(1), // the issuer
@@ -888,7 +888,7 @@ mod tests {
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -910,7 +910,7 @@ mod tests {
         let result = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(1),
@@ -931,7 +931,7 @@ mod tests {
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -953,7 +953,7 @@ mod tests {
         let results = execute_protocol_instructions(
             &instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut shielded_state,
             test_addr(1),

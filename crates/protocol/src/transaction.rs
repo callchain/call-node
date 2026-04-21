@@ -72,7 +72,7 @@ pub enum AuthScheme {
 pub enum GasConfig {
     SelfPay,
     AuthorizedSponsor { sponsor: Address },
-    PoolSponsor,
+    PoolSponsor { sponsor: Address },
     PerTxSponsor { sponsor: Address, sponsor_signature: Vec<u8> },
 }
 
@@ -112,8 +112,9 @@ impl ProtocolTransaction {
                 preimage.push(1);
                 preimage.extend_from_slice(sponsor.as_slice());
             }
-            GasConfig::PoolSponsor => {
+            GasConfig::PoolSponsor { sponsor } => {
                 preimage.push(2);
+                preimage.extend_from_slice(sponsor.as_slice());
             }
             GasConfig::PerTxSponsor { sponsor, sponsor_signature } => {
                 preimage.push(3);
@@ -387,10 +388,8 @@ fn deduct_call_from_payer(
                 sponsor, &sender, fee, current_day, balances,
             )
         }
-        GasConfig::PoolSponsor => {
-            Err(ProtocolError::SponsorError(
-                "PoolSponsor not yet implemented in production".into(),
-            ))
+        GasConfig::PoolSponsor { sponsor } => {
+            sponsor_registry.verify_and_deduct_pool_sponsor(sponsor, &sender, fee, balances)
         }
         GasConfig::PerTxSponsor { sponsor, .. } => {
             sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, balances)
@@ -415,10 +414,8 @@ fn deduct_stablecoin_from_payer(
                 sponsor, &sender, fee, current_day, balances,
             )
         }
-        GasConfig::PoolSponsor => {
-            Err(ProtocolError::SponsorError(
-                "PoolSponsor not yet implemented in production".into(),
-            ))
+        GasConfig::PoolSponsor { sponsor } => {
+            sponsor_registry.verify_and_deduct_pool_sponsor(sponsor, &sender, fee, balances)
         }
         GasConfig::PerTxSponsor { sponsor, .. } => {
             sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, balances)
@@ -583,11 +580,6 @@ pub fn accept_to_mempool(
 
     // Gap 3 — Reject unimplemented sponsor configs at mempool boundary
     match tx.gas_config {
-        GasConfig::PoolSponsor => {
-            return Err(ProtocolError::SponsorError(
-                "PoolSponsor not yet enabled".into(),
-            ));
-        }
         GasConfig::PerTxSponsor { .. } => {
             return Err(ProtocolError::SponsorError(
                 "PerTxSponsor not yet enabled".into(),
@@ -741,12 +733,16 @@ mod tests {
     }
 
     #[test]
-    fn test_deduct_gas_pool_sponsor_rejected() {
+    fn test_deduct_gas_pool_sponsor() {
         let mut balances = BalanceState::new();
         let mut sponsors = SponsorRegistry::new();
+        let pool_addr = test_addr(9);
+        sponsors.deposit_to_pool(pool_addr, 10_000).unwrap();
+        balances.balances.set_balance(0, pool_addr, 10_000).unwrap();
+
         let result = deduct_gas(
             &mut balances,
-            &GasConfig::PoolSponsor,
+            &GasConfig::PoolSponsor { sponsor: pool_addr },
             &FeeCurrency::Call,
             500,
             test_addr(1),
@@ -754,7 +750,7 @@ mod tests {
             &mut sponsors,
             10,
         );
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]

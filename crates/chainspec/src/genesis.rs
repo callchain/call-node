@@ -310,6 +310,7 @@ impl GenesisExecutor {
                     asset.decimals,
                     Address::ZERO, // Genesis assets have no specific issuer
                     0,             // Default compliance policy
+                    0,             // registered_at (genesis block)
                 )
                 .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
 
@@ -363,6 +364,7 @@ impl GenesisExecutor {
                         18,
                         Address::ZERO,
                         0,
+                        0, // registered_at (genesis block)
                     )
                     .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
             }

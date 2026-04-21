@@ -186,7 +186,7 @@ mod tests {
     fn test_issuer_freeze_address() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
             .unwrap();
         let id = 1;
 
@@ -212,7 +212,7 @@ mod tests {
     fn test_issuer_unfreeze_address() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
             .unwrap();
         let id = 1;
 
@@ -263,7 +263,7 @@ mod tests {
     fn test_issuer_transfer_ownership() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
             .unwrap();
 
         let mut issuer_state = IssuerState::new();
@@ -276,7 +276,7 @@ mod tests {
     fn test_non_issuer_cannot_freeze() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
             .unwrap();
 
         let mut issuer_state = IssuerState::new();
@@ -298,10 +298,10 @@ mod tests {
     fn test_issuer_cannot_modify_other_assets() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("A".into(), "A".into(), 18, test_addr(1), 0)
+            .register_asset("A".into(), "A".into(), 18, test_addr(1), 0, 100)
             .unwrap();
         registry
-            .register_asset("B".into(), "B".into(), 18, test_addr(2), 0)
+            .register_asset("B".into(), "B".into(), 18, test_addr(2), 0, 100)
             .unwrap();
 
         // test_addr(1) owns asset 1, cannot mint on asset 2

@@ -55,6 +55,7 @@ impl AssetRegistry {
         decimals: u8,
         issuer: Address,
         compliance_policy: u8,
+        registered_at: u64,
     ) -> ProtocolResult<AssetId> {
         // Check symbol uniqueness
         if self.assets_by_symbol.contains_key(&symbol) {
@@ -81,7 +82,7 @@ impl AssetRegistry {
             total_supply: 0,
             status: AssetStatus::Active,
             compliance_policy,
-            registered_at: 0, // set by caller with current block
+            registered_at,
             evm_contract_address: None,
         };
 
@@ -225,23 +226,24 @@ mod tests {
     fn test_register_asset_success() {
         let mut registry = AssetRegistry::new();
         let id = registry
-            .register_asset("TEST".into(), "Test Token".into(), 18, test_addr(1), 0)
+            .register_asset("TEST".into(), "Test Token".into(), 18, test_addr(1), 0, 100)
             .expect("register");
         assert_eq!(id, 1);
         let asset = registry.get_asset(id).expect("lookup");
         assert_eq!(asset.symbol, "TEST");
         assert_eq!(asset.issuer, test_addr(1));
         assert_eq!(asset.status, AssetStatus::Active);
+        assert_eq!(asset.registered_at, 100);
     }
 
     #[test]
     fn test_register_asset_duplicate_symbol() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("TEST".into(), "Test".into(), 18, test_addr(1), 0)
+            .register_asset("TEST".into(), "Test".into(), 18, test_addr(1), 0, 100)
             .unwrap();
         let err = registry
-            .register_asset("TEST".into(), "Test 2".into(), 18, test_addr(2), 0)
+            .register_asset("TEST".into(), "Test 2".into(), 18, test_addr(2), 0, 100)
             .unwrap_err();
         assert!(matches!(err, ProtocolError::RegistryError(_)));
     }
@@ -253,7 +255,7 @@ mod tests {
         // This test documents that fee validation is the caller's responsibility.
         let mut registry = AssetRegistry::new();
         // Without fee check, registration succeeds at registry level
-        let result = registry.register_asset("OK".into(), "Ok".into(), 18, test_addr(1), 0);
+        let result = registry.register_asset("OK".into(), "Ok".into(), 18, test_addr(1), 0, 100);
         assert!(result.is_ok());
     }
 
@@ -261,7 +263,7 @@ mod tests {
     fn test_asset_freeze_and_delist() {
         let mut registry = AssetRegistry::new();
         let id = registry
-            .register_asset("X".into(), "X Token".into(), 18, test_addr(1), 0)
+            .register_asset("X".into(), "X Token".into(), 18, test_addr(1), 0, 100)
             .unwrap();
 
         // Freeze by issuer
@@ -280,7 +282,7 @@ mod tests {
 
         // Freeze by non-issuer fails
         let id2 = registry
-            .register_asset("Y".into(), "Y Token".into(), 18, test_addr(2), 0)
+            .register_asset("Y".into(), "Y Token".into(), 18, test_addr(2), 0, 100)
             .unwrap();
         assert!(registry.freeze_asset(id2, &test_addr(3)).is_err());
     }

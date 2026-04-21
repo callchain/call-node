@@ -46,7 +46,7 @@ mod test_payment_flow_impl {
             vec![make_transfer(asset_id, receiver, 3_000)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &holder), 7_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 3_000);
@@ -87,7 +87,7 @@ mod test_payment_flow_impl {
             ],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(asset_id, &holder), 4_000);
         assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
@@ -126,7 +126,7 @@ mod test_payment_flow_impl {
                 },
             ],
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut ShieldedState::new(),
             holder,
@@ -177,7 +177,7 @@ mod test_payment_flow_impl {
         let gas_units = calculate_gas_units(&tx.instructions);
         assert!(gas_units > 0);
 
-        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         for r in &recipients {
             assert_eq!(balances.get_balance(asset_id, r), 1_000);
@@ -216,7 +216,7 @@ mod test_payment_flow_impl {
             },
         };
 
-        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         assert_eq!(balances.get_balance(stable_id, &receiver), 100);
     }
@@ -245,7 +245,7 @@ mod test_payment_flow_impl {
             vec![make_transfer(1, receiver, 100)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         let call_balance_after = balances.get_balance(0, &sender);
         assert!(call_balance_after < call_balance_before);
@@ -286,7 +286,7 @@ mod test_payment_flow_impl {
         call_protocol::instructions::execute_protocol_instructions(
             &tx.instructions,
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut ShieldedState::new(),
             sender,

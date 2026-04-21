@@ -570,11 +570,11 @@ impl RpcState {
 
         // Execute immediately
         let mut balances = self.balance_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let registry_guard = self.asset_registry.read().map_err(|_| "lock poisoned".to_string())?;
+        let mut registry_guard = self.asset_registry.write().map_err(|_| "lock poisoned".to_string())?;
         let mut compliance_guard = self.compliance_engine.write().map_err(|_| "lock poisoned".to_string())?;
         let mut shielded_state = self.shielded_state.write().map_err(|_| "lock poisoned".to_string())?;
 
-        match execute_protocol_instructions(&instructions, &mut balances, &registry_guard, &mut compliance_guard, &mut shielded_state, sender, None, &mut None, None) {
+        match execute_protocol_instructions(&instructions, &mut balances, &mut registry_guard, &mut compliance_guard, &mut shielded_state, sender, None, &mut None, None) {
             Ok(results) => {
                 let status = call_primitives::ExecutionStatus::Success;
                 let gas_used = results.iter().map(|r| match r {

@@ -197,7 +197,7 @@ impl SimplexConsensus {
         &self,
         block: &Block,
         balances: &mut call_protocol::balances::BalanceState,
-        registry: &call_protocol::registry::AssetRegistry,
+        registry: &mut call_protocol::registry::AssetRegistry,
         compliance: &mut call_protocol::compliance::ComplianceEngine,
         bridge_state: &mut call_bridge::BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,

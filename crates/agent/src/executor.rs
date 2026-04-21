@@ -135,7 +135,7 @@ pub fn execute_agent_tx(
     _evm_executor: &EvmExecutor,
     _bridge_state: &mut BridgeStateManager,
     _bridge_config: &BridgeConfig,
-    registry: &AssetRegistry,
+    registry: &mut AssetRegistry,
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     agent_evm_address: Address,
@@ -361,7 +361,7 @@ mod tests {
     fn setup_registry() -> AssetRegistry {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("TEST".into(), "Test".into(), 18, test_addr(1), 0)
+            .register_asset("TEST".into(), "Test".into(), 18, test_addr(1), 0, 100)
             .ok();
         registry
     }

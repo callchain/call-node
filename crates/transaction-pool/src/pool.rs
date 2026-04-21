@@ -208,11 +208,6 @@ impl Mempool {
 
         // Gap 3 — Reject unimplemented sponsor configs
         match tx.gas_config {
-            call_protocol::transaction::GasConfig::PoolSponsor => {
-                return Err(MempoolError::Generic(
-                    "PoolSponsor not yet enabled".into(),
-                ));
-            }
             call_protocol::transaction::GasConfig::PerTxSponsor { .. } => {
                 return Err(MempoolError::Generic(
                     "PerTxSponsor not yet enabled".into(),

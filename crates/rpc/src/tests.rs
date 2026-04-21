@@ -73,7 +73,7 @@ mod tests {
         // Register an asset
         let issuer = test_addr(1);
         let mut registry = state.asset_registry.write().unwrap();
-        let id = registry.register_asset("TEST".into(), "Test Token".into(), 18, issuer, 0).unwrap();
+        let id = registry.register_asset("TEST".into(), "Test Token".into(), 18, issuer, 0, 0).unwrap();
         drop(registry);
 
         let info = state.get_asset_info(id).expect("asset info");

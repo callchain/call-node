@@ -228,7 +228,7 @@ impl Block {
     pub fn execute(
         &self,
         balances: &mut BalanceState,
-        registry: &AssetRegistry,
+        registry: &mut AssetRegistry,
         compliance: &mut call_protocol::compliance::ComplianceEngine,
         bridge_state: &mut call_bridge::BridgeStateManager,
         shielded_state: &mut ShieldedState,
@@ -1293,7 +1293,7 @@ mod tests {
             .unwrap();
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0)
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0)
             .unwrap();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000_000u128));
@@ -1323,7 +1323,7 @@ mod tests {
         let result = block
             .execute(
                 &mut balances,
-                &registry,
+                &mut registry,
                 &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
@@ -1388,7 +1388,7 @@ mod tests {
         );
 
         let mut balances = BalanceState::new();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::new();
@@ -1399,7 +1399,7 @@ mod tests {
         let result = block
             .execute(
                 &mut balances,
-                &registry,
+                &mut registry,
                 &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
@@ -1521,7 +1521,7 @@ mod tests {
 
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0)
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0)
             .unwrap();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
@@ -1533,7 +1533,7 @@ mod tests {
         let result = block
             .execute(
                 &mut balances,
-                &registry,
+                &mut registry,
                 &mut compliance,
                 &mut bridge_state,
                 &mut shielded_state,
@@ -1606,7 +1606,7 @@ mod tests {
 
         let mut balances = BalanceState::new();
         balances.balances.set_balance(1, sender, 10_000).unwrap();
-        let registry = AssetRegistry::new();
+        let mut registry = AssetRegistry::new();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::new();
@@ -1616,7 +1616,7 @@ mod tests {
 
         let result = block.execute(
             &mut balances,
-            &registry,
+            &mut registry,
             &mut compliance,
             &mut bridge_state,
             &mut shielded_state,

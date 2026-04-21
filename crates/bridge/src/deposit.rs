@@ -133,6 +133,7 @@ mod tests {
                 18,
                 test_addr(1),
                 0, // compliance_policy: None
+                100, // registered_at
             )
             .ok();
         registry

@@ -186,7 +186,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let issuer_addr = issuer.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
             let mut registry = state.asset_registry.write().map_err(|_| internal_error("lock poisoned".into()))?;
-            let id = registry.register_asset(symbol.clone(), name, decimals, issuer_addr, 0)
+            let id = registry.register_asset(symbol.clone(), name, decimals, issuer_addr, 0, 0)
                 .map_err(|e| invalid_params(e.to_string()))?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": id,

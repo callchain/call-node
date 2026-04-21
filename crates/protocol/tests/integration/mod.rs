@@ -87,6 +87,7 @@ pub fn setup_asset(
             18,
             issuer,
             0, // no compliance
+            100, // registered_at
         )
         .unwrap();
     balances.balances.set_balance(id, holder, initial).unwrap();
@@ -100,7 +101,7 @@ pub fn setup_asset(
 pub fn execute_tx(
     tx: &ProtocolTransaction,
     balances: &mut BalanceState,
-    registry: &AssetRegistry,
+    registry: &mut AssetRegistry,
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
     fee_params: &FeeParams,
