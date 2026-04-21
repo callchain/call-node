@@ -185,7 +185,7 @@ fn test_bridge_event_parsing_from_receipt() {
 
     // Topics list
     let mut topics = Vec::new();
-    topics.push(rlp_encode_short_bytes(&source_tx_hash.0)); // event signature (placeholder)
+    topics.push(rlp_encode_short_bytes(&super::ethereum::BRIDGE_DEPOSIT_EVENT_SIG.0)); // event signature
     topics.push(rlp_encode_short_bytes(&source_tx_hash.0)); // source_tx_hash
     // Recipient: Address padded to 32 bytes
     let mut recipient_padded = [0u8; 32];

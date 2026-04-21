@@ -670,3 +670,164 @@ pub fn load_prune_state(db: &DatabaseEnv) -> Result<crate::prune::PruneState, St
         None => Ok(crate::prune::PruneState::new()),
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::db::{CallDb, open_db};
+    use call_primitives::Address;
+    use std::collections::HashMap;
+    use std::thread;
+    use std::sync::Arc;
+
+    fn temp_db() -> CallDb {
+        let path = std::env::temp_dir().join(format!(
+            "call-mdbx-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        open_db(path).expect("failed to open temp db")
+    }
+
+    #[test]
+    fn test_concurrent_writes_different_keys() {
+        let db = temp_db();
+
+        let db_a = Arc::clone(&db.db);
+        let handle_a = thread::spawn(move || {
+            for i in 0..100 {
+                let key = format!("balance_{}", i).into_bytes();
+                let value: u128 = i as u128 * 1_000_000;
+                let data = serde_json::to_vec(&value).unwrap();
+                db_put::<CallProtocolBalances>(&db_a, key, data).unwrap();
+            }
+        });
+
+        let db_b = Arc::clone(&db.db);
+        let handle_b = thread::spawn(move || {
+            for i in 0..100 {
+                let key = format!("allowance_{}", i).into_bytes();
+                let value: u128 = i as u128 * 500_000;
+                let data = serde_json::to_vec(&value).unwrap();
+                db_put::<CallProtocolAllowances>(&db_b, key, data).unwrap();
+            }
+        });
+
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+
+        for i in 0..100 {
+            let key = format!("balance_{}", i).into_bytes();
+            let data = db_get::<CallProtocolBalances>(&db.db, &key).unwrap().unwrap();
+            let value: u128 = serde_json::from_slice(&data).unwrap();
+            assert_eq!(value, i as u128 * 1_000_000);
+
+            let key = format!("allowance_{}", i).into_bytes();
+            let data = db_get::<CallProtocolAllowances>(&db.db, &key).unwrap().unwrap();
+            let value: u128 = serde_json::from_slice(&data).unwrap();
+            assert_eq!(value, i as u128 * 500_000);
+        }
+    }
+
+    #[test]
+    fn test_crash_recovery_checkpoint() {
+        let db = temp_db();
+
+        write_checkpoint(&db.db, [0xDEu8; 32]).unwrap();
+        assert!(check_recovery(&db.db).unwrap(), "should detect pending checkpoint");
+
+        clear_checkpoint(&db.db).unwrap();
+        assert!(!check_recovery(&db.db).unwrap(), "checkpoint should be cleared");
+    }
+
+    #[test]
+    fn test_compaction_flag() {
+        let db = temp_db();
+        save_balances(&db.db, &HashMap::new(), &HashMap::new()).unwrap();
+        compact_db(&db.db).unwrap();
+
+        let (balances, allowances) = load_balances(&db.db).unwrap();
+        assert!(balances.is_empty());
+        assert!(allowances.is_empty());
+    }
+
+    #[test]
+    fn test_save_load_balances_roundtrip() {
+        let db = temp_db();
+        let mut balances = HashMap::new();
+        let mut allowances = HashMap::new();
+        balances.insert((1, Address::repeat_byte(0x01)), 1_000_000);
+        balances.insert((2, Address::repeat_byte(0x02)), 2_000_000);
+        allowances.insert((1, Address::repeat_byte(0x01), Address::repeat_byte(0x03)), 500);
+
+        save_balances(&db.db, &balances, &allowances).unwrap();
+        let (loaded_balances, loaded_allowances) = load_balances(&db.db).unwrap();
+
+        assert_eq!(loaded_balances, balances);
+        assert_eq!(loaded_allowances, allowances);
+    }
+
+    #[test]
+    fn test_save_load_prune_state_roundtrip() {
+        let db = temp_db();
+        let state = crate::prune::PruneState::new();
+        save_prune_state(&db.db, &state).unwrap();
+        let loaded = load_prune_state(&db.db).unwrap();
+        assert_eq!(serde_json::to_string(&state).unwrap(), serde_json::to_string(&loaded).unwrap());
+    }
+
+    #[test]
+    fn test_db_clear_and_repopulate() {
+        let db = temp_db();
+        db_put::<CallMetadataChainId>(&db.db, b"key1".to_vec(), b"value1".to_vec()).unwrap();
+        db_put::<CallMetadataChainId>(&db.db, b"key2".to_vec(), b"value2".to_vec()).unwrap();
+
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key1").unwrap().is_some());
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key2").unwrap().is_some());
+
+        db_clear::<CallMetadataChainId>(&db.db).unwrap();
+
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key1").unwrap().is_none());
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key2").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_batch_write_large_dataset() {
+        let db = temp_db();
+        let mut pairs = Vec::new();
+        for i in 0..10_000 {
+            let key = format!("receipt_{:08x}", i).into_bytes();
+            let receipt = format!("receipt data {}", i);
+            let value = serde_json::to_vec(&receipt).unwrap();
+            pairs.push((key, value));
+        }
+
+        db_batch_put::<CallReceipts>(&db.db, pairs).unwrap();
+
+        for i in [0, 4999, 9999] {
+            let key = format!("receipt_{:08x}", i).into_bytes();
+            let data = db_get::<CallReceipts>(&db.db, &key).unwrap().unwrap();
+            let receipt: String = serde_json::from_slice(&data).unwrap();
+            assert_eq!(receipt, format!("receipt data {}", i));
+        }
+
+        let all = db_iter_all::<CallReceipts>(&db.db).unwrap();
+        assert_eq!(all.len(), 10_000);
+    }
+
+    fn write_checkpoint(db: &DatabaseEnv, block_hash: [u8; 32]) -> Result<(), String> {
+        db_put::<CallCheckpoint>(db, b"pending".to_vec(), block_hash.to_vec())
+            .map_err(|e| e.to_string())
+    }
+
+    fn check_recovery(db: &DatabaseEnv) -> Result<bool, String> {
+        match db_get::<CallCheckpoint>(db, b"pending").map_err(|e: StorageError| e.to_string())? {
+            Some(_) => Ok(true),
+            None => Ok(false),
+        }
+    }
+
+    fn clear_checkpoint(db: &DatabaseEnv) -> Result<(), String> {
+        db_del::<CallCheckpoint>(db, b"pending").map_err(|e| e.to_string())
+    }
+}

@@ -33,6 +33,7 @@ real-prover = ["call-shielded/real-prover"]
 [dev-dependencies]
 hex-literal = "0.4"
 hex = "0.4"
+proptest = "1"
 call-bridge.workspace = true
 call-agent.workspace = true
 call-consensus.workspace = true

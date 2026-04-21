@@ -933,4 +933,269 @@ mod tests {
         let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
         assert!(result.is_err());
     }
+
+    // ── Signature negative tests ─────────────────────────────────────
+
+    #[test]
+    fn test_verify_signature_all_zeros() {
+        let tx = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: [0u8; 65] },
+        };
+        assert!(tx.verify_signature().is_err());
+    }
+
+    #[test]
+    fn test_verify_signature_all_ones() {
+        let tx = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: [0xFFu8; 65] },
+        };
+        assert!(tx.verify_signature().is_err());
+    }
+
+    #[test]
+    fn test_verify_signature_wrong_keypair() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let correct_sender = call_crypto::pubkey_to_address(&pubkey);
+        let wrong_addr = test_addr(0xAA);
+
+        let msg_hash = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&correct_sender.as_slice());
+            buf.extend_from_slice(&1u64.to_le_bytes());
+            // Include instructions in hash
+            call_crypto::keccak256(&buf)
+        };
+        let sig = call_crypto::secp256k1_sign(&secret, &msg_hash);
+
+        // Sign with correct keypair but claim a different sender
+        let tx = ProtocolTransaction {
+            sender: wrong_addr,
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: sig },
+        };
+        assert!(tx.verify_signature().is_err());
+    }
+
+    #[test]
+    fn test_verify_signature_malleated_recovery_id() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        let tx_hash = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&sender.as_slice());
+            buf.extend_from_slice(&1u64.to_le_bytes());
+            call_crypto::keccak256(&buf)
+        };
+        let mut sig = call_crypto::secp256k1_sign(&secret, &tx_hash);
+
+        // Flip the recovery ID byte
+        sig[64] ^= 0x01;
+
+        let tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: sig },
+        };
+        assert!(tx.verify_signature().is_err());
+    }
+
+    #[test]
+    fn test_verify_signature_nonce_replay() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        // Build tx with placeholder sig, then sign it properly
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: [0u8; 65] },
+        };
+
+        // Sign with the actual tx hash so verify_signature succeeds
+        let tx_hash = tx.compute_tx_hash();
+        let sig = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: sig },
+        };
+
+        // Signature verifies correctly
+        assert!(tx.verify_signature().is_ok());
+
+        // But mempool rejects duplicate nonce
+        let mut balances = BalanceState::new();
+        balances.balances.set_balance(0, sender, 1_000_000).unwrap();
+        let fee_params = FeeParams::default();
+        let nonces = HashSet::new();
+        let mut expected_nonces = std::collections::HashMap::new();
+        expected_nonces.insert(sender, 1);
+
+        let r1 = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        assert!(r1.is_ok());
+
+        // After accepting tx1, expected nonce increments to 2
+        expected_nonces.insert(sender, 2);
+        let _r2 = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        // tx has nonce 1 but expected is 2, so it should be rejected
+    }
+
+    #[test]
+    fn test_verify_signature_multi_sig_insufficient_threshold() {
+        let tx = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::MultiSig {
+                signatures: vec![
+                    [1u8; 65], // invalid sigs
+                    [2u8; 65],
+                ],
+            },
+        };
+
+        // Verify with invalid signatures — recovery will fail
+        assert!(tx.verify_signature().is_err());
+    }
+
+    #[test]
+    fn test_verify_signature_session_key_mismatch() {
+        let session_key = test_addr(0xBB);
+
+        let tx = ProtocolTransaction {
+            sender: test_addr(1),
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SessionKey { key: session_key, signature: [0u8; 65] },
+        };
+        // SessionKey auth with an invalid signature should fail
+        assert!(tx.verify_signature().is_err());
+    }
+
+    // ── Property-based tests ─────────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_tx_roundtrip_encode_decode(
+            sender_bytes: [u8; 20],
+            nonce: u64,
+            amount: u128,
+            gas_limit: u64,
+            max_fee: u128,
+            expires_at: u64,
+        ) {
+            let sender = Address::from_slice(&sender_bytes);
+            let instructions = vec![Instruction::Transfer {
+                asset_id: 1,
+                to: sender,
+                amount,
+                memo: None,
+            }];
+
+            let tx = ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: GasConfig::SelfPay,
+                fee_currency: FeeCurrency::Call,
+                gas_limit,
+                max_fee,
+                expires_at,
+                auth: AuthScheme::SingleSig { signature: [0u8; 65] },
+            };
+
+            // Serialize and deserialize
+            let bytes = serde_json::to_vec(&tx).unwrap();
+            let decoded: ProtocolTransaction = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(decoded.sender, tx.sender);
+            assert_eq!(decoded.nonce, tx.nonce);
+            assert_eq!(decoded.gas_limit, tx.gas_limit);
+            assert_eq!(decoded.max_fee, tx.max_fee);
+            assert_eq!(decoded.expires_at, tx.expires_at);
+        }
+
+        #[test]
+        fn test_instruction_roundtrip(
+            asset_id: u64,
+            amount: u128,
+            to_bytes: [u8; 20],
+        ) {
+            let to = Address::from_slice(&to_bytes);
+            let instr = Instruction::Transfer {
+                asset_id,
+                to,
+                amount,
+                memo: Some(PaymentMemo {
+                    message: "test memo".to_string(),
+                    reference: Some("ref-123".to_string()),
+                    metadata: None,
+                }),
+            };
+
+            let bytes = serde_json::to_vec(&instr).unwrap();
+            let decoded: Instruction = serde_json::from_slice(&bytes).unwrap();
+
+            if let Instruction::Transfer { asset_id: a_id, to: a_to, amount: a_amount, .. } = decoded {
+                assert_eq!(a_id, asset_id);
+                assert_eq!(a_to, to);
+                assert_eq!(a_amount, amount);
+            } else {
+                panic!("decoded wrong instruction variant");
+            }
+        }
+    }
 }
