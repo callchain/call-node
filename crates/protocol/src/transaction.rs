@@ -1026,6 +1026,94 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_signature_wrong_signer() {
+        let (secret_a, pubkey_a) = call_crypto::generate_keypair();
+        let sender_a = call_crypto::pubkey_to_address(&pubkey_a);
+        let (_, pubkey_b) = call_crypto::generate_keypair();
+        let sender_b = call_crypto::pubkey_to_address(&pubkey_b);
+
+        // Sign tx as sender_a
+        let tx_a = ProtocolTransaction {
+            sender: sender_a,
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: [0u8; 65] },
+        };
+        let tx_hash = tx_a.compute_tx_hash();
+        let sig = call_crypto::secp256k1_sign(&secret_a, &tx_hash);
+
+        // But claim sender is sender_b
+        let tx_impersonating_b = ProtocolTransaction {
+            sender: sender_b,
+            nonce: 1,
+            instructions: vec![make_transfer()],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: sig },
+        };
+        assert!(
+            tx_impersonating_b.verify_signature().is_err(),
+            "signature from A should not verify as B"
+        );
+    }
+
+    #[test]
+    fn test_verify_signature_tampered_tx() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        // Sign a tx with amount 100
+        let tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![Instruction::Transfer {
+                asset_id: 1,
+                to: test_addr(2),
+                amount: 100,
+                memo: None,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: [0u8; 65] },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let sig = call_crypto::secp256k1_sign(&secret, &tx_hash);
+
+        // Attacker mutates amount to 1000 but keeps the original signature
+        let tampered_tx = ProtocolTransaction {
+            sender,
+            nonce: 1,
+            instructions: vec![Instruction::Transfer {
+                asset_id: 1,
+                to: test_addr(2),
+                amount: 1000, // changed!
+                memo: None,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig { signature: sig },
+        };
+        assert!(
+            tampered_tx.verify_signature().is_err(),
+            "signature over different hash should fail"
+        );
+    }
+
+    #[test]
     fn test_verify_signature_nonce_replay() {
         let (secret, pubkey) = call_crypto::generate_keypair();
         let sender = call_crypto::pubkey_to_address(&pubkey);

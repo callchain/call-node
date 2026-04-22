@@ -27,4 +27,28 @@ mod tests {
         let decoded: Address = from_json_str(&json).expect("deserialize");
         assert_eq!(addr, decoded);
     }
+
+    #[test]
+    fn test_json_invalid_input_rejected() {
+        let result: Result<Address, _> = from_json_str("not-json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_json_complex_struct_roundtrip() {
+        #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+        struct Payload {
+            sender: Address,
+            nonce: u64,
+            data: Vec<u8>,
+        }
+        let payload = Payload {
+            sender: Address::repeat_byte(0xAB),
+            nonce: 123,
+            data: vec![1, 2, 3],
+        };
+        let json = to_json_string(&payload).expect("serialize");
+        let decoded: Payload = from_json_str(&json).expect("deserialize");
+        assert_eq!(payload, decoded);
+    }
 }

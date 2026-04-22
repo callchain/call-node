@@ -28,4 +28,20 @@ mod tests {
         let decoded: Address = rlp_decode(&encoded).expect("decode");
         assert_eq!(addr, decoded);
     }
+
+    #[test]
+    fn test_rlp_u256_roundtrip() {
+        use call_primitives::U256;
+        let value = U256::from(42_000u64);
+        let encoded = rlp_encode(&value);
+        let decoded: U256 = rlp_decode(&encoded).expect("decode");
+        assert_eq!(value, decoded);
+    }
+
+    #[test]
+    fn test_rlp_malformed_bytes_rejected() {
+        let bad = vec![0xff, 0xff]; // invalid RLP prefix
+        let result: Result<Address, _> = rlp_decode(&bad);
+        assert!(result.is_err());
+    }
 }

@@ -115,6 +115,45 @@ mod tests {
         assert_eq!(addr, expected_addr);
     }
 
+    #[test]
+    fn test_secp256k1_verify_wrong_message_fails() {
+        let (secret, pubkey) = generate_keypair();
+        let msg_a = keccak256(b"message a");
+        let sig = secp256k1_sign(&secret, &msg_a);
+
+        let msg_b = keccak256(b"message b");
+        assert!(
+            secp256k1_verify(&pubkey, &sig, &msg_b).is_err(),
+            "signature for different message should fail"
+        );
+    }
+
+    #[test]
+    fn test_secp256k1_recover_wrong_signer_fails() {
+        let (secret_a, _) = generate_keypair();
+        let (_, pubkey_b) = generate_keypair();
+        let msg = keccak256(b"same message");
+        let sig = secp256k1_sign(&secret_a, &msg);
+
+        let recovered = recover_secp256k1_signer(&msg, &sig).expect("recover");
+        let addr_b = pubkey_to_address(&pubkey_b);
+        assert_ne!(recovered, addr_b, "recovered address should not match a different key");
+    }
+
+    #[test]
+    fn test_secp256k1_tampered_signature_fails() {
+        let (secret, pubkey) = generate_keypair();
+        let msg = keccak256(b"test");
+        let mut sig = secp256k1_sign(&secret, &msg);
+
+        // Flip one byte in the signature
+        sig[0] ^= 0xFF;
+        assert!(
+            secp256k1_verify(&pubkey, &sig, &msg).is_err(),
+            "tampered signature should fail verification"
+        );
+    }
+
     /// Helper: derive address from public key bytes
     fn pubkey_to_address(pubkey: &PublicKey) -> Address {
         let mut hasher = Keccak256::new();
