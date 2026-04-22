@@ -35,6 +35,14 @@ Callchain follows [SemVer](https://semver.org/):
    cargo build --release
    docker build -t callchain:vX.Y.Z .
 
+5.1. Sign release binaries
+   # Generate SHA-256 checksums
+   sha256sum target/release/callchaind > callchaind-vX.Y.Z.sha256
+   # Sign with release GPG key (security@callchain.org)
+   gpg --armor --detach-sign callchaind-vX.Y.Z.sha256
+   # Verify signature
+   gpg --verify callchaind-vX.Y.Z.sha256.asc callchaind-vX.Y.Z.sha256
+
 6. Create git tag
    git tag -a vX.Y.Z -m "Release vX.Y.Z"
    git push origin vX.Y.Z
@@ -315,7 +323,7 @@ cargo bench -p call-light-client --bench mpt_verify
 
 ```bash
 # Pull release image
-docker pull ghcr.io/callchain/calld:v0.1.0-testnet
+docker pull ghcr.io/callchain/callchaind:v0.1.0-testnet
 
 # Run with config
 docker run -d \
@@ -325,14 +333,14 @@ docker run -d \
   -p 8545:8545 \
   -p 8546:8546 \
   -p 30303:30303 \
-  ghcr.io/callchain/calld:v0.1.0-testnet \
+  ghcr.io/callchain/callchaind:v0.1.0-testnet \
   --config /config/config.toml
 ```
 
 ### Systemd Service
 
 ```ini
-# /etc/systemd/system/calld.service
+# /etc/systemd/system/callchaind.service
 [Unit]
 Description=Callchain Node
 After=network.target
@@ -341,7 +349,7 @@ After=network.target
 Type=simple
 User=callchain
 Group=callchain
-ExecStart=/usr/local/bin/calld --config /etc/callchain/config.toml
+ExecStart=/usr/local/bin/callchaind --config /etc/callchain/config.toml
 Restart=always
 RestartSec=10
 Environment="RUST_LOG=info,callchain=debug"
@@ -360,6 +368,57 @@ WantedBy=multi-user.target
 | `callchain_mempool_size` | > 10,000 | Check block production |
 | `callchain_bridge_pending_count` | Growing unbounded | Check bridge finalization |
 | `mdbx_db_size_bytes` | > 80% disk | Trigger prune or expand storage |
+
+### Canary Deployment
+
+Before rolling out a release to all validators, deploy to a small canary subset:
+
+```
+1. Select 5-10% of validator nodes for canary
+2. Deploy new version to canary nodes
+3. Monitor for 4 hours:
+   - Block production rate (should match non-canary)
+   - Error rate in logs
+   - Memory and CPU usage
+   - P2P peer connectivity
+4. If all healthy, proceed to full rollout
+5. If issues detected, halt rollout and investigate
+```
+
+**Canary gating criteria**:
+
+| Check | Threshold | Action if failed |
+|---|---|---|
+| Block production rate | > 95% of target | Pause, investigate logs |
+| Consensus round time | < 500ms p99 | Pause, check network |
+| Memory growth | < 10% vs baseline | Pause, check for leaks |
+| Error rate | < 0.1% of log lines | Pause, check errors |
+
+### Rollback Procedure
+
+If a release causes consensus halts, state corruption, or critical bugs:
+
+```
+1. Identify the issue via monitoring / validator reports
+2. Stop callchaind on affected nodes: systemctl stop callchaind
+3. Restore previous binary from backup:
+   cp /usr/local/bin/callchaind.backup /usr/local/bin/callchaind
+4. If database schema changed, restore database from pre-upgrade snapshot:
+   # Snapshot taken before upgrade
+   rm -rf /var/lib/callchain/mdbx
+   tar xzf /backup/callchain-pre-upgrade.tar.gz -C /var/lib/callchain
+5. Restart node: systemctl start callchaind
+6. Verify reconnection to peers and block sync
+7. File post-mortem issue with rollback tag
+```
+
+**Pre-upgrade checklist** (prevents rollback pain):
+
+- [ ] Take database snapshot before upgrade
+- [ ] Back up current binary as `callchaind.backup`
+- [ ] Back up config files
+- [ ] Announce maintenance window to validators
+- [ ] Have >= 2/3 validators coordinate upgrade timing
 
 ---
 
