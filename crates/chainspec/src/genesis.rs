@@ -141,6 +141,13 @@ impl Genesis {
     pub fn to_json(&self) -> Result<String, GenesisError> {
         serde_json::to_string_pretty(self).map_err(|e| GenesisError::InvalidJson(e.to_string()))
     }
+
+    /// Load genesis from a JSON file path.
+    pub fn load_from_file(path: impl AsRef<std::path::Path>) -> Result<Self, GenesisError> {
+        let json = std::fs::read_to_string(path)
+            .map_err(|e| GenesisError::InvalidJson(format!("read file: {e}")))?;
+        Self::from_json(&json)
+    }
 }
 
 // ── Genesis Error ─────────────────────────────────────────────────────

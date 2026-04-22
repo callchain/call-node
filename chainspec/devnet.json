@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "chain_name": "callchain-devnet",
+  "chain_id": 8886,
+  "timestamp_millis": 1751328000000,
+  "initial_assets": [
+    {
+      "asset_id": 1,
+      "symbol": "CALL",
+      "name": "Call Token",
+      "decimals": 18,
+      "initial_supply": "1000000000000000000000000000",
+      "distribution": {
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "500000000000000000000000000",
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "500000000000000000000000000"
+      }
+    }
+  ],
+  "initial_fee_currencies": [
+    {
+      "symbol": "CALL",
+      "asset_id": 1,
+      "oracle_address": null
+    }
+  ],
+  "validators": [
+    {
+      "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ed25519_pubkey": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "self_stake": "1000000000000000000000000"
+    },
+    {
+      "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "ed25519_pubkey": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "self_stake": "1000000000000000000000000"
+    }
+  ],
+  "consensus_params": {
+    "max_validators": 10,
+    "subset_size": 3,
+    "block_time_millis": 250,
+    "slashing_window": 1000,
+    "oracle_request_delay_ms": 200,
+    "epoch_length": 100
+  },
+  "oracle_assets": [1]
+}
