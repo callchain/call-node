@@ -226,11 +226,13 @@ impl TestNode {
 
         let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
+        let version = self.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
             height,
             self.parent_hash,
             timestamp,
             proposer,
+            version,
             protocol_txs,
             evm_txs,
             vec![SystemTx {

@@ -6,7 +6,7 @@
 use call_bridge::{BridgeOp, BridgeStateManager};
 use call_consensus::block::{Block, BlockExecutionResult, SystemTx, SystemTxKind};
 use call_consensus::validator::ConsensusError;
-use call_primitives::{Balance, BlockHash, Hash};
+use call_primitives::{Balance, BlockHash, Hash, ProtocolVersion};
 use call_protocol::balances::BalanceState;
 use call_protocol::compliance::ComplianceEngine;
 use call_protocol::instructions::{Instruction, InstructionResult};
@@ -220,6 +220,7 @@ impl PayloadBuilder {
             attrs.parent_hash,
             attrs.timestamp_millis,
             attrs.proposer,
+            attrs.version,
             selected_protocol,
             selected_evm,
             system_txs,
@@ -419,7 +420,7 @@ mod tests {
     fn test_payload_builds_block_from_mempool() {
         let fee_params = FeeParams::default();
         let builder = PayloadBuilder::new(fee_params);
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
         let protocol_txs = vec![make_test_tx(0), make_test_tx(1)];
         let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
@@ -462,7 +463,7 @@ mod tests {
             ..Default::default()
         };
         let builder = PayloadBuilder::with_limits(fee_params, limits);
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
         // Send more txs than limit
         let protocol_txs: Vec<_> = (0..10).map(|n| make_test_tx(n)).collect();
@@ -507,7 +508,7 @@ mod tests {
             ..Default::default()
         };
         let builder = PayloadBuilder::with_limits(fee_params, limits);
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
         // Regular transfers that will execute successfully
         let protocol_txs = vec![
@@ -569,7 +570,7 @@ mod tests {
     fn test_payload_execution_order() {
         let fee_params = FeeParams::default();
         let builder = PayloadBuilder::new(fee_params);
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
         let protocol_txs = vec![make_test_tx(0)];
         let evm_txs: Vec<Vec<u8>> = vec![{
@@ -646,7 +647,7 @@ mod tests {
     fn test_payload_state_root_mismatch_rejects() {
         let fee_params = FeeParams::default();
         let builder = PayloadBuilder::new(fee_params);
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
         let protocol_txs = vec![make_test_tx(0)];
         let evm_txs: Vec<Vec<u8>> = vec![];
@@ -683,7 +684,7 @@ mod tests {
     fn test_payload_build_from_mempool() {
         let fee_params = FeeParams::default();
         let builder = PayloadBuilder::new(fee_params);
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
         // Create mempool entries with serialized protocol txs
         let tx1 = make_test_tx(0);
@@ -754,7 +755,7 @@ mod tests {
             ..Default::default()
         };
         let builder = PayloadBuilder::with_limits(fee_params, limits);
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
         // First tx exceeds instruction limit (6 > 5)
         let tx_over = sign_tx(ProtocolTransaction {

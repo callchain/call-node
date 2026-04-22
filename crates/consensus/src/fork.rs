@@ -5,7 +5,7 @@
 
 use call_crypto::ed25519_verify;
 use call_primitives::{Ed25519PublicKey, ProtocolVersion, ValidatorId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ─── Constants ─────────────────────────────────────────────────────────
 
@@ -14,9 +14,67 @@ pub fn rollback_quorum(total_validators: u32) -> u32 {
     (2 * total_validators).div_ceil(3)
 }
 /// Timelock duration in blocks before upgrade activates
-pub const DEFAULT_TIMELOCK_BLOCKS: u64 = 1000;
+pub const DEFAULT_TIMELOCK_BLOCKS: u64 = 10000;
 /// Minimum timelock blocks (safety floor)
 pub const MIN_TIMELOCK_BLOCKS: u64 = 100;
+
+// ─── Protocol Features ─────────────────────────────────────────────────
+
+/// Protocol features that can be gated by version.
+/// Each feature has a minimum version at which it becomes active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProtocolFeature {
+    /// Shielded pool operations (deposit, transfer, withdraw)
+    ShieldedPool,
+    /// Agent instructions (AgentPay, AgentCall, AgentBridgeDeposit)
+    AgentInstructions,
+    /// Bridge operations (external deposits/withdrawals)
+    BridgeOperations,
+    /// Smart accounts (multi-sig, social recovery, session keys)
+    SmartAccounts,
+    /// Compliance engine with policy-based checks
+    ComplianceEngine,
+    /// Oracle price feed integration
+    OracleIntegration,
+    /// BLS aggregate signatures for light client verification
+    BlsAggregateSignatures,
+    /// Governance proposal execution on-chain
+    OnChainGovernance,
+    /// Per-transaction gas sponsorship
+    GasSponsorship,
+    /// Instruction batching with multi-instruction transactions
+    InstructionBatching,
+}
+
+impl ProtocolFeature {
+    /// Minimum protocol version required for this feature.
+    /// Features introduced in version 1.0.0 are always available.
+    pub const fn min_version(&self) -> ProtocolVersion {
+        match self {
+            // Core features available from genesis (1.0.0)
+            ProtocolFeature::BridgeOperations => ProtocolVersion::new(1, 0, 0),
+            ProtocolFeature::InstructionBatching => ProtocolVersion::new(1, 0, 0),
+            // Features introduced in 1.1.0
+            ProtocolFeature::ShieldedPool => ProtocolVersion::new(1, 1, 0),
+            ProtocolFeature::AgentInstructions => ProtocolVersion::new(1, 1, 0),
+            ProtocolFeature::ComplianceEngine => ProtocolVersion::new(1, 1, 0),
+            ProtocolFeature::GasSponsorship => ProtocolVersion::new(1, 1, 0),
+            // Features introduced in 1.2.0
+            ProtocolFeature::SmartAccounts => ProtocolVersion::new(1, 2, 0),
+            ProtocolFeature::OracleIntegration => ProtocolVersion::new(1, 2, 0),
+            ProtocolFeature::BlsAggregateSignatures => ProtocolVersion::new(1, 2, 0),
+            ProtocolFeature::OnChainGovernance => ProtocolVersion::new(1, 2, 0),
+        }
+    }
+}
+
+/// Check if a feature is enabled at the given protocol version.
+pub fn is_feature_enabled(feature: ProtocolFeature, version: ProtocolVersion) -> bool {
+    let min = feature.min_version();
+    version.major > min.major
+        || (version.major == min.major && version.minor > min.minor)
+        || (version.major == min.major && version.minor == min.minor && version.patch >= min.patch)
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -66,6 +124,12 @@ pub struct ForkManager {
     pub rollback_nonces: HashMap<ValidatorId, u64>,
     /// History of executed rollbacks
     pub rollback_history: Vec<RollbackRecord>,
+    /// Per-upgrade validator readiness signals.
+    /// Maps upgrade version -> set of validators that have signaled readiness.
+    pub validator_readiness: HashMap<ProtocolVersion, HashSet<ValidatorId>>,
+    /// Whether to require validator readiness before applying upgrades.
+    /// When true, `check_upgrades_at_height` skips upgrades that lack quorum readiness.
+    pub require_validator_readiness: bool,
 }
 
 impl ForkManager {
@@ -79,6 +143,8 @@ impl ForkManager {
             timelock_blocks: DEFAULT_TIMELOCK_BLOCKS,
             rollback_nonces: HashMap::new(),
             rollback_history: Vec::new(),
+            validator_readiness: HashMap::new(),
+            require_validator_readiness: false,
         }
     }
 
@@ -123,21 +189,48 @@ impl ForkManager {
     }
 
     /// Check and apply any pending upgrades at the given block height.
-    /// Returns Some(new_version) if an upgrade was applied.
+    /// Applies all upgrades at or below the given height in order.
+    /// If `require_validator_readiness` is true, skips upgrades that lack quorum readiness.
+    /// Returns the last applied version, or None if no upgrades were applied.
     pub fn check_upgrades_at_height(&mut self, height: u64) -> Option<ProtocolVersion> {
-        for entry in &mut self.scheduled_upgrades {
-            if !entry.applied && height >= entry.activation_height {
-                entry.applied = true;
-                self.current_version = entry.version;
-                return Some(entry.version);
+        // Pre-compute readiness status to avoid borrow conflicts in the loop
+        let mut skip_versions = std::collections::HashSet::new();
+        if self.require_validator_readiness {
+            for entry in &self.scheduled_upgrades {
+                if !entry.applied && height >= entry.activation_height {
+                    let (ready, quorum) = self.check_upgrade_readiness(entry.version);
+                    if ready < quorum {
+                        skip_versions.insert(entry.version);
+                    }
+                }
             }
         }
-        None
+
+        let mut last_version = None;
+        for entry in &mut self.scheduled_upgrades {
+            if !entry.applied && height >= entry.activation_height {
+                if skip_versions.contains(&entry.version) {
+                    tracing::debug!(
+                        version = ?entry.version,
+                        "skipping upgrade: insufficient validator readiness"
+                    );
+                    continue;
+                }
+                entry.applied = true;
+                self.current_version = entry.version;
+                last_version = Some(entry.version);
+            }
+        }
+        // Clear readiness signals for any applied upgrades
+        if let Some(version) = last_version {
+            self.clear_upgrade_readiness(version);
+        }
+        last_version
     }
 
-    /// Get the expected protocol version for a given height
+    /// Get the expected protocol version for a given height.
+    /// Considers all scheduled upgrades at or below the given height.
     pub fn version_at_height(&self, height: u64) -> ProtocolVersion {
-        // Find the highest scheduled upgrade at or below the given height
         let mut version = self.current_version;
         for entry in &self.scheduled_upgrades {
             if entry.activation_height <= height {
@@ -167,6 +260,16 @@ impl ForkManager {
     /// Get the current protocol version
     pub fn current_version(&self) -> ProtocolVersion {
         self.current_version
+    }
+
+    /// Check if a protocol feature is enabled at the current version
+    pub fn is_feature_enabled(&self, feature: ProtocolFeature) -> bool {
+        crate::fork::is_feature_enabled(feature, self.current_version)
+    }
+
+    /// Check if a protocol feature is enabled at a specific version
+    pub fn is_feature_enabled_at(&self, feature: ProtocolFeature, version: ProtocolVersion) -> bool {
+        crate::fork::is_feature_enabled(feature, version)
     }
 
     /// Set the timelock duration
@@ -297,6 +400,59 @@ impl ForkManager {
     pub fn rollback_history(&self) -> &[RollbackRecord] {
         &self.rollback_history
     }
+
+    // ─── Upgrade Readiness ───────────────────────────────────────────────
+
+    /// Signal that a validator is ready for a specific upgrade version.
+    /// Validators call this after upgrading their binary to the new version.
+    pub fn signal_upgrade_readiness(
+        &mut self,
+        validator_id: ValidatorId,
+        version: ProtocolVersion,
+    ) -> Result<(), ForkError> {
+        // Verify validator exists
+        if !self.validator_keys.contains_key(&validator_id) {
+            return Err(ForkError::ValidatorNotFound(validator_id));
+        }
+        // Verify this upgrade is actually scheduled
+        if !self.scheduled_upgrades.iter().any(|e| e.version == version) {
+            return Err(ForkError::UpgradeNotScheduled(version));
+        }
+        self.validator_readiness
+            .entry(version)
+            .or_default()
+            .insert(validator_id);
+        Ok(())
+    }
+
+    /// Check readiness status for a specific upgrade version.
+    /// Returns (ready_count, required_quorum).
+    pub fn check_upgrade_readiness(&self, version: ProtocolVersion) -> (u32, u32) {
+        let ready = self
+            .validator_readiness
+            .get(&version)
+            .map(|s| s.len() as u32)
+            .unwrap_or(0);
+        let quorum = rollback_quorum(self.total_validators);
+        (ready, quorum)
+    }
+
+    /// Returns true if enough validators have signaled readiness for the upgrade.
+    /// Uses 2/3 quorum (same as emergency rollback).
+    pub fn is_upgrade_ready(&self, version: ProtocolVersion) -> bool {
+        let (ready, quorum) = self.check_upgrade_readiness(version);
+        ready >= quorum
+    }
+
+    /// Get the set of validators ready for a specific upgrade version.
+    pub fn get_ready_validators(&self, version: ProtocolVersion) -> Option<&HashSet<ValidatorId>> {
+        self.validator_readiness.get(&version)
+    }
+
+    /// Clear readiness signals for an upgrade (called after it activates).
+    pub fn clear_upgrade_readiness(&mut self, version: ProtocolVersion) {
+        self.validator_readiness.remove(&version);
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────
@@ -372,6 +528,8 @@ pub enum ForkError {
     NoActiveRollback,
     #[error("rollback nonce mismatch: expected {expected}, got {got}")]
     RollbackNonceMismatch { expected: u64, got: u64 },
+    #[error("upgrade not scheduled: {0:?}")]
+    UpgradeNotScheduled(ProtocolVersion),
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────
@@ -547,5 +705,218 @@ mod tests {
         let sig0_v2_replay = ed25519_sign(signing_key2, &rollback_message_hash(*vid2, target_height, target_version, 0));
         let err = fm.submit_rollback_signature(*vid2, target_height, target_version, 0, sig0_v2_replay).unwrap_err();
         assert!(matches!(err, ForkError::RollbackNonceMismatch { expected: 1, got: 0 }));
+    }
+
+    #[test]
+    fn test_feature_flagging_by_version() {
+        let fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 1);
+
+        // Core features (1.0.0) are always enabled
+        assert!(fm.is_feature_enabled(ProtocolFeature::BridgeOperations));
+        assert!(fm.is_feature_enabled(ProtocolFeature::InstructionBatching));
+
+        // Features from 1.1.0 are disabled at 1.0.0
+        assert!(!fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::AgentInstructions));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::ComplianceEngine));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::GasSponsorship));
+
+        // Features from 1.2.0 are disabled at 1.0.0
+        assert!(!fm.is_feature_enabled(ProtocolFeature::SmartAccounts));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::OracleIntegration));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::BlsAggregateSignatures));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::OnChainGovernance));
+    }
+
+    #[test]
+    fn test_feature_flagging_after_upgrade() {
+        let mut fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 1);
+
+        // Before upgrade: shielded pool disabled
+        assert!(!fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
+
+        // Upgrade to 1.1.0
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(1, 1, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        fm.check_upgrades_at_height(100);
+
+        // After upgrade: shielded pool enabled
+        assert!(fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
+        assert!(fm.is_feature_enabled(ProtocolFeature::AgentInstructions));
+        assert!(fm.is_feature_enabled(ProtocolFeature::ComplianceEngine));
+
+        // But 1.2.0 features still disabled
+        assert!(!fm.is_feature_enabled(ProtocolFeature::SmartAccounts));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::OracleIntegration));
+
+        // Upgrade to 1.2.0
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(1, 2, 0),
+            activation_height: 200,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        fm.check_upgrades_at_height(200);
+
+        // Now all features enabled
+        assert!(fm.is_feature_enabled(ProtocolFeature::SmartAccounts));
+        assert!(fm.is_feature_enabled(ProtocolFeature::OracleIntegration));
+        assert!(fm.is_feature_enabled(ProtocolFeature::BlsAggregateSignatures));
+        assert!(fm.is_feature_enabled(ProtocolFeature::OnChainGovernance));
+    }
+
+    #[test]
+    fn test_feature_flagging_patch_versions() {
+        // Patch versions should not enable new minor features
+        let fm = ForkManager::new(ProtocolVersion::new(1, 0, 5), 1);
+        assert!(!fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
+
+        // But patch bumps within same minor should keep features enabled
+        let fm = ForkManager::new(ProtocolVersion::new(1, 1, 3), 1);
+        assert!(fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
+        assert!(fm.is_feature_enabled(ProtocolFeature::AgentInstructions));
+    }
+
+    #[test]
+    fn test_check_upgrades_applies_all_at_same_height() {
+        let mut fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 1);
+
+        // Schedule two upgrades at the same height
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(1, 1, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(1, 2, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        // Apply all at height 100
+        let result = fm.check_upgrades_at_height(100);
+        assert_eq!(result, Some(ProtocolVersion::new(1, 2, 0)));
+        assert_eq!(fm.current_version(), ProtocolVersion::new(1, 2, 0));
+
+        // Both should be marked applied
+        assert!(fm.scheduled_upgrades.iter().all(|e| e.applied));
+    }
+
+    #[test]
+    fn test_upgrade_readiness_signaling() {
+        let mut fm = make_fork_manager(21).0;
+
+        let version = ProtocolVersion::new(2, 0, 0);
+        fm.schedule_upgrade(UpgradeEntry {
+            version,
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        // Signaling from unknown validator fails
+        let err = fm.signal_upgrade_readiness(999, version).unwrap_err();
+        assert!(matches!(err, ForkError::ValidatorNotFound(999)));
+
+        // Signaling for unscheduled upgrade fails
+        let err = fm.signal_upgrade_readiness(0, ProtocolVersion::new(3, 0, 0)).unwrap_err();
+        assert!(matches!(err, ForkError::UpgradeNotScheduled(_)));
+
+        // Valid signal succeeds
+        fm.signal_upgrade_readiness(0, version).unwrap();
+        let (ready, quorum) = fm.check_upgrade_readiness(version);
+        assert_eq!(ready, 1);
+        assert_eq!(quorum, 14); // ceil(2*21/3) = 14
+        assert!(!fm.is_upgrade_ready(version));
+    }
+
+    #[test]
+    fn test_upgrade_readiness_quorum_blocks_activation() {
+        let mut fm = make_fork_manager(21).0;
+        fm.require_validator_readiness = true;
+
+        let version = ProtocolVersion::new(2, 0, 0);
+        fm.schedule_upgrade(UpgradeEntry {
+            version,
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        // Without readiness signals, upgrade is skipped
+        let result = fm.check_upgrades_at_height(100);
+        assert!(result.is_none());
+        assert_eq!(fm.current_version(), ProtocolVersion::new(1, 0, 0));
+
+        // Signal readiness from 14 validators (quorum)
+        for i in 0..14 {
+            fm.signal_upgrade_readiness(i, version).unwrap();
+        }
+
+        // Now upgrade applies
+        let result = fm.check_upgrades_at_height(100);
+        assert_eq!(result, Some(version));
+        assert_eq!(fm.current_version(), version);
+
+        // Readiness signals are cleared after activation
+        assert!(fm.validator_readiness.get(&version).is_none());
+    }
+
+    #[test]
+    fn test_upgrade_readiness_disabled_by_default() {
+        let mut fm = make_fork_manager(21).0;
+        // require_validator_readiness defaults to false
+        assert!(!fm.require_validator_readiness);
+
+        let version = ProtocolVersion::new(2, 0, 0);
+        fm.schedule_upgrade(UpgradeEntry {
+            version,
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        // Without readiness signals, upgrade still applies (backward compat)
+        let result = fm.check_upgrades_at_height(100);
+        assert_eq!(result, Some(version));
+        assert_eq!(fm.current_version(), version);
+    }
+
+    #[test]
+    fn test_upgrade_readiness_get_ready_validators() {
+        let mut fm = make_fork_manager(21).0;
+
+        let version = ProtocolVersion::new(2, 0, 0);
+        fm.schedule_upgrade(UpgradeEntry {
+            version,
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        // No signals yet
+        assert!(fm.get_ready_validators(version).is_none());
+
+        fm.signal_upgrade_readiness(5, version).unwrap();
+        fm.signal_upgrade_readiness(7, version).unwrap();
+
+        let ready = fm.get_ready_validators(version).unwrap();
+        assert!(ready.contains(&5));
+        assert!(ready.contains(&7));
+        assert_eq!(ready.len(), 2);
     }
 }

@@ -4,6 +4,7 @@
 //! consensus driver with proposer selection, validator management, and block lifecycle.
 
 use crate::block::{Block, BlockExecutionResult};
+use crate::fork::ForkManager;
 use crate::proposer::{
     derive_vrf_seed, select_proposer, select_proposer_subset, verify_proposer_in_subset,
     ConsensusParams,
@@ -165,6 +166,7 @@ impl SimplexConsensus {
         &self,
         block: &Block,
         parent_hash: call_primitives::BlockHash,
+        fork_manager: &ForkManager,
     ) -> Result<(), ConsensusError> {
         // Verify proposer is in the current subset
         let proposer = block.header.proposer;
@@ -180,8 +182,8 @@ impl SimplexConsensus {
             )));
         }
 
-        // Validate block structure and header
-        block.validate(parent_hash)?;
+        // Validate block structure and header (including protocol version)
+        block.validate(parent_hash, fork_manager)?;
 
         Ok(())
     }

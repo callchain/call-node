@@ -72,7 +72,7 @@ impl BlockCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_primitives::BlockHash;
+    use call_primitives::{BlockHash, ProtocolVersion};
 
     fn dummy_block(height: u64) -> Block {
         Block::new(
@@ -80,6 +80,7 @@ mod tests {
             BlockHash::ZERO,
             0,
             0,
+            ProtocolVersion::new(1, 0, 0),
             vec![],
             vec![],
             vec![],

@@ -1669,11 +1669,18 @@ async fn block_production_loop(
 
         let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
+        // Get current protocol version from ForkManager
+        let version = {
+            let fm = state.fork_manager.read().unwrap();
+            fm.current_version()
+        };
+
         let mut block = Block::new(
             height,
             parent_hash,
             current_timestamp_millis(),
             proposer,
+            version,
             protocol_txs,
             evm_txs,
             vec![SystemTx {
@@ -2227,6 +2234,11 @@ async fn bft_event_loop(
                     .collect();
                 let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
+                let version = {
+                    let fm = state.fork_manager.read().unwrap();
+                    fm.current_version()
+                };
+
                 // Request oracle price submissions at boundary intervals
                 let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
                 if is_oracle_boundary {
@@ -2255,6 +2267,7 @@ async fn bft_event_loop(
                     parent_hash,
                     current_timestamp_millis(),
                     proposer,
+                    version,
                     protocol_txs,
                     evm_txs,
                     vec![SystemTx {
@@ -3133,11 +3146,13 @@ mod tests {
             .filter_map(|e| serde_json::from_slice(&e.data).ok())
             .collect();
 
+        let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
             height,
             node.parent_hash,
             1_000, // timestamp
             proposer,
+            version,
             protocol_txs,
             vec![],
             vec![SystemTx {
@@ -3224,11 +3239,13 @@ mod tests {
         assert!(selection.evm_txs.is_empty());
         assert!(selection.bridge_ops.is_empty());
 
+        let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
             height,
             node.parent_hash,
             2_000,
             proposer,
+            version,
             vec![],
             vec![],
             vec![SystemTx {
@@ -3340,11 +3357,13 @@ mod tests {
 
         assert_eq!(protocol_txs.len(), 1, "should have 1 protocol tx");
 
+        let version = node1.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
             height,
             node1.parent_hash,
             3_000,
             proposer,
+            version,
             protocol_txs,
             vec![],
             vec![SystemTx {
@@ -3446,11 +3465,13 @@ mod tests {
             .filter_map(|e| serde_json::from_slice(&e.data).ok())
             .collect();
 
+        let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
             height,
             node.parent_hash,
             4_000,
             proposer,
+            version,
             protocol_txs,
             vec![],
             vec![SystemTx {
@@ -3559,8 +3580,9 @@ mod tests {
                 .filter_map(|e| serde_json::from_slice(&e.data).ok())
                 .collect();
 
+            let version = node.state.fork_manager.read().unwrap().current_version();
             let mut block = Block::new(
-                height, node.parent_hash, 5_000, proposer, protocol_txs, vec![],
+                height, node.parent_hash, 5_000, proposer, version, protocol_txs, vec![],
                 vec![SystemTx { kind: SystemTxKind::UpdateBaseFee, data: vec![] }],
                 selection.bridge_ops,
             );

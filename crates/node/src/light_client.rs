@@ -4,7 +4,7 @@
 //! Targets: <10MB storage, ~1KB/block bandwidth, ~50ms compute per block.
 
 use call_consensus::{BlockHeader, BlockSignature};
-use call_primitives::{Address, Balance, BlockHash, Hash, TxHash, ValidatorId};
+use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash, ValidatorId};
 use call_primitives::Ed25519PublicKey;
 use call_shielded::{
     Note, ViewingKey,
@@ -589,6 +589,7 @@ mod tests {
             receipt_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
+            version: ProtocolVersion::new(1, 0, 0),
             bls_aggregate_signature: None,
             bls_signer_bitmap: Vec::new(),
         }

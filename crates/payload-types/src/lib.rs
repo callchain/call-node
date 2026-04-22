@@ -3,6 +3,7 @@
 //! Block limits, payload attributes, and configuration types
 //! for the payload builder and consensus integration.
 
+use call_primitives::ProtocolVersion;
 use serde::{Deserialize, Serialize};
 
 // ── Re-exports ────────────────────────────────────────────────────────
@@ -61,6 +62,8 @@ pub struct PayloadAttributes {
     pub timestamp_millis: u64,
     /// Validator ID of the proposer
     pub proposer: call_primitives::ValidatorId,
+    /// Protocol version for this block
+    pub version: ProtocolVersion,
     /// Block limits to enforce
     pub limits: BlockLimits,
 }
@@ -72,12 +75,14 @@ impl PayloadAttributes {
         parent_hash: call_primitives::BlockHash,
         timestamp_millis: u64,
         proposer: call_primitives::ValidatorId,
+        version: ProtocolVersion,
     ) -> Self {
         Self {
             height,
             parent_hash,
             timestamp_millis,
             proposer,
+            version,
             limits: BlockLimits::default(),
         }
     }
@@ -98,7 +103,9 @@ impl PayloadAttributes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_primitives::BlockHash;
+    use call_primitives::{BlockHash, ProtocolVersion};
+
+    const TEST_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0, 0);
 
     #[test]
     fn test_block_limits_defaults() {
@@ -119,6 +126,7 @@ mod tests {
             BlockHash::ZERO,
             1000,
             1,
+            TEST_VERSION,
         );
         assert_eq!(attrs.height, 1);
         assert_eq!(attrs.parent_hash, BlockHash::ZERO);
@@ -134,7 +142,7 @@ mod tests {
             max_transactions: 100,
             ..Default::default()
         };
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1)
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, TEST_VERSION)
             .with_limits(custom);
         assert_eq!(attrs.limits.max_transactions, 100);
         assert_eq!(attrs.limits.max_block_size, 5 * 1024 * 1024); // unchanged
@@ -142,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_payload_attributes_estimate_size() {
-        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1);
+        let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, TEST_VERSION);
         let size = attrs.estimate_size(100, 50);
         // 100 * 200 + 50 * 500 = 20_000 + 25_000 = 45_000
         assert_eq!(size, 45_000);
@@ -184,6 +192,7 @@ mod tests {
             BlockHash::repeat_byte(0xAB),
             1_000_000,
             7,
+            TEST_VERSION,
         );
         let json = serde_json::to_string(&attrs).unwrap();
         let parsed: PayloadAttributes = serde_json::from_str(&json).unwrap();

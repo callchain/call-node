@@ -8,7 +8,7 @@ use e2e::harness::*;
 
 use call_consensus::{ConsensusParams, SimplexConsensus};
 use call_consensus::ValidatorStateManager as ConsensusValidatorState;
-use call_primitives::{Address, BlockHash, Ed25519PublicKey, ValidatorId};
+use call_primitives::{Address, BlockHash, Ed25519PublicKey, ProtocolVersion, ValidatorId};
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 
@@ -203,13 +203,15 @@ async fn test_invalid_proposer_rejected() {
         BlockHash::ZERO,
         1_000_000,
         invalid_proposer,
+        ProtocolVersion::new(1, 0, 0),
         vec![],
         vec![],
         vec![],
         vec![],
     );
 
+    let fm = node.state.fork_manager.read().unwrap();
     let c = node.consensus.read().unwrap();
-    let result = c.validate_block(&block, BlockHash::ZERO);
+    let result = c.validate_block(&block, BlockHash::ZERO, &*fm);
     assert!(result.is_err(), "invalid proposer should be rejected");
 }

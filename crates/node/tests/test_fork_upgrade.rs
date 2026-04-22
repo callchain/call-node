@@ -97,11 +97,13 @@ async fn test_height_activated_upgrade() {
             }]
         };
 
+        let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = call_consensus::Block::new(
             height,
             node.parent_hash,
             ts,
             proposer,
+            version,
             protocol_txs,
             vec![],
             system_txs,

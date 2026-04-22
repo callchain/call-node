@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::validator::ConsensusError;
+use crate::ForkManager;
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
 
@@ -72,6 +73,8 @@ pub struct BlockHeader {
     pub receipt_root: Hash,
     pub proposer: call_primitives::ValidatorId,
     pub signature: BlockSignature,
+    /// Protocol version of this block (per spec §19)
+    pub version: ProtocolVersion,
     /// Optional BLS12-381 aggregated signature for light client verification
     pub bls_aggregate_signature: Option<Vec<u8>>,
     /// Bitmask of which validators contributed to the BLS aggregate (bit i = validator i)
@@ -91,13 +94,21 @@ impl BlockHeader {
         data.extend_from_slice(self.receipt_root.as_slice());
         data.extend_from_slice(&self.proposer.to_le_bytes());
         data.extend_from_slice(&self.signature.0);
+        data.extend_from_slice(&self.version.major.to_le_bytes());
+        data.extend_from_slice(&self.version.minor.to_le_bytes());
+        data.extend_from_slice(&self.version.patch.to_le_bytes());
         // Note: bls_aggregate_signature is intentionally excluded from the hash
         // because it is a consensus seal added after the block content is finalized.
         keccak256(&data)
     }
 
-    /// Validate header fields
-    pub fn validate(&self, expected_parent: BlockHash) -> Result<(), ConsensusError> {
+    /// Validate header fields including protocol version.
+    /// `fork_manager` is used to verify the block's version matches the expected version at its height.
+    pub fn validate(
+        &self,
+        expected_parent: BlockHash,
+        fork_manager: &ForkManager,
+    ) -> Result<(), ConsensusError> {
         if self.parent_hash != expected_parent {
             return Err(ConsensusError::InvalidBlock(format!(
                 "parent hash mismatch: expected {expected_parent}, got {}",
@@ -114,6 +125,12 @@ impl BlockHeader {
         }
         if self.proposer == 0 {
             return Err(ConsensusError::InvalidBlock("zero proposer".into()));
+        }
+        // Validate block version matches expected version at this height
+        if let Err(e) = fork_manager.validate_block_version(self.height, self.version) {
+            return Err(ConsensusError::InvalidBlock(format!(
+                "block version mismatch: {e}"
+            )));
         }
         Ok(())
     }
@@ -167,6 +184,7 @@ impl Block {
         parent_hash: BlockHash,
         timestamp_millis: u64,
         proposer: call_primitives::ValidatorId,
+        version: ProtocolVersion,
         protocol_txs: Vec<ProtocolTransaction>,
         evm_txs: Vec<EvmTx>,
         system_txs: Vec<SystemTx>,
@@ -182,6 +200,7 @@ impl Block {
             receipt_root: Hash::ZERO,
             proposer,
             signature: BlockSignature::default(),
+            version,
             bls_aggregate_signature: None,
             bls_signer_bitmap: Vec::new(),
         };
@@ -196,8 +215,12 @@ impl Block {
     }
 
     /// Validate block structure and header
-    pub fn validate(&self, expected_parent: BlockHash) -> Result<(), ConsensusError> {
-        self.header.validate(expected_parent)?;
+    pub fn validate(
+        &self,
+        expected_parent: BlockHash,
+        fork_manager: &ForkManager,
+    ) -> Result<(), ConsensusError> {
+        self.header.validate(expected_parent, fork_manager)?;
 
         // Per spec §2.5: execution order must be EVM → Protocol → Bridge → System
         // We validate that each section is internally consistent
@@ -1114,6 +1137,7 @@ fn decode_evm_tx(raw: &[u8]) -> Result<EvmTransaction, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ForkManager;
     use call_primitives::Address;
     use call_protocol::instructions::Instruction;
     use call_protocol::transaction::{AuthScheme, GasConfig};
@@ -1121,6 +1145,12 @@ mod tests {
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
     }
+
+    fn test_fork_manager() -> ForkManager {
+        ForkManager::new(ProtocolVersion::new(1, 0, 0), 1)
+    }
+
+    const TEST_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0, 0);
 
     fn make_test_evm_tx() -> EvmTransaction {
         EvmTransaction {
@@ -1192,6 +1222,7 @@ mod tests {
             BlockHash::ZERO,
             1000,
             1,
+            TEST_VERSION,
             vec![make_test_tx()],
             vec![vec![0u8; 100]],
             vec![SystemTx {
@@ -1221,6 +1252,7 @@ mod tests {
             receipt_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
+            version: TEST_VERSION,
             bls_aggregate_signature: None,
             bls_signer_bitmap: Vec::new(),
         };
@@ -1245,12 +1277,14 @@ mod tests {
             receipt_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
+            version: TEST_VERSION,
             bls_aggregate_signature: None,
             bls_signer_bitmap: Vec::new(),
         };
+        let fm = test_fork_manager();
 
-        assert!(header.validate(BlockHash::repeat_byte(1)).is_ok());
-        assert!(header.validate(BlockHash::repeat_byte(2)).is_err());
+        assert!(header.validate(BlockHash::repeat_byte(1), &fm).is_ok());
+        assert!(header.validate(BlockHash::repeat_byte(2), &fm).is_err());
     }
 
     #[test]
@@ -1260,14 +1294,16 @@ mod tests {
             BlockHash::repeat_byte(1),
             1000,
             1,
+            TEST_VERSION,
             vec![make_test_tx()],
             vec![],
             vec![],
             vec![],
         );
+        let fm = test_fork_manager();
 
-        assert!(block.validate(BlockHash::repeat_byte(1)).is_ok());
-        assert!(block.validate(BlockHash::repeat_byte(2)).is_err());
+        assert!(block.validate(BlockHash::repeat_byte(1), &fm).is_ok());
+        assert!(block.validate(BlockHash::repeat_byte(2), &fm).is_err());
     }
 
     #[test]
@@ -1278,13 +1314,15 @@ mod tests {
             BlockHash::ZERO,
             1000,
             1,
+            TEST_VERSION,
             vec![tx.clone(), tx],
             vec![],
             vec![],
             vec![],
         );
+        let fm = test_fork_manager();
 
-        let result = block.validate(BlockHash::ZERO);
+        let result = block.validate(BlockHash::ZERO, &fm);
         assert!(result.is_err());
     }
 
@@ -1298,6 +1336,7 @@ mod tests {
             BlockHash::ZERO,
             1000,
             1,
+            TEST_VERSION,
             vec![protocol_tx],
             vec![evm_bytes],
             vec![SystemTx {
@@ -1405,6 +1444,7 @@ mod tests {
             BlockHash::ZERO,
             1000,
             1,
+            TEST_VERSION,
             vec![],
             vec![],
             vec![SystemTx {
@@ -1457,6 +1497,7 @@ mod tests {
             BlockHash::repeat_byte(0xFF),
             999_000,
             7,
+            TEST_VERSION,
             vec![],
             vec![],
             vec![],
@@ -1467,6 +1508,7 @@ mod tests {
         assert_eq!(block.header.parent_hash, BlockHash::repeat_byte(0xFF));
         assert_eq!(block.header.timestamp_millis, 999_000);
         assert_eq!(block.header.proposer, 7);
+        assert_eq!(block.header.version, TEST_VERSION);
     }
 
     #[test]
@@ -1543,6 +1585,7 @@ mod tests {
             BlockHash::ZERO,
             1000,
             1,
+            TEST_VERSION,
             vec![tx],
             vec![],
             vec![],
@@ -1628,6 +1671,7 @@ mod tests {
             BlockHash::ZERO,
             1000,
             1,
+            TEST_VERSION,
             vec![tx],
             vec![],
             vec![],
