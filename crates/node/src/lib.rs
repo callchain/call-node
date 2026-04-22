@@ -18,7 +18,7 @@ use call_consensus::{
     bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
     block_cache::BlockCache,
     digest::ConsensusDigest,
-    proposer::{derive_vrf_seed, select_proposer_subset, EPOCH_LENGTH},
+    proposer::{derive_vrf_seed, select_proposer_subset},
 };
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, UpgradeAnnouncement};
 use call_primitives::{BlockHash, Hash, Address};
@@ -1409,6 +1409,7 @@ fn load_receipts(db: &DatabaseEnv) -> Result<std::collections::HashMap<TxHash, P
     Ok(receipts)
 }
 
+#[allow(dead_code)]
 fn delete_receipts_by_block(db: &DatabaseEnv, block_number: u64) -> Result<(), String> {
     let all = db_iter_all::<CallReceipts>(db).map_err(|e: StorageError| e.to_string())?;
     for (k, v) in all {

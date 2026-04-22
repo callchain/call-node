@@ -5,6 +5,7 @@ use alloy_primitives::address;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
+#[allow(dead_code)]
 pub(crate) const BALANCE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000102");
 

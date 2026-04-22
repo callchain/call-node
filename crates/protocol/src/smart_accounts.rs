@@ -115,7 +115,7 @@ pub struct SmartAccountRegistry {
     recovery_configs: HashMap<Address, SocialRecoveryConfig>,
     /// Multiple session keys per account: account → (session_key → config)
     session_keys: HashMap<Address, HashMap<Address, SessionKeyConfig>>,
-    session_usage: HashMap<Address, SessionKeyDailyUsage>,
+    _session_usage: HashMap<Address, SessionKeyDailyUsage>,
 }
 
 impl SmartAccountRegistry {

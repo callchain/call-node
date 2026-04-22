@@ -76,7 +76,7 @@ pub fn poseidon_hash_tagged(tag: &str, inputs: &[ark_bn254::Fr]) -> ark_bn254::F
 
 #[cfg(feature = "real-prover")]
 pub mod gadget {
-    use super::*;
+    
     use ark_bn254::Fr;
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};

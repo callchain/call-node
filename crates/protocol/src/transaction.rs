@@ -5,7 +5,7 @@
 use call_primitives::{Address, FeeCurrency, TxHash};
 use crate::balances::BalanceState;
 use crate::instructions::Instruction;
-use crate::sponsor::{GasSponsorAuth, SponsorRegistry};
+use crate::sponsor::SponsorRegistry;
 use crate::{ProtocolError, ProtocolResult};
 use std::collections::HashSet;
 

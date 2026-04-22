@@ -6,7 +6,7 @@
 use call_node::boot::boot_node;
 use call_node::cli::{CliArgs, Commands, WalletCommand};
 use call_node::config::NodeConfig;
-use call_node::telemetry::{init_opentelemetry_tracing, start_alert_task, start_metrics_server, AlertDispatcher, HealthState, TelemetryRegistry};
+use call_node::telemetry::{init_opentelemetry_tracing, start_alert_task, start_metrics_server, AlertDispatcher, HealthState};
 use call_node::wallet;
 use clap::Parser;
 use std::sync::Arc;

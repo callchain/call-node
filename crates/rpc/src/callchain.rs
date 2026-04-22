@@ -13,11 +13,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // ── Governance signature helper ──────────────────────────────
 
     /// Block window size for replay protection. Signatures are valid for ±1 window.
+    #[allow(dead_code)]
     const REPLAY_WINDOW: u64 = 100;
 
     /// Verify a secp256k1 signature, optionally required based on auth config.
     /// When `require_auth` is true, a valid signature MUST be provided.
     /// When false, a signature is optional (if provided, must be valid).
+    #[allow(dead_code)]
     fn verify_signature(
         msg_hash: [u8; 32],
         expected: Address,
@@ -51,6 +53,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     }
 
     /// Check replay protection: nonce must be within ±1 window of current block.
+    #[allow(dead_code)]
     fn check_replay_nonce(current_block: u64, nonce: u64) -> Result<(), ErrorObjectOwned> {
         let expected = current_block / REPLAY_WINDOW;
         if nonce.abs_diff(expected) > 1 {
@@ -62,6 +65,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     }
 
     /// Compute a keccak256 hash for signing.
+    #[allow(dead_code)]
     fn msg_hash(message: &[u8]) -> [u8; 32] {
         let h = keccak256(message);
         let mut arr = [0u8; 32];
@@ -918,7 +922,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .ok_or_else(|| invalid_params("missing 'proposer' field".into()))?;
             let proposer = proposer_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
 
-            let type_str = call_obj.get("type")
+            let _type_str = call_obj.get("type")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| invalid_params("missing 'type' field".into()))?;
             let title = call_obj.get("title")
@@ -1616,7 +1620,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
 
     // call_lightClientBridgeDeposit
     module
-        .register_async_method("call_lightClientBridgeDeposit", |params, state, _ctx| async move {
+        .register_async_method("call_lightClientBridgeDeposit", |_params, _state, _ctx| async move {
             #[cfg(not(feature = "light-client-bridge"))]
             return Err::<serde_json::Value, _>(internal_error(
                 "light client bridge is not enabled".into()));

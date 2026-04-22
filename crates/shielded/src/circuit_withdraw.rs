@@ -29,7 +29,7 @@
 use ark_bn254::Fr;
 use ark_ff::{Field, Zero};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use crate::poseidon::{poseidon_hash, bytes_to_fr};
+use crate::poseidon::bytes_to_fr;
 use crate::poseidon::domain;
 
 /// Witness data for a withdraw note.

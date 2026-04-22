@@ -27,19 +27,20 @@ use tracing::info;
 // ── Server State ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct ProverState {
+pub(crate) struct ProverState {
     pub prover: &'static RealProver,
     pub mode: ProverMode,
 }
 
 #[derive(Clone, Copy)]
-pub enum ProverMode {
+#[allow(dead_code)]
+pub(crate) enum ProverMode {
     Production,
     Dev,
 }
 
 impl ProverMode {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             ProverMode::Production => "production",
             ProverMode::Dev => "dev",
@@ -50,7 +51,7 @@ impl ProverMode {
 // ── Request/Response Types ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct DepositRequest {
+pub(crate) struct DepositRequest {
     pub value: u128,
     #[serde(rename = "assetId")]
     pub asset_id: u64,
@@ -60,7 +61,7 @@ pub struct DepositRequest {
 }
 
 #[derive(Serialize)]
-pub struct DepositResponse {
+pub(crate) struct DepositResponse {
     pub proof: String,
     pub commitment: String,
     #[serde(rename = "assetId")]
@@ -68,7 +69,7 @@ pub struct DepositResponse {
 }
 
 #[derive(Deserialize)]
-pub struct TransferRequest {
+pub(crate) struct TransferRequest {
     pub inputs: Vec<InputNoteRequest>,
     pub outputs: Vec<OutputNoteRequest>,
     #[serde(rename = "assetId")]
@@ -78,7 +79,7 @@ pub struct TransferRequest {
 }
 
 #[derive(Deserialize)]
-pub struct InputNoteRequest {
+pub(crate) struct InputNoteRequest {
     pub value: u128,
     pub rcm: String,
     #[serde(rename = "recipientIvk")]
@@ -91,7 +92,7 @@ pub struct InputNoteRequest {
 }
 
 #[derive(Deserialize)]
-pub struct OutputNoteRequest {
+pub(crate) struct OutputNoteRequest {
     pub value: u128,
     pub rcm: String,
     #[serde(rename = "recipientIvk")]
@@ -100,21 +101,21 @@ pub struct OutputNoteRequest {
 }
 
 #[derive(Deserialize)]
-pub struct MerklePathEntry {
+pub(crate) struct MerklePathEntry {
     pub sibling: String,
     #[serde(rename = "isRight")]
     pub is_right: bool,
 }
 
 #[derive(Serialize)]
-pub struct TransferResponse {
+pub(crate) struct TransferResponse {
     pub proof: String,
     pub nullifiers: Vec<String>,
     pub commitments: Vec<String>,
 }
 
 #[derive(Deserialize)]
-pub struct WithdrawRequest {
+pub(crate) struct WithdrawRequest {
     pub value: u128,
     #[serde(rename = "assetId")]
     pub asset_id: u64,
@@ -130,20 +131,20 @@ pub struct WithdrawRequest {
 }
 
 #[derive(Serialize)]
-pub struct WithdrawResponse {
+pub(crate) struct WithdrawResponse {
     pub proof: String,
     pub nullifier: String,
 }
 
 #[derive(Serialize)]
-pub struct HealthResponse {
+pub(crate) struct HealthResponse {
     pub status: &'static str,
     pub mode: &'static str,
 }
 
 // ── Router ─────────────────────────────────────────────────────────────────
 
-pub fn build_router(state: ProverState) -> Router {
+pub(crate) fn build_router(state: ProverState) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/prove/deposit", post(handle_deposit))
@@ -259,7 +260,7 @@ async fn handle_transfer(
         let rho = decode_hex_32(&output.rho, "rho")?;
         let rcm = decode_hex_32(&output.rcm, "rcm")?;
 
-        let vk = ViewingKey {
+        let _vk = ViewingKey {
             incoming_view_key: recipient_ivk,
             full_view_key: derive_fvk_from_ivk(&recipient_ivk),
         };
@@ -330,7 +331,7 @@ async fn handle_withdraw(
 
     let rcm = compute_rcm_poseidon(&vk, req.value, req.asset_id, &rho);
     let nullifier = compute_nullifier(&recipient_ivk, &rho);
-    let commitment = compute_commitment_poseidon(req.value, req.asset_id, &rcm, &rho);
+    let _commitment = compute_commitment_poseidon(req.value, req.asset_id, &rcm, &rho);
 
     let merkle_path: Vec<([u8; 32], bool)> = req
         .merkle_path

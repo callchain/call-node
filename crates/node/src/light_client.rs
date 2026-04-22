@@ -3,15 +3,14 @@
 //! Lightweight block header and proof verification for resource-constrained clients.
 //! Targets: <10MB storage, ~1KB/block bandwidth, ~50ms compute per block.
 
-use call_consensus::{BlockHeader, BlockSignature};
-use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash, ValidatorId};
+use call_consensus::BlockHeader;
+use call_primitives::{Address, Balance, BlockHash, Hash, TxHash, ValidatorId};
 use call_primitives::Ed25519PublicKey;
 use call_shielded::{
     Note, ViewingKey,
     verify_merkle_path, verify_zk_proof, ZkProof,
-    IncrementalMerkleTree,
 };
-use call_crypto::{keccak256, BlsPublicKey, BlsSignature, bls_verify_aggregate};
+use call_crypto::{BlsPublicKey, BlsSignature, bls_verify_aggregate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -39,7 +39,7 @@ pub struct MetricSample {
 /// Central telemetry registry collecting all subsystem metrics
 pub struct TelemetryRegistry {
     metrics: RwLock<HashMap<String, Metric>>,
-    alerts: RwLock<Vec<Alert>>,
+    _alerts: RwLock<Vec<Alert>>,
     start_time: Instant,
     data_dir: PathBuf,
     // Atomic counters for hot-path performance
@@ -70,7 +70,7 @@ impl TelemetryRegistry {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             metrics: RwLock::new(HashMap::new()),
-            alerts: RwLock::new(Vec::new()),
+            _alerts: RwLock::new(Vec::new()),
             start_time: Instant::now(),
             data_dir,
             consensus_blocks_produced: AtomicU64::new(0),
@@ -912,7 +912,7 @@ use opentelemetry::trace::{Span, Tracer};
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::{
     propagation::TraceContextPropagator,
-    trace::{self, RandomIdGenerator, Sampler, TracerProvider},
+    trace::{RandomIdGenerator, Sampler, TracerProvider},
     Resource,
 };
 use opentelemetry_semantic_conventions::resource;
@@ -934,15 +934,12 @@ pub fn init_opentelemetry_tracing(
 
     // Create tracer provider with resource attributes
     let provider = TracerProvider::builder()
-        .with_config(
-            trace::Config::default()
-                .with_sampler(Sampler::AlwaysOn)
-                .with_id_generator(RandomIdGenerator::default())
-                .with_resource(Resource::new(vec![
-                    KeyValue::new(resource::SERVICE_NAME, service_name.to_string()),
-                    KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-                ])),
-        )
+        .with_sampler(Sampler::AlwaysOn)
+        .with_id_generator(RandomIdGenerator::default())
+        .with_resource(Resource::new(vec![
+            KeyValue::new(resource::SERVICE_NAME, service_name.to_string()),
+            KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+        ]))
         .build();
 
     // Store provider for shutdown

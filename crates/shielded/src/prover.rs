@@ -319,6 +319,7 @@ mod real_prover_impl {
         ///
         /// Validators only need verifying keys, not proving keys. This provides
         /// a placeholder for the proving key fields when loading ceremony VKs.
+        #[allow(dead_code)]
         fn empty_proving_key() -> ProvingKey<Bn254> {
             use ark_bn254::{G1Affine, G2Affine};
             ProvingKey {

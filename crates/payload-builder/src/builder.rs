@@ -6,7 +6,7 @@
 use call_bridge::{BridgeOp, BridgeStateManager};
 use call_consensus::block::{Block, BlockExecutionResult, SystemTx, SystemTxKind};
 use call_consensus::validator::ConsensusError;
-use call_primitives::{Balance, BlockHash, Hash, ProtocolVersion};
+use call_primitives::{Balance, BlockHash, Hash};
 use call_protocol::balances::BalanceState;
 use call_protocol::compliance::ComplianceEngine;
 use call_protocol::instructions::{Instruction, InstructionResult};

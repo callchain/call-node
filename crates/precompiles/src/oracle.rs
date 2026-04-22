@@ -8,6 +8,7 @@ use alloy_primitives::address;
 use std::sync::{Arc, RwLock};
 
 /// Precompile address
+#[allow(dead_code)]
 pub(crate) const ORACLE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000101");
 
@@ -47,7 +48,7 @@ pub enum OracleStatus {
 #[derive(Debug)]
 pub struct OracleState {
     manager: OracleManager,
-    stale_threshold_secs: u64,
+    _stale_threshold_secs: u64,
 }
 
 impl Default for OracleState {
@@ -64,7 +65,7 @@ impl OracleState {
         };
         Self {
             manager: OracleManager::new(config),
-            stale_threshold_secs,
+            _stale_threshold_secs: stale_threshold_secs,
         }
     }
 

@@ -4,7 +4,7 @@
 //! of proving/verifying keys. All operations gated behind the `real-prover` feature.
 
 use ark_bn254::Bn254;
-use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
+use ark_groth16::{ProvingKey, VerifyingKey};
 use ark_relations::r1cs::ConstraintSynthesizer;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;

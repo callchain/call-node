@@ -30,7 +30,7 @@
 use ark_bn254::Fr;
 use ark_ff::{Field, Zero};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use crate::poseidon::{poseidon_hash, poseidon_hash_tagged, bytes_to_fr};
+use crate::poseidon::{poseidon_hash_tagged, bytes_to_fr};
 use crate::poseidon::domain;
 
 // ============================================================================
@@ -334,6 +334,7 @@ fn value_to_fr_bytes(value: u128) -> [u8; 32] {
 /// Derive the incoming viewing key Fr from a spending key.
 ///
 /// Matches ViewingKey::generate: ivk = poseidon_hash_tagged("call/shielded/ivk", [sk_fr]).
+#[allow(dead_code)]
 fn derive_ivk_from_spending_key(spending_key: &[u8; 32]) -> Fr {
     let sk_fr = bytes_to_fr(spending_key);
     poseidon_hash_tagged(domain::IVK_FROM_SK, &[sk_fr])
