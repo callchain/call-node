@@ -202,6 +202,12 @@ impl TestNode {
         let _ = mempool.insert_protocol_tx(tx);
     }
 
+    /// Insert a bridge operation into the mempool.
+    pub fn insert_bridge_op(&self, op: call_bridge::BridgeOp) {
+        let mut mempool = self.mempool.write().unwrap();
+        let _ = mempool.insert_bridge_op(op);
+    }
+
     /// Produce a single block deterministically.
     ///
     /// Returns the produced block, or `None` if no proposer is available.
@@ -252,6 +258,15 @@ impl TestNode {
             let mut fee_params = self.state.fee_params.write().unwrap();
             let mut evm_state = self.state.evm_state.write().unwrap();
             let mut oracle = self.state.oracle.write().unwrap();
+            let mut governance = self.state.governance.write().unwrap();
+            governance.set_current_block(height);
+            let bridge_config = call_bridge::BridgeConfig::default();
+            let validator_mgr = self.state.validator_state.read().unwrap();
+            let validators: Vec<Address> = validator_mgr
+                .get_all_validators()
+                .values()
+                .map(|v| v.address)
+                .collect();
 
             block
                 .execute(
@@ -267,9 +282,9 @@ impl TestNode {
                     None,
                     None,
                     None,
-                    None,
-                    None,
-                    None,
+                    Some(&mut *governance),
+                    Some(&bridge_config),
+                    if validators.is_empty() { None } else { Some(&validators) },
                     None,
                 )
                 .expect("block execution")
