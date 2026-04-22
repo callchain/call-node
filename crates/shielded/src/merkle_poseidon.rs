@@ -5,9 +5,10 @@
 //! `merkle.rs` but operates with `[u8; 32]` bytes internally converted to
 //! `ark_bn254::Fr` for Poseidon hashing.
 //!
-//! All operations are gated behind the `real-prover` feature.
+//! All operations are gated behind the `poseidon` feature.
 
 use std::cell::RefCell;
+use crate::poseidon::poseidon_hash_pair;
 
 // ============================================================================
 // PoseidonMerkleTree
@@ -17,7 +18,6 @@ use std::cell::RefCell;
 ///
 /// Stores all tree nodes explicitly for efficient proof generation.
 /// Uses Poseidon hash over BN254 Fr field, suitable for ZK circuit verification.
-#[cfg(feature = "real-prover")]
 #[derive(Debug, Clone)]
 pub struct PoseidonMerkleTree {
     depth: usize,
@@ -26,7 +26,6 @@ pub struct PoseidonMerkleTree {
     levels: Vec<Vec<[u8; 32]>>,
 }
 
-#[cfg(feature = "real-prover")]
 impl PoseidonMerkleTree {
     /// Creates a new incremental Merkle tree with the given depth.
     ///
@@ -102,6 +101,11 @@ impl PoseidonMerkleTree {
         self.count
     }
 
+    /// Check if a leaf exists in the tree.
+    pub fn contains(&self, leaf: &[u8; 32]) -> bool {
+        self.levels[0].contains(leaf)
+    }
+
     /// Returns a Merkle proof for the most recently inserted leaf.
     pub fn proof_for_last(&self) -> Vec<([u8; 32], bool)> {
         if self.count == 0 {
@@ -168,7 +172,6 @@ impl PoseidonMerkleTree {
     }
 }
 
-#[cfg(feature = "real-prover")]
 impl Default for PoseidonMerkleTree {
     fn default() -> Self {
         Self::new(32)
@@ -183,7 +186,6 @@ impl Default for PoseidonMerkleTree {
 ///
 /// Recomputes the root from the leaf and proof path, comparing against
 /// `expected_root`. Returns `true` if the proof is valid.
-#[cfg(feature = "real-prover")]
 pub fn verify_poseidon_proof(
     root: &[u8; 32],
     leaf: &[u8; 32],
@@ -193,10 +195,10 @@ pub fn verify_poseidon_proof(
     for (sibling, sibling_is_right) in proof {
         if *sibling_is_right {
             // Sibling is on the right: current || sibling
-            current = poseidon_hash_pair(&current, sibling);
+            current = crate::poseidon::poseidon_hash_pair(&current, sibling);
         } else {
             // Sibling is on the left: sibling || current
-            current = poseidon_hash_pair(sibling, &current);
+            current = crate::poseidon::poseidon_hash_pair(sibling, &current);
         }
     }
     current == *root
@@ -207,26 +209,15 @@ pub fn verify_poseidon_proof(
 // ============================================================================
 
 // Thread-local cache of empty hashes per level.
-#[cfg(feature = "real-prover")]
 thread_local! {
     static EMPTY_HASH: RefCell<Vec<[u8; 32]>> = RefCell::new(vec![[0u8; 32]]);
-}
-
-/// Hash a pair of 32-byte values using Poseidon over BN254.
-///
-/// Converts each `[u8; 32]` to Fr, hashes with Poseidon, returns `[u8; 32]`.
-#[cfg(feature = "real-prover")]
-fn poseidon_hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let left_fr = crate::poseidon::bytes_to_fr(left);
-    let right_fr = crate::poseidon::bytes_to_fr(right);
-    crate::poseidon::fr_to_bytes(&crate::poseidon::poseidon_hash_2(&left_fr, &right_fr))
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "real-prover"))]
+#[cfg(all(test, feature = "poseidon"))]
 mod tests {
     use super::*;
 

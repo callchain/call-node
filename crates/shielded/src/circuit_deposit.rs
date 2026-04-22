@@ -12,10 +12,10 @@
 //!   D2. Value range: Non-zero, 128-bit range
 //!   D3. RCM determinism: H("rcm" || ivk || value || asset_id || rho) == rcm
 
-use ark_bn254::{Fr, Bn254};
-use ark_ff::{BigInteger, Field, PrimeField, Zero};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, Namespace, SynthesisError};
-use crate::poseidon::{poseidon_hash, bytes_to_fr};
+use ark_bn254::Fr;
+use ark_ff::{Field, Zero};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use crate::poseidon::bytes_to_fr;
 
 /// Witness data for a deposit note.
 #[derive(Debug, Clone)]
@@ -59,44 +59,72 @@ impl DepositCircuit {
 impl ConstraintSynthesizer<Fr> for DepositCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         use ark_r1cs_std::alloc::AllocVar;
+        use ark_r1cs_std::boolean::Boolean;
+        use ark_r1cs_std::eq::EqGadget;
         use ark_r1cs_std::fields::fp::FpVar;
+        use ark_r1cs_std::prelude::ToBitsGadget;
+        use crate::poseidon::gadget::poseidon_hash_gadget;
 
         let witness = self.witness.ok_or(SynthesisError::AssignmentMissing)?;
 
-        // Allocate public commitment as witness variable (for constraint checking)
-        let expected_cm_fr = bytes_to_fr(&self.commitment);
-        let _cm_var = FpVar::new_input(cs.clone(), || Ok(expected_cm_fr))?;
+        // --- Public inputs ---
+        let commitment_fr = bytes_to_fr(&self.commitment);
+        let commitment_var = FpVar::new_input(cs.clone(), || Ok(commitment_fr))?;
 
-        // Allocate private witnesses
-        let value_bytes = value_to_fr_bytes(witness.value);
-        let value_fr = bytes_to_fr(&value_bytes);
-        let mut asset_bytes = [0u8; 32];
-        asset_bytes[..8].copy_from_slice(&self.asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
+        let asset_id_fr = {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&self.asset_id.to_le_bytes());
+            bytes_to_fr(&b)
+        };
+        let asset_id_var = FpVar::new_input(cs.clone(), || Ok(asset_id_fr))?;
+
+        // --- Private witnesses ---
+        let value_fr = bytes_to_fr(&value_to_fr_bytes(witness.value));
+        let value_var = FpVar::new_witness(cs.clone(), || Ok(value_fr))?;
+
         let rcm_fr = bytes_to_fr(&witness.rcm);
+        let rcm_var = FpVar::new_witness(cs.clone(), || Ok(rcm_fr))?;
+
         let ivk_fr = bytes_to_fr(&witness.recipient_ivk);
+        let ivk_var = FpVar::new_witness(cs.clone(), || Ok(ivk_fr))?;
+
         let rho_fr = bytes_to_fr(&witness.rho);
+        let rho_var = FpVar::new_witness(cs.clone(), || Ok(rho_fr))?;
 
         // D1: Commitment validity
-        // Recompute H(value || asset_id || rcm || rho) and enforce == public commitment
-        let computed_cm = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
-        if computed_cm != expected_cm_fr {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+        // H(value || asset_id || rcm || rho) == public commitment
+        let computed_cm = poseidon_hash_gadget(
+            cs.clone(),
+            &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+        )?;
+        computed_cm.enforce_equal(&commitment_var)?;
 
-        // D2: Value range — non-zero
-        if witness.value == 0 {
-            return Err(SynthesisError::Unsatisfiable);
+        // D2: Value range — non-zero (inverse witness trick)
+        let value_inv = FpVar::new_witness(cs.clone(), || {
+            if value_fr.is_zero() {
+                Err(SynthesisError::Unsatisfiable)
+            } else {
+                Ok(value_fr.inverse().unwrap())
+            }
+        })?;
+        let one = FpVar::new_constant(cs.clone(), Fr::from(1u64))?;
+        (value_var.clone() * value_inv).enforce_equal(&one)?;
+
+        // 128-bit range: decompose to bits and enforce bits 128..=253 are zero
+        let bits = value_var.to_bits_le()?;
+        for bit in &bits[128..] {
+            bit.enforce_equal(&Boolean::constant(false))?;
         }
-        // 128-bit range: value fits in u128 (already enforced by type)
 
         // D3: RCM determinism
-        // Recompute H("rcm" || ivk || value || asset_id || rho) and enforce == rcm
-        let rcm_tag = domain_tag_to_fr("rcm");
-        let computed_rcm = poseidon_hash(&[rcm_tag, ivk_fr, value_fr, asset_fr, rho_fr]);
-        if computed_rcm != rcm_fr {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+        // H("rcm" || ivk || value || asset_id || rho) == rcm
+        let rcm_tag_fr = domain_tag_to_fr("rcm");
+        let rcm_tag_var = FpVar::new_constant(cs.clone(), rcm_tag_fr)?;
+        let computed_rcm = poseidon_hash_gadget(
+            cs.clone(),
+            &[rcm_tag_var, ivk_var, value_var, asset_id_var, rho_var],
+        )?;
+        computed_rcm.enforce_equal(&rcm_var)?;
 
         Ok(())
     }
@@ -114,7 +142,7 @@ fn value_to_fr_bytes(value: u128) -> [u8; 32] {
     bytes
 }
 
-/// Compute the public input count for a deposit circuit.
+/// Compute the public input byte count for a deposit circuit.
 pub const fn deposit_public_input_count() -> usize {
     32 + 8 // commitment (32 bytes) + asset_id (8 bytes)
 }
@@ -124,6 +152,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{test_hash, test_spending_key};
     use crate::ViewingKey;
+    use crate::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
 
     fn make_deposit_witness(value: u128, seed: u8) -> DepositWitness {
         let sk = test_spending_key(seed);
@@ -139,43 +168,38 @@ mod tests {
     }
 
     fn compute_rcm_plain(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
-        use call_crypto::keccak256;
-        let mut data = Vec::with_capacity(76);
-        data.extend_from_slice(b"rcm");
-        data.extend_from_slice(&vk.incoming_view_key);
-        data.extend_from_slice(&value.to_be_bytes());
-        data.extend_from_slice(&asset_id.to_be_bytes());
-        data.extend_from_slice(rho);
-        keccak256(&data).0
+        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
+        let value_bytes = value_to_fr_bytes(value);
+        let value_fr = bytes_to_fr(&value_bytes);
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
+        let asset_fr = bytes_to_fr(&asset_bytes);
+        let rho_fr = bytes_to_fr(rho);
+        let rcm_fr = poseidon_hash_tagged("rcm", &[ivk_fr, value_fr, asset_fr, rho_fr]);
+        fr_to_bytes(&rcm_fr)
     }
 
     fn make_commitment_plain(witness: &DepositWitness, asset_id: u64) -> [u8; 32] {
-        use call_crypto::keccak256;
-        let mut data = Vec::with_capacity(128);
-        data.extend_from_slice(&witness.value.to_be_bytes());
-        data.extend_from_slice(&asset_id.to_be_bytes());
-        data.extend_from_slice(&witness.rcm);
-        data.extend_from_slice(&witness.rho);
-        keccak256(&data).0
+        let value_bytes = value_to_fr_bytes(witness.value);
+        let value_fr = bytes_to_fr(&value_bytes);
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
+        let asset_fr = bytes_to_fr(&asset_bytes);
+        let rcm_fr = bytes_to_fr(&witness.rcm);
+        let rho_fr = bytes_to_fr(&witness.rho);
+        let cm_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
+        fr_to_bytes(&cm_fr)
     }
 
     #[test]
     fn test_deposit_circuit_satisfiable() {
         let witness = make_deposit_witness(1000, 1);
         let commitment = make_commitment_plain(&witness, 1);
-        let _circuit = DepositCircuit::new(commitment, 1, witness);
+        let circuit = DepositCircuit::new(commitment, 1, witness);
 
-        // Verify the Poseidon hash computation (uses Poseidon, not Keccak256)
-        let w = make_deposit_witness(1000, 1);
-        let mut asset_bytes = [0u8; 32];
-        asset_bytes[..8].copy_from_slice(&1u64.to_le_bytes());
-        let computed_cm = poseidon_hash(&[
-            bytes_to_fr(&value_to_fr_bytes(w.value)),
-            bytes_to_fr(&asset_bytes),
-            bytes_to_fr(&w.rcm),
-            bytes_to_fr(&w.rho),
-        ]);
-        assert_ne!(computed_cm, Fr::zero());
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(cs.is_satisfied().unwrap());
     }
 
     #[test]
@@ -206,10 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn test_deposit_circuit_zero_value() {
-        // Zero value is valid witness creation (constraint should reject it)
+    fn test_deposit_circuit_zero_value_rejected() {
         let witness = make_deposit_witness(0, 1);
-        assert_eq!(witness.value, 0);
+        let commitment = make_commitment_plain(&witness, 1);
+        let circuit = DepositCircuit::new(commitment, 1, witness);
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
     }
 
     #[test]
@@ -235,5 +263,17 @@ mod tests {
         assert!(circuit.witness.is_none());
         assert_eq!(circuit.commitment.len(), 32);
         assert_eq!(circuit.asset_id, 1);
+    }
+
+    #[test]
+    fn test_deposit_circuit_wrong_commitment_rejected() {
+        let witness = make_deposit_witness(1000, 1);
+        let mut bad_commitment = make_commitment_plain(&witness, 1);
+        bad_commitment[0] ^= 0xFF;
+
+        let circuit = DepositCircuit::new(bad_commitment, 1, witness);
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
     }
 }

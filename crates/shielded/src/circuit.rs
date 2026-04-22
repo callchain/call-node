@@ -145,22 +145,20 @@ impl ShieldedCircuit {
         Ok(())
     }
 
-    /// Compute the Merkle root from a proof path and leaf
+    /// Compute the Merkle root from a proof path and leaf.
+    ///
+    /// Uses Poseidon hashing to match the R1CS circuit and on-chain Merkle tree.
     fn compute_root_from_path(&self, proof: &[(call_primitives::Hash, bool)], leaf: call_primitives::Hash) -> call_primitives::Hash {
-        use call_crypto::keccak256;
-        let mut current = leaf;
+        let mut current: [u8; 32] = leaf.into();
         for (sibling, is_left) in proof {
-            let mut data = Vec::with_capacity(64);
-            if *is_left {
-                data.extend_from_slice(sibling.as_slice());
-                data.extend_from_slice(current.as_slice());
+            let sibling_bytes: [u8; 32] = (*sibling).into();
+            current = if *is_left {
+                crate::poseidon::poseidon_hash_pair(&sibling_bytes, &current)
             } else {
-                data.extend_from_slice(current.as_slice());
-                data.extend_from_slice(sibling.as_slice());
-            }
-            current = keccak256(&data);
+                crate::poseidon::poseidon_hash_pair(&current, &sibling_bytes)
+            };
         }
-        current
+        call_primitives::Hash::from_slice(&current)
     }
 
     /// Get the number of public inputs
@@ -194,7 +192,7 @@ pub enum CircuitError {
 mod tests {
     use super::*;
     use crate::test_utils::{test_hash, test_note, test_spending_key};
-    use crate::merkle::IncrementalMerkleTree;
+    use crate::merkle_poseidon::PoseidonMerkleTree;
 
     fn build_valid_circuit() -> ShieldedCircuit {
         let input = test_note(1000, 1, 1);
@@ -271,9 +269,10 @@ mod tests {
     #[test]
     fn test_circuit_merkle_path_valid() {
         // Build a tree with a note and verify its path
-        let mut tree = IncrementalMerkleTree::new(32);
+        let mut tree = PoseidonMerkleTree::new(32);
         let input = test_note(1000, 1, 1);
-        tree.insert(input.commitment().0);
+        let leaf: [u8; 32] = input.commitment().0.into();
+        tree.insert(&leaf);
         let proof = tree.proof_for_last();
 
         let output = test_note(800, 1, 2);
@@ -286,18 +285,17 @@ mod tests {
             1,
             vec![input],
             vec![output],
-        ).with_merkle_paths(vec![
-            proof.iter().map(|(h, l)| (h.0, *l)).collect()
-        ]);
+        ).with_merkle_paths(vec![proof]);
 
         assert!(circuit.check_merkle_path_valid().is_ok());
     }
 
     #[test]
     fn test_circuit_all_constraints_pass() {
-        let mut tree = IncrementalMerkleTree::new(32);
+        let mut tree = PoseidonMerkleTree::new(32);
         let input = test_note(1000, 1, 1);
-        tree.insert(input.commitment().0);
+        let leaf: [u8; 32] = input.commitment().0.into();
+        tree.insert(&leaf);
         let proof = tree.proof_for_last();
 
         let output = test_note(800, 1, 2);
@@ -310,9 +308,7 @@ mod tests {
             1,
             vec![input],
             vec![output],
-        ).with_merkle_paths(vec![
-            proof.iter().map(|(h, l)| (h.0, *l)).collect()
-        ]);
+        ).with_merkle_paths(vec![proof]);
 
         assert!(circuit.verify_constraints().is_ok());
     }

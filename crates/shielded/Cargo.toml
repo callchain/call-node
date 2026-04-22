@@ -17,37 +17,37 @@ chacha20poly1305 = { version = "0.10", features = ["std"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 
-# ZK proving (arkworks + BN254) — gated behind `real-prover` feature
+# ZK proving (arkworks + BN254)
 # Note: ark 0.4 required for poseidon-ark-no-std compatibility
+# Plain Poseidon hashing (always available — required for shielded pool)
+ark-ff = { version = "0.4" }
+ark-bn254 = { version = "0.4" }
+poseidon-ark-no-std = { version = "0.0.1" }
+# R1CS proving (gated behind `real-prover`)
 ark-std = { version = "0.4", optional = true }
-ark-ff = { version = "0.4", optional = true }
 ark-ec = { version = "0.4", optional = true }
 ark-groth16 = { version = "0.4", optional = true }
 ark-r1cs-std = { version = "0.4", optional = true }
-ark-bn254 = { version = "0.4", optional = true }
 ark-relations = { version = "0.4", optional = true }
 ark-serialize = { version = "0.4", optional = true }
 ark-snark = { version = "0.4", optional = true }
-# Poseidon hash for BN254 (uses ark 0.4)
-poseidon-ark-no-std = { version = "0.0.1", optional = true }
 ark-crypto-primitives = { version = "0.4", features = ["crh", "merkle_tree", "sponge"], optional = true }
 
 # Ceremony key loading — SHA-256 for verifying key hash verification
 sha2 = { version = "0.10", optional = true }
 
 [features]
-default = []
+default = ["poseidon"]
+poseidon = []
 real-prover = [
+    "poseidon",
     "ark-std",
-    "ark-ff",
     "ark-ec",
     "ark-groth16",
     "ark-r1cs-std",
-    "ark-bn254",
     "ark-relations",
     "ark-serialize",
     "ark-snark",
-    "poseidon-ark-no-std",
     "ark-crypto-primitives",
 ]
 production-keys = ["real-prover", "sha2"]

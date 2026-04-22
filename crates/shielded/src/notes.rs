@@ -3,8 +3,7 @@
 //! Note-based UTXO model with encrypted values and commitment derivation.
 
 use call_primitives::{AssetId, Balance, Hash};
-use call_crypto::keccak256;
-use crate::{NoteCommitment, Nullifier, ViewingKey};
+use crate::{NoteCommitment, Nullifier, ViewingKey, poseidon};
 
 /// A shielded note: encrypted value with commitment and nullifier derivation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -20,20 +19,24 @@ pub struct Note {
 }
 
 impl Note {
-    /// Create a new shielded note
+    /// Create a new shielded note.
+    ///
+    /// RCM is derived via Poseidon: H("rcm" || ivk || value || asset || rho).
     pub fn new(
         value: Balance,
         asset_id: AssetId,
         viewing_key: &ViewingKey,
         rho: Hash,
     ) -> Self {
-        let mut data = Vec::with_capacity(76);
-        data.extend_from_slice(b"rcm");
-        data.extend_from_slice(&viewing_key.incoming_view_key);
-        data.extend_from_slice(&value.to_be_bytes());
-        data.extend_from_slice(&asset_id.to_be_bytes());
-        data.extend_from_slice(rho.as_slice());
-        let rcm = keccak256(&data).0;
+        let ivk_fr = poseidon::bytes_to_fr(&viewing_key.incoming_view_key);
+        let value_bytes = poseidon::value_to_fr_bytes(value);
+        let value_fr = poseidon::bytes_to_fr(&value_bytes);
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
+        let asset_fr = poseidon::bytes_to_fr(&asset_bytes);
+        let rho_fr = poseidon::bytes_to_fr(&rho.0);
+        let rcm_fr = poseidon::poseidon_hash_tagged(poseidon::domain::RCM, &[ivk_fr, value_fr, asset_fr, rho_fr]);
+        let rcm = poseidon::fr_to_bytes(&rcm_fr);
 
         Self {
             value,
@@ -44,26 +47,29 @@ impl Note {
         }
     }
 
-    /// Compute the note commitment (what goes into the Merkle tree)
+    /// Compute the note commitment (what goes into the Merkle tree).
+    ///
+    /// Matches the R1CS circuit: commitment = H(value || asset || rcm || rho).
     pub fn commitment(&self) -> NoteCommitment {
-        let mut data = Vec::with_capacity(128);
-        data.extend_from_slice(&self.value.to_be_bytes());
-        data.extend_from_slice(&self.asset_id.to_be_bytes());
-        data.extend_from_slice(&self.rcm);
-        data.extend_from_slice(&self.rho);
-        NoteCommitment::new(keccak256(&data))
+        let value_bytes = poseidon::value_to_fr_bytes(self.value);
+        let value_fr = poseidon::bytes_to_fr(&value_bytes);
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&self.asset_id.to_le_bytes());
+        let asset_fr = poseidon::bytes_to_fr(&asset_bytes);
+        let rcm_fr = poseidon::bytes_to_fr(&self.rcm);
+        let rho_fr = poseidon::bytes_to_fr(&self.rho);
+        let cm_fr = poseidon::poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
+        NoteCommitment::new(Hash::from_slice(&poseidon::fr_to_bytes(&cm_fr)))
     }
 
-    /// Derive the nullifier for this note (what marks it as spent)
+    /// Derive the nullifier for this note (what marks it as spent).
+    ///
+    /// Matches the R1CS circuit: fvk = H("fvk_from_ivk" || ivk), nullifier = H(fvk || rho).
     pub fn nullifier(&self) -> Nullifier {
-        let mut fvk_data = Vec::with_capacity(44);
-        fvk_data.extend_from_slice(b"fvk_from_ivk");
-        fvk_data.extend_from_slice(&self.recipient_ivk);
-        let fvk = keccak256(&fvk_data);
-        let vk = ViewingKey {
-            incoming_view_key: self.recipient_ivk,
-            full_view_key: fvk.0,
-        };
+        let ivk_fr = poseidon::bytes_to_fr(&self.recipient_ivk);
+        let fvk_fr = poseidon::poseidon_hash_tagged(poseidon::domain::FVK_FROM_IVK, &[ivk_fr]);
+        let fvk = poseidon::fr_to_bytes(&fvk_fr);
+        let vk = ViewingKey::from_incoming_view_key(self.recipient_ivk, fvk);
         vk.derive_nullifier(&self.rho)
     }
 

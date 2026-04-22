@@ -26,10 +26,10 @@
 //!   W3. Value match: note_value == public value
 //!   W4. Range & asset: Non-zero value, 128-bit range, asset_id consistency
 
-use ark_bn254::{Fr, Bn254};
-use ark_ff::{BigInteger, Field, PrimeField, Zero};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, Namespace, SynthesisError};
-use crate::poseidon::{poseidon_hash, bytes_to_fr, fr_to_bytes};
+use ark_bn254::Fr;
+use ark_ff::{Field, Zero};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use crate::poseidon::{poseidon_hash, bytes_to_fr};
 use crate::poseidon::domain;
 
 /// Witness data for a withdraw note.
@@ -102,77 +102,90 @@ impl WithdrawCircuit {
 impl ConstraintSynthesizer<Fr> for WithdrawCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         use ark_r1cs_std::alloc::AllocVar;
+        use ark_r1cs_std::boolean::Boolean;
+        use ark_r1cs_std::eq::EqGadget;
         use ark_r1cs_std::fields::fp::FpVar;
+        use ark_r1cs_std::prelude::ToBitsGadget;
+        use crate::poseidon::gadget::poseidon_hash_gadget;
 
         let witness = self.witness.ok_or(SynthesisError::AssignmentMissing)?;
 
-        // Allocate public inputs as witness variables (for constraint checking)
-        let expected_nf_fr = bytes_to_fr(&self.nullifier);
-        let _nf_var = FpVar::new_input(cs.clone(), || Ok(expected_nf_fr))?;
+        // --- Public inputs ---
+        let nullifier_fr = bytes_to_fr(&self.nullifier);
+        let nullifier_var = FpVar::new_input(cs.clone(), || Ok(nullifier_fr))?;
 
-        let expected_root_fr = bytes_to_fr(&self.merkle_root);
-        let _root_var = FpVar::new_input(cs.clone(), || Ok(expected_root_fr))?;
+        let asset_id_fr = {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&self.asset_id.to_le_bytes());
+            bytes_to_fr(&b)
+        };
+        let asset_id_var = FpVar::new_input(cs.clone(), || Ok(asset_id_fr))?;
 
-        // Private witnesses
-        let value_bytes = value_to_fr_bytes(witness.note_value);
-        let value_fr = bytes_to_fr(&value_bytes);
-        let mut asset_bytes = [0u8; 32];
-        asset_bytes[..8].copy_from_slice(&self.asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let ivk_fr = bytes_to_fr(&witness.recipient_ivk);
-        let rho_fr = bytes_to_fr(&witness.rho);
+        let merkle_root_fr = bytes_to_fr(&self.merkle_root);
+        let merkle_root_var = FpVar::new_input(cs.clone(), || Ok(merkle_root_fr))?;
 
-        // W1. Nullifier derivation
-        // poseidon_hash(poseidon_hash("fvk_from_ivk" || ivk), rho) == public nullifier
-        let fvk_tag = domain_tag_to_fr(domain::FVK_FROM_IVK);
-        let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fr]);
-        let computed_nf = poseidon_hash(&[fvk_from_ivk, rho_fr]);
-        if computed_nf != expected_nf_fr {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+        let public_value_fr = bytes_to_fr(&value_to_fr_bytes(self.value));
+        let public_value_var = FpVar::new_input(cs.clone(), || Ok(public_value_fr))?;
 
-        // W2. Merkle path validity
-        // Walk the Poseidon Merkle path, enforce root == public merkle_root
-        if witness.merkle_path.is_empty() {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+        // --- Private witnesses ---
+        let value_fr = bytes_to_fr(&value_to_fr_bytes(witness.note_value));
+        let value_var = FpVar::new_witness(cs.clone(), || Ok(value_fr))?;
 
-        // Recompute commitment from note components: H(value || asset_id || rcm || rho)
         let rcm_fr = bytes_to_fr(&witness.rcm);
-        let note_commitment = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
+        let rcm_var = FpVar::new_witness(cs.clone(), || Ok(rcm_fr))?;
 
-        // Walk up the Merkle tree from the leaf (note commitment) to the root
-        let mut current_fr = note_commitment;
+        let ivk_fr = bytes_to_fr(&witness.recipient_ivk);
+        let ivk_var = FpVar::new_witness(cs.clone(), || Ok(ivk_fr))?;
+
+        let rho_fr = bytes_to_fr(&witness.rho);
+        let rho_var = FpVar::new_witness(cs.clone(), || Ok(rho_fr))?;
+
+        // W1: Nullifier derivation
+        let fvk_tag_fr = domain_tag_to_fr(domain::FVK_FROM_IVK);
+        let fvk_tag_var = FpVar::new_constant(cs.clone(), fvk_tag_fr)?;
+        let fvk_from_ivk = poseidon_hash_gadget(cs.clone(), &[fvk_tag_var, ivk_var.clone()])?;
+        let computed_nf = poseidon_hash_gadget(cs.clone(), &[fvk_from_ivk, rho_var.clone()])?;
+        computed_nf.enforce_equal(&nullifier_var)?;
+
+        // W2: Merkle path validity
+        let note_commitment = poseidon_hash_gadget(
+            cs.clone(),
+            &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+        )?;
+
+        let mut current = note_commitment;
         for (sibling_hash, sibling_is_right) in &witness.merkle_path {
             let sibling_fr = bytes_to_fr(sibling_hash);
-            let parent = if *sibling_is_right {
-                // current is left child, sibling is right
-                poseidon_hash(&[current_fr, sibling_fr])
+            let sibling_var = FpVar::new_witness(cs.clone(), || Ok(sibling_fr))?;
+
+            current = if *sibling_is_right {
+                poseidon_hash_gadget(cs.clone(), &[current, sibling_var])?
             } else {
-                // sibling is left child, current is right
-                poseidon_hash(&[sibling_fr, current_fr])
+                poseidon_hash_gadget(cs.clone(), &[sibling_var, current])?
             };
-            current_fr = parent;
         }
+        current.enforce_equal(&merkle_root_var)?;
 
-        // Enforce that the computed root matches the public merkle_root
-        if current_fr != expected_root_fr {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+        // W3: Value match
+        value_var.enforce_equal(&public_value_var)?;
 
-        // W3. Value match: note_value == public value
-        let public_value_bytes = value_to_fr_bytes(self.value);
-        let public_value_fr = bytes_to_fr(&public_value_bytes);
-        if value_fr != public_value_fr {
-            return Err(SynthesisError::Unsatisfiable);
-        }
-
-        // W4. Range & asset checks
+        // W4: Range & asset checks
         // Non-zero value
-        if witness.note_value == 0 {
-            return Err(SynthesisError::Unsatisfiable);
+        let value_inv = FpVar::new_witness(cs.clone(), || {
+            if value_fr.is_zero() {
+                Err(SynthesisError::Unsatisfiable)
+            } else {
+                Ok(value_fr.inverse().unwrap())
+            }
+        })?;
+        let one = FpVar::new_constant(cs.clone(), Fr::from(1u64))?;
+        (value_var.clone() * value_inv).enforce_equal(&one)?;
+
+        // 128-bit range
+        let bits = value_var.to_bits_le()?;
+        for bit in &bits[128..] {
+            bit.enforce_equal(&Boolean::constant(false))?;
         }
-        // 128-bit range: already enforced by u128 type
 
         Ok(())
     }
@@ -205,6 +218,7 @@ mod tests {
     use crate::test_utils::{test_hash, test_spending_key};
     use crate::ViewingKey;
     use crate::merkle_poseidon::PoseidonMerkleTree;
+    use crate::poseidon::{fr_to_bytes, poseidon_hash_tagged};
 
     /// Build a withdraw witness and all public inputs from scratch.
     fn make_withdraw_data(
@@ -264,14 +278,15 @@ mod tests {
     }
 
     fn compute_rcm_plain(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
-        use call_crypto::keccak256;
-        let mut data = Vec::with_capacity(76);
-        data.extend_from_slice(b"rcm");
-        data.extend_from_slice(&vk.incoming_view_key);
-        data.extend_from_slice(&value.to_be_bytes());
-        data.extend_from_slice(&asset_id.to_be_bytes());
-        data.extend_from_slice(rho);
-        keccak256(&data).0
+        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
+        let value_bytes = value_to_fr_bytes(value);
+        let value_fr = bytes_to_fr(&value_bytes);
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
+        let asset_fr = bytes_to_fr(&asset_bytes);
+        let rho_fr = bytes_to_fr(rho);
+        let rcm_fr = poseidon_hash_tagged("rcm", &[ivk_fr, value_fr, asset_fr, rho_fr]);
+        fr_to_bytes(&rcm_fr)
     }
 
     #[test]
@@ -279,21 +294,13 @@ mod tests {
         let (nullifier, asset_id, value, target_address, merkle_root, witness) =
             make_withdraw_data(1000, 1, 1);
 
-        // Capture rho before moving witness into the circuit
-        let witness_rho = witness.rho;
-        let _circuit = WithdrawCircuit::new(
+        let circuit = WithdrawCircuit::new(
             nullifier, asset_id, value, target_address, merkle_root, witness,
         );
 
-        // Verify the nullifier derivation independently
-        let vk = ViewingKey::generate(&test_spending_key(1));
-        let fvk_tag = domain_tag_to_fr(domain::FVK_FROM_IVK);
-        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
-        let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fr]);
-        let rho_fr = bytes_to_fr(&witness_rho);
-        let computed_nf = poseidon_hash(&[fvk_from_ivk, rho_fr]);
-        assert_ne!(computed_nf, Fr::zero());
-        assert_eq!(computed_nf, bytes_to_fr(&nullifier));
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(cs.is_satisfied().unwrap());
     }
 
     #[test]
@@ -369,11 +376,9 @@ mod tests {
             bad_nullifier, asset_id, value, target_address, merkle_root, witness,
         );
 
-        // The constraint check should fail (Unsatisfiable)
-        let result = circuit.generate_constraints(
-            ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref(),
-        );
-        assert!(result.is_err());
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
     }
 
     #[test]
@@ -396,7 +401,11 @@ mod tests {
         let value_bytes = value_to_fr_bytes(value);
         let value_fr = bytes_to_fr(&value_bytes);
         let rcm_fr = bytes_to_fr(&rcm);
-        let commitment_fr = poseidon_hash(&[value_fr, bytes_to_fr(&[0u8; 32]), rcm_fr, rho_fr]);
+        // Use asset_id = 1 to match circuit
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&1u64.to_le_bytes());
+        let asset_fr = bytes_to_fr(&asset_bytes);
+        let commitment_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
         let commitment = fr_to_bytes(&commitment_fr);
 
         let mut tree = PoseidonMerkleTree::new(32);
@@ -416,10 +425,8 @@ mod tests {
             nullifier, 1, value, [99u8; 20], merkle_root, witness,
         );
 
-        // Zero value should fail constraint checking
-        let result = circuit.generate_constraints(
-            ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref(),
-        );
-        assert!(result.is_err());
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
     }
 }

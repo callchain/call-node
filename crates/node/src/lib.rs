@@ -1209,7 +1209,8 @@ fn load_shielded_state_inner(db: &DatabaseEnv) -> Result<ShieldedState, String> 
 
     // Rebuild merkle tree from note commitments
     for cm in state.note_registry.keys() {
-        state.merkle_tree.insert(cm.0);
+        let bytes: [u8; 32] = cm.0.into();
+        state.merkle_tree.insert(&bytes);
     }
 
     Ok(state)

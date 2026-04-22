@@ -11,6 +11,7 @@
 /// Domain tags for Poseidon hashing.
 /// Used to separate different hash purposes so the same inputs produce different outputs.
 pub mod domain {
+    pub const IVK_FROM_SK: &'static str = "call/shielded/ivk";
     pub const FVK_FROM_IVK: &'static str = "fvk_from_ivk";
     pub const NULLIFIER: &'static str = "nullifier";
     pub const RCM: &'static str = "rcm";
@@ -24,7 +25,6 @@ pub mod domain {
 ///
 /// # Panics
 /// Panics if inputs is empty or has more than 16 elements.
-#[cfg(feature = "real-prover")]
 pub fn poseidon_hash(inputs: &[ark_bn254::Fr]) -> ark_bn254::Fr {
     use poseidon_ark_no_std::Poseidon;
     assert!(!inputs.is_empty() && inputs.len() <= 16, "Poseidon input count must be 1..=16");
@@ -34,14 +34,12 @@ pub fn poseidon_hash(inputs: &[ark_bn254::Fr]) -> ark_bn254::Fr {
 }
 
 /// Convert a 32-byte array to BN254 Fr (little-endian).
-#[cfg(feature = "real-prover")]
 pub fn bytes_to_fr(bytes: &[u8; 32]) -> ark_bn254::Fr {
     use ark_ff::Field;
     ark_bn254::Fr::from_random_bytes(bytes).unwrap_or_default()
 }
 
 /// Convert BN254 Fr to a 32-byte array (little-endian).
-#[cfg(feature = "real-prover")]
 pub fn fr_to_bytes(fr: &ark_bn254::Fr) -> [u8; 32] {
     use ark_ff::{BigInt, BigInteger};
     let bi: BigInt<4> = (*fr).into();
@@ -54,7 +52,6 @@ pub fn fr_to_bytes(fr: &ark_bn254::Fr) -> [u8; 32] {
 /// Hash raw 32-byte inputs directly.
 ///
 /// Converts each `[u8; 32]` to Fr, hashes with Poseidon, returns `[u8; 32]`.
-#[cfg(feature = "real-prover")]
 pub fn poseidon_hash_bytes(inputs: &[[u8; 32]]) -> [u8; 32] {
     let frs: Vec<_> = inputs.iter().map(bytes_to_fr).collect();
     fr_to_bytes(&poseidon_hash(&frs))
@@ -63,7 +60,6 @@ pub fn poseidon_hash_bytes(inputs: &[[u8; 32]]) -> [u8; 32] {
 /// Domain-tagged Poseidon hash.
 ///
 /// Prepends the domain separator as an Fr element before hashing.
-#[cfg(feature = "real-prover")]
 pub fn poseidon_hash_tagged(tag: &str, inputs: &[ark_bn254::Fr]) -> ark_bn254::Fr {
     use ark_ff::Field;
     // Hash the tag string to get a domain separator Fr element
@@ -112,7 +108,7 @@ pub mod gadget {
         for round in 0..(n_rounds_f + n_rounds_p_t) {
             // Add round constants (Ark)
             for i in 0..t {
-                let rc = FpVar::new_constant(cs.clone(), c[t - 2][i])?;
+                let rc = FpVar::new_constant(cs.clone(), c[t - 2][round * t + i])?;
                 state[i] = state[i].clone() + rc;
             }
 
@@ -156,13 +152,27 @@ pub mod gadget {
 }
 
 /// Multi-input convenience wrapper: hash exactly 2 inputs.
-#[cfg(feature = "real-prover")]
 pub fn poseidon_hash_2(a: &ark_bn254::Fr, b: &ark_bn254::Fr) -> ark_bn254::Fr {
     poseidon_hash(&[*a, *b])
 }
 
+/// Hash a pair of 32-byte values using Poseidon over BN254.
+///
+/// Converts each `[u8; 32]` to Fr, hashes with Poseidon, returns `[u8; 32]`.
+pub fn poseidon_hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let left_fr = bytes_to_fr(left);
+    let right_fr = bytes_to_fr(right);
+    fr_to_bytes(&poseidon_hash_2(&left_fr, &right_fr))
+}
+
+/// Convert a u128 value to a 32-byte Fr-compatible representation (zero-padded LE).
+pub fn value_to_fr_bytes(value: u128) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(&value.to_le_bytes());
+    bytes
+}
+
 /// Multi-input convenience wrapper: hash exactly 3 inputs.
-#[cfg(feature = "real-prover")]
 pub fn poseidon_hash_3(
     a: &ark_bn254::Fr,
     b: &ark_bn254::Fr,
@@ -172,14 +182,13 @@ pub fn poseidon_hash_3(
 }
 
 /// Multi-input convenience wrapper: hash exactly 5 inputs.
-#[cfg(feature = "real-prover")]
 pub fn poseidon_hash_5(
     inputs: [ark_bn254::Fr; 5],
 ) -> ark_bn254::Fr {
     poseidon_hash(&inputs)
 }
 
-#[cfg(all(test, feature = "real-prover"))]
+#[cfg(all(test, feature = "poseidon"))]
 mod tests {
     use super::*;
     use ark_bn254::Fr;
@@ -309,7 +318,7 @@ mod tests {
         assert_eq!(h5, h5_direct);
     }
 
-    #[ignore = "gadget constants need cross-crate Fr type alignment"]
+    #[cfg(feature = "real-prover")]
     #[test]
     fn test_poseidon_gadget_circuit_satisfied() {
         use ark_r1cs_std::alloc::AllocVar;
@@ -335,6 +344,7 @@ mod tests {
         assert_eq!(plain, result_val, "gadget output != plain hash");
     }
 
+    #[cfg(feature = "real-prover")]
     #[test]
     fn test_poseidon_gadget_constraint_count() {
         use ark_r1cs_std::alloc::AllocVar;

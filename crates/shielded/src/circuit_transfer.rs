@@ -28,9 +28,9 @@
 //!   T5. Range & asset validity: Non-zero check for all notes, 128-bit range, asset_id match
 
 use ark_bn254::Fr;
-use ark_ff::Field;
+use ark_ff::{Field, Zero};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use crate::poseidon::{poseidon_hash, bytes_to_fr};
+use crate::poseidon::{poseidon_hash, poseidon_hash_tagged, bytes_to_fr};
 use crate::poseidon::domain;
 
 // ============================================================================
@@ -132,12 +132,19 @@ impl TransferCircuit {
 }
 
 impl ConstraintSynthesizer<Fr> for TransferCircuit {
-    fn generate_constraints(self, _cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        use ark_r1cs_std::alloc::AllocVar;
+        use ark_r1cs_std::boolean::Boolean;
+        use ark_r1cs_std::eq::EqGadget;
+        use ark_r1cs_std::fields::fp::FpVar;
+        use ark_r1cs_std::prelude::ToBitsGadget;
+        use crate::poseidon::gadget::poseidon_hash_gadget;
+
         let inputs = self.input_notes.ok_or(SynthesisError::AssignmentMissing)?;
         let outputs = self.output_notes.ok_or(SynthesisError::AssignmentMissing)?;
         let paths = self.merkle_paths.ok_or(SynthesisError::AssignmentMissing)?;
 
-        // Validate structural consistency
+        // Structural consistency (determines circuit topology)
         if inputs.len() != self.nullifiers.len() {
             return Err(SynthesisError::Unsatisfiable);
         }
@@ -151,118 +158,158 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
             return Err(SynthesisError::Unsatisfiable);
         }
 
-        // Precompute public input Fr values
-        let expected_root_fr = bytes_to_fr(&self.merkle_root);
-        let mut asset_bytes = [0u8; 32];
-        asset_bytes[..8].copy_from_slice(&self.asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let nullifier_frs: Vec<Fr> = self.nullifiers.iter().map(|nf| bytes_to_fr(nf)).collect();
-        let commitment_frs: Vec<Fr> = self.commitments.iter().map(|cm| bytes_to_fr(cm)).collect();
+        // --- Public inputs ---
+        let asset_id_fr = {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&self.asset_id.to_le_bytes());
+            bytes_to_fr(&b)
+        };
+        let asset_id_var = FpVar::new_input(cs.clone(), || Ok(asset_id_fr))?;
 
-        // FVK tag for nullifier derivation
-        let fvk_tag = domain_tag_to_fr(domain::FVK_FROM_IVK);
+        let merkle_root_fr = bytes_to_fr(&self.merkle_root);
+        let merkle_root_var = FpVar::new_input(cs.clone(), || Ok(merkle_root_fr))?;
 
-        // Track running sums for value conservation
-        let mut input_value_sum: u128 = 0;
-        let mut output_value_sum: u128 = 0;
+        let nullifier_vars: Vec<_> = self
+            .nullifiers
+            .iter()
+            .map(|nf| {
+                let nf_fr = bytes_to_fr(nf);
+                FpVar::new_input(cs.clone(), || Ok(nf_fr))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let commitment_vars: Vec<_> = self
+            .commitments
+            .iter()
+            .map(|cm| {
+                let cm_fr = bytes_to_fr(cm);
+                FpVar::new_input(cs.clone(), || Ok(cm_fr))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let fvk_tag_fr = domain_tag_to_fr(domain::FVK_FROM_IVK);
+        let fvk_tag_var = FpVar::new_constant(cs.clone(), fvk_tag_fr)?;
+        let ivk_tag_fr = domain_tag_to_fr(domain::IVK_FROM_SK);
+        let ivk_tag_var = FpVar::new_constant(cs.clone(), ivk_tag_fr)?;
+
+        // Running sums for value conservation
+        let mut input_sum = FpVar::new_constant(cs.clone(), Fr::zero())?;
+        let mut output_sum = FpVar::new_constant(cs.clone(), Fr::zero())?;
 
         // ------------------------------------------------------------------
-        // Process each input note: nullifier derivation + Merkle path
+        // Process each input note: nullifier + Merkle path + spending rights
         // ------------------------------------------------------------------
         for (i, (input, path)) in inputs.iter().zip(paths.iter()).enumerate() {
-            let ivk_fr = bytes_to_fr(&input.recipient_ivk);
-            let rho_fr = bytes_to_fr(&input.rho);
+            let value_fr = bytes_to_fr(&value_to_fr_bytes(input.value));
+            let value_var = FpVar::new_witness(cs.clone(), || Ok(value_fr))?;
 
-            // T1. Nullifier derivation
-            // poseidon_hash(poseidon_hash("fvk_from_ivk" || ivk), rho) == public nullifier[i]
-            let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fr]);
-            let computed_nf = poseidon_hash(&[fvk_from_ivk, rho_fr]);
-            if computed_nf != nullifier_frs[i] {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-
-            // T3. Spending rights: IVK must be derivable from spending_key
-            // ivk = H("ivk" || spending_key)
-            let derived_ivk = derive_ivk_from_spending_key(&input.spending_key);
-            if derived_ivk != ivk_fr {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-
-            // T2. Merkle path validity
-            if path.is_empty() {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-
-            // Recompute commitment from input note components: H(value || asset_id || rcm || rho)
-            let value_bytes = value_to_fr_bytes(input.value);
-            let value_fr = bytes_to_fr(&value_bytes);
             let rcm_fr = bytes_to_fr(&input.rcm);
-            let note_commitment = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
+            let rcm_var = FpVar::new_witness(cs.clone(), || Ok(rcm_fr))?;
 
-            // Walk up the Merkle tree from the leaf to the root
-            let mut current_fr = note_commitment;
+            let ivk_fr = bytes_to_fr(&input.recipient_ivk);
+            let ivk_var = FpVar::new_witness(cs.clone(), || Ok(ivk_fr))?;
+
+            let rho_fr = bytes_to_fr(&input.rho);
+            let rho_var = FpVar::new_witness(cs.clone(), || Ok(rho_fr))?;
+
+            let sk_fr = bytes_to_fr(&input.spending_key);
+            let sk_var = FpVar::new_witness(cs.clone(), || Ok(sk_fr))?;
+
+            // T1: Nullifier derivation
+            let fvk_from_ivk = poseidon_hash_gadget(cs.clone(), &[fvk_tag_var.clone(), ivk_var.clone()])?;
+            let computed_nf = poseidon_hash_gadget(cs.clone(), &[fvk_from_ivk, rho_var.clone()])?;
+            computed_nf.enforce_equal(&nullifier_vars[i])?;
+
+            // T3: Spending rights — IVK derived from spending_key must match note IVK
+            let derived_ivk = poseidon_hash_gadget(cs.clone(), &[ivk_tag_var.clone(), sk_var])?;
+            derived_ivk.enforce_equal(&ivk_var)?;
+
+            // T2: Merkle path validity
+            let note_commitment = poseidon_hash_gadget(
+                cs.clone(),
+                &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+            )?;
+
+            let mut current = note_commitment;
             for (sibling_hash, sibling_is_right) in path {
                 let sibling_fr = bytes_to_fr(sibling_hash);
-                let parent = if *sibling_is_right {
-                    // current is left, sibling is right
-                    poseidon_hash(&[current_fr, sibling_fr])
+                let sibling_var = FpVar::new_witness(cs.clone(), || Ok(sibling_fr))?;
+                current = if *sibling_is_right {
+                    poseidon_hash_gadget(cs.clone(), &[current, sibling_var])?
                 } else {
-                    // sibling is left, current is right
-                    poseidon_hash(&[sibling_fr, current_fr])
+                    poseidon_hash_gadget(cs.clone(), &[sibling_var, current])?
                 };
-                current_fr = parent;
+            }
+            current.enforce_equal(&merkle_root_var)?;
+
+            // T5: Range — non-zero value
+            let value_inv = FpVar::new_witness(cs.clone(), || {
+                if value_fr.is_zero() {
+                    Err(SynthesisError::Unsatisfiable)
+                } else {
+                    Ok(value_fr.inverse().unwrap())
+                }
+            })?;
+            let one = FpVar::new_constant(cs.clone(), Fr::from(1u64))?;
+            (value_var.clone() * value_inv).enforce_equal(&one)?;
+
+            // T5: Range — 128-bit
+            let bits = value_var.to_bits_le()?;
+            for bit in &bits[128..] {
+                bit.enforce_equal(&Boolean::constant(false))?;
             }
 
-            // Enforce computed root matches public merkle_root
-            if current_fr != expected_root_fr {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-
-            // T5. Range check: non-zero value, 128-bit (enforced by type)
-            if input.value == 0 {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-
-            // T5. Asset_id match: checked implicitly via commitment reconstruction
-            // (the commitment uses asset_fr from public asset_id)
-
-            input_value_sum = input_value_sum
-                .checked_add(input.value)
-                .ok_or(SynthesisError::Unsatisfiable)?;
+            input_sum = input_sum + value_var;
         }
 
         // ------------------------------------------------------------------
         // Process each output note: commitment validity
         // ------------------------------------------------------------------
         for (i, output) in outputs.iter().enumerate() {
-            let rho_fr = bytes_to_fr(&output.rho);
-            let value_bytes = value_to_fr_bytes(output.value);
-            let value_fr = bytes_to_fr(&value_bytes);
+            let value_fr = bytes_to_fr(&value_to_fr_bytes(output.value));
+            let value_var = FpVar::new_witness(cs.clone(), || Ok(value_fr))?;
+
             let rcm_fr = bytes_to_fr(&output.rcm);
+            let rcm_var = FpVar::new_witness(cs.clone(), || Ok(rcm_fr))?;
+
+            let rho_fr = bytes_to_fr(&output.rho);
+            let rho_var = FpVar::new_witness(cs.clone(), || Ok(rho_fr))?;
 
             // Recompute commitment: H(value || asset_id || rcm || rho)
-            let computed_cm = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
-            if computed_cm != commitment_frs[i] {
-                return Err(SynthesisError::Unsatisfiable);
+            let computed_cm = poseidon_hash_gadget(
+                cs.clone(),
+                &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+            )?;
+            computed_cm.enforce_equal(&commitment_vars[i])?;
+
+            // T5: Range — non-zero value
+            let value_inv = FpVar::new_witness(cs.clone(), || {
+                if value_fr.is_zero() {
+                    Err(SynthesisError::Unsatisfiable)
+                } else {
+                    Ok(value_fr.inverse().unwrap())
+                }
+            })?;
+            let one = FpVar::new_constant(cs.clone(), Fr::from(1u64))?;
+            (value_var.clone() * value_inv).enforce_equal(&one)?;
+
+            // T5: Range — 128-bit
+            let bits = value_var.to_bits_le()?;
+            for bit in &bits[128..] {
+                bit.enforce_equal(&Boolean::constant(false))?;
             }
 
-            // T5. Range check: non-zero value
-            if output.value == 0 {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-
-            output_value_sum = output_value_sum
-                .checked_add(output.value)
-                .ok_or(SynthesisError::Unsatisfiable)?;
+            output_sum = output_sum + value_var;
         }
 
-        // T4. Value conservation: sum(outputs) <= sum(inputs)
-        if output_value_sum > input_value_sum {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+        // T4: Value conservation — diff = input_sum - output_sum, enforce diff >= 0
+        let diff = input_sum.clone() - output_sum.clone();
+        (diff.clone() + output_sum).enforce_equal(&input_sum)?;
 
-        // Enforce non-negative difference (implicit from the comparison above)
-        let _diff = input_value_sum - output_value_sum; // leftover value (fee or change)
+        let diff_bits = diff.to_bits_le()?;
+        for bit in &diff_bits[128..] {
+            bit.enforce_equal(&Boolean::constant(false))?;
+        }
 
         Ok(())
     }
@@ -286,14 +333,10 @@ fn value_to_fr_bytes(value: u128) -> [u8; 32] {
 
 /// Derive the incoming viewing key Fr from a spending key.
 ///
-/// Matches ViewingKey::generate: ivk = keccak256("ivk" || spending_key)
+/// Matches ViewingKey::generate: ivk = poseidon_hash_tagged("call/shielded/ivk", [sk_fr]).
 fn derive_ivk_from_spending_key(spending_key: &[u8; 32]) -> Fr {
-    use call_crypto::keccak256;
-    let mut data = Vec::with_capacity(36);
-    data.extend_from_slice(b"ivk");
-    data.extend_from_slice(spending_key);
-    let ivk = keccak256(&data);
-    bytes_to_fr(&ivk.0)
+    let sk_fr = bytes_to_fr(spending_key);
+    poseidon_hash_tagged(domain::IVK_FROM_SK, &[sk_fr])
 }
 
 /// Compute the public input byte count for a transfer circuit with N inputs and M outputs.
@@ -314,19 +357,19 @@ mod tests {
     use crate::test_utils::{test_hash, test_spending_key};
     use crate::ViewingKey;
     use crate::merkle_poseidon::PoseidonMerkleTree;
-    use crate::poseidon::fr_to_bytes;
-    use ark_ff::Zero;
+    use crate::poseidon::{fr_to_bytes, poseidon_hash_tagged};
 
-    /// Compute rcm for a note using the same derivation as deposit/withdraw tests.
+    /// Compute rcm for a note using Poseidon (matches Note::new and circuit D3).
     fn compute_rcm_plain(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
-        use call_crypto::keccak256;
-        let mut data = Vec::with_capacity(76);
-        data.extend_from_slice(b"rcm");
-        data.extend_from_slice(&vk.incoming_view_key);
-        data.extend_from_slice(&value.to_be_bytes());
-        data.extend_from_slice(&asset_id.to_be_bytes());
-        data.extend_from_slice(rho);
-        keccak256(&data).0
+        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
+        let value_bytes = value_to_fr_bytes(value);
+        let value_fr = bytes_to_fr(&value_bytes);
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
+        let asset_fr = bytes_to_fr(&asset_bytes);
+        let rho_fr = bytes_to_fr(rho);
+        let rcm_fr = poseidon_hash_tagged(domain::RCM, &[ivk_fr, value_fr, asset_fr, rho_fr]);
+        fr_to_bytes(&rcm_fr)
     }
 
     /// Derive nullifier from ivk and rho using the Poseidon hash method.
@@ -385,17 +428,15 @@ mod tests {
         recipient_ivk: [u8; 32],
         rho: [u8; 32],
     ) -> (OutputNoteWitness, [u8; 32] /* commitment */) {
-        // Derive rcm from ivk for output notes
-        let rcm = {
-            use call_crypto::keccak256;
-            let mut data = Vec::with_capacity(76);
-            data.extend_from_slice(b"rcm");
-            data.extend_from_slice(&recipient_ivk);
-            data.extend_from_slice(&value.to_be_bytes());
-            data.extend_from_slice(&asset_id.to_be_bytes());
-            data.extend_from_slice(&rho);
-            keccak256(&data).0
-        };
+        let ivk_fr = bytes_to_fr(&recipient_ivk);
+        let value_bytes = value_to_fr_bytes(value);
+        let value_fr = bytes_to_fr(&value_bytes);
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
+        let asset_fr = bytes_to_fr(&asset_bytes);
+        let rho_fr = bytes_to_fr(&rho);
+        let rcm_fr = poseidon_hash_tagged(domain::RCM, &[ivk_fr, value_fr, asset_fr, rho_fr]);
+        let rcm = fr_to_bytes(&rcm_fr);
         let commitment = compute_commitment_plain(value, asset_id, &rcm, &rho);
         let witness = OutputNoteWitness {
             value,
@@ -448,23 +489,9 @@ mod tests {
     fn test_transfer_circuit_satisfiable_1in_1out() {
         let circuit = make_1in_1out_data(1000, 900, 1);
 
-        // Verify structural properties
-        assert_eq!(circuit.nullifiers.len(), 1);
-        assert_eq!(circuit.commitments.len(), 1);
-        assert_eq!(circuit.input_notes.as_ref().unwrap().len(), 1);
-        assert_eq!(circuit.output_notes.as_ref().unwrap().len(), 1);
-        assert_eq!(circuit.merkle_paths.as_ref().unwrap().len(), 1);
-
-        // Verify nullifier is non-zero
-        let nf = &circuit.nullifiers[0];
-        assert!(nf.iter().any(|&b| b != 0));
-
-        // Verify commitment is non-zero
-        let cm = &circuit.commitments[0];
-        assert!(cm.iter().any(|&b| b != 0));
-
-        // Verify merkle root is non-zero
-        assert!(circuit.merkle_root.iter().any(|&b| b != 0));
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(cs.is_satisfied().unwrap());
     }
 
     #[test]
@@ -483,9 +510,9 @@ mod tests {
         // Build Merkle tree with both commitments
         let mut tree = PoseidonMerkleTree::new(32);
         tree.insert(&cm1);
-        let path1 = tree.proof_for_last();
         tree.insert(&cm2);
-        let path2 = tree.proof_for_last();
+        let path1 = tree.proof_for_index(0).unwrap();
+        let path2 = tree.proof_for_index(1).unwrap();
         let merkle_root = tree.root();
 
         // Create two output notes
@@ -507,16 +534,9 @@ mod tests {
             vec![path1, path2],
         );
 
-        // Verify structure
-        assert_eq!(circuit.nullifiers.len(), 2);
-        assert_eq!(circuit.commitments.len(), 2);
-        assert_eq!(circuit.input_notes.as_ref().unwrap().len(), 2);
-        assert_eq!(circuit.output_notes.as_ref().unwrap().len(), 2);
-
-        // Total input: 500 + 700 = 1200, total output: 600 + 500 = 1100 <= 1200
-        let input_sum: u128 = circuit.input_notes.as_ref().unwrap().iter().map(|n| n.value).sum();
-        let output_sum: u128 = circuit.output_notes.as_ref().unwrap().iter().map(|n| n.value).sum();
-        assert!(output_sum <= input_sum);
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(cs.is_satisfied().unwrap());
     }
 
     #[test]
@@ -552,15 +572,15 @@ mod tests {
     fn test_transfer_circuit_value_conservation() {
         // Input 1000, output 800 -> OK (200 leftover for fee)
         let circuit = make_1in_1out_data(1000, 800, 1);
-        let input_sum: u128 = circuit.input_notes.as_ref().unwrap().iter().map(|n| n.value).sum();
-        let output_sum: u128 = circuit.output_notes.as_ref().unwrap().iter().map(|n| n.value).sum();
-        assert!(output_sum <= input_sum);
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(cs.is_satisfied().unwrap());
 
         // Exact match: input 500, output 500 -> OK
         let circuit2 = make_1in_1out_data(500, 500, 1);
-        let input_sum2: u128 = circuit2.input_notes.as_ref().unwrap().iter().map(|n| n.value).sum();
-        let output_sum2: u128 = circuit2.output_notes.as_ref().unwrap().iter().map(|n| n.value).sum();
-        assert_eq!(input_sum2, output_sum2);
+        let cs2 = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit2.generate_constraints(cs2.clone()).unwrap();
+        assert!(cs2.is_satisfied().unwrap());
     }
 
     #[test]
@@ -598,11 +618,9 @@ mod tests {
             vec![merkle_path],
         );
 
-        // Constraint check should fail due to value violation
-        let result = circuit.generate_constraints(
-            ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref(),
-        );
-        assert!(result.is_err(), "circuit should reject output > input");
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "circuit should reject output > input");
     }
 
     #[test]
@@ -639,10 +657,9 @@ mod tests {
         );
 
         // Should fail: zero input value
-        let result = circuit.generate_constraints(
-            ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref(),
-        );
-        assert!(result.is_err(), "circuit should reject zero-value input");
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap(), "circuit should reject zero-value input");
 
         // Also test zero output value
         let (input_witness2, nullifier2, input_cm2) =
@@ -670,10 +687,9 @@ mod tests {
             vec![merkle_path2],
         );
 
-        let result2 = circuit2.generate_constraints(
-            ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref(),
-        );
-        assert!(result2.is_err(), "circuit should reject zero-value output");
+        let cs2 = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result2 = circuit2.generate_constraints(cs2.clone());
+        assert!(result2.is_err() || !cs2.is_satisfied().unwrap(), "circuit should reject zero-value output");
     }
 
     #[test]
@@ -715,10 +731,9 @@ mod tests {
             vec![merkle_path],
         );
 
-        let result = circuit.generate_constraints(
-            ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref(),
-        );
-        assert!(result.is_err(), "circuit should reject mismatched asset_id");
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "circuit should reject mismatched asset_id");
     }
 
     #[test]

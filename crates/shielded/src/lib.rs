@@ -14,9 +14,7 @@ mod circuit;
 pub mod prover;
 mod compliance;
 
-#[cfg(feature = "real-prover")]
 pub mod poseidon;
-#[cfg(feature = "real-prover")]
 pub mod merkle_poseidon;
 #[cfg(feature = "real-prover")]
 pub mod circuit_deposit;
@@ -32,7 +30,6 @@ pub mod keygen;
 pub mod ceremony;
 
 pub use merkle::*;
-#[cfg(feature = "real-prover")]
 pub use merkle_poseidon::*;
 pub use notes::*;
 pub use nullifiers::*;
@@ -41,7 +38,6 @@ pub use prover::*;
 pub use compliance::*;
 
 use call_primitives::{AssetId, Balance, Hash};
-use call_crypto::keccak256;
 use thiserror::Error;
 use std::collections::{HashMap, HashSet};
 
@@ -95,39 +91,38 @@ pub struct ViewingKey {
 impl ViewingKey {
     /// Generate a viewing key pair from a spending key seed.
     ///
-    /// Uses domain-separated keccak256 with explicit prefix tagging and
-    /// length padding to prevent length-extension attacks. While not a
-    /// full HKDF/PBKDF2, the domain separation and fixed-length output
-    /// provide stronger guarantees than naive concatenation.
+    /// Uses domain-separated Poseidon hashing over BN254 Fr. Matches the
+    /// R1CS circuit constraint T3: ivk = poseidon_hash_tagged("call/shielded/ivk", [sk_fr]).
     pub fn generate(spending_key: &[u8; 32]) -> Self {
-        // Domain-separated derivation: keccak256(domain_tag || spending_key || length)
-        let mut ivk_data = Vec::with_capacity(40);
-        ivk_data.extend_from_slice(b"call/shielded/ivk");
-        ivk_data.extend_from_slice(spending_key);
-        ivk_data.extend_from_slice(&32u8.to_be_bytes());
-        let ivk = keccak256(&ivk_data);
+        let sk_fr = poseidon::bytes_to_fr(spending_key);
+        let ivk_fr = poseidon::poseidon_hash_tagged(poseidon::domain::IVK_FROM_SK, &[sk_fr]);
+        let ivk = poseidon::fr_to_bytes(&ivk_fr);
 
-        let mut fvk_data = Vec::with_capacity(40);
-        fvk_data.extend_from_slice(b"call/shielded/fvk");
-        fvk_data.extend_from_slice(spending_key);
-        fvk_data.extend_from_slice(&32u8.to_be_bytes());
-        let fvk = keccak256(&fvk_data);
+        let fvk_fr = poseidon::poseidon_hash_tagged(poseidon::domain::FVK_FROM_IVK, &[ivk_fr]);
+        let fvk = poseidon::fr_to_bytes(&fvk_fr);
 
         Self {
-            incoming_view_key: ivk.0,
-            full_view_key: fvk.0,
+            incoming_view_key: ivk,
+            full_view_key: fvk,
         }
     }
 
-    /// Derive a note commitment nullifier for a given note
+    /// Construct a ViewingKey from pre-derived incoming and full view keys.
+    pub fn from_incoming_view_key(incoming_view_key: [u8; 32], full_view_key: [u8; 32]) -> Self {
+        Self {
+            incoming_view_key,
+            full_view_key,
+        }
+    }
+
+    /// Derive a note commitment nullifier for a given note.
+    ///
+    /// Matches the R1CS circuit: nullifier = poseidon_hash([fvk_fr, rho_fr]).
     pub fn derive_nullifier(&self, rho: &[u8; 32]) -> Nullifier {
-        let mut data = Vec::with_capacity(96);
-        data.extend_from_slice(&self.full_view_key);
-        data.extend_from_slice(rho);
-        let mut nf_data = Vec::with_capacity(42);
-        nf_data.extend_from_slice(b"nullifier");
-        nf_data.extend_from_slice(&data);
-        Nullifier::new(keccak256(&nf_data))
+        let fvk_fr = poseidon::bytes_to_fr(&self.full_view_key);
+        let rho_fr = poseidon::bytes_to_fr(rho);
+        let nf_fr = poseidon::poseidon_hash(&[fvk_fr, rho_fr]);
+        Nullifier::new(Hash::from_slice(&poseidon::fr_to_bytes(&nf_fr)))
     }
 
     /// Verify this viewing key can decrypt a note by attempting
@@ -242,7 +237,7 @@ impl ShieldedTransfer {
 pub struct ShieldedState {
     // Merkle tree is skipped during serialization — rebuilt from note_registry on deserialize.
     #[serde(skip_serializing)]
-    pub merkle_tree: IncrementalMerkleTree,
+    pub merkle_tree: PoseidonMerkleTree,
     pub nullifier_set: NullifierSet,
     pub note_registry: HashMap<NoteCommitment, Note>,
 }
@@ -263,7 +258,7 @@ impl<'de> serde::Deserialize<'de> for ShieldedState {
     {
         let raw = ShieldedStateRaw::deserialize(deserializer)?;
         let mut state = Self {
-            merkle_tree: IncrementalMerkleTree::new(32),
+            merkle_tree: PoseidonMerkleTree::new(32),
             nullifier_set: raw.nullifier_set,
             note_registry: raw.note_registry,
         };
@@ -275,7 +270,7 @@ impl<'de> serde::Deserialize<'de> for ShieldedState {
 impl ShieldedState {
     pub fn new() -> Self {
         Self {
-            merkle_tree: IncrementalMerkleTree::new(32),
+            merkle_tree: PoseidonMerkleTree::new(32),
             nullifier_set: NullifierSet::new(),
             note_registry: HashMap::new(),
         }
@@ -325,7 +320,8 @@ impl ShieldedState {
             let input_commitments: std::collections::HashSet<_> =
                 transfer.input_notes.iter().map(|n| n.commitment()).collect();
             for cm in &input_commitments {
-                if !self.merkle_tree.contains(cm.0) {
+                let leaf: [u8; 32] = cm.0.into();
+                if !self.merkle_tree.contains(&leaf) {
                     return Err(ShieldedError::CommitmentNotFound(cm.clone()));
                 }
             }
@@ -347,7 +343,8 @@ impl ShieldedState {
 
         // 7. Insert new commitments
         for cm in &transfer.proof.commitments {
-            self.merkle_tree.insert(cm.0);
+            let leaf: [u8; 32] = cm.0.into();
+            self.merkle_tree.insert(&leaf);
         }
 
         // 8. Register notes
@@ -371,7 +368,8 @@ impl ShieldedState {
         }
 
         // Insert commitment into Merkle tree
-        self.merkle_tree.insert(commitment.0);
+        let leaf: [u8; 32] = commitment.0.into();
+        self.merkle_tree.insert(&leaf);
 
         // Register the note
         self.note_registry.insert(commitment, note);
@@ -397,9 +395,10 @@ impl ShieldedState {
 
     /// Rebuild Merkle tree from note_registry (used after deserialization)
     pub fn rebuild_merkle_tree(&mut self) {
-        self.merkle_tree = IncrementalMerkleTree::new(32);
+        self.merkle_tree = PoseidonMerkleTree::new(32);
         for commitment in self.note_registry.keys() {
-            self.merkle_tree.insert(commitment.0);
+            let leaf: [u8; 32] = commitment.0.into();
+            self.merkle_tree.insert(&leaf);
         }
     }
 
@@ -417,7 +416,7 @@ impl ShieldedState {
 
     /// Get current Merkle root
     pub fn merkle_root(&self) -> Hash {
-        self.merkle_tree.root()
+        Hash::from_slice(&self.merkle_tree.root())
     }
 
     /// Look up a note by commitment
@@ -791,7 +790,8 @@ mod tests {
         let new_note = test_note(800, 1, 2);
 
         // Insert the input note's commitment into the Merkle tree first
-        state.merkle_tree.insert(note.commitment().0);
+        let leaf: [u8; 32] = note.commitment().0.into();
+        state.merkle_tree.insert(&leaf);
         state.note_registry.insert(note.commitment(), note.clone());
 
         let proof = ZkProof {
@@ -818,7 +818,8 @@ mod tests {
         // Build expected state with a properly populated tree
         let mut expected = ShieldedState::new();
         expected.note_registry.insert(cm.clone(), note.clone());
-        expected.merkle_tree.insert(cm.0);
+        let leaf: [u8; 32] = cm.0.into();
+        expected.merkle_tree.insert(&leaf);
         let expected_root = expected.merkle_root();
 
         // Simulate deserialized state: note_registry kept, tree reset

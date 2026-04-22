@@ -755,18 +755,19 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let mut proof_entries: Vec<serde_json::Value> = Vec::new();
             for (i, (cm, note)) in shielded.note_registry.iter().enumerate() {
                 if note.asset_id == asset_id {
-                    let proof = shielded.merkle_tree.proof_for_index(i);
-                    let proof_serialized: Vec<serde_json::Value> = proof.iter()
-                        .map(|(sibling, is_right)| serde_json::json!({
-                            "sibling": format!("0x{}", hex::encode(sibling.as_slice())),
-                            "is_right": is_right,
-                        }))
-                        .collect();
-                    proof_entries.push(serde_json::json!({
-                        "commitment": format!("0x{}", hex::encode(cm.0.as_slice())),
-                        "value": note.value.to_string(),
-                        "proof": proof_serialized,
-                    }));
+                    if let Some(proof) = shielded.merkle_tree.proof_for_index(i) {
+                        let proof_serialized: Vec<serde_json::Value> = proof.iter()
+                            .map(|(sibling, is_right)| serde_json::json!({
+                                "sibling": format!("0x{}", hex::encode(sibling.as_slice())),
+                                "is_right": is_right,
+                            }))
+                            .collect();
+                        proof_entries.push(serde_json::json!({
+                            "commitment": format!("0x{}", hex::encode(cm.0.as_slice())),
+                            "value": note.value.to_string(),
+                            "proof": proof_serialized,
+                        }));
+                    }
                 }
             }
 
