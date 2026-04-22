@@ -53,6 +53,9 @@ mod test_shielded_flow_impl {
         let input_note = shield_note(1_000, 1, 1);
         let output_note = shield_note(800, 1, 2);
 
+        // Insert input commitment so the transfer can spend it
+        state.merkle_tree.insert(&input_note.commitment().0.0);
+
         let proof = ZkProof {
             proof_data: vec![1u8; 200],
             nullifiers: vec![input_note.nullifier()],
@@ -65,7 +68,8 @@ mod test_shielded_flow_impl {
             proof,
         };
         state.process_transfer(&transfer).unwrap();
-        assert_eq!(state.merkle_tree.leaf_count(), 1);
+        // 2 leaves: input commitment (pre-inserted) + output commitment
+        assert_eq!(state.merkle_tree.leaf_count(), 2);
         assert!(state.nullifier_set.is_spent(&transfer.proof.nullifiers[0]));
     }
 
@@ -74,6 +78,9 @@ mod test_shielded_flow_impl {
         let mut state = ShieldedState::new();
         let input_note = shield_note(1_000, 1, 1);
         let output_note = shield_note(800, 1, 2);
+
+        // Insert input commitment so the first transfer can spend it
+        state.merkle_tree.insert(&input_note.commitment().0.0);
 
         let proof = ZkProof {
             proof_data: vec![1u8; 200],
@@ -109,6 +116,9 @@ mod test_shielded_flow_impl {
         let mut state = ShieldedState::new();
         let input_note = shield_note(500, 1, 1);
         let output_note = shield_note(1_000, 1, 2);
+
+        // Insert input commitment so we reach the value-conservation check
+        state.merkle_tree.insert(&input_note.commitment().0.0);
 
         let proof = ZkProof {
             proof_data: vec![1u8; 200],
@@ -282,7 +292,7 @@ mod test_shielded_flow_impl {
         let mut state = ShieldedState::new();
         let root_before = state.merkle_root();
         let note = shield_note(500, 1, 1);
-        state.merkle_tree.insert(note.commitment().0);
+        state.merkle_tree.insert(&note.commitment().0.0);
         assert_ne!(state.merkle_root(), root_before);
     }
 

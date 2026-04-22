@@ -265,7 +265,7 @@ mod test_shielded_integration_impl {
         let mut state = ShieldedState::new();
         let root_before = state.merkle_root();
         let note = shield_note(500, 1, 1);
-        state.merkle_tree.insert(note.commitment().0);
+        state.merkle_tree.insert(&note.commitment().0.0);
         assert_ne!(state.merkle_root(), root_before);
     }
 

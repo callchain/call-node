@@ -342,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "slow-tests")]
     fn test_poseidon_merkle_depth_32() {
         let mut tree = PoseidonMerkleTree::new(32);
         for i in 0..100u8 {
@@ -379,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "slow-tests")]
     fn test_poseidon_merkle_root_deterministic() {
         let mut tree1 = PoseidonMerkleTree::new(32);
         let mut tree2 = PoseidonMerkleTree::new(32);

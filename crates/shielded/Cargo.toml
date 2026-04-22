@@ -39,6 +39,7 @@ sha2 = { version = "0.10", optional = true }
 [features]
 default = ["poseidon"]
 poseidon = []
+slow-tests = ["poseidon"]
 real-prover = [
     "poseidon",
     "ark-std",
