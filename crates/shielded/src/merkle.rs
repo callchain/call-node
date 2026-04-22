@@ -78,6 +78,11 @@ impl IncrementalMerkleTree {
         self.count
     }
 
+    /// Check if a leaf exists in the tree (Gap #3: merkle inclusion check).
+    pub fn contains(&self, leaf: Hash) -> bool {
+        self.levels[0].contains(&leaf)
+    }
+
     pub fn proof_for_last(&self) -> Vec<(Hash, bool)> {
         if self.count == 0 {
             return vec![];

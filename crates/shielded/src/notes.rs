@@ -157,6 +157,12 @@ pub mod encryption {
         cipher.decrypt(nonce, payload)
             .map_err(|_| "decryption failed")
     }
+
+    /// Try to decrypt note data, returning false on any failure.
+    /// Used by ViewingKey::can_decrypt for actual decryption attempts.
+    pub fn try_decrypt_note(ciphertext: &[u8], ivk: &[u8; 32]) -> bool {
+        decrypt_note(ciphertext, ivk).is_ok()
+    }
 }
 
 #[cfg(test)]
