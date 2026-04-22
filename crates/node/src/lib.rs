@@ -109,11 +109,18 @@ pub struct CallNode {
     pub telemetry: Arc<crate::telemetry::TelemetryRegistry>,
     /// Append-only audit log for compliance and tamper evidence
     pub audit_log: Arc<RwLock<crate::logging::AuditLog>>,
+    /// True when the node started from empty or corrupted state (genesis should be applied).
+    pub fresh_start: bool,
 }
 
 impl CallNode {
     /// Create a new node with default state
     pub fn new(data_dir: PathBuf) -> Result<Self, String> {
+        Self::new_with_chain_id(data_dir, None)
+    }
+
+    /// Create a new node with an optional chain_id override (from genesis).
+    pub fn new_with_chain_id(data_dir: PathBuf, chain_id: Option<u64>) -> Result<Self, String> {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
         let db = open_db(data_dir.clone()).map_err(|e| format!("failed to open db: {e}"))?;
 
@@ -131,6 +138,9 @@ impl CallNode {
             tracing::warn!("pending checkpoint detected — previous shutdown was unclean; starting from genesis");
             let _ = clear_checkpoint(db_env);
         }
+
+        let blocks_exist = data_dir.join("blocks").exists();
+        let fresh_start = recovery_needed || !blocks_exist;
 
         // Load persisted state from reth-db (skip if recovery needed)
         let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, receipts, fork_manager) = if recovery_needed {
@@ -206,7 +216,7 @@ impl CallNode {
             agent_nonces,
             shielded_state,
             mempool.clone(),
-            CALLCHAIN_CHAIN_ID,
+            chain_id.unwrap_or(CALLCHAIN_CHAIN_ID),
             oracle_manager,
         ));
 
@@ -252,6 +262,7 @@ impl CallNode {
             block_cache: Arc::new(std::sync::Mutex::new(BlockCache::new(1000))),
             telemetry,
             audit_log,
+            fresh_start,
         })
     }
 

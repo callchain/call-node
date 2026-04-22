@@ -5,99 +5,20 @@
 
 use crate::config::{NodeConfig, NodeMode, parse_bootstrap_peers};
 use crate::CallNode;
+use call_consensus::SimplexConsensus;
 use call_network::{CommonwareConfig, NetworkLimits, load_or_generate_identity_key};
 use call_primitives::Address;
+use call_protocol::fee_currency::FeeCurrencyEntry;
 use call_rpc::RpcConfig;
 use call_crypto::{LocalSigner, SignerRef, load_key as load_keystore_key, bls_generate, bls_public_key_bytes};
 use commonware_cryptography::ed25519;
 use commonware_codec::extensions::DecodeExt;
 use rand::rngs::OsRng;
-use serde::Deserialize;
-use std::fs;
 use std::sync::Arc;
 use tracing::info;
 
 /// Result type for boot sequence
 pub type BootResult = Result<CallNode, String>;
-
-/// Genesis file format: balances, assets, validators, timestamp.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Genesis {
-    #[serde(default)]
-    pub balances: Vec<GenesisBalance>,
-    #[serde(default)]
-    pub validators: Vec<GenesisValidator>,
-    #[serde(default = "Genesis::default_timestamp")]
-    pub timestamp: u64,
-    /// Asset IDs to track for oracle price submissions
-    #[serde(default)]
-    pub oracle_assets: Vec<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct GenesisBalance {
-    pub address: String,
-    pub asset_id: u64,
-    pub amount: u128,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct GenesisValidator {
-    pub address: String,
-    pub pubkey: String,
-    pub stake: u128,
-}
-
-impl Genesis {
-    fn default_timestamp() -> u64 {
-        1_000_000 // default genesis timestamp
-    }
-
-    /// Load and parse a genesis file from disk
-    pub fn load(path: &std::path::Path) -> Result<Self, String> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("failed to read genesis file: {e}"))?;
-        let genesis: Genesis = serde_json::from_str(&content)
-            .map_err(|e| format!("failed to parse genesis JSON: {e}"))?;
-        Ok(genesis)
-    }
-
-    /// Apply genesis state to the node: balances and validators
-    pub fn apply(&self, node: &mut CallNode) -> Result<(), String> {
-        // Apply genesis balances
-        let mut balance_state = node.state.balance_state.write().map_err(|_| "lock poisoned")?;
-        for entry in &self.balances {
-            let addr = parse_address(&entry.address)?;
-            balance_state
-                .balances
-                .set_balance(entry.asset_id, addr, entry.amount)
-                .map_err(|e| format!("failed to set genesis balance: {e}"))?;
-        }
-
-        // Stake genesis validators
-        let mut consensus = node.consensus.write().map_err(|_| "lock poisoned")?;
-        for val in &self.validators {
-            let addr = parse_address(&val.address)?;
-            let pubkey = parse_pubkey(&val.pubkey)?;
-            consensus
-                .stake_validator(addr, pubkey, val.stake)
-                .map_err(|e| format!("failed to stake validator: {e}"))?;
-        }
-        consensus.refresh_proposer_subset();
-        drop(consensus);
-
-        // Register genesis validators into governance for voting
-        {
-            let mut gov = node.state.governance.write().map_err(|_| "lock poisoned")?;
-            for (i, val) in self.validators.iter().enumerate() {
-                let addr = parse_address(&val.address)?;
-                gov.register_validator(i as u32, addr);
-            }
-        }
-
-        Ok(())
-    }
-}
 
 fn parse_address(s: &str) -> Result<Address, String> {
     let bytes = hex::decode(s.trim_start_matches("0x"))
@@ -106,17 +27,6 @@ fn parse_address(s: &str) -> Result<Address, String> {
         return Err(format!("address must be 20 bytes, got {}", bytes.len()));
     }
     Ok(Address::from_slice(&bytes))
-}
-
-fn parse_pubkey(s: &str) -> Result<[u8; 32], String> {
-    let bytes = hex::decode(s.trim_start_matches("0x"))
-        .map_err(|e| format!("invalid pubkey hex: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(format!("pubkey must be 32 bytes, got {}", bytes.len()));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(arr)
 }
 
 /// Load or derive an ed25519 private key for BFT consensus.
@@ -211,9 +121,19 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         info!("fresh database — will initialize from genesis");
     }
 
+    // Pre-load genesis to extract chain_id before node creation
+    let preloaded_genesis = if let Some(ref genesis_path) = config.genesis.path {
+        info!(path = ?genesis_path, "pre-loading genesis for chain_id");
+        Some(call_chainspec::Genesis::load_from_file(genesis_path)
+            .map_err(|e| format!("failed to load genesis: {e}"))?)
+    } else {
+        None
+    };
+    let genesis_chain_id = preloaded_genesis.as_ref().map(|g| g.chain_id);
+
     // Step 2: Create node (opens DB, initializes state)
     info!("step 2: initializing node");
-    let mut node = CallNode::new(config.storage.data_dir.clone())?;
+    let mut node = CallNode::new_with_chain_id(config.storage.data_dir.clone(), genesis_chain_id)?;
 
     // Wire governance auth config
     node.state.set_governance_auth(config.governance.require_auth);
@@ -258,28 +178,77 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         }
     }
 
-    // Step 3: Load genesis if path provided
-    if let Some(ref genesis_path) = config.genesis.path {
-        info!(path = ?genesis_path, "step 3: loading genesis");
-        let genesis = Genesis::load(genesis_path)?;
-        info!(
-            balances = genesis.balances.len(),
-            validators = genesis.validators.len(),
-            "genesis loaded"
-        );
-        genesis.apply(&mut node)?;
+    // Step 3: Apply genesis if this is a fresh start
+    if node.fresh_start {
+        if let Some(genesis) = preloaded_genesis {
+            info!(path = ?config.genesis.path, "step 3: executing genesis");
+            info!(
+                assets = genesis.initial_assets.len(),
+                validators = genesis.validators.len(),
+                "genesis loaded"
+            );
 
-        // Register genesis validators into the oracle for price submissions
-        let mut oracle = node.state.oracle.write().map_err(|_| "lock poisoned")?;
-        for (i, val) in genesis.validators.iter().enumerate() {
-            let addr = parse_address(&val.address)?;
-            let pubkey = parse_pubkey(&val.pubkey)?;
-            oracle.register_validator(i as u32, addr, pubkey);
+            let executor = call_chainspec::GenesisExecutor::new(genesis.clone());
+            let genesis_state = executor.execute()
+                .map_err(|e| format!("failed to execute genesis: {e}"))?;
+
+            // Inject genesis state into RpcState
+            *node.state.balance_state.write().map_err(|_| "lock poisoned")? = genesis_state.balances;
+            *node.state.asset_registry.write().map_err(|_| "lock poisoned")? = genesis_state.registry;
+            *node.state.compliance_engine.write().map_err(|_| "lock poisoned")? = genesis_state.compliance;
+            *node.state.evm_state.write().map_err(|_| "lock poisoned")? = genesis_state.evm_state;
+            *node.state.validator_state.write().map_err(|_| "lock poisoned")? = genesis_state.validators.clone();
+            *node.state.oracle.write().map_err(|_| "lock poisoned")? = genesis_state.oracle;
+
+            // Register fee currencies
+            {
+                let mut fcr = node.state.fee_currency_registry.write().map_err(|_| "lock poisoned")?;
+                for asset_id in &genesis_state.fee_currencies {
+                    let registry = node.state.asset_registry.read().map_err(|_| "lock poisoned")?;
+                    let asset = registry.get_asset(*asset_id);
+                    let (name, decimals) = match asset {
+                        Some(a) => (a.name.clone(), a.decimals),
+                        None => (format!("Asset {}", asset_id), 18),
+                    };
+                    drop(registry);
+
+                    let entry = FeeCurrencyEntry {
+                        asset_id: *asset_id,
+                        name,
+                        decimals,
+                        oracle_price_key: None,
+                        added_at_block: 0,
+                        added_by_proposal: 0,
+                    };
+                    let _ = fcr.add_fee_currency(entry, 0);
+                }
+            }
+
+            // Replace consensus with genesis validators and params
+            let new_consensus = SimplexConsensus::new(genesis.consensus_params.clone(), genesis_state.validators);
+            *node.consensus.write().map_err(|_| "lock poisoned")? = new_consensus;
+
+            // Sync consensus params into RpcState
+            {
+                let consensus = node.consensus.read().map_err(|_| "lock poisoned")?;
+                *node.state.consensus_params.write().map_err(|_| "lock poisoned")? = *consensus.params();
+            }
+
+            // Register genesis validators into governance for voting
+            {
+                let mut gov = node.state.governance.write().map_err(|_| "lock poisoned")?;
+                for (i, val) in genesis.validators.iter().enumerate() {
+                    let addr = parse_address(&val.address)?;
+                    gov.register_validator(i as u32, addr);
+                }
+            }
+
+            info!("genesis applied successfully");
+        } else {
+            info!("step 3: no genesis path configured, starting with empty state");
         }
-        if !genesis.oracle_assets.is_empty() {
-            oracle.set_tracked_assets(genesis.oracle_assets.clone());
-        }
-        drop(oracle);
+    } else {
+        info!("step 3: existing data found, skipping genesis");
     }
 
     // Step 4: Init P2P and connect seeds

@@ -554,6 +554,10 @@ pub struct GetShieldedTxProofResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use call_consensus::BlockSignature;
+    use call_crypto::keccak256;
+    use call_primitives::ProtocolVersion;
+    use call_shielded::IncrementalMerkleTree;
 
     fn test_hash(n: u8) -> Hash {
         Hash::repeat_byte(n)
