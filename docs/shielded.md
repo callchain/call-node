@@ -200,25 +200,6 @@ Each block can contain at most 50 shielded transactions. This limits the computa
 
 ---
 
-## Resolved Gaps
-
-All previously identified production readiness gaps have been resolved:
-
-| # | Gap | Resolution |
-|---|-----|------------|
-| 1 | **Non-standard viewing key KDF** | Domain-separated `call/shielded/ivk` and `call/shielded/fvk` prefixes with length encoding |
-| 2 | **Merkle tree deserialization rebuild** | Custom `Serialize`/`Deserialize` auto-rebuilds tree from `note_registry` |
-| 3 | **No Merkle inclusion proof in execution** | `process_transfer()` verifies input note commitments exist in tree via `contains()` |
-| 4 | **ZK verification by design** | Resolved — `real-prover` feature enables full Groth16 verification |
-| 5 | **Structural ZK validation insufficient** | Added circuit-specific count checks, asset consistency, `validate_structure()` |
-| 6 | **Value conservation allows implicit burn** | Documented as intentional fee burn; `value_conserved_exact()` added |
-| 7 | **Deposits skip value conservation** | Zero-value check added; amounts enforced by protocol-layer balance deduction |
-| 8 | **No shielded balance audit** | `shielded_pool_supply()` and `verify_pool_integrity()` added |
-| 9 | **`can_decrypt` is a stub** | `try_decrypt_note()` attempts actual ChaCha20-Poly1305 decryption |
-| 10 | **Trusted setup persistence** | Resolved — `real-prover` feature with `production-keys` sub-feature |
-| 11 | **Note registry grows unbounded** | `prune_spent_notes()` removes notes with spent nullifiers |
-| 12 | **No shielded transaction receipt** | `ShieldedReceipt` struct records nullifiers, commitments, values for tracing |
-
 ---
 
 ## Test Status
