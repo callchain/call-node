@@ -68,23 +68,9 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 
 ---
 
-## Recently Resolved Recommendations
-
-The following five recommendations have been implemented and verified:
-
-| # | Recommendation | Resolution | Files Changed |
-|---|----------------|------------|---------------|
-| 1 | **Fix `FixedBytes<32>` type mismatch in shielded tests** | `PoseidonMerkleTree::insert()` expects `&[u8; 32]`; `note.commitment().0` is `alloy_primitives::B256`. Fixed by passing `&note.commitment().0.0`. Pre-inserted input commitments before `process_transfer()` to satisfy Merkle-inclusion checks. | `crates/protocol/tests/test_shielded_flow.rs`, `crates/protocol/tests/test_shielded_integration.rs` |
-| 2 | **Add serialization roundtrip tests for `call-serialization`** | Added `test_rlp_u256_roundtrip`, `test_rlp_malformed_bytes_rejected`, `test_json_invalid_input_rejected`, and `test_json_complex_struct_roundtrip`. | `crates/serialization/src/rlp.rs`, `crates/serialization/src/json.rs` |
-| 3 | **Add negative signature tests** | Added wrong-message verification, wrong-signer recovery, tampered-signature rejection in `call-crypto`; plus wrong-signer and tampered-transaction tests in `call-protocol`. | `crates/crypto/src/secp256k1.rs`, `crates/protocol/src/transaction.rs` |
-| 4 | **Gate slow Poseidon tests behind `#[cfg(feature = "slow-tests")]`** | Added `slow-tests = ["poseidon"]` feature to `call-shielded/Cargo.toml`. Gated `test_poseidon_merkle_depth_32` and `test_poseidon_merkle_root_deterministic`. Reduces default test time from ~273s to ~1s. | `crates/shielded/Cargo.toml`, `crates/shielded/src/merkle_poseidon.rs` |
-| 5 | **Add governance and bridge E2E tests using `TestNode` harness** | Created `test_governance_e2e.rs` (full lifecycle with signed txs and short governance periods) and `test_bridge_e2e.rs` (deposit, withdraw, and `#[should_panic]` rejection test). Updated harness to advance `governance.current_block` during block production and to pass governance/bridge config to execution. | `crates/node/tests/test_governance_e2e.rs`, `crates/node/tests/test_bridge_e2e.rs`, `crates/node/tests/e2e/harness.rs` |
-
----
-
 ## Production Readiness Gaps
 
-### Critical Gaps — No Tests Exist
+### Critical Gaps
 
 | # | Gap | Impact |
 |---|-----|--------|
@@ -97,7 +83,7 @@ The following five recommendations have been implemented and verified:
 | 7 | **No light client consensus verification tests** | Light client does not verify Ethereum BLS signatures. No tests for malicious fork feeding. |
 | 8 | **No oracle signature verification tests** | Oracle price submissions accept any 64-byte signature. No negative test exists. |
 
-### High Gaps — Tests Exist but Insufficient
+### High Gaps
 
 | # | Gap | Details |
 |---|-----|---------|
@@ -112,7 +98,7 @@ The following five recommendations have been implemented and verified:
 | 17 | **No snapshot production/verification tests** | Snapshot production is not wired. `verify_snapshot` does not cryptographically verify signatures. Tests only count signatures. |
 | 18 | **No fast sync incremental catch-up tests** | `incremental_sync()` returns `Ok(0)`. No test verifies catch-up from snapshot to chain head. |
 
-### Medium Gaps — Edge Cases Missing
+### Medium Gaps
 
 | # | Gap | Details |
 |---|-----|---------|
@@ -127,21 +113,6 @@ The following five recommendations have been implemented and verified:
 | 27 | **No mempool eviction under memory pressure tests** | `ReplayProtector` evicts 25% when over limit but no test verifies correctness during eviction. |
 | 28 | **No cross-crate integration test for light client bridge deposit** | `call_lightClientBridgeDeposit` is feature-gated. No integration test covers the full flow. |
 | 29 | **No MPT proof verification tests** | Bridge MPT proof verification is behind `light-client-bridge` feature flag. No tests validate tx inclusion or receipt proof verification against Ethereum headers. |
-
-### Resolved Gaps — Recently Fixed
-
-| # | Gap | Resolution |
-|---|---|---|
-| R1 | ~~**No bridge challenge instruction tests**~~ | `test_challenge_deposit_revoke_pending` verifies permissionless challenge revocation of pending bridge deposits. |
-| R2 | ~~**No P2P defense integration tests**~~ | `P2PDefense` is now wired into the P2P receive loop. Network-level tests exercise oversized message rejection and rate limiting. |
-| R3 | ~~**No compliance state persistence tests**~~ | `ComplianceEngineSnapshot` serialization/deserialization and MDBX load/save are covered in protocol and storage tests. |
-| R4 | ~~**FixedBytes<32> type mismatch in shielded tests**~~ | Corrected `B256` → `[u8; 32]` conversion and pre-inserted input commitments to satisfy Merkle-inclusion checks. 34 shielded tests now pass. |
-| R5 | ~~**Missing serialization roundtrip tests**~~ | Added RLP and JSON roundtrip plus malformed-input rejection tests to `call-serialization`. |
-| R6 | ~~**Missing negative signature tests**~~ | Added wrong-signer, tampered-message, and tampered-signature tests to `call-crypto` and `call-protocol`. |
-| R7 | ~~**Slow Poseidon tests ungated**~~ | Gated depth-32 and deterministic-root tests behind `slow-tests` feature. Default suite runs in ~1s instead of ~273s. |
-| R8 | ~~**No governance/bridge E2E tests via TestNode**~~ | Added `test_governance_proposal_full_lifecycle` and `test_bridge_deposit_evm_credits` / `test_bridge_withdraw_records_outflow` / `test_bridge_external_deposit_insufficient_sigs_rejected`. |
-| R9 | ~~**No light client E2E tests**~~ | Added `test_light_verify_block_header_valid` / `bad_parent` / `zero_timestamp_rejected` and `test_light_get_balance_proof` / `unknown_address` in `test_light_client_e2e.rs`. |
-| R10 | ~~**No WebSocket subscription E2E tests**~~ | Added `test_ws_subscribe_new_blocks`, `new_payments`, `bridge_completed`, `asset_registered`, `agent_executed`, `agent_revoked`, `shielded_deposit`, `shielded_withdrawal`, and `governance` in `test_websocket_e2e.rs`. |
 
 ---
 
@@ -188,7 +159,7 @@ The following five recommendations have been implemented and verified:
 |---|-----|----------|
 | 1 | **No CI/CD pipeline configuration** | Tests are run manually. No automated test execution on PRs. |
 | 2 | **No code coverage tracking** | No `cargo tarpaulin` or `llvm-cov` integration. Unknown actual coverage percentage. |
-| 3 | **No benchmark suite** (Gap 11) | No `criterion.rs` benchmarks for hot paths (MPT verification, proof generation, block production). E2E `test_stress.rs` runs in-memory; no real-network latency/packet-loss validation. |
+| 3 | **No benchmark suite** | No `criterion.rs` benchmarks for hot paths (MPT verification, proof generation, block production). E2E `test_stress.rs` runs in-memory; no real-network latency/packet-loss validation. |
 | 4 | **No property-based testing** | No `proptest` or `quickcheck` for invariant-based testing. |
-| 5 | **No testnet environment** (Gap 13, 14, 11) | E2E tests run in-memory. No long-running testnet for soak testing, light client real-network validation, or heterogeneous fork upgrade testing. |
+| 5 | **No testnet environment** | E2E tests run in-memory. No long-running testnet for soak testing, light client real-network validation, or heterogeneous fork upgrade testing. |
 | 6 | **No mutation testing** | No `cargo-mutants` to verify test suite effectiveness. |
