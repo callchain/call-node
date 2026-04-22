@@ -23,3 +23,8 @@ reth-codecs-derive.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "mdbx_read_write"
+harness = false

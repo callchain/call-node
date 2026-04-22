@@ -57,3 +57,11 @@ production-keys = ["real-prover", "sha2"]
 name = "export_r1cs"
 path = "src/bin/export_r1cs.rs"
 required-features = ["real-prover"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "proof_generate"
+harness = false
+required-features = ["real-prover"]

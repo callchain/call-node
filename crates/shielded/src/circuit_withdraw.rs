@@ -218,7 +218,7 @@ mod tests {
     use crate::test_utils::{test_hash, test_spending_key};
     use crate::ViewingKey;
     use crate::merkle_poseidon::PoseidonMerkleTree;
-    use crate::poseidon::{fr_to_bytes, poseidon_hash_tagged};
+    use crate::poseidon::{fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
 
     /// Build a withdraw witness and all public inputs from scratch.
     fn make_withdraw_data(

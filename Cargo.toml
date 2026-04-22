@@ -216,6 +216,9 @@ insta = "1.43"
 indexmap = "2"
 p256 = "0.13"
 
+# Benchmarks
+criterion = "0.5"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

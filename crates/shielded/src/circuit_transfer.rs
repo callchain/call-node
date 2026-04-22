@@ -358,7 +358,7 @@ mod tests {
     use crate::test_utils::{test_hash, test_spending_key};
     use crate::ViewingKey;
     use crate::merkle_poseidon::PoseidonMerkleTree;
-    use crate::poseidon::{fr_to_bytes, poseidon_hash_tagged};
+    use crate::poseidon::{fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
 
     /// Compute rcm for a note using Poseidon (matches Note::new and circuit D3).
     fn compute_rcm_plain(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {

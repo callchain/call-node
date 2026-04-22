@@ -34,6 +34,7 @@ real-prover = ["call-shielded/real-prover"]
 hex-literal = "0.4"
 hex = "0.4"
 proptest = "1"
+criterion = { workspace = true }
 call-bridge.workspace = true
 call-agent.workspace = true
 call-consensus.workspace = true
@@ -41,3 +42,7 @@ call-consensus.workspace = true
 [[test]]
 name = "test_shielded_integration"
 path = "tests/test_shielded_integration.rs"
+
+[[bench]]
+name = "instruction_execute"
+harness = false
