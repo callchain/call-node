@@ -2,7 +2,7 @@
 //!
 //! Functions: getPrice(), getTWAP(), isStale(), getOracleStatus()
 
-use call_primitives::AssetId;
+use call_primitives::{AssetId, PricePair};
 use call_oracle::OracleManager;
 use alloy_primitives::address;
 use std::sync::{Arc, RwLock};
@@ -69,28 +69,47 @@ impl OracleState {
         }
     }
 
-    /// Get current aggregated price from the oracle manager
+    /// Get current aggregated price for an asset (implicitly quoted in USD).
     pub fn get_price(&self, asset_id: AssetId) -> Option<OraclePrice> {
-        self.manager.get_price(asset_id).map(|agg| OraclePrice {
+        self.manager.get_price_by_asset(asset_id).map(|agg| OraclePrice {
             price: agg.median_price,
             timestamp: agg.timestamp,
             block_number: agg.block_number,
         })
     }
 
-    /// Get TWAP from the oracle manager
+    /// Get current aggregated price for a specific pair.
+    pub fn get_price_for_pair(&self, pair: PricePair) -> Option<OraclePrice> {
+        self.manager.get_price(pair).map(|agg| OraclePrice {
+            price: agg.median_price,
+            timestamp: agg.timestamp,
+            block_number: agg.block_number,
+        })
+    }
+
+    /// Get TWAP for an asset (implicitly quoted in USD).
     pub fn get_twapped(&self, asset_id: AssetId, current_timestamp: u64) -> Option<u128> {
-        self.manager.get_twap(asset_id, current_timestamp)
+        self.manager.get_twap_by_asset(asset_id, current_timestamp)
     }
 
-    /// Check if price is stale
+    /// Get TWAP for a specific pair.
+    pub fn get_twapped_for_pair(&self, pair: PricePair, current_timestamp: u64) -> Option<u128> {
+        self.manager.get_twap(pair, current_timestamp)
+    }
+
+    /// Check if price is stale for an asset (implicitly quoted in USD).
     pub fn is_stale(&self, asset_id: AssetId, current_timestamp: u64) -> bool {
-        self.manager.is_stale(asset_id, current_timestamp)
+        self.manager.is_stale_by_asset(asset_id, current_timestamp)
     }
 
-    /// Get oracle status for an asset
+    /// Check if price is stale for a specific pair.
+    pub fn is_stale_for_pair(&self, pair: PricePair, current_timestamp: u64) -> bool {
+        self.manager.is_stale(pair, current_timestamp)
+    }
+
+    /// Get oracle status for an asset (implicitly quoted in USD).
     pub fn get_oracle_status(&self, asset_id: AssetId, current_timestamp: u64) -> OracleStatus {
-        match self.manager.get_price(asset_id) {
+        match self.manager.get_price_by_asset(asset_id) {
             None => OracleStatus::Disabled,
             Some(_) => {
                 if self.is_stale(asset_id, current_timestamp) {
@@ -112,7 +131,7 @@ impl OracleState {
         block_number: u64,
     ) {
         self.manager
-            .record_direct_price(asset_id, price, timestamp, block_number);
+            .record_direct_price_by_asset(asset_id, price, timestamp, block_number);
     }
 
     /// Access the underlying manager for advanced operations

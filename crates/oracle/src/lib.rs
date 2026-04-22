@@ -6,7 +6,7 @@
 use alloy_primitives::U256;
 use call_crypto::ed25519_sign;
 use call_crypto::ed25519_verify;
-use call_primitives::{Address, AssetId, Ed25519PublicKey};
+use call_primitives::{Address, AssetId, Ed25519PublicKey, PricePair};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ pub fn oracle_quorum(active_count: usize) -> usize {
 #[derive(Debug, Clone)]
 pub struct OracleSubmission {
     pub validator_id: u32,
-    pub asset_id: AssetId,
+    pub pair: PricePair,
     pub price: u128,
     pub block_number: u64,
     pub timestamp: u64,
@@ -55,7 +55,7 @@ pub struct OracleSubmission {
 /// Aggregated price after quorum
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatedPrice {
-    pub asset_id: AssetId,
+    pub pair: PricePair,
     pub median_price: u128,
     pub block_number: u64,
     pub timestamp: u64,
@@ -119,15 +119,15 @@ pub struct OracleManager {
     validators: HashMap<u32, OracleValidatorInfo>,
     /// Reverse lookup: validator address -> validator_id
     validator_ids_by_address: HashMap<Address, u32>,
-    /// Asset IDs to track for oracle submissions
-    pub tracked_assets: Vec<AssetId>,
-    /// Pending submissions for current period: asset_id -> (validator_id -> submission)
+    /// Price pairs to track for oracle submissions
+    pub tracked_pairs: Vec<PricePair>,
+    /// Pending submissions for current period: pair -> (validator_id -> submission)
     #[serde(skip)]
-    pending: HashMap<AssetId, HashMap<u32, OracleSubmission>>,
-    /// Current aggregated prices per asset
-    aggregated: HashMap<AssetId, AggregatedPrice>,
-    /// Historical prices for TWAP: asset_id -> Vec<HistoricalPrice>
-    history: HashMap<AssetId, Vec<HistoricalPrice>>,
+    pending: HashMap<PricePair, HashMap<u32, OracleSubmission>>,
+    /// Current aggregated prices per pair
+    aggregated: HashMap<PricePair, AggregatedPrice>,
+    /// Historical prices for TWAP: pair -> Vec<HistoricalPrice>
+    history: HashMap<PricePair, Vec<HistoricalPrice>>,
     current_block: u64,
     /// Accumulated fee pool for oracle rewards (reset each period)
     pub reward_pool: u128,
@@ -151,7 +151,7 @@ impl OracleManager {
             config,
             validators: HashMap::new(),
             validator_ids_by_address: HashMap::new(),
-            tracked_assets: Vec::new(),
+            tracked_pairs: Vec::new(),
             pending: HashMap::new(),
             aggregated: HashMap::new(),
             history: HashMap::new(),
@@ -189,9 +189,17 @@ impl OracleManager {
         self.validator_ids_by_address.get(&address).copied()
     }
 
-    /// Set the list of asset IDs to track for oracle submissions
+    /// Set the list of price pairs to track for oracle submissions
+    pub fn set_tracked_pairs(&mut self, pairs: Vec<PricePair>) {
+        self.tracked_pairs = pairs;
+    }
+
+    /// Legacy compatibility: set tracked assets, all quoted in USD (asset_id 0)
     pub fn set_tracked_assets(&mut self, asset_ids: Vec<AssetId>) {
-        self.tracked_assets = asset_ids;
+        self.tracked_pairs = asset_ids
+            .into_iter()
+            .map(|id| PricePair::new(id, 0))
+            .collect();
     }
 
     /// Submit a price from a validator.
@@ -219,7 +227,7 @@ impl OracleManager {
         // Verify Ed25519 signature
         let message = oracle_message_hash(
             submission.validator_id,
-            submission.asset_id,
+            submission.pair,
             submission.price,
             submission.block_number,
             submission.timestamp,
@@ -243,11 +251,11 @@ impl OracleManager {
         }
 
         // Accept submission
-        let asset_id = submission.asset_id;
+        let pair = submission.pair;
         let validator_id = submission.validator_id;
         let block_number = submission.block_number;
         self.pending
-            .entry(asset_id)
+            .entry(pair)
             .or_default()
             .insert(validator_id, submission);
 
@@ -258,19 +266,19 @@ impl OracleManager {
         }
 
         // Check if quorum reached
-        let submissions = self.pending.get(&asset_id).unwrap();
+        let submissions = self.pending.get(&pair).unwrap();
         if submissions.len() >= oracle_quorum(self.validators.len()) {
-            self.aggregate_and_publish_price(asset_id)?;
+            self.aggregate_and_publish_price(pair)?;
         }
 
         Ok(())
     }
 
     /// Aggregate submissions: sort, compute median, mark outliers, append to TWAP history
-    fn aggregate_and_publish_price(&mut self, asset_id: AssetId) -> Result<(), OracleError> {
+    fn aggregate_and_publish_price(&mut self, pair: PricePair) -> Result<(), OracleError> {
         let submissions = self
             .pending
-            .remove(&asset_id)
+            .remove(&pair)
             .ok_or(OracleError::NoSubmissions)?;
 
         if submissions.is_empty() {
@@ -322,7 +330,7 @@ impl OracleManager {
         let block = submissions.values().map(|s| s.block_number).next().unwrap_or(0);
 
         let aggregated = AggregatedPrice {
-            asset_id,
+            pair,
             median_price: median,
             block_number: block,
             timestamp: first_ts,
@@ -331,7 +339,7 @@ impl OracleManager {
         };
 
         // Store aggregated price
-        self.aggregated.insert(asset_id, aggregated);
+        self.aggregated.insert(pair, aggregated);
 
         // Record contributors (non-outlier validators who contributed to quorum)
         self.current_contributors = prices
@@ -350,7 +358,7 @@ impl OracleManager {
 
         // Append to TWAP history
         self.history
-            .entry(asset_id)
+            .entry(pair)
             .or_default()
             .push(HistoricalPrice {
                 price: median,
@@ -359,7 +367,7 @@ impl OracleManager {
             });
 
         // Prune TWAP history beyond window
-        if let Some(entries) = self.history.get_mut(&asset_id) {
+        if let Some(entries) = self.history.get_mut(&pair) {
             if entries.len() > 1 {
                 let cutoff = first_ts.saturating_sub(self.config.twap_window_secs);
                 entries.retain(|e| e.timestamp >= cutoff);
@@ -369,9 +377,14 @@ impl OracleManager {
         Ok(())
     }
 
-    /// Get current aggregated price for an asset
-    pub fn get_price(&self, asset_id: AssetId) -> Option<&AggregatedPrice> {
-        self.aggregated.get(&asset_id)
+    /// Get current aggregated price for a pair
+    pub fn get_price(&self, pair: PricePair) -> Option<&AggregatedPrice> {
+        self.aggregated.get(&pair)
+    }
+
+    /// Legacy compatibility: get price by asset_id, implicitly quoted in USD
+    pub fn get_price_by_asset(&self, asset_id: AssetId) -> Option<&AggregatedPrice> {
+        self.get_price(PricePair::new(asset_id, 0))
     }
 
     /// Calculate time-weighted average price over the configured window.
@@ -379,8 +392,8 @@ impl OracleManager {
     /// Each historical price is weighted by the duration it was valid
     /// (time until the next price update, or until `current_timestamp`
     /// for the most recent entry).
-    pub fn get_twap(&self, asset_id: AssetId, current_timestamp: u64) -> Option<u128> {
-        let entries = self.history.get(&asset_id)?;
+    pub fn get_twap(&self, pair: PricePair, current_timestamp: u64) -> Option<u128> {
+        let entries = self.history.get(&pair)?;
         if entries.is_empty() {
             return None;
         }
@@ -418,12 +431,22 @@ impl OracleManager {
         u128::try_from(&result).ok()
     }
 
+    /// Legacy compatibility: get TWAP by asset_id, implicitly quoted in USD
+    pub fn get_twap_by_asset(&self, asset_id: AssetId, current_timestamp: u64) -> Option<u128> {
+        self.get_twap(PricePair::new(asset_id, 0), current_timestamp)
+    }
+
     /// Check if a price is stale
-    pub fn is_stale(&self, asset_id: AssetId, current_timestamp: u64) -> bool {
-        match self.aggregated.get(&asset_id) {
+    pub fn is_stale(&self, pair: PricePair, current_timestamp: u64) -> bool {
+        match self.aggregated.get(&pair) {
             Some(p) => current_timestamp.saturating_sub(p.timestamp) > self.config.staleness_secs,
             None => true,
         }
+    }
+
+    /// Legacy compatibility: check staleness by asset_id, implicitly quoted in USD
+    pub fn is_stale_by_asset(&self, asset_id: AssetId, current_timestamp: u64) -> bool {
+        self.is_stale(PricePair::new(asset_id, 0), current_timestamp)
     }
 
     /// Get validator info
@@ -436,9 +459,9 @@ impl OracleManager {
         self.current_block = block;
     }
 
-    /// Get pending submission count for an asset
-    pub fn pending_count(&self, asset_id: AssetId) -> usize {
-        self.pending.get(&asset_id).map(|m| m.len()).unwrap_or(0)
+    /// Get pending submission count for a pair
+    pub fn pending_count(&self, pair: PricePair) -> usize {
+        self.pending.get(&pair).map(|m| m.len()).unwrap_or(0)
     }
 
     /// Add to the oracle reward pool
@@ -457,24 +480,24 @@ impl OracleManager {
         self.last_outliers.clear();
     }
 
-    /// Advance the oracle period for all tracked assets.
+    /// Advance the oracle period for all tracked pairs.
     ///
     /// Called by the block proposer at each `ORACLE_UPDATE_INTERVAL` boundary.
-    /// For assets where quorum was not reached, the last known price is carried
+    /// For pairs where quorum was not reached, the last known price is carried
     /// forward (graceful degradation) so the oracle never stalls.
     pub fn advance_period(&mut self, block: u64) {
-        for asset_id in &self.tracked_assets.clone() {
+        for pair in &self.tracked_pairs.clone() {
             let has_quorum = self
                 .pending
-                .get(asset_id)
+                .get(pair)
                 .map(|p| p.len() >= oracle_quorum(self.validators.len()))
                 .unwrap_or(false);
 
             if !has_quorum {
-                // Carry forward the last known price for this asset
-                if let Some(last) = self.aggregated.get(asset_id).cloned() {
+                // Carry forward the last known price for this pair
+                if let Some(last) = self.aggregated.get(pair).cloned() {
                     self.history
-                        .entry(*asset_id)
+                        .entry(*pair)
                         .or_default()
                         .push(HistoricalPrice {
                             price: last.median_price,
@@ -485,7 +508,7 @@ impl OracleManager {
             }
             // If quorum was reached, aggregate_and_publish_price was already
             // called during submission — just prune history
-            if let Some(entries) = self.history.get_mut(asset_id) {
+            if let Some(entries) = self.history.get_mut(pair) {
                 if entries.len() > 1 {
                     let cutoff_ts = entries
                         .last()
@@ -496,7 +519,7 @@ impl OracleManager {
                 }
             }
         }
-        // Clear pending for all assets
+        // Clear pending for all pairs
         self.pending.clear();
     }
 
@@ -562,7 +585,7 @@ impl OracleManager {
     #[doc(hidden)]
     pub fn simple_submit_price(
         &mut self,
-        asset_id: AssetId,
+        pair: PricePair,
         price: u128,
         timestamp: u64,
         block_number: u64,
@@ -571,7 +594,7 @@ impl OracleManager {
             return;
         }
         self.history
-            .entry(asset_id)
+            .entry(pair)
             .or_default()
             .push(HistoricalPrice {
                 price,
@@ -581,9 +604,9 @@ impl OracleManager {
 
         // Update current aggregated price
         self.aggregated.insert(
-            asset_id,
+            pair,
             AggregatedPrice {
-                asset_id,
+                pair,
                 median_price: price,
                 block_number,
                 timestamp,
@@ -593,12 +616,25 @@ impl OracleManager {
         );
     }
 
+    /// Legacy compatibility: simple_submit_price by asset_id, implicitly quoted in USD
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn simple_submit_price_by_asset(
+        &mut self,
+        asset_id: AssetId,
+        price: u128,
+        timestamp: u64,
+        block_number: u64,
+    ) {
+        self.simple_submit_price(PricePair::new(asset_id, 0), price, timestamp, block_number);
+    }
+
     /// Directly record a price in history and aggregated state.
     /// Used by the precompiles crate for legacy integrations.
     /// Bypasses the full validation pipeline — use with caution.
     pub fn record_direct_price(
         &mut self,
-        asset_id: AssetId,
+        pair: PricePair,
         price: u128,
         timestamp: u64,
         block_number: u64,
@@ -607,7 +643,7 @@ impl OracleManager {
             return;
         }
         self.history
-            .entry(asset_id)
+            .entry(pair)
             .or_default()
             .push(HistoricalPrice {
                 price,
@@ -615,9 +651,9 @@ impl OracleManager {
                 block_number,
             });
         self.aggregated.insert(
-            asset_id,
+            pair,
             AggregatedPrice {
-                asset_id,
+                pair,
                 median_price: price,
                 block_number,
                 timestamp,
@@ -626,6 +662,17 @@ impl OracleManager {
             },
         );
     }
+
+    /// Legacy compatibility: record_direct_price by asset_id, implicitly quoted in USD
+    pub fn record_direct_price_by_asset(
+        &mut self,
+        asset_id: AssetId,
+        price: u128,
+        timestamp: u64,
+        block_number: u64,
+    ) {
+        self.record_direct_price(PricePair::new(asset_id, 0), price, timestamp, block_number);
+    }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────
@@ -633,14 +680,15 @@ impl OracleManager {
 /// Create a canonical message hash for oracle submissions
 pub fn oracle_message_hash(
     validator_id: u32,
-    asset_id: AssetId,
+    pair: PricePair,
     price: u128,
     block_number: u64,
     timestamp: u64,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(4 + 8 + 16 + 8 + 8);
+    let mut msg = Vec::with_capacity(4 + 16 + 16 + 8 + 8);
     msg.extend_from_slice(&validator_id.to_le_bytes());
-    msg.extend_from_slice(&asset_id.to_le_bytes());
+    msg.extend_from_slice(&pair.base.to_le_bytes());
+    msg.extend_from_slice(&pair.quote.to_le_bytes());
     msg.extend_from_slice(&price.to_le_bytes());
     msg.extend_from_slice(&block_number.to_le_bytes());
     msg.extend_from_slice(&timestamp.to_le_bytes());
@@ -651,12 +699,12 @@ pub fn oracle_message_hash(
 pub fn sign_oracle_submission(
     signing_key: &SigningKey,
     validator_id: u32,
-    asset_id: AssetId,
+    pair: PricePair,
     price: u128,
     block_number: u64,
     timestamp: u64,
 ) -> [u8; 64] {
-    let message = oracle_message_hash(validator_id, asset_id, price, block_number, timestamp);
+    let message = oracle_message_hash(validator_id, pair, price, block_number, timestamp);
     ed25519_sign(signing_key, &message)
 }
 
@@ -690,8 +738,8 @@ pub enum OracleError {
 /// Validators implement this to provide real-time price data
 /// for oracle submissions.
 pub trait PriceFetcher: Send + Sync {
-    /// Fetch the current price for an asset. Returns price in smallest units.
-    fn fetch_price(&self, asset_id: AssetId) -> Option<u128>;
+    /// Fetch the current price for a pair. Returns price in smallest units.
+    fn fetch_price(&self, pair: PricePair) -> Option<u128>;
     /// Data source names this fetcher uses (e.g., ["binance", "coinbase"])
     fn sources(&self) -> Vec<String>;
 }
@@ -700,7 +748,7 @@ pub trait PriceFetcher: Send + Sync {
 pub struct NoOpPriceFetcher;
 
 impl PriceFetcher for NoOpPriceFetcher {
-    fn fetch_price(&self, _asset_id: AssetId) -> Option<u128> {
+    fn fetch_price(&self, _pair: PricePair) -> Option<u128> {
         None
     }
 
@@ -740,8 +788,8 @@ impl HttpPriceFetcher {
 
 #[cfg(feature = "http-fetcher")]
 impl PriceFetcher for HttpPriceFetcher {
-    fn fetch_price(&self, asset_id: AssetId) -> Option<u128> {
-        let url = self.endpoints.get(&asset_id)?;
+    fn fetch_price(&self, pair: PricePair) -> Option<u128> {
+        let url = self.endpoints.get(&pair.base)?;
 
         // Blocking call — acceptable in the oracle context where we
         // already have a configurable delay window.
@@ -795,21 +843,21 @@ mod tests {
     fn submit_all(
         manager: &mut OracleManager,
         validators: &[(u32, Ed25519PublicKey, SigningKey)],
-        asset_id: AssetId,
+        pair: PricePair,
         block: u64,
         price: u128,
     ) {
         for (vid, _, signing_key) in validators {
             let timestamp = block * 1000;
-            let sig = sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
+            let sig = sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
             let _ = manager.submit_price(OracleSubmission {
                 validator_id: *vid,
-                asset_id,
+                pair,
                 price,
                 block_number: block,
                 timestamp,
                 signature: sig,
-            sources: Vec::new(),
+                sources: Vec::new(),
             });
         }
     }
@@ -829,27 +877,27 @@ mod tests {
         assert_eq!(oracle_quorum(216), 144);
     }
 
-    fn submit_price_for_asset(
+    fn submit_price_for_pair(
         manager: &mut OracleManager,
         validators: &[(u32, Ed25519PublicKey, SigningKey)],
-        asset_id: AssetId,
+        pair: PricePair,
         block: u64,
         price: u128,
     ) {
-        submit_all(manager, validators, asset_id, block, price);
+        submit_all(manager, validators, pair, block, price);
     }
 
     #[test]
     fn test_oracle_submission_valid() {
         let (mut manager, validators) = make_manager();
-        let asset_id = 1u64;
+        let pair = PricePair::new(1, 0);
         let block = 1000u64;
         let price = 2_000_000u128;
 
-        submit_all(&mut manager, &validators, asset_id, block, price);
+        submit_all(&mut manager, &validators, pair, block, price);
 
         let q = quorum_for(&validators);
-        let agg = manager.get_price(asset_id).unwrap();
+        let agg = manager.get_price(pair).unwrap();
         assert_eq!(agg.median_price, price);
         assert_eq!(agg.submission_count, q);
         assert_eq!(agg.outlier_count, 0);
@@ -860,12 +908,13 @@ mod tests {
         let (mut manager, validators) = make_manager();
         let (vid, _, signing_key) = &validators[0];
         let timestamp = 500_000u64;
+        let pair = PricePair::new(1, 0);
 
         // Block 500 is not on update interval (1000)
-        let sig = sign_oracle_submission(signing_key, *vid, 1, 2_000_000, 500, timestamp);
+        let sig = sign_oracle_submission(signing_key, *vid, pair, 2_000_000, 500, timestamp);
         let submission = OracleSubmission {
             validator_id: *vid,
-            asset_id: 1,
+            pair,
             price: 2_000_000,
             block_number: 500,
             timestamp,
@@ -884,12 +933,13 @@ mod tests {
         let (vid, _, signing_key) = &validators[0];
         let block = 1000u64;
         let timestamp = block * 1000;
+        let pair = PricePair::new(1, 0);
 
         // First submission
-        let sig = sign_oracle_submission(signing_key, *vid, 1, 2_000_000, block, timestamp);
+        let sig = sign_oracle_submission(signing_key, *vid, pair, 2_000_000, block, timestamp);
         let submission = OracleSubmission {
             validator_id: *vid,
-            asset_id: 1,
+            pair,
             price: 2_000_000,
             block_number: block,
             timestamp,
@@ -899,10 +949,10 @@ mod tests {
         assert!(manager.submit_price(submission).is_ok());
 
         // Same validator, same block = duplicate
-        let sig2 = sign_oracle_submission(signing_key, *vid, 1, 2_100_000, block, timestamp);
+        let sig2 = sign_oracle_submission(signing_key, *vid, pair, 2_100_000, block, timestamp);
         let submission2 = OracleSubmission {
             validator_id: *vid,
-            asset_id: 1,
+            pair,
             price: 2_100_000,
             block_number: block,
             timestamp,
@@ -918,7 +968,7 @@ mod tests {
     #[test]
     fn test_oracle_aggregation_median() {
         let (mut manager, validators) = make_manager();
-        let asset_id = 1u64;
+        let pair = PricePair::new(1, 0);
         let block = 1000u64;
         let q = quorum_for(&validators);
 
@@ -927,20 +977,20 @@ mod tests {
         for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
             let timestamp = block * 1000;
             let price = if i < half { 1_900_000 } else { 2_100_000 };
-            let sig = sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
+            let sig = sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
             let submission = OracleSubmission {
                 validator_id: *vid,
-                asset_id,
+                pair,
                 price,
                 block_number: block,
                 timestamp,
                 signature: sig,
-            sources: Vec::new(),
+                sources: Vec::new(),
             };
             manager.submit_price(submission).unwrap();
         }
 
-        let agg = manager.get_price(asset_id).unwrap();
+        let agg = manager.get_price(pair).unwrap();
         // Sorted: [1.9M x half, 2.1M x (q-half)], median at index q/2
         assert_eq!(agg.median_price, 2_100_000);
     }
@@ -948,7 +998,7 @@ mod tests {
     #[test]
     fn test_oracle_outlier_detection() {
         let (mut manager, validators) = make_manager();
-        let asset_id = 1u64;
+        let pair = PricePair::new(1, 0);
         let block = 1000u64;
         let q = quorum_for(&validators);
 
@@ -956,20 +1006,20 @@ mod tests {
         for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
             let timestamp = block * 1000;
             let price = if i == q - 1 { 10_000_000 } else { 2_000_000 };
-            let sig = sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
+            let sig = sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
             let submission = OracleSubmission {
                 validator_id: *vid,
-                asset_id,
+                pair,
                 price,
                 block_number: block,
                 timestamp,
                 signature: sig,
-            sources: Vec::new(),
+                sources: Vec::new(),
             };
             manager.submit_price(submission).unwrap();
         }
 
-        let agg = manager.get_price(asset_id).unwrap();
+        let agg = manager.get_price(pair).unwrap();
         assert_eq!(agg.outlier_count, 1);
 
         // The outlier validator should have 1 strike
@@ -982,7 +1032,7 @@ mod tests {
     #[test]
     fn test_oracle_outlier_disabled_after_10() {
         let (mut manager, validators) = make_manager();
-        let asset_id = 1u64;
+        let pair = PricePair::new(1, 0);
         let q = quorum_for(&validators);
         let outlier_vid = validators[q - 1].0;
 
@@ -993,15 +1043,15 @@ mod tests {
                 let timestamp = block * 1000;
                 let price = if i == q - 1 { 10_000_000 } else { 2_000_000 };
                 let sig =
-                    sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
+                    sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
                 let submission = OracleSubmission {
                     validator_id: *vid,
-                    asset_id,
+                    pair,
                     price,
                     block_number: block,
                     timestamp,
                     signature: sig,
-            sources: Vec::new(),
+                    sources: Vec::new(),
                 };
                 manager.submit_price(submission).unwrap();
             }
@@ -1017,10 +1067,10 @@ mod tests {
         let timestamp = block * 1000;
         let (_, _, signing_key) = &validators[q - 1];
         let sig =
-            sign_oracle_submission(signing_key, outlier_vid, asset_id, 2_000_000, block, timestamp);
+            sign_oracle_submission(signing_key, outlier_vid, pair, 2_000_000, block, timestamp);
         let submission = OracleSubmission {
             validator_id: outlier_vid,
-            asset_id,
+            pair,
             price: 2_000_000,
             block_number: block,
             timestamp,
@@ -1036,26 +1086,26 @@ mod tests {
     #[test]
     fn test_oracle_price_staleness() {
         let (mut manager, validators) = make_manager();
-        let asset_id = 1u64;
+        let pair = PricePair::new(1, 0);
         let block = 1000u64;
 
-        submit_price_for_asset(&mut manager, &validators, asset_id, block, 2_000_000);
+        submit_price_for_pair(&mut manager, &validators, pair, block, 2_000_000);
 
         // Not stale immediately
         let ts = block * 1000;
-        assert!(!manager.is_stale(asset_id, ts));
+        assert!(!manager.is_stale(pair, ts));
 
         // Stale after 901 seconds
-        assert!(manager.is_stale(asset_id, ts + 901));
+        assert!(manager.is_stale(pair, ts + 901));
 
-        // Unknown asset is stale
-        assert!(manager.is_stale(999, ts));
+        // Unknown pair is stale
+        assert!(manager.is_stale(PricePair::new(999, 0), ts));
     }
 
     #[test]
     fn test_oracle_twap_calculation() {
         let (mut manager, validators) = make_manager();
-        let asset_id = 1u64;
+        let pair = PricePair::new(1, 0);
         let q = quorum_for(&validators);
 
         // Submit prices at different timestamps within a 24h window
@@ -1069,15 +1119,15 @@ mod tests {
         for (price, block, timestamp) in rounds {
             for (vid, _, signing_key) in validators.iter().take(q) {
                 let sig =
-                    sign_oracle_submission(signing_key, *vid, asset_id, price, block, timestamp);
+                    sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
                 let submission = OracleSubmission {
                     validator_id: *vid,
-                    asset_id,
+                    pair,
                     price,
                     block_number: block,
                     timestamp,
                     signature: sig,
-            sources: Vec::new(),
+                    sources: Vec::new(),
                 };
                 manager.submit_price(submission).unwrap();
             }
@@ -1086,12 +1136,12 @@ mod tests {
         // TWAP at ts = 1_007_200 with window 86_400 covers all 3 entries
         // Time-weighted: 1M*3600 + 2M*3600 + 3M*0 = 10_800_000_000 / 7200 = 1_500_000
         let current_ts = 1_007_200u64;
-        let twap = manager.get_twap(asset_id, current_ts).unwrap();
+        let twap = manager.get_twap(pair, current_ts).unwrap();
         assert_eq!(twap, 1_500_000);
 
         // At current_ts + 1800, last entry gets duration 1800
         // 1M*3600 + 2M*3600 + 3M*1800 = 16_200_000_000 / 9000 = 1_800_000
-        let twap = manager.get_twap(asset_id, current_ts + 1800).unwrap();
+        let twap = manager.get_twap(pair, current_ts + 1800).unwrap();
         assert_eq!(twap, 1_800_000);
     }
 
@@ -1110,10 +1160,10 @@ mod tests {
     #[test]
     fn test_oracle_contributor_tracking() {
         let (mut manager, validators) = make_manager();
-        let asset_id = 1u64;
+        let pair = PricePair::new(1, 0);
         let block = 1000u64;
 
-        submit_all(&mut manager, &validators, asset_id, block, 2_000_000);
+        submit_all(&mut manager, &validators, pair, block, 2_000_000);
 
         // After successful aggregation, contributors should be recorded
         assert!(!manager.current_contributors.is_empty());
@@ -1123,5 +1173,23 @@ mod tests {
         manager.clear_tracking();
         assert!(manager.current_contributors.is_empty());
         assert!(manager.last_outliers.is_empty());
+    }
+
+    #[test]
+    fn test_legacy_get_price_by_asset() {
+        let mut manager = OracleManager::new(OracleConfig::default());
+        manager.record_direct_price_by_asset(1, 2_000_000, 1000, 100);
+        assert_eq!(manager.get_price_by_asset(1).map(|p| p.median_price), Some(2_000_000));
+        assert!(manager.get_price_by_asset(999).is_none());
+    }
+
+    #[test]
+    fn test_legacy_set_tracked_assets() {
+        let mut manager = OracleManager::new(OracleConfig::default());
+        manager.set_tracked_assets(vec![1, 2, 3]);
+        assert_eq!(manager.tracked_pairs.len(), 3);
+        assert_eq!(manager.tracked_pairs[0], PricePair::new(1, 0));
+        assert_eq!(manager.tracked_pairs[1], PricePair::new(2, 0));
+        assert_eq!(manager.tracked_pairs[2], PricePair::new(3, 0));
     }
 }

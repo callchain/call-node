@@ -1790,12 +1790,12 @@ async fn block_production_loop(
             if let Some(ref net) = network {
                 let tracked = {
                     let oracle = state.oracle.read().unwrap();
-                    oracle.tracked_assets.clone()
+                    oracle.tracked_pairs.clone()
                 };
                 if !tracked.is_empty() {
                     let proposer_id = proposer;
                     let request = OraclePriceRequest {
-                        asset_ids: tracked,
+                        pairs: tracked,
                         block: height,
                         requester_id: proposer_id,
                     };
@@ -2256,10 +2256,10 @@ async fn bft_event_loop(
                 let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
                 if is_oracle_boundary {
                     if let Some(ref net) = network {
-                        let tracked = { state.oracle.read().unwrap().tracked_assets.clone() };
+                        let tracked = { state.oracle.read().unwrap().tracked_pairs.clone() };
                         if !tracked.is_empty() {
                             let request = OraclePriceRequest {
-                                asset_ids: tracked,
+                                pairs: tracked,
                                 block: height,
                                 requester_id: proposer,
                             };
@@ -2919,18 +2919,18 @@ fn handle_network_message(
                             .map(|d| d.as_secs())
                             .unwrap_or(0);
 
-                        // Submit a price for each requested asset
-                        for asset_id in &request.asset_ids {
+                        // Submit a price for each requested pair
+                        for pair in &request.pairs {
                             // Use last known price as a baseline (fetchers would override)
                             let price = {
                                 let oracle = state_clone.oracle.read().unwrap();
-                                oracle.get_price(*asset_id).map(|p| p.median_price)
+                                oracle.get_price(*pair).map(|p| p.median_price)
                             };
                             if let Some(price) = price {
                                 // Send back as an oracle price submission
                                 let submission = OraclePriceSubmission {
                                     validator_id: 0, // would be this validator's ID
-                                    asset_id: *asset_id,
+                                    pair: *pair,
                                     price,
                                     block_number: current_block,
                                     timestamp,
@@ -2952,7 +2952,7 @@ fn handle_network_message(
                     let current_block = state_clone.get_current_block();
                     let oracle_submission = OracleSubmission {
                         validator_id: submission.validator_id,
-                        asset_id: submission.asset_id,
+                        pair: submission.pair,
                         price: submission.price,
                         block_number: current_block,
                         timestamp: submission.timestamp,

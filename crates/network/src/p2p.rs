@@ -3,7 +3,7 @@
 //! Message types, network traits, and state sync interfaces.
 
 use alloy_rlp::{RlpDecodable, RlpEncodable};
-use call_primitives::{BlockHash, TxHash};
+use call_primitives::{BlockHash, PricePair, TxHash};
 use commonware_codec::extensions::DecodeExt;
 use commonware_p2p::{Address, AddressableManager, Blocker, PeerSetUpdate, Provider, Receiver, Recipients, Sender};
 use serde::{Deserialize, Serialize};
@@ -123,8 +123,8 @@ pub struct Handshake {
 /// Validators respond with signed price submissions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OraclePriceRequest {
-    /// Asset IDs to fetch prices for
-    pub asset_ids: Vec<u64>,
+    /// Price pairs to fetch prices for
+    pub pairs: Vec<PricePair>,
     /// Block height at which the oracle period is advancing
     pub block: u64,
     /// Validator ID of the requesting proposer
@@ -148,8 +148,8 @@ pub struct UpgradeAnnouncement {
 pub struct OraclePriceSubmission {
     /// Validator ID submitting the price
     pub validator_id: u32,
-    /// Asset ID for this price
-    pub asset_id: u64,
+    /// Price pair for this price
+    pub pair: PricePair,
     /// Price value
     pub price: u128,
     /// Block number
@@ -933,11 +933,11 @@ mod tests {
     #[test]
     fn test_oracle_price_request() {
         let req = OraclePriceRequest {
-            asset_ids: vec![1, 2, 3],
+            pairs: vec![PricePair::new(1, 0), PricePair::new(2, 0), PricePair::new(3, 0)],
             block: 1000,
             requester_id: 5,
         };
-        assert_eq!(req.asset_ids.len(), 3);
+        assert_eq!(req.pairs.len(), 3);
         assert_eq!(req.block, 1000);
         assert_eq!(req.requester_id, 5);
 
@@ -952,7 +952,7 @@ mod tests {
     fn test_oracle_price_submission() {
         let sub = OraclePriceSubmission {
             validator_id: 2,
-            asset_id: 1,
+            pair: PricePair::new(1, 0),
             price: 2_000_000,
             block_number: 1000,
             timestamp: 1_000_000,
@@ -974,7 +974,7 @@ mod tests {
         let evt = NetworkEvent::OraclePriceRequestReceived {
             peer_id: "peer_1".into(),
             request: OraclePriceRequest {
-                asset_ids: vec![1],
+                pairs: vec![PricePair::new(1, 0)],
                 block: 1000,
                 requester_id: 0,
             },
@@ -985,7 +985,7 @@ mod tests {
             peer_id: "peer_2".into(),
             submission: OraclePriceSubmission {
                 validator_id: 1,
-                asset_id: 1,
+                pair: PricePair::new(1, 0),
                 price: 100,
                 block_number: 1000,
                 timestamp: 1000,

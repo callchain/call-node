@@ -36,6 +36,29 @@ pub type PublicKey = [u8; 64];
 /// Ed25519 public key (32 bytes)
 pub type Ed25519PublicKey = [u8; 32];
 
+// ─── Price pair ─────────────────────────────────────────────────
+
+/// A trading pair for oracle price lookups.
+///
+/// `base` is the asset being priced; `quote` is the denomination.
+/// Example: `PricePair { base: 1, quote: 0 }` = CALL/USD.
+/// Asset ID `0` is reserved for the USD quote currency (not a real token).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PricePair {
+    pub base: AssetId,
+    pub quote: AssetId,
+}
+
+impl PricePair {
+    /// CALL/USD price pair (base = CALL asset_id 1, quote = USD 0)
+    pub const CALL_USD: Self = Self { base: 1, quote: 0 };
+
+    /// Create a new price pair.
+    pub const fn new(base: AssetId, quote: AssetId) -> Self {
+        Self { base, quote }
+    }
+}
+
 // ─── Protocol version ───────────────────────────────────────────
 
 /// Protocol version (semver-like)
@@ -218,5 +241,29 @@ mod tests {
     #[test]
     fn test_minimum_unit() {
         assert_eq!(MINIMUM_UNIT, 1);
+    }
+
+    #[test]
+    fn test_price_pair_call_usd() {
+        let pair = PricePair::CALL_USD;
+        assert_eq!(pair.base, 1);
+        assert_eq!(pair.quote, 0);
+    }
+
+    #[test]
+    fn test_price_pair_equality() {
+        let p1 = PricePair::new(2, 0);
+        let p2 = PricePair::new(2, 0);
+        let p3 = PricePair::new(2, 1);
+        assert_eq!(p1, p2);
+        assert_ne!(p1, p3);
+    }
+
+    #[test]
+    fn test_price_pair_serialization() {
+        let pair = PricePair::new(5, 0);
+        let json = serde_json::to_string(&pair).unwrap();
+        let decoded: PricePair = serde_json::from_str(&json).unwrap();
+        assert_eq!(pair, decoded);
     }
 }

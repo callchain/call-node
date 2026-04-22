@@ -1305,15 +1305,16 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         .register_async_method("call_oracleGetPrice", |params, state, _ctx| async move {
             let asset_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
             let oracle = state.oracle.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            match oracle.get_price(asset_id) {
+            match oracle.get_price_by_asset(asset_id) {
                 Some(p) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "assetId": p.asset_id,
+                    "assetId": p.pair.base,
+                    "quoteAssetId": p.pair.quote,
                     "medianPrice": p.median_price.to_string(),
                     "blockNumber": p.block_number,
                     "timestamp": p.timestamp,
                     "submissionCount": p.submission_count,
                     "outlierCount": p.outlier_count,
-                    "isStale": oracle.is_stale(asset_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+                    "isStale": oracle.is_stale_by_asset(asset_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
                 })),
                 None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
             }
@@ -1329,7 +1330,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            match oracle.get_twap(asset_id, now) {
+            match oracle.get_twap_by_asset(asset_id, now) {
                 Some(twap) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "assetId": asset_id,
                     "twap": twap.to_string(),

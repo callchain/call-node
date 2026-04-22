@@ -544,7 +544,7 @@ pub fn execute_instruction(
             })?;
             let submission = OracleSubmission {
                 validator_id,
-                asset_id: *asset_id,
+                pair: call_primitives::PricePair::new(*asset_id, 0),
                 price: *price,
                 block_number: *block_number,
                 timestamp: *timestamp,

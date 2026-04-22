@@ -203,7 +203,7 @@ pub fn oracle_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
                 }
                 buf
             });
-            if let Some(price) = oracle.get_price(asset_id) {
+            if let Some(price) = oracle.get_price_by_asset(asset_id) {
                 output[16..].copy_from_slice(&price.median_price.to_be_bytes());
             }
         }
@@ -223,7 +223,7 @@ pub fn oracle_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
                 }
                 buf
             });
-            if let Some(twap) = oracle.get_twap(asset_id, current_ts) {
+            if let Some(twap) = oracle.get_twap_by_asset(asset_id, current_ts) {
                 let twap_bytes: [u8; 16] = twap.to_be_bytes();
                 output[16..].copy_from_slice(&twap_bytes);
             }
@@ -244,7 +244,7 @@ pub fn oracle_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
                 }
                 buf
             });
-            output[31] = if oracle.is_stale(asset_id, current_ts) { 1 } else { 0 };
+                        output[31] = if oracle.is_stale_by_asset(asset_id, current_ts) { 1 } else { 0 };
         }
         _ => return Err(PrecompileError::Other("unknown selector".into())),
     }
