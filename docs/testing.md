@@ -63,6 +63,8 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | `test_multi_node_network.rs` | Two-node block propagation, transaction propagation, multi-node consensus |
 | `test_governance_e2e.rs` | Full proposal lifecycle (submit → vote → queue → execute) via `TestNode` harness |
 | `test_bridge_e2e.rs` | Bridge deposit, withdrawal, and insufficient-signature rejection via `TestNode` harness |
+| `test_light_client_e2e.rs` | Light client block header verification (`call_lightVerifyBlockHeader`) and balance proofs (`call_lightGetBalanceProof`) via `TestNode` harness |
+| `test_websocket_e2e.rs` | All 9 WebSocket subscription channels (`call_subscribeNewBlocks`, `call_subscribeNewPayments`, `call_subscribeBridgeCompleted`, `call_subscribeAssetRegistered`, `call_subscribeAgentExecuted`, `call_subscribeAgentRevoked`, `call_subscribeShieldedDeposit`, `call_subscribeShieldedWithdrawal`, `call_subscribeGovernance`) |
 
 ---
 
@@ -138,6 +140,8 @@ The following five recommendations have been implemented and verified:
 | R6 | ~~**Missing negative signature tests**~~ | Added wrong-signer, tampered-message, and tampered-signature tests to `call-crypto` and `call-protocol`. |
 | R7 | ~~**Slow Poseidon tests ungated**~~ | Gated depth-32 and deterministic-root tests behind `slow-tests` feature. Default suite runs in ~1s instead of ~273s. |
 | R8 | ~~**No governance/bridge E2E tests via TestNode**~~ | Added `test_governance_proposal_full_lifecycle` and `test_bridge_deposit_evm_credits` / `test_bridge_withdraw_records_outflow` / `test_bridge_external_deposit_insufficient_sigs_rejected`. |
+| R9 | ~~**No light client E2E tests**~~ | Added `test_light_verify_block_header_valid` / `bad_parent` / `zero_timestamp_rejected` and `test_light_get_balance_proof` / `unknown_address` in `test_light_client_e2e.rs`. |
+| R10 | ~~**No WebSocket subscription E2E tests**~~ | Added `test_ws_subscribe_new_blocks`, `new_payments`, `bridge_completed`, `asset_registered`, `agent_executed`, `agent_revoked`, `shielded_deposit`, `shielded_withdrawal`, and `governance` in `test_websocket_e2e.rs`. |
 
 ---
 

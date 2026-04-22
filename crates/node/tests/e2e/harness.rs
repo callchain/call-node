@@ -43,7 +43,7 @@ const BLOCK_CHANNEL: u64 = 2;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-fn test_addr(n: u8) -> Address {
+pub fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
 }
 
