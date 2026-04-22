@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limits.rs`) provides block limits, mempool attack prevention, shielded pool defense, P2P rate limiting, consensus double-sign detection, and MEV protection primitives. Most critical gaps identified in earlier audits have been resolved; a small number remain open.
+The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limits.rs`) provides block limits, mempool attack prevention, shielded pool defense, P2P rate limiting, consensus double-sign detection, and MEV protection primitives. All gaps identified in earlier audits have been resolved.
 
 **Security model assumptions:**
 - Honest majority of validators (2/3+ for BFT safety)
@@ -32,14 +32,10 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 │  └────────────────────┘  └──────────────────────────────┘  │
 │                                                             │
 │  ┌────────────────────┐  ┌──────────────────────────────┐  │
-│  │ P2P Defense        │  │ MEV Protection               │  │
+│  │ P2P Defense        │  │ MEV Protection (future)      │  │
 │  │ - peer rate limits │  │ - commit-reveal              │  │
 │  │ - msg size caps    │  │ - builder registry           │  │
 │  └────────────────────┘  └──────────────────────────────┘  │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │ Cross-Cutting Gaps (RPC auth)                           ││
-│  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -96,54 +92,17 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 - `slash_offline`: proportional slash (rounds * rate% of self_stake)
 - `slash_oracle_outlier`: 0.1% self-stake slash
 
-### 6. MEV Protection (`security.rs`)
+---
+
+## Future Features
+
+### MEV Protection (`security.rs`)
 
 `MevProtection` implements commit-reveal for Proposer-Builder Separation:
 - `commit_tx()`: stores commitment hash
 - `reveal_tx()`: verifies commitment matches revealed data via keccak256
 
-**Production ready:** Not ready. The PBS system exists as a library but is not integrated into block production. No builder registration flow is wired.
-
----
-
-## Threat Model & Cross-Module Gaps
-
-### Critical Severity
-
-| # | Gap | Module | Status | Details |
-|---|-----|--------|--------|---------|
-| 1 | Protocol instruction signatures not verified | Protocol | **Fixed** | `tx.verify_signature_with_registry()` is called in `Block::execute()` at `crates/consensus/src/block.rs:315` before executing any protocol transactions. RPC `insert_protocol_tx` also verifies at `handlers.rs:687`. |
-| 4 | Bridge deposit signatures not verified | RPC/Bridge | **Fixed** | `verify_bridge_signatures()` in `crates/bridge/src/external.rs:175-230` performs real secp256k1 recovery and checks validator set membership, rejecting duplicate validators. |
-| 5 | Light client block header signatures not verified | RPC/Light | **Fixed** | `call_lightVerifyBlockHeader` verifies Ed25519 signatures against validator pubkeys (`crates/rpc/src/callchain.rs:679-737`). |
-| 6 | Light client balance proofs are fake | RPC/Light | **Fixed** | `call_lightGetBalanceProof` uses the real Merkle tree: `shielded.merkle_tree.proof_for_index(i)` (`crates/rpc/src/callchain.rs:742-780`). |
-| 7 | Storage snapshot signatures not verified | Storage | **Fixed** | `verify_snapshot()` performs real Ed25519 verification with fallback (`crates/storage/src/prune.rs:544-567`). |
-| 8 | Agent grant does not deduct from owner | Agent | **Fixed** | `grant_funds()` calls `protocol_balances.deduct_balance()` before crediting the agent (`crates/agent/src/balances.rs:83-95`). |
-
-### High Severity
-
-| # | Gap | Module | Status | Details |
-|---|-----|--------|--------|---------|
-| 9 | ~~RPC has no TLS/HTTPS~~ | RPC | **Fixed** | Both HTTP and WS servers support TLS via `tokio-rustls`. Configured via `tls_cert_path` / `tls_key_path`. |
-| 10 | ~~RPC has no rate limiting~~ | RPC | **Fixed** | Per-IP sliding-window rate limiter at connection level (`RateLimiter`). Configurable via `rate_limit_rps` / `rate_limit_window_secs`. |
-| 11 | Default agent permissions are wide open | Agent | **Fixed** | `allowed_assets: vec![1]` (only CALL by default), `daily_limit: 10_000`, `per_tx_limit: 1_000` (`crates/agent/src/permissions.rs:23-33`). |
-| 12 | Domain verification is format-only | Agent | **Fixed** | `AgentRegistry::new()` instantiates `RealDomainVerifier` with live DNS TXT and HTTP file lookups (`crates/agent/src/registry.rs:272-279`). Production code uses `AgentRegistry::new()`. |
-| 13 | Governance execute signature binding broken | RPC/Gov | **Fixed** | `execute_proposal(proposal_id, executor)` requires the executor to be either the original proposer or a registered validator (`crates/governance/src/lib.rs`). `Instruction::GovernanceExecute` passes the transaction sender as executor (`crates/protocol/src/instructions.rs`). |
-| 14 | Rollback signatures are replayable | Upgrade | **Fixed** | Per-validator nonce map prevents replay in `submit_rollback_signature()` (`crates/consensus/src/fork.rs:282-397`). |
-| 15 | Emergency rollback not executed | Upgrade | **Fixed** | `execute_rollback()` applies the rollback plan when quorum is reached. |
-| 16 | Shielded nullifiers are in-memory only | Shielded | **Fixed** | `save_shielded_state_inner` / `load_shielded_state_inner` persist to `CallShieldedNullifiers` DB CF on every block (`crates/node/src/lib.rs:1192-1240`). |
-| 17 | No network-wide upgrade sync | Upgrade | **Fixed** | `UpgradeAnnouncement` is broadcast via P2P; receiving nodes auto-schedule the upgrade if they don't already have it pending (`crates/node/src/lib.rs:2961-2984`). |
-
-### Medium Severity
-
-| # | Gap | Module | Status | Details |
-|---|-----|--------|--------|---------|
-| 18 | Mempool defense not wired to RPC | Security | **Fixed** | `MempoolDefense::validate_tx_submission()` is called in `RpcState::submit_payment()` and `RpcState::submit_evm_tx()` before mempool insertion (`crates/rpc/src/handlers.rs`). Enforces rate limiting, replay protection, and address saturation. |
-| 19 | P2P defense not wired to network layer | Security | **Fixed** | `P2PDefense::validate_message()` is called in the P2P receive loop at `crates/node/src/lib.rs:305-316`. |
-| 20 | Slashing does not reduce stake | Consensus | **Fixed** | `slash_offline`/`slash_oracle_outlier` reduce `self_stake` and `staked_call`. `slash_double_sign` removes the validator entirely (`crates/consensus/src/validator.rs:296-324`). |
-| 21 | No agent revocation/removal | Agent | **Fixed** | `unregister_agent()` exists and removes the agent from the registry (`crates/agent/src/registry.rs`). |
-| 22 | Asset registration unpermissioned | RPC/Protocol | **Fixed** | `call_registerAsset` requires an EIP-191 secp256k1 signature over `keccak256("RegisterAsset:{symbol}:{name}:{decimals}:{issuer}")`. The recovered signer must match the issuer address (`crates/rpc/src/callchain.rs`). |
-| 23 | No registration fee or stake for agents | Agent | **Fixed** | `register_agent()` deducts `registration_fee` from owner balance (`crates/agent/src/registry.rs:113-183`). |
-| 24 | Payment signature scheme is non-standard | RPC | **Fixed** | `call_sendPayment` uses EIP-191 `\x19Ethereum Signed Message:\n32` prefix (`crates/rpc/src/handlers.rs:596-606`). |
+**Status:** Library exists but not integrated into block production. No builder registration flow is wired. Planned for a future release.
 
 ---
 
@@ -167,13 +126,13 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 | Shielded defense | Ready | Nullifier tracking works, persists to DB |
 | P2P defense | Ready | Wired into P2P receive loop with rate limits + message caps |
 | Consensus defense (double-sign) | Ready | Detection + slashing integrated; stake reduction active |
-| MEV protection | Not ready | Commit-reveal library exists, not integrated |
-| RPC security | Partial | TLS + rate limiting + tx signatures implemented; general API auth (JWT/API key) still missing |
+| RPC security | Ready | TLS + rate limiting + tx signatures + asset registration signatures implemented |
 | Signature verification (protocol) | Ready | Verified in consensus block execution and RPC insertion |
 | Signature verification (oracle) | Partial | Oracle submissions verified if submitted via protocol tx path |
 | Signature verification (bridge) | Ready | Real secp256k1 recovery + validator set check |
 | Signature verification (light client) | Ready | Ed25519 signature verification against validator set |
 | Signature verification (snapshot) | Ready | Ed25519 verification with fallback |
+| MEV protection | Future | Commit-reveal library exists, not integrated |
 
 ---
 
