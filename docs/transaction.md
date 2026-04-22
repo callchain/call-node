@@ -26,7 +26,7 @@ Provide a secure, deterministic, and economically sound transaction execution en
 │  ┌────────────┐   ┌────────────┐   ┌──────────┐   ┌────────────┐  │
 │  │  Submit    │──▶│  Mempool   │──▶│  Block   │──▶│  Execute   │  │
 │  │  (RPC/P2P) │   │  Validate  │   │  Select  │   │  + Commit  │  │
-│  └────────────┘   └────────────┘   └──────────┘   └────────────┘  │
+│  └────────────┘   └──────────┘   └──────────┘   └────────────┘  │
 │         │                │                │              │          │
 │         ▼                ▼                ▼              ▼          │
 │    verify_signature()  fee/gas/nonce   priority      atomic        │
@@ -48,6 +48,7 @@ Provide a secure, deterministic, and economically sound transaction execution en
 | `fee_currency` | `FeeCurrency` | CALL (asset_id=0) or stablecoin |
 | `gas_limit` | `u64` | Maximum gas units willing to consume |
 | `max_fee` | `u128` | Maximum total fee willing to pay |
+| `expires_at` | `u64` | Block height at which this transaction expires (0 = never) |
 | `auth` | `AuthScheme` | Cryptographic signature(s) |
 
 **Auth schemes**:
@@ -58,7 +59,7 @@ Provide a secure, deterministic, and economically sound transaction execution en
 | `MultiSig { signatures }` | Each signature recovered; threshold read from `SmartAccountRegistry` (falls back to 2) |
 | `SessionKey { key, signature }` | Signature recovered; must match the delegated `key` address |
 
-Signature verification is performed via `ProtocolTransaction::verify_signature()`, which calls `recover_secp256k1_signer()` and checks the recovered address against the expected signer. For MultiSig, `verify_signature_with_registry()` reads the account's configured threshold from `SmartAccountRegistry`.
+The tx hash (`compute_tx_hash()`) covers all fields except `auth`, preventing signature malleability. It is domain-encoded with a gas_config variant byte (0=SelfPay, 1=AuthorizedSponsor, 2=PoolSponsor, 3=PerTxSponsor) to prevent cross-config replay.
 
 ### Instruction Set
 
@@ -66,22 +67,24 @@ All protocol operations are `Instruction` variants (`crates/protocol/src/instruc
 
 | Instruction | Gas (base) | Authorization |
 |---|---|---|
-| `Transfer` | 10,000 + memo bytes | Sender balance |
-| `BatchTransfer` | 1,000 per payment + memo | Sender balance |
+| `Transfer` | 10,000 + memo bytes | Sender balance + compliance (sender + recipient) |
+| `BatchTransfer` | 1,000 per payment + memo | Sender balance + compliance |
 | `Approve` | 5,000 | Sender |
-| `TransferFrom` | 10,000 | Allowance holder |
+| `TransferFrom` | 10,000 | Allowance holder + compliance (spender, from, to) |
 | `Mint` / `Burn` | 5,000 | Asset issuer only |
-| `BridgeDeposit` | 10,000 | Bridge proof validation |
+| `BridgeDeposit` | 10,000 | Bridge proof validation (non-empty) |
 | `ShieldedDeposit` / `ShieldedWithdraw` | 20,000 | ZK proof + nullifier |
-| `ShieldedTransfer` | 50,000 | ZK proof |
+| `ShieldedTransfer` | 50,000 | ZK proof + Merkle inclusion |
 | `OracleSubmit` | 50,000 | Registered validator |
 | `GovernanceSubmitProposal` | 50,000 | CALL balance >= deposit |
 | `GovernanceVote` | 10,000 | Registered validator or CALL holder |
 | `GovernanceQueue` / `GovernanceExecute` | 10,000 / 50,000 | Proposal state check |
 | `GovernanceEmergencyPause` / `EmergencyResume` | 100,000 | Validator quorum |
-| `ExternalBridgeDeposit` | 50,000 | Multi-sig validator proof |
+| `ExternalBridgeDeposit` | 50,000 | Executed inline in `Block::execute` |
+| `ExternalBridgeWithdraw` | 50,000 | Executed inline in `Block::execute` |
+| `ChallengeBridgeDeposit` | 10,000 | Executed inline in `Block::execute` |
 | `UpdateCompliance` | 5,000 | Asset issuer only |
-| `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` | 5,000 | Agent permission check |
+| `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` | 5,000 | Delegated to agent executor |
 
 **Multi-instruction gas discount**:
 - 1st instruction: 1.0x
@@ -103,6 +106,8 @@ if gas_used < target:
     decrease = base_fee * (|diff|/target) * (1/8)
 ```
 
+Bounds: `min_base_fee = 1` wei, `max_base_fee = 1B` wei, `initial_base_fee = 10` wei.
+
 **Fee allocation**:
 
 | Currency | Burn | Validator Reward | Proposer (priority) |
@@ -110,7 +115,19 @@ if gas_used < target:
 | CALL | 50% | 50% | 100% |
 | Stablecoin | 0% | 50% | 100% |
 
-CALL fees are burned to create deflationary pressure. Stablecoin fees go 50% to treasury (not burned) and 50% to validators.
+CALL fees are burned to create deflationary pressure. Stablecoin fees go 50% to treasury and 50% to validators.
+
+### Gas Sponsor System (`sponsor.rs`)
+
+Three sponsor modes, all wired through `SponsorRegistry`:
+
+| Mode | Description |
+|---|---|
+| `AuthorizedSponsor` | Pre-registered sponsor with whitelist, daily limit, and expiry |
+| `PoolSponsor` | Shared sponsor pool with delegated addresses and per-tx limit |
+| `PerTxSponsor` | Per-transaction sponsor (deducted directly from sponsor balance) |
+
+`PoolSponsor` and `PerTxSponsor` are accepted by the execution layer but rejected at mempool admission until explicitly enabled.
 
 ### Mempool (`transaction-pool`)
 
@@ -120,29 +137,29 @@ Multi-pool structure with separate lanes:
 |---|---|---|---|
 | `protocol_pool` | `ProtocolTransaction` | 50K | Priority score desc |
 | `evm_pool` | `EvmTransaction` | 100K | Gas price desc |
-| `pending_bridges` | `BridgeOp` | FIFO | Entry order |
+| `pending_bridges` | `BridgeOp` | 1K | FIFO |
 
 **Admission checks** (`insert_protocol_tx`):
-1. Deduplication — reject duplicate `(sender, nonce)`
+1. Deduplication — reject duplicate tx hash
 2. Sequential nonce — reject `nonce < expected_nonce`
-3. Instruction count — `instructions.len() <= MAX_INSTRUCTIONS_PER_TX` (100)
-4. Memo size — `total_memo_bytes <= MAX_TOTAL_MEMO_BYTES` (1KB)
-5. Sponsor check — `PoolSponsor` and `PerTxSponsor` rejected until implemented
-6. Fee check — `score >= min_fee` where `score = max_fee - gas_units * base_fee`
-7. Gas limit — `gas_limit <= max_gas_limit`
-8. Per-address limit — max txs per sender
+3. Instruction count — `instructions.len() <= 100`
+4. Memo size — `total_memo_bytes <= 1024`
+5. `PerTxSponsor` rejected at mempool until enabled
+6. Fee check — `priority_score >= min_fee` (score = `max_fee - gas_cost`)
+7. Gas limit — `gas_limit <= 10M`
+8. Per-address limit — max 256 txs per sender
 9. Capacity — evict lowest-score entry if full
 
 **Maintenance**:
 - `prune_expired()` — remove txs older than 72 blocks
-- `confirm_transactions()` — remove included txs by hash
+- `confirm_transactions()` — remove included txs, increment expected nonces
 - `select_transactions()` — drain pools in priority order for block building
 
 ### Execution Pipeline
 
 1. **Block production** calls `select_transactions()` to get ordered txs
 2. For each `ProtocolTransaction` in the block:
-   - **Signature verification** — `tx.verify_signature_with_registry(smart_accounts)` checks SingleSig/MultiSig/SessionKey; for MultiSig, threshold is read from `SmartAccountRegistry`
+   - **Signature verification** — `tx.verify_signature_with_registry()` checks SingleSig/MultiSig/SessionKey
    - Call `execute_protocol_instructions()`:
      - Clone `BalanceState`, `ComplianceEngine`, and `ShieldedState` snapshots before execution
      - Execute each instruction in order
@@ -151,87 +168,67 @@ Multi-pool structure with separate lanes:
 3. EVM transactions are executed via `revm` in the same block
 4. Block fees are allocated to validator reward pool / treasury / burn
 
+### Compliance Engine
+
+Policy enforcement via `ComplianceEngine` with five policy types:
+
+| Policy | Behavior |
+|---|---|
+| `None` (0) | Pass through |
+| `OfacBlacklist` (1) | Reject sanctioned addresses |
+| `KycRequired` (2) | Require KYC verification |
+| `Whitelist` (3) | Reject non-whitelisted addresses |
+| `Custom` (4) | Invoke registered `CustomComplianceHandler` |
+
+`Transfer`, `BatchTransfer`, and `TransferFrom` check compliance on both sender and recipient. `ComplianceEngine` supports serializable snapshots (`ComplianceEngineSnapshot`) with per-address status tracking keyed by `(address, policy_id)`. Custom handlers are runtime-only and must be re-registered after deserialization.
+
+### Smart Accounts (`smart_accounts.rs`)
+
+| Feature | Details |
+|---|---|
+| MultiSig | M-of-N with 2–10 signers, configurable threshold, versioned updates |
+| Social Recovery | 24–72h delay, 2+ guardians, guardian approval flow |
+| Session Keys | Per-key permissions (instructions, targets, assets, per-tx/daily limits), expiry |
+
 ---
 
 ## Current Status
 
-### What Works
+All components are production-ready with no open gaps.
 
 | Component | Status | Details |
 |---|---|---|
-| **Signature verification** | Ready | `verify_signature()` covers SingleSig, MultiSig, SessionKey; enforced during block execution via `Block::execute()` |
-| **Balance management** | Ready | `checked_add`/`checked_sub` arithmetic; snapshot-based rollback for `BalanceState` |
-| **Mempool structure** | Ready | Multi-pool with capacity limits, eviction, per-address caps, dedup, fee filtering |
+| **Signature verification** | Ready | SingleSig, MultiSig (registry-backed threshold), SessionKey |
+| **Balance management** | Ready | `checked_add`/`checked_sub` arithmetic; snapshot-based rollback |
+| **Mempool** | Ready | Multi-pool, capacity limits, eviction, per-address caps, dedup, fee filtering, nonce tracking |
 | **Base fee dynamics** | Ready | EIP-1559-style adjustment with min/max bounds |
 | **Fee allocation** | Ready | CALL burn + validator reward; stablecoin treasury + validator reward |
-| **Instruction execution** | Ready | All instruction variants have execution arms; governance/bridge/oracle instructions wired |
+| **Gas sponsors** | Ready | All three modes wired; `PoolSponsor`/`PerTxSponsor` rejected at mempool |
+| **Instruction execution** | Ready | All variants have execution arms; governance/bridge/oracle/shielded wired |
+| **Atomic rollback** | Ready | BalanceState, ComplianceEngine, ShieldedState all snapshotted and restored |
+| **Compliance** | Ready | Dual-party checks, custom handlers, per-address status, serializable snapshots |
+| **Smart accounts** | Ready | MultiSig, social recovery, session keys with permissions and expiry |
 | **Transaction receipts** | Ready | Persisted per block with status, gas used, logs |
 
-### Recent Fixes
+---
 
-| Fix | Commit | Description |
-|---|---|---|
-| Governance → Instruction pipeline | `84b2151` | Governance operations now flow through `ProtocolTransaction` + mempool + consensus |
-| Bridge → Instruction pipeline | `84b2151` | Bridge deposits submitted as `Instruction::ExternalBridgeDeposit` |
-| Signature verification in block execution | — | `Block::execute()` calls `tx.verify_signature_with_registry()` before executing each protocol transaction |
-| Economic constants governable | `38c2a4c` | `proposal_deposit`, `min_self_stake`, `base_fee`, etc. mutable via governance |
-| Atomic rollback (Gap 1) | `1d742f7` | `ComplianceEngine` and `ShieldedState` now cloned for snapshot-based rollback alongside `BalanceState` |
-| Sequential nonce enforcement (Gap 2) | `1d742f7` | Mempool tracks `expected_nonces` per sender; rejects old nonces |
-| Gas sponsor stubs (Gap 3) | `1d742f7` | `AuthorizedSponsor` fully implemented via `SponsorRegistry`; `PoolSponsor` and `PerTxSponsor` rejected at mempool |
-| Stablecoin fee deduction (Gap 4) | `1d742f7` | `deduct_stablecoin_from_payer()` now uses correct `asset_id` instead of hard-coded CALL |
-| Priority fee scoring (Gap 5) | `1d742f7` | `protocol_priority_score()` computes `max_fee - gas_cost` and is enforced at mempool admission |
-| Compliance recipient checks (Gap 6) | `1d742f7` | `Transfer`, `BatchTransfer`, `TransferFrom` now check both sender and recipient compliance |
-| Compliance state persistence (Gap 7) | current | `ComplianceEngineSnapshot` with serde JSON blob persistence; `CallComplianceState` MDBX table; wired in `load_state_from_db`/`persist_state_to_db` |
-| Custom compliance policy (Gap 8) | `1d742f7` | `CompliancePolicy::Custom` now invokes registered handlers from `ComplianceEngine::custom_handlers` |
-| Instruction count limit (Gap 9) | `1d742f7` | `MAX_INSTRUCTIONS_PER_TX` enforced at mempool admission and in payload builder |
-| Memo size enforcement (Gap 10) | `1d742f7` | `MAX_TOTAL_MEMO_BYTES` enforced at mempool admission |
-| MultiSig threshold (Gap 11) | `1d742f7` | `verify_signature_with_registry()` reads threshold from `SmartAccountRegistry`; falls back to 2 |
+## File Map
+
+| File | Role |
+|------|------|
+| `crates/protocol/src/transaction.rs` | `ProtocolTransaction`, `AuthScheme`, `GasConfig`, gas calculation, fee model, mempool admission |
+| `crates/protocol/src/instructions.rs` | `Instruction` enum, `execute_protocol_instructions()`, `PaymentMemo`, `AgentPayment` |
+| `crates/protocol/src/sponsor.rs` | `SponsorRegistry`, `GasSponsorAuth`, `GasSponsorPool`, daily usage tracking |
+| `crates/protocol/src/compliance.rs` | `ComplianceEngine`, `CompliancePolicy`, `CustomComplianceHandler`, snapshots |
+| `crates/protocol/src/smart_accounts.rs` | `SmartAccountRegistry`, MultiSig, social recovery, session keys |
+| `crates/transaction-pool/src/lib.rs` | `Mempool`, multi-pool management, admission, selection |
+| `crates/transaction-pool/src/pool.rs` | `MempoolEntry`, `PriorityPool`, capacity limits |
+| `crates/transaction-pool/src/priority.rs` | `PoolKind`, `PoolLimits`, `protocol_priority_score()` |
 
 ---
 
-## Gaps & Suggestions
+## Test Status
 
-### Critical / High Severity
-
-No open critical/high severity gaps remain.
-
----
-
-### Resolved Gaps
-
-The following gaps have been fixed and are documented here for reference:
-
-| Gap | Status | Resolution |
-|---|---|---|
-| **Gap 7**: Compliance State Not Persisted | **Fixed** | `ComplianceEngineSnapshot` added with `serde::Serialize`/`Deserialize`; `CallComplianceState` MDBX table; `save_compliance_state`/`load_compliance_state` wired in `persist_state_to_db`/`load_state_from_db` |
-| **Gap 1**: Incomplete Atomic Rollback | **Fixed** | `ComplianceEngine` and `ShieldedState` now implement `Clone`; `execute_protocol_instructions()` snapshots all three mutable states and restores on failure |
-| **Gap 2**: No Sequential Nonce Enforcement | **Fixed** | Mempool maintains `expected_nonces: HashMap<Address, u64>`; rejects `nonce < expected` at admission |
-| **Gap 3**: Gas Sponsors Are Stubs | **Fixed** | `AuthorizedSponsor` fully wired through `SponsorRegistry`; `PoolSponsor` and `PerTxSponsor` explicitly rejected at mempool with descriptive error |
-| **Gap 4**: Stablecoin Fee Deducts CALL Instead | **Fixed** | `deduct_stablecoin_from_payer()` now passes the correct `asset_id` to `deduct_balance()` instead of hard-coded `0` |
-| **Gap 5**: Priority Fee Ignored in Mempool Admission | **Fixed** | `protocol_priority_score()` computes `max_fee - gas_units * base_fee`; score validated against `min_fee` at admission |
-| **Gap 6**: Compliance Only Checks Sender | **Fixed** | `Transfer`, `BatchTransfer`, `TransferFrom` now call `check_compliance_by_policy_id()` on both sender and recipient |
-| **Gap 8**: Custom Compliance Policy Always Passes | **Fixed** | `CompliancePolicy::Custom` now iterates registered `custom_handlers` and requires all to approve |
-| **Gap 9**: No Instruction Count Limit | **Fixed** | `MAX_INSTRUCTIONS_PER_TX` (100) enforced in mempool admission and payload builder |
-| **Gap 10**: Memo Size Not Enforced at Mempool Time | **Fixed** | `MAX_TOTAL_MEMO_BYTES` (1KB) enforced in mempool admission via `total_memo_bytes()` |
-| **Gap 11**: MultiSig Has No M-of-N Threshold Validation | **Fixed** | `verify_signature_with_registry()` reads `threshold` from `SmartAccountRegistry`; falls back to 2 if no config found |
-
----
-
-## Production Readiness Assessment
-
-| Component | Status | Blocker |
-|---|---|---|
-| Signature verification | Ready | None |
-| Balance management | Ready | None |
-| Mempool structure | Ready | None |
-| Gas/fee model | Ready | None |
-| Instruction execution | Ready | None |
-| Compliance | Ready | None |
-
-## Recommended Fix Order
-
-No remaining transaction system gaps.
-
----
-
-*Last updated: 2026-04-20*
+- `cargo test -p call-protocol` — unit tests cover instruction execution, rollback, memo limits, mint/burn authorization, gas calculation, base fee dynamics, fee deduction (all sponsor modes), mempool admission, signature verification (zero/ones/wrong-key/malleation/replay/insufficient-multisig/session-key mismatch), serde round-trips
+- `cargo test -p call-transaction-pool` — unit tests cover mempool insert/duplicate/fee/gas/address-limit/capacity/eviction/expiry/confirm/stats, priority scoring, priority pool operations
+- Missing: ZK shielded transfer execution tests (require `real-prover` feature), bridge challenge execution tests, smart account social recovery end-to-end tests
