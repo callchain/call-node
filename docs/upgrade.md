@@ -116,25 +116,6 @@ Validators can signal readiness for an upcoming upgrade via `ForkManager::signal
 
 ---
 
-## Production Readiness Gaps
-
-All previously identified gaps have been resolved. The system is production-ready for protocol upgrade and fork management.
-
-| # | Gap | Status | Resolution |
-|---|-----|--------|------------|
-| 1 | `check_upgrades_at_height` applies only first match | Resolved | Loop continues to apply all eligible upgrades at the same height |
-| 2 | `version_at_height` ignores `applied` flag | Resolved | Behavior is correct: scheduled upgrades determine expected version at each height |
-| 3 | No block version field | Resolved | `version: ProtocolVersion` added to `BlockHeader`; `validate_block_version` called during validation |
-| 4 | ForkManager not persisted | Resolved | `save_fork_state` / `load_fork_state` persist to MDBX `CallForkState` table |
-| 5 | No network-wide upgrade sync | Resolved | `UPGRADE_CHANNEL` gossips `UpgradeAnnouncement`; peers auto-schedule |
-| 6 | Emergency rollback not executed | Resolved | `apply_rollback_plan` performs structural reversion (heights, caches, files, receipts) |
-| 7 | Rollback signatures replayable | Resolved | Nonce-based replay protection with per-validator `rollback_nonces` |
-| 8 | No version-gated features | Resolved | `ProtocolFeature` enum with `min_version()` and `is_feature_enabled()` checks |
-| 9 | Timelock default very short | Resolved | `DEFAULT_TIMELOCK_BLOCKS` increased from 1000 to 10000 (~42 min at 250ms/block) |
-| 10 | No upgrade readiness check | Resolved | `signal_upgrade_readiness`, `check_upgrade_readiness`, `is_upgrade_ready` with optional quorum-gated activation |
-
----
-
 ## Test Status
 
 - `cargo test -p call-consensus` (fork tests) — covers height-activated upgrade, multi-upgrade-at-same-height, version mismatch rejection, governance trigger with timelock, emergency rollback with 14/21 signatures, nonce replay protection, feature flagging by version, upgrade readiness signaling and quorum-gated activation
