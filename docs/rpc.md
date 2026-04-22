@@ -84,7 +84,7 @@ Validates EIP-191 personal_sign signatures (`\x19Ethereum Signed Message:\n32` p
 
 #### Asset Registration (`call_registerAsset`)
 
-Registers a new asset in the `AssetRegistry`. Deducts `governance.config.asset_registration_fee` from the issuer's CALL balance.
+Registers a new asset in the `AssetRegistry`. Requires an EIP-191 `personal_sign` signature over `keccak256("RegisterAsset:{symbol}:{name}:{decimals}:{issuer}")`; the recovered signer must match the issuer address. Deducts `governance.config.asset_registration_fee` from the issuer's CALL balance.
 
 #### Agent (`call_agentRegister`, `call_agentGrant`, `call_agentRevoke`)
 

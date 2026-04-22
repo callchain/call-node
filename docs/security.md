@@ -38,8 +38,7 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 │  └────────────────────┘  └──────────────────────────────┘  │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────────┐│
-│  │ Cross-Cutting Gaps (RPC auth, domain verification,      ││
-│  │ mempool defense wiring)                                 ││
+│  │ Cross-Cutting Gaps (RPC auth)                           ││
 │  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -67,7 +66,7 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 - `ReplayProtector`: bounded HashSet of seen tx hashes, evicts ~25% when over limit
 - Address saturation: max txs per address per window
 
-**Production ready:** Partial. The library works and is tested, but it is not integrated into the RPC transaction submission path (`call_sendPayment`, `eth_sendRawTransaction`). The RPC layer accepts transactions without rate limiting.
+**Production ready:** Yes. Integrated into `RpcState::submit_payment()` and `RpcState::submit_evm_tx()` before mempool insertion. Enforces per-address rate limiting, replay protection, and address saturation.
 
 ### 3. Shielded Pool Defense (`security.rs`)
 
@@ -127,8 +126,8 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 | 9 | ~~RPC has no TLS/HTTPS~~ | RPC | **Fixed** | Both HTTP and WS servers support TLS via `tokio-rustls`. Configured via `tls_cert_path` / `tls_key_path`. |
 | 10 | ~~RPC has no rate limiting~~ | RPC | **Fixed** | Per-IP sliding-window rate limiter at connection level (`RateLimiter`). Configurable via `rate_limit_rps` / `rate_limit_window_secs`. |
 | 11 | Default agent permissions are wide open | Agent | **Fixed** | `allowed_assets: vec![1]` (only CALL by default), `daily_limit: 10_000`, `per_tx_limit: 1_000` (`crates/agent/src/permissions.rs:23-33`). |
-| 12 | Domain verification is format-only | Agent | **Open** | `RealDomainVerifier` exists with live DNS TXT and HTTP file lookups (`crates/agent/src/registry.rs:272-279`), but no production code instantiates it. The default `verify_domain_proof()` only validates format. |
-| 13 | Governance execute signature binding broken | RPC/Gov | **Partially addressed** | `insert_protocol_tx` verifies signatures against the actual sender address (fixed). However, `execute_proposal()` has no authorization check on the executor — any account can execute a queued proposal after the timelock expires. |
+| 12 | Domain verification is format-only | Agent | **Fixed** | `AgentRegistry::new()` instantiates `RealDomainVerifier` with live DNS TXT and HTTP file lookups (`crates/agent/src/registry.rs:272-279`). Production code uses `AgentRegistry::new()`. |
+| 13 | Governance execute signature binding broken | RPC/Gov | **Fixed** | `execute_proposal(proposal_id, executor)` requires the executor to be either the original proposer or a registered validator (`crates/governance/src/lib.rs`). `Instruction::GovernanceExecute` passes the transaction sender as executor (`crates/protocol/src/instructions.rs`). |
 | 14 | Rollback signatures are replayable | Upgrade | **Fixed** | Per-validator nonce map prevents replay in `submit_rollback_signature()` (`crates/consensus/src/fork.rs:282-397`). |
 | 15 | Emergency rollback not executed | Upgrade | **Fixed** | `execute_rollback()` applies the rollback plan when quorum is reached. |
 | 16 | Shielded nullifiers are in-memory only | Shielded | **Fixed** | `save_shielded_state_inner` / `load_shielded_state_inner` persist to `CallShieldedNullifiers` DB CF on every block (`crates/node/src/lib.rs:1192-1240`). |
@@ -138,11 +137,11 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 
 | # | Gap | Module | Status | Details |
 |---|-----|--------|--------|---------|
-| 18 | Mempool defense not wired to RPC | Security | **Open** | `MempoolDefense` only used in unit tests. RPC endpoints (`call_sendPayment`, `eth_sendRawTransaction`) do not invoke it. |
+| 18 | Mempool defense not wired to RPC | Security | **Fixed** | `MempoolDefense::validate_tx_submission()` is called in `RpcState::submit_payment()` and `RpcState::submit_evm_tx()` before mempool insertion (`crates/rpc/src/handlers.rs`). Enforces rate limiting, replay protection, and address saturation. |
 | 19 | P2P defense not wired to network layer | Security | **Fixed** | `P2PDefense::validate_message()` is called in the P2P receive loop at `crates/node/src/lib.rs:305-316`. |
 | 20 | Slashing does not reduce stake | Consensus | **Fixed** | `slash_offline`/`slash_oracle_outlier` reduce `self_stake` and `staked_call`. `slash_double_sign` removes the validator entirely (`crates/consensus/src/validator.rs:296-324`). |
 | 21 | No agent revocation/removal | Agent | **Fixed** | `unregister_agent()` exists and removes the agent from the registry (`crates/agent/src/registry.rs`). |
-| 22 | Asset registration unpermissioned | RPC/Protocol | **Open** | Fee is charged from issuer balance, but `call_registerAsset` requires no signature proving the caller controls the issuer address. |
+| 22 | Asset registration unpermissioned | RPC/Protocol | **Fixed** | `call_registerAsset` requires an EIP-191 secp256k1 signature over `keccak256("RegisterAsset:{symbol}:{name}:{decimals}:{issuer}")`. The recovered signer must match the issuer address (`crates/rpc/src/callchain.rs`). |
 | 23 | No registration fee or stake for agents | Agent | **Fixed** | `register_agent()` deducts `registration_fee` from owner balance (`crates/agent/src/registry.rs:113-183`). |
 | 24 | Payment signature scheme is non-standard | RPC | **Fixed** | `call_sendPayment` uses EIP-191 `\x19Ethereum Signed Message:\n32` prefix (`crates/rpc/src/handlers.rs:596-606`). |
 
@@ -164,7 +163,7 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Block limits | Ready | Well-defined, tested, enforced in `Block::execute()` |
-| Mempool defense | Partial | Library works, not wired to RPC submission path |
+| Mempool defense | Ready | Wired into `submit_payment` and `submit_evm_tx` with rate limiting, replay protection, and address saturation |
 | Shielded defense | Ready | Nullifier tracking works, persists to DB |
 | P2P defense | Ready | Wired into P2P receive loop with rate limits + message caps |
 | Consensus defense (double-sign) | Ready | Detection + slashing integrated; stake reduction active |
@@ -184,4 +183,5 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 - `cargo test -p call-network` (limits tests) — covers default limits, custom limits, validation bounds
 - `cargo test -p call-consensus` — covers slashing economics, double-sign removal, offline proportional slash
 - `cargo test -p call-agent` — covers permission defaults, grant deduction, registration fee, revocation
-- Missing: integration of `MempoolDefense` into actual RPC paths, `RealDomainVerifier` integration tests, governance executor authorization tests
+- `cargo test -p call-rpc` — covers mempool defense integration in payment and EVM tx submission paths, EIP-191 signature verification for asset registration
+- `cargo test -p call-protocol --test test_governance_flow` — covers governance executor authorization (proposer/validator-only execution)

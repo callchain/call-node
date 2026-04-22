@@ -1,6 +1,7 @@
 //! Core handler trait and RPC state management.
 
 use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams, FeeCurrencyRegistry};
+use call_protocol::security::MempoolDefense;
 use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_oracle::OracleManager;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
@@ -36,6 +37,7 @@ pub struct RpcState {
     pub fee_params: RwLock<FeeParams>,
     pub consensus_params: RwLock<ConsensusParams>,
     pub mempool: Arc<RwLock<Mempool>>,
+    pub mempool_defense: RwLock<MempoolDefense>,
     pub chain_id: u64,
     pub subscriptions: SubscriptionManager,
     pub governance: RwLock<GovernanceManager>,
@@ -91,6 +93,7 @@ impl RpcState {
             fee_params: RwLock::new(FeeParams::default()),
             consensus_params: RwLock::new(ConsensusParams::default()),
             mempool,
+            mempool_defense: RwLock::new(MempoolDefense::new(1000, 1000, 10000, 100)),
             chain_id,
             subscriptions: SubscriptionManager::new(),
             governance: RwLock::new(GovernanceManager::new()),
@@ -405,6 +408,17 @@ impl RpcState {
             TxEnvelope::Eip4844(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
         };
 
+        // Mempool defense: rate limit, replay protection, address saturation
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
+            defense.validate_tx_submission(caller, tx_hash, now_ms)
+                .map_err(|e| format!("mempool defense: {e}"))?;
+        }
+
         // Insert into mempool (for tracking/dedup)
         {
             let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
@@ -603,6 +617,17 @@ impl RpcState {
             .map_err(|e| format!("signature verification failed: {e}"))?;
         if recovered != sender {
             return Err(format!("signature does not match sender: recovered {:?}, expected {:?}", recovered, sender));
+        }
+
+        // Mempool defense: rate limit, replay protection, address saturation
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
+            defense.validate_tx_submission(sender, tx_hash, now_ms)
+                .map_err(|e| format!("mempool defense: {e}"))?;
         }
 
         // Insert into mempool (for tracking/dedup)

@@ -644,8 +644,13 @@ impl GovernanceManager {
         Ok(())
     }
 
-    /// Execute a queued proposal (after timelock)
-    pub fn execute_proposal(&mut self, proposal_id: u64) -> Result<(), GovernanceError> {
+    /// Execute a queued proposal (after timelock).
+    /// Only the original proposer or a registered validator may execute.
+    pub fn execute_proposal(
+        &mut self,
+        proposal_id: u64,
+        executor: Address,
+    ) -> Result<(), GovernanceError> {
         let (proposer, execution_block) = {
             let p = self
                 .proposals
@@ -659,6 +664,11 @@ impl GovernanceManager {
 
         if self.current_block < execution_block {
             return Err(GovernanceError::TimelockNotElapsed);
+        }
+
+        // Authorization: executor must be the proposer or a registered validator
+        if executor != proposer && self.validator_id_by_address(executor).is_none() {
+            return Err(GovernanceError::UnauthorizedExecutor);
         }
 
         self.proposals.get_mut(&proposal_id).unwrap().state = ProposalState::Executed;
@@ -878,7 +888,8 @@ impl GovernanceManager {
                 let proposal_type_str = self.proposals.get(&id)
                     .map(|p| format!("{:?}", p.proposal_type))
                     .unwrap_or_default();
-                let _ = self.execute_proposal(id);
+                let proposer = self.proposals.get(&id).map(|p| p.proposer).unwrap_or_default();
+                let _ = self.execute_proposal(id, proposer);
                 self.events.push(GovernanceEvent::ProposalExecuted { id, proposal_type: proposal_type_str });
             }
         }
@@ -1139,6 +1150,8 @@ pub enum GovernanceError {
     ExecutionFailed(String),
     #[error("proposal rate limited — {0} blocks remaining before next submission allowed")]
     ProposalRateLimited(u64),
+    #[error("unauthorized executor")]
+    UnauthorizedExecutor,
 }
 
 #[cfg(test)]
@@ -1307,13 +1320,13 @@ mod tests {
         mgr.queue_proposal(id).unwrap();
 
         // Cannot execute before timelock
-        let result = mgr.execute_proposal(id);
+        let result = mgr.execute_proposal(id, proposer);
         assert!(result.is_err());
 
         // Advance past timelock
         let exec_block = mgr.get_proposal(id).unwrap().execution_block.unwrap();
         mgr.set_current_block(exec_block + 1);
-        mgr.execute_proposal(id).unwrap();
+        mgr.execute_proposal(id, proposer).unwrap();
 
         let proposal = mgr.get_proposal(id).unwrap();
         assert_eq!(proposal.state, ProposalState::Executed);
@@ -1648,7 +1661,7 @@ mod tests {
         // Advance past timelock, execute
         let exec = p.execution_block.unwrap();
         mgr.set_current_block(exec + 1);
-        mgr.execute_proposal(id).unwrap();
+        mgr.execute_proposal(id, proposer).unwrap();
 
         let p = mgr.get_proposal(id).unwrap();
         assert_eq!(p.state, ProposalState::Executed);

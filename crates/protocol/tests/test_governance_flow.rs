@@ -49,7 +49,7 @@ mod test_governance_flow_impl {
 
         // Execute after timelock — use a large enough block number
         mgr.set_current_block(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + TIMELOCK_PERIOD_BLOCKS + 100);
-        mgr.execute_proposal(id).unwrap();
+        mgr.execute_proposal(id, proposer).unwrap();
         assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Executed);
     }
 
@@ -146,7 +146,7 @@ mod test_governance_flow_impl {
         // which is current_block at queue time
         let exec_block = REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1;
         mgr.set_current_block(exec_block);
-        mgr.execute_proposal(id).unwrap();
+        mgr.execute_proposal(id, proposer).unwrap();
         assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Executed);
     }
 
@@ -331,7 +331,7 @@ mod test_governance_flow_impl {
 
         let exec = REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + TIMELOCK_PERIOD_BLOCKS + 100;
         mgr.set_current_block(exec);
-        mgr.execute_proposal(id).unwrap();
+        mgr.execute_proposal(id, proposer).unwrap();
         assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Executed);
     }
 }

@@ -593,7 +593,7 @@ pub fn execute_instruction(
             let gov = governance.ok_or(ProtocolError::InvalidInstruction(
                 "governance not available".into(),
             ))?;
-            gov.execute_proposal(*proposal_id)
+            gov.execute_proposal(*proposal_id, sender)
                 .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
             Ok(InstructionResult::Success)
         }

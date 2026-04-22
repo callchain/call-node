@@ -194,9 +194,41 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_registerAsset
     module
         .register_async_method("call_registerAsset", |params, state, _ctx| async move {
-            let (symbol, name, decimals, issuer): (String, String, u8, String) =
+            let (symbol, name, decimals, issuer, signature_hex): (String, String, u8, String, String) =
                 params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let issuer_addr = issuer.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            // Parse signature
+            let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature hex: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params(format!("signature must be 65 bytes, got {}", sig_bytes.len())));
+            }
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
+
+            // Canonical registration message: keccak256("RegisterAsset:{symbol}:{name}:{decimals}:{issuer}")
+            let canonical = format!("RegisterAsset:{symbol}:{name}:{decimals}:{}", hex::encode(issuer_addr.as_slice()));
+            let raw_hash: [u8; 32] = call_crypto::keccak256(canonical.as_bytes()).into();
+
+            // Apply EIP-191 personal_sign prefix
+            let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
+            let mut eip191_msg = Vec::with_capacity(eip191_prefix.len() + 32);
+            eip191_msg.extend_from_slice(eip191_prefix);
+            eip191_msg.extend_from_slice(&raw_hash);
+            let eip191_hash = {
+                let h = call_crypto::keccak256(&eip191_msg);
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(h.as_slice());
+                arr
+            };
+
+            // Recover signer and verify it matches issuer
+            let recovered = call_crypto::recover_secp256k1_signer(&eip191_hash, &signature)
+                .map_err(|e| invalid_params(format!("signature recovery failed: {e:?}")))?;
+            if recovered != issuer_addr {
+                return Err(invalid_params("signature does not match issuer address".into()));
+            }
 
             // Check and collect asset registration fee
             let fee = {
