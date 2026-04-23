@@ -4,9 +4,14 @@
 //! 1. Validate asset is registered
 //! 2. Check bridge not paused
 //! 3. Check per-tx and daily limits
-//! 4. EVM burn equivalent tokens via bridgeBurn
+//! 4. EVM burn equivalent tokens via bridgeBurn (for user assets)
+//!    or native EVM balance transfer (for CALL, asset_id == 1)
 //! 5. Restore protocol balance
 //! 6. Same-block completion guarantee
+//!
+//! CALL (asset_id == 1) is withdrawn from native EVM balance.
+//! User-defined assets are withdrawn from ERC-20 wrapped tokens.
+//! Asset 0 (virtual USD) is not bridgeable.
 
 use alloy_primitives::{Address, U256};
 use call_protocol::balances::BalanceState;
@@ -56,22 +61,39 @@ pub fn execute_withdraw(
     // 4. Check daily limit (auto-resets when a new day starts)
     bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
 
-    // 5. Check EVM balance is sufficient
-    let evm_balance = evm_state.get_balance(from);
-    let amount_u256 = U256::from(*amount);
-    if evm_balance < amount_u256 {
-        return Err(BridgeError::InsufficientEvmBalance(bridge_address, amount_u256));
+    // 5. Reject virtual USD (asset_id == 0) from bridging
+    if *asset_id == 0 {
+        return Err(BridgeError::AssetNotRegistered(*asset_id));
     }
 
-    // 6. EVM burn equivalent tokens (atomic — if fails, no protocol change)
-    let burn_result = evm_executor.evm_call_bridge_burn(
-        protocol_bridge_caller,
-        bridge_address,
-        evm_state,
-        amount_u256,
-    );
+    // 6. Bridge from EVM
+    let amount_u256 = U256::from(*amount);
 
-    match burn_result {
+    let exec_result = if *asset_id == 1 {
+        // CALL: transfer from native EVM balance
+        let evm_balance = evm_state.get_balance(from);
+        if evm_balance < amount_u256 {
+            return Err(BridgeError::InsufficientEvmBalance(*from, amount_u256));
+        }
+        evm_state.set_balance(*from, evm_balance - amount_u256);
+        Ok(EvmExecutionResult {
+            success: true,
+            gas_used: 21_000,
+            output: alloy_primitives::Bytes::default(),
+            logs: vec![],
+        })
+    } else {
+        // User-defined asset: burn ERC-20 wrapped token
+        evm_executor.evm_call_bridge_burn(
+            protocol_bridge_caller,
+            bridge_address,
+            evm_state,
+            amount_u256,
+        )
+        .map_err(|e| BridgeError::EvmExecutionFailed(format!("{e:?}")))
+    };
+
+    match exec_result {
         Ok(execution) => {
             if execution.success {
                 // 7. Restore protocol balance
@@ -80,10 +102,10 @@ pub fn execute_withdraw(
                 bridge_state.record_withdrawal(*asset_id, *amount);
                 Ok(execution)
             } else {
-                Err(BridgeError::EvmExecutionFailed("bridgeBurn reverted".into()))
+                Err(BridgeError::EvmExecutionFailed("bridge withdraw from EVM reverted".into()))
             }
         }
-        Err(e) => Err(BridgeError::EvmExecutionFailed(format!("{e:?}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -139,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn test_withdraw_full_flow() {
+    fn test_withdraw_full_flow_call_native() {
         let mut protocol_balances = BalanceState::new();
         let mut evm_state = EvmState::new();
         evm_state.set_balance(test_addr(1), U256::from(1000));
@@ -150,7 +172,7 @@ mod tests {
         let registry = setup_registry();
 
         let op = BridgeOp::WithdrawToProtocol {
-            asset_id: 1,
+            asset_id: 1, // CALL is withdrawn as native EVM balance
             from: test_addr(1),
             to: test_addr(1),
             amount: 500,
@@ -169,8 +191,14 @@ mod tests {
             test_addr(0xFF),
             100,
         );
-        // EVM burn will fail (no contract), but the flow is correct
-        assert!(result.is_err());
+        // CALL (asset_id == 1) withdraws from native EVM balance — should succeed
+        assert!(result.is_ok(), "withdraw failed: {:?}", result);
+        assert!(result.unwrap().success);
+
+        // Protocol balance credited
+        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 500);
+        // EVM native balance deducted
+        assert_eq!(evm_state.get_balance(&test_addr(1)), U256::from(500));
     }
 
     #[test]

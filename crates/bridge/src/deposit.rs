@@ -5,8 +5,13 @@
 //! 2. Check bridge not paused
 //! 3. Check per-tx and daily limits
 //! 4. Deduct protocol balance (burn from protocol)
-//! 5. EVM mint equivalent tokens via bridgeMint
+//! 5. EVM mint equivalent tokens via bridgeMint (for user assets)
+//!    or native EVM balance transfer (for CALL, asset_id == 1)
 //! 6. Same-block completion guarantee
+//!
+//! CALL (asset_id == 1) is bridged as native EVM balance.
+//! User-defined assets are bridged as ERC-20 wrapped tokens.
+//! Asset 0 (virtual USD) is not bridgeable.
 
 use alloy_primitives::{Address, U256};
 use call_primitives::AssetId;
@@ -63,38 +68,58 @@ pub fn execute_deposit(
         return Err(BridgeError::InsufficientProtocolBalance(*asset_id, *amount));
     }
 
-    // 6. Deduct protocol balance (atomic — if EVM fails, we restore)
+    // 6. Reject virtual USD (asset_id == 0) from bridging
+    if *asset_id == 0 {
+        return Err(BridgeError::AssetNotRegistered(*asset_id));
+    }
+
+    // 7. Deduct protocol balance (atomic — if EVM fails, we restore)
     let snapshot = protocol_balances.clone();
     protocol_balances
         .deduct_balance(*asset_id, *from, *amount)
         .map_err(|_| BridgeError::InsufficientProtocolBalance(*asset_id, *amount))?;
 
-    // 7. EVM mint equivalent tokens
+    // 8. Bridge to EVM
     let amount_u256 = U256::from(*amount);
-    let mint_result = evm_executor.evm_call_bridge_mint(
-        *from,
-        bridge_address,
-        evm_state,
-        *to,
-        amount_u256,
-    );
 
-    match mint_result {
+    let exec_result = if *asset_id == 1 {
+        // CALL: transfer as native EVM balance
+        let current = evm_state.get_balance(to);
+        evm_state.set_balance(*to, current + amount_u256);
+        Ok(EvmExecutionResult {
+            success: true,
+            gas_used: 21_000,
+            output: alloy_primitives::Bytes::default(),
+            logs: vec![],
+        })
+    } else {
+        // User-defined asset: mint ERC-20 wrapped token
+        evm_executor.evm_call_bridge_mint(
+            *from,
+            bridge_address,
+            evm_state,
+            *to,
+            amount_u256,
+        )
+        .map_err(|e| BridgeError::EvmExecutionFailed(format!("{e:?}")))
+    };
+
+    match exec_result {
         Ok(execution) => {
             if execution.success {
-                // 8. Record completed deposit
+                // 9. Record completed deposit
                 bridge_state.record_deposit(*asset_id, *amount);
                 Ok(execution)
             } else {
                 // EVM reverted — restore protocol balance
                 *protocol_balances = snapshot;
-                Err(BridgeError::EvmExecutionFailed("bridgeMint reverted".into()))
+                Err(BridgeError::EvmExecutionFailed("bridge deposit to EVM reverted".into()))
             }
         }
         Err(e) => {
             // EVM error — restore protocol balance
             *protocol_balances = snapshot;
-            Err(BridgeError::EvmExecutionFailed(format!("{e:?}")))
+            Err(e)
         }
     }
 }
