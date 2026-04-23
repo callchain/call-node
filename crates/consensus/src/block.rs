@@ -16,7 +16,7 @@ use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::validator::{ConsensusError, ValidatorStateManager};
+use crate::validator::{ConsensusError, STAKING_ESCROW, ValidatorStateManager};
 use crate::ForkManager;
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
@@ -1006,7 +1006,9 @@ fn execute_bridge_instruction(
 fn is_validator_instruction(instr: &Instruction) -> bool {
     matches!(
         instr,
-        Instruction::ValidatorStake { .. } | Instruction::ValidatorUnstake { .. }
+        Instruction::ValidatorStake { .. }
+            | Instruction::ValidatorUnstake { .. }
+            | Instruction::ValidatorClaimUnbonded { .. }
     )
 }
 
@@ -1029,9 +1031,9 @@ fn execute_validator_instruction(
                     "validator stake: insufficient balance".into(),
                 ));
             }
-            // Deduct stake from sender
+            // Transfer stake to escrow (Cosmos-style module account)
             balances
-                .deduct_balance(0, sender, *self_stake)
+                .transfer(0, sender, STAKING_ESCROW, *self_stake)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("validator stake: {e}")))?;
             // Register validator
             validator_state.set_current_block(current_block_height);
@@ -1043,8 +1045,19 @@ fn execute_validator_instruction(
         Instruction::ValidatorUnstake { validator_id } => {
             validator_state.set_current_block(current_block_height);
             validator_state
-                .unstake(*validator_id)
+                .unstake(*validator_id, sender)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("validator unstake: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::ValidatorClaimUnbonded { validator_id } => {
+            validator_state.set_current_block(current_block_height);
+            let (amount, recipient) = validator_state
+                .claim_unbonded(*validator_id)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("validator claim: {e}")))?;
+            // Return staked tokens from escrow to the original staker
+            balances
+                .transfer(0, STAKING_ESCROW, recipient, amount)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("validator claim: {e}")))?;
             Ok(InstructionResult::Success)
         }
         _ => Err(ConsensusError::InvalidBlock(

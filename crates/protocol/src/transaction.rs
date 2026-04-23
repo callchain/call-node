@@ -254,6 +254,7 @@ pub fn base_gas_units(instruction: &Instruction) -> u64 {
         Instruction::ChallengeBridgeDeposit { .. } => 10_000,
         Instruction::ValidatorStake { .. } => 50_000,
         Instruction::ValidatorUnstake { .. } => 25_000,
+        Instruction::ValidatorClaimUnbonded { .. } => 25_000,
     }
 }
 
@@ -625,6 +626,7 @@ mod tests {
     use call_primitives::Hash;
     use crate::instructions::PaymentMemo;
     use crate::FeeCurrencyRegistry;
+    use crate::sponsor::GasSponsorAuth;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)

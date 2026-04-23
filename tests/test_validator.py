@@ -15,7 +15,10 @@ import sys
 import time
 
 from rpc_client import CallchainNode, CallchainCluster
-from signer import sign_validator_stake, sign_validator_unstake
+from signer import sign_validator_stake, sign_validator_unstake, sign_validator_claim_unbonded
+
+# System escrow address for staked CALL (matches Rust STAKING_ESCROW)
+STAKING_ESCROW = "0x" + "00" * 20
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -119,7 +122,7 @@ def test_add_validator(cluster, accounts):
     current_height = int(cluster.nodes[0].block_number(), 16)
     wait_for_height(cluster.nodes[0], current_height + 1)
 
-    # Verify every node sees the new validator
+    # Verify every node sees the new validator and escrow holds the stake
     for i, node in enumerate(cluster.nodes):
         validators = node.validator_list()
         new_validator = next(
@@ -131,7 +134,14 @@ def test_add_validator(cluster, accounts):
             new_validator.get("selfStake") == str(self_stake),
             f"node{i+1}: selfStake mismatch"
         )
-        print(f"  node{i+1}: new validator confirmed (id={new_validator.get('validatorId')})")
+        # Verify escrow balance holds the staked amount
+        escrow_result = node.get_balance(1, STAKING_ESCROW)
+        escrow_bal = escrow_result.get("balance") if isinstance(escrow_result, dict) else escrow_result
+        assert_true(
+            int(escrow_bal) >= self_stake,
+            f"node{i+1}: escrow balance {escrow_bal} < stake {self_stake}"
+        )
+        print(f"  node{i+1}: new validator confirmed (id={new_validator.get('validatorId')}), escrow={escrow_bal}")
 
     print("  [OK] validator added and synced to all nodes")
 
@@ -177,6 +187,29 @@ def test_remove_validator(cluster, accounts):
             f"node{i+1}: validator {validator_id} should be unbonding"
         )
         print(f"  node{i+1}: validator {validator_id} is unbonding")
+
+    # Attempt to claim before unbonding period elapsed — should fail
+    claim_nonce = _next_nonce()
+    claim_payload = sign_validator_claim_unbonded(
+        private_key=sender["private_key"],
+        sender=sender["address"],
+        nonce=claim_nonce,
+        validator_id=validator_id,
+    )
+    try:
+        result = cluster.nodes[0].validator_claim_unbonded(claim_payload)
+        claim_tx_hash = result.get("txHash")
+        if claim_tx_hash:
+            claim_receipt = wait_for_tx(cluster, claim_tx_hash, timeout=30)
+            status = claim_receipt.get("status", "N/A") if claim_receipt else "no receipt"
+            print(f"  claim tx status (before period): {status}")
+            # Expect failure — unbonding period not elapsed
+            assert_true(
+                claim_receipt is None or status != "success",
+                "claim before unbonding period should fail"
+            )
+    except RuntimeError as e:
+        print(f"  [OK] claim before period rejected: {e}")
 
     print("  [OK] validator removed and synced to all nodes")
 

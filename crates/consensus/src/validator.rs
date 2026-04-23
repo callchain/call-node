@@ -20,6 +20,9 @@ pub const OFFLINE_SLASH_RATE_PER_ROUND: u128 = 10; // basis points (0.10%)
 /// Grace period for rotated keys — old key remains valid for this many blocks
 pub const KEY_ROTATION_GRACE_BLOCKS: u64 = 100;
 
+/// System escrow address for staked CALL tokens (Cosmos-style module account)
+pub const STAKING_ESCROW: Address = Address::repeat_byte(0);
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /// Slash event record
@@ -55,6 +58,8 @@ fn default_bls_pubkey() -> [u8; 48] {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnbondingRequest {
     pub validator_id: ValidatorId,
+    /// Original staker address — used to return tokens from escrow on claim
+    pub sender_address: Address,
     pub amount: u128,
     pub requested_at_block: u64,
     pub eligible_at_block: u64,
@@ -209,11 +214,21 @@ impl ValidatorStateManager {
     }
 
     /// Begin unbonding process (starts 7-day timer)
-    pub fn unstake(&mut self, validator_id: ValidatorId) -> Result<u128, ConsensusError> {
+    pub fn unstake(
+        &mut self,
+        validator_id: ValidatorId,
+        sender: Address,
+    ) -> Result<u128, ConsensusError> {
         let validator = self
             .validators
             .get_mut(&validator_id)
             .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
+
+        if validator.address != sender {
+            return Err(ConsensusError::ConsensusError(
+                "unstake: sender must be the validator owner".into(),
+            ));
+        }
 
         if validator.unbonding_start.is_some() {
             return Err(ConsensusError::UnbondingNotElapsed);
@@ -230,6 +245,7 @@ impl ValidatorStateManager {
 
         self.unbonding_requests.push(UnbondingRequest {
             validator_id,
+            sender_address: sender,
             amount,
             requested_at_block: self.current_block,
             eligible_at_block: eligible_at,
@@ -238,8 +254,13 @@ impl ValidatorStateManager {
         Ok(amount)
     }
 
-    /// Claim unbonded stake after unbonding period
-    pub fn claim_unbonded(&mut self, validator_id: ValidatorId) -> Result<u128, ConsensusError> {
+    /// Claim unbonded stake after unbonding period.
+    /// Returns (amount, sender_address) so the caller can transfer tokens
+    /// from the escrow back to the original staker.
+    pub fn claim_unbonded(
+        &mut self,
+        validator_id: ValidatorId,
+    ) -> Result<(u128, Address), ConsensusError> {
         let request_idx = self
             .unbonding_requests
             .iter()
@@ -252,9 +273,10 @@ impl ValidatorStateManager {
         }
 
         let amount = request.amount;
+        let sender_address = request.sender_address;
         self.unbonding_requests.remove(request_idx);
         self.validators.remove(&validator_id);
-        Ok(amount)
+        Ok((amount, sender_address))
     }
 
     // ── Slashing ──────────────────────────────────────────────────────
@@ -616,12 +638,12 @@ mod tests {
             .unwrap();
 
         // Unstake begins unbonding
-        let amount = state.unstake(id).unwrap();
+        let amount = state.unstake(id, test_addr(1)).unwrap();
         assert_eq!(amount, one_million_call());
         assert!(state.is_unbonding(id));
 
         // Cannot unstake again while unbonding
-        let result = state.unstake(id);
+        let result = state.unstake(id, test_addr(1));
         assert!(matches!(
             result,
             Err(ConsensusError::UnbondingNotElapsed)
@@ -636,7 +658,7 @@ mod tests {
 
         // Advance past unbonding period (1008 blocks)
         state.set_current_block(2000);
-        let claimed = state.claim_unbonded(id).unwrap();
+        let (claimed, _recipient) = state.claim_unbonded(id).unwrap();
         assert_eq!(claimed, one_million_call());
         assert!(!state.is_unbonding(id));
     }
@@ -782,7 +804,7 @@ mod tests {
             .stake(test_addr(1), test_pubkey(1), one_million_call())
             .unwrap();
 
-        state.unstake(id).unwrap();
+        state.unstake(id, test_addr(1)).unwrap();
 
         // Delegation rejected while unbonding
         let result = state.delegate(id, 1000);
@@ -799,7 +821,7 @@ mod tests {
             .stake(test_addr(1), test_pubkey(1), one_million_call())
             .unwrap();
 
-        state.unstake(id).unwrap();
+        state.unstake(id, test_addr(1)).unwrap();
 
         // Before period: no eligible requests
         let eligible = state.eligible_unbonding_requests();

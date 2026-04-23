@@ -31,7 +31,11 @@ from signer import (
     sign_payment,
     sign_validator_stake,
     sign_validator_unstake,
+    sign_validator_claim_unbonded,
 )
+
+# System escrow address for staked CALL (matches Rust STAKING_ESCROW)
+STAKING_ESCROW = "0x" + "00" * 20
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -473,7 +477,12 @@ def test_validator_stake(cluster, accounts):
     )
     assert_true(new_validator is not None, "new validator not found in list")
     assert_true(new_validator.get("selfStake") == str(self_stake), "selfStake mismatch")
-    print(f"  [OK] validator staked — count {initial_count} -> {final_count}, new validator_id: {new_validator.get('validatorId')}")
+
+    # Verify escrow holds the staked amount
+    escrow_result = cluster.nodes[0].get_balance(1, STAKING_ESCROW)
+    escrow_bal = escrow_result.get("balance") if isinstance(escrow_result, dict) else escrow_result
+    assert_true(int(escrow_bal) >= self_stake, f"escrow balance {escrow_bal} < stake {self_stake}")
+    print(f"  [OK] validator staked — count {initial_count} -> {final_count}, escrow={escrow_bal}, new validator_id: {new_validator.get('validatorId')}")
 
 
 def test_validator_unstake(cluster, accounts):
@@ -515,6 +524,26 @@ def test_validator_unstake(cluster, accounts):
     assert_true(target_after is not None, f"validator {validator_id} not found after unstake")
     assert_true(target_after.get("isUnbonding") is True,
                 f"validator {validator_id} should be unbonding")
+
+    # Attempt claim before unbonding period — should fail
+    claim_payload = sign_validator_claim_unbonded(
+        private_key=sender["private_key"],
+        sender=sender["address"],
+        nonce=_next_nonce(),
+        validator_id=validator_id,
+    )
+    try:
+        result = cluster.nodes[0].validator_claim_unbonded(claim_payload)
+        claim_tx = result.get("txHash")
+        if claim_tx:
+            claim_receipt = wait_for_tx(cluster, claim_tx, timeout=30)
+            status = claim_receipt.get("status", "N/A") if claim_receipt else "no receipt"
+            print(f"  claim-before-period status: {status}")
+            assert_true(claim_receipt is None or status != "success",
+                        "claim before period should not succeed")
+    except RuntimeError as e:
+        print(f"  [OK] claim before period rejected: {e}")
+
     print(f"  [OK] validator {validator_id} unstaked — isUnbonding=True")
 
 

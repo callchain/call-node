@@ -162,6 +162,10 @@ class CallchainNode:
         """Submit a validator unstake transaction via call_validatorUnstake."""
         return self._call("call_validatorUnstake", [params])
 
+    def validator_claim_unbonded(self, params: Dict) -> Dict:
+        """Submit a validator claim unbonded transaction via call_validatorClaimUnbonded."""
+        return self._call("call_validatorClaimUnbonded", [params])
+
     def validator_list(self) -> List[Dict]:
         """List all validators via call_validatorList."""
         result = self._call("call_validatorList")

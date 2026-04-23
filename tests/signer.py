@@ -302,3 +302,28 @@ def sign_validator_unstake(
         "validatorId": validator_id,
         "signature": signature,
     }
+
+
+def sign_validator_claim_unbonded(
+    private_key: str,
+    sender: str,
+    nonce: int,
+    validator_id: int,
+    gas_limit: int = 100_000,
+    max_fee: int = 1_000_000,
+) -> dict:
+    """Build a signed validator claim unbonded payload for call_validatorClaimUnbonded RPC."""
+    instructions = [{
+        "ValidatorClaimUnbonded": {
+            "validator_id": validator_id,
+        }
+    }]
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    signature = sign_raw(private_key, tx_hash)
+
+    return {
+        "sender": sender,
+        "nonce": nonce,
+        "validatorId": validator_id,
+        "signature": signature,
+    }

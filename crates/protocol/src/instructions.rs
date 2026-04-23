@@ -171,6 +171,11 @@ pub enum Instruction {
     ValidatorUnstake {
         validator_id: u32,
     },
+    /// Claim unbonded stake after the unbonding period has elapsed.
+    /// Transfers staked CALL from the escrow back to the original staker.
+    ValidatorClaimUnbonded {
+        validator_id: u32,
+    },
 }
 
 /// Payment memo with size limits per spec §3.5
@@ -651,6 +656,11 @@ pub fn execute_instruction(
         Instruction::ValidatorUnstake { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ValidatorUnstake must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::ValidatorClaimUnbonded { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "ValidatorClaimUnbonded must be executed inline in Block::execute".into(),
             ))
         }
     }
