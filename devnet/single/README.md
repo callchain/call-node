@@ -5,7 +5,10 @@ Isolated single-node network for local testing and development. No consensus ove
 ## Quick Start
 
 ```bash
-# Start the node (builds image first)
+# Build the Docker image first (required after source changes)
+./scripts/build-image.sh
+
+# Start the node
 ./devnet/single/scripts/start.sh
 
 # Stop

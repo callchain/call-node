@@ -25,7 +25,10 @@
 ## Quick Start
 
 ```bash
-# Start all 6 nodes (builds image first)
+# Build the Docker image first (required after source changes)
+./scripts/build-image.sh
+
+# Start all 6 nodes
 ./devnet/scripts/start.sh
 
 # Check status
@@ -97,6 +100,6 @@ docker compose -f devnet/docker-compose.yml ps
 # Restart a single node
 docker compose -f devnet/docker-compose.yml restart node2
 
-# Rebuild from source
-./devnet/scripts/build.sh
+# Rebuild Docker image after source changes
+./scripts/build-image.sh
 ```

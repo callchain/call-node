@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "=== Starting Callchain single-node devnet ==="
-docker compose -f devnet/single/docker-compose.yml up -d --build
+docker compose -f devnet/single/docker-compose.yml up -d
 
 echo ""
 echo "=== Single node started ==="
