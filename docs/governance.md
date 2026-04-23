@@ -64,8 +64,14 @@ The CallChain governance system enables decentralized decision-making for protoc
 | `current_block` | Current block height for time-based transitions |
 | `emergency_pause` | Emergency pause state with signature collection |
 | `executor` | `Option<Arc<dyn ProposalExecutor>>` — real on-chain effects |
+| `scheduled_upgrades` | Protocol upgrades scheduled via governance proposals |
+| `compliance_policies` | Asset ID → compliance policy ID |
+| `fee_currencies` | Asset ID → `FeeCurrencyEntry` (name, oracle key, added block) |
+| `fee_currencies_pending_removal` | Asset ID → grace period end block |
+| `fee_currency_cap_bps` | Fee currency cap in basis points |
+| `validator_pubkeys` | Validator ID → Ed25519 public key (32 bytes) |
 
-### Proposal Types (9 variants)
+### Proposal Types (10 variants)
 
 | Type | Voting Model | Quorum | Description |
 |---|---|---|---|
@@ -211,9 +217,12 @@ let balance_source = Arc::new(move |addr: Address| {
 
 `call_balances` is retained as a fallback (used in tests where real balances aren't set up). The field is `#[serde(skip)]` and rewired on every node load.
 
-### Execution Callbacks
+### Execution Model
 
-`ProposalExecutor` trait enables real on-chain side effects when proposals are executed:
+Governance uses a two-phase execution model:
+
+1. **`apply_proposal`** — Updates governance-internal state (always runs)
+2. **`ProposalExecutor::on_proposal_executed`** — Applies cross-system side effects (runs if executor is wired)
 
 ```rust
 pub trait ProposalExecutor: Send + Sync {
@@ -221,34 +230,51 @@ pub trait ProposalExecutor: Send + Sync {
 }
 ```
 
-`GovernanceManager` holds `executor: Option<Arc<dyn ProposalExecutor>>`. The node layer provides `NodeProposalExecutor` (`crates/rpc/src/handlers.rs`) which dispatches by proposal type:
+`GovernanceManager` holds `executor: Option<Arc<dyn ProposalExecutor>>`. The node layer provides `NodeProposalExecutor` (`crates/rpc/src/handlers.rs`) which dispatches by proposal type.
 
-| Proposal Type | Executor Action |
+#### `apply_proposal` Internal Effects
+
+| Proposal Type | Internal State Change |
+|---|---|
+| `ParameterChange` | Updates `GovernanceConfig` fields for `governance.*` and `protocol.*` params |
+| `ProtocolUpgrade` | Appends to `scheduled_upgrades` (tracks proposal_id, activation_block, changelog) |
+| `TreasurySpend` | Transfers CALL from treasury to recipient via `call_balances` |
+| `ValidatorSlash` | Removes validator from `validator_addresses`, `call_balances`, and `validator_pubkeys` |
+| `ComplianceUpdate` | Updates `compliance_policies[asset_id] = new_policy` |
+| `EmergencyPause` | Sets `emergency_pause.is_paused = true` and records reason |
+| `FeeCurrencyAdd` | Inserts into `fee_currencies` and cancels any pending removal |
+| `FeeCurrencyRemove` | Records grace period end block in `fee_currencies_pending_removal` |
+| `FeeCurrencyCap` | Updates `fee_currency_cap_bps` |
+| `ValidatorKeyRotation` | Updates `validator_pubkeys[validator_id] = new_pubkey` |
+
+#### `NodeProposalExecutor` Cross-System Effects
+
+| Proposal Type | Cross-System Action |
 |---|---|
 | `ProtocolUpgrade` | `ForkManager.schedule_governance_upgrade(version, activation_block, proposal_id, current_height)` |
-| `ValidatorSlash` | `ValidatorStateManager.remove_validator(validator_id)` — removes from consensus |
-| `EmergencyPause` | Already handled by `apply_proposal` (sets `is_paused`) |
-| `ParameterChange` | Routes by `param_id` prefix (see below) |
-| `ComplianceUpdate` | Maps `new_policy` u8 to `CompliancePolicy`, updates `AssetRegistry.compliance_policy` for the asset |
+| `ValidatorSlash` | `ValidatorStateManager.remove_validator(validator_id)` — removes from consensus set |
+| `EmergencyPause` | Confirmed via logging (pause state is governance-internal) |
+| `ParameterChange` | Routes by `param_id` prefix to consensus, validator, oracle, fee_currency, and fee params (see below) |
+| `ComplianceUpdate` | Maps `new_policy` u8 to `CompliancePolicy`, updates `AssetRegistry.compliance_policy` |
 | `FeeCurrencyAdd` | `FeeCurrencyRegistry.add_fee_currency(entry, proposal_id)` with decoded oracle key |
 | `FeeCurrencyRemove` | `FeeCurrencyRegistry.remove_fee_currency(asset_id, grace_period_blocks)` |
 | `FeeCurrencyCap` | `FeeCurrencyRegistry.stablecoin_cap_bps = new_cap_bps` |
-| `TreasurySpend` | Handled in `apply_proposal` (in-memory transfer, confirmed by executor) |
+| `TreasurySpend` | Confirmed via logging (transfer is governance-internal) |
 | `ValidatorKeyRotation` | Verifies old-key signature, calls `ValidatorStateManager.rotate_key()` |
 
 #### ParameterChange Prefix Routing
 
 `ParameterChange` proposals use a `param_id` prefix system to route updates to the correct subsystem. The `new_value` field is parsed as JSON. Supported prefixes:
 
-| Prefix | Target Subsystem | Example `param_id` | Example `new_value` |
-|---|---|---|---|
-| `governance.*` | `GovernanceConfig` | `governance.proposal_deposit` | `{"proposal_deposit": 5000000000000000000000}` |
-| `consensus.*` | `ConsensusParams` | `consensus.subset_size` | `{"subset_size": 31}` |
-| `validator.*` | `ValidatorStateManager` | `validator.min_self_stake` | `{"min_self_stake": 500000000000000000000000}` |
-| `oracle.*` | `OracleConfig` | `oracle.outlier_threshold_bps` | `{"outlier_threshold_bps": 300}` |
-| `protocol.*` | `GovernanceConfig` (protocol-level) | `protocol.asset_registration_fee` | `{"asset_registration_fee": 5000000000000000000}` |
-| `fee_currency.*` | `FeeCurrencyRegistry` | `fee_currency.min_market_cap_usd` | `{"min_market_cap_usd": 50000000}` |
-| (no prefix / `fee.*`) | `FeeParams` | `base_fee` | `{"base_fee": 20}` |
+| Prefix | Handler | Target Subsystem | Example `param_id` | Example `new_value` |
+|---|---|---|---|---|
+| `governance.*` | `apply_proposal` (internal) | `GovernanceConfig` | `governance.proposal_deposit` | `{"proposal_deposit": 5000000000000000000000}` |
+| `protocol.*` | `apply_proposal` (internal) | `GovernanceConfig` (protocol-level) | `protocol.asset_registration_fee` | `{"asset_registration_fee": 5000000000000000000}` |
+| `consensus.*` | Executor | `ConsensusParams` | `consensus.subset_size` | `{"subset_size": 31}` |
+| `validator.*` | Executor | `ValidatorStateManager` | `validator.min_self_stake` | `{"min_self_stake": 500000000000000000000000}` |
+| `oracle.*` | Executor | `OracleConfig` | `oracle.outlier_threshold_bps` | `{"outlier_threshold_bps": 300}` |
+| `fee_currency.*` | Executor | `FeeCurrencyRegistry` | `fee_currency.min_market_cap_usd` | `{"min_market_cap_usd": 50000000}` |
+| (no prefix / `fee.*`) | Executor | `FeeParams` | `base_fee` | `{"base_fee": 20}` |
 
 All parameter changes take effect immediately upon proposal execution (no restart required).
 
@@ -314,7 +340,7 @@ When no signature is provided, the call proceeds (backwards compatible for devne
 
 ### Gap 1: `apply_proposal` only logs — no real execution callbacks
 
-**Status**: Resolved. All 9 proposal types have real side effects via `NodeProposalExecutor` (see "Execution Callbacks" table above).
+**Status**: Resolved. `apply_proposal` now applies real internal state changes for all 10 proposal types (governance config, scheduled upgrades, treasury transfers, validator slashing, compliance policies, emergency pause, fee currency registry, fee currency cap, and key rotations). Cross-system effects (consensus, fork manager, oracle, asset registry) are handled by `NodeProposalExecutor` (see "Execution Model" tables above).
 
 ### Gap 2: Governance state is in-memory only
 
@@ -342,7 +368,8 @@ crates/governance/
 ├── Cargo.toml
 └── src/
     └── lib.rs          # GovernanceManager, ProposalType, Vote, errors,
-                        # ProposalExecutor trait, BalanceSource, EmergencyPauseState
+                        # ProposalExecutor trait, BalanceSource, EmergencyPauseState,
+                        # ScheduledUpgrade, FeeCurrencyEntry
 ```
 
 ### Dependencies

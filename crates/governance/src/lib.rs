@@ -292,6 +292,31 @@ pub enum GovernanceEvent {
     ProposalDefeated { id: u64 },
 }
 
+// ── Scheduled Upgrade ─────────────────────────────────────────────────
+
+/// A protocol upgrade scheduled by a governance proposal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledUpgrade {
+    pub proposal_id: u64,
+    pub activation_block: u64,
+    pub changelog: String,
+    pub applied: bool,
+}
+
+// ── Fee Currency Entry ────────────────────────────────────────────────
+
+/// A fee currency registered via governance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeeCurrencyEntry {
+    pub name: String,
+    pub oracle_price_key: String,
+    pub added_at_block: u64,
+}
+
+fn default_fee_currency_cap() -> u32 {
+    10_000 // 100%
+}
+
 // ── Governance Manager ────────────────────────────────────────────────
 
 /// Manages governance proposals, voting, and execution (per spec §13.3)
@@ -329,6 +354,24 @@ pub struct GovernanceManager {
     /// Optional external balance source for real on-chain balances (not serialized — rewired after load)
     #[serde(skip)]
     pub balance_source: Option<BalanceSource>,
+    /// Scheduled protocol upgrades from governance proposals
+    #[serde(default)]
+    pub scheduled_upgrades: Vec<ScheduledUpgrade>,
+    /// Compliance policies: asset_id -> policy_id
+    #[serde(default)]
+    pub compliance_policies: HashMap<AssetId, u8>,
+    /// Fee currencies: asset_id -> entry
+    #[serde(default)]
+    pub fee_currencies: HashMap<AssetId, FeeCurrencyEntry>,
+    /// Fee currencies pending removal: asset_id -> grace_period_end_block
+    #[serde(default)]
+    pub fee_currencies_pending_removal: HashMap<AssetId, u64>,
+    /// Fee currency cap in basis points
+    #[serde(default = "default_fee_currency_cap")]
+    pub fee_currency_cap_bps: u32,
+    /// Validator public keys: validator_id -> pubkey
+    #[serde(default)]
+    pub validator_pubkeys: HashMap<ValidatorId, [u8; 32]>,
 }
 
 impl Default for GovernanceManager {
@@ -355,6 +398,12 @@ impl GovernanceManager {
             events: Vec::new(),
             executor: None,
             balance_source: None,
+            scheduled_upgrades: Vec::new(),
+            compliance_policies: HashMap::new(),
+            fee_currencies: HashMap::new(),
+            fee_currencies_pending_removal: HashMap::new(),
+            fee_currency_cap_bps: 10_000,
+            validator_pubkeys: HashMap::new(),
         }
     }
 
@@ -720,28 +769,72 @@ impl GovernanceManager {
     // ── On-Chain Execution ──────────────────────────────────────────
 
     /// Apply the actual on-chain change from an executed proposal.
-    /// Parses `execution_data` as JSON and applies the change based on proposal type.
+    /// Updates governance-internal state for all proposal types.
+    /// Cross-system effects (consensus, fork manager, oracle, etc.) are handled
+    /// by the optional `ProposalExecutor` callback.
     fn apply_proposal(&mut self, proposal_id: u64) -> Result<(), GovernanceError> {
         let proposal = self.proposals.get(&proposal_id)
             .ok_or(GovernanceError::ProposalNotFound)?;
+        let current_block = self.current_block;
 
         match &proposal.proposal_type {
             ProposalType::ParameterChange { param_id, new_value } => {
-                // Execution data format: JSON with param updates
-                // e.g., {"max_block_size": 10000000}
-                if !proposal.execution_data.is_empty() {
-                    // Parse and apply — in a real system this would update consensus/protocol params
-                    let _params: serde_json::Value = serde_json::from_slice(&proposal.execution_data)
-                        .map_err(|_| GovernanceError::ExecutionFailed(format!("invalid execution_data JSON")))?;
-                    tracing::info!(param_id, new_value, "parameter change applied via governance");
+                // Parse new_value as JSON and apply governance-internal config updates.
+                // Cross-system param updates (consensus, validator, oracle) are handled
+                // by the executor callback.
+                match serde_json::from_str::<serde_json::Value>(new_value) {
+                    Ok(val) => {
+                        if param_id.starts_with("governance.") {
+                            if let Some(v) = val.get("validator_quorum_bps").and_then(|v| v.as_u64()) {
+                                self.config.validator_quorum_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("supply_quorum_bps").and_then(|v| v.as_u64()) {
+                                self.config.supply_quorum_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("treasury_quorum_bps").and_then(|v| v.as_u64()) {
+                                self.config.treasury_quorum_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("simple_majority_bps").and_then(|v| v.as_u64()) {
+                                self.config.simple_majority_bps = v as u32;
+                            }
+                            if let Some(v) = val.get("review_period_blocks").and_then(|v| v.as_u64()) {
+                                self.config.review_period_blocks = v;
+                            }
+                            if let Some(v) = val.get("voting_period_blocks").and_then(|v| v.as_u64()) {
+                                self.config.voting_period_blocks = v;
+                            }
+                            if let Some(v) = val.get("timelock_period_blocks").and_then(|v| v.as_u64()) {
+                                self.config.timelock_period_blocks = v;
+                            }
+                            if let Some(v) = val.get("execution_timeout_blocks").and_then(|v| v.as_u64()) {
+                                self.config.execution_timeout_blocks = v;
+                            }
+                            if let Some(v) = val.get("proposal_deposit").and_then(|v| v.as_u64()) {
+                                self.config.proposal_deposit = v as u128;
+                            }
+                            if let Some(v) = val.get("asset_registration_fee").and_then(|v| v.as_u64()) {
+                                self.config.asset_registration_fee = v as u128;
+                            }
+                            tracing::info!(param_id, new_value, "governance config updated via apply_proposal");
+                        } else {
+                            tracing::info!(param_id, new_value, "parameter change recorded; cross-system update via executor");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to parse ParameterChange new_value as JSON");
+                    }
                 }
             }
             ProposalType::ProtocolUpgrade { activation_block, changelog } => {
-                // Signal upgrade — consensus layer handles the actual activation
-                tracing::info!(activation_block, changelog, "protocol upgrade scheduled via governance");
+                self.scheduled_upgrades.push(ScheduledUpgrade {
+                    proposal_id,
+                    activation_block: *activation_block,
+                    changelog: changelog.clone(),
+                    applied: false,
+                });
+                tracing::info!(activation_block, changelog, "protocol upgrade recorded in governance state");
             }
             ProposalType::TreasurySpend { recipient, amount, asset_id } => {
-                // Transfer from treasury (proposal deposit address acts as treasury)
                 let treasury = proposal.proposer;
                 let current = self.call_balances.get(&treasury).copied().unwrap_or(0);
                 if current >= *amount {
@@ -752,37 +845,43 @@ impl GovernanceManager {
                 }
             }
             ProposalType::ValidatorSlash { validator_id, reason } => {
-                // Remove validator from active set
                 if let Some(addr) = self.validator_addresses.remove(validator_id) {
                     self.call_balances.remove(&addr);
+                    self.validator_pubkeys.remove(validator_id);
                     tracing::info!(validator_id, reason, "validator slashed via governance");
                 }
             }
             ProposalType::ComplianceUpdate { asset_id, new_policy } => {
-                // Update compliance — tracked via execution_data for external enforcement
+                self.compliance_policies.insert(*asset_id, *new_policy);
                 tracing::info!(asset_id, new_policy, "compliance policy updated via governance");
             }
             ProposalType::EmergencyPause { reason } => {
-                // Emergency pause is handled separately via signature collection
                 self.emergency_pause.is_paused = true;
                 self.emergency_pause.pause_reason = reason.clone();
                 tracing::info!(reason, "emergency pause activated via governance");
             }
             ProposalType::FeeCurrencyAdd { asset_id, name, oracle_price_key } => {
-                // Register new fee currency — tracked for oracle pricing
+                self.fee_currencies.insert(*asset_id, FeeCurrencyEntry {
+                    name: name.clone(),
+                    oracle_price_key: oracle_price_key.clone(),
+                    added_at_block: current_block,
+                });
+                // If previously pending removal, cancel it
+                self.fee_currencies_pending_removal.remove(asset_id);
                 tracing::info!(asset_id, name, oracle_price_key, "fee currency added via governance");
             }
             ProposalType::FeeCurrencyRemove { asset_id, grace_period_blocks } => {
-                // Mark currency for removal after grace period
-                tracing::info!(asset_id, grace_period_blocks, "fee currency removal scheduled");
+                let end_block = current_block.saturating_add(*grace_period_blocks);
+                self.fee_currencies_pending_removal.insert(*asset_id, end_block);
+                tracing::info!(asset_id, grace_period_blocks, end_block, "fee currency removal scheduled");
             }
             ProposalType::FeeCurrencyCap { new_cap_bps } => {
-                // Update fee currency cap
+                self.fee_currency_cap_bps = *new_cap_bps;
                 tracing::info!(new_cap_bps, "fee currency cap updated via governance");
             }
             ProposalType::ValidatorKeyRotation { validator_id, old_pubkey, new_pubkey, .. } => {
-                // Record rotation (actual key update is done by executor in call-rpc)
-                tracing::info!(validator_id, ?old_pubkey, ?new_pubkey, "validator key rotation scheduled");
+                self.validator_pubkeys.insert(*validator_id, *new_pubkey);
+                tracing::info!(validator_id, ?old_pubkey, ?new_pubkey, "validator key rotation applied");
             }
         }
 
