@@ -263,6 +263,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         namespace: b"callchain".to_vec(),
         min_healthy_peers: if config.mode == NodeMode::Validator { 1 } else { 0 },
         limits: NetworkLimits::default(),
+        ..Default::default()
     };
     node.start_network(p2p_config, identity_key).await?;
 

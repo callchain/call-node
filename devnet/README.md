@@ -1,33 +1,31 @@
 # Callchain Devnet
 
-4-node devnet running via Docker Compose.
+6-node devnet running via Docker Compose: 4 validators with BFT consensus + 2 full nodes syncing finalized blocks.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Docker Network: devnet                │
-│                                                         │
-│  node1  172.28.0.11  (bootstrap)                        │
-│    ├── RPC  :5005  WS :5006  P2P :51235  Metrics :9090  │
-│                                                         │
-│  node2  172.28.0.12                                     │
-│    ├── RPC  :5007  WS :5008  P2P :51236  Metrics :9091  │
-│                                                         │
-│  node3  172.28.0.13                                     │
-│    ├── RPC  :5009  WS :5010  P2P :51237  Metrics :9092  │
-│                                                         │
-│  node4  172.28.0.14                                     │
-│    ├── RPC  :5011  WS :5012  P2P :51238  Metrics :9093  │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                   Docker Network: devnet                            │
+│                                                                     │
+│  Validators (BFT consensus via commonware-consensus)               │
+│  ─────────────────────────────────────────────────                 │
+│  node1  172.28.0.11  Validator  RPC :5005/:5006  P2P :51235  Metrics :9090  │
+│  node2  172.28.0.12  Validator  RPC :5007/:5008  P2P :51236  Metrics :9091  │
+│  node3  172.28.0.13  Validator  RPC :5009/:5010  P2P :51237  Metrics :9092  │
+│  node4  172.28.0.14  Validator  RPC :5011/:5012  P2P :51238  Metrics :9093  │
+│                                                                     │
+│  Full Nodes (sync finalized blocks)                                │
+│  ─────────────────────────────────────────────────                 │
+│  node5  172.28.0.15  Full        RPC :5013/:5014  P2P :51239  Metrics :9094  │
+│  node6  172.28.0.16  Full        RPC :5015/:5016  P2P :51240  Metrics :9095  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
-
-All 4 nodes are validators with equal stake (100k CALL). Node1 is the bootstrap peer; nodes 2-4 connect to it.
 
 ## Quick Start
 
 ```bash
-# Start all 4 nodes (builds image first)
+# Start all 6 nodes (builds image first)
 ./devnet/scripts/start.sh
 
 # Check status
@@ -48,29 +46,41 @@ All 4 nodes are validators with equal stake (100k CALL). Node1 is the bootstrap 
 
 ## Port Mapping
 
-| Node | HTTP RPC | WS RPC | P2P    | Metrics |
-|------|----------|--------|--------|---------|
-| 1    | 5005     | 5006   | 51235  | 9090    |
-| 2    | 5007     | 5008   | 51236  | 9091    |
-| 3    | 5009     | 5010   | 51237  | 9092    |
-| 4    | 5011     | 5012   | 51238  | 9093    |
+| Node | Mode | HTTP RPC | WS RPC | P2P | Metrics |
+|------|------|----------|--------|-----|---------|
+| 1 | Validator | 5005 | 5006 | 51235 | 9090 |
+| 2 | Validator | 5007 | 5008 | 51236 | 9091 |
+| 3 | Validator | 5009 | 5010 | 51237 | 9092 |
+| 4 | Validator | 5011 | 5012 | 51238 | 9093 |
+| 5 | Full | 5013 | 5014 | 51239 | 9094 |
+| 6 | Full | 5015 | 5016 | 51240 | 9095 |
 
 ## Genesis
 
 The devnet genesis (`genesis.json`) initializes:
 
-- **4 validators**, each with 100k CALL self-stake
+- **4 validators**, each with 1M CALL self-stake
 - **4 funded accounts**, each with 1M CALL initial balance
-- Chain starts at timestamp 1000000
+- Chain starts at timestamp 1700000000000
 
 ### Validator Key Pairs (devnet only — deterministic)
 
-| Node | Address | Pubkey (hex) | Stake |
-|------|---------|--------------|-------|
-| 1 | `0x00...01` | `0x0101...01` (32 bytes) | 100k CALL |
-| 2 | `0x00...02` | `0x0202...02` (32 bytes) | 100k CALL |
-| 3 | `0x00...03` | `0x0303...03` (32 bytes) | 100k CALL |
-| 4 | `0x00...04` | `0x0404...04` (32 bytes) | 100k CALL |
+| Node | Address | Secp256k1 Privkey | Ed25519 Seed | Ed25519 Pubkey | Stake |
+|------|---------|-------------------|--------------|----------------|-------|
+| 1 | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | `ac09...ff80` | `0x00...01` | `4cb5...ba29` | 1M CALL |
+| 2 | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` | `59c6...690d` | `0x00...02` | `7422...2674` | 1M CALL |
+| 3 | `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` | `5de4...365a` | `0x00...03` | `f381...a54b` | 1M CALL |
+| 4 | `0x90F79bf6EB2c4f870365E785982E1f101E93b906` | `7c85...07a6` | `0x00...04` | `fd50...329b` | 1M CALL |
+
+## Single-Node Devnet
+
+For isolated testing without consensus overhead, use the single-node devnet:
+
+```bash
+./devnet/single/scripts/start.sh
+```
+
+See `devnet/single/README.md` for details.
 
 ## Troubleshooting
 

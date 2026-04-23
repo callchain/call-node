@@ -40,8 +40,6 @@ services:
       --config /etc/callchain/config.toml
       --genesis-path /etc/callchain/genesis.json
       --log-level info
-    depends_on:
-      - node1
     restart: unless-stopped
     networks:
       devnet:
@@ -64,8 +62,6 @@ services:
       --config /etc/callchain/config.toml
       --genesis-path /etc/callchain/genesis.json
       --log-level info
-    depends_on:
-      - node1
     restart: unless-stopped
     networks:
       devnet:
@@ -88,18 +84,62 @@ services:
       --config /etc/callchain/config.toml
       --genesis-path /etc/callchain/genesis.json
       --log-level info
-    depends_on:
-      - node1
     restart: unless-stopped
     networks:
       devnet:
         ipv4_address: 172.28.0.14
+
+  node5:
+    image: callchain/calld:latest
+    container_name: callchain-node5
+    ports:
+      - "5013:5005"    # HTTP RPC
+      - "5014:5006"    # WebSocket RPC
+      - "51239:51235"  # P2P
+      - "9094:9090"    # Metrics
+    volumes:
+      - node5-data:/var/lib/callchain
+      - ./genesis.json:/etc/callchain/genesis.json:ro
+      - ./configs/node5.toml:/etc/callchain/config.toml:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --log-level info
+    restart: unless-stopped
+    networks:
+      devnet:
+        ipv4_address: 172.28.0.15
+
+  node6:
+    image: callchain/calld:latest
+    container_name: callchain-node6
+    ports:
+      - "5015:5005"    # HTTP RPC
+      - "5016:5006"    # WebSocket RPC
+      - "51240:51235"  # P2P
+      - "9095:9090"    # Metrics
+    volumes:
+      - node6-data:/var/lib/callchain
+      - ./genesis.json:/etc/callchain/genesis.json:ro
+      - ./configs/node6.toml:/etc/callchain/config.toml:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --log-level info
+    restart: unless-stopped
+    networks:
+      devnet:
+        ipv4_address: 172.28.0.16
 
 volumes:
   node1-data:
   node2-data:
   node3-data:
   node4-data:
+  node5-data:
+  node6-data:
 
 networks:
   devnet:

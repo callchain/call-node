@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Show logs for devnet nodes
-# Usage: logs.sh [node1|node2|node3|node4] [--follow]
+# Usage: logs.sh [node1|node2|node3|node4|node5|node6] [--follow]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

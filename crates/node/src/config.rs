@@ -361,8 +361,8 @@ impl NodeConfig {
                 ));
             }
             if let Some(ref key) = self.keys.validator_key {
-                if key.len() != 128 {
-                    return Err("validator_key must be 64 hex bytes (128 hex chars)".into());
+                if key.len() != 64 {
+                    return Err("validator_key must be 32 bytes (64 hex chars)".into());
                 }
             }
             if let Some(ref path) = self.keys.validator_keystore {
@@ -419,7 +419,7 @@ mod tests {
     use clap::Parser;
 
     fn valid_key() -> String {
-        "a".repeat(128)
+        "a".repeat(64)
     }
 
     #[test]
@@ -470,7 +470,7 @@ mod tests {
 mode = "validator"
 
 [keys]
-validator_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+validator_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 identity_key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 [genesis]
@@ -628,7 +628,7 @@ level = "warn"
         config.keys.validator_key = Some("short".into());
         assert!(config.validate().is_err());
         let err = config.validate().unwrap_err();
-        assert!(err.contains("128 hex chars"));
+        assert!(err.contains("64 hex chars"));
 
         // Archive mode without key should pass
         let mut config = NodeConfig::default();

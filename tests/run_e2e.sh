@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "============================================"
-echo "Callchain Devnet E2E — Full Run"
+echo "Callchain Devnet E2E — 6-Node Validator Network"
 echo "============================================"
 echo
 
@@ -33,7 +33,7 @@ echo
 
 # ── Wait for nodes ──
 echo "[3/5] Waiting for nodes to be ready..."
-for port in 5005 5007 5009 5011; do
+for port in 5005 5007 5009 5011 5013 5015; do
     for i in {1..60}; do
         if curl -s --noproxy "*" -X POST "http://127.0.0.1:$port" \
             -H "Content-Type: application/json" \

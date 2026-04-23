@@ -1,12 +1,18 @@
+mode = "validator"
+
+[keys]
+validator_key = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+identity_key = "0000000000000000000000000000000000000000000000000000000000000001"
+
+[p2p]
+listen_addr = "0.0.0.0:51235"
+bootstrap_peers = "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674@172.28.0.12:51235,f381626e41e7027ea431bfe3009e94bdd25a746beec468948d6c3c7c5dc9a54b@172.28.0.13:51235,fd50b8e3b144ea244fbf7737f550bc8dd0c2650bbc1aada833ca17ff8dbf329b@172.28.0.14:51235"
+
 [storage]
 data_dir = "/var/lib/callchain"
 
 [genesis]
 path = "/etc/callchain/genesis.json"
-
-[p2p]
-listen_addr = "0.0.0.0:51235"
-bootstrap_peers = ""
 
 [rpc]
 http_addr = "0.0.0.0:5005"
@@ -19,5 +25,3 @@ addr = "0.0.0.0:9090"
 [logging]
 level = "info"
 format = "text"
-
-mode = "Full"
