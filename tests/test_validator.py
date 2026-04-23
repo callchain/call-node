@@ -81,26 +81,31 @@ def _next_nonce():
     return int(time.time() * 1000) % 1_000_000_000
 
 
-# ── Tests ─────────────────────────────────────────────────────────────
+def _balance_int(node, asset_id, address):
+    """Return balance as an integer, defaulting to 0 on error."""
+    try:
+        result = node.get_balance(asset_id, address)
+        bal = result.get("balance") if isinstance(result, dict) else result
+        return int(bal)
+    except Exception:
+        return 0
 
 
-def test_add_validator(cluster, accounts):
-    """Stake a new validator and verify it appears on all 6 nodes."""
+# ── Tests: Validator Join ─────────────────────────────────────────────
+
+
+def test_validator_join(cluster, accounts):
+    """Full join flow: stake CALL, verify validator appears, verify escrow holds stake."""
     sender = accounts[3]
     nonce = _next_nonce()
     ed25519_pubkey_hex = "0x" + "aa" * 32
     self_stake = 1_000_000 * 10**18
 
-    # Capture initial validator count from every node
-    initial_counts = []
-    for i, node in enumerate(cluster.nodes):
-        try:
-            validators = node.validator_list()
-            initial_counts.append(len(validators))
-            print(f"  node{i+1} initial validators: {len(validators)}")
-        except Exception as e:
-            initial_counts.append(-1)
-            print(f"  node{i+1} initial validator query failed: {e}")
+    # Capture pre-state on node1
+    validators_before = cluster.nodes[0].validator_list()
+    sender_bal_before = _balance_int(cluster.nodes[0], 0, sender["address"])
+    escrow_bal_before = _balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    print(f"  pre: validators={len(validators_before)}, sender_bal={sender_bal_before}, escrow={escrow_bal_before}")
 
     payload = sign_validator_stake(
         private_key=sender["private_key"],
@@ -134,29 +139,53 @@ def test_add_validator(cluster, accounts):
             new_validator.get("selfStake") == str(self_stake),
             f"node{i+1}: selfStake mismatch"
         )
-        # Verify escrow balance holds the staked amount
-        escrow_result = node.get_balance(1, STAKING_ESCROW)
-        escrow_bal = escrow_result.get("balance") if isinstance(escrow_result, dict) else escrow_result
+        # Verify escrow balance increased by stake amount
+        escrow_bal = _balance_int(node, 0, STAKING_ESCROW)
         assert_true(
-            int(escrow_bal) >= self_stake,
-            f"node{i+1}: escrow balance {escrow_bal} < stake {self_stake}"
+            escrow_bal >= escrow_bal_before + self_stake,
+            f"node{i+1}: escrow {escrow_bal} < before {escrow_bal_before} + stake {self_stake}"
         )
-        print(f"  node{i+1}: new validator confirmed (id={new_validator.get('validatorId')}), escrow={escrow_bal}")
+        print(f"  node{i+1}: validator id={new_validator.get('validatorId')} confirmed, escrow={escrow_bal}")
 
-    print("  [OK] validator added and synced to all nodes")
+    # Verify sender balance decreased (fees + stake deducted)
+    sender_bal_after = _balance_int(cluster.nodes[0], 0, sender["address"])
+    assert_true(
+        sender_bal_after < sender_bal_before,
+        f"sender balance did not decrease: {sender_bal_before} -> {sender_bal_after}"
+    )
+    print(f"  sender balance: {sender_bal_before} -> {sender_bal_after} (stake={self_stake})")
+    print("  [OK] validator joined — staked, escrowed, synced to all nodes")
 
 
-def test_remove_validator(cluster, accounts):
-    """Unstake an existing validator and verify it is marked unbonding on all 6 nodes."""
+# ── Tests: Validator Leave ────────────────────────────────────────────
+
+
+def test_validator_leave(cluster, accounts):
+    """Full leave flow: unstake existing validator, verify unbonding, reject early claim."""
     sender = accounts[0]
     nonce = _next_nonce()
     validator_id = 0
 
-    # Verify the validator exists on every node before unstaking
-    for i, node in enumerate(cluster.nodes):
-        validators = node.validator_list()
-        target = next((v for v in validators if v.get("validatorId") == validator_id), None)
-        assert_true(target is not None, f"node{i+1}: validator {validator_id} not found before unstake")
+    # Verify the validator exists before leaving
+    validators_before = cluster.nodes[0].validator_list()
+    target = next((v for v in validators_before if v.get("validatorId") == validator_id), None)
+    assert_true(target is not None, f"validator {validator_id} not found before unstake")
+    stake_amount = int(target.get("selfStake", "0"))
+    escrow_bal_before = _balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    print(f"  pre: validator {validator_id} found, selfStake={stake_amount}, escrow={escrow_bal_before}")
+
+    # Reject unstake from non-owner
+    bad_payload = sign_validator_unstake(
+        private_key=accounts[1]["private_key"],
+        sender=accounts[1]["address"],
+        nonce=_next_nonce(),
+        validator_id=validator_id,
+    )
+    try:
+        cluster.nodes[0].validator_unstake(bad_payload)
+        print("  [WARN] non-owner unstake accepted")
+    except RuntimeError as e:
+        print(f"  [OK] non-owner unstake rejected: {e}")
 
     payload = sign_validator_unstake(
         private_key=sender["private_key"],
@@ -177,23 +206,28 @@ def test_remove_validator(cluster, accounts):
     current_height = int(cluster.nodes[0].block_number(), 16)
     wait_for_height(cluster.nodes[0], current_height + 1)
 
-    # Verify every node sees the validator as unbonding
+    # Verify every node sees the validator as unbonding and escrow still holds stake
     for i, node in enumerate(cluster.nodes):
         validators = node.validator_list()
-        target = next((v for v in validators if v.get("validatorId") == validator_id), None)
-        assert_true(target is not None, f"node{i+1}: validator {validator_id} not found after unstake")
+        target_after = next((v for v in validators if v.get("validatorId") == validator_id), None)
+        assert_true(target_after is not None, f"node{i+1}: validator {validator_id} not found after unstake")
         assert_true(
-            target.get("isUnbonding") is True,
+            target_after.get("isUnbonding") is True,
             f"node{i+1}: validator {validator_id} should be unbonding"
         )
-        print(f"  node{i+1}: validator {validator_id} is unbonding")
+        # Escrow should still hold the stake (not yet returned)
+        escrow_bal = _balance_int(node, 0, STAKING_ESCROW)
+        assert_true(
+            escrow_bal >= stake_amount,
+            f"node{i+1}: escrow {escrow_bal} < stake {stake_amount} during unbonding"
+        )
+        print(f"  node{i+1}: validator {validator_id} is unbonding, escrow={escrow_bal}")
 
     # Attempt to claim before unbonding period elapsed — should fail
-    claim_nonce = _next_nonce()
     claim_payload = sign_validator_claim_unbonded(
         private_key=sender["private_key"],
         sender=sender["address"],
-        nonce=claim_nonce,
+        nonce=_next_nonce(),
         validator_id=validator_id,
     )
     try:
@@ -203,7 +237,6 @@ def test_remove_validator(cluster, accounts):
             claim_receipt = wait_for_tx(cluster, claim_tx_hash, timeout=30)
             status = claim_receipt.get("status", "N/A") if claim_receipt else "no receipt"
             print(f"  claim tx status (before period): {status}")
-            # Expect failure — unbonding period not elapsed
             assert_true(
                 claim_receipt is None or status != "success",
                 "claim before unbonding period should fail"
@@ -211,14 +244,14 @@ def test_remove_validator(cluster, accounts):
     except RuntimeError as e:
         print(f"  [OK] claim before period rejected: {e}")
 
-    print("  [OK] validator removed and synced to all nodes")
+    print("  [OK] validator left — unbonding started, escrow locked, early claim rejected")
 
 
 # ── Main ──────────────────────────────────────────────────────────────
 
 TEST_FUNCTIONS = [
-    test_add_validator,
-    test_remove_validator,
+    test_validator_join,
+    test_validator_leave,
 ]
 
 

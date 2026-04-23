@@ -428,19 +428,17 @@ def test_bridge_withdraw_error_handling(cluster, accounts):
 # ── Tests: Validator Management ───────────────────────────────────────
 
 
-def test_validator_stake(cluster, accounts):
-    """Stake a new validator via call_validatorStake."""
-    sender = accounts[3]  # account 3 stakes itself as a new validator
+def test_validator_join(cluster, accounts):
+    """Validator joins via ValidatorStake — verify registration and escrow."""
+    sender = accounts[3]
     nonce = _next_nonce()
-
-    # Use a deterministic ed25519 pubkey for testing
     ed25519_pubkey_hex = "0x" + "aa" * 32
-    self_stake = 1_000_000 * 10**18  # 1M CALL (matches min_self_stake)
+    self_stake = 1_000_000 * 10**18
 
-    # Verify initial validator count
     initial_validators = cluster.nodes[0].validator_list()
-    initial_count = len(initial_validators)
-    print(f"  initial validators: {initial_count}")
+    sender_bal_before = get_balance_int(cluster.nodes[0], 0, sender["address"])
+    escrow_bal_before = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    print(f"  pre: validators={len(initial_validators)}, sender_bal={sender_bal_before}, escrow={escrow_bal_before}")
 
     payload = sign_validator_stake(
         private_key=sender["private_key"],
@@ -455,22 +453,17 @@ def test_validator_stake(cluster, accounts):
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted stake tx: {tx_hash}")
 
-    # Wait for block inclusion
     receipt = wait_for_tx(cluster, tx_hash, timeout=30)
     assert_true(receipt is not None, "transaction receipt not found")
     print(f"  receipt status: {receipt.get('status', 'N/A')}")
 
-    # Wait for a new block to ensure persistence
     current_height = int(cluster.nodes[0].block_number(), 16)
     wait_for_height(cluster.nodes[0], current_height + 1)
 
-    # Verify validator count increased
     final_validators = cluster.nodes[0].validator_list()
-    final_count = len(final_validators)
-    assert_true(final_count > initial_count,
-                f"validator count did not increase: {initial_count} -> {final_count}")
+    assert_true(len(final_validators) > len(initial_validators),
+                f"validator count did not increase")
 
-    # Verify the new validator appears in the list
     new_validator = next(
         (v for v in final_validators if v.get("ed25519Pubkey", "").lower() == ed25519_pubkey_hex.lower()),
         None
@@ -478,24 +471,44 @@ def test_validator_stake(cluster, accounts):
     assert_true(new_validator is not None, "new validator not found in list")
     assert_true(new_validator.get("selfStake") == str(self_stake), "selfStake mismatch")
 
-    # Verify escrow holds the staked amount
-    escrow_result = cluster.nodes[0].get_balance(1, STAKING_ESCROW)
-    escrow_bal = escrow_result.get("balance") if isinstance(escrow_result, dict) else escrow_result
-    assert_true(int(escrow_bal) >= self_stake, f"escrow balance {escrow_bal} < stake {self_stake}")
-    print(f"  [OK] validator staked — count {initial_count} -> {final_count}, escrow={escrow_bal}, new validator_id: {new_validator.get('validatorId')}")
+    # Verify escrow holds the staked amount (asset_id 0 per Rust code)
+    escrow_bal = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    assert_true(escrow_bal >= escrow_bal_before + self_stake,
+                f"escrow balance {escrow_bal} < before {escrow_bal_before} + stake {self_stake}")
+
+    # Verify sender balance decreased
+    sender_bal_after = get_balance_int(cluster.nodes[0], 0, sender["address"])
+    assert_true(sender_bal_after < sender_bal_before,
+                f"sender balance did not decrease: {sender_bal_before} -> {sender_bal_after}")
+    print(f"  [OK] validator joined — escrow={escrow_bal}, sender {sender_bal_before} -> {sender_bal_after}")
 
 
-def test_validator_unstake(cluster, accounts):
-    """Unstake an existing validator via call_validatorUnstake."""
-    sender = accounts[0]  # account 0 is genesis validator 0
+def test_validator_leave(cluster, accounts):
+    """Validator leaves via ValidatorUnstake — verify unbonding and locked escrow."""
+    sender = accounts[0]
     nonce = _next_nonce()
-    validator_id = 0  # unstake the first genesis validator
+    validator_id = 0
 
-    # Verify the validator exists before unstaking
+    # Verify the validator exists before leaving
     initial_validators = cluster.nodes[0].validator_list()
     target = next((v for v in initial_validators if v.get("validatorId") == validator_id), None)
     assert_true(target is not None, f"validator {validator_id} not found")
-    print(f"  target validator {validator_id} found, selfStake={target.get('selfStake')}")
+    stake_amount = int(target.get("selfStake", "0"))
+    escrow_bal_before = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    print(f"  pre: validator {validator_id} selfStake={stake_amount}, escrow={escrow_bal_before}")
+
+    # Reject non-owner unstake
+    try:
+        bad = sign_validator_unstake(
+            private_key=accounts[1]["private_key"],
+            sender=accounts[1]["address"],
+            nonce=_next_nonce(),
+            validator_id=validator_id,
+        )
+        cluster.nodes[0].validator_unstake(bad)
+        print("  [WARN] non-owner unstake accepted")
+    except RuntimeError as e:
+        print(f"  [OK] non-owner unstake rejected: {e}")
 
     payload = sign_validator_unstake(
         private_key=sender["private_key"],
@@ -509,21 +522,24 @@ def test_validator_unstake(cluster, accounts):
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted unstake tx: {tx_hash}")
 
-    # Wait for block inclusion
     receipt = wait_for_tx(cluster, tx_hash, timeout=30)
     assert_true(receipt is not None, "transaction receipt not found")
     print(f"  receipt status: {receipt.get('status', 'N/A')}")
 
-    # Wait for a new block to ensure persistence
     current_height = int(cluster.nodes[0].block_number(), 16)
     wait_for_height(cluster.nodes[0], current_height + 1)
 
-    # Verify the validator is now unbonding
+    # Verify validator is unbonding and escrow still holds stake
     final_validators = cluster.nodes[0].validator_list()
     target_after = next((v for v in final_validators if v.get("validatorId") == validator_id), None)
     assert_true(target_after is not None, f"validator {validator_id} not found after unstake")
     assert_true(target_after.get("isUnbonding") is True,
                 f"validator {validator_id} should be unbonding")
+
+    escrow_bal_after = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    assert_true(escrow_bal_after >= stake_amount,
+                f"escrow {escrow_bal_after} < stake {stake_amount} during unbonding")
+    print(f"  escrow still locked: {escrow_bal_after}")
 
     # Attempt claim before unbonding period — should fail
     claim_payload = sign_validator_claim_unbonded(
@@ -544,7 +560,7 @@ def test_validator_unstake(cluster, accounts):
     except RuntimeError as e:
         print(f"  [OK] claim before period rejected: {e}")
 
-    print(f"  [OK] validator {validator_id} unstaked — isUnbonding=True")
+    print(f"  [OK] validator {validator_id} left — unbonding, escrow locked")
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -568,8 +584,8 @@ TEST_FUNCTIONS = [
     test_compliance_policy,
     test_bridge_deposit_error_handling,
     test_bridge_withdraw_error_handling,
-    test_validator_stake,
-    test_validator_unstake,
+    test_validator_join,
+    test_validator_leave,
 ]
 
 
