@@ -1684,6 +1684,73 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // call_withdrawFromEvm
+    module
+        .register_async_method("call_withdrawFromEvm", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            let to_str = call_obj.get("to")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'to' field".into()))?;
+            let to = to_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            let asset_id = call_obj.get("assetId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
+
+            let amount_str = call_obj.get("amount")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'amount' field (must be string)".into()))?;
+            let amount: u128 = amount_str
+                .parse()
+                .map_err(|_| invalid_params("invalid amount: must be a numeric string".into()))?;
+
+            let sig_hex = call_obj.get("signature").and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes".into()));
+            }
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
+
+            let nonce = call_obj.get("nonce").and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+
+            let instructions = vec![call_protocol::Instruction::WithdrawFromEvm {
+                asset_id,
+                to,
+                amount,
+            }];
+
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 25_000,
+                max_fee: 25_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
+                "status": "pending",
+            }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
     // ── Light Client Bridge RPC Methods ──────────────────────────────
 
     // call_lightClientBridgeDeposit

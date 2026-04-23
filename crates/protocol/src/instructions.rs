@@ -78,6 +78,12 @@ pub enum Instruction {
         to: Address,
         amount: Balance,
     },
+    /// Withdraw EVM balance back to protocol (native CALL or ERC-20 wrapped asset)
+    WithdrawFromEvm {
+        asset_id: AssetId,
+        to: Address,
+        amount: Balance,
+    },
     UpdateCompliance {
         asset_id: AssetId,
         target: Address,
@@ -657,6 +663,11 @@ pub fn execute_instruction(
         Instruction::BridgeToEvm { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "BridgeToEvm must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::WithdrawFromEvm { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "WithdrawFromEvm must be executed inline in Block::execute".into(),
             ))
         }
         Instruction::ValidatorStake { .. } => {

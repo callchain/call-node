@@ -160,6 +160,14 @@ class CallchainNode:
         """
         return self._call("call_bridgeToEvm", [params])
 
+    def withdraw_from_evm(self, params: Dict) -> Dict:
+        """Withdraw EVM balance to protocol via call_withdrawFromEvm.
+
+        params must include:
+          sender, to, assetId, amount, nonce, signature
+        """
+        return self._call("call_withdrawFromEvm", [params])
+
     # ── Validator ─────────────────────────────────────────────────────
 
     def validator_stake(self, params: Dict) -> Dict:

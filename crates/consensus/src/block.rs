@@ -838,7 +838,7 @@ fn execute_agent_instruction(
 // ── Bridge instruction helpers ────────────────────────────────────────
 
 fn is_bridge_instruction(instr: &Instruction) -> bool {
-    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ExternalBridgeWithdraw { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. } | Instruction::BridgeToEvm { .. })
+    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ExternalBridgeWithdraw { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. } | Instruction::BridgeToEvm { .. } | Instruction::WithdrawFromEvm { .. })
 }
 
 fn execute_bridge_instruction(
@@ -1100,6 +1100,105 @@ fn execute_bridge_instruction(
                     } else {
                         Err(ConsensusError::InvalidBlock(
                             "BridgeToEvm: EVM operation reverted".into(),
+                        ))
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Instruction::WithdrawFromEvm {
+            asset_id,
+            to,
+            amount,
+        } => {
+            // 1. Reject virtual USD (asset_id == 0)
+            if *asset_id == 0 {
+                return Err(ConsensusError::InvalidBlock(
+                    "WithdrawFromEvm: asset 0 (USD) is not bridgeable".into(),
+                ));
+            }
+
+            // 2. Validate asset is registered
+            if registry.get_asset(*asset_id).is_none() {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "WithdrawFromEvm: asset {} not registered",
+                    asset_id
+                )));
+            }
+
+            // 3. Check bridge not paused
+            if bridge_state.is_paused(*asset_id) {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "WithdrawFromEvm: bridge paused for asset {}",
+                    asset_id
+                )));
+            }
+
+            // 4. Check per-tx limit
+            bridge_state
+                .check_per_tx_limit(*amount, config.max_per_tx)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e}")))?;
+
+            // 5. Check daily limit
+            bridge_state
+                .check_and_update_daily_limit(
+                    *asset_id,
+                    *amount,
+                    config.daily_limit_per_asset,
+                    current_block_height,
+                    config.blocks_per_day,
+                )
+                .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e}")))?;
+
+            let amount_u256 = call_evm::U256::from(*amount);
+
+            // 6. Withdraw from EVM
+            let exec_result = if *asset_id == 1 {
+                // CALL: transfer from native EVM balance
+                let evm_balance = evm_state.get_balance(&sender);
+                if evm_balance < amount_u256 {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "WithdrawFromEvm: insufficient EVM native balance for CALL: have {}, need {}",
+                        evm_balance, amount_u256
+                    )));
+                }
+                evm_state.set_balance(sender, evm_balance - amount_u256);
+                Ok(call_evm::EvmExecutionResult {
+                    success: true,
+                    gas_used: 21_000,
+                    output: call_evm::Bytes::default(),
+                    logs: vec![],
+                })
+            } else {
+                // User-defined asset: burn ERC-20 wrapped token
+                let Some(contract_addr) = registry.get_evm_contract_address(*asset_id) else {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "WithdrawFromEvm: no EVM contract registered for asset {}",
+                        asset_id
+                    )));
+                };
+                evm_executor
+                    .evm_call_bridge_burn(
+                        sender,
+                        contract_addr,
+                        evm_state,
+                        amount_u256,
+                    )
+                    .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e:?}")))
+            };
+
+            match exec_result {
+                Ok(execution) => {
+                    if execution.success {
+                        // 7. Credit protocol balance
+                        balances
+                            .credit_balance(*asset_id, *to, *amount)
+                            .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e}")))?;
+                        bridge_state.record_withdrawal(*asset_id, *amount);
+                        Ok(InstructionResult::Success)
+                    } else {
+                        Err(ConsensusError::InvalidBlock(
+                            "WithdrawFromEvm: EVM operation reverted".into(),
                         ))
                     }
                 }
