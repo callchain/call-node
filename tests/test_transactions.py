@@ -29,6 +29,8 @@ from signer import (
     sign_governance_proposal,
     sign_governance_vote,
     sign_payment,
+    sign_validator_stake,
+    sign_validator_unstake,
 )
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -419,6 +421,103 @@ def test_bridge_withdraw_error_handling(cluster, accounts):
         print("  [OK] bridge withdraw error handling works")
 
 
+# ── Tests: Validator Management ───────────────────────────────────────
+
+
+def test_validator_stake(cluster, accounts):
+    """Stake a new validator via call_validatorStake."""
+    sender = accounts[3]  # account 3 stakes itself as a new validator
+    nonce = _next_nonce()
+
+    # Use a deterministic ed25519 pubkey for testing
+    ed25519_pubkey_hex = "0x" + "aa" * 32
+    self_stake = 1_000_000 * 10**18  # 1M CALL (matches min_self_stake)
+
+    # Verify initial validator count
+    initial_validators = cluster.nodes[0].validator_list()
+    initial_count = len(initial_validators)
+    print(f"  initial validators: {initial_count}")
+
+    payload = sign_validator_stake(
+        private_key=sender["private_key"],
+        sender=sender["address"],
+        nonce=nonce,
+        ed25519_pubkey_hex=ed25519_pubkey_hex,
+        self_stake=self_stake,
+    )
+
+    result = cluster.nodes[0].validator_stake(payload)
+    tx_hash = result.get("txHash")
+    assert_true(tx_hash, f"missing txHash in result: {result}")
+    print(f"  submitted stake tx: {tx_hash}")
+
+    # Wait for block inclusion
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "transaction receipt not found")
+    print(f"  receipt status: {receipt.get('status', 'N/A')}")
+
+    # Wait for a new block to ensure persistence
+    current_height = int(cluster.nodes[0].block_number(), 16)
+    wait_for_height(cluster.nodes[0], current_height + 1)
+
+    # Verify validator count increased
+    final_validators = cluster.nodes[0].validator_list()
+    final_count = len(final_validators)
+    assert_true(final_count > initial_count,
+                f"validator count did not increase: {initial_count} -> {final_count}")
+
+    # Verify the new validator appears in the list
+    new_validator = next(
+        (v for v in final_validators if v.get("ed25519Pubkey", "").lower() == ed25519_pubkey_hex.lower()),
+        None
+    )
+    assert_true(new_validator is not None, "new validator not found in list")
+    assert_true(new_validator.get("selfStake") == str(self_stake), "selfStake mismatch")
+    print(f"  [OK] validator staked — count {initial_count} -> {final_count}, new validator_id: {new_validator.get('validatorId')}")
+
+
+def test_validator_unstake(cluster, accounts):
+    """Unstake an existing validator via call_validatorUnstake."""
+    sender = accounts[0]  # account 0 is genesis validator 0
+    nonce = _next_nonce()
+    validator_id = 0  # unstake the first genesis validator
+
+    # Verify the validator exists before unstaking
+    initial_validators = cluster.nodes[0].validator_list()
+    target = next((v for v in initial_validators if v.get("validatorId") == validator_id), None)
+    assert_true(target is not None, f"validator {validator_id} not found")
+    print(f"  target validator {validator_id} found, selfStake={target.get('selfStake')}")
+
+    payload = sign_validator_unstake(
+        private_key=sender["private_key"],
+        sender=sender["address"],
+        nonce=nonce,
+        validator_id=validator_id,
+    )
+
+    result = cluster.nodes[0].validator_unstake(payload)
+    tx_hash = result.get("txHash")
+    assert_true(tx_hash, f"missing txHash in result: {result}")
+    print(f"  submitted unstake tx: {tx_hash}")
+
+    # Wait for block inclusion
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "transaction receipt not found")
+    print(f"  receipt status: {receipt.get('status', 'N/A')}")
+
+    # Wait for a new block to ensure persistence
+    current_height = int(cluster.nodes[0].block_number(), 16)
+    wait_for_height(cluster.nodes[0], current_height + 1)
+
+    # Verify the validator is now unbonding
+    final_validators = cluster.nodes[0].validator_list()
+    target_after = next((v for v in final_validators if v.get("validatorId") == validator_id), None)
+    assert_true(target_after is not None, f"validator {validator_id} not found after unstake")
+    assert_true(target_after.get("isUnbonding") is True,
+                f"validator {validator_id} should be unbonding")
+    print(f"  [OK] validator {validator_id} unstaked — isUnbonding=True")
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 TEST_FUNCTIONS = [
@@ -440,6 +539,8 @@ TEST_FUNCTIONS = [
     test_compliance_policy,
     test_bridge_deposit_error_handling,
     test_bridge_withdraw_error_handling,
+    test_validator_stake,
+    test_validator_unstake,
 ]
 
 

@@ -196,7 +196,7 @@ impl SimplexConsensus {
     /// The caller is responsible for providing the correct state handles.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_block(
-        &self,
+        &mut self,
         block: &Block,
         balances: &mut call_protocol::balances::BalanceState,
         registry: &mut call_protocol::registry::AssetRegistry,
@@ -220,6 +220,7 @@ impl SimplexConsensus {
             None,
             None,
             None, None, None, None,
+            Some(&mut self.validators),
         )
     }
 

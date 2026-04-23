@@ -248,3 +248,57 @@ def sign_governance_vote(
         "vote": vote,
         "signature": signature,
     }
+
+
+def sign_validator_stake(
+    private_key: str,
+    sender: str,
+    nonce: int,
+    ed25519_pubkey_hex: str,
+    self_stake: int,
+    gas_limit: int = 200_000,
+    max_fee: int = 2_000_000,
+) -> dict:
+    """Build a signed validator stake payload for call_validatorStake RPC."""
+    pubkey_bytes = bytes.fromhex(ed25519_pubkey_hex.removeprefix("0x"))
+    instructions = [{
+        "ValidatorStake": {
+            "ed25519_pubkey": list(pubkey_bytes),
+            "self_stake": self_stake,
+        }
+    }]
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    signature = sign_raw(private_key, tx_hash)
+
+    return {
+        "sender": sender,
+        "nonce": nonce,
+        "ed25519Pubkey": ed25519_pubkey_hex,
+        "selfStake": str(self_stake),
+        "signature": signature,
+    }
+
+
+def sign_validator_unstake(
+    private_key: str,
+    sender: str,
+    nonce: int,
+    validator_id: int,
+    gas_limit: int = 100_000,
+    max_fee: int = 1_000_000,
+) -> dict:
+    """Build a signed validator unstake payload for call_validatorUnstake RPC."""
+    instructions = [{
+        "ValidatorUnstake": {
+            "validator_id": validator_id,
+        }
+    }]
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    signature = sign_raw(private_key, tx_hash)
+
+    return {
+        "sender": sender,
+        "nonce": nonce,
+        "validatorId": validator_id,
+        "signature": signature,
+    }

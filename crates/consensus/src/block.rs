@@ -16,7 +16,7 @@ use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::validator::ConsensusError;
+use crate::validator::{ConsensusError, ValidatorStateManager};
 use crate::ForkManager;
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
@@ -266,6 +266,7 @@ impl Block {
         bridge_config: Option<&BridgeConfig>,
         validators: Option<&[Address]>,
         smart_accounts: Option<&call_protocol::smart_accounts::SmartAccountRegistry>,
+        mut validator_state: Option<&mut ValidatorStateManager>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -327,21 +328,26 @@ impl Block {
                 )));
             }
 
-            // Separate instructions by type: bridge, agent, regular
+            // Separate instructions by type: bridge, agent, validator, regular
             let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
                 .instructions
                 .iter()
                 .cloned()
                 .partition(|i| is_bridge_instruction(i));
-            let (agent_instrs, other_instrs): (Vec<_>, Vec<_>) = non_bridge
+            let (agent_instrs, non_agent): (Vec<_>, Vec<_>) = non_bridge
                 .iter()
                 .cloned()
                 .partition(|i| is_agent_instruction(i));
+            let (validator_instrs, other_instrs): (Vec<_>, Vec<_>) = non_agent
+                .iter()
+                .cloned()
+                .partition(|i| is_validator_instruction(i));
 
             // Take snapshots for atomic rollback
             let balance_snapshot = balances.clone();
             let evm_snapshot = evm_state.clone();
             let bridge_snapshot = bridge_state.clone();
+            let validator_snapshot = validator_state.as_ref().map(|vs| (*vs).clone());
             let mut tx_results = Vec::new();
             let mut tx_agent_events = Vec::new();
 
@@ -423,6 +429,25 @@ impl Block {
                     }
                 }
 
+                // Execute validator instructions inline
+                if !validator_instrs.is_empty() {
+                    let vs = validator_state.as_mut().ok_or_else(|| {
+                        ConsensusError::InvalidBlock(
+                            "validator instructions require validator state".into(),
+                        )
+                    })?;
+                    for instr in &validator_instrs {
+                        let r = execute_validator_instruction(
+                            instr,
+                            tx.sender,
+                            balances,
+                            vs,
+                            current_block_height,
+                        )?;
+                        tx_results.push(r);
+                    }
+                }
+
                 Ok(())
             })();
 
@@ -430,6 +455,11 @@ impl Block {
                 *balances = balance_snapshot;
                 *evm_state = evm_snapshot;
                 *bridge_state = bridge_snapshot;
+                if let Some(ref snapshot) = validator_snapshot {
+                    if let Some(ref mut vs) = validator_state {
+                        **vs = snapshot.clone();
+                    }
+                }
                 return Err(e);
             }
 
@@ -971,6 +1001,58 @@ fn execute_bridge_instruction(
     }
 }
 
+// ── Validator instruction helpers ─────────────────────────────────────
+
+fn is_validator_instruction(instr: &Instruction) -> bool {
+    matches!(
+        instr,
+        Instruction::ValidatorStake { .. } | Instruction::ValidatorUnstake { .. }
+    )
+}
+
+fn execute_validator_instruction(
+    instruction: &Instruction,
+    sender: call_primitives::Address,
+    balances: &mut BalanceState,
+    validator_state: &mut ValidatorStateManager,
+    current_block_height: u64,
+) -> Result<InstructionResult, ConsensusError> {
+    match instruction {
+        Instruction::ValidatorStake {
+            ed25519_pubkey,
+            self_stake,
+        } => {
+            // Verify sender has sufficient balance
+            let balance = balances.get_balance(0, &sender);
+            if balance < *self_stake {
+                return Err(ConsensusError::InvalidBlock(
+                    "validator stake: insufficient balance".into(),
+                ));
+            }
+            // Deduct stake from sender
+            balances
+                .deduct_balance(0, sender, *self_stake)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("validator stake: {e}")))?;
+            // Register validator
+            validator_state.set_current_block(current_block_height);
+            validator_state
+                .stake(sender, *ed25519_pubkey, *self_stake)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("validator stake: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::ValidatorUnstake { validator_id } => {
+            validator_state.set_current_block(current_block_height);
+            validator_state
+                .unstake(*validator_id)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("validator unstake: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        _ => Err(ConsensusError::InvalidBlock(
+            "not a validator instruction".into(),
+        )),
+    }
+}
+
 // ── Block Execution Result ────────────────────────────────────────────
 
 /// Result of executing all transactions in a block
@@ -1407,6 +1489,7 @@ mod tests {
                 Some(&bridge_config),
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -1482,6 +1565,7 @@ mod tests {
                 None,
                 None,
                 Some(&bridge_config),
+                None,
                 None,
                 None,
             )
@@ -1621,6 +1705,7 @@ mod tests {
                 Some(&bridge_config),
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -1703,6 +1788,7 @@ mod tests {
             None,
             None,
             Some(&bridge_config),
+            None,
             None,
             None,
         );

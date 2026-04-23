@@ -58,15 +58,17 @@ BASIC_OK=true
 STRESS_OK=true
 
 TX_OK=true
+VAL_OK=true
 
 python3 test_basic.py || BASIC_OK=false
 python3 test_stress.py || STRESS_OK=false
 python3 test_transactions.py || TX_OK=false
+python3 test_validator.py || VAL_OK=false
 
 # ── Report ──
 echo
 echo "============================================"
-if $BASIC_OK && $STRESS_OK && $TX_OK; then
+if $BASIC_OK && $STRESS_OK && $TX_OK && $VAL_OK; then
     echo "All tests PASSED"
     EXIT_CODE=0
 else

@@ -152,6 +152,21 @@ class CallchainNode:
     def bridge_submit_withdraw(self, params: Dict) -> Dict:
         return self._call("call_bridgeSubmitWithdraw", [params])
 
+    # ── Validator ─────────────────────────────────────────────────────
+
+    def validator_stake(self, params: Dict) -> Dict:
+        """Submit a validator stake transaction via call_validatorStake."""
+        return self._call("call_validatorStake", [params])
+
+    def validator_unstake(self, params: Dict) -> Dict:
+        """Submit a validator unstake transaction via call_validatorUnstake."""
+        return self._call("call_validatorUnstake", [params])
+
+    def validator_list(self) -> List[Dict]:
+        """List all validators via call_validatorList."""
+        result = self._call("call_validatorList")
+        return result.get("validators", []) if isinstance(result, dict) else result
+
     # ── Metrics ───────────────────────────────────────────────────────
 
     def get_metrics(self) -> Optional[str]:

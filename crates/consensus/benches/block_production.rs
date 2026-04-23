@@ -100,6 +100,7 @@ fn bench_block_execution(c: &mut Criterion) {
                             Some(&bridge_config),
                             None,
                             None,
+                            None,
                         );
                         black_box(result);
                     },

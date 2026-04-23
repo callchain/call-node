@@ -159,6 +159,18 @@ pub enum Instruction {
         source_tx_hash: [u8; 32],
         proof: Vec<u8>,
     },
+    /// Stake CALL to become a validator.
+    /// Deducts `self_stake` from sender's balance and registers them in the validator set.
+    ValidatorStake {
+        ed25519_pubkey: [u8; 32],
+        self_stake: u128,
+    },
+    /// Begin unbonding for a validator.
+    /// The validator is removed from the active set immediately; stake can be
+    /// claimed after the unbonding period elapsed.
+    ValidatorUnstake {
+        validator_id: u32,
+    },
 }
 
 /// Payment memo with size limits per spec §3.5
@@ -629,6 +641,16 @@ pub fn execute_instruction(
         Instruction::ChallengeBridgeDeposit { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ChallengeBridgeDeposit must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::ValidatorStake { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "ValidatorStake must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::ValidatorUnstake { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "ValidatorUnstake must be executed inline in Block::execute".into(),
             ))
         }
     }

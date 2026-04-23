@@ -242,6 +242,7 @@ impl PayloadBuilder {
             None,
             None,
             None, bridge_config, None, None,
+            None,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)

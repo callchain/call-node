@@ -1726,5 +1726,147 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // ── Validator RPC Methods ───────────────────────────────────────
+
+    // call_validatorStake
+    module
+        .register_async_method("call_validatorStake", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            let ed25519_pubkey_hex = call_obj.get("ed25519Pubkey")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'ed25519Pubkey' field".into()))?;
+            let ed25519_pubkey_bytes = hex::decode(ed25519_pubkey_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid ed25519Pubkey: {e}")))?;
+            if ed25519_pubkey_bytes.len() != 32 {
+                return Err(invalid_params("ed25519Pubkey must be 32 bytes".into()));
+            }
+            let mut ed25519_pubkey = [0u8; 32];
+            ed25519_pubkey.copy_from_slice(&ed25519_pubkey_bytes);
+
+            let self_stake_str = call_obj.get("selfStake")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'selfStake' field (must be string)".into()))?;
+            let self_stake: u128 = self_stake_str
+                .parse()
+                .map_err(|_| invalid_params("invalid selfStake: must be a numeric string".into()))?;
+
+            let sig_hex = call_obj.get("signature").and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes".into()));
+            }
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
+
+            let nonce = call_obj.get("nonce").and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+
+            let instructions = vec![call_protocol::Instruction::ValidatorStake {
+                ed25519_pubkey,
+                self_stake,
+            }];
+
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 200_000,
+                max_fee: 200_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
+                "status": "pending",
+            }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_validatorUnstake
+    module
+        .register_async_method("call_validatorUnstake", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+
+            let validator_id = call_obj.get("validatorId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'validatorId' field".into()))? as u32;
+
+            let sig_hex = call_obj.get("signature").and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes".into()));
+            }
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
+
+            let nonce = call_obj.get("nonce").and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+
+            let instructions = vec![call_protocol::Instruction::ValidatorUnstake { validator_id }];
+
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 100_000,
+                max_fee: 100_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
+                "validatorId": validator_id,
+                "status": "pending",
+            }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // call_validatorList
+    module
+        .register_async_method("call_validatorList", |_params, state, _ctx| async move {
+            let vs = state.validator_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let validators: Vec<serde_json::Value> = vs.get_all_validators().values()
+                .map(|v| serde_json::json!({
+                    "validatorId": v.validator_id,
+                    "address": format!("0x{}", hex::encode(v.address.as_slice())),
+                    "ed25519Pubkey": format!("0x{}", hex::encode(v.ed25519_pubkey)),
+                    "selfStake": v.self_stake.to_string(),
+                    "stakedCall": v.staked_call.to_string(),
+                    "delegatedCall": v.delegated_call.to_string(),
+                    "rewards": v.rewards.to_string(),
+                    "isUnbonding": v.unbonding_start.is_some(),
+                }))
+                .collect();
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "validators": validators }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
     Ok(())
 }

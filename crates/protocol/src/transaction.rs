@@ -252,6 +252,8 @@ pub fn base_gas_units(instruction: &Instruction) -> u64 {
         Instruction::ExternalBridgeDeposit { .. } => 50_000,
         Instruction::ExternalBridgeWithdraw { .. } => 50_000,
         Instruction::ChallengeBridgeDeposit { .. } => 10_000,
+        Instruction::ValidatorStake { .. } => 50_000,
+        Instruction::ValidatorUnstake { .. } => 25_000,
     }
 }
 

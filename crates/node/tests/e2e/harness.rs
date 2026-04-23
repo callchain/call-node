@@ -288,6 +288,7 @@ impl TestNode {
                     Some(&bridge_config),
                     if validators.is_empty() { None } else { Some(&validators) },
                     None,
+                    None,
                 )
                 .expect("block execution")
         };
