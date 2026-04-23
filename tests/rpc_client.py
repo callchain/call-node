@@ -105,7 +105,8 @@ class CallchainNode:
         return self._call("call_governanceGetProposal", [proposal_id])
 
     def governance_get_all_proposals(self) -> List[Dict]:
-        return self._call("call_governanceGetAllProposals")
+        result = self._call("call_governanceGetAllProposals")
+        return result.get("proposals", []) if isinstance(result, dict) else result
 
     def governance_is_paused(self) -> bool:
         result = self._call("call_governanceIsPaused")

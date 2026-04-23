@@ -77,6 +77,100 @@ def wait_for_tx(cluster, tx_hash, timeout=30):
     return None
 
 
+def wait_for_height(node, min_height, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            h = int(node.block_number(), 16)
+            if h >= min_height:
+                return h
+        except Exception:
+            pass
+        time.sleep(0.5)
+    raise TimeoutError(f"Node did not reach height {min_height}")
+
+
+def get_balance_int(node, asset_id, address):
+    """Return balance as an integer."""
+    result = node.get_balance(asset_id, address)
+    bal = result.get("balance") if isinstance(result, dict) else result
+    return int(bal)
+
+
+# ── Tests: Block Inclusion & State Verification ───────────────────────
+
+
+def test_transfer_balance_change_after_block(cluster, accounts):
+    """Submit a transfer, wait for block inclusion, verify balance change persists."""
+    sender = accounts[0]
+    receiver = accounts[1]
+    amount = 10**18  # 1 CALL
+    nonce = _next_nonce()
+
+    initial_sender = get_balance_int(cluster.nodes[0], 1, sender["address"])
+    initial_receiver = get_balance_int(cluster.nodes[0], 1, receiver["address"])
+
+    payload = sign_payment(
+        private_key=sender["private_key"],
+        sender=sender["address"],
+        nonce=nonce,
+        asset_id=1,
+        to=receiver["address"],
+        amount=amount,
+    )
+
+    result = cluster.nodes[0].send_payment(payload)
+    tx_hash = result.get("txHash")
+    assert_true(tx_hash, f"missing txHash in result: {result}")
+    print(f"  submitted tx: {tx_hash}")
+
+    # Wait for receipt (synchronous execution stores it immediately)
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "transaction receipt not found")
+    print(f"  receipt status: {receipt.get('status', 'N/A')}")
+
+    # Wait for at least one new block to confirm persistence
+    current_height = int(cluster.nodes[0].block_number(), 16)
+    wait_for_height(cluster.nodes[0], current_height + 1)
+
+    final_sender = get_balance_int(cluster.nodes[0], 1, sender["address"])
+    final_receiver = get_balance_int(cluster.nodes[0], 1, receiver["address"])
+
+    assert_true(final_sender < initial_sender, "sender balance did not decrease")
+    assert_true(final_receiver > initial_receiver, "receiver balance did not increase")
+    print(f"  [OK] transfer persisted after block — sender {initial_sender} -> {final_sender}")
+
+
+def test_agent_register_and_query_after_block(cluster, accounts):
+    """Register an agent, wait for block inclusion, verify it is queryable on all nodes."""
+    owner = accounts[2]
+    pubkey_hex = "b" * 128
+    name = "BlockTestAgent"
+    url = "https://blocktest.example.com"
+
+    result = cluster.nodes[0].agent_register(
+        owner=owner["address"],
+        pubkey_hex=pubkey_hex,
+        name=name,
+        url=url,
+    )
+    assert_true("agentId" in result, "missing agentId")
+    agent_id = result["agentId"]
+    print(f"  registered agent {agent_id}")
+
+    # Wait for a new block to ensure persistence
+    current_height = int(cluster.nodes[0].block_number(), 16)
+    wait_for_height(cluster.nodes[0], current_height + 1)
+
+    # Query agent info on the submission node to verify persistence
+    info = cluster.nodes[0].agent_info(agent_id)
+    assert_true(info is not None, f"agent {agent_id} not found after block")
+    assert_true(info.get("name") == name, "agent name mismatch")
+    print(f"  agent info verified after block")
+
+    print(f"  [OK] agent registration persisted after block inclusion")
+
+
 # ── Tests: Asset Registration ─────────────────────────────────────────
 
 
@@ -328,6 +422,8 @@ def test_bridge_withdraw_error_handling(cluster, accounts):
 # ── Main ──────────────────────────────────────────────────────────────
 
 TEST_FUNCTIONS = [
+    test_transfer_balance_change_after_block,
+    test_agent_register_and_query_after_block,
     test_register_asset,
     test_register_asset_duplicate_rejected,
     test_asset_info_query,
