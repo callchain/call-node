@@ -2,9 +2,7 @@ name: callchain-devnet
 
 services:
   node1:
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    image: callchain/calld:latest
     container_name: callchain-node1
     ports:
       - "5005:5005"    # HTTP RPC
@@ -26,9 +24,7 @@ services:
         ipv4_address: 172.28.0.11
 
   node2:
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    image: callchain/calld:latest
     container_name: callchain-node2
     ports:
       - "5007:5005"    # HTTP RPC
@@ -52,9 +48,7 @@ services:
         ipv4_address: 172.28.0.12
 
   node3:
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    image: callchain/calld:latest
     container_name: callchain-node3
     ports:
       - "5009:5005"    # HTTP RPC
@@ -78,9 +72,7 @@ services:
         ipv4_address: 172.28.0.13
 
   node4:
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    image: callchain/calld:latest
     container_name: callchain-node4
     ports:
       - "5011:5005"    # HTTP RPC

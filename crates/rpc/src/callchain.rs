@@ -240,7 +240,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 gov.config.asset_registration_fee
             };
             if fee > 0 {
-                let issuer_balance = state.get_balance(0, &issuer_addr); // asset 0 = CALL
+                let issuer_balance = state.get_balance(1, &issuer_addr); // asset 1 = CALL
                 if issuer_balance < fee {
                     return Err(invalid_params(format!(
                         "insufficient CALL balance for registration fee: need {fee}, have {issuer_balance}"
@@ -248,7 +248,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 }
                 state.balance_state.write()
                     .map_err(|_| internal_error("lock poisoned".into()))?
-                    .deduct_balance(0, issuer_addr, fee)
+                    .deduct_balance(1, issuer_addr, fee)
                     .map_err(|e| internal_error(format!("fee deduction failed: {e:?}")))?;
             }
 
@@ -305,7 +305,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .map_err(|_| internal_error("lock poisoned".into()))?
                 .base_fee;
             if fee > 0 {
-                let owner_balance = state.get_balance(0, &owner_addr); // asset 0 = CALL
+                let owner_balance = state.get_balance(1, &owner_addr); // asset 1 = CALL
                 if owner_balance < fee {
                     return Err(invalid_params(format!(
                         "insufficient CALL balance for agent registration fee: need {fee}, have {owner_balance}"
@@ -313,7 +313,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 }
                 state.balance_state.write()
                     .map_err(|_| internal_error("lock poisoned".into()))?
-                    .deduct_balance(0, owner_addr, fee)
+                    .deduct_balance(1, owner_addr, fee)
                     .map_err(|e| internal_error(format!("fee deduction failed: {e:?}")))?;
             }
 

@@ -678,6 +678,11 @@ impl RpcState {
                     amount,
                 );
 
+                // Decrement mempool defense counter since tx executed immediately
+                if let Ok(mut defense) = self.mempool_defense.write() {
+                    defense.on_tx_confirmed(sender);
+                }
+
                 Ok(tx_hash)
             }
             Err(e) => {
@@ -696,6 +701,12 @@ impl RpcState {
                 };
                 drop(balances);
                 self.store_receipt(tx_hash, receipt);
+
+                // Decrement mempool defense counter since tx failed immediately
+                if let Ok(mut defense) = self.mempool_defense.write() {
+                    defense.on_tx_confirmed(sender);
+                }
+
                 Err(format!("execution failed: {e}"))
             }
         }
@@ -767,40 +778,11 @@ impl ProposalExecutor for NodeProposalExecutor {
                 // Parse new_value as JSON
                 match serde_json::from_str::<serde_json::Value>(new_value) {
                     Ok(val) => {
-                        // Governance config updates: param_id starts with "governance."
-                        if param_id.starts_with("governance.") {
-                            let mut gov = self.state.governance.write().map_err(|_| "governance lock poisoned".to_string())?;
-                            if let Some(v) = val.get("validator_quorum_bps").and_then(|v| v.as_u64()) {
-                                gov.config.validator_quorum_bps = v as u32;
-                            }
-                            if let Some(v) = val.get("supply_quorum_bps").and_then(|v| v.as_u64()) {
-                                gov.config.supply_quorum_bps = v as u32;
-                            }
-                            if let Some(v) = val.get("treasury_quorum_bps").and_then(|v| v.as_u64()) {
-                                gov.config.treasury_quorum_bps = v as u32;
-                            }
-                            if let Some(v) = val.get("simple_majority_bps").and_then(|v| v.as_u64()) {
-                                gov.config.simple_majority_bps = v as u32;
-                            }
-                            if let Some(v) = val.get("review_period_blocks").and_then(|v| v.as_u64()) {
-                                gov.config.review_period_blocks = v;
-                            }
-                            if let Some(v) = val.get("voting_period_blocks").and_then(|v| v.as_u64()) {
-                                gov.config.voting_period_blocks = v;
-                            }
-                            if let Some(v) = val.get("timelock_period_blocks").and_then(|v| v.as_u64()) {
-                                gov.config.timelock_period_blocks = v;
-                            }
-                            if let Some(v) = val.get("execution_timeout_blocks").and_then(|v| v.as_u64()) {
-                                gov.config.execution_timeout_blocks = v;
-                            }
-                            if let Some(v) = val.get("proposal_deposit").and_then(|v| v.as_u64()) {
-                                gov.config.proposal_deposit = v as u128;
-                            }
-                            if let Some(v) = val.get("asset_registration_fee").and_then(|v| v.as_u64()) {
-                                gov.config.asset_registration_fee = v as u128;
-                            }
-                            tracing::info!(param_id, new_value, "governance config updated via executor");
+                        // Governance-internal config updates (governance.*, protocol.*)
+                        // are handled by GovernanceManager::apply_proposal.
+                        // The executor only applies cross-system parameter changes.
+                        if param_id.starts_with("governance.") || param_id.starts_with("protocol.") {
+                            tracing::info!(param_id, new_value, "governance-internal param change already applied");
                         } else if param_id.starts_with("consensus.") {
                             let mut cp = self.state.consensus_params.write().map_err(|_| "consensus params lock poisoned".to_string())?;
                             if let Some(v) = val.get("max_validators").and_then(|v| v.as_u64()) {
@@ -854,12 +836,6 @@ impl ProposalExecutor for NodeProposalExecutor {
                             }
                             oracle.update_config(config);
                             tracing::info!(param_id, new_value, "oracle config updated via executor");
-                        } else if param_id.starts_with("protocol.") {
-                            let mut gov = self.state.governance.write().map_err(|_| "governance lock poisoned".to_string())?;
-                            if let Some(v) = val.get("asset_registration_fee").and_then(|v| v.as_u64()) {
-                                gov.config.asset_registration_fee = v as u128;
-                            }
-                            tracing::info!(param_id, new_value, "protocol params updated via executor");
                         } else if param_id.starts_with("fee_currency.") {
                             let mut fcr = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
                             if let Some(v) = val.get("min_market_cap_usd").and_then(|v| v.as_u64()) {
@@ -1016,7 +992,7 @@ pub fn wire_governance_executor(state: &Arc<RpcState>) {
     let balance_source = {
         let state = Arc::clone(state);
         Arc::new(move |addr: Address| {
-            state.balance_state.read().ok().map(|s| s.balances.get_balance(0, &addr)).unwrap_or(0)
+            state.balance_state.read().ok().map(|s| s.balances.get_balance(1, &addr)).unwrap_or(0)
         })
     };
     if let Ok(mut gov) = state.governance.write() {

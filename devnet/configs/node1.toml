@@ -20,4 +20,4 @@ addr = "0.0.0.0:9090"
 level = "info"
 format = "text"
 
-mode = "Validator"
+mode = "Full"

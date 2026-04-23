@@ -1,10 +1,12 @@
 # Build stage
-FROM rust:1.82-slim AS builder
+FROM rust:1.94-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev protobuf-compiler \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates libclang-dev clang \
     && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 WORKDIR /build
 COPY . .
@@ -12,7 +14,7 @@ RUN cargo build --release && \
     cp target/release/calld /usr/local/bin/calld
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

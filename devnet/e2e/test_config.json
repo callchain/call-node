@@ -1,0 +1,16 @@
+{
+  "nodes": [
+    {"rpc": "http://127.0.0.1:5005", "ws": "ws://127.0.0.1:5006", "metrics": "http://127.0.0.1:9090"},
+    {"rpc": "http://127.0.0.1:5007", "ws": "ws://127.0.0.1:5008", "metrics": "http://127.0.0.1:9091"},
+    {"rpc": "http://127.0.0.1:5009", "ws": "ws://127.0.0.1:5010", "metrics": "http://127.0.0.1:9092"},
+    {"rpc": "http://127.0.0.1:5011", "ws": "ws://127.0.0.1:5012", "metrics": "http://127.0.0.1:9093"}
+  ],
+  "accounts": [
+    {"address": "0xd10782ca2bc9c76f973f327f1aa1d7540e1d9072", "secret": "0x1e02fec9a67afc7de9d84df60d57539c7c90adf9c5ce79c351c3f1d549565638", "name": "account1"},
+    {"address": "0x3ca727465e96fdbee725b3b186b470ab09cdd832", "secret": "0xe5595866df8b279becc4d69de172cfee7e71bf000f48804f05a70c2962d08bb4", "name": "account2"},
+    {"address": "0xf87f466bbb3fff59136729b5afa9bbb89139500a", "secret": "0x9453473d00be15f400398b4f5778cb3dba9ce768d68bc386bcc6a98faf63fa53", "name": "account3"},
+    {"address": "0x15ec1bc5dcef77b2bd2c477e1027d03f17defd3b", "secret": "0x284a713fe651dafff1f19e50c0e7a3e339d3535153b0ba668ed8320df50be995", "name": "account4"}
+  ],
+  "chain_id": 8886,
+  "asset_id": 1
+}
