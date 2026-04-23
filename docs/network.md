@@ -49,6 +49,8 @@ The `Network` trait (`crates/network/src/p2p.rs`) provides an abstraction over t
 | `connect(address)` | Connect to a peer (`"peer_id@host:port"` format) |
 | `disconnect(peer_id)` | Block and disconnect a peer |
 | `is_healthy()` | Returns true if peer count meets `min_healthy_peers` threshold |
+| `known_peers()` | Return a snapshot of the known peer address book |
+| `send_peer_exchange()` | Broadcast a `PeerExchange` message to all connected peers |
 
 Two implementations exist:
 - **`CommonwareNetwork`** — production P2P backed by `commonware-p2p`
@@ -69,6 +71,10 @@ The real P2P network adapter. Runs the commonware-p2p runtime in a separate OS t
 | `gossip` | `GossipManager` for per-peer rate limiting and deduplication |
 | `bootstrap_peers` | Configured seed peers for periodic reconnection |
 | `min_healthy_peers` | Minimum peer count for `is_healthy()` (validators: 1+, full nodes: 0) |
+| `known_peers` | Address book of peers discovered via PEX or manual connection |
+| `enable_peer_exchange` | Whether to participate in peer exchange gossip (default: `true`) |
+| `pex_interval_seconds` | How often to broadcast `PeerExchange` messages (default: 60) |
+| `auto_connect_discovered` | Whether to auto-connect to peers learned via PEX (default: `false`) |
 
 #### Peer Discovery
 
@@ -79,6 +85,26 @@ Callchain uses commonware-p2p's **authenticated lookup** model:
 3. **Manual connect** — `connect("peer_id@host:port")` decodes the hex public key, constructs an `Address::Symmetric`, and calls `oracle.track()` to initiate discovery.
 4. **Disconnect** — `disconnect(peer_id)` decodes the public key and calls `oracle.block()` to prevent future reconnection.
 5. **Periodic reconnection** — A background task runs every 30 seconds, re-`track()`ing any bootstrap peers that are no longer in the active peer set.
+
+#### Peer Exchange (PEX)
+
+In addition to static bootstrap peers, Callchain supports **Peer Exchange (PEX)** for dynamic peer discovery. Connected peers periodically share subsets of their known peer lists, allowing nodes to learn about the network topology without a complete hardcoded configuration.
+
+**How it works:**
+
+1. **`send_peer_exchange()`** — Shuffles the local `known_peers` address book, truncates to `max_pex_peers_per_msg` (default: 50), and broadcasts a `PeerExchange` message to all connected peers.
+2. **Transparent handling in `receive()`** — When a `PeerExchange` message is received, it is processed internally and does not surface to the caller. The receiver:
+   - Rate-limits PEX per peer (max 1 per 30 seconds)
+   - Adds new `(peer_id, socket_addr)` entries to `known_peers`
+   - Trims the address book if it exceeds `max_known_peers` (default: 1000)
+   - Optionally auto-connects to newly discovered peers if `auto_connect_discovered` is enabled and the node is below `max_peers`
+3. **PEX interval** — A background task broadcasts `PeerExchange` every `pex_interval_seconds` (default: 60).
+
+**Security considerations:**
+
+- PEX messages are rate-limited per peer to prevent spam
+- Discovered peers are only added to the address book; connections still require the standard authenticated handshake
+- Auto-connect is disabled by default to prevent unwanted outbound connections in permissioned deployments
 
 #### Message Multiplexing
 
@@ -112,6 +138,7 @@ pub enum NetworkMessage {
     Handshake(Handshake),
     OraclePriceRequest(OraclePriceRequest),
     OraclePriceSubmission(OraclePriceSubmission),
+    PeerExchange(PeerExchange),         // peer discovery gossip
 }
 ```
 
@@ -221,3 +248,19 @@ The private key is stored as hex in `{data_dir}/node.key`, written atomically vi
 ### Health Checking
 
 `is_healthy()` returns true only when `peer_count() >= min_healthy_peers`. Validators require at least 1 peer; full/archive nodes accept 0. The health check is used by the boot sequence and monitoring to determine if the node is properly connected to the network.
+
+## Future Features
+
+### Permissionless Network Discovery
+
+The current PEX implementation works well for permissioned and semi-permissioned networks where nodes bootstrap from a known validator set. For fully permissionless participation, the following enhancements are planned:
+
+| Feature | Description | Status |
+|---|---|---|
+| DHT / discv5 | Distributed hash table for peer discovery without static bootstrap lists | Planned |
+| DNS Seed Nodes | DNS-based bootstrap using TXT records (similar to Bitcoin's `seed.bitcoin.sipa.be`) | Planned |
+| Rendezvous / Relay | Circuit-relay and rendezvous protocols for nodes behind NAT | Planned |
+| NAT Hole-Punching | UPnP / NAT-PMP and hole-punching for direct peer connections | Planned |
+| Gossip-Based Peer Exchange | Epidemic-style peer list propagation with cryptographically signed peer advertisements | Planned |
+
+These features would allow any node to join the Callchain network with minimal configuration (potentially just a DNS seed or a single bootstrap peer), discover peers dynamically, and maintain connectivity even when behind restrictive firewalls or NAT.

@@ -65,6 +65,7 @@ async fn test_two_node_connection_and_message() {
         namespace: b"callchain-test".to_vec(),
         min_healthy_peers: 0,
         limits: NetworkLimits::default(),
+        ..Default::default()
     };
     let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
 
@@ -79,6 +80,7 @@ async fn test_two_node_connection_and_message() {
         namespace: b"callchain-test".to_vec(),
         min_healthy_peers: 0,
         limits: NetworkLimits::default(),
+        ..Default::default()
     };
     let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
 
@@ -143,6 +145,7 @@ async fn test_network_health_check() {
         namespace: b"callchain-test".to_vec(),
         min_healthy_peers: 1,
         limits: NetworkLimits::default(),
+        ..Default::default()
     };
     let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
 
@@ -154,6 +157,7 @@ async fn test_network_health_check() {
         namespace: b"callchain-test".to_vec(),
         min_healthy_peers: 1,
         limits: NetworkLimits::default(),
+        ..Default::default()
     };
     let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
 
@@ -187,6 +191,7 @@ async fn test_disconnect_removes_peer() {
         namespace: b"callchain-test".to_vec(),
         min_healthy_peers: 0,
         limits: NetworkLimits::default(),
+        ..Default::default()
     };
     let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
 
@@ -198,6 +203,7 @@ async fn test_disconnect_removes_peer() {
         namespace: b"callchain-test".to_vec(),
         min_healthy_peers: 0,
         limits: NetworkLimits::default(),
+        ..Default::default()
     };
     let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
 
@@ -235,4 +241,120 @@ async fn test_identity_key_persistence() {
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Test Peer Exchange (PEX) — a node discovers peers via PEX from a connected peer.
+#[tokio::test]
+async fn test_peer_exchange_discovery() {
+    let ports = find_available_ports(3);
+    let node1_addr = ports[0];
+    let node2_addr = ports[1];
+    let node3_addr = ports[2];
+
+    let key1 = test_key();
+    let key2 = test_key();
+    let key3 = test_key();
+
+    let node1_peer_id = hex::encode(key1.public_key().as_ref());
+    let node2_peer_id = hex::encode(key2.public_key().as_ref());
+    let node3_peer_id = hex::encode(key3.public_key().as_ref());
+
+    // Node1 tracks both Node2 and Node3 so it can broadcast to them
+    let config1 = CommonwareConfig {
+        listen_addr: node1_addr,
+        bootstrap_peers: vec![
+            (node2_peer_id.clone(), node2_addr),
+            (node3_peer_id.clone(), node3_addr),
+        ],
+        max_message_size: 1024 * 1024,
+        allow_private_ips: true,
+        namespace: b"callchain-test".to_vec(),
+        min_healthy_peers: 0,
+        limits: NetworkLimits::default(),
+        ..Default::default()
+    };
+    let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
+
+    let config2 = CommonwareConfig {
+        listen_addr: node2_addr,
+        bootstrap_peers: vec![(node1_peer_id.clone(), node1_addr)],
+        max_message_size: 1024 * 1024,
+        allow_private_ips: true,
+        namespace: b"callchain-test".to_vec(),
+        min_healthy_peers: 0,
+        limits: NetworkLimits::default(),
+        ..Default::default()
+    };
+    let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
+
+    // Node3 only knows Node1 initially
+    let config3 = CommonwareConfig {
+        listen_addr: node3_addr,
+        bootstrap_peers: vec![(node1_peer_id.clone(), node1_addr)],
+        max_message_size: 1024 * 1024,
+        allow_private_ips: true,
+        namespace: b"callchain-test".to_vec(),
+        min_healthy_peers: 0,
+        limits: NetworkLimits::default(),
+        ..Default::default()
+    };
+    let mut node3 = CommonwareNetwork::new(&config3, key3).await.expect("node3 init");
+
+    // Wait for connections to establish (PEX test needs all peers connected)
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Verify Node1 sees both Node2 and Node3 before broadcasting PEX
+    let mut attempts = 0;
+    while node1.peer_count() < 2 && attempts < 30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+    assert!(
+        node1.peer_count() >= 2,
+        "node1 should see 2 peers, saw {}",
+        node1.peer_count()
+    );
+
+    // Node1 broadcasts PEX so Node3 learns about Node2
+    node1.send_peer_exchange().await;
+
+    // Node1 also sends a dummy message so node3.receive() has something to return
+    // after processing the PEX message internally.
+    let dummy = NetworkMessage::Transaction(TransactionMessage::new(vec![0xFF], TxHash::repeat_byte(0xBB)));
+    let dummy_data = bincode::serialize(&dummy).unwrap();
+    node1.broadcast(1, dummy_data).await;
+
+    // Node3 receives: first PEX (handled transparently), then the dummy message
+    let (_sender_id, channel, _data) = tokio::time::timeout(
+        Duration::from_secs(10),
+        node3.receive(),
+    )
+    .await
+    .expect("receive timeout")
+    .expect("receive failed");
+    assert_eq!(channel, 1, "should receive dummy on channel 1");
+
+    // Node3 should now know about Node2 via PEX
+    let node3_known = node3.known_peers().await;
+    let known_ids: Vec<_> = node3_known.iter().map(|(id, _)| id.clone()).collect();
+    assert!(
+        known_ids.contains(&node2_peer_id),
+        "node3 should have discovered node2 via PEX; known: {known_ids:?}"
+    );
+
+    // Node3 should also know about Node1 (from bootstrap)
+    assert!(
+        known_ids.contains(&node1_peer_id),
+        "node3 should know node1 from bootstrap"
+    );
+
+    // Node3 should not know itself
+    assert!(
+        !known_ids.contains(&node3_peer_id),
+        "node3 should not include itself in known peers"
+    );
+
+    node1.stop();
+    node2.stop();
+    node3.stop();
 }

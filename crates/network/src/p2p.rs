@@ -44,6 +44,8 @@ pub enum NetworkMessage {
     OraclePriceSubmission(OraclePriceSubmission),
     /// Protocol upgrade announcement
     UpgradeAnnouncement(UpgradeAnnouncement),
+    /// Peer exchange — list of known peers for network discovery
+    PeerExchange(PeerExchange),
 }
 
 /// Transaction message for gossipsub propagation
@@ -140,6 +142,27 @@ pub struct UpgradeAnnouncement {
     pub activation_height: u64,
     /// Governance proposal ID that triggered this upgrade, if any
     pub proposal_id: Option<u64>,
+}
+
+/// Peer exchange message — exchanged between connected peers to discover new nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerExchange {
+    /// Known peers advertised by the sender: (peer_id_hex, socket_address)
+    pub peers: Vec<(String, SocketAddr)>,
+    /// Sender's own listen address (helps with NAT traversal / address advertisement)
+    pub sender_addr: SocketAddr,
+}
+
+impl PeerExchange {
+    /// Create a new peer exchange with the given peer list and sender address.
+    pub fn new(peers: Vec<(String, SocketAddr)>, sender_addr: SocketAddr) -> Self {
+        Self { peers, sender_addr }
+    }
+
+    /// Limit the number of advertised peers to avoid oversized messages.
+    pub fn truncate(&mut self, max: usize) {
+        self.peers.truncate(max);
+    }
 }
 
 /// Oracle price submission — signed price data from a validator
@@ -298,6 +321,18 @@ pub struct CommonwareConfig {
     pub min_healthy_peers: u32,
     /// Network-level rate limiting and gossip configuration
     pub limits: NetworkLimits,
+    /// Enable peer exchange (PEX) for dynamic peer discovery.
+    /// When enabled, nodes exchange lists of known peers with connected peers.
+    pub enable_peer_exchange: bool,
+    /// Interval between periodic PEX broadcasts, in seconds.
+    pub pex_interval_seconds: u64,
+    /// Automatically connect to peers discovered via PEX.
+    /// Set to false in permissioned networks; true for permissionless discovery.
+    pub auto_connect_discovered: bool,
+    /// Maximum number of known peers to retain in the address book.
+    pub max_known_peers: usize,
+    /// Maximum number of peers to advertise in a single PEX message.
+    pub max_pex_peers_per_msg: usize,
 }
 
 impl Default for CommonwareConfig {
@@ -310,6 +345,11 @@ impl Default for CommonwareConfig {
             namespace: b"callchain".to_vec(),
             min_healthy_peers: 0,
             limits: NetworkLimits::default(),
+            enable_peer_exchange: true,
+            pex_interval_seconds: 60,
+            auto_connect_discovered: false,
+            max_known_peers: 1000,
+            max_pex_peers_per_msg: 50,
         }
     }
 }
@@ -325,6 +365,11 @@ impl CommonwareConfig {
             namespace: b"callchain-local".to_vec(),
             min_healthy_peers: 0,
             limits: NetworkLimits::default(),
+            enable_peer_exchange: true,
+            pex_interval_seconds: 60,
+            auto_connect_discovered: false,
+            max_known_peers: 1000,
+            max_pex_peers_per_msg: 50,
         }
     }
 }
@@ -430,6 +475,15 @@ pub struct CommonwareNetwork {
     min_healthy_peers: u32,
     /// Gossip manager for rate limiting, dedup, and peer management
     gossip: Arc<tokio::sync::Mutex<GossipManager>>,
+    /// Known peers address book: hex(peer_id) -> SocketAddr (includes bootstrap + discovered)
+    known_peers: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, SocketAddr>>>,
+    /// Last PEX received timestamp per peer (rate limiting)
+    pex_last_received: Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// PEX configuration fields
+    enable_peer_exchange: bool,
+    auto_connect_discovered: bool,
+    max_known_peers: usize,
+    max_pex_peers_per_msg: usize,
 }
 
 impl CommonwareNetwork {
@@ -448,6 +502,9 @@ impl CommonwareNetwork {
 
         let listen_addr = config.listen_addr;
         let bootstrap_peers = Arc::new(tokio::sync::RwLock::new(config.bootstrap_peers.clone()));
+        let known_peers = Arc::new(tokio::sync::RwLock::new(
+            config.bootstrap_peers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>()
+        ));
 
         // Channels for returning initialized components and shutdown signal
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -583,6 +640,12 @@ impl CommonwareNetwork {
             bootstrap_peers,
             min_healthy_peers: cfg.min_healthy_peers,
             gossip: Arc::new(tokio::sync::Mutex::new(GossipManager::new(config.limits))),
+            known_peers,
+            pex_last_received: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            enable_peer_exchange: config.enable_peer_exchange,
+            auto_connect_discovered: config.auto_connect_discovered,
+            max_known_peers: config.max_known_peers,
+            max_pex_peers_per_msg: config.max_pex_peers_per_msg,
         })
     }
 
@@ -604,6 +667,130 @@ impl CommonwareNetwork {
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
+    }
+
+    // ── Peer Exchange (PEX) ───────────────────────────────────────────
+
+    /// Send our known peers to all connected peers.
+    /// Call this periodically (e.g., every `pex_interval_seconds`) from the node loop.
+    pub async fn send_peer_exchange(&self) {
+        if !self.enable_peer_exchange {
+            return;
+        }
+
+        let peers_to_advertise = {
+            let guard = self.known_peers.read().await;
+            let mut list: Vec<(String, SocketAddr)> = guard
+                .iter()
+                .filter(|(id, _)| **id != self.our_peer_id)
+                .map(|(id, addr)| (id.clone(), *addr))
+                .collect();
+            // Shuffle to avoid always advertising the same subset
+            use rand::seq::SliceRandom;
+            list.shuffle(&mut rand::thread_rng());
+            list.truncate(self.max_pex_peers_per_msg);
+            list
+        };
+
+        if peers_to_advertise.is_empty() {
+            return;
+        }
+
+        let pex = PeerExchange::new(peers_to_advertise, self.listen_addr);
+        let msg = NetworkMessage::PeerExchange(pex);
+        match bincode::serialize(&msg) {
+            Ok(data) => {
+                tracing::debug!(peers = %self.peer_count(), "broadcasting PEX");
+                self.broadcast(0, data).await;
+            }
+            Err(e) => {
+                tracing::warn!("failed to serialize PEX message: {e}");
+            }
+        }
+    }
+
+    /// Process an incoming PeerExchange message.
+    /// Adds new peers to the known_peers address book and optionally auto-connects.
+    async fn process_peer_exchange(&self, pex: PeerExchange, from_peer: &str) {
+        if !self.enable_peer_exchange {
+            return;
+        }
+
+        // Rate limit: max 1 PEX per peer per 30 seconds
+        {
+            let mut guard = self.pex_last_received.lock().await;
+            let now = std::time::Instant::now();
+            if let Some(last) = guard.get(from_peer) {
+                if now.duration_since(*last).as_secs() < 30 {
+                    tracing::debug!(peer = %from_peer, "PEX rate limit hit");
+                    return;
+                }
+            }
+            guard.insert(from_peer.to_string(), now);
+        }
+
+        // Also add the sender's advertised address (they know best)
+        let mut new_peers: Vec<(String, SocketAddr)> = Vec::new();
+
+        {
+            let mut guard = self.known_peers.write().await;
+
+            // Add sender's own address
+            let sender_id = from_peer.to_string();
+            if !guard.contains_key(&sender_id) && sender_id != self.our_peer_id {
+                guard.insert(sender_id.clone(), pex.sender_addr);
+                new_peers.push((sender_id, pex.sender_addr));
+            }
+
+            // Add advertised peers
+            for (peer_id, addr) in pex.peers {
+                if peer_id == self.our_peer_id {
+                    continue;
+                }
+                if !guard.contains_key(&peer_id) {
+                    guard.insert(peer_id.clone(), addr);
+                    new_peers.push((peer_id, addr));
+                }
+            }
+
+            // Trim if over capacity (oldest entries first — BTreeMap preserves order)
+            while guard.len() > self.max_known_peers {
+                if let Some(oldest) = guard.keys().next().cloned() {
+                    guard.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let known_count = self.known_peers.read().await.len();
+        tracing::info!(
+            count = new_peers.len(),
+            total = known_count,
+            "added peers from PEX"
+        );
+
+        // Auto-connect if enabled and below max_peers
+        if self.auto_connect_discovered {
+            let current_peers = self.peer_count();
+            let max_peers = self.gossip.lock().await.limits().max_peers as usize;
+            for (peer_id, addr) in new_peers {
+                if current_peers >= max_peers {
+                    break;
+                }
+                let addr_str = format!("{}@{}", peer_id, addr);
+                tracing::debug!(addr = %addr_str, "auto-connecting to discovered peer");
+                if let Err(e) = self.connect(&addr_str).await {
+                    tracing::debug!(addr = %addr_str, "auto-connect failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Get a snapshot of the known peers address book.
+    pub async fn known_peers(&self) -> Vec<(String, SocketAddr)> {
+        let guard = self.known_peers.read().await;
+        guard.iter().map(|(k, v)| (k.clone(), *v)).collect()
     }
 }
 
@@ -654,38 +841,46 @@ impl Network for CommonwareNetwork {
     }
 
     async fn receive(&self) -> Result<(String, u64, Vec<u8>), NetworkError> {
-        let mut receiver = self.receiver.lock().await;
-        let (public_key, io_buf) = receiver.recv().await.map_err(|e| {
-            NetworkError::NetworkError(format!("receive failed: {e}"))
-        })?;
+        loop {
+            let mut receiver = self.receiver.lock().await;
+            let (public_key, io_buf) = receiver.recv().await.map_err(|e| {
+                NetworkError::NetworkError(format!("receive failed: {e}"))
+            })?;
 
-        let peer_id = hex::encode(public_key.as_ref());
-        let data: &[u8] = io_buf.as_ref();
+            let peer_id = hex::encode(public_key.as_ref());
+            let data: &[u8] = io_buf.as_ref();
 
-        let (channel, payload) = decode_with_channel(data).ok_or_else(|| {
-            NetworkError::NetworkError("empty message received".into())
-        })?;
+            let (channel, payload) = decode_with_channel(data).ok_or_else(|| {
+                NetworkError::NetworkError("empty message received".into())
+            })?;
 
-        // Apply gossip rate limiting per peer
-        // Auto-register unknown peers (discovered via oracle, not explicit connect)
-        {
-            let mut gossip = self.gossip.lock().await;
-            if gossip.peers.contains_key(&peer_id) {
-                let peer_state = gossip.peers.get_mut(&peer_id).unwrap();
-                if let Err(e) = peer_state.record_message() {
-                    tracing::warn!(peer_id = %peer_id, "gossip rate limit hit: {e}");
-                    return Err(e);
-                }
-            } else {
-                // Auto-register peer seen for the first time
-                let _ = gossip.add_peer(peer_id.clone());
-                if let Some(peer_state) = gossip.peers.get_mut(&peer_id) {
-                    let _ = peer_state.record_message();
+            // Apply gossip rate limiting per peer
+            // Auto-register unknown peers (discovered via oracle, not explicit connect)
+            {
+                let mut gossip = self.gossip.lock().await;
+                if gossip.peers.contains_key(&peer_id) {
+                    let peer_state = gossip.peers.get_mut(&peer_id).unwrap();
+                    if let Err(e) = peer_state.record_message() {
+                        tracing::warn!(peer_id = %peer_id, "gossip rate limit hit: {e}");
+                        return Err(e);
+                    }
+                } else {
+                    // Auto-register peer seen for the first time
+                    let _ = gossip.add_peer(peer_id.clone());
+                    if let Some(peer_state) = gossip.peers.get_mut(&peer_id) {
+                        let _ = peer_state.record_message();
+                    }
                 }
             }
-        }
 
-        Ok((peer_id, channel, payload.to_vec()))
+            // Transparently handle PeerExchange messages — loop again so callers never see them
+            if let Ok(NetworkMessage::PeerExchange(pex)) = bincode::deserialize(payload) {
+                self.process_peer_exchange(pex, &peer_id).await;
+                continue;
+            }
+
+            return Ok((peer_id, channel, payload.to_vec()));
+        }
     }
 
     fn peer_count(&self) -> usize {
@@ -743,6 +938,9 @@ impl Network for CommonwareNetwork {
 
         // Record in peers map for bookkeeping
         self.peers.write().await.insert(peer_id_hex.clone(), addr);
+
+        // Also add to known_peers address book
+        self.known_peers.write().await.insert(peer_id_hex.clone(), addr);
 
         // Register peer with gossip manager for rate limiting
         let _ = self.gossip.lock().await.add_peer(peer_id_hex);
@@ -1113,5 +1311,48 @@ mod tests {
         let cfg = CommonwareConfig::local(addr);
         assert!(cfg.allow_private_ips);
         assert_eq!(cfg.listen_addr, addr);
+    }
+
+    #[test]
+    fn test_peer_exchange_serialization() {
+        let pex = PeerExchange::new(
+            vec![
+                ("abcd".to_string(), "127.0.0.1:5001".parse().unwrap()),
+                ("efgh".to_string(), "127.0.0.1:5002".parse().unwrap()),
+            ],
+            "127.0.0.1:5000".parse().unwrap(),
+        );
+        let msg = NetworkMessage::PeerExchange(pex);
+        let serialized = bincode::serialize(&msg).unwrap();
+        let deserialized: NetworkMessage = bincode::deserialize(&serialized).unwrap();
+        match deserialized {
+            NetworkMessage::PeerExchange(px) => {
+                assert_eq!(px.peers.len(), 2);
+                assert_eq!(px.sender_addr.to_string(), "127.0.0.1:5000");
+            }
+            _ => panic!("expected PeerExchange variant"),
+        }
+    }
+
+    #[test]
+    fn test_peer_exchange_truncate() {
+        let mut pex = PeerExchange::new(
+            (0..100)
+                .map(|i| (format!("peer_{i}"), format!("127.0.0.1:{i}").parse().unwrap()))
+                .collect(),
+            "127.0.0.1:5000".parse().unwrap(),
+        );
+        pex.truncate(10);
+        assert_eq!(pex.peers.len(), 10);
+    }
+
+    #[test]
+    fn test_commonware_config_pex_defaults() {
+        let cfg = CommonwareConfig::default();
+        assert!(cfg.enable_peer_exchange);
+        assert_eq!(cfg.pex_interval_seconds, 60);
+        assert!(!cfg.auto_connect_discovered);
+        assert_eq!(cfg.max_known_peers, 1000);
+        assert_eq!(cfg.max_pex_peers_per_msg, 50);
     }
 }
