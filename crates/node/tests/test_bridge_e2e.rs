@@ -178,6 +178,15 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     let (secret, sender) = test_keypair();
     let recipient = test_addr(2);
 
+    // Fund sender with CALL for gas
+    node.state
+        .balance_state
+        .write()
+        .unwrap()
+        .balances
+        .set_balance(1, sender, 1_000_000_000)
+        .unwrap();
+
     // Stake sender as validator and register in validator state
     {
         let mut consensus = node.consensus.write().unwrap();
@@ -209,7 +218,7 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
         &secret,
         ProtocolTransaction {
             sender,
-            nonce: 1,
+            nonce: 0,
             instructions: vec![Instruction::ExternalBridgeDeposit {
                 source_chain: 0,
                 source_tx_hash: [0u8; 32],

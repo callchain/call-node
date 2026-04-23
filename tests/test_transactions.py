@@ -21,9 +21,16 @@ import time
 from rpc_client import CallchainNode, CallchainCluster
 
 
-def _next_nonce():
-    """Return a unique nonce to avoid replay detection across test runs."""
-    return int(time.time() * 1000) % 1_000_000_000
+_NONCE_COUNTERS = {}
+
+def _next_nonce(address=None):
+    """Return the next sequential nonce for an address (starts at 0)."""
+    global _NONCE_COUNTERS
+    key = address.lower() if address else "__global__"
+    nonce = _NONCE_COUNTERS.get(key, 0)
+    _NONCE_COUNTERS[key] = nonce + 1
+    return nonce
+
 from signer import (
     sign_asset_registration,
     sign_governance_proposal,
@@ -111,7 +118,7 @@ def test_transfer_balance_change_after_block(cluster, accounts):
     sender = accounts[0]
     receiver = accounts[1]
     amount = 10**18  # 1 CALL
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
 
     initial_sender = get_balance_int(cluster.nodes[0], 1, sender["address"])
     initial_receiver = get_balance_int(cluster.nodes[0], 1, receiver["address"])
@@ -255,7 +262,7 @@ def test_asset_info_query(cluster, accounts):
 def test_governance_submit_proposal(cluster, accounts):
     """Submit a governance proposal via call_governanceSubmitProposal."""
     sender = accounts[0]
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
 
     payload = sign_governance_proposal(
         private_key=sender["private_key"],
@@ -276,7 +283,7 @@ def test_governance_submit_proposal(cluster, accounts):
 def test_governance_vote(cluster, accounts):
     """Cast a vote on a governance proposal."""
     sender = accounts[1]
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
 
     payload = sign_governance_vote(
         private_key=sender["private_key"],
@@ -431,13 +438,13 @@ def test_bridge_withdraw_error_handling(cluster, accounts):
 def test_validator_join(cluster, accounts):
     """Validator joins via ValidatorStake — verify registration and escrow."""
     sender = accounts[3]
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
     ed25519_pubkey_hex = "0x" + "aa" * 32
     self_stake = 1_000_000 * 10**18
 
     initial_validators = cluster.nodes[0].validator_list()
-    sender_bal_before = get_balance_int(cluster.nodes[0], 0, sender["address"])
-    escrow_bal_before = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    sender_bal_before = get_balance_int(cluster.nodes[0], 1, sender["address"])
+    escrow_bal_before = get_balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     print(f"  pre: validators={len(initial_validators)}, sender_bal={sender_bal_before}, escrow={escrow_bal_before}")
 
     payload = sign_validator_stake(
@@ -471,13 +478,13 @@ def test_validator_join(cluster, accounts):
     assert_true(new_validator is not None, "new validator not found in list")
     assert_true(new_validator.get("selfStake") == str(self_stake), "selfStake mismatch")
 
-    # Verify escrow holds the staked amount (asset_id 0 per Rust code)
-    escrow_bal = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    # Verify escrow holds the staked amount (asset_id 1 for CALL)
+    escrow_bal = get_balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     assert_true(escrow_bal >= escrow_bal_before + self_stake,
                 f"escrow balance {escrow_bal} < before {escrow_bal_before} + stake {self_stake}")
 
     # Verify sender balance decreased
-    sender_bal_after = get_balance_int(cluster.nodes[0], 0, sender["address"])
+    sender_bal_after = get_balance_int(cluster.nodes[0], 1, sender["address"])
     assert_true(sender_bal_after < sender_bal_before,
                 f"sender balance did not decrease: {sender_bal_before} -> {sender_bal_after}")
     print(f"  [OK] validator joined — escrow={escrow_bal}, sender {sender_bal_before} -> {sender_bal_after}")
@@ -486,7 +493,7 @@ def test_validator_join(cluster, accounts):
 def test_validator_leave(cluster, accounts):
     """Validator leaves via ValidatorUnstake — verify unbonding and locked escrow."""
     sender = accounts[0]
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
     validator_id = 0
 
     # Verify the validator exists before leaving
@@ -494,7 +501,7 @@ def test_validator_leave(cluster, accounts):
     target = next((v for v in initial_validators if v.get("validatorId") == validator_id), None)
     assert_true(target is not None, f"validator {validator_id} not found")
     stake_amount = int(target.get("selfStake", "0"))
-    escrow_bal_before = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    escrow_bal_before = get_balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     print(f"  pre: validator {validator_id} selfStake={stake_amount}, escrow={escrow_bal_before}")
 
     # Reject non-owner unstake
@@ -502,7 +509,7 @@ def test_validator_leave(cluster, accounts):
         bad = sign_validator_unstake(
             private_key=accounts[1]["private_key"],
             sender=accounts[1]["address"],
-            nonce=_next_nonce(),
+            nonce=_next_nonce(accounts[1]["address"]),
             validator_id=validator_id,
         )
         cluster.nodes[0].validator_unstake(bad)
@@ -536,7 +543,7 @@ def test_validator_leave(cluster, accounts):
     assert_true(target_after.get("isUnbonding") is True,
                 f"validator {validator_id} should be unbonding")
 
-    escrow_bal_after = get_balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    escrow_bal_after = get_balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     assert_true(escrow_bal_after >= stake_amount,
                 f"escrow {escrow_bal_after} < stake {stake_amount} during unbonding")
     print(f"  escrow still locked: {escrow_bal_after}")
@@ -545,7 +552,7 @@ def test_validator_leave(cluster, accounts):
     claim_payload = sign_validator_claim_unbonded(
         private_key=sender["private_key"],
         sender=sender["address"],
-        nonce=_next_nonce(),
+        nonce=_next_nonce(sender["address"]),
         validator_id=validator_id,
     )
     try:

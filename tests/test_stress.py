@@ -47,10 +47,8 @@ class StressRunner:
         self.accounts = accounts
         self.results = []
         self.errors = []
-        # Per-account nonces start from a time-based base so they never replay
-        # across test runs or across sequential stress tests.
-        base = int(time.time() * 1000) % 1_000_000_000
-        self.next_nonce = [base + i * 100_000 for i in range(len(accounts))]
+        # Per-account nonces start at 0 and increment sequentially.
+        self.next_nonce = [0] * len(accounts)
         self._nonce_lock = threading.Lock()
 
     def _take_nonce(self, sender_idx: int) -> int:

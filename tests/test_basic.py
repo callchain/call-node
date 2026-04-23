@@ -57,9 +57,15 @@ def assert_true(cond, msg=""):
         raise AssertionError(msg)
 
 
-def _next_nonce():
-    """Return a unique nonce to avoid replay detection across test runs."""
-    return int(time.time() * 1000) % 1_000_000_000
+_NONCE_COUNTERS = {}
+
+def _next_nonce(address=None):
+    """Return the next sequential nonce for an address (starts at 0)."""
+    global _NONCE_COUNTERS
+    key = address.lower() if address else "__global__"
+    nonce = _NONCE_COUNTERS.get(key, 0)
+    _NONCE_COUNTERS[key] = nonce + 1
+    return nonce
 
 
 def wait_for_height(node, min_height, timeout=30):
@@ -114,7 +120,7 @@ def test_single_transfer_submission(cluster, accounts):
     sender = accounts[0]
     receiver = accounts[1]
     amount = 10**18  # 1 CALL
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
 
     payload = sign_payment(
         private_key=sender["private_key"],
@@ -139,7 +145,7 @@ def test_mempool_gossip(cluster, accounts):
     sender = accounts[0]
     receiver = accounts[1]
     amount = 10**17  # 0.1 CALL
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
 
     payload = sign_payment(
         private_key=sender["private_key"],
@@ -198,7 +204,7 @@ def test_nonce_sequence_submission(cluster, accounts):
     sender = accounts[2]
     receiver = accounts[3]
     amount = 10**16  # 0.01 CALL
-    base_nonce = _next_nonce()
+    base_nonce = _next_nonce(sender["address"])
 
     tx_hashes = []
     for i in range(5):
@@ -220,7 +226,7 @@ def test_duplicate_nonce_rejected(cluster, accounts):
     """Submit two transfers with the same nonce; second should be rejected."""
     sender = accounts[0]
     receiver = accounts[1]
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
     amount = 10**15
 
     payload = sign_payment(

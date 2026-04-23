@@ -77,8 +77,15 @@ def wait_for_height(node, min_height, timeout=30):
     raise TimeoutError(f"Node did not reach height {min_height}")
 
 
-def _next_nonce():
-    return int(time.time() * 1000) % 1_000_000_000
+_NONCE_COUNTERS = {}
+
+def _next_nonce(address=None):
+    """Return the next sequential nonce for an address (starts at 0)."""
+    global _NONCE_COUNTERS
+    key = address.lower() if address else "__global__"
+    nonce = _NONCE_COUNTERS.get(key, 0)
+    _NONCE_COUNTERS[key] = nonce + 1
+    return nonce
 
 
 def _balance_int(node, asset_id, address):
@@ -97,14 +104,14 @@ def _balance_int(node, asset_id, address):
 def test_validator_join(cluster, accounts):
     """Full join flow: stake CALL, verify validator appears, verify escrow holds stake."""
     sender = accounts[3]
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
     ed25519_pubkey_hex = "0x" + "aa" * 32
     self_stake = 1_000_000 * 10**18
 
     # Capture pre-state on node1
     validators_before = cluster.nodes[0].validator_list()
-    sender_bal_before = _balance_int(cluster.nodes[0], 0, sender["address"])
-    escrow_bal_before = _balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    sender_bal_before = _balance_int(cluster.nodes[0], 1, sender["address"])
+    escrow_bal_before = _balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     print(f"  pre: validators={len(validators_before)}, sender_bal={sender_bal_before}, escrow={escrow_bal_before}")
 
     payload = sign_validator_stake(
@@ -140,7 +147,7 @@ def test_validator_join(cluster, accounts):
             f"node{i+1}: selfStake mismatch"
         )
         # Verify escrow balance increased by stake amount
-        escrow_bal = _balance_int(node, 0, STAKING_ESCROW)
+        escrow_bal = _balance_int(node, 1, STAKING_ESCROW)
         assert_true(
             escrow_bal >= escrow_bal_before + self_stake,
             f"node{i+1}: escrow {escrow_bal} < before {escrow_bal_before} + stake {self_stake}"
@@ -148,7 +155,7 @@ def test_validator_join(cluster, accounts):
         print(f"  node{i+1}: validator id={new_validator.get('validatorId')} confirmed, escrow={escrow_bal}")
 
     # Verify sender balance decreased (fees + stake deducted)
-    sender_bal_after = _balance_int(cluster.nodes[0], 0, sender["address"])
+    sender_bal_after = _balance_int(cluster.nodes[0], 1, sender["address"])
     assert_true(
         sender_bal_after < sender_bal_before,
         f"sender balance did not decrease: {sender_bal_before} -> {sender_bal_after}"
@@ -163,7 +170,7 @@ def test_validator_join(cluster, accounts):
 def test_validator_leave(cluster, accounts):
     """Full leave flow: unstake existing validator, verify unbonding, reject early claim."""
     sender = accounts[0]
-    nonce = _next_nonce()
+    nonce = _next_nonce(sender["address"])
     validator_id = 0
 
     # Verify the validator exists before leaving
@@ -171,14 +178,14 @@ def test_validator_leave(cluster, accounts):
     target = next((v for v in validators_before if v.get("validatorId") == validator_id), None)
     assert_true(target is not None, f"validator {validator_id} not found before unstake")
     stake_amount = int(target.get("selfStake", "0"))
-    escrow_bal_before = _balance_int(cluster.nodes[0], 0, STAKING_ESCROW)
+    escrow_bal_before = _balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     print(f"  pre: validator {validator_id} found, selfStake={stake_amount}, escrow={escrow_bal_before}")
 
     # Reject unstake from non-owner
     bad_payload = sign_validator_unstake(
         private_key=accounts[1]["private_key"],
         sender=accounts[1]["address"],
-        nonce=_next_nonce(),
+        nonce=_next_nonce(accounts[1]["address"]),
         validator_id=validator_id,
     )
     try:
@@ -216,7 +223,7 @@ def test_validator_leave(cluster, accounts):
             f"node{i+1}: validator {validator_id} should be unbonding"
         )
         # Escrow should still hold the stake (not yet returned)
-        escrow_bal = _balance_int(node, 0, STAKING_ESCROW)
+        escrow_bal = _balance_int(node, 1, STAKING_ESCROW)
         assert_true(
             escrow_bal >= stake_amount,
             f"node{i+1}: escrow {escrow_bal} < stake {stake_amount} during unbonding"
@@ -227,7 +234,7 @@ def test_validator_leave(cluster, accounts):
     claim_payload = sign_validator_claim_unbonded(
         private_key=sender["private_key"],
         sender=sender["address"],
-        nonce=_next_nonce(),
+        nonce=_next_nonce(sender["address"]),
         validator_id=validator_id,
     )
     try:

@@ -53,14 +53,25 @@ fn test_governance_proposal_full_lifecycle() {
         );
     }
 
-    // Fund proposer with enough for deposit + gas
+    // Fund proposer with enough CALL for deposit + gas
     {
         node.state
             .balance_state
             .write()
             .unwrap()
             .balances
-            .set_balance(0, proposer, one_million_call() * 3)
+            .set_balance(1, proposer, one_million_call() * 3)
+            .unwrap();
+    }
+
+    // Fund validator with enough CALL for voting gas
+    {
+        node.state
+            .balance_state
+            .write()
+            .unwrap()
+            .balances
+            .set_balance(1, validator_addr, one_million_call())
             .unwrap();
     }
 
@@ -72,6 +83,10 @@ fn test_governance_proposal_full_lifecycle() {
         gov.config.voting_period_blocks = 10;
         gov.config.timelock_period_blocks = 5;
         gov.config.execution_timeout_blocks = 100;
+        // Fund proposer's governance voting balance for proposal deposit
+        gov.set_call_balance(proposer, one_million_call() * 3);
+        // Fund validator's governance voting balance
+        gov.set_call_balance(validator_addr, one_million_call());
     }
 
     // Step 1: Submit proposal
@@ -79,7 +94,7 @@ fn test_governance_proposal_full_lifecycle() {
         &proposer_secret,
         ProtocolTransaction {
             sender: proposer,
-            nonce: 1,
+            nonce: 0,
             instructions: vec![Instruction::GovernanceSubmitProposal {
                 proposal_type: call_governance::ProposalType::ParameterChange {
                     param_id: "max_block_size".into(),
@@ -115,7 +130,7 @@ fn test_governance_proposal_full_lifecycle() {
         &validator_secret,
         ProtocolTransaction {
             sender: validator_addr,
-            nonce: 1,
+            nonce: 0,
             instructions: vec![Instruction::GovernanceVote {
                 proposal_id,
                 vote: call_governance::Vote::Yes,
@@ -149,7 +164,7 @@ fn test_governance_proposal_full_lifecycle() {
         &proposer_secret,
         ProtocolTransaction {
             sender: proposer,
-            nonce: 2,
+            nonce: 1,
             instructions: vec![Instruction::GovernanceQueue { proposal_id }],
             gas_config: GasConfig::SelfPay,
             fee_currency: call_primitives::FeeCurrency::Call,
@@ -174,7 +189,7 @@ fn test_governance_proposal_full_lifecycle() {
         &proposer_secret,
         ProtocolTransaction {
             sender: proposer,
-            nonce: 3,
+            nonce: 2,
             instructions: vec![Instruction::GovernanceExecute { proposal_id }],
             gas_config: GasConfig::SelfPay,
             fee_currency: call_primitives::FeeCurrency::Call,

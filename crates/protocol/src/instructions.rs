@@ -588,14 +588,14 @@ pub fn execute_instruction(
             let gov = governance.ok_or(ProtocolError::InvalidInstruction(
                 "governance not available".into(),
             ))?;
-            // Deduct proposal deposit from sender's balance
+            // Deduct proposal deposit from sender's CALL balance
             let deposit = gov.config.proposal_deposit;
-            if account.get_balance(0, &sender) < deposit {
+            if account.get_balance(crate::CALL_ASSET_ID, &sender) < deposit {
                 return Err(ProtocolError::InvalidInstruction(
                     "governance: insufficient balance for proposal deposit".into(),
                 ));
             }
-            account.balances.deduct_balance(0, sender, deposit)
+            account.balances.deduct_balance(crate::CALL_ASSET_ID, sender, deposit)
                 .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: deposit deduction failed: {e}")))?;
             let _id = gov.submit_proposal_with_deposit(sender, proposal_type.clone(), title.clone(), description.clone(), execution_data.clone())
                 .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
