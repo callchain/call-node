@@ -1,0 +1,34 @@
+name: callchain-single
+
+services:
+  node1:
+    image: callchain/calld:latest
+    container_name: callchain-single-node1
+    ports:
+      - "5005:5005"    # HTTP RPC
+      - "5006:5006"    # WebSocket RPC
+      - "51235:51235"  # P2P
+      - "9090:9090"    # Metrics
+    volumes:
+      - node1-data:/var/lib/callchain
+      - ../genesis.json:/etc/callchain/genesis.json:ro
+      - ./configs/node1.toml:/etc/callchain/config.toml:ro
+    command: >
+      --data-dir /var/lib/callchain
+      --config /etc/callchain/config.toml
+      --genesis-path /etc/callchain/genesis.json
+      --log-level info
+    restart: unless-stopped
+    networks:
+      single:
+        ipv4_address: 172.29.0.11
+
+volumes:
+  node1-data:
+
+networks:
+  single:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16

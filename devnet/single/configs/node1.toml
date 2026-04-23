@@ -1,0 +1,23 @@
+mode = "full"
+
+[p2p]
+listen_addr = "0.0.0.0:51235"
+bootstrap_peers = ""
+
+[storage]
+data_dir = "/var/lib/callchain"
+
+[genesis]
+path = "/etc/callchain/genesis.json"
+
+[rpc]
+http_addr = "0.0.0.0:5005"
+ws_addr = "0.0.0.0:5006"
+max_connections = 100
+
+[metrics]
+addr = "0.0.0.0:9090"
+
+[logging]
+level = "info"
+format = "text"
