@@ -424,8 +424,6 @@ mod tests {
 
     #[test]
     fn test_cli_parse_all_args() {
-        use std::ffi::OsString;
-
         let args = CliArgs::parse_from([
             "calld",
             "--validator",

@@ -3655,7 +3655,7 @@ mod tests {
 
     #[test]
     fn test_governance_full_cycle() {
-        use call_governance::{ProposalType, GovernanceEvent, DEFAULT_PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS, TIMELOCK_PERIOD_BLOCKS, EXECUTION_TIMEOUT_BLOCKS};
+        use call_governance::{ProposalType, GovernanceEvent, DEFAULT_PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS, TIMELOCK_PERIOD_BLOCKS};
 
         let tmp = std::env::temp_dir().join("call_gov_cycle_test");
         let _ = std::fs::remove_dir_all(&tmp);
