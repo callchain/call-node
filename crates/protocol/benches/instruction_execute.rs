@@ -7,15 +7,15 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Benchmark
 use call_primitives::{Address, AssetId, Balance};
 use call_protocol::{
     Instruction, PaymentMemo,
-    balances::BalanceState,
+    AccountState,
     registry::AssetRegistry,
     compliance::ComplianceEngine,
     instructions::execute_instruction,
 };
 use call_shielded::ShieldedState;
 
-fn setup_state() -> (BalanceState, AssetRegistry, ComplianceEngine, ShieldedState) {
-    let mut balances = BalanceState::new();
+fn setup_state() -> (AccountState, AssetRegistry, ComplianceEngine, ShieldedState) {
+    let mut account = AccountState::new();
     let mut registry = AssetRegistry::new();
     let compliance = ComplianceEngine::new();
     let shielded = ShieldedState::new();
@@ -25,9 +25,9 @@ fn setup_state() -> (BalanceState, AssetRegistry, ComplianceEngine, ShieldedStat
 
     // Seed sender balance
     let sender = Address::repeat_byte(1);
-    balances.balances.set_balance(1, sender, 1_000_000_000_000u128).unwrap();
+    account.balances.set_balance(1, sender, 1_000_000_000_000u128).unwrap();
 
-    (balances, registry, compliance, shielded)
+    (account, registry, compliance, shielded)
 }
 
 fn bench_transfer(c: &mut Criterion) {
@@ -40,7 +40,7 @@ fn bench_transfer(c: &mut Criterion) {
             |b, &size| {
                 b.iter_batched(
                     setup_state,
-                    |(mut balances, mut registry, mut compliance, mut shielded)| {
+                    |(mut account, mut registry, mut compliance, mut shielded)| {
                         let sender = Address::repeat_byte(1);
                         let mut total = 0u64;
                         for i in 0..size {
@@ -52,7 +52,7 @@ fn bench_transfer(c: &mut Criterion) {
                             };
                             let _ = execute_instruction(
                                 &instr,
-                                &mut balances,
+                                &mut account,
                                 &mut registry,
                                 &mut compliance,
                                 &mut shielded,
@@ -96,11 +96,11 @@ fn bench_batch_transfer(c: &mut Criterion) {
 
                 b.iter_batched(
                     setup_state,
-                    |(mut balances, mut registry, mut compliance, mut shielded)| {
+                    |(mut account, mut registry, mut compliance, mut shielded)| {
                         let sender = Address::repeat_byte(1);
                         let result = execute_instruction(
                             &instr,
-                            &mut balances,
+                            &mut account,
                             &mut registry,
                             &mut compliance,
                             &mut shielded,
@@ -135,12 +135,12 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
         b.iter_batched(
             setup_state,
-            |(mut balances, mut registry, mut compliance, mut shielded)| {
+            |(mut account, mut registry, mut compliance, mut shielded)| {
                 let mut results = Vec::with_capacity(instructions.len());
                 for instr in &instructions {
                     let r = execute_instruction(
                         instr,
-                        &mut balances,
+                        &mut account,
                         &mut registry,
                         &mut compliance,
                         &mut shielded,

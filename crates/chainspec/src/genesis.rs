@@ -8,7 +8,7 @@ use call_consensus::validator::ValidatorStateManager;
 use call_crypto::{build_merkle_root, keccak256};
 use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
-use call_protocol::balances::BalanceState;
+use call_protocol::AccountState;
 use call_protocol::compliance::ComplianceEngine;
 use call_oracle::{OracleConfig, OracleManager};
 use call_protocol::registry::AssetRegistry;
@@ -176,8 +176,8 @@ pub struct GenesisState {
     pub evm_state_root: Hash,
     /// Bridge state root (always ZERO in genesis)
     pub bridge_root: Hash,
-    /// Protocol balances
-    pub balances: BalanceState,
+    /// Protocol account
+    pub balances: AccountState,
     /// Asset registry
     pub registry: AssetRegistry,
     /// Compliance engine
@@ -220,14 +220,14 @@ impl GenesisExecutor {
         self.validate()?;
 
         // Step 2: Initialize state tables
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut evm_state = EvmState::new();
         let mut validators = ValidatorStateManager::default();
 
-        // Step 3: Register assets and distribute initial balances
-        self.register_assets(&mut balances, &mut registry, &mut evm_state)?;
+        // Step 3: Register assets and distribute initial account
+        self.register_assets(&mut account, &mut registry, &mut evm_state)?;
 
         // Step 4: Register validators
         self.register_validators(&mut validators)?;
@@ -250,7 +250,7 @@ impl GenesisExecutor {
         }
 
         // Step 8: Compute initial state roots
-        let payment_root = compute_payment_root(&balances);
+        let payment_root = compute_payment_root(&account);
         let evm_state_root = compute_evm_state_root(&evm_state);
         let bridge_root = Hash::ZERO; // No bridge operations in genesis
 
@@ -258,7 +258,7 @@ impl GenesisExecutor {
             payment_root,
             evm_state_root,
             bridge_root,
-            balances,
+            balances: account,
             registry,
             compliance,
             evm_state,
@@ -301,10 +301,10 @@ impl GenesisExecutor {
         Ok(())
     }
 
-    /// Register assets and distribute initial balances
+    /// Register assets and distribute initial account
     fn register_assets(
         &self,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
         registry: &mut AssetRegistry,
         evm_state: &mut EvmState,
     ) -> Result<(), GenesisError> {
@@ -321,10 +321,10 @@ impl GenesisExecutor {
                 )
                 .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
 
-            // Distribute initial balances
+            // Distribute initial account
             for (address_str, amount) in &asset.distribution {
                 let addr = parse_address(address_str)?;
-                balances
+                account
                     .balances
                     .set_balance(asset.asset_id, addr, *amount)
                     .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
@@ -413,8 +413,8 @@ impl GenesisExecutor {
 // ── State Root Computation ────────────────────────────────────────────
 
 /// Compute payment Merkle root from balance state
-pub fn compute_payment_root(balances: &BalanceState) -> Hash {
-    let mut leaves: Vec<Hash> = balances
+pub fn compute_payment_root(account: &AccountState) -> Hash {
+    let mut leaves: Vec<Hash> = account
         .balances
         .iter()
         .map(|(&(asset_id, addr), &balance)| {

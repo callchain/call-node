@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use call_primitives::{Address, AssetId};
-    use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine};
+    use call_protocol::{AccountState, AssetRegistry, ComplianceEngine};
     use call_oracle::OracleManager;
     use call_evm::EvmState;
     use call_bridge::BridgeStateManager;
@@ -39,7 +39,7 @@ mod tests {
     fn make_test_state() -> RpcState {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
         RpcState::new(
-            BalanceState::new(),
+            AccountState::new(),
             AssetRegistry::new(),
             ComplianceEngine::new(),
             EvmState::new(),

@@ -198,7 +198,7 @@ impl SimplexConsensus {
     pub fn execute_block(
         &mut self,
         block: &Block,
-        balances: &mut call_protocol::balances::BalanceState,
+        balances: &mut call_protocol::AccountState,
         registry: &mut call_protocol::registry::AssetRegistry,
         compliance: &mut call_protocol::compliance::ComplianceEngine,
         bridge_state: &mut call_bridge::BridgeStateManager,

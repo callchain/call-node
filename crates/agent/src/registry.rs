@@ -119,7 +119,7 @@ impl AgentRegistry {
         metadata_hash: [u8; 32],
         domain_proof: Option<DomainProof>,
         current_block: u64,
-        balances: Option<&mut call_protocol::balances::BalanceState>,
+        balances: Option<&mut call_protocol::AccountState>,
     ) -> Result<u64, AgentError> {
         // 1. Validate name uniqueness
         if self.agents_by_name.contains_key(&name) {
@@ -548,7 +548,7 @@ mod tests {
     fn test_agent_register_with_fee_success() {
         let mut registry = AgentRegistry::new_with_format_verifier()
             .with_registration_fee(500, 1);
-        let mut balances = call_protocol::balances::BalanceState::new();
+        let mut balances = call_protocol::AccountState::new();
         balances.balances.set_balance(1, test_addr(1), 1000).unwrap();
 
         let id = registry
@@ -566,7 +566,7 @@ mod tests {
     fn test_agent_register_with_fee_insufficient_balance() {
         let mut registry = AgentRegistry::new_with_format_verifier()
             .with_registration_fee(500, 1);
-        let mut balances = call_protocol::balances::BalanceState::new();
+        let mut balances = call_protocol::AccountState::new();
         balances.balances.set_balance(1, test_addr(1), 100).unwrap();
 
         let result = registry.register_agent(

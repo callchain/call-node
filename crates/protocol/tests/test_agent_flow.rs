@@ -4,7 +4,7 @@ mod integration;
 mod test_agent_flow_impl {
     use super::integration::*;
     use call_primitives::Address;
-    use call_protocol::balances::BalanceState;
+    use call_protocol::AccountState;
     use call_protocol::registry::AssetRegistry;
     use call_protocol::instructions::{AgentPayment, Instruction};
     use call_agent::{
@@ -64,7 +64,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_owner_grant_funds() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_balances = AccountState::new();
         protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
         balances.grant_funds(owner, 0, 1, 5_000, &mut protocol_balances).unwrap();
@@ -76,7 +76,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_revoke_funds() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_balances = AccountState::new();
         protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
         balances.grant_funds(owner, 0, 1, 5_000, &mut protocol_balances).unwrap();
@@ -88,7 +88,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_balances_isolated_by_owner() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_balances = AccountState::new();
         protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         protocol_balances.balances.set_balance(1, addr(2), 10_000).unwrap();
         balances.grant_funds(addr(1), 0, 1, 1_000, &mut protocol_balances).unwrap();
@@ -100,7 +100,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_deduct_from_balance() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_balances = AccountState::new();
         protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
         balances.grant_funds(owner, 0, 1, 1_000, &mut protocol_balances).unwrap();
@@ -154,7 +154,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_funding_action_grant() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_balances = AccountState::new();
         protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
         let action = AgentFundingAction::Grant { agent_id: 0, asset_id: 1, amount: 3_000 };
@@ -170,7 +170,7 @@ mod test_agent_flow_impl {
     #[test]
     fn test_agent_funding_action_revoke() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_balances = AccountState::new();
         protocol_balances.balances.set_balance(1, addr(1), 10_000).unwrap();
         let owner = addr(1);
         balances.grant_funds(owner, 0, 1, 2_000, &mut protocol_balances).unwrap();

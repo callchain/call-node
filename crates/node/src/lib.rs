@@ -23,7 +23,7 @@ use call_consensus::{
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, UpgradeAnnouncement};
 use call_primitives::{BlockHash, Hash, Address};
 use call_protocol::{
-    BalanceState, AssetRegistry, ComplianceEngine,
+    AccountState, AssetRegistry, ComplianceEngine,
     transaction::ProtocolTransaction,
     security::P2PDefense,
 };
@@ -145,7 +145,7 @@ impl CallNode {
         // Load persisted state from reth-db (skip if recovery needed)
         let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, receipts, fork_manager) = if recovery_needed {
             (
-                BalanceState::new(), EvmState::new(), BridgeStateManager::default(),
+                AccountState::new(), EvmState::new(), BridgeStateManager::default(),
                 ShieldedState::new(), ValidatorStateManager::default(),
                 AgentRegistry::new(), AgentBalances::new(), call_agent::AgentNonces::new(),
                 OracleManager::default(), GovernanceManager::new(), ComplianceEngine::new(),
@@ -956,7 +956,7 @@ impl CallNode {
 /// Load all state types from the reth-db database.
 fn load_state_from_db(
     db_env: &Arc<DatabaseEnv>,
-) -> (BalanceState, EvmState, BridgeStateManager, ShieldedState,
+) -> (AccountState, EvmState, BridgeStateManager, ShieldedState,
       ValidatorStateManager, AgentRegistry, AgentBalances, call_agent::AgentNonces, GovernanceManager, ComplianceEngine) {
     // Load balances
     let (balances, allowances) = match db_load_balances(db_env) {
@@ -966,7 +966,7 @@ fn load_state_from_db(
             (std::collections::HashMap::new(), std::collections::HashMap::new())
         }
     };
-    let mut balance_state = BalanceState::new();
+    let mut balance_state = AccountState::new();
     for ((asset_id, address), balance) in &balances {
         let _ = balance_state.balances.set_balance(*asset_id, *address, *balance);
     }

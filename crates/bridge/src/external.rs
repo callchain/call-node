@@ -9,7 +9,7 @@
 use alloy_primitives::{Address, B256};
 use call_primitives::{AssetId, Signature};
 use call_crypto::{keccak256, secp256k1_sign, recover_secp256k1_signer};
-use call_protocol::balances::BalanceState;
+use call_protocol::AccountState;
 use crate::{BridgeConfig, BridgeError, BridgeStateManager};
 
 #[cfg(feature = "light-client-bridge")]
@@ -285,7 +285,7 @@ pub fn sign_bridge_event(
 /// `finalize_pending_external_deposits`.
 pub fn process_external_deposit(
     op: &ExternalBridgeOp,
-    _protocol_balances: &mut BalanceState,
+    _protocol_account: &mut AccountState,
     bridge_state: &mut BridgeStateManager,
     config: &BridgeConfig,
     validators: &[Address],
@@ -396,7 +396,7 @@ pub fn process_external_deposit(
 pub fn process_light_client_deposit(
     light_client: &mut call_light_client::EthLightClient,
     op: &ExternalBridgeOp,
-    _protocol_balances: &mut BalanceState,
+    _protocol_account: &mut AccountState,
     bridge_state: &mut BridgeStateManager,
     config: &BridgeConfig,
     current_block: u64,
@@ -506,13 +506,13 @@ pub enum ExternalDepositResult {
 
 /// Finalize pending external deposits whose challenge period has expired.
 ///
-/// Credits protocol balances for all deposits past the challenge period.
+/// Credits protocol account for all deposits past the challenge period.
 /// Returns the number of deposits finalized.
 ///
 /// This should be called periodically (e.g., each block or in the block finalization step).
 pub fn finalize_pending_external_deposits(
     bridge_state: &mut BridgeStateManager,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
     current_block: u64,
 ) -> usize {
     let ready = bridge_state.finalize_pending_external_deposits(
@@ -524,7 +524,7 @@ pub fn finalize_pending_external_deposits(
 
     let count = ready.len();
     for deposit in ready {
-        let _ = protocol_balances.credit_balance(deposit.asset_id, deposit.recipient, deposit.amount);
+        let _ = protocol_account.credit_balance(deposit.asset_id, deposit.recipient, deposit.amount);
         bridge_state.record_bridge_event(
             crate::BridgeEventType::ExternalDepositFinalized,
             Some(deposit.source_tx_hash),
@@ -540,11 +540,11 @@ pub fn finalize_pending_external_deposits(
 
 /// Finalize pending external deposits with explicit challenge period.
 ///
-/// Credits protocol balances for all deposits past the challenge period.
+/// Credits protocol account for all deposits past the challenge period.
 /// Returns the number of deposits finalized.
 pub fn finalize_pending_external_deposits_with_period(
     bridge_state: &mut BridgeStateManager,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
     current_block: u64,
     challenge_period_blocks: u64,
 ) -> usize {
@@ -555,7 +555,7 @@ pub fn finalize_pending_external_deposits_with_period(
 
     let count = ready.len();
     for deposit in ready {
-        let _ = protocol_balances.credit_balance(deposit.asset_id, deposit.recipient, deposit.amount);
+        let _ = protocol_account.credit_balance(deposit.asset_id, deposit.recipient, deposit.amount);
         bridge_state.record_bridge_event(
             crate::BridgeEventType::ExternalDepositFinalized,
             Some(deposit.source_tx_hash),
@@ -605,7 +605,7 @@ pub fn challenge_pending_deposit(
 /// 4. Return withdraw event for validator signing
 pub fn process_external_withdraw(
     op: &ExternalBridgeOp,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
     bridge_state: &mut BridgeStateManager,
     config: &BridgeConfig,
     current_block: u64,
@@ -652,13 +652,13 @@ pub fn process_external_withdraw(
         .ok_or_else(|| BridgeError::BridgeFeeExceedsAmount(fee, *amount))?;
 
     // 6. Check protocol balance
-    let balance = protocol_balances.get_balance(*asset_id, sender);
+    let balance = protocol_account.get_balance(*asset_id, sender);
     if balance < total_deduction {
         return Err(BridgeError::InsufficientProtocolBalance(*asset_id, total_deduction));
     }
 
     // 7. Deduct protocol balance (amount + fee)
-    protocol_balances.deduct_balance(*asset_id, *sender, total_deduction)?;
+    protocol_account.deduct_balance(*asset_id, *sender, total_deduction)?;
 
     // 8. Record fee
     if fee > 0 {
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_external_deposit_asset_not_allowed() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
             allowed_assets: vec![1], // only CALL allowed
@@ -940,7 +940,7 @@ mod tests {
 
         let result = process_external_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             &validators,
@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_external_withdraw_insufficient_balance() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig::default();
 
@@ -966,7 +966,7 @@ mod tests {
 
         let result = process_external_withdraw(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             100, // current_block
@@ -980,7 +980,7 @@ mod tests {
 
     #[test]
     fn test_challenge_period_deposit_queued_not_credited() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
             challenge_period_blocks: 10, // Short period for testing
@@ -991,7 +991,7 @@ mod tests {
 
         let result = process_external_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             &validators,
@@ -1001,13 +1001,13 @@ mod tests {
         assert!(matches!(result, Ok(ExternalDepositResult::Queued { .. })));
 
         // Balance should NOT be credited yet (in challenge period)
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 0);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(1)), 0);
         assert_eq!(bridge_state.pending_external_deposits.len(), 1);
     }
 
     #[test]
     fn test_challenge_period_finalize_after_expiry() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
             challenge_period_blocks: 10,
@@ -1018,7 +1018,7 @@ mod tests {
 
         process_external_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             &validators,
@@ -1030,28 +1030,28 @@ mod tests {
         // Before challenge period expires: no credit
         let finalized = finalize_pending_external_deposits_with_period(
             &mut bridge_state,
-            &mut protocol_balances,
+            &mut protocol_account,
             105, // block 105 < 100 + 10
             10,
         );
         assert_eq!(finalized, 0);
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 0);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(1)), 0);
 
         // After challenge period expires: credit
         let finalized = finalize_pending_external_deposits_with_period(
             &mut bridge_state,
-            &mut protocol_balances,
+            &mut protocol_account,
             110, // block 110 >= 100 + 10
             10,
         );
         assert_eq!(finalized, 1);
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 1000);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(1)), 1000);
         assert_eq!(bridge_state.pending_external_deposits.len(), 0);
     }
 
     #[test]
     fn test_challenge_period_revoke_during_window() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
             challenge_period_blocks: 10,
@@ -1062,7 +1062,7 @@ mod tests {
 
         process_external_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             &validators,
@@ -1079,18 +1079,18 @@ mod tests {
         // After revocation, finalize should credit nothing
         let finalized = finalize_pending_external_deposits_with_period(
             &mut bridge_state,
-            &mut protocol_balances,
+            &mut protocol_account,
             110,
             10,
         );
         assert_eq!(finalized, 0);
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 0);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(1)), 0);
     }
 
     #[test]
     fn test_external_withdraw_period_limit() {
-        let mut protocol_balances = BalanceState::new();
-        protocol_balances.credit_balance(1, test_addr(1), 10_000).ok();
+        let mut protocol_account = AccountState::new();
+        protocol_account.credit_balance(1, test_addr(1), 10_000).ok();
 
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
@@ -1111,7 +1111,7 @@ mod tests {
         };
         assert!(process_external_withdraw(
             &op1,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             100,
@@ -1128,7 +1128,7 @@ mod tests {
         };
         assert!(process_external_withdraw(
             &op2,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             100,
@@ -1138,8 +1138,8 @@ mod tests {
 
     #[test]
     fn test_external_withdraw_period_reset() {
-        let mut protocol_balances = BalanceState::new();
-        protocol_balances.credit_balance(1, test_addr(1), 10_000).ok();
+        let mut protocol_account = AccountState::new();
+        protocol_account.credit_balance(1, test_addr(1), 10_000).ok();
 
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
@@ -1158,7 +1158,7 @@ mod tests {
             sender: test_addr(1),
             amount: 500,
         };
-        process_external_withdraw(&op, &mut protocol_balances, &mut bridge_state, &config, 100)
+        process_external_withdraw(&op, &mut protocol_account, &mut bridge_state, &config, 100)
             .unwrap();
 
         // Next block in same period: should fail
@@ -1171,7 +1171,7 @@ mod tests {
         };
         assert!(process_external_withdraw(
             &op2,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             105,
@@ -1181,7 +1181,7 @@ mod tests {
         // After period expires: should succeed (counter reset)
         assert!(process_external_withdraw(
             &op2,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             110, // 100 + 10 = period expired
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn test_challenge_period_reject_duplicate_pending() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
             challenge_period_blocks: 10,
@@ -1203,7 +1203,7 @@ mod tests {
         // First deposit: queued
         let result1 = process_external_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             &validators,
@@ -1215,7 +1215,7 @@ mod tests {
         // Same tx hash again: rejected (replay protection covers pending)
         let result2 = process_external_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             &validators,
@@ -1227,7 +1227,7 @@ mod tests {
 
     #[test]
     fn test_challenge_deposit_revoke_pending() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig {
             challenge_period_blocks: 10,
@@ -1239,7 +1239,7 @@ mod tests {
         // Deposit is queued
         let result = process_external_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut bridge_state,
             &config,
             &validators,

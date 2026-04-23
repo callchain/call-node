@@ -4,7 +4,7 @@
 //! Issuer limitations per §7.2.
 
 use call_primitives::{Address, AssetId, Balance};
-use crate::balances::BalanceState;
+use crate::AccountState;
 use crate::registry::AssetRegistry;
 use crate::{ProtocolError, ProtocolResult};
 use std::collections::HashSet;
@@ -41,7 +41,7 @@ impl IssuerState {
         caller: Address,
         action: IssuerAction,
         registry: &mut AssetRegistry,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
     ) -> ProtocolResult<()> {
         // Verify caller is the asset issuer
         let asset = registry
@@ -54,10 +54,10 @@ impl IssuerState {
 
         match action {
             IssuerAction::Mint { to, amount } => {
-                balances.mint(asset_id, &caller, to, amount)?;
+                account.mint(asset_id, &caller, to, amount)?;
             }
             IssuerAction::Burn { from, amount } => {
-                balances.burn(asset_id, from, amount)?;
+                account.burn(asset_id, from, amount)?;
             }
             IssuerAction::FreezeAddress { target } => {
                 self.frozen
@@ -145,7 +145,7 @@ pub fn verify_issuer_limitations(
     // Cannot bypass compliance (checked at instruction level)
     // Cannot change fee model (enforced by governance)
     // Cannot modify bridge rules (enforced by bridge layer)
-    // Cannot directly modify user balances (only via mint/burn)
+    // Cannot directly modify user account (only via mint/burn)
 
     match action {
         IssuerAction::Mint { .. } | IssuerAction::Burn { .. } => {
@@ -191,7 +191,7 @@ mod tests {
         let id = 1;
 
         let mut issuer_state = IssuerState::new();
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
 
         issuer_state
             .execute_issuer_action(
@@ -201,7 +201,7 @@ mod tests {
                     target: test_addr(2),
                 },
                 &mut registry,
-                &mut balances,
+                &mut account,
             )
             .unwrap();
 
@@ -217,7 +217,7 @@ mod tests {
         let id = 1;
 
         let mut issuer_state = IssuerState::new();
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
 
         issuer_state
             .execute_issuer_action(
@@ -227,7 +227,7 @@ mod tests {
                     target: test_addr(2),
                 },
                 &mut registry,
-                &mut balances,
+                &mut account,
             )
             .unwrap();
 
@@ -239,7 +239,7 @@ mod tests {
                     target: test_addr(2),
                 },
                 &mut registry,
-                &mut balances,
+                &mut account,
             )
             .unwrap();
 
@@ -280,7 +280,7 @@ mod tests {
             .unwrap();
 
         let mut issuer_state = IssuerState::new();
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
 
         let result = issuer_state.execute_issuer_action(
             1,
@@ -289,7 +289,7 @@ mod tests {
                 target: test_addr(2),
             },
             &mut registry,
-            &mut balances,
+            &mut account,
         );
         assert!(result.is_err());
     }
@@ -306,7 +306,7 @@ mod tests {
 
         // test_addr(1) owns asset 1, cannot mint on asset 2
         let mut issuer_state = IssuerState::new();
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
 
         let result = issuer_state.execute_issuer_action(
             2,
@@ -316,7 +316,7 @@ mod tests {
                 amount: 100,
             },
             &mut registry,
-            &mut balances,
+            &mut account,
         );
         assert!(result.is_err());
     }

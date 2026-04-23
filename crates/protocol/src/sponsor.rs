@@ -3,7 +3,7 @@
 //! Authorized sponsors, sponsor pools, per-tx sponsors.
 
 use call_primitives::{Address, Balance};
-use crate::balances::BalanceState;
+use crate::AccountState;
 use crate::{ProtocolError, ProtocolResult};
 use std::collections::HashMap;
 
@@ -70,7 +70,7 @@ impl SponsorRegistry {
         sender: &Address,
         fee: u128,
         current_day: u64,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
     ) -> ProtocolResult<()> {
         let auth = self
             .auths
@@ -98,7 +98,7 @@ impl SponsorRegistry {
         }
 
         // Deduct from sponsor balance
-        balances.balances.deduct_balance(0, *sponsor, fee)
+        account.balances.deduct_balance(crate::CALL_ASSET_ID, *sponsor, fee)
     }
 
     // ── Sponsor Pool ──
@@ -151,7 +151,7 @@ impl SponsorRegistry {
         sponsor: &Address,
         sender: &Address,
         fee: u128,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
     ) -> ProtocolResult<()> {
         let pool = self
             .pools
@@ -175,29 +175,29 @@ impl SponsorRegistry {
             ));
         }
 
-        // Deduct from pool balance only (balances layer tracks pool separately)
+        // Deduct from pool balance only (account layer tracks pool separately)
         let pool = self.pools.get_mut(sponsor).unwrap();
         pool.balance -= fee as Balance;
 
         // Deduct from sponsor's balance layer entry
-        balances.balances.deduct_balance(0, *sponsor, fee as Balance)
+        account.balances.deduct_balance(crate::CALL_ASSET_ID, *sponsor, fee as Balance)
     }
 
     pub fn verify_and_deduct_per_tx_sponsor(
         &mut self,
         sponsor: &Address,
         fee: u128,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
     ) -> ProtocolResult<()> {
         // Check sponsor has sufficient balance
-        let sponsor_bal = balances.balances.get_balance(0, sponsor);
+        let sponsor_bal = account.balances.get_balance(crate::CALL_ASSET_ID, sponsor);
         if sponsor_bal < fee {
             return Err(ProtocolError::SponsorError(
                 "sponsor insufficient balance".into(),
             ));
         }
         // Deduct from sponsor balance
-        balances.balances.deduct_balance(0, *sponsor, fee)
+        account.balances.deduct_balance(crate::CALL_ASSET_ID, *sponsor, fee)
     }
 }
 
@@ -236,13 +236,13 @@ mod tests {
         };
         registry.register_sponsor_auth(auth).unwrap();
 
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let result = registry.verify_and_deduct_authorized_sponsor(
             &test_addr(1),
             &test_addr(2),
             100,
             100, // current_day > expires_at
-            &mut balances,
+            &mut account,
         );
         assert!(result.is_err());
     }
@@ -259,13 +259,13 @@ mod tests {
         };
         registry.register_sponsor_auth(auth).unwrap();
 
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let result = registry.verify_and_deduct_authorized_sponsor(
             &test_addr(1),
             &test_addr(3), // not in whitelist
             100,
             10,
-            &mut balances,
+            &mut account,
         );
         assert!(result.is_err());
     }
@@ -282,17 +282,17 @@ mod tests {
         };
         registry.register_sponsor_auth(auth).unwrap();
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 10_000).unwrap();
 
         // First tx: OK
         registry
-            .verify_and_deduct_authorized_sponsor(&test_addr(1), &test_addr(2), 300, 10, &mut balances)
+            .verify_and_deduct_authorized_sponsor(&test_addr(1), &test_addr(2), 300, 10, &mut account)
             .unwrap();
 
         // Second tx: exceeds daily limit (300+300 > 500)
         let result = registry.verify_and_deduct_authorized_sponsor(
-            &test_addr(1), &test_addr(2), 300, 10, &mut balances,
+            &test_addr(1), &test_addr(2), 300, 10, &mut account,
         );
         assert!(result.is_err());
     }
@@ -316,15 +316,15 @@ mod tests {
     #[test]
     fn test_per_tx_sponsor_signature_verification() {
         let mut registry = SponsorRegistry::new();
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 1000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 1000).unwrap();
         // With sufficient balance, should succeed
-        let result = registry.verify_and_deduct_per_tx_sponsor(&test_addr(1), 100, &mut balances);
+        let result = registry.verify_and_deduct_per_tx_sponsor(&test_addr(1), 100, &mut account);
         assert!(result.is_ok());
-        assert_eq!(balances.balances.get_balance(0, &test_addr(1)), 900);
+        assert_eq!(account.balances.get_balance(crate::CALL_ASSET_ID, &test_addr(1)), 900);
 
         // Insufficient balance should fail
-        let result = registry.verify_and_deduct_per_tx_sponsor(&test_addr(2), 100, &mut balances);
+        let result = registry.verify_and_deduct_per_tx_sponsor(&test_addr(2), 100, &mut account);
         assert!(result.is_err());
     }
 }

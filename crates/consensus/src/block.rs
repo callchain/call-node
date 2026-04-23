@@ -6,7 +6,7 @@ use call_bridge::{BridgeOp, BridgeConfig};
 use call_crypto::{build_merkle_root, keccak256};
 use call_governance::GovernanceManager;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion};
-use call_protocol::balances::BalanceState;
+use call_protocol::account::AccountState;
 use call_protocol::instructions::{execute_protocol_instructions, Instruction, InstructionResult};
 use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::ProtocolTransaction;
@@ -250,7 +250,7 @@ impl Block {
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &self,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
         registry: &mut AssetRegistry,
         compliance: &mut call_protocol::compliance::ComplianceEngine,
         bridge_state: &mut call_bridge::BridgeStateManager,
@@ -274,42 +274,66 @@ impl Block {
         let mut gas_tracker = BlockGasTracker::new(max_evm_gas);
         // Track nonces separately: EVM and protocol operate on separate namespaces
         let mut used_evm_nonces: HashSet<(call_primitives::Address, u64)> = HashSet::new();
-        let mut used_protocol_nonces: HashSet<(call_primitives::Address, u64)> = HashSet::new();
 
         // Step 1: EVM transactions
         for raw_tx in &self.evm_txs {
             if let Ok(tx) = decode_evm_tx(raw_tx) {
-                // Validate nonce and balance before execution
-                if call_evm::validate_evm_tx(&tx, evm_state).is_err() {
-                    // Skip invalid txs — they don't consume gas
-                    continue;
-                }
-                // Check for duplicate nonce within this block
                 let caller = tx.caller;
                 let nonce = tx.nonce;
+
+                // Check for duplicate nonce within this block
                 if !used_evm_nonces.insert((caller, nonce)) {
                     continue; // duplicate nonce in same block
                 }
+
+                // Validate nonce and balance before execution
+                if call_evm::validate_evm_tx(&tx, evm_state).is_err() {
+                    continue;
+                }
+
+                // Unified gas balance: auto-bridge Protocol→EVM if needed
+                let gas_cost_u256 = call_evm::U256::from(tx.gas_limit)
+                    .saturating_mul(call_evm::U256::from(tx.gas_price));
+                let gas_cost_u128: u128 = gas_cost_u256.try_into().unwrap_or(u128::MAX);
+                let evm_balance_u128: u128 =
+                    evm_state.get_balance(&caller).try_into().unwrap_or(0);
+
+                if evm_balance_u128 < gas_cost_u128 {
+                    let needed = gas_cost_u128 - evm_balance_u128;
+                    let protocol_balance =
+                        account.get_balance(call_protocol::CALL_ASSET_ID, &caller);
+                    if protocol_balance < needed {
+                        continue; // insufficient unified gas
+                    }
+                    if account
+                        .deduct_balance(call_protocol::CALL_ASSET_ID, caller, needed)
+                        .is_ok()
+                    {
+                        let new_evm = evm_state.get_balance(&caller)
+                            + call_evm::U256::from(needed);
+                        evm_state.set_balance(caller, new_evm);
+                    } else {
+                        continue;
+                    }
+                }
+
                 if let Ok(exec_result) = executor.execute_tx(tx, evm_state) {
                     if gas_tracker.add_gas(exec_result.gas_used).is_err() {
-                        // Gas limit exceeded — skip this tx, release nonce
-                        used_evm_nonces.remove(&(caller, nonce));
                         continue;
                     }
                     result.evm_tx_count += 1;
                     result.evm_gas_used += exec_result.gas_used;
-                } else {
-                    // Execution failed — release nonce so it can be retried
-                    used_evm_nonces.remove(&(caller, nonce));
                 }
+                // Nonce consumed regardless of execution result (same as Ethereum)
             }
         }
 
         // Step 2: Protocol transactions
         for tx in &self.protocol_txs {
-            // Reject duplicate nonce within the same block
-            if !used_protocol_nonces.insert((tx.sender, tx.nonce)) {
-                continue; // duplicate nonce
+            // Validate nonce against state (nonce consumed on inclusion)
+            if let Err(_e) = account.validate_nonce(&tx.sender, tx.nonce) {
+                // Nonce mismatch or already used — skip this tx
+                continue;
             }
 
             // Verify transaction signature before execution
@@ -328,6 +352,69 @@ impl Block {
                 )));
             }
 
+            // Compute gas fee
+            let gas_units = call_protocol::transaction::calculate_gas_units(&tx.instructions);
+            let fee = call_protocol::transaction::compute_fee(
+                gas_units,
+                call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS,
+                fee_params.base_fee,
+            )
+            .min(tx.max_fee);
+
+            // Unified gas balance: auto-bridge EVM→Protocol if needed
+            let mut bridged_from_evm = 0u128;
+            let protocol_balance = account.get_balance(call_protocol::CALL_ASSET_ID, &tx.sender);
+            if protocol_balance < fee {
+                let needed = fee - protocol_balance;
+                let evm_balance_u128: u128 =
+                    evm_state.get_balance(&tx.sender).try_into().unwrap_or(0);
+                if evm_balance_u128 < needed {
+                    continue; // insufficient unified gas
+                }
+                let current_evm = evm_state.get_balance(&tx.sender);
+                evm_state.set_balance(
+                    tx.sender,
+                    current_evm - call_evm::U256::from(needed),
+                );
+                if account
+                    .credit_balance(call_protocol::CALL_ASSET_ID, tx.sender, needed)
+                    .is_err()
+                {
+                    evm_state.set_balance(tx.sender, current_evm);
+                    continue;
+                }
+                bridged_from_evm = needed;
+            }
+
+            // Deduct gas fee from protocol balance
+            let gas_ok = match tx.fee_currency {
+                call_primitives::FeeCurrency::Call => account
+                    .deduct_balance(call_protocol::CALL_ASSET_ID, tx.sender, fee)
+                    .is_ok(),
+                call_primitives::FeeCurrency::Stablecoin(asset_id) => account
+                    .deduct_balance(asset_id, tx.sender, fee)
+                    .is_ok(),
+            };
+            if !gas_ok {
+                // Rollback EVM bridge if we bridged
+                if bridged_from_evm > 0 {
+                    let current_evm = evm_state.get_balance(&tx.sender);
+                    evm_state.set_balance(
+                        tx.sender,
+                        current_evm + call_evm::U256::from(bridged_from_evm),
+                    );
+                    let _ = account.deduct_balance(
+                        call_protocol::CALL_ASSET_ID,
+                        tx.sender,
+                        bridged_from_evm,
+                    );
+                }
+                continue;
+            }
+
+            // Increment nonce (consumed on inclusion, regardless of execution result)
+            account.increment_nonce(tx.sender);
+
             // Separate instructions by type: bridge, agent, validator, regular
             let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
                 .instructions
@@ -343,8 +430,8 @@ impl Block {
                 .cloned()
                 .partition(|i| is_validator_instruction(i));
 
-            // Take snapshots for atomic rollback
-            let balance_snapshot = balances.clone();
+            // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
+            let balance_snapshot = account.clone();
             let evm_snapshot = evm_state.clone();
             let bridge_snapshot = bridge_state.clone();
             let validator_snapshot = validator_state.as_ref().map(|vs| (*vs).clone());
@@ -356,7 +443,7 @@ impl Block {
                 if !other_instrs.is_empty() {
                     let results = execute_protocol_instructions(
                         &other_instrs,
-                        balances,
+                        account,
                         registry,
                         compliance,
                         shielded_state,
@@ -387,7 +474,7 @@ impl Block {
                         let r = execute_bridge_instruction(
                             instr,
                             tx.sender,
-                            balances,
+                            account,
                             bridge_state,
                             config,
                             vals,
@@ -420,7 +507,7 @@ impl Block {
                             tx.sender,
                             ab,
                             ar,
-                            balances,
+                            account,
                             evm_state,
                             bridge_state,
                             registry,
@@ -443,7 +530,7 @@ impl Block {
                         let r = execute_validator_instruction(
                             instr,
                             tx.sender,
-                            balances,
+                            account,
                             vs,
                             current_block_height,
                         )?;
@@ -455,7 +542,8 @@ impl Block {
             })();
 
             if let Err(e) = exec_result {
-                *balances = balance_snapshot;
+                // Rollback balance/EVM/bridge but nonce stays consumed
+                *account = balance_snapshot;
                 *evm_state = evm_snapshot;
                 *bridge_state = bridge_snapshot;
                 if let Some(ref snapshot) = validator_snapshot {
@@ -473,7 +561,7 @@ impl Block {
 
         // Step 3: Bridge operations
         // Execute internal bridge deposits/withdrawals atomically.
-        // Each operation deducts/credits protocol balances and mints/burns
+        // Each operation deducts/credits protocol account and mints/burns
         // wrapped ERC-20 tokens in the EVM layer.
         if let Some(config) = bridge_config {
             for op in &self.bridge_operations {
@@ -487,7 +575,7 @@ impl Block {
                     BridgeOp::DepositToEvm { from, .. } => {
                         call_bridge::execute_deposit(
                             op,
-                            balances,
+                            account,
                             evm_state,
                             &executor,
                             bridge_state,
@@ -501,7 +589,7 @@ impl Block {
                     BridgeOp::WithdrawToProtocol { from, .. } => {
                         call_bridge::execute_withdraw(
                             op,
-                            balances,
+                            account,
                             evm_state,
                             &executor,
                             bridge_state,
@@ -564,7 +652,7 @@ impl Block {
         }
 
         // Compute state roots
-        result.payment_root = compute_payment_root(balances);
+        result.payment_root = compute_payment_root(account);
         result.evm_state_root = compute_evm_state_root(evm_state);
         result.bridge_root = compute_bridge_root(bridge_state);
         result.receipt_root = compute_receipt_root(&result);
@@ -627,7 +715,7 @@ fn execute_agent_instruction(
     sender: call_primitives::Address,
     agent_balances: &mut call_agent::AgentBalances,
     agent_registry: &call_agent::AgentRegistry,
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     evm_state: &mut EvmState,
     bridge_state: &mut call_bridge::BridgeStateManager,
     registry: &AssetRegistry,
@@ -654,7 +742,7 @@ fn execute_agent_instruction(
             agent_balances
                 .deduct(agent.owner, payment.agent_id, payment.asset_id, payment.amount)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("agent pay: {e}")))?;
-            balances
+            account
                 .credit_balance(payment.asset_id, payment.to, payment.amount)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("agent pay: {e}")))?;
             agent_events.push(call_agent::AgentEvent {
@@ -689,7 +777,7 @@ fn execute_agent_instruction(
                     .map_err(|e| {
                         ConsensusError::InvalidBlock(format!("agent batch pay: {e}"))
                     })?;
-                balances
+                account
                     .credit_balance(payment.asset_id, payment.to, payment.amount)
                     .map_err(|e| {
                         ConsensusError::InvalidBlock(format!("agent batch pay: {e}"))
@@ -778,7 +866,7 @@ fn execute_agent_instruction(
                 .map_err(|e| {
                     ConsensusError::InvalidBlock(format!("agent bridge deposit: {e}"))
                 })?;
-            balances
+            account
                 .deduct_balance(*asset_id, sender, *amount)
                 .map_err(|e| {
                     ConsensusError::InvalidBlock(format!("agent bridge deposit: {e}"))
@@ -798,7 +886,7 @@ fn execute_agent_instruction(
                 .unwrap_or_else(|| call_primitives::Address::from_slice(&[0xCCu8; 20]));
 
             match call_bridge::execute_deposit(
-                &op, balances, evm_state, evm_executor, bridge_state, &config, registry,
+                &op, account, evm_state, evm_executor, bridge_state, &config, registry,
                 bridge_address, sender, current_block_height,
             ) {
                 Ok(exec) if exec.success => {
@@ -817,14 +905,14 @@ fn execute_agent_instruction(
                 }
                 Ok(_) => {
                     let _ = agent_balances.credit(agent.owner, *agent_id, *asset_id, *amount);
-                    let _ = balances.credit_balance(*asset_id, sender, *amount);
+                    let _ = account.credit_balance(*asset_id, sender, *amount);
                     Err(ConsensusError::InvalidBlock(
                         "agent bridge deposit failed".into(),
                     ))
                 }
                 Err(e) => {
                     let _ = agent_balances.credit(agent.owner, *agent_id, *asset_id, *amount);
-                    let _ = balances.credit_balance(*asset_id, sender, *amount);
+                    let _ = account.credit_balance(*asset_id, sender, *amount);
                     Err(ConsensusError::InvalidBlock(format!(
                         "agent bridge deposit: {e:?}"
                     )))
@@ -844,7 +932,7 @@ fn is_bridge_instruction(instr: &Instruction) -> bool {
 fn execute_bridge_instruction(
     instruction: &Instruction,
     sender: call_primitives::Address,
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     bridge_state: &mut call_bridge::BridgeStateManager,
     config: &call_bridge::BridgeConfig,
     validators: &[call_primitives::Address],
@@ -888,7 +976,7 @@ fn execute_bridge_instruction(
             };
             match call_bridge::process_external_deposit(
                 &op,
-                balances,
+                account,
                 bridge_state,
                 config,
                 validators,
@@ -920,7 +1008,7 @@ fn execute_bridge_instruction(
             };
             match call_bridge::process_external_withdraw(
                 &op,
-                balances,
+                account,
                 bridge_state,
                 config,
                 current_block_height,
@@ -969,7 +1057,7 @@ fn execute_bridge_instruction(
             };
             match call_bridge::process_external_deposit(
                 &op,
-                balances,
+                account,
                 bridge_state,
                 config,
                 validators,
@@ -1048,7 +1136,7 @@ fn execute_bridge_instruction(
                 .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToEvm: {e}")))?;
 
             // 6. Check protocol balance is sufficient
-            let protocol_balance = balances.get_balance(*asset_id, &sender);
+            let protocol_balance = account.get_balance(*asset_id, &sender);
             if protocol_balance < *amount {
                 return Err(ConsensusError::InvalidBlock(format!(
                     "BridgeToEvm: insufficient protocol balance for asset {}: have {}, need {}",
@@ -1057,13 +1145,13 @@ fn execute_bridge_instruction(
             }
 
             // 7. Deduct protocol balance
-            balances
+            account
                 .deduct_balance(*asset_id, sender, *amount)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToEvm: {e}")))?;
 
             // 8. Bridge to EVM
             let amount_u256 = call_evm::U256::from(*amount);
-            let exec_result = if *asset_id == 1 {
+            let exec_result = if *asset_id == call_protocol::CALL_ASSET_ID {
                 // CALL: transfer as native EVM balance
                 let current = evm_state.get_balance(to);
                 evm_state.set_balance(*to, current + amount_u256);
@@ -1153,7 +1241,7 @@ fn execute_bridge_instruction(
             let amount_u256 = call_evm::U256::from(*amount);
 
             // 6. Withdraw from EVM
-            let exec_result = if *asset_id == 1 {
+            let exec_result = if *asset_id == call_protocol::CALL_ASSET_ID {
                 // CALL: transfer from native EVM balance
                 let evm_balance = evm_state.get_balance(&sender);
                 if evm_balance < amount_u256 {
@@ -1191,7 +1279,7 @@ fn execute_bridge_instruction(
                 Ok(execution) => {
                     if execution.success {
                         // 7. Credit protocol balance
-                        balances
+                        account
                             .credit_balance(*asset_id, *to, *amount)
                             .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e}")))?;
                         bridge_state.record_withdrawal(*asset_id, *amount);
@@ -1223,7 +1311,7 @@ fn is_validator_instruction(instr: &Instruction) -> bool {
 fn execute_validator_instruction(
     instruction: &Instruction,
     sender: call_primitives::Address,
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     validator_state: &mut ValidatorStateManager,
     current_block_height: u64,
 ) -> Result<InstructionResult, ConsensusError> {
@@ -1233,15 +1321,15 @@ fn execute_validator_instruction(
             self_stake,
         } => {
             // Verify sender has sufficient balance
-            let balance = balances.get_balance(0, &sender);
+            let balance = account.get_balance(call_protocol::CALL_ASSET_ID, &sender);
             if balance < *self_stake {
                 return Err(ConsensusError::InvalidBlock(
                     "validator stake: insufficient balance".into(),
                 ));
             }
             // Transfer stake to escrow (Cosmos-style module account)
-            balances
-                .transfer(0, sender, STAKING_ESCROW, *self_stake)
+            account
+                .transfer(call_protocol::CALL_ASSET_ID, sender, STAKING_ESCROW, *self_stake)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("validator stake: {e}")))?;
             // Register validator
             validator_state.set_current_block(current_block_height);
@@ -1263,8 +1351,8 @@ fn execute_validator_instruction(
                 .claim_unbonded(*validator_id)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("validator claim: {e}")))?;
             // Return staked tokens from escrow to the original staker
-            balances
-                .transfer(0, STAKING_ESCROW, recipient, amount)
+            account
+                .transfer(call_protocol::CALL_ASSET_ID, STAKING_ESCROW, recipient, amount)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("validator claim: {e}")))?;
             Ok(InstructionResult::Success)
         }
@@ -1310,8 +1398,8 @@ fn update_base_fee_after_block(params: &mut FeeParams, gas_used: u64) {
 }
 
 /// Compute payment root from current balance state
-fn compute_payment_root(balances: &BalanceState) -> Hash {
-    let mut leaves: Vec<Hash> = balances
+fn compute_payment_root(account: &AccountState) -> Hash {
+    let mut leaves: Vec<Hash> = account
         .balances
         .iter()
         .map(|(&(asset_id, addr), &balance)| {
@@ -1471,9 +1559,9 @@ mod tests {
     fn make_test_tx() -> ProtocolTransaction {
         ProtocolTransaction {
             sender: test_addr(1),
-            nonce: 1,
+            nonce: 0,
             instructions: vec![Instruction::Transfer {
-                asset_id: 1,
+                asset_id: call_protocol::CALL_ASSET_ID,
                 to: test_addr(2),
                 amount: 100,
                 memo: None,
@@ -1496,9 +1584,9 @@ mod tests {
         let sender = call_crypto::pubkey_to_address(&pubkey);
         let mut tx = ProtocolTransaction {
             sender,
-            nonce: 1,
+            nonce: 0,
             instructions: vec![Instruction::Transfer {
-                asset_id: 1,
+                asset_id: call_protocol::CALL_ASSET_ID,
                 to: test_addr(2),
                 amount: 100,
                 memo: None,
@@ -1650,7 +1738,7 @@ mod tests {
                 data: vec![],
             }],
             vec![BridgeOp::DepositToEvm {
-                asset_id: 1,
+                asset_id: call_protocol::CALL_ASSET_ID,
                 from: sender,
                 to: test_addr(2),
                 amount: 500,
@@ -1658,10 +1746,10 @@ mod tests {
         );
 
         // Setup balance state
-        let mut balances = BalanceState::new();
-        balances
+        let mut account = AccountState::new();
+        account
             .balances
-            .set_balance(1, sender, 10_000)
+            .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
             .unwrap();
         let mut registry = AssetRegistry::new();
         registry
@@ -1694,7 +1782,7 @@ mod tests {
 
         let result = block
             .execute(
-                &mut balances,
+                &mut account,
                 &mut registry,
                 &mut compliance,
                 &mut bridge_state,
@@ -1761,7 +1849,7 @@ mod tests {
             vec![],
         );
 
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
@@ -1772,7 +1860,7 @@ mod tests {
 
         let result = block
             .execute(
-                &mut balances,
+                &mut account,
                 &mut registry,
                 &mut compliance,
                 &mut bridge_state,
@@ -1853,21 +1941,21 @@ mod tests {
             .unwrap();
 
         // Fund owner and grant to agent
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, sender, 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000).unwrap();
         let mut agent_balances = AgentBalances::new();
         agent_balances
-            .grant_funds(sender, agent_id, 1, 5_000, &mut balances)
+            .grant_funds(sender, agent_id, 1, 5_000, &mut account)
             .unwrap();
 
         // Build signed AgentPay transaction
         let mut tx = ProtocolTransaction {
             sender,
-            nonce: 1,
+            nonce: 0,
             instructions: vec![Instruction::AgentPay {
                 payment: AgentPayment {
                     agent_id,
-                    asset_id: 1,
+                    asset_id: call_protocol::CALL_ASSET_ID,
                     to: test_addr(2),
                     amount: 1_000,
                 },
@@ -1910,7 +1998,7 @@ mod tests {
 
         let result = block
             .execute(
-                &mut balances,
+                &mut account,
                 &mut registry,
                 &mut compliance,
                 &mut bridge_state,
@@ -1930,6 +2018,7 @@ mod tests {
             )
             .unwrap();
 
+        eprintln!("protocol_tx_count={} agent_events={}", result.protocol_tx_count, result.agent_events.len());
         // Verify agent event was emitted
         assert_eq!(result.agent_events.len(), 1);
         let event = &result.agent_events[0];
@@ -1952,9 +2041,9 @@ mod tests {
 
         let mut tx = ProtocolTransaction {
             sender,
-            nonce: 1,
+            nonce: 0,
             instructions: vec![Instruction::Transfer {
-                asset_id: 1,
+                asset_id: call_protocol::CALL_ASSET_ID,
                 to: test_addr(2),
                 amount: 100,
                 memo: None,
@@ -1984,8 +2073,8 @@ mod tests {
             vec![],
         );
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, sender, 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
@@ -1995,7 +2084,7 @@ mod tests {
         let bridge_config = call_bridge::BridgeConfig::default();
 
         let result = block.execute(
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,

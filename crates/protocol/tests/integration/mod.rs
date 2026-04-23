@@ -1,7 +1,7 @@
 //! Integration test shared utilities (T22.1)
 
 use call_primitives::{Address, AssetId, Balance, FeeCurrency, Hash};
-use call_protocol::balances::BalanceState;
+use call_protocol::AccountState;
 use call_protocol::compliance::ComplianceEngine;
 use call_protocol::instructions::{
     AgentPayment, Instruction, PaymentEntry, PaymentMemo,
@@ -73,13 +73,19 @@ pub fn make_memo() -> PaymentMemo {
 
 /// Setup: register an asset and credit initial balance
 pub fn setup_asset(
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     registry: &mut AssetRegistry,
     symbol: &str,
     issuer: Address,
     holder: Address,
     initial: Balance,
 ) -> AssetId {
+    // Register CALL first so user assets get IDs >= 2 and don't collide with gas asset.
+    if registry.get_asset(call_protocol::CALL_ASSET_ID).is_none() {
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, issuer, 0, 100)
+            .ok();
+    }
     let id = registry
         .register_asset(
             symbol.into(),
@@ -90,17 +96,17 @@ pub fn setup_asset(
             100, // registered_at
         )
         .unwrap();
-    balances.balances.set_balance(id, holder, initial).unwrap();
-    // Also give the issuer some balance for fee payment
-    balances.balances.set_balance(0, issuer, 1_000_000_000).unwrap();
-    balances.balances.set_balance(0, holder, 1_000_000_000).unwrap();
+    account.balances.set_balance(id, holder, initial).unwrap();
+    // Also give the issuer and holder some CALL balance for fee payment.
+    account.balances.set_balance(call_protocol::CALL_ASSET_ID, issuer, 1_000_000_000).unwrap();
+    account.balances.set_balance(call_protocol::CALL_ASSET_ID, holder, 1_000_000_000).unwrap();
     id
 }
 
 /// Execute a protocol transaction through the full instruction pipeline
 pub fn execute_tx(
     tx: &ProtocolTransaction,
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     registry: &mut AssetRegistry,
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
@@ -109,7 +115,7 @@ pub fn execute_tx(
     // Mempool acceptance
     let nonces = HashSet::new();
     let expected_nonces = HashMap::new();
-    accept_to_mempool(tx, balances, fee_params, &nonces, &expected_nonces)
+    accept_to_mempool(tx, account, fee_params, &nonces, &expected_nonces)
         .map_err(|e| format!("mempool reject: {e}"))?;
 
     // Gas calculation
@@ -119,7 +125,7 @@ pub fn execute_tx(
     // Deduct gas
     let mut sponsor_registry = SponsorRegistry::new();
     deduct_gas(
-        balances,
+        account,
         &tx.gas_config,
         &tx.fee_currency,
         fee,
@@ -133,7 +139,7 @@ pub fn execute_tx(
     // Execute instructions
     call_protocol::instructions::execute_protocol_instructions(
         &tx.instructions,
-        balances,
+        account,
         registry,
         compliance,
         shielded_state,
@@ -150,14 +156,14 @@ pub fn execute_tx(
 /// Setup a sponsor with balance and whitelist
 pub fn setup_sponsor(
     sponsors: &mut SponsorRegistry,
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     sponsor: Address,
     allowed_senders: Vec<Address>,
     max_daily: u128,
 ) {
-    balances
+    account
         .balances
-        .set_balance(0, sponsor, 100_000_000)
+        .set_balance(call_protocol::CALL_ASSET_ID, sponsor, 100_000_000)
         .unwrap();
     let auth = GasSponsorAuth {
         sponsor,

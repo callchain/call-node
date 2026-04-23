@@ -2,7 +2,7 @@
 
 pub mod security;
 pub mod registry;
-pub mod balances;
+pub mod account;
 pub mod compliance;
 pub mod instructions;
 pub mod transaction;
@@ -14,7 +14,7 @@ pub mod issuer;
 pub mod economics;
 
 pub use registry::*;
-pub use balances::*;
+pub use account::*;
 pub use compliance::*;
 pub use instructions::*;
 pub use transaction::*;
@@ -26,6 +26,9 @@ pub use issuer::*;
 pub use economics::*;
 
 use thiserror::Error;
+
+/// Asset ID for CALL (native token)
+pub const CALL_ASSET_ID: u64 = 1;
 
 /// Error type for protocol operations
 #[derive(Debug, Error)]

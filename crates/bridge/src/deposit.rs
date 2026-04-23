@@ -15,7 +15,7 @@
 
 use alloy_primitives::{Address, U256};
 use call_primitives::AssetId;
-use call_protocol::balances::BalanceState;
+use call_protocol::AccountState;
 use call_protocol::registry::AssetRegistry;
 use call_evm::{EvmExecutor, EvmState, EvmExecutionResult};
 use crate::{BridgeConfig, BridgeError, BridgeOp, BridgeStateManager};
@@ -26,7 +26,7 @@ use crate::{BridgeConfig, BridgeError, BridgeOp, BridgeStateManager};
 /// If EVM mint fails, the protocol balance is restored (atomic rollback).
 pub fn execute_deposit(
     op: &BridgeOp,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
     evm_state: &mut EvmState,
     evm_executor: &EvmExecutor,
     bridge_state: &mut BridgeStateManager,
@@ -63,7 +63,7 @@ pub fn execute_deposit(
     bridge_state.check_and_update_daily_limit(*asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
 
     // 5. Check protocol balance is sufficient
-    let protocol_balance = protocol_balances.get_balance(*asset_id, from);
+    let protocol_balance = protocol_account.get_balance(*asset_id, from);
     if protocol_balance < *amount {
         return Err(BridgeError::InsufficientProtocolBalance(*asset_id, *amount));
     }
@@ -74,8 +74,8 @@ pub fn execute_deposit(
     }
 
     // 7. Deduct protocol balance (atomic — if EVM fails, we restore)
-    let snapshot = protocol_balances.clone();
-    protocol_balances
+    let snapshot = protocol_account.clone();
+    protocol_account
         .deduct_balance(*asset_id, *from, *amount)
         .map_err(|_| BridgeError::InsufficientProtocolBalance(*asset_id, *amount))?;
 
@@ -112,13 +112,13 @@ pub fn execute_deposit(
                 Ok(execution)
             } else {
                 // EVM reverted — restore protocol balance
-                *protocol_balances = snapshot;
+                *protocol_account = snapshot;
                 Err(BridgeError::EvmExecutionFailed("bridge deposit to EVM reverted".into()))
             }
         }
         Err(e) => {
             // EVM error — restore protocol balance
-            *protocol_balances = snapshot;
+            *protocol_account = snapshot;
             Err(e)
         }
     }
@@ -126,12 +126,12 @@ pub fn execute_deposit(
 
 /// Check if there is sufficient protocol balance for a deposit
 pub fn check_deposit_balance(
-    protocol_balances: &BalanceState,
+    protocol_account: &AccountState,
     asset_id: AssetId,
     from: Address,
     amount: u128,
 ) -> Result<(), BridgeError> {
-    let balance = protocol_balances.get_balance(asset_id, &from);
+    let balance = protocol_account.get_balance(asset_id, &from);
     if balance < amount {
         Err(BridgeError::InsufficientProtocolBalance(asset_id, amount))
     } else {
@@ -166,8 +166,8 @@ mod tests {
 
     #[test]
     fn test_deposit_insufficient_protocol_balance() {
-        let mut protocol_balances = BalanceState::new();
-        protocol_balances
+        let mut protocol_account = AccountState::new();
+        protocol_account
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
@@ -190,7 +190,7 @@ mod tests {
         let bridge_addr = test_addr(0xCC);
         let result = execute_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut evm_state.clone(),
             &evm_executor,
             &mut bridge_state,
@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn test_deposit_success_with_contract() {
-        let mut protocol_balances = BalanceState::new();
-        protocol_balances
+        let mut protocol_account = AccountState::new();
+        protocol_account
             .balances
             .set_balance(1, test_addr(1), 10_000)
             .unwrap();
@@ -243,7 +243,7 @@ mod tests {
 
         let result = execute_deposit(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut evm_state,
             &evm_executor,
             &mut bridge_state,
@@ -258,22 +258,22 @@ mod tests {
         assert!(result.unwrap().success);
 
         // Protocol balance deducted
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 9_500);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(1)), 9_500);
     }
 
     #[test]
     fn test_check_deposit_balance() {
-        let mut protocol_balances = BalanceState::new();
-        protocol_balances
+        let mut protocol_account = AccountState::new();
+        protocol_account
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
 
         // Sufficient
-        assert!(check_deposit_balance(&protocol_balances, 1, test_addr(1), 500).is_ok());
+        assert!(check_deposit_balance(&protocol_account, 1, test_addr(1), 500).is_ok());
         // Exact
-        assert!(check_deposit_balance(&protocol_balances, 1, test_addr(1), 1000).is_ok());
+        assert!(check_deposit_balance(&protocol_account, 1, test_addr(1), 1000).is_ok());
         // Insufficient
-        assert!(check_deposit_balance(&protocol_balances, 1, test_addr(1), 1001).is_err());
+        assert!(check_deposit_balance(&protocol_account, 1, test_addr(1), 1001).is_err());
     }
 }

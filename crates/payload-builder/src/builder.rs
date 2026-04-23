@@ -7,7 +7,7 @@ use call_bridge::{BridgeOp, BridgeStateManager};
 use call_consensus::block::{Block, BlockExecutionResult, SystemTx, SystemTxKind};
 use call_consensus::validator::ConsensusError;
 use call_primitives::{Balance, BlockHash, Hash};
-use call_protocol::balances::BalanceState;
+use call_protocol::AccountState;
 use call_protocol::compliance::ComplianceEngine;
 use call_protocol::instructions::{Instruction, InstructionResult};
 use call_protocol::registry::AssetRegistry;
@@ -96,7 +96,7 @@ impl PayloadBuilder {
         protocol_txs: Vec<ProtocolTransaction>,
         evm_txs: Vec<Vec<u8>>,
         bridge_ops: Vec<BridgeOp>,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
         registry: &mut AssetRegistry,
         compliance: &mut ComplianceEngine,
         bridge_state: &mut BridgeStateManager,
@@ -229,7 +229,7 @@ impl PayloadBuilder {
 
         // Execute the block
         let result = block.execute(
-            balances,
+            account,
             registry,
             compliance,
             bridge_state,
@@ -282,7 +282,7 @@ impl PayloadBuilder {
         &self,
         attrs: &PayloadAttributes,
         selection: MempoolSelection,
-        balances: &mut BalanceState,
+        account: &mut AccountState,
         registry: &mut AssetRegistry,
         compliance: &mut ComplianceEngine,
         bridge_state: &mut BridgeStateManager,
@@ -304,7 +304,7 @@ impl PayloadBuilder {
             protocol_txs,
             evm_txs,
             selection.bridge_ops,
-            balances,
+            account,
             registry,
             compliance,
             bridge_state,
@@ -349,7 +349,7 @@ pub fn compute_receipt_root(results: &[InstructionResult]) -> Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_primitives::Address;
+    use call_primitives::{Address, ProtocolVersion};
     use call_protocol::transaction::{AuthScheme, GasConfig};
 
     fn test_addr(n: u8) -> Address {
@@ -427,8 +427,8 @@ mod tests {
         let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
         let bridge_ops: Vec<BridgeOp> = vec![];
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -440,7 +440,7 @@ mod tests {
             protocol_txs,
             evm_txs,
             bridge_ops,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,
@@ -471,8 +471,8 @@ mod tests {
         let evm_txs: Vec<Vec<u8>> = vec![];
         let bridge_ops: Vec<BridgeOp> = vec![];
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_sender(), 100_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_sender(), 100_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -484,7 +484,7 @@ mod tests {
             protocol_txs,
             evm_txs,
             bridge_ops,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,
@@ -518,8 +518,8 @@ mod tests {
             make_test_tx_with_sender(test_sender(), 1, 2),
         ];
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_sender(), 30_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_sender(), 30_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -531,7 +531,7 @@ mod tests {
             protocol_txs,
             vec![],
             vec![],
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,
@@ -594,8 +594,8 @@ mod tests {
             amount: 500,
         }];
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         registry.register_asset("CALL".into(), "Callchain".into(), 18, test_sender(), 0, 0).unwrap();
         let mut compliance = ComplianceEngine::new();
@@ -627,7 +627,7 @@ mod tests {
             protocol_txs,
             evm_txs,
             bridge_ops,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,
@@ -654,8 +654,8 @@ mod tests {
         let evm_txs: Vec<Vec<u8>> = vec![];
         let bridge_ops: Vec<BridgeOp> = vec![];
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -668,7 +668,7 @@ mod tests {
             protocol_txs,
             evm_txs,
             bridge_ops,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,
@@ -720,8 +720,8 @@ mod tests {
             bridge_ops: vec![],
         };
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -732,7 +732,7 @@ mod tests {
         let payload = builder.build_from_mempool(
             &attrs,
             selection,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,
@@ -779,8 +779,8 @@ mod tests {
         });
         let tx_ok = make_test_tx(1);
 
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(1, test_sender(), 10_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
@@ -792,7 +792,7 @@ mod tests {
             vec![tx_over, tx_ok],
             vec![],
             vec![],
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,

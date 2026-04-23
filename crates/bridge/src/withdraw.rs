@@ -14,7 +14,7 @@
 //! Asset 0 (virtual USD) is not bridgeable.
 
 use alloy_primitives::{Address, U256};
-use call_protocol::balances::BalanceState;
+use call_protocol::AccountState;
 use call_protocol::registry::AssetRegistry;
 use call_evm::{EvmExecutor, EvmState, EvmExecutionResult};
 use crate::{BridgeConfig, BridgeError, BridgeOp, BridgeStateManager};
@@ -25,7 +25,7 @@ use crate::{BridgeConfig, BridgeError, BridgeOp, BridgeStateManager};
 /// If EVM burn fails, no protocol balance change occurs (atomic).
 pub fn execute_withdraw(
     op: &BridgeOp,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
     evm_state: &mut EvmState,
     evm_executor: &EvmExecutor,
     bridge_state: &mut BridgeStateManager,
@@ -97,7 +97,7 @@ pub fn execute_withdraw(
         Ok(execution) => {
             if execution.success {
                 // 7. Restore protocol balance
-                let _ = protocol_balances.credit_balance(*asset_id, *to, *amount);
+                let _ = protocol_account.credit_balance(*asset_id, *to, *amount);
                 // 8. Record completed withdrawal
                 bridge_state.record_withdrawal(*asset_id, *amount);
                 Ok(execution)
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_withdraw_full_flow_call_native() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut evm_state = EvmState::new();
         evm_state.set_balance(test_addr(1), U256::from(1000));
 
@@ -181,7 +181,7 @@ mod tests {
         let bridge_addr = test_addr(0xCC);
         let result = execute_withdraw(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut evm_state,
             &evm_executor,
             &mut bridge_state,
@@ -196,14 +196,14 @@ mod tests {
         assert!(result.unwrap().success);
 
         // Protocol balance credited
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 500);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(1)), 500);
         // EVM native balance deducted
         assert_eq!(evm_state.get_balance(&test_addr(1)), U256::from(500));
     }
 
     #[test]
     fn test_withdraw_success_with_contract() {
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let mut evm_state = EvmState::new();
         evm_state.set_balance(test_addr(1), U256::from(100_000_000_000_000u128));
 
@@ -245,7 +245,7 @@ mod tests {
 
         let result = execute_withdraw(
             &op,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut evm_state,
             &evm_executor,
             &mut bridge_state,
@@ -260,6 +260,6 @@ mod tests {
         assert!(result.unwrap().success);
 
         // Protocol balance credited
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(1)), 500);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(1)), 500);
     }
 }

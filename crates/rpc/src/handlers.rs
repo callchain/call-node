@@ -1,6 +1,6 @@
 //! Core handler trait and RPC state management.
 
-use call_protocol::{BalanceState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams, FeeCurrencyRegistry};
+use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams, FeeCurrencyRegistry};
 use call_protocol::security::MempoolDefense;
 use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_oracle::OracleManager;
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 /// Shared RPC state — all handlers read from this.
 pub struct RpcState {
-    pub balance_state: RwLock<BalanceState>,
+    pub balance_state: RwLock<AccountState>,
     pub asset_registry: RwLock<AssetRegistry>,
     pub compliance_engine: RwLock<ComplianceEngine>,
     pub evm_state: RwLock<EvmState>,
@@ -62,7 +62,7 @@ pub struct RpcState {
 impl RpcState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        balance_state: BalanceState,
+        balance_state: AccountState,
         asset_registry: AssetRegistry,
         compliance_engine: ComplianceEngine,
         evm_state: EvmState,

@@ -4,7 +4,7 @@
 
 use call_primitives::{Address, AssetId, Balance, Hash};
 use call_shielded::{ShieldedState, ShieldedTransfer, ZkProof, Note, Nullifier, NoteCommitment};
-use crate::balances::BalanceState;
+use crate::AccountState;
 use crate::registry::AssetRegistry;
 use crate::compliance::ComplianceEngine;
 use call_oracle::{OracleManager, OracleSubmission};
@@ -272,7 +272,7 @@ pub type AgentExecutor<'a> = &'a mut dyn FnMut(&Instruction, Address) -> Option<
 /// 3-8. execute instructions with snapshot/rollback
 pub fn execute_protocol_instructions(
     instructions: &[Instruction],
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     registry: &mut AssetRegistry,
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
@@ -282,18 +282,18 @@ pub fn execute_protocol_instructions(
     mut governance: Option<&mut GovernanceManager>,
 ) -> ProtocolResult<Vec<InstructionResult>> {
     // Gap 1 — Take state snapshots for atomic rollback
-    let balance_snapshot = balances.clone();
+    let balance_snapshot = account.clone();
     let compliance_snapshot = compliance.clone();
     let shielded_snapshot = shielded_state.clone();
 
     let mut results = Vec::with_capacity(instructions.len());
 
     for (i, instr) in instructions.iter().enumerate() {
-        match execute_instruction(instr, balances, registry, compliance, shielded_state, sender, oracle.as_deref_mut(), agent_executor, governance.as_deref_mut()) {
+        match execute_instruction(instr, account, registry, compliance, shielded_state, sender, oracle.as_deref_mut(), agent_executor, governance.as_deref_mut()) {
             Ok(result) => results.push(result),
             Err(e) => {
                 // Gap 1 — Restore all state snapshots on failure
-                *balances = balance_snapshot;
+                *account = balance_snapshot;
                 *compliance = compliance_snapshot;
                 *shielded_state = shielded_snapshot;
                 return Err(ProtocolError::InvalidInstruction(format!(
@@ -310,7 +310,7 @@ pub fn execute_protocol_instructions(
 /// Execute a single instruction
 pub fn execute_instruction(
     instruction: &Instruction,
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     registry: &mut AssetRegistry,
     compliance: &mut ComplianceEngine,
     shielded_state: &mut ShieldedState,
@@ -340,7 +340,7 @@ pub fn execute_instruction(
             let policy_id = registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0);
             compliance.check_compliance_by_policy_id(&sender, policy_id)?;
             compliance.check_compliance_by_policy_id(to, policy_id)?;
-            balances.transfer(*asset_id, sender, *to, *amount)?;
+            account.transfer(*asset_id, sender, *to, *amount)?;
             Ok(InstructionResult::Success)
         }
         Instruction::BatchTransfer { asset_id, payments } => {
@@ -352,7 +352,7 @@ pub fn execute_instruction(
                 }
                 // Gap 6 — Check recipient compliance
                 compliance.check_compliance_by_policy_id(&p.to, policy_id)?;
-                balances.transfer(*asset_id, sender, p.to, p.amount)?;
+                account.transfer(*asset_id, sender, p.to, p.amount)?;
             }
             Ok(InstructionResult::Success)
         }
@@ -361,7 +361,7 @@ pub fn execute_instruction(
             spender,
             amount,
         } => {
-            balances.allowances.set_allowance(*asset_id, sender, *spender, *amount);
+            account.allowances.set_allowance(*asset_id, sender, *spender, *amount);
             Ok(InstructionResult::Success)
         }
         Instruction::TransferFrom {
@@ -375,8 +375,8 @@ pub fn execute_instruction(
             compliance.check_compliance_by_policy_id(&sender, policy_id)?;
             compliance.check_compliance_by_policy_id(from, policy_id)?;
             compliance.check_compliance_by_policy_id(to, policy_id)?;
-            balances.allowances.spend_allowance(*asset_id, *from, sender, *amount)?;
-            balances.transfer(*asset_id, *from, *to, *amount)?;
+            account.allowances.spend_allowance(*asset_id, *from, sender, *amount)?;
+            account.transfer(*asset_id, *from, *to, *amount)?;
             Ok(InstructionResult::Success)
         }
         Instruction::Mint {
@@ -393,7 +393,7 @@ pub fn execute_instruction(
             }
             // Update total supply in registry
             registry.mint_supply(*asset_id, &sender, *amount)?;
-            balances.mint(*asset_id, &sender, *to, *amount)?;
+            account.mint(*asset_id, &sender, *to, *amount)?;
             Ok(InstructionResult::Success)
         }
         Instruction::Burn {
@@ -408,7 +408,7 @@ pub fn execute_instruction(
             if asset.issuer != sender {
                 return Err(ProtocolError::Unauthorized);
             }
-            balances.burn(*asset_id, *from, *amount)?;
+            account.burn(*asset_id, *from, *amount)?;
             Ok(InstructionResult::Success)
         }
         Instruction::AgentPay { .. } => {
@@ -451,7 +451,7 @@ pub fn execute_instruction(
                 ));
             }
             let _ = (source_chain, target_address);
-            balances.mint(*asset_id, &sender, *target_address, *amount)?;
+            account.mint(*asset_id, &sender, *target_address, *amount)?;
             Ok(InstructionResult::Success)
         }
         Instruction::UpdateCompliance {
@@ -543,12 +543,12 @@ pub fn execute_instruction(
                 ProtocolError::InvalidInstruction(format!("shielded withdraw: {e}"))
             })?;
             // Credit transparent balance
-            balances.credit_balance(0, *target, *amount)?;
+            account.credit_balance(0, *target, *amount)?;
             Ok(InstructionResult::Success)
         }
         Instruction::ShieldedDeposit { asset_id, amount, commitment, encrypted_note } => {
             // Deduct from transparent balance
-            balances.deduct_balance(*asset_id, sender, *amount)?;
+            account.deduct_balance(*asset_id, sender, *amount)?;
             // Register note in shielded pool
             let note = Note::from_encrypted_bytes(encrypted_note)
                 .map_err(|e| ProtocolError::InvalidInstruction(format!(
@@ -590,12 +590,12 @@ pub fn execute_instruction(
             ))?;
             // Deduct proposal deposit from sender's balance
             let deposit = gov.config.proposal_deposit;
-            if balances.get_balance(0, &sender) < deposit {
+            if account.get_balance(0, &sender) < deposit {
                 return Err(ProtocolError::InvalidInstruction(
                     "governance: insufficient balance for proposal deposit".into(),
                 ));
             }
-            balances.balances.deduct_balance(0, sender, deposit)
+            account.balances.deduct_balance(0, sender, deposit)
                 .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: deposit deduction failed: {e}")))?;
             let _id = gov.submit_proposal_with_deposit(sender, proposal_type.clone(), title.clone(), description.clone(), execution_data.clone())
                 .map_err(|e| ProtocolError::InvalidInstruction(format!("governance: {e}")))?;
@@ -706,8 +706,8 @@ mod tests {
 
     #[test]
     fn test_execute_transfer() {
-        let mut balances = BalanceState::new();
-        balances
+        let mut account = AccountState::new();
+        account
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
@@ -724,7 +724,7 @@ mod tests {
 
         let results = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -736,14 +736,14 @@ mod tests {
         .expect("execute");
 
         assert_eq!(results.len(), 1);
-        assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
-        assert_eq!(balances.get_balance(1, &test_addr(2)), 500);
+        assert_eq!(account.get_balance(1, &test_addr(1)), 500);
+        assert_eq!(account.get_balance(1, &test_addr(2)), 500);
     }
 
     #[test]
     fn test_execute_batch_transfer() {
-        let mut balances = BalanceState::new();
-        balances
+        let mut account = AccountState::new();
+        account
             .balances
             .set_balance(1, test_addr(1), 3000)
             .unwrap();
@@ -769,7 +769,7 @@ mod tests {
 
         let results = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -780,13 +780,13 @@ mod tests {
         )
         .expect("execute");
         assert_eq!(results.len(), 1);
-        assert_eq!(balances.get_balance(1, &test_addr(1)), 1000);
+        assert_eq!(account.get_balance(1, &test_addr(1)), 1000);
     }
 
     #[test]
     fn test_execute_approve_and_transfer_from() {
-        let mut balances = BalanceState::new();
-        balances
+        let mut account = AccountState::new();
+        account
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
@@ -810,7 +810,7 @@ mod tests {
 
         let results = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -821,13 +821,13 @@ mod tests {
         )
         .expect("execute");
         assert_eq!(results.len(), 2);
-        assert_eq!(balances.get_balance(1, &test_addr(3)), 300);
+        assert_eq!(account.get_balance(1, &test_addr(3)), 300);
     }
 
     #[test]
     fn test_execute_mint_issuer_only() {
         // Mint requires sender to be the asset issuer.
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         registry
             .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100)
@@ -843,7 +843,7 @@ mod tests {
         }];
         let result = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -857,7 +857,7 @@ mod tests {
         // Issuer mints — should succeed
         let result = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -867,17 +867,17 @@ mod tests {
             None,
         );
         assert!(result.is_ok());
-        assert_eq!(balances.get_balance(1, &test_addr(99)), 1000);
+        assert_eq!(account.get_balance(1, &test_addr(99)), 1000);
     }
 
     #[test]
     fn test_execute_burn_issuer_only() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         registry
             .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100)
             .unwrap();
-        balances
+        account
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
@@ -892,7 +892,7 @@ mod tests {
         }];
         let result = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -906,7 +906,7 @@ mod tests {
         // Issuer burns — should succeed
         let result = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -916,7 +916,7 @@ mod tests {
             None,
         );
         assert!(result.is_ok());
-        assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
+        assert_eq!(account.get_balance(1, &test_addr(1)), 500);
     }
 
     #[test]
@@ -952,8 +952,8 @@ mod tests {
 
     #[test]
     fn test_instruction_rollback_on_failure() {
-        let mut balances = BalanceState::new();
-        balances
+        let mut account = AccountState::new();
+        account
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
@@ -978,7 +978,7 @@ mod tests {
 
         let result = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -989,14 +989,14 @@ mod tests {
         );
         assert!(result.is_err());
         // State should be rolled back to original
-        assert_eq!(balances.get_balance(1, &test_addr(1)), 1000);
-        assert_eq!(balances.get_balance(1, &test_addr(2)), 0);
+        assert_eq!(account.get_balance(1, &test_addr(1)), 1000);
+        assert_eq!(account.get_balance(1, &test_addr(2)), 0);
     }
 
     #[test]
     fn test_atomic_multi_instruction() {
-        let mut balances = BalanceState::new();
-        balances
+        let mut account = AccountState::new();
+        account
             .balances
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
@@ -1021,7 +1021,7 @@ mod tests {
 
         let results = execute_protocol_instructions(
             &instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut shielded_state,
@@ -1032,8 +1032,8 @@ mod tests {
         )
         .expect("execute");
         assert_eq!(results.len(), 2);
-        assert_eq!(balances.get_balance(1, &test_addr(1)), 500);
-        assert_eq!(balances.get_balance(1, &test_addr(2)), 300);
-        assert_eq!(balances.get_balance(1, &test_addr(3)), 200);
+        assert_eq!(account.get_balance(1, &test_addr(1)), 500);
+        assert_eq!(account.get_balance(1, &test_addr(2)), 300);
+        assert_eq!(account.get_balance(1, &test_addr(3)), 200);
     }
 }

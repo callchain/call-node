@@ -9,7 +9,7 @@ use call_consensus::{Block, ConsensusParams, SimplexConsensus, SystemTx, SystemT
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey};
 use call_protocol::{
-    BalanceState, AssetRegistry, ComplianceEngine,
+    AccountState, AssetRegistry, ComplianceEngine,
     instructions::Instruction,
     transaction::{AuthScheme, GasConfig, ProtocolTransaction},
 };
@@ -127,7 +127,7 @@ impl NodeBuilder {
         consensus.refresh_proposer_subset();
 
         let state = Arc::new(RpcState::new(
-            BalanceState::new(),
+            AccountState::new(),
             AssetRegistry::new(),
             ComplianceEngine::new(),
             call_evm::EvmState::new(),

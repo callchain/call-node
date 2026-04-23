@@ -5,7 +5,7 @@ mod integration;
 mod test_payment_flow_impl {
     use super::integration::*;
     use call_primitives::{Address, FeeCurrency, InstructionType};
-    use call_protocol::balances::BalanceState;
+    use call_protocol::AccountState;
     use call_protocol::compliance::ComplianceEngine;
     use call_protocol::instructions::{
         Instruction, PaymentEntry, PaymentMemo,
@@ -25,7 +25,7 @@ mod test_payment_flow_impl {
     /// Register asset -> transfer -> check balance -> verify receipt
     #[test]
     fn test_full_payment_flow_register_transfer_balance() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
@@ -35,10 +35,10 @@ mod test_payment_flow_impl {
         let holder = addr(2);
         let receiver = addr(3);
 
-        let asset_id = setup_asset(&mut balances, &mut registry, "TEST", issuer, holder, 10_000);
+        let asset_id = setup_asset(&mut account, &mut registry, "TEST", issuer, holder, 10_000);
 
-        assert_eq!(balances.get_balance(asset_id, &holder), 10_000);
-        assert_eq!(balances.get_balance(asset_id, &receiver), 0);
+        assert_eq!(account.get_balance(asset_id, &holder), 10_000);
+        assert_eq!(account.get_balance(asset_id, &receiver), 0);
 
         let tx = make_tx(
             holder,
@@ -46,10 +46,10 @@ mod test_payment_flow_impl {
             vec![make_transfer(asset_id, receiver, 3_000)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
-        assert_eq!(balances.get_balance(asset_id, &holder), 7_000);
-        assert_eq!(balances.get_balance(asset_id, &receiver), 3_000);
+        assert_eq!(account.get_balance(asset_id, &holder), 7_000);
+        assert_eq!(account.get_balance(asset_id, &receiver), 3_000);
     }
 
     // ── Multi-Instruction Atomic Transfer ──────────────────────────────────
@@ -57,7 +57,7 @@ mod test_payment_flow_impl {
     /// Transfer + Approve in single tx
     #[test]
     fn test_atomic_multi_instruction_transfer_approve_bridge() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
@@ -67,7 +67,7 @@ mod test_payment_flow_impl {
         let spender = addr(2);
         let receiver = addr(3);
 
-        let asset_id = setup_asset(&mut balances, &mut registry, "ATOMIC", addr(10), holder, 5_000);
+        let asset_id = setup_asset(&mut account, &mut registry, "ATOMIC", addr(10), holder, 5_000);
 
         let tx = make_tx(
             holder,
@@ -87,12 +87,12 @@ mod test_payment_flow_impl {
             ],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
-        assert_eq!(balances.get_balance(asset_id, &holder), 4_000);
-        assert_eq!(balances.get_balance(asset_id, &receiver), 1_000);
+        assert_eq!(account.get_balance(asset_id, &holder), 4_000);
+        assert_eq!(account.get_balance(asset_id, &receiver), 1_000);
         assert_eq!(
-            balances.allowances.get_allowance(asset_id, &holder, &spender),
+            account.allowances.get_allowance(asset_id, &holder, &spender),
             500
         );
     }
@@ -100,7 +100,7 @@ mod test_payment_flow_impl {
     /// Rollback: if one instruction fails, all revert
     #[test]
     fn test_atomic_rollback_on_failure() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let fee_params = FeeParams::default();
@@ -108,7 +108,7 @@ mod test_payment_flow_impl {
         let holder = addr(1);
         let receiver = addr(2);
 
-        let asset_id = setup_asset(&mut balances, &mut registry, "ROLL", addr(10), holder, 1_000);
+        let asset_id = setup_asset(&mut account, &mut registry, "ROLL", addr(10), holder, 1_000);
 
         let result = call_protocol::instructions::execute_protocol_instructions(
             &[
@@ -125,7 +125,7 @@ mod test_payment_flow_impl {
                     memo: None,
                 },
             ],
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut ShieldedState::new(),
@@ -136,15 +136,15 @@ mod test_payment_flow_impl {
         );
         assert!(result.is_err());
 
-        assert_eq!(balances.get_balance(asset_id, &holder), 1_000);
-        assert_eq!(balances.get_balance(asset_id, &receiver), 0);
+        assert_eq!(account.get_balance(asset_id, &holder), 1_000);
+        assert_eq!(account.get_balance(asset_id, &receiver), 0);
     }
 
     // ── Batch Transfer with Memo ───────────────────────────────────────────
 
     #[test]
     fn test_batch_transfer_with_memo() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
@@ -153,7 +153,7 @@ mod test_payment_flow_impl {
         let sender = addr(1);
         let recipients: Vec<Address> = (2..12).map(|i| addr(i)).collect();
 
-        let asset_id = setup_asset(&mut balances, &mut registry, "BATCH", addr(10), sender, 100_000);
+        let asset_id = setup_asset(&mut account, &mut registry, "BATCH", addr(10), sender, 100_000);
 
         let payments: Vec<PaymentEntry> = recipients
             .iter()
@@ -177,19 +177,19 @@ mod test_payment_flow_impl {
         let gas_units = calculate_gas_units(&tx.instructions);
         assert!(gas_units > 0);
 
-        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
         for r in &recipients {
-            assert_eq!(balances.get_balance(asset_id, r), 1_000);
+            assert_eq!(account.get_balance(asset_id, r), 1_000);
         }
-        assert_eq!(balances.get_balance(asset_id, &sender), 90_000);
+        assert_eq!(account.get_balance(asset_id, &sender), 90_000);
     }
 
     // ── Stablecoin Gas Payment ────────────────────────────────────────────
 
     #[test]
     fn test_stablecoin_gas_payment() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
@@ -198,9 +198,9 @@ mod test_payment_flow_impl {
         let sender = addr(1);
         let receiver = addr(2);
 
-        let stable_id = setup_asset(&mut balances, &mut registry, "USDC", addr(10), sender, 10_000);
+        let stable_id = setup_asset(&mut account, &mut registry, "USDC", addr(10), sender, 10_000);
         // Need enough stablecoin balance to cover the fee (~100k CALL wei equivalent)
-        balances.balances.set_balance(stable_id, sender, 10_000_000).unwrap();
+        account.balances.set_balance(stable_id, sender, 10_000_000).unwrap();
 
         let tx = ProtocolTransaction {
             sender,
@@ -216,16 +216,16 @@ mod test_payment_flow_impl {
             },
         };
 
-        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
-        assert_eq!(balances.get_balance(stable_id, &receiver), 100);
+        assert_eq!(account.get_balance(stable_id, &receiver), 100);
     }
 
     // ── GasConfig: SelfPay ────────────────────────────────────────────────
 
     #[test]
     fn test_gas_self_pay_deducted_from_sender() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
@@ -234,10 +234,10 @@ mod test_payment_flow_impl {
         let sender = addr(1);
         let receiver = addr(2);
 
-        setup_asset(&mut balances, &mut registry, "SELF", addr(10), sender, 5_000);
-        balances.balances.set_balance(0, sender, 1_000_000).unwrap();
+        setup_asset(&mut account, &mut registry, "SELF", addr(10), sender, 5_000);
+        account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000).unwrap();
 
-        let call_balance_before = balances.get_balance(0, &sender);
+        let call_balance_before = account.get_balance(call_protocol::CALL_ASSET_ID, &sender);
 
         let tx = make_tx(
             sender,
@@ -245,9 +245,9 @@ mod test_payment_flow_impl {
             vec![make_transfer(1, receiver, 100)],
             GasConfig::SelfPay,
         );
-        execute_tx(&tx, &mut balances, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
 
-        let call_balance_after = balances.get_balance(0, &sender);
+        let call_balance_after = account.get_balance(call_protocol::CALL_ASSET_ID, &sender);
         assert!(call_balance_after < call_balance_before);
     }
 
@@ -255,7 +255,7 @@ mod test_payment_flow_impl {
 
     #[test]
     fn test_gas_authorized_sponsor_pays() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut fee_params = FeeParams::default();
@@ -265,14 +265,14 @@ mod test_payment_flow_impl {
         let receiver = addr(2);
         let sponsor_addr = addr(50);
 
-        setup_asset(&mut balances, &mut registry, "SPON", addr(10), sender, 5_000);
-        balances.balances.set_balance(0, sender, 100).unwrap();
-        setup_sponsor(&mut sponsors, &mut balances, sponsor_addr, vec![sender], 10_000_000);
+        let asset_id = setup_asset(&mut account, &mut registry, "SPON", addr(10), sender, 5_000);
+        account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 100).unwrap();
+        setup_sponsor(&mut sponsors, &mut account, sponsor_addr, vec![sender], 10_000_000);
 
         let tx = make_tx(
             sender,
             1,
-            vec![make_transfer(1, receiver, 100)],
+            vec![make_transfer(asset_id, receiver, 100)],
             GasConfig::AuthorizedSponsor { sponsor: sponsor_addr },
         );
 
@@ -280,12 +280,12 @@ mod test_payment_flow_impl {
         let fee = compute_fee(gas_units, 0, fee_params.base_fee);
 
         sponsors
-            .verify_and_deduct_authorized_sponsor(&sponsor_addr, &sender, fee, 1, &mut balances)
+            .verify_and_deduct_authorized_sponsor(&sponsor_addr, &sender, fee, 1, &mut account)
             .unwrap();
 
         call_protocol::instructions::execute_protocol_instructions(
             &tx.instructions,
-            &mut balances,
+            &mut account,
             &mut registry,
             &mut compliance,
             &mut ShieldedState::new(),
@@ -296,8 +296,8 @@ mod test_payment_flow_impl {
         )
         .unwrap();
 
-        assert_eq!(balances.get_balance(1, &receiver), 100);
-        assert_eq!(balances.get_balance(0, &sender), 100);
+        assert_eq!(account.get_balance(asset_id, &receiver), 100);
+        assert_eq!(account.get_balance(call_protocol::CALL_ASSET_ID, &sender), 100);
     }
 
     // ── AuthScheme: MultiSig 2-of-3 ───────────────────────────────────────

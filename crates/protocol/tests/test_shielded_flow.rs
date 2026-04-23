@@ -4,7 +4,7 @@ mod integration;
 mod test_shielded_flow_impl {
     use super::integration::*;
     use call_primitives::{Address, AssetId, Hash};
-    use call_protocol::balances::BalanceState;
+    use call_protocol::AccountState;
     use call_protocol::registry::AssetRegistry;
     use call_protocol::instructions::Instruction;
     use call_shielded::{
@@ -236,12 +236,12 @@ mod test_shielded_flow_impl {
 
     #[test]
     fn test_shielded_deposit_instruction() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
-        let asset_id = setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
+        let asset_id = setup_asset(&mut account, &mut registry, "SHIELD", addr(10), sender, 5_000);
 
         // Create a valid encrypted note for deposit
         let note = shield_note(1_000, asset_id, 1);
@@ -249,28 +249,28 @@ mod test_shielded_flow_impl {
         let cm = note.commitment();
 
         let instructions = vec![Instruction::ShieldedDeposit { asset_id, amount: 1_000, commitment: cm.0, encrypted_note: encrypted }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &mut registry, &mut compliance, &mut shielded_state, sender, None, &mut None, None).unwrap();
-        assert_eq!(balances.get_balance(asset_id, &sender), 4_000);
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut account, &mut registry, &mut compliance, &mut shielded_state, sender, None, &mut None, None).unwrap();
+        assert_eq!(account.get_balance(asset_id, &sender), 4_000);
         assert_eq!(shielded_state.merkle_tree.leaf_count(), 1);
     }
 
     #[test]
     fn test_shielded_withdraw_instruction() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
         let sender = addr(1);
         let receiver = addr(2);
-        setup_asset(&mut balances, &mut registry, "SHIELD", addr(10), sender, 5_000);
+        setup_asset(&mut account, &mut registry, "SHIELD", addr(10), sender, 5_000);
 
         // Create a valid nullifier for withdraw
         let note = shield_note(500, 0, 1);
         let nullifier = note.nullifier();
 
         let instructions = vec![Instruction::ShieldedWithdraw { asset_id: 0, target: receiver, amount: 500, proof: vec![1u8; 200], nullifier: nullifier.0 }];
-        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut balances, &mut registry, &mut compliance, &mut shielded_state, sender, None, &mut None, None).unwrap();
-        assert_eq!(balances.get_balance(0, &receiver), 500);
+        call_protocol::instructions::execute_protocol_instructions(&instructions, &mut account, &mut registry, &mut compliance, &mut shielded_state, sender, None, &mut None, None).unwrap();
+        assert_eq!(account.get_balance(0, &receiver), 500);
         assert!(shielded_state.nullifier_set.is_spent(&nullifier));
     }
 

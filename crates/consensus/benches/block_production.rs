@@ -7,7 +7,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Benchmark
 use call_consensus::{Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind};
 use call_primitives::{Address, BlockHash, ValidatorId};
 use call_protocol::{
-    BalanceState, AssetRegistry, ComplianceEngine,
+    AccountState, AssetRegistry, ComplianceEngine,
     instructions::Instruction,
     transaction::{AuthScheme, GasConfig, ProtocolTransaction},
 };
@@ -59,19 +59,19 @@ fn bench_block_execution(c: &mut Criterion) {
 
                 b.iter_batched(
                     || {
-                        let mut balances = BalanceState::new();
+                        let mut account = AccountState::new();
                         let mut registry = AssetRegistry::new();
                         registry.register_asset("CALL".into(), "Call Token".into(), 18, Address::ZERO, 0, 0).unwrap();
-                        balances.balances.set_balance(1, Address::repeat_byte(1), 1_000_000_000_000u128).unwrap();
+                        account.balances.set_balance(1, Address::repeat_byte(1), 1_000_000_000_000u128).unwrap();
                         let mut evm_state = EvmState::new();
                         let mut fee_params = call_protocol::transaction::FeeParams::default();
                         let mut governance = call_governance::GovernanceManager::default();
                         governance.set_current_block(0);
                         let bridge_config = call_bridge::BridgeConfig::default();
 
-                        (balances, registry, evm_state, fee_params, governance, bridge_config)
+                        (account, registry, evm_state, fee_params, governance, bridge_config)
                     },
-                    |(mut balances, mut registry, mut evm_state, mut fee_params, mut governance, bridge_config)| {
+                    |(mut account, mut registry, mut evm_state, mut fee_params, mut governance, bridge_config)| {
                         let mut block = Block::new(
                             1,
                             BlockHash::ZERO,
@@ -84,7 +84,7 @@ fn bench_block_execution(c: &mut Criterion) {
                             vec![],
                         );
                         let result = block.execute(
-                            &mut balances,
+                            &mut account,
                             &mut registry,
                             &mut ComplianceEngine::new(),
                             &mut call_bridge::BridgeStateManager::default(),

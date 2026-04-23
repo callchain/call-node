@@ -86,7 +86,7 @@ impl AgentBalances {
         agent_id: u64,
         asset_id: AssetId,
         amount: u128,
-        protocol_balances: &mut call_protocol::balances::BalanceState,
+        protocol_balances: &mut call_protocol::AccountState,
     ) -> Result<(), AgentError> {
         protocol_balances.deduct_balance(asset_id, owner, amount)
             .map_err(|_| AgentError::ExecutionFailed("insufficient owner balance for grant".into()))?;
@@ -101,7 +101,7 @@ impl AgentBalances {
         agent_id: u64,
         asset_id: AssetId,
         amount: u128,
-        protocol_balances: &mut call_protocol::balances::BalanceState,
+        protocol_balances: &mut call_protocol::AccountState,
     ) -> Result<(), AgentError> {
         self.grant_funds(owner, agent_id, asset_id, amount, protocol_balances)
     }
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn test_agent_grant_funding() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = call_protocol::balances::BalanceState::new();
+        let mut protocol_balances = call_protocol::AccountState::new();
         let owner = test_addr(1);
         protocol_balances.balances.set_balance(1, owner, 10_000).unwrap();
         balances.grant_funds(owner, 0, 1, 5000, &mut protocol_balances).unwrap();
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn test_agent_grant_funding_insufficient_owner_balance() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = call_protocol::balances::BalanceState::new();
+        let mut protocol_balances = call_protocol::AccountState::new();
         let owner = test_addr(1);
         protocol_balances.balances.set_balance(1, owner, 100).unwrap();
         assert!(balances.grant_funds(owner, 0, 1, 5000, &mut protocol_balances).is_err());
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn test_agent_top_up() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = call_protocol::balances::BalanceState::new();
+        let mut protocol_balances = call_protocol::AccountState::new();
         let owner = test_addr(1);
         protocol_balances.balances.set_balance(1, owner, 10_000).unwrap();
         balances.grant_funds(owner, 0, 1, 1000, &mut protocol_balances).unwrap();
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn test_agent_revoke_by_owner() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = call_protocol::balances::BalanceState::new();
+        let mut protocol_balances = call_protocol::AccountState::new();
         let owner = test_addr(1);
         protocol_balances.balances.set_balance(1, owner, 10_000).unwrap();
         balances.grant_funds(owner, 0, 1, 5000, &mut protocol_balances).unwrap();
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_agent_deduct_insufficient() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = call_protocol::balances::BalanceState::new();
+        let mut protocol_balances = call_protocol::AccountState::new();
         let owner = test_addr(1);
         protocol_balances.balances.set_balance(1, owner, 10_000).unwrap();
         balances.grant_funds(owner, 0, 1, 100, &mut protocol_balances).unwrap();
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn test_agent_total_balance() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = call_protocol::balances::BalanceState::new();
+        let mut protocol_balances = call_protocol::AccountState::new();
         let owner = test_addr(1);
         protocol_balances.balances.set_balance(1, owner, 1000).unwrap();
         protocol_balances.balances.set_balance(2, owner, 2000).unwrap();
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn test_agent_balances_isolated_by_owner() {
         let mut balances = AgentBalances::new();
-        let mut protocol_balances = call_protocol::balances::BalanceState::new();
+        let mut protocol_balances = call_protocol::AccountState::new();
         protocol_balances.balances.set_balance(1, test_addr(1), 1000).unwrap();
         protocol_balances.balances.set_balance(1, test_addr(2), 2000).unwrap();
         balances.grant_funds(test_addr(1), 0, 1, 1000, &mut protocol_balances).unwrap();

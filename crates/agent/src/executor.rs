@@ -6,7 +6,7 @@
 
 use call_primitives::{Address, AssetId, PublicKey};
 use call_protocol::{
-    balances::BalanceState,
+    AccountState,
     registry::AssetRegistry,
     compliance::ComplianceEngine,
     instructions::{execute_protocol_instructions, Instruction, InstructionResult},
@@ -129,8 +129,8 @@ pub fn verify_agent_tx(
 pub fn execute_agent_tx(
     signed_tx: &SignedAgentTx,
     agent: &AgentRegistration,
-    balances: &mut AgentBalances,
-    protocol_balances: &mut BalanceState,
+    account: &mut AgentBalances,
+    protocol_account: &mut AccountState,
     _evm_state: &mut EvmState,
     _evm_executor: &EvmExecutor,
     _bridge_state: &mut BridgeStateManager,
@@ -152,16 +152,16 @@ pub fn execute_agent_tx(
         call_primitives::FeeCurrency::Stablecoin(id) => id,
     };
     let fee = agent_gas_units as u128 * protocol_tx.max_fee;
-    let agent_balance = balances.get_balance(agent.owner, agent.agent_id, fee_asset_id);
+    let agent_balance = account.get_balance(agent.owner, agent.agent_id, fee_asset_id);
     if agent_balance < fee {
         return Err(AgentError::InsufficientAgentBalance(agent.agent_id, fee));
     }
-    balances.deduct(agent.owner, agent.agent_id, fee_asset_id, fee)?;
+    account.deduct(agent.owner, agent.agent_id, fee_asset_id, fee)?;
 
     // Execute instructions via protocol engine
     let results = execute_protocol_instructions(
         &protocol_tx.instructions,
-        protocol_balances,
+        protocol_account,
         registry,
         compliance,
         shielded_state,
@@ -181,15 +181,15 @@ pub fn execute_agent_pay(
     asset_id: AssetId,
     to: Address,
     amount: u128,
-    balances: &mut AgentBalances,
+    account: &mut AgentBalances,
     owner: Address,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
 ) -> Result<(), AgentError> {
     // Deduct from agent balance
-    balances.deduct(owner, agent_id, asset_id, amount)?;
+    account.deduct(owner, agent_id, asset_id, amount)?;
 
     // Credit to protocol balance of recipient
-    let _ = protocol_balances.credit_balance(asset_id, to, amount);
+    let _ = protocol_account.credit_balance(asset_id, to, amount);
 
     Ok(())
 }
@@ -198,12 +198,12 @@ pub fn execute_agent_pay(
 pub fn execute_agent_batch_pay(
     agent_id: u64,
     payments: &[(AssetId, Address, u128)],
-    balances: &mut AgentBalances,
+    account: &mut AgentBalances,
     owner: Address,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
 ) -> Result<(), AgentError> {
     for &(asset_id, to, amount) in payments {
-        execute_agent_pay(agent_id, asset_id, to, amount, balances, owner, protocol_balances)?;
+        execute_agent_pay(agent_id, asset_id, to, amount, account, owner, protocol_account)?;
     }
     Ok(())
 }
@@ -239,9 +239,9 @@ pub fn execute_agent_bridge_deposit(
     amount: u128,
     _target_chain: u64,
     target_address: Vec<u8>,
-    balances: &mut AgentBalances,
+    account: &mut AgentBalances,
     owner: Address,
-    protocol_balances: &mut BalanceState,
+    protocol_account: &mut AccountState,
     evm_state: &mut EvmState,
     evm_executor: &EvmExecutor,
     bridge_state: &mut BridgeStateManager,
@@ -251,10 +251,10 @@ pub fn execute_agent_bridge_deposit(
     current_block: u64,
 ) -> Result<(), AgentError> {
     // 1. Deduct from agent balance
-    balances.deduct(owner, agent_id, asset_id, amount)?;
+    account.deduct(owner, agent_id, asset_id, amount)?;
 
     // 2. Deduct from protocol balance (agent -> protocol)
-    protocol_balances
+    protocol_account
         .deduct_balance(asset_id, owner, amount)
         .map_err(|_| AgentError::ExecutionFailed("insufficient protocol balance".into()))?;
 
@@ -268,7 +268,7 @@ pub fn execute_agent_bridge_deposit(
 
     let result = bridge_execute_deposit(
         &op,
-        protocol_balances,
+        protocol_account,
         evm_state,
         evm_executor,
         bridge_state,
@@ -284,16 +284,16 @@ pub fn execute_agent_bridge_deposit(
             if exec.success {
                 Ok(())
             } else {
-                // Restore balances on failure
-                let _ = balances.credit(owner, agent_id, asset_id, amount);
-                let _ = protocol_balances.credit_balance(asset_id, owner, amount);
+                // Restore account on failure
+                let _ = account.credit(owner, agent_id, asset_id, amount);
+                let _ = protocol_account.credit_balance(asset_id, owner, amount);
                 Err(AgentError::ExecutionFailed("bridge deposit failed".into()))
             }
         }
         Err(e) => {
-            // Restore balances on failure
-            let _ = balances.credit(owner, agent_id, asset_id, amount);
-            let _ = protocol_balances.credit_balance(asset_id, owner, amount);
+            // Restore account on failure
+            let _ = account.credit(owner, agent_id, asset_id, amount);
+            let _ = protocol_account.credit_balance(asset_id, owner, amount);
             Err(AgentError::ExecutionFailed(format!("{:?}", e)))
         }
     }
@@ -455,35 +455,35 @@ mod tests {
     #[test]
     fn test_agent_pay_success() {
         let mut agent_balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let owner = test_addr(1);
-        protocol_balances.balances.set_balance(1, owner, 1000).unwrap();
+        protocol_account.balances.set_balance(1, owner, 1000).unwrap();
 
-        agent_balances.grant_funds(owner, 0, 1, 1000, &mut protocol_balances).unwrap();
+        agent_balances.grant_funds(owner, 0, 1, 1000, &mut protocol_account).unwrap();
 
         execute_agent_pay(
             0, 1, test_addr(2), 500,
             &mut agent_balances, owner,
-            &mut protocol_balances,
+            &mut protocol_account,
         ).unwrap();
 
         assert_eq!(agent_balances.get_balance(owner, 0, 1), 500);
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(2)), 500);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(2)), 500);
     }
 
     #[test]
     fn test_agent_pay_insufficient_balance() {
         let mut agent_balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let owner = test_addr(1);
-        protocol_balances.balances.set_balance(1, owner, 100).unwrap();
+        protocol_account.balances.set_balance(1, owner, 100).unwrap();
 
-        agent_balances.grant_funds(owner, 0, 1, 100, &mut protocol_balances).unwrap();
+        agent_balances.grant_funds(owner, 0, 1, 100, &mut protocol_account).unwrap();
 
         let result = execute_agent_pay(
             0, 1, test_addr(2), 200,
             &mut agent_balances, owner,
-            &mut protocol_balances,
+            &mut protocol_account,
         );
         assert!(matches!(result, Err(AgentError::InsufficientAgentBalance(0, 200))));
     }
@@ -491,11 +491,11 @@ mod tests {
     #[test]
     fn test_agent_batch_pay() {
         let mut agent_balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
+        let mut protocol_account = AccountState::new();
         let owner = test_addr(1);
-        protocol_balances.balances.set_balance(1, owner, 3000).unwrap();
+        protocol_account.balances.set_balance(1, owner, 3000).unwrap();
 
-        agent_balances.grant_funds(owner, 0, 1, 3000, &mut protocol_balances).unwrap();
+        agent_balances.grant_funds(owner, 0, 1, 3000, &mut protocol_account).unwrap();
 
         let payments = vec![
             (1, test_addr(2), 1000),
@@ -505,12 +505,12 @@ mod tests {
         execute_agent_batch_pay(
             0, &payments,
             &mut agent_balances, owner,
-            &mut protocol_balances,
+            &mut protocol_account,
         ).unwrap();
 
         assert_eq!(agent_balances.get_balance(owner, 0, 1), 500);
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(2)), 1000);
-        assert_eq!(protocol_balances.get_balance(1, &test_addr(3)), 1500);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(2)), 1000);
+        assert_eq!(protocol_account.get_balance(1, &test_addr(3)), 1500);
     }
 
     #[test]
@@ -528,23 +528,27 @@ mod tests {
     #[test]
     fn test_agent_bridge_deposit_flow() {
         let mut agent_balances = AgentBalances::new();
-        let mut protocol_balances = BalanceState::new();
-        protocol_balances.balances.set_balance(1, test_addr(1), 1000).unwrap();
+        let mut protocol_account = AccountState::new();
+        // Use asset_id=2 so it is treated as a user asset (ERC-20 mint) rather than CALL.
+        let asset_id = 2u64;
+        protocol_account.balances.set_balance(asset_id, test_addr(1), 1000).unwrap();
         let mut evm_state = EvmState::new();
         let evm_executor = EvmExecutor::new(1);
         let mut bridge_state = BridgeStateManager::default();
         let config = BridgeConfig::default();
-        let registry = setup_registry();
+        let mut registry = setup_registry();
+        // Register a second asset so asset_id=2 exists in registry
+        registry.register_asset("TEST2".into(), "Test2".into(), 18, test_addr(1), 0, 100).ok();
         let owner = test_addr(1);
 
-        agent_balances.grant_funds(owner, 0, 1, 500, &mut protocol_balances).unwrap();
+        agent_balances.grant_funds(owner, 0, asset_id, 500, &mut protocol_account).unwrap();
 
         let target_addr = test_addr(2);
         let result = execute_agent_bridge_deposit(
-            0, 1, 200,
-            1, target_addr.as_slice().to_vec(),
+            0, asset_id, 200,
+            asset_id, target_addr.as_slice().to_vec(),
             &mut agent_balances, owner,
-            &mut protocol_balances,
+            &mut protocol_account,
             &mut evm_state, &evm_executor,
             &mut bridge_state, &config, &registry,
             test_addr(0xCC),
@@ -554,7 +558,7 @@ mod tests {
         // EVM bridge will fail (no contract at address), but agent balance should be restored
         assert!(result.is_err());
         // Balance should be restored after failure
-        assert_eq!(agent_balances.get_balance(owner, 0, 1), 500);
+        assert_eq!(agent_balances.get_balance(owner, 0, asset_id), 500);
     }
 
     #[test]

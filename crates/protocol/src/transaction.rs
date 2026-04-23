@@ -3,7 +3,7 @@
 //! ProtocolTransaction, gas calculation, fee params, base fee updates, mempool.
 
 use call_primitives::{Address, FeeCurrency, TxHash};
-use crate::balances::BalanceState;
+use crate::account::AccountState;
 use crate::instructions::Instruction;
 use crate::sponsor::SponsorRegistry;
 use crate::{ProtocolError, ProtocolResult};
@@ -356,7 +356,7 @@ pub fn compute_fee(
 
 /// Deduct gas fee from payer (per spec §3.6)
 pub fn deduct_gas(
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     config: &GasConfig,
     fee_currency: &FeeCurrency,
     fee: u128,
@@ -367,11 +367,11 @@ pub fn deduct_gas(
 ) -> ProtocolResult<()> {
     match fee_currency {
         FeeCurrency::Call => {
-            deduct_call_from_payer(balances, config, fee, sender, sponsor_registry, current_day)
+            deduct_call_from_payer(account, config, fee, sender, sponsor_registry, current_day)
         }
         FeeCurrency::Stablecoin(asset_id) => {
             deduct_stablecoin_from_payer(
-                balances, config, *asset_id, fee, sender, sponsor_registry, current_day,
+                account, config, *asset_id, fee, sender, sponsor_registry, current_day,
             )
         }
     }
@@ -379,7 +379,7 @@ pub fn deduct_gas(
 
 /// Deduct CALL fees (per spec §3.6)
 fn deduct_call_from_payer(
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     config: &GasConfig,
     fee: u128,
     sender: Address,
@@ -387,24 +387,24 @@ fn deduct_call_from_payer(
     current_day: u64,
 ) -> ProtocolResult<()> {
     match config {
-        GasConfig::SelfPay => balances.deduct_balance(0, sender, fee),
+        GasConfig::SelfPay => account.deduct_balance(crate::CALL_ASSET_ID, sender, fee),
         GasConfig::AuthorizedSponsor { sponsor } => {
             sponsor_registry.verify_and_deduct_authorized_sponsor(
-                sponsor, &sender, fee, current_day, balances,
+                sponsor, &sender, fee, current_day, account,
             )
         }
         GasConfig::PoolSponsor { sponsor } => {
-            sponsor_registry.verify_and_deduct_pool_sponsor(sponsor, &sender, fee, balances)
+            sponsor_registry.verify_and_deduct_pool_sponsor(sponsor, &sender, fee, account)
         }
         GasConfig::PerTxSponsor { sponsor, .. } => {
-            sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, balances)
+            sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, account)
         }
     }
 }
 
 /// Deduct stablecoin fees (per spec §3.6)
 fn deduct_stablecoin_from_payer(
-    balances: &mut BalanceState,
+    account: &mut AccountState,
     config: &GasConfig,
     asset_id: u64,
     fee: u128,
@@ -413,17 +413,17 @@ fn deduct_stablecoin_from_payer(
     current_day: u64,
 ) -> ProtocolResult<()> {
     match config {
-        GasConfig::SelfPay => balances.deduct_balance(asset_id, sender, fee),
+        GasConfig::SelfPay => account.deduct_balance(asset_id, sender, fee),
         GasConfig::AuthorizedSponsor { sponsor } => {
             sponsor_registry.verify_and_deduct_authorized_sponsor(
-                sponsor, &sender, fee, current_day, balances,
+                sponsor, &sender, fee, current_day, account,
             )
         }
         GasConfig::PoolSponsor { sponsor } => {
-            sponsor_registry.verify_and_deduct_pool_sponsor(sponsor, &sender, fee, balances)
+            sponsor_registry.verify_and_deduct_pool_sponsor(sponsor, &sender, fee, account)
         }
         GasConfig::PerTxSponsor { sponsor, .. } => {
-            sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, balances)
+            sponsor_registry.verify_and_deduct_per_tx_sponsor(sponsor, fee, account)
         }
     }
 }
@@ -546,7 +546,7 @@ fn total_memo_bytes(instructions: &[Instruction]) -> usize {
 
 pub fn accept_to_mempool(
     tx: &ProtocolTransaction,
-    balances: &BalanceState,
+    account: &AccountState,
     fee_params: &FeeParams,
     seen_nonces: &HashSet<(Address, u64)>,
     expected_nonces: &std::collections::HashMap<Address, u64>,
@@ -610,10 +610,10 @@ pub fn accept_to_mempool(
 
     // Check balance in the correct fee currency
     let fee_asset_id = match tx.fee_currency {
-        FeeCurrency::Call => 0,
+        FeeCurrency::Call => crate::CALL_ASSET_ID,
         FeeCurrency::Stablecoin(asset_id) => asset_id,
     };
-    let balance = balances.get_balance(fee_asset_id, &tx.sender);
+    let balance = account.get_balance(fee_asset_id, &tx.sender);
     if balance < required_fee {
         return Err(ProtocolError::InsufficientBalance);
     }
@@ -635,7 +635,7 @@ mod tests {
 
     fn make_transfer() -> Instruction {
         Instruction::Transfer {
-            asset_id: 1,
+            asset_id: crate::CALL_ASSET_ID,
             to: test_addr(2),
             amount: 100,
             memo: None,
@@ -693,11 +693,11 @@ mod tests {
 
     #[test]
     fn test_deduct_gas_self_pay() {
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 1000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 1000).unwrap();
         let mut sponsors = SponsorRegistry::new();
         deduct_gas(
-            &mut balances,
+            &mut account,
             &GasConfig::SelfPay,
             &FeeCurrency::Call,
             500,
@@ -707,13 +707,13 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(balances.get_balance(0, &test_addr(1)), 500);
+        assert_eq!(account.get_balance(crate::CALL_ASSET_ID, &test_addr(1)), 500);
     }
 
     #[test]
     fn test_deduct_gas_authorized_sponsor() {
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(2), 1000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(2), 1000).unwrap();
         let mut sponsors = SponsorRegistry::new();
         let auth = GasSponsorAuth {
             sponsor: test_addr(2),
@@ -725,7 +725,7 @@ mod tests {
         sponsors.register_sponsor_auth(auth).unwrap();
 
         let result = deduct_gas(
-            &mut balances,
+            &mut account,
             &GasConfig::AuthorizedSponsor { sponsor: test_addr(2) },
             &FeeCurrency::Call,
             500,
@@ -735,19 +735,19 @@ mod tests {
             10,
         );
         assert!(result.is_ok());
-        assert_eq!(balances.get_balance(0, &test_addr(2)), 500);
+        assert_eq!(account.get_balance(crate::CALL_ASSET_ID, &test_addr(2)), 500);
     }
 
     #[test]
     fn test_deduct_gas_pool_sponsor() {
-        let mut balances = BalanceState::new();
+        let mut account = AccountState::new();
         let mut sponsors = SponsorRegistry::new();
         let pool_addr = test_addr(9);
         sponsors.deposit_to_pool(pool_addr, 10_000).unwrap();
-        balances.balances.set_balance(0, pool_addr, 10_000).unwrap();
+        account.balances.set_balance(crate::CALL_ASSET_ID, pool_addr, 10_000).unwrap();
 
         let result = deduct_gas(
-            &mut balances,
+            &mut account,
             &GasConfig::PoolSponsor { sponsor: pool_addr },
             &FeeCurrency::Call,
             500,
@@ -756,16 +756,16 @@ mod tests {
             &mut sponsors,
             10,
         );
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "pool sponsor deduct failed: {:?}", result);
     }
 
     #[test]
     fn test_deduct_gas_per_tx_sponsor() {
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(2), 1000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(2), 1000).unwrap();
         let mut sponsors = SponsorRegistry::new();
         let result = deduct_gas(
-            &mut balances,
+            &mut account,
             &GasConfig::PerTxSponsor {
                 sponsor: test_addr(2),
                 sponsor_signature: vec![0u8; 65],
@@ -778,7 +778,7 @@ mod tests {
             10,
         );
         assert!(result.is_ok());
-        assert_eq!(balances.get_balance(0, &test_addr(2)), 500);
+        assert_eq!(account.get_balance(crate::CALL_ASSET_ID, &test_addr(2)), 500);
     }
 
     #[test]
@@ -813,13 +813,13 @@ mod tests {
                 signature: [0u8; 65],
             },
         };
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 1_000_000).unwrap();
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
         let expected_nonces = std::collections::HashMap::new();
 
-        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        let result = accept_to_mempool(&tx, &account, &fee_params, &nonces, &expected_nonces);
         assert!(result.is_err());
     }
 
@@ -838,13 +838,13 @@ mod tests {
                 signature: [0u8; 65],
             },
         };
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 1_000_000).unwrap();
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
         let expected_nonces = std::collections::HashMap::new();
 
-        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        let result = accept_to_mempool(&tx, &account, &fee_params, &nonces, &expected_nonces);
         assert!(result.is_ok());
     }
 
@@ -867,12 +867,12 @@ mod tests {
                 signature: [0u8; 65],
             },
         };
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 1_000_000).unwrap();
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
 
-        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        let result = accept_to_mempool(&tx, &account, &fee_params, &nonces, &expected_nonces);
         assert!(result.is_err());
     }
 
@@ -891,13 +891,13 @@ mod tests {
                 signature: [0u8; 65],
             },
         };
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 1_000_000).unwrap();
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
         let expected_nonces = std::collections::HashMap::new();
 
-        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        let result = accept_to_mempool(&tx, &account, &fee_params, &nonces, &expected_nonces);
         assert!(result.is_err());
     }
 
@@ -912,7 +912,7 @@ mod tests {
             sender: test_addr(1),
             nonce: 0,
             instructions: vec![Instruction::Transfer {
-                asset_id: 1,
+                asset_id: crate::CALL_ASSET_ID,
                 to: test_addr(2),
                 amount: 100,
                 memo: Some(big_memo),
@@ -926,13 +926,13 @@ mod tests {
                 signature: [0u8; 65],
             },
         };
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, test_addr(1), 1_000_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, test_addr(1), 1_000_000).unwrap();
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
         let expected_nonces = std::collections::HashMap::new();
 
-        let result = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        let result = accept_to_mempool(&tx, &account, &fee_params, &nonces, &expected_nonces);
         assert!(result.is_err());
     }
 
@@ -1080,7 +1080,7 @@ mod tests {
             sender,
             nonce: 1,
             instructions: vec![Instruction::Transfer {
-                asset_id: 1,
+                asset_id: crate::CALL_ASSET_ID,
                 to: test_addr(2),
                 amount: 100,
                 memo: None,
@@ -1100,7 +1100,7 @@ mod tests {
             sender,
             nonce: 1,
             instructions: vec![Instruction::Transfer {
-                asset_id: 1,
+                asset_id: crate::CALL_ASSET_ID,
                 to: test_addr(2),
                 amount: 1000, // changed!
                 memo: None,
@@ -1155,19 +1155,19 @@ mod tests {
         assert!(tx.verify_signature().is_ok());
 
         // But mempool rejects duplicate nonce
-        let mut balances = BalanceState::new();
-        balances.balances.set_balance(0, sender, 1_000_000).unwrap();
+        let mut account = AccountState::new();
+        account.balances.set_balance(crate::CALL_ASSET_ID, sender, 1_000_000).unwrap();
         let fee_params = FeeParams::default();
         let nonces = HashSet::new();
         let mut expected_nonces = std::collections::HashMap::new();
         expected_nonces.insert(sender, 1);
 
-        let r1 = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        let r1 = accept_to_mempool(&tx, &account, &fee_params, &nonces, &expected_nonces);
         assert!(r1.is_ok());
 
         // After accepting tx1, expected nonce increments to 2
         expected_nonces.insert(sender, 2);
-        let _r2 = accept_to_mempool(&tx, &balances, &fee_params, &nonces, &expected_nonces);
+        let _r2 = accept_to_mempool(&tx, &account, &fee_params, &nonces, &expected_nonces);
         // tx has nonce 1 but expected is 2, so it should be rejected
     }
 
@@ -1229,7 +1229,7 @@ mod tests {
         ) {
             let sender = Address::from_slice(&sender_bytes);
             let instructions = vec![Instruction::Transfer {
-                asset_id: 1,
+                asset_id: crate::CALL_ASSET_ID,
                 to: sender,
                 amount,
                 memo: None,

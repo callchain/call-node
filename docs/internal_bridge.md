@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Internal Bridge manages asset flow between the **Protocol Payment Layer** (`BalanceState`) and the **EVM Contract Layer** (`EvmState`) within a single Callchain node. It enables:
+The Internal Bridge manages asset flow between the **Protocol Payment Layer** (`AccountState`) and the **EVM Contract Layer** (`EvmState`) within a single Callchain node. It enables:
 
 - **Deposits (Protocol → EVM):** Users bridge protocol balance into the EVM layer
 - **Withdrawals (EVM → Protocol):** Users bridge EVM assets back to the protocol layer
@@ -18,7 +18,7 @@ Internal bridge operations are **atomic** and execute within a single block. If 
 │  Internal Bridge (Protocol ↔ EVM)                          │
 │                                                             │
 │  ┌──────────────┐        ┌──────────────────────────────┐  │
-│  │ BalanceState │        │ EvmState                     │  │
+│  │ AccountState │        │ EvmState                     │  │
 │  │ (protocol)   │◄──────►│ (EVM layer)                  │  │
 │  └──────────────┘        └──────────────────────────────┘  │
 │         ▲                           ▲                       │
@@ -123,7 +123,7 @@ fn is_bridge_instruction(instr: &Instruction) -> bool {
 Bridge instructions are extracted and executed via `execute_bridge_instruction`, which receives:
 - `instruction`: the bridge instruction
 - `sender`: the transaction sender address
-- `balances`: mutable `BalanceState`
+- `account`: mutable `AccountState`
 - `bridge_state`: mutable `BridgeStateManager`
 - `config`: `BridgeConfig`
 - `validators`: current validator set (for external bridge)
@@ -166,7 +166,7 @@ Bridge instructions are extracted and executed via `execute_bridge_instruction`,
 `Block::execute` takes snapshots before processing each transaction:
 
 ```rust
-let balance_snapshot = balances.clone();
+let balance_snapshot = account.clone();
 let evm_snapshot = evm_state.clone();
 let bridge_snapshot = bridge_state.clone();
 ```
@@ -174,7 +174,7 @@ let bridge_snapshot = bridge_state.clone();
 If any bridge instruction fails, all three states are restored:
 
 ```rust
-*balances = balance_snapshot;
+*account = balance_snapshot;
 *evm_state = evm_snapshot;
 *bridge_state = bridge_snapshot;
 ```
@@ -321,7 +321,7 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 | CALL native bridging | Ready | asset_id==1 uses `evm_state.set_balance` directly; no ERC-20 contract needed |
 | User asset ERC-20 bridging | Ready | Requires `AssetRegistry::evm_contract_address` registration; `evm_call_bridge_mint` / `evm_call_bridge_burn` |
 | Virtual USD rejection | Ready | asset_id==0 explicitly rejected in both deposit and withdraw paths |
-| Atomic rollback | Ready | Snapshot of balances + evm_state + bridge_state before each tx; full restore on failure |
+| Atomic rollback | Ready | Snapshot of account + evm_state + bridge_state before each tx; full restore on failure |
 | Rate limiting | Ready | Per-tx and daily limits enforced; auto-reset per `blocks_per_day` |
 | Bridge pause | Ready | Per-asset pause via `BridgeStateManager` |
 | User-facing RPC | Ready | `call_bridgeToEvm` and `call_withdrawFromEvm` with signature verification and mempool submission |
