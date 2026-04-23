@@ -72,6 +72,12 @@ pub enum Instruction {
         asset_id: AssetId,
         proof: Vec<u8>,
     },
+    /// Bridge protocol balance to EVM (native CALL or ERC-20 wrapped asset)
+    BridgeToEvm {
+        asset_id: AssetId,
+        to: Address,
+        amount: Balance,
+    },
     UpdateCompliance {
         asset_id: AssetId,
         target: Address,
@@ -646,6 +652,11 @@ pub fn execute_instruction(
         Instruction::ChallengeBridgeDeposit { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ChallengeBridgeDeposit must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::BridgeToEvm { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "BridgeToEvm must be executed inline in Block::execute".into(),
             ))
         }
         Instruction::ValidatorStake { .. } => {

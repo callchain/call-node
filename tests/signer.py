@@ -304,6 +304,37 @@ def sign_validator_unstake(
     }
 
 
+def sign_bridge_to_evm(
+    private_key: str,
+    sender: str,
+    nonce: int,
+    asset_id: int,
+    to: str,
+    amount: int,
+    gas_limit: int = 25_000,
+    max_fee: int = 250_000,
+) -> dict:
+    """Build a signed BridgeToEvm payload for call_bridgeToEvm RPC."""
+    instructions = [{
+        "BridgeToEvm": {
+            "asset_id": asset_id,
+            "to": _norm_addr(to),
+            "amount": amount,
+        }
+    }]
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    signature = sign_raw(private_key, tx_hash)
+
+    return {
+        "sender": sender,
+        "nonce": nonce,
+        "assetId": asset_id,
+        "to": to,
+        "amount": str(amount),
+        "signature": signature,
+    }
+
+
 def sign_validator_claim_unbonded(
     private_key: str,
     sender: str,

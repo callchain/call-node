@@ -152,6 +152,14 @@ class CallchainNode:
     def bridge_submit_withdraw(self, params: Dict) -> Dict:
         return self._call("call_bridgeSubmitWithdraw", [params])
 
+    def bridge_to_evm(self, params: Dict) -> Dict:
+        """Bridge protocol balance to EVM via call_bridgeToEvm.
+
+        params must include:
+          sender, to, assetId, amount, nonce, signature
+        """
+        return self._call("call_bridgeToEvm", [params])
+
     # ── Validator ─────────────────────────────────────────────────────
 
     def validator_stake(self, params: Dict) -> Dict:

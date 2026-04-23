@@ -392,6 +392,9 @@ impl Block {
                             config,
                             vals,
                             current_block_height,
+                            evm_state,
+                            &executor,
+                            registry,
                         )?;
                         tx_results.push(r);
                     }
@@ -835,17 +838,20 @@ fn execute_agent_instruction(
 // ── Bridge instruction helpers ────────────────────────────────────────
 
 fn is_bridge_instruction(instr: &Instruction) -> bool {
-    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ExternalBridgeWithdraw { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. })
+    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ExternalBridgeWithdraw { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. } | Instruction::BridgeToEvm { .. })
 }
 
 fn execute_bridge_instruction(
     instruction: &Instruction,
-    _sender: call_primitives::Address,
+    sender: call_primitives::Address,
     balances: &mut BalanceState,
     bridge_state: &mut call_bridge::BridgeStateManager,
     config: &call_bridge::BridgeConfig,
     validators: &[call_primitives::Address],
     current_block_height: u64,
+    evm_state: &mut call_evm::EvmState,
+    evm_executor: &call_evm::EvmExecutor,
+    registry: &call_protocol::registry::AssetRegistry,
 ) -> Result<InstructionResult, ConsensusError> {
     match instruction {
         Instruction::ExternalBridgeDeposit {
@@ -995,6 +1001,109 @@ fn execute_bridge_instruction(
                 Err(ConsensusError::InvalidBlock(
                     "bridge challenge: no pending deposit found for source_tx_hash".into(),
                 ))
+            }
+        }
+        Instruction::BridgeToEvm {
+            asset_id,
+            to,
+            amount,
+        } => {
+            // 1. Reject virtual USD (asset_id == 0)
+            if *asset_id == 0 {
+                return Err(ConsensusError::InvalidBlock(
+                    "BridgeToEvm: asset 0 (USD) is not bridgeable".into(),
+                ));
+            }
+
+            // 2. Validate asset is registered
+            if registry.get_asset(*asset_id).is_none() {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "BridgeToEvm: asset {} not registered",
+                    asset_id
+                )));
+            }
+
+            // 3. Check bridge not paused
+            if bridge_state.is_paused(*asset_id) {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "BridgeToEvm: bridge paused for asset {}",
+                    asset_id
+                )));
+            }
+
+            // 4. Check per-tx limit
+            bridge_state
+                .check_per_tx_limit(*amount, config.max_per_tx)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToEvm: {e}")))?;
+
+            // 5. Check daily limit
+            bridge_state
+                .check_and_update_daily_limit(
+                    *asset_id,
+                    *amount,
+                    config.daily_limit_per_asset,
+                    current_block_height,
+                    config.blocks_per_day,
+                )
+                .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToEvm: {e}")))?;
+
+            // 6. Check protocol balance is sufficient
+            let protocol_balance = balances.get_balance(*asset_id, &sender);
+            if protocol_balance < *amount {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "BridgeToEvm: insufficient protocol balance for asset {}: have {}, need {}",
+                    asset_id, protocol_balance, amount
+                )));
+            }
+
+            // 7. Deduct protocol balance
+            balances
+                .deduct_balance(*asset_id, sender, *amount)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToEvm: {e}")))?;
+
+            // 8. Bridge to EVM
+            let amount_u256 = call_evm::U256::from(*amount);
+            let exec_result = if *asset_id == 1 {
+                // CALL: transfer as native EVM balance
+                let current = evm_state.get_balance(to);
+                evm_state.set_balance(*to, current + amount_u256);
+                Ok(call_evm::EvmExecutionResult {
+                    success: true,
+                    gas_used: 21_000,
+                    output: call_evm::Bytes::default(),
+                    logs: vec![],
+                })
+            } else {
+                // User-defined asset: mint ERC-20 wrapped token
+                let Some(contract_addr) = registry.get_evm_contract_address(*asset_id) else {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "BridgeToEvm: no EVM contract registered for asset {}",
+                        asset_id
+                    )));
+                };
+                evm_executor
+                    .evm_call_bridge_mint(
+                        sender,
+                        contract_addr,
+                        evm_state,
+                        *to,
+                        amount_u256,
+                    )
+                    .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToEvm: {e:?}")))
+            };
+
+            match exec_result {
+                Ok(execution) => {
+                    if execution.success {
+                        bridge_state.record_deposit(*asset_id, *amount);
+                        Ok(InstructionResult::Success)
+                    } else {
+                        Err(ConsensusError::InvalidBlock(
+                            "BridgeToEvm: EVM operation reverted".into(),
+                        ))
+                    }
+                }
+                Err(e) => Err(e),
             }
         }
         _ => Err(ConsensusError::InvalidBlock("not a bridge instruction".into())),
