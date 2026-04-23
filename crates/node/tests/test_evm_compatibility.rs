@@ -26,7 +26,7 @@ fn one_million_call() -> u128 {
 /// EVM state is independent from protocol balances.
 #[test]
 fn test_evm_state_isolation_from_protocol() {
-    let mut node = TestNode::new();
+    let node = TestNode::new();
 
     let sender = test_addr(1);
     {
@@ -213,7 +213,7 @@ fn test_evm_state_default() {
 /// Protocol balance and EVM balance can be set for the same address independently.
 #[test]
 fn test_protocol_and_evm_same_address() {
-    let mut node = TestNode::new();
+    let node = TestNode::new();
 
     let sender = test_addr(1);
     {

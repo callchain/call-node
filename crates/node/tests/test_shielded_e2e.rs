@@ -14,12 +14,11 @@ mod e2e;
 use e2e::harness::{NodeBuilder, DeterministicRuntime, test_keypair, sign_tx};
 use call_primitives::{Address, FeeCurrency, Hash};
 use call_protocol::{
-    BalanceState, AssetRegistry, ComplianceEngine,
     instructions::Instruction,
-    transaction::{AuthScheme, FeeParams, GasConfig, ProtocolTransaction},
+    transaction::{AuthScheme, GasConfig, ProtocolTransaction},
 };
 use call_shielded::{
-    ShieldedState, ViewingKey, Note, Nullifier, NoteCommitment, ShieldedBlockTracker,
+    ViewingKey, Note, NoteCommitment, ShieldedBlockTracker,
 };
 
 fn addr(n: u8) -> Address {

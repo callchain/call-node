@@ -7,7 +7,7 @@
 mod e2e;
 use e2e::harness::*;
 
-use call_primitives::{Address, ValidatorId};
+use call_primitives::ValidatorId;
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 

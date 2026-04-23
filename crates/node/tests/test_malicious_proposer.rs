@@ -8,18 +8,12 @@ use e2e::harness::*;
 
 use call_consensus::{ConsensusParams, SimplexConsensus};
 use call_consensus::ValidatorStateManager as ConsensusValidatorState;
-use call_primitives::{Address, BlockHash, Ed25519PublicKey, ProtocolVersion, ValidatorId};
+use call_primitives::{Address, BlockHash, ProtocolVersion, ValidatorId};
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
-}
-
-fn test_pubkey(n: u8) -> Ed25519PublicKey {
-    let mut key = [0u8; 32];
-    key[0] = n;
-    key
 }
 
 fn one_million_call() -> u128 {
@@ -49,7 +43,7 @@ fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: 
 /// Double-sign detection slashes the validator's full stake.
 #[tokio::test]
 async fn test_double_sign_slash() {
-    let mut node = TestNode::new();
+    let node = TestNode::new();
 
     let val_addr = test_addr(1);
     let mut consensus = node.consensus.write().unwrap();
@@ -77,7 +71,7 @@ async fn test_double_sign_slash() {
 /// Offline detection slashes proportionally.
 #[tokio::test]
 async fn test_offline_penalty() {
-    let mut node = TestNode::new();
+    let node = TestNode::new();
 
     let val_addr = test_addr(1);
     let mut consensus = node.consensus.write().unwrap();
@@ -181,7 +175,7 @@ async fn test_cumulative_offline_penalty() {
 /// Block with invalid proposer is rejected by validate_block.
 #[tokio::test]
 async fn test_invalid_proposer_rejected() {
-    let mut node = TestNode::new();
+    let node = TestNode::new();
 
     let sender = test_addr(1);
     {
@@ -189,12 +183,6 @@ async fn test_invalid_proposer_rejected() {
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
         consensus.refresh_proposer_subset();
     }
-
-    // Get the valid proposer subset
-    let subset = {
-        let c = node.consensus.read().unwrap();
-        c.proposer_subset().to_vec()
-    };
 
     // Try to validate a block from an invalid proposer (not in subset)
     let invalid_proposer: ValidatorId = 99_999;

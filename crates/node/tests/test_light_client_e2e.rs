@@ -147,7 +147,7 @@ async fn test_light_verify_block_header_bad_parent() {
     }
 
     // Produce first block
-    let block1 = node.produce_block(1_000_000).expect("block 1");
+    let _block1 = node.produce_block(1_000_000).expect("block 1");
 
     // Produce second block
     let block2 = node.produce_block(1_000_250).expect("block 2");
@@ -190,7 +190,7 @@ async fn test_light_verify_block_header_bad_parent() {
 /// `call_lightGetBalanceProof` returns a proof with the correct balance.
 #[tokio::test]
 async fn test_light_get_balance_proof() {
-    let mut node = TestNode::new();
+    let node = TestNode::new();
 
     let addr = test_addr(42);
     let asset_id = 7u64;

@@ -3,13 +3,15 @@
 //! Provides `TestNode`, `NetworkSimulator`, and `NodeBuilder` for
 //! constructing end-to-end test scenarios.
 
+#![allow(dead_code, unreachable_pub)]
+
 use call_consensus::{Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
-use call_primitives::{Address, BlockHash, Ed25519PublicKey, ValidatorId};
+use call_primitives::{Address, BlockHash, Ed25519PublicKey};
 use call_protocol::{
     BalanceState, AssetRegistry, ComplianceEngine,
     instructions::Instruction,
-    transaction::{AuthScheme, FeeParams, GasConfig, ProtocolTransaction},
+    transaction::{AuthScheme, GasConfig, ProtocolTransaction},
 };
 use call_oracle::OracleManager;
 use call_transaction_pool::Mempool;

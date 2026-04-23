@@ -7,7 +7,7 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::{Address, BlockHash, ProtocolVersion};
-use call_consensus::{ConsensusParams, SystemTx, SystemTxKind};
+use call_consensus::{SystemTx, SystemTxKind};
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 
@@ -186,7 +186,7 @@ async fn test_chain_fork_and_reconcile() {
 /// Governance-style upgrade: proposal passes, upgrade activates at height.
 #[tokio::test]
 async fn test_governance_triggered_upgrade() {
-    use call_governance::{GovernanceManager, ProposalType, Vote};
+    use call_governance::{GovernanceManager, ProposalType};
 
     let mut node = TestNode::new();
 

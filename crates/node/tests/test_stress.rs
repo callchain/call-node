@@ -68,7 +68,7 @@ async fn test_high_throughput_many_transactions() {
     // Produce blocks until mempool is drained
     let mut blocks = 0;
     for i in 0..100 {
-        if let Some(_block) = node.produce_block(1_000_000 + i * 250) {
+        if let Some(_) = node.produce_block(1_000_000 + i * 250) {
             blocks += 1;
         }
     }
@@ -81,7 +81,7 @@ async fn test_high_throughput_many_transactions() {
 /// Mempool capacity: fill mempool to capacity across multiple senders.
 #[test]
 fn test_mempool_capacity_under_pressure() {
-    let mut node = TestNode::new();
+    let node = TestNode::new();
 
     let sender = test_addr(1);
     {
