@@ -724,6 +724,10 @@ impl CallNode {
         // Exit channel for epoch rotation
         let (exit_tx, exit_rx) = oneshot::channel::<EpochRotationReason>();
 
+        // Shutdown channel to gracefully stop the background P2P thread
+        let (bft_shutdown_tx, bft_shutdown_rx) =
+            std::sync::mpsc::channel::<()>();
+
         // Spawn BFT engine in a dedicated background OS thread
         let thread_port = consensus_p2p_port;
         let bft_data_dir = data_dir.join("bft_journal");
@@ -812,8 +816,8 @@ impl CallNode {
                     (resolve_s, resolve_r),
                 );
 
-                // Keep the background thread alive indefinitely
-                std::future::pending::<()>().await;
+                // Keep the background thread alive until shutdown is signaled
+                let _ = bft_shutdown_rx.recv();
             });
         });
 
@@ -845,7 +849,10 @@ impl CallNode {
             .await
             .map_err(|e| format!("exit channel canceled: {e:?}"));
         event_loop_handle.abort();
-        let _ = bft_handle;
+        // Signal the background P2P thread to shut down so the port is
+        // released before the next epoch starts.
+        let _ = bft_shutdown_tx.send(());
+        let _ = bft_handle.join();
         reason
     }
 
