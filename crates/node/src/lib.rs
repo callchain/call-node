@@ -2325,6 +2325,12 @@ async fn bft_event_loop(
                     c.current_height()
                 };
 
+                // Refresh parent_hash in case sync recovered missed blocks independently
+                parent_hash = {
+                    let c = consensus.read().unwrap();
+                    c.last_block_hash()
+                };
+
                 let protocol_txs: Vec<ProtocolTransaction> = selection
                     .protocol_txs
                     .into_iter()
@@ -2537,10 +2543,37 @@ async fn bft_event_loop(
 
             Some(info) = finalize_rx.recv() => {
                 // Block has been finalized by BFT consensus.
-                let block = {
+                let mut block = {
                     let mut cache = block_cache.lock().unwrap();
                     cache.remove(&info.digest)
                 };
+
+                // Cache miss: try disk, then trigger sync as last resort
+                if block.is_none() {
+                    let height = {
+                        let c = consensus.read().unwrap();
+                        c.current_height()
+                    };
+                    if let Some(b) = load_block(&data_dir, height) {
+                        tracing::info!(digest = %info.digest, height, "BFT finalize: block recovered from disk");
+                        block = Some(b);
+                    } else {
+                        tracing::warn!(digest = %info.digest, height, "BFT finalize: block not in cache or disk, triggering sync");
+                        if let Some(ref net) = network {
+                            let request = SyncRequest {
+                                start_height: height,
+                                count: SYNC_REQUEST_BATCH,
+                                full_state: false,
+                            };
+                            if let Ok(req_data) = bincode::serialize(&NetworkMessage::SyncRequest(request)) {
+                                let net_clone = Arc::clone(net);
+                                tokio::spawn(async move {
+                                    net_clone.broadcast(SYNC_CHANNEL, req_data).await;
+                                });
+                            }
+                        }
+                    }
+                }
 
                 if let Some(block) = block {
                     let height = block.header.height;
@@ -2836,8 +2869,6 @@ async fn bft_event_loop(
                         break;
                     }
                     qualified_validator_count = current_qualified;
-                } else {
-                    tracing::warn!(digest = %info.digest, "BFT finalize: block not in cache");
                 }
             }
 
