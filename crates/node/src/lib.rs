@@ -66,6 +66,7 @@ use commonware_cryptography::ed25519;
 use commonware_cryptography::Digest;
 use commonware_cryptography::Signer;
 use commonware_parallel::Sequential;
+use commonware_p2p::AddressableManager;
 use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
 use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
 use commonware_runtime::{Quota, Runner, Metrics};
@@ -90,6 +91,22 @@ const BLOCK_CHANNEL: u64 = 2;
 const SYNC_CHANNEL: u64 = 3;
 const ORACLE_CHANNEL: u64 = 4;
 const UPGRADE_CHANNEL: u64 = 5;
+
+/// Maximum number of blocks the full / archive node requests in a single
+/// `SyncRequest`. Keep this multiplied by typical block size well under the
+/// network's 10 MB `max_message_size` (a 1 KB block × 100 = 100 KB ≪ 10 MB).
+const SYNC_REQUEST_BATCH: u64 = 100;
+
+/// How long a peer may be considered "busy serving our SyncRequest" before
+/// we allow a fresh request to be issued for that peer. Acts as both a
+/// debounce against the high-frequency BlockAnnouncement stream and a
+/// timeout in case the peer never responds.
+const SYNC_REQUEST_INFLIGHT_TIMEOUT_MS: u64 = 5_000;
+
+/// Tracks the most recent `SyncRequest` we sent to each peer so the
+/// announcement-driven request path doesn't spawn a fresh request on every
+/// `BlockAnnouncement`. Maps peer_id → unix-millis of the last request.
+type SyncInflight = Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>;
 
 /// The Callchain node
 pub struct CallNode {
@@ -309,11 +326,22 @@ impl CallNode {
         // Start receive loop
         let mempool = Arc::clone(&self.mempool);
         let state = Arc::clone(&self.state);
+        let consensus = Arc::clone(&self.consensus);
         let data_dir = self.db.data_dir.clone();
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
         let telemetry = Arc::clone(&self.telemetry);
         let p2p_defense = std::sync::Mutex::new(P2PDefense::new(100, 1000, 10 * 1024 * 1024));
+        // Tracks SyncRequests we've sent recently. Both the announcement
+        // handler (BLOCK_CHANNEL) and the response handler (SYNC_CHANNEL)
+        // share this map so an in-flight request for a given peer suppresses
+        // new requests to that peer until either the response lands or the
+        // timeout elapses. Without this debounce, a 4-validator network at
+        // 4 Hz produces ~16 announcements/sec per validator and we'd spawn
+        // an equal number of redundant SyncRequests, each pulling a fresh
+        // SyncResponse and tripping the per-peer P2PDefense rate limit.
+        let sync_inflight: SyncInflight =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         tokio::spawn(async move {
             while let Ok((peer_id, channel, data)) = net_clone.receive().await {
                 // P2P defense: rate limiting + max message size
@@ -331,16 +359,97 @@ impl CallNode {
                     // Handle sync requests: respond with blocks
                     if let Ok(NetworkMessage::SyncRequest(request)) = bincode::deserialize(&data) {
                         tracing::debug!(peer_id, start = request.start_height, count = request.count, "sync: request from peer");
-                        if let Some(response) = handle_sync_request(&data_dir, &request) {
-                            let resp_data = bincode::serialize(&NetworkMessage::SyncResponse(response))
-                                .expect("serialize sync response");
-                            net_clone.send_to(vec![peer_id], resp_data).await;
+                        // Spawn the disk-and-serialize work into its own task
+                        // so the receive loop doesn't block while we read up
+                        // to SYNC_REQUEST_BATCH blocks from MDBX and JSON-
+                        // serialize them. Without this, a single inbound
+                        // SyncRequest can stall *all* incoming traffic
+                        // (including the SyncResponses we ourselves are
+                        // waiting on) for hundreds of milliseconds.
+                        let data_dir_owned = data_dir.clone();
+                        let net_for_resp = Arc::clone(&net_clone);
+                        let peer_for_resp = peer_id.clone();
+                        tokio::spawn(async move {
+                            if let Some(response) = handle_sync_request(&data_dir_owned, &request) {
+                                let resp_data = bincode::serialize(&NetworkMessage::SyncResponse(response))
+                                    .expect("serialize sync response");
+                                net_for_resp.send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data).await;
+                            }
+                        });
+                    } else if let Ok(NetworkMessage::SyncResponse(response)) = bincode::deserialize(&data) {
+                        // A response for our outstanding request landed —
+                        // free the in-flight slot for this peer so the next
+                        // BlockAnnouncement (or our own catch-up below) can
+                        // immediately drive another request.
+                        sync_inflight.lock().unwrap().remove(&peer_id);
+
+                        // Apply blocks delivered by a peer in response to a SyncRequest.
+                        // This is the path full / archive nodes use to follow the
+                        // canonical chain finalized by the validators (a peer's
+                        // BlockAnnouncement triggers a SyncRequest in the
+                        // BLOCK_CHANNEL handler, the response lands here).
+                        let applied = apply_synced_blocks(&response, &state, &consensus, &data_dir);
+                        let new_local = state.get_current_block();
+                        if applied > 0 {
+                            tracing::info!(
+                                peer_id,
+                                start = response.start_height,
+                                applied,
+                                local_height = new_local,
+                                "sync: applied blocks from peer"
+                            );
+
+                            // Catch-up: if the peer just gave us a full
+                            // batch (i.e. it likely has more), proactively
+                            // request the next chunk from the same peer
+                            // instead of waiting for another BlockAnnouncement
+                            // (which arrives at most every block_time and
+                            // would otherwise leave us several seconds
+                            // behind real time on every batch).
+                            if applied as u64 >= SYNC_REQUEST_BATCH {
+                                let now_ms2 = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0);
+                                let mut should_request = false;
+                                {
+                                    let mut inflight = sync_inflight.lock().unwrap();
+                                    if !inflight.contains_key(&peer_id) {
+                                        inflight.insert(peer_id.clone(), now_ms2);
+                                        should_request = true;
+                                    }
+                                }
+                                if should_request {
+                                    let next = SyncRequest {
+                                        start_height: new_local,
+                                        count: SYNC_REQUEST_BATCH,
+                                        full_state: false,
+                                    };
+                                    if let Ok(req_data) = bincode::serialize(&NetworkMessage::SyncRequest(next)) {
+                                        let net = Arc::clone(&net_clone);
+                                        let peer = peer_id.clone();
+                                        tokio::spawn(async move {
+                                            net.send_to(SYNC_CHANNEL, vec![peer], req_data).await;
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 } else if channel == BLOCK_CHANNEL {
-                    // Try BlockAnnouncement first (post-commit announcements)
-                    if let Ok(_announcement) = serde_json::from_slice::<BlockAnnouncement>(&data) {
-                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone);
+                    // Two valid payload kinds on this channel:
+                    //   1) `NetworkMessage::BlockAnnouncement` (bincode) — the
+                    //      post-finalize broadcast emitted by validators in the
+                    //      BFT event loop.
+                    //   2) A serde_json-serialized `Block` — the BFT relay's
+                    //      block dissemination so peers can satisfy proposals
+                    //      under verification (see `CallRelay::broadcast`).
+                    // Each codec MUST match its sender; mixing them silently
+                    // dropped traffic in the past.
+                    if let Ok(NetworkMessage::BlockAnnouncement(_)) =
+                        bincode::deserialize::<NetworkMessage>(&data)
+                    {
+                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight);
                     } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
@@ -350,7 +459,7 @@ impl CallNode {
                         tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
                 } else {
-                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone);
+                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight);
                 }
             }
         });
@@ -435,6 +544,7 @@ impl CallNode {
         &self,
         ed25519_private_key: ed25519::PrivateKey,
         consensus_p2p_port: u16,
+        bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)>,
     ) -> tokio::task::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let mempool = Arc::clone(&self.mempool);
@@ -496,6 +606,7 @@ impl CallNode {
                     let result = Self::start_bft_engine_inner(
                         ed25519_private_key.clone(),
                         consensus_p2p_port,
+                        bft_bootstrap_peers.clone(),
                         state.clone(),
                         mempool.clone(),
                         consensus.clone(),
@@ -560,6 +671,7 @@ impl CallNode {
     async fn start_bft_engine_inner(
         ed25519_private_key: ed25519::PrivateKey,
         consensus_p2p_port: u16,
+        bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)>,
         state: Arc<RpcState>,
         mempool: Arc<RwLock<Mempool>>,
         consensus: Arc<RwLock<SimplexConsensus>>,
@@ -629,10 +741,28 @@ impl CallNode {
                     listen_addr,
                     10 * 1024 * 1024,
                 );
-                let (mut network, oracle) = p2p_lookup::Network::new(
+                let (mut network, mut oracle) = p2p_lookup::Network::new(
                     context.with_label("consensus-p2p"),
                     p2p_cfg,
                 );
+
+                // Register the other validators' BFT P2P endpoints with the oracle so
+                // that the simplex engine can connect to them. Without this step the
+                // consensus P2P listener has no peer addresses and votes/certificates
+                // never reach the other validators (which is why the 4-node devnet
+                // never finalized a block).
+                if !bft_bootstrap_peers.is_empty() {
+                    let entries: Vec<(ed25519::PublicKey, commonware_p2p::Address)> =
+                        bft_bootstrap_peers
+                            .iter()
+                            .map(|(pk, addr)| (pk.clone(), commonware_p2p::Address::Symmetric(*addr)))
+                            .collect();
+                    let peer_map: commonware_utils::ordered::Map<
+                        ed25519::PublicKey,
+                        commonware_p2p::Address,
+                    > = commonware_utils::ordered::Map::from_iter_dedup(entries);
+                    oracle.track(0, peer_map).await;
+                }
 
                 // Register 3 consensus channels (vote, certificate, resolver)
                 let quota = Quota::per_second(NonZeroU32::new(10000).unwrap());
@@ -2827,7 +2957,11 @@ fn handle_sync_request(data_dir: &Path, request: &SyncRequest) -> Option<SyncRes
     let end = request.start_height.saturating_add(request.count);
     for h in request.start_height..end {
         if let Some(block) = load_block(data_dir, h) {
-            if let Ok(serialized) = bincode::serialize(&block) {
+            // NOTE: Blocks are serialized as JSON for the SyncResponse payload
+            // because the receiving side (`apply_synced_blocks` and the legacy
+            // `start_sync` path) deserializes them with `serde_json::from_slice`.
+            // Using bincode here would silently produce undeliverable responses.
+            if let Ok(serialized) = serde_json::to_vec(&block) {
                 blocks.push(serialized);
             }
         } else {
@@ -2848,6 +2982,86 @@ fn handle_sync_request(data_dir: &Path, request: &SyncRequest) -> Option<SyncRes
     })
 }
 
+/// Apply blocks received in a `SyncResponse` to local state.
+///
+/// Used by full / archive nodes (and any validator catching up) to import
+/// finalized blocks broadcast by validators. Returns the number of blocks
+/// successfully applied.
+///
+/// Only blocks at `local_height` or above are applied; out-of-order /
+/// already-known heights are skipped without error. Blocks are persisted to
+/// disk and committed to the in-memory `SimplexConsensus` so that subsequent
+/// `BlockAnnouncement`s correctly compare heights.
+fn apply_synced_blocks(
+    response: &SyncResponse,
+    state: &Arc<RpcState>,
+    consensus: &Arc<RwLock<SimplexConsensus>>,
+    data_dir: &Path,
+) -> usize {
+    let mut applied = 0usize;
+    for (i, block_data) in response.blocks.iter().enumerate() {
+        let block_height = response.start_height.saturating_add(i as u64);
+        let local_height = state.get_current_block();
+        if block_height < local_height {
+            continue; // already have this block
+        }
+        if block_height > local_height {
+            // We can't apply blocks out of order — wait for an earlier batch.
+            break;
+        }
+        let mut block: Block = match serde_json::from_slice(block_data) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(height = block_height, error = %e, "sync: failed to deserialize block");
+                continue;
+            }
+        };
+
+        let execute_result = {
+            let mut balances = state.balance_state.write().unwrap();
+            let mut registry = state.asset_registry.write().unwrap();
+            let mut compliance = state.compliance_engine.write().unwrap();
+            let mut bridge_state = state.bridge_state.write().unwrap();
+            let mut shielded_state = state.shielded_state.write().unwrap();
+            let mut fee_params = state.fee_params.write().unwrap();
+            let mut evm_state = state.evm_state.write().unwrap();
+            let mut agent_balances = state.agent_balances.write().unwrap();
+            let agent_registry = state.agent_registry.read().unwrap();
+
+            block.execute(
+                &mut balances, &mut registry, &mut compliance, &mut bridge_state,
+                &mut shielded_state, &mut fee_params, block_height, &mut evm_state,
+                None, None,
+                Some(&mut *agent_balances),
+                Some(&*agent_registry),
+                None, None, None, None,
+                Some(&mut *state.validator_state.write().unwrap()),
+            )
+        };
+
+        match execute_result {
+            Ok(result) => {
+                block.finalize(&result);
+                if let Err(e) = persist_block(data_dir, block_height, &block) {
+                    tracing::warn!(height = block_height, error = %e, "sync: failed to persist block to disk");
+                }
+                if let Ok(mut c) = consensus.write() {
+                    if let Err(e) = c.commit_block(&block, &result) {
+                        tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
+                    }
+                }
+                state.set_current_block(block_height + 1);
+                applied += 1;
+            }
+            Err(e) => {
+                tracing::warn!(height = block_height, error = %e, "sync: block execution failed");
+                break;
+            }
+        }
+    }
+    applied
+}
+
 fn handle_network_message(
     peer_id: &str,
     channel: u64,
@@ -2855,6 +3069,7 @@ fn handle_network_message(
     mempool: &Arc<RwLock<Mempool>>,
     state: &Arc<RpcState>,
     network: &Arc<dyn Network>,
+    sync_inflight: &SyncInflight,
 ) {
     match channel {
         TX_CHANNEL => {
@@ -2869,37 +3084,72 @@ fn handle_network_message(
             }
         }
         BLOCK_CHANNEL => {
-            // Handle block announcements (post-commit) — trigger sync if behind
-            if let Ok(announcement) = serde_json::from_slice::<BlockAnnouncement>(data) {
-                let local_height = state.get_current_block();
-                if announcement.height > local_height {
-                    tracing::info!(
-                        peer_id,
-                        height = announcement.height,
-                        local = local_height,
-                        "block announcement: peer ahead, requesting sync"
-                    );
-                    let request = SyncRequest {
-                        start_height: local_height,
-                        count: 100,
-                        full_state: false,
-                    };
-                    let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
-                        .expect("serialize sync request");
-                    let peer_id_owned = peer_id.to_string();
-                    let net = Arc::clone(network);
-                    tokio::spawn(async move {
-                        net.send_to(vec![peer_id_owned], req_data).await;
-                    });
-                } else {
-                    tracing::debug!(
-                        peer_id,
-                        height = announcement.height,
-                        local = local_height,
-                        "block announcement: already caught up"
-                    );
+            // Handle block announcements (post-commit) — trigger sync if behind.
+            // The sender wraps the announcement in `NetworkMessage::BlockAnnouncement`
+            // and uses bincode (see the BFT event-loop broadcast path); the
+            // receiver MUST use the same codec to deserialize.
+            let announcement = match bincode::deserialize::<NetworkMessage>(data) {
+                Ok(NetworkMessage::BlockAnnouncement(a)) => a,
+                _ => return,
+            };
+            let local_height = state.get_current_block();
+            if announcement.height <= local_height {
+                tracing::debug!(
+                    peer_id,
+                    height = announcement.height,
+                    local = local_height,
+                    "block announcement: already caught up"
+                );
+                return;
+            }
+
+            // Debounce: don't pile up SyncRequests against the same peer.
+            // At default block_time=250ms we'd otherwise emit ~16 requests/sec
+            // per peer just from announcements, blowing past the 100 msg/sec
+            // P2PDefense rate limit on the validator and causing most
+            // SyncResponses to be silently dropped. Allow at most one
+            // outstanding request per peer at a time, with a timeout that
+            // covers a slow / lost response.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            {
+                let mut inflight = sync_inflight.lock().unwrap();
+                match inflight.get(peer_id) {
+                    Some(&ts) if now_ms.saturating_sub(ts) < SYNC_REQUEST_INFLIGHT_TIMEOUT_MS => {
+                        tracing::debug!(
+                            peer_id,
+                            height = announcement.height,
+                            local = local_height,
+                            "block announcement: sync request already in flight, debounced"
+                        );
+                        return;
+                    }
+                    _ => {
+                        inflight.insert(peer_id.to_string(), now_ms);
+                    }
                 }
             }
+
+            tracing::info!(
+                peer_id,
+                height = announcement.height,
+                local = local_height,
+                "block announcement: peer ahead, requesting sync"
+            );
+            let request = SyncRequest {
+                start_height: local_height,
+                count: SYNC_REQUEST_BATCH,
+                full_state: false,
+            };
+            let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
+                .expect("serialize sync request");
+            let peer_id_owned = peer_id.to_string();
+            let net = Arc::clone(network);
+            tokio::spawn(async move {
+                net.send_to(SYNC_CHANNEL, vec![peer_id_owned], req_data).await;
+            });
         }
         SYNC_CHANNEL => {
             // SyncRequest / SyncResponse are handled by the sync task separately
@@ -2943,7 +3193,7 @@ fn handle_network_message(
                                     sources: vec!["local_oracle".into()],
                                 };
                                 if let Ok(msg) = bincode::serialize(&NetworkMessage::OraclePriceSubmission(submission)) {
-                                    net_clone.send_to(vec![peer_id_owned.clone()], msg).await;
+                                    net_clone.send_to(ORACLE_CHANNEL, vec![peer_id_owned.clone()], msg).await;
                                 }
                             }
                         }

@@ -1,0 +1,28 @@
+mode = "validator"
+
+[keys]
+validator_key = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+identity_key = "0000000000000000000000000000000000000000000000000000000000000002"
+
+[p2p]
+listen_addr = "127.0.0.1:51233"
+bootstrap_peers = "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29@127.0.0.1:51231,f381626e41e7027ea431bfe3009e94bdd25a746beec468948d6c3c7c5dc9a54b@127.0.0.1:51235,fd50b8e3b144ea244fbf7737f550bc8dd0c2650bbc1aada833ca17ff8dbf329b@127.0.0.1:51237,fde4fba030ad002f7c2f7d4c331f49d13fb0ec747eceebec634f1ff4cbca9def@127.0.0.1:51239,b4c92afb3ba57f3ab959ffe6d319c98484a2155a0f4c65b2c37011ffd197b075@127.0.0.1:51241"
+allow_private_ips = true
+
+[storage]
+data_dir = "./devnet/local/data/node2"
+
+[genesis]
+path = "./devnet/local/genesis.json"
+
+[rpc]
+http_addr = "127.0.0.1:5007"
+ws_addr = "127.0.0.1:5008"
+max_connections = 100
+
+[metrics]
+addr = "127.0.0.1:9091"
+
+[logging]
+level = "info"
+format = "text"
