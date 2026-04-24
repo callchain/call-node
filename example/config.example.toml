@@ -21,6 +21,11 @@ listen_addr = "0.0.0.0:51235"
 # bootstrap_peers = ""
 # Max peers
 max_peers = 50
+# Allow connecting to peers on private (RFC1918) IPs.
+# Defaults to `false` for validators (production: require public IPs) and
+# `true` for full/archive nodes. Set to `true` for local/devnet deployments
+# where every node lives on a private docker/LAN subnet.
+# allow_private_ips = false
 
 [rpc]
 # HTTP RPC listen address
