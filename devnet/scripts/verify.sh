@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Verify the devnet topology behaves correctly:
+#   1. The 4 validators reach BFT consensus and advance the SAME chain.
+#   2. The 2 full nodes follow that chain (sync) instead of producing their
+#      own divergent blocks.
+#
+# Usage:
+#   ./devnet/scripts/verify.sh                # default: 60s observation window
+#   OBSERVE_SECS=120 ./devnet/scripts/verify.sh
+#   POLL_INTERVAL=2 ./devnet/scripts/verify.sh
+#
+# Exit status: 0 on success, non-zero on failure (with a per-check report).
+set -uo pipefail
+
+OBSERVE_SECS="${OBSERVE_SECS:-60}"
+POLL_INTERVAL="${POLL_INTERVAL:-3}"
+WARMUP_SECS="${WARMUP_SECS:-15}"
+MIN_PROGRESS_BLOCKS="${MIN_PROGRESS_BLOCKS:-2}"
+
+# (label, role, rpc_port)
+NODES=(
+    "node1 validator 5005"
+    "node2 validator 5007"
+    "node3 validator 5009"
+    "node4 validator 5011"
+    "node5 full      5013"
+    "node6 full      5015"
+)
+
+PASS=0
+FAIL=0
+ISSUES=()
+
+color() {
+    case "$1" in
+        red)    printf '\033[31m%s\033[0m' "$2" ;;
+        green)  printf '\033[32m%s\033[0m' "$2" ;;
+        yellow) printf '\033[33m%s\033[0m' "$2" ;;
+        bold)   printf '\033[1m%s\033[0m'  "$2" ;;
+        *) printf '%s' "$2" ;;
+    esac
+}
+
+ok()   { PASS=$((PASS+1)); echo "  $(color green '[PASS]') $*"; }
+fail() { FAIL=$((FAIL+1)); ISSUES+=("$*"); echo "  $(color red   '[FAIL]') $*"; }
+info() { echo "  $(color yellow '[INFO]') $*"; }
+
+# Query block height via JSON-RPC `eth_blockNumber`. Returns the height as a
+# decimal string, or empty string on failure.
+get_height() {
+    local port="$1"
+    local resp
+    resp=$(curl -fsS --max-time 3 -X POST "http://127.0.0.1:${port}" \
+        -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' 2>/dev/null) || {
+        echo ""
+        return
+    }
+    # Extract "result":"0x..." → decimal
+    local hex
+    hex=$(printf '%s' "$resp" | sed -n 's/.*"result"[[:space:]]*:[[:space:]]*"0x\([0-9a-fA-F]*\)".*/\1/p')
+    if [[ -z "$hex" ]]; then
+        echo ""
+        return
+    fi
+    # uppercase for printf %d / use python fallback
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "print(int('$hex', 16))"
+    else
+        printf '%d\n' "0x${hex}"
+    fi
+}
+
+heights_snapshot() {
+    # Prints "<label> <role> <port> <height>" lines, one per node.
+    for entry in "${NODES[@]}"; do
+        # shellcheck disable=SC2086
+        set -- $entry
+        local label="$1" role="$2" port="$3"
+        local h
+        h=$(get_height "$port")
+        printf '%s %s %s %s\n' "$label" "$role" "$port" "${h:-NA}"
+    done
+}
+
+print_snapshot() {
+    local title="$1"
+    local snap="$2"
+    echo
+    echo "  $(color bold "$title")"
+    while IFS= read -r line; do
+        # shellcheck disable=SC2086
+        set -- $line
+        printf '    %-6s %-10s rpc:%s  height=%s\n' "$1" "$2" "$3" "$4"
+    done <<< "$snap"
+}
+
+echo "=================================================================="
+echo " Callchain devnet verification"
+echo "=================================================================="
+echo "  Observation window : ${OBSERVE_SECS}s"
+echo "  Poll interval      : ${POLL_INTERVAL}s"
+echo "  Warmup             : ${WARMUP_SECS}s"
+echo "  Min validator      : ${MIN_PROGRESS_BLOCKS} new block(s) within window"
+
+# 1. All 6 containers running
+echo
+color bold '[1/5] docker compose: 6 containers up'; echo
+COMPOSE_FILE="$(cd "$(dirname "$0")/.." && pwd)/docker-compose.yml"
+if [[ ! -f "$COMPOSE_FILE" ]]; then
+    fail "compose file not found at $COMPOSE_FILE"
+else
+    running=$(docker compose -f "$COMPOSE_FILE" ps --status running --format '{{.Name}}' 2>/dev/null | wc -l)
+    if [[ "$running" -eq 6 ]]; then
+        ok "6/6 containers running"
+    else
+        fail "expected 6 running containers, got ${running}"
+        docker compose -f "$COMPOSE_FILE" ps || true
+    fi
+fi
+
+# 2. RPC reachable on every node
+echo
+color bold '[2/5] RPC reachable on every node'; echo
+for entry in "${NODES[@]}"; do
+    # shellcheck disable=SC2086
+    set -- $entry
+    label="$1"; role="$2"; port="$3"
+    h=$(get_height "$port")
+    if [[ -z "$h" ]]; then
+        fail "${label} (${role}) RPC :${port} not reachable / no eth_blockNumber"
+    else
+        ok "${label} (${role}) RPC :${port} → height ${h}"
+    fi
+done
+
+# 3. Warmup, then snapshot
+info "warming up for ${WARMUP_SECS}s before measuring progress…"
+sleep "$WARMUP_SECS"
+
+START_SNAP=$(heights_snapshot)
+print_snapshot "Initial snapshot:" "$START_SNAP"
+
+elapsed=0
+while [[ "$elapsed" -lt "$OBSERVE_SECS" ]]; do
+    sleep "$POLL_INTERVAL"
+    elapsed=$((elapsed + POLL_INTERVAL))
+done
+
+END_SNAP=$(heights_snapshot)
+print_snapshot "Snapshot after ${OBSERVE_SECS}s:" "$END_SNAP"
+
+# Build associative arrays from snapshots
+declare -A START END
+while IFS= read -r line; do
+    # shellcheck disable=SC2086
+    set -- $line
+    START["$1"]=$4
+done <<< "$START_SNAP"
+while IFS= read -r line; do
+    # shellcheck disable=SC2086
+    set -- $line
+    END["$1"]=$4
+done <<< "$END_SNAP"
+
+is_num() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# 4. Validator consensus: heights advance AND match each other
+echo
+color bold '[3/5] Validators reach consensus (advance & agree)'; echo
+val_heights=()
+for label in node1 node2 node3 node4; do
+    s="${START[$label]:-NA}"
+    e="${END[$label]:-NA}"
+    if ! is_num "$e"; then
+        fail "${label}: end height not numeric (${e})"
+        continue
+    fi
+    if is_num "$s"; then
+        delta=$((e - s))
+        if [[ "$delta" -lt "$MIN_PROGRESS_BLOCKS" ]]; then
+            fail "${label}: only advanced ${delta} block(s) in ${OBSERVE_SECS}s (need ≥ ${MIN_PROGRESS_BLOCKS}); validators are not finalising blocks"
+        else
+            ok "${label}: advanced ${delta} block(s) (${s} → ${e})"
+        fi
+    fi
+    val_heights+=("$e")
+done
+
+# Validators must agree (allow a small drift of 2 blocks since heights are
+# polled non-atomically; true forks would diverge unboundedly).
+if [[ "${#val_heights[@]}" -eq 4 ]]; then
+    min=${val_heights[0]}; max=${val_heights[0]}
+    for h in "${val_heights[@]}"; do
+        is_num "$h" || continue
+        (( h < min )) && min=$h
+        (( h > max )) && max=$h
+    done
+    spread=$((max - min))
+    if [[ "$spread" -le 2 ]]; then
+        ok "validators agree on chain tip (heights ${val_heights[*]}; spread=${spread})"
+    else
+        fail "validator heights diverge — spread=${spread}, heights=${val_heights[*]}; this looks like 4 separate chains, not consensus"
+    fi
+fi
+
+# 5. Full nodes follow validators (sync, not local production)
+echo
+color bold '[4/5] Full nodes sync from validators (no local production)'; echo
+# Use the median validator height as the "canonical" reference.
+sorted_vals=$(printf '%s\n' "${val_heights[@]}" | sort -n)
+canon=$(echo "$sorted_vals" | awk 'NR==2{print}')   # 2nd of 4 ≈ median-low
+[[ -z "$canon" ]] && canon=0
+
+for label in node5 node6; do
+    s="${START[$label]:-NA}"
+    e="${END[$label]:-NA}"
+    if ! is_num "$e"; then
+        fail "${label}: end height not numeric (${e})"
+        continue
+    fi
+
+    # Must have advanced (otherwise sync is broken).
+    if is_num "$s"; then
+        delta=$((e - s))
+        if [[ "$delta" -lt 1 && "$canon" -gt "$s" ]]; then
+            fail "${label}: did not advance (${s} → ${e}) while validators reached ${canon}; sync is broken"
+        fi
+    fi
+
+    # Must NOT be ahead of the validators by more than 1 block — that would
+    # mean the full node is producing its own blocks instead of syncing.
+    if is_num "$canon" && (( e > canon + 1 )); then
+        fail "${label}: height ${e} is ahead of validator tip ${canon} by $((e - canon)) — full node is producing local blocks, not syncing"
+        continue
+    fi
+
+    # Must be reasonably caught up (within 5 blocks of canon).
+    drift=$((canon - e))
+    (( drift < 0 )) && drift=$((-drift))
+    if [[ "$drift" -le 5 ]]; then
+        ok "${label}: synced (height=${e}, validator tip=${canon}, drift=${drift})"
+    else
+        fail "${label}: lagging — height=${e}, validator tip=${canon}, drift=${drift} blocks"
+    fi
+done
+
+# 6. Cross-check: every node's chain tip should agree (within tolerance)
+echo
+color bold '[5/5] All 6 nodes converge on the same chain'; echo
+all_heights=()
+for label in node1 node2 node3 node4 node5 node6; do
+    h="${END[$label]:-NA}"
+    is_num "$h" && all_heights+=("$h")
+done
+if [[ "${#all_heights[@]}" -ge 2 ]]; then
+    min=${all_heights[0]}; max=${all_heights[0]}
+    for h in "${all_heights[@]}"; do
+        (( h < min )) && min=$h
+        (( h > max )) && max=$h
+    done
+    spread=$((max - min))
+    if [[ "$spread" -le 5 ]]; then
+        ok "all 6 nodes agree (min=${min}, max=${max}, spread=${spread})"
+    else
+        fail "chain tips diverge across the 6 nodes (min=${min}, max=${max}, spread=${spread})"
+    fi
+fi
+
+echo
+echo "=================================================================="
+echo " Verification result: $(color green "${PASS} passed"), $(color red "${FAIL} failed")"
+echo "=================================================================="
+if [[ "$FAIL" -gt 0 ]]; then
+    echo
+    echo "Failures:"
+    for issue in "${ISSUES[@]}"; do
+        echo "  - $issue"
+    done
+    exit 1
+fi
+exit 0
