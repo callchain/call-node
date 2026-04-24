@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "chain_name": "callchain-devnet",
+  "chain_id": 1,
+  "timestamp_millis": 1700000000000,
+  "initial_assets": [
+    {
+      "asset_id": 1,
+      "symbol": "CALL",
+      "name": "Call Token",
+      "decimals": 18,
+      "initial_supply": 4000000000000000000000000,
+      "distribution": {
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266": 2000000000000000000000000,
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8": 2000000000000000000000000,
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC": 2000000000000000000000000,
+        "0x90F79bf6EB2c4f870365E785982E1f101E93b906": 2000000000000000000000000
+      }
+    }
+  ],
+  "initial_fee_currencies": [
+    {
+      "symbol": "CALL",
+      "asset_id": 1,
+      "oracle_address": null
+    }
+  ],
+  "validators": [
+    {
+      "address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "ed25519_pubkey": "0x4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+      "self_stake": 1000000000000000000000000
+    },
+    {
+      "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "ed25519_pubkey": "0x7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674",
+      "self_stake": 1000000000000000000000000
+    },
+    {
+      "address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "ed25519_pubkey": "0xf381626e41e7027ea431bfe3009e94bdd25a746beec468948d6c3c7c5dc9a54b",
+      "self_stake": 1000000000000000000000000
+    },
+    {
+      "address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+      "ed25519_pubkey": "0xfd50b8e3b144ea244fbf7737f550bc8dd0c2650bbc1aada833ca17ff8dbf329b",
+      "self_stake": 1000000000000000000000000
+    }
+  ],
+  "consensus_params": {
+    "max_validators": 216,
+    "subset_size": 21,
+    "block_time_millis": 250,
+    "slashing_window": 10000,
+    "oracle_request_delay_ms": 200,
+    "epoch_length": 1000
+  },
+  "oracle_assets": [1]
+}

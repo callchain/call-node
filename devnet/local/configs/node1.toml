@@ -1,0 +1,30 @@
+mode = "validator"
+
+[keys]
+validator_key = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+identity_key = "0000000000000000000000000000000000000000000000000000000000000001"
+
+[p2p]
+listen_addr = "127.0.0.1:51231"
+bootstrap_peers = "7422b9887598068e32c4448a949adb290d0f4e35b9e01b0ee5f1a1e600fe2674@127.0.0.1:51233,f381626e41e7027ea431bfe3009e94bdd25a746beec468948d6c3c7c5dc9a54b@127.0.0.1:51235,fd50b8e3b144ea244fbf7737f550bc8dd0c2650bbc1aada833ca17ff8dbf329b@127.0.0.1:51237"
+# Local devnet binds every node to 127.0.0.1, so validators must accept
+# private-IP / loopback peers (production default rejects them).
+allow_private_ips = true
+
+[storage]
+data_dir = "./devnet/local/data/node1"
+
+[genesis]
+path = "./devnet/local/genesis.json"
+
+[rpc]
+http_addr = "127.0.0.1:5005"
+ws_addr = "127.0.0.1:5006"
+max_connections = 100
+
+[metrics]
+addr = "127.0.0.1:9090"
+
+[logging]
+level = "info"
+format = "text"
