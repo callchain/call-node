@@ -199,6 +199,36 @@ pub enum Instruction {
     ValidatorClaimUnbonded {
         validator_id: u32,
     },
+    /// Register a new agent. The transaction sender becomes the owner.
+    /// Deducts `fee_params.base_fee` from the sender's CALL balance.
+    RegisterAgent {
+        pubkey: Vec<u8>,
+        name: String,
+        url: String,
+    },
+    /// Grant protocol balance to an agent. Only the agent owner can grant.
+    GrantAgentBalance {
+        agent_id: u64,
+        asset_id: AssetId,
+        amount: Balance,
+    },
+    /// Revoke all protocol balance from an agent for a given asset.
+    /// Only the agent owner can revoke. Funds are not returned to owner.
+    RevokeAgentBalance {
+        agent_id: u64,
+        asset_id: AssetId,
+    },
+    /// Submit an Ed25519-signed emergency rollback signature.
+    /// When quorum is reached, a RollbackPlan is produced in the block result.
+    SubmitRollbackSignature {
+        validator_id: u32,
+        target_height: u64,
+        target_version_major: u16,
+        target_version_minor: u16,
+        target_version_patch: u16,
+        nonce: u64,
+        signature: Vec<u8>,
+    },
 }
 
 /// Payment memo with size limits per spec §3.5
@@ -704,6 +734,26 @@ pub fn execute_instruction(
         Instruction::ValidatorClaimUnbonded { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ValidatorClaimUnbonded must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::RegisterAgent { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RegisterAgent must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::GrantAgentBalance { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "GrantAgentBalance must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::RevokeAgentBalance { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RevokeAgentBalance must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::SubmitRollbackSignature { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "SubmitRollbackSignature must be executed inline in Block::execute".into(),
             ))
         }
     }

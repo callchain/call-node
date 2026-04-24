@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::validator::{ConsensusError, STAKING_ESCROW, ValidatorStateManager};
-use crate::ForkManager;
+use crate::{ForkManager, RollbackPlan};
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
 
@@ -261,12 +261,13 @@ impl Block {
         mut oracle: Option<&mut call_oracle::OracleManager>,
         mut agent_executor: Option<call_protocol::instructions::AgentExecutor>,
         mut agent_balances: Option<&mut call_agent::AgentBalances>,
-        agent_registry: Option<&call_agent::AgentRegistry>,
+        mut agent_registry: Option<&mut call_agent::AgentRegistry>,
         mut governance: Option<&mut GovernanceManager>,
         bridge_config: Option<&BridgeConfig>,
         validators: Option<&[Address]>,
         smart_accounts: Option<&call_protocol::smart_accounts::SmartAccountRegistry>,
         mut validator_state: Option<&mut ValidatorStateManager>,
+        mut fork_manager: Option<&mut ForkManager>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -429,10 +430,14 @@ impl Block {
                 .iter()
                 .cloned()
                 .partition(|i| is_validator_instruction(i));
-            let (asset_instrs, other_instrs): (Vec<_>, Vec<_>) = non_validator
+            let (asset_instrs, non_asset): (Vec<_>, Vec<_>) = non_validator
                 .iter()
                 .cloned()
                 .partition(|i| is_asset_instruction(i));
+            let (rollback_instrs, other_instrs): (Vec<_>, Vec<_>) = non_asset
+                .iter()
+                .cloned()
+                .partition(|i| is_rollback_instruction(i));
 
             // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
             let balance_snapshot = account.clone();
@@ -517,7 +522,7 @@ impl Block {
                                 "agent instructions require agent state".into(),
                             )
                         })?;
-                    let ar = agent_registry.ok_or_else(|| {
+                    let ar = agent_registry.as_mut().ok_or_else(|| {
                         ConsensusError::InvalidBlock(
                             "agent instructions require agent registry".into(),
                         )
@@ -534,6 +539,7 @@ impl Block {
                             registry,
                             &executor,
                             current_block_height,
+                            fee_params,
                             &mut tx_agent_events,
                         )?;
                         tx_results.push(r);
@@ -556,6 +562,26 @@ impl Block {
                             current_block_height,
                         )?;
                         tx_results.push(r);
+                    }
+                }
+
+                // Execute rollback instructions inline
+                if !rollback_instrs.is_empty() {
+                    let fm = fork_manager.as_mut().ok_or_else(|| {
+                        ConsensusError::InvalidBlock(
+                            "rollback instructions require fork manager".into(),
+                        )
+                    })?;
+                    for instr in &rollback_instrs {
+                        let maybe_plan = execute_rollback_instruction(
+                            instr,
+                            fm,
+                            current_block_height,
+                        )?;
+                        if let Some(plan) = maybe_plan {
+                            result.pending_rollback = Some(plan);
+                        }
+                        tx_results.push(InstructionResult::Success);
                     }
                 }
 
@@ -699,6 +725,9 @@ fn is_agent_instruction(instr: &Instruction) -> bool {
             | Instruction::AgentBatchPay { .. }
             | Instruction::AgentCall { .. }
             | Instruction::AgentBridgeDeposit { .. }
+            | Instruction::RegisterAgent { .. }
+            | Instruction::GrantAgentBalance { .. }
+            | Instruction::RevokeAgentBalance { .. }
     )
 }
 
@@ -735,13 +764,14 @@ fn execute_agent_instruction(
     instruction: &Instruction,
     sender: call_primitives::Address,
     agent_balances: &mut call_agent::AgentBalances,
-    agent_registry: &call_agent::AgentRegistry,
+    agent_registry: &mut call_agent::AgentRegistry,
     account: &mut AccountState,
     evm_state: &mut EvmState,
     bridge_state: &mut call_bridge::BridgeStateManager,
     registry: &AssetRegistry,
     evm_executor: &EvmExecutor,
     current_block_height: u64,
+    fee_params: &FeeParams,
     agent_events: &mut Vec<call_agent::AgentEvent>,
 ) -> Result<InstructionResult, ConsensusError> {
     match instruction {
@@ -939,6 +969,87 @@ fn execute_agent_instruction(
                     )))
                 }
             }
+        }
+        Instruction::RegisterAgent {
+            pubkey,
+            name,
+            url,
+        } => {
+            if pubkey.len() != 64 {
+                return Err(ConsensusError::InvalidBlock(
+                    "RegisterAgent: pubkey must be 64 bytes".into(),
+                ));
+            }
+            let mut pk = [0u8; 64];
+            pk.copy_from_slice(pubkey);
+            let fee = fee_params.base_fee;
+            if fee > 0 {
+                let sender_balance = account.get_balance(call_protocol::CALL_ASSET_ID, &sender);
+                if sender_balance < fee {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "RegisterAgent: insufficient CALL balance for fee: need {fee}, have {sender_balance}"
+                    )));
+                }
+                account
+                    .deduct_balance(call_protocol::CALL_ASSET_ID, sender, fee)
+                    .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterAgent: {e}")))?;
+            }
+            agent_registry
+                .register_agent(
+                    sender,
+                    pk,
+                    name.clone(),
+                    url.clone(),
+                    [0u8; 32],
+                    None,
+                    current_block_height,
+                    None,
+                )
+                .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterAgent: {e}")))?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::GrantAgentBalance {
+            agent_id,
+            asset_id,
+            amount,
+        } => {
+            let agent = agent_registry
+                .get_agent(*agent_id)
+                .ok_or_else(|| {
+                    ConsensusError::InvalidBlock(format!(
+                        "GrantAgentBalance: agent {agent_id} not found"
+                    ))
+                })?;
+            if agent.owner != sender {
+                return Err(ConsensusError::InvalidBlock(
+                    "GrantAgentBalance: only agent owner can grant".into(),
+                ));
+            }
+            agent_balances
+                .grant_funds(sender, *agent_id, *asset_id, *amount, account)
+                .map_err(|e| {
+                    ConsensusError::InvalidBlock(format!("GrantAgentBalance: {e:?}"))
+                })?;
+            Ok(InstructionResult::Success)
+        }
+        Instruction::RevokeAgentBalance {
+            agent_id,
+            asset_id,
+        } => {
+            let agent = agent_registry
+                .get_agent(*agent_id)
+                .ok_or_else(|| {
+                    ConsensusError::InvalidBlock(format!(
+                        "RevokeAgentBalance: agent {agent_id} not found"
+                    ))
+                })?;
+            if agent.owner != sender {
+                return Err(ConsensusError::InvalidBlock(
+                    "RevokeAgentBalance: only agent owner can revoke".into(),
+                ));
+            }
+            agent_balances.revoke_funds(sender, *agent_id, *asset_id);
+            Ok(InstructionResult::Success)
         }
         _ => Err(ConsensusError::InvalidBlock("not an agent instruction".into())),
     }
@@ -1535,6 +1646,63 @@ fn execute_validator_instruction(
     }
 }
 
+// ── Rollback instruction helpers ──────────────────────────────────────
+
+fn is_rollback_instruction(instr: &Instruction) -> bool {
+    matches!(instr, Instruction::SubmitRollbackSignature { .. })
+}
+
+fn execute_rollback_instruction(
+    instruction: &Instruction,
+    fork_manager: &mut ForkManager,
+    current_block_height: u64,
+) -> Result<Option<RollbackPlan>, ConsensusError> {
+    match instruction {
+        Instruction::SubmitRollbackSignature {
+            validator_id,
+            target_height,
+            target_version_major,
+            target_version_minor,
+            target_version_patch,
+            nonce,
+            signature,
+        } => {
+            if signature.len() != 64 {
+                return Err(ConsensusError::InvalidBlock(
+                    "SubmitRollbackSignature: signature must be 64 bytes".into(),
+                ));
+            }
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(signature);
+            let target_version = ProtocolVersion::new(
+                *target_version_major,
+                *target_version_minor,
+                *target_version_patch,
+            );
+            let sig_result = fork_manager.submit_rollback_signature(
+                *validator_id,
+                *target_height,
+                target_version,
+                *nonce,
+                sig,
+            );
+            match sig_result {
+                Ok(Some(rollback_result)) => {
+                    let plan = fork_manager.execute_rollback(rollback_result, current_block_height);
+                    Ok(Some(plan))
+                }
+                Ok(None) => Ok(None),
+                Err(e) => Err(ConsensusError::InvalidBlock(format!(
+                    "SubmitRollbackSignature: {e}"
+                ))),
+            }
+        }
+        _ => Err(ConsensusError::InvalidBlock(
+            "not a rollback instruction".into(),
+        )),
+    }
+}
+
 // ── Block Execution Result ────────────────────────────────────────────
 
 /// Result of executing all transactions in a block
@@ -1554,6 +1722,8 @@ pub struct BlockExecutionResult {
     pub evm_gas_used: u64,
     /// Agent activity events emitted during block execution
     pub agent_events: Vec<call_agent::AgentEvent>,
+    /// Emergency rollback plan produced during block execution (quorum reached)
+    pub pending_rollback: Option<RollbackPlan>,
 }
 
 impl BlockExecutionResult {
@@ -1972,6 +2142,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -2047,6 +2218,7 @@ mod tests {
                 None,
                 None,
                 Some(&bridge_config),
+                None,
                 None,
                 None,
                 None,
@@ -2182,9 +2354,10 @@ mod tests {
                 None,
                 None,
                 Some(&mut agent_balances),
-                Some(&agent_registry),
+                Some(&mut agent_registry),
                 None,
                 Some(&bridge_config),
+                None,
                 None,
                 None,
                 None,
@@ -2271,6 +2444,7 @@ mod tests {
             None,
             None,
             Some(&bridge_config),
+            None,
             None,
             None,
             None,

@@ -120,7 +120,7 @@ async fn test_height_activated_upgrade() {
             let mut evm_state = node.state.evm_state.write().unwrap();
 
             block
-                .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None)
+                .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None, None)
                 .expect("execution")
         };
         block.finalize(&result);

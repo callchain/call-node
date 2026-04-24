@@ -258,6 +258,10 @@ pub fn base_gas_units(instruction: &Instruction) -> u64 {
         Instruction::ValidatorClaimUnbonded { .. } => 25_000,
         Instruction::RegisterAsset { .. } => 50_000,
         Instruction::RegisterEvmBridge { .. } => 50_000,
+        Instruction::RegisterAgent { .. } => 50_000,
+        Instruction::GrantAgentBalance { .. } => 10_000,
+        Instruction::RevokeAgentBalance { .. } => 10_000,
+        Instruction::SubmitRollbackSignature { .. } => 50_000,
     }
 }
 

@@ -298,43 +298,68 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_agentRegister
     module
         .register_async_method("call_agentRegister", |params, state, _ctx| async move {
-            let (owner, pubkey_hex, name, url): (String, String, String, String) =
-                params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let owner_addr = owner.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
-            let pubkey_bytes = hex::decode(&pubkey_hex).map_err(|e| invalid_params(e.to_string()))?;
-            let pubkey: [u8; 64] = pubkey_bytes
-                .try_into()
-                .map_err(|_| invalid_params("pubkey must be 64 bytes (128 hex chars)".into()))?;
-            let metadata_hash = [0u8; 32];
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
 
-            // Check and collect agent registration fee (base_fee)
-            let fee = state.fee_params.read()
-                .map_err(|_| internal_error("lock poisoned".into()))?
-                .base_fee;
-            if fee > 0 {
-                let owner_balance = state.get_balance(1, &owner_addr); // asset 1 = CALL
-                if owner_balance < fee {
-                    return Err(invalid_params(format!(
-                        "insufficient CALL balance for agent registration fee: need {fee}, have {owner_balance}"
-                    )));
-                }
-                state.balance_state.write()
-                    .map_err(|_| internal_error("lock poisoned".into()))?
-                    .deduct_balance(1, owner_addr, fee)
-                    .map_err(|e| internal_error(format!("fee deduction failed: {e:?}")))?;
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let pubkey_hex = call_obj.get("pubkey")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'pubkey' field".into()))?;
+            let pubkey_bytes = hex::decode(pubkey_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid pubkey: {e}")))?;
+            if pubkey_bytes.len() != 64 {
+                return Err(invalid_params("pubkey must be 64 bytes (128 hex chars)".into()));
             }
+            let name = call_obj.get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'name' field".into()))?
+                .to_string();
+            let url = call_obj.get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let nonce = call_obj.get("nonce")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+            let sig_hex = call_obj.get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes".into()));
+            }
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
 
-            match state.register_agent(owner_addr, pubkey, name.clone(), url.clone(), metadata_hash) {
-                Ok(agent_id) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "agentId": agent_id,
-                    "owner": owner,
-                    "name": name,
-                    "url": url,
-                    "feePaid": fee.to_string(),
-                    "status": "registered",
-                })),
-                Err(e) => Err(invalid_params(e)),
-            }
+            let instructions = vec![call_protocol::Instruction::RegisterAgent {
+                pubkey: pubkey_bytes,
+                name: name.clone(),
+                url: url.clone(),
+            }];
+
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 100_000,
+                max_fee: 100_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
+                "name": name,
+                "status": "pending",
+            }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -398,26 +423,61 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_agentGrant
     module
         .register_async_method("call_agentGrant", |params, state, _ctx| async move {
-            let (caller_str, agent_id, asset_id, amount): (String, u64, u64, u128) =
-                params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let caller = caller_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
 
-            // Verify caller is the agent owner
-            let registry = state.agent_registry.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let agent = registry.get_agent(agent_id)
-                .ok_or_else(|| invalid_params("agent not found".into()))?;
-            if agent.owner != caller {
-                return Err(invalid_params("only the agent owner can grant balance".into()));
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let agent_id = call_obj.get("agentId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'agentId' field".into()))?;
+            let asset_id = call_obj.get("assetId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
+            let amount = call_obj.get("amount")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u128>().ok())
+                .ok_or_else(|| invalid_params("missing 'amount' field".into()))?;
+            let nonce = call_obj.get("nonce")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+            let sig_hex = call_obj.get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes".into()));
             }
-            drop(registry);
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
 
-            state.grant_agent_balance(agent_id, asset_id, amount)
-                .map_err(invalid_params)?;
+            let instructions = vec![call_protocol::Instruction::GrantAgentBalance {
+                agent_id,
+                asset_id,
+                amount,
+            }];
+
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 50_000,
+                max_fee: 50_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
                 "agentId": agent_id,
-                "assetId": asset_id,
-                "amount": amount.to_string(),
-                "status": "granted",
+                "status": "pending",
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -425,25 +485,56 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_agentRevoke
     module
         .register_async_method("call_agentRevoke", |params, state, _ctx| async move {
-            let (caller_str, agent_id, asset_id): (String, u64, u64) =
-                params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let caller = caller_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
 
-            // Verify caller is the agent owner
-            let registry = state.agent_registry.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let agent = registry.get_agent(agent_id)
-                .ok_or_else(|| invalid_params("agent not found".into()))?;
-            if agent.owner != caller {
-                return Err(invalid_params("only the agent owner can revoke balance".into()));
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let agent_id = call_obj.get("agentId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'agentId' field".into()))?;
+            let asset_id = call_obj.get("assetId")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
+            let nonce = call_obj.get("nonce")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+            let sig_hex = call_obj.get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
+            if sig_bytes.len() != 65 {
+                return Err(invalid_params("signature must be 65 bytes".into()));
             }
-            drop(registry);
+            let mut signature = [0u8; 65];
+            signature.copy_from_slice(&sig_bytes);
 
-            state.revoke_agent_balance(agent_id, asset_id)
-                .map_err(invalid_params)?;
+            let instructions = vec![call_protocol::Instruction::RevokeAgentBalance {
+                agent_id,
+                asset_id,
+            }];
+
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 50_000,
+                max_fee: 50_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
                 "agentId": agent_id,
-                "assetId": asset_id,
-                "status": "revoked",
+                "status": "pending",
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -616,6 +707,24 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         .register_async_method("call_submitRollbackSignature", |params, state, _ctx| async move {
             let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
 
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let tx_nonce = call_obj.get("txNonce")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'txNonce' field".into()))?;
+            let tx_sig_hex = call_obj.get("txSignature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'txSignature' field".into()))?;
+            let tx_sig_bytes = hex::decode(tx_sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid txSignature: {e}")))?;
+            if tx_sig_bytes.len() != 65 {
+                return Err(invalid_params("txSignature must be 65 bytes (secp256k1)".into()));
+            }
+            let mut tx_signature = [0u8; 65];
+            tx_signature.copy_from_slice(&tx_sig_bytes);
+
             let validator_id = call_obj.get("validatorId")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| invalid_params("missing 'validatorId' field".into()))? as u32;
@@ -631,42 +740,47 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let patch = call_obj.get("targetVersionPatch")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u16;
-            let nonce = call_obj.get("nonce")
+            let rollback_nonce = call_obj.get("rollbackNonce")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let sig_hex = call_obj.get("signature")
+            let rollback_sig_hex = call_obj.get("rollbackSignature")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
-            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
-                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
-            if sig_bytes.len() != 64 {
-                return Err(invalid_params("signature must be 64 bytes (Ed25519)".into()));
+                .ok_or_else(|| invalid_params("missing 'rollbackSignature' field".into()))?;
+            let rollback_sig_bytes = hex::decode(rollback_sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid rollbackSignature: {e}")))?;
+            if rollback_sig_bytes.len() != 64 {
+                return Err(invalid_params("rollbackSignature must be 64 bytes (Ed25519)".into()));
             }
-            let mut signature = [0u8; 64];
-            signature.copy_from_slice(&sig_bytes);
 
-            let target_version = call_primitives::ProtocolVersion::new(major, minor, patch);
+            let instructions = vec![call_protocol::Instruction::SubmitRollbackSignature {
+                validator_id,
+                target_height,
+                target_version_major: major,
+                target_version_minor: minor,
+                target_version_patch: patch,
+                nonce: rollback_nonce,
+                signature: rollback_sig_bytes,
+            }];
 
-            let mut fm = state.fork_manager.write().map_err(|_| internal_error("lock poisoned".into()))?;
-            match fm.submit_rollback_signature(validator_id, target_height, target_version, nonce, signature) {
-                Ok(None) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "status": "collected",
-                    "progress": fm.rollback_progress(),
-                })),
-                Ok(Some(result)) => {
-                    let current_block = *state.current_block.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                    let plan = fm.execute_rollback(result, current_block);
-                    // Store the plan so the node loop can apply structural reversion
-                    *state.pending_rollback.write().map_err(|_| internal_error("lock poisoned".into()))? = Some(plan.clone());
-                    Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                        "status": "quorum_reached",
-                        "targetHeight": plan.target_height,
-                        "targetVersion": format!("{}.{}.{}", plan.target_version.major, plan.target_version.minor, plan.target_version.patch),
-                        "signatureCount": plan.signature_count,
-                    }))
-                }
-                Err(e) => Err(invalid_params(e.to_string())),
-            }
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce: tx_nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 100_000,
+                max_fee: 100_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature: tx_signature },
+            };
+
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
+
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
+                "status": "pending",
+            }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 

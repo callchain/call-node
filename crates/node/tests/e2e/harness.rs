@@ -289,6 +289,7 @@ impl TestNode {
                     if validators.is_empty() { None } else { Some(&validators) },
                     None,
                     None,
+                    None,
                 )
                 .expect("block execution")
         };
