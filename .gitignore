@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 tests/.nonce_state.json
+
+# Local devnet runtime state — never commit
+devnet/local/data/
+devnet/local/logs/
+devnet/local/run/

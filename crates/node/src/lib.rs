@@ -3004,7 +3004,12 @@ fn handle_network_message(
                     );
                     let request = SyncRequest {
                         start_height: local_height,
-                        count: 100,
+                        // Smaller batch (was 100) to keep SyncResponse messages
+                        // well under the 10 MB max_message_size and reduce the
+                        // chance of a single slow batch stalling sync. The
+                        // sender will keep issuing further requests as new
+                        // BlockAnnouncements arrive.
+                        count: 20,
                         full_state: false,
                     };
                     let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
