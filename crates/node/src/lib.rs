@@ -632,11 +632,15 @@ impl CallNode {
                                 "BFT: engine exited for epoch rotation"
                             );
                             epoch_number += 1;
+                            // Brief pause so the OS fully releases the consensus P2P
+                            // port before the next epoch tries to re-bind it.
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                             continue;
                         }
                         Err(e) => {
                             tracing::error!(?e, "BFT: engine exited with error");
                             epoch_number += 1;
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                             continue;
                         }
                     }
