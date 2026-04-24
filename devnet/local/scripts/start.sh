@@ -47,12 +47,26 @@ for i in 1 2 3 4 5 6; do
     fi
 done
 
-# Sanity check: required ports must be free.
+# Sanity check: required ports must be free. Use whichever of `ss`, `netstat`,
+# or `lsof` is available on the host.
+port_in_use() {
+    local p="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -lnt 2>/dev/null | awk '{print $4}' | grep -q ":${p}\$"
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -lnt 2>/dev/null | awk '{print $4}' | grep -q ":${p}\$"
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP:"${p}" -sTCP:LISTEN -n -P >/dev/null 2>&1
+    else
+        # No tool available — skip the check rather than fail.
+        return 1
+    fi
+}
 ports=(5005 5006 5007 5008 5009 5010 5011 5012 5013 5014 5015 5016 \
        9090 9091 9092 9093 9094 9095 \
        51231 51232 51233 51234 51235 51236 51237 51238 51239 51241)
 for port in "${ports[@]}"; do
-    if ss -lnt 2>/dev/null | awk '{print $4}' | grep -q ":${port}\$"; then
+    if port_in_use "$port"; then
         echo "ERROR: port ${port} is already in use" >&2
         exit 1
     fi

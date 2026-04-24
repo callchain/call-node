@@ -199,7 +199,7 @@ for label in node1 node2 node3 node4; do
     if is_num "$s"; then
         delta=$((e - s))
         if [[ "$delta" -lt "$MIN_PROGRESS_BLOCKS" ]]; then
-            fail "${label}: only advanced ${delta} block(s) in ${OBSERVE_SECS}s (need ≥ ${MIN_PROGRESS_BLOCKS}); validators are not finalising blocks"
+            fail "${label}: only advanced ${delta} block(s) in ${OBSERVE_SECS}s (need ≥ ${MIN_PROGRESS_BLOCKS}); validators are not finalizing blocks"
         else
             ok "${label}: advanced ${delta} block(s) (${s} → ${e})"
         fi

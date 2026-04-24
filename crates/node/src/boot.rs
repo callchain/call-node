@@ -318,8 +318,20 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             let bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)> = bootstrap
                 .iter()
                 .filter_map(|(peer_hex, addr)| {
-                    let bytes = hex::decode(peer_hex).ok()?;
-                    let pk = ed25519::PublicKey::decode(&bytes[..]).ok()?;
+                    let bytes = match hex::decode(peer_hex) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(peer = peer_hex, error = %e, "skipping BFT bootstrap peer: invalid hex");
+                            return None;
+                        }
+                    };
+                    let pk = match ed25519::PublicKey::decode(&bytes[..]) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            tracing::warn!(peer = peer_hex, error = %e, "skipping BFT bootstrap peer: invalid ed25519 public key");
+                            return None;
+                        }
+                    };
                     let mut bft_addr = *addr;
                     bft_addr.set_port(addr.port().saturating_add(1));
                     Some((pk, bft_addr))
