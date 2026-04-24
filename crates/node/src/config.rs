@@ -90,6 +90,12 @@ pub struct P2pConfig {
     pub bootstrap_peers: Option<String>,
     #[serde(default = "P2pConfig::default_max_peers")]
     pub max_peers: u32,
+    /// Override the default mode-based `allow_private_ips` setting.
+    /// When unset, validators reject private-IP peers (production default) and
+    /// full/archive nodes accept them. Set to `true` for local/devnet
+    /// deployments where every node lives on an RFC1918 subnet.
+    #[serde(default)]
+    pub allow_private_ips: Option<bool>,
 }
 
 impl Default for P2pConfig {
@@ -98,6 +104,7 @@ impl Default for P2pConfig {
             listen_addr: Self::default_listen_addr(),
             bootstrap_peers: None,
             max_peers: Self::default_max_peers(),
+            allow_private_ips: None,
         }
     }
 }
@@ -478,6 +485,7 @@ path = "/tmp/genesis.json"
 listen_addr = "0.0.0.0:6000"
 bootstrap_peers = "peer1@127.0.0.1:51235"
 max_peers = 100
+allow_private_ips = true
 
 [rpc]
 http_addr = "127.0.0.1:9545"
@@ -509,6 +517,7 @@ format = "json"
         assert_eq!(config.p2p.listen_addr, "0.0.0.0:6000".parse().unwrap());
         assert_eq!(config.p2p.bootstrap_peers, Some("peer1@127.0.0.1:51235".into()));
         assert_eq!(config.p2p.max_peers, 100);
+        assert_eq!(config.p2p.allow_private_ips, Some(true));
         assert_eq!(config.rpc.http_addr, "127.0.0.1:9545".parse().unwrap());
         assert_eq!(config.rpc.ws_addr, "127.0.0.1:9546".parse().unwrap());
         assert_eq!(config.rpc.max_connections, 200);

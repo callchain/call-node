@@ -208,6 +208,8 @@ Different node modes configure the network differently:
 | `min_healthy_peers` | 1 | 0 | 0 |
 | Validator signing key | Required | Not used | Not used |
 
+The mode-based defaults above can be overridden per-node via `[p2p] allow_private_ips = true|false` in the TOML config. This is required for local/devnet deployments where validators live on a private (RFC1918) subnet — without the override, validators reject every devnet peer and never reach quorum.
+
 ## Boot Sequence
 
 The network initializes as part of the node boot sequence (`crates/node/src/boot.rs`, step 4):

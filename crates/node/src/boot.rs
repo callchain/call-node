@@ -255,11 +255,18 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     info!(listen = %config.p2p.listen_addr, "step 4: initializing P2P");
     let identity_key = load_or_generate_identity_key(&config.storage.data_dir, config.keys.identity_key.as_deref())?;
     let bootstrap = parse_bootstrap_peers(&config.p2p.bootstrap_peers);
+    // Default: validators reject private IPs (production semantics); full/archive nodes accept them.
+    // Operators can override via `[p2p] allow_private_ips = true` (required for local devnets where
+    // every node lives on an RFC1918 subnet, e.g. the docker-compose devnet on 172.28.0.0/16).
+    let allow_private_ips = config
+        .p2p
+        .allow_private_ips
+        .unwrap_or(config.mode != NodeMode::Validator);
     let p2p_config = CommonwareConfig {
         listen_addr: config.p2p.listen_addr,
         bootstrap_peers: bootstrap,
         max_message_size: 10 * 1024 * 1024,
-        allow_private_ips: config.mode != NodeMode::Validator,
+        allow_private_ips,
         namespace: b"callchain".to_vec(),
         min_healthy_peers: if config.mode == NodeMode::Validator { 1 } else { 0 },
         limits: NetworkLimits::default(),
