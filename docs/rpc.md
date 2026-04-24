@@ -17,7 +17,7 @@ The RPC layer is the primary interface for users, dApps, validators, and operato
 
 Direct state mutations from RPC handlers are prohibited. State-changing operations are implemented as `Instruction` variants executed inline during block production. This ensures deterministic state transitions, replay protection through consensus ordering, and uniform gas accounting.
 
-Endpoints that still bypass this flow are documented below as **Direct Execution** and should be migrated to Instruction-based models.
+The only write endpoint is `call_submit`, which accepts a `ProtocolTransaction` containing one or more `Instruction`s. All former individual write endpoints (`call_sendPayment`, `call_registerAsset`, `call_governanceVote`, etc.) have been removed and consolidated into this unified interface.
 
 ---
 
@@ -34,6 +34,16 @@ Endpoints that still bypass this flow are documented below as **Direct Execution
 | `eth_blockNumber` | Read-only | Returns current block height |
 | `eth_getLogs` | Read-only | Address-indexed log lookup, unfiltered fallback capped at 10k receipts |
 | `eth_getProof` | Read-only | Returns account state (balance, nonce, codeHash, storageRoot) with state root proof |
+| `eth_chainId` | Read-only | Returns the chain ID |
+| `eth_gasPrice` | Read-only | Returns the current base fee |
+| `eth_syncing` | Read-only | Returns `false` (fully synced) or sync progress object |
+| `eth_getTransactionCount` | Read-only | Returns EVM nonce for an address |
+| `eth_getCode` | Read-only | Returns contract bytecode for an address |
+| `eth_getStorageAt` | Read-only | Returns storage slot value for an address |
+| `eth_estimateGas` | Read-only | Executes EVM call and returns gas used |
+| `eth_getBlockByNumber` | Read-only | Returns block data by number tag (`latest`, `pending`, hex) |
+| `eth_getBlockByHash` | Read-only | Returns block data by hash (not stored in RPC state — returns null) |
+| `eth_getTransactionByHash` | Read-only | Returns transaction data by hash (looks up in receipts) |
 
 ### Read-Only Callchain RPC (`call_*`)
 
@@ -71,48 +81,77 @@ Endpoints that still bypass this flow are documented below as **Direct Execution
 | `call_bridgeGetDepositStatus` | Returns per-deposit status by `sourceTxHash` |
 | `call_validatorList` | Returns all validators with stake and bonding info |
 
-### Instruction-Based RPC (`call_*` via `insert_protocol_tx`)
+### Unified Write Endpoint (`call_submit`)
 
-These endpoints construct a `ProtocolTransaction` wrapping one or more `Instruction`s, submit it to the mempool via `insert_protocol_tx`, and return a pending tx hash. Execution happens during block production in `Block::execute`.
+All state-mutating operations are submitted through a single endpoint:
 
-| Endpoint | Instruction | Gas |
-|----------|-------------|-----|
-| `call_registerAsset` | `RegisterAsset { symbol, name, decimals }` | 200,000 |
-| `call_sendPayment` | `Transfer { asset_id, to, amount, memo }` | 100,000 |
-| `call_agentRegister` | `RegisterAgent { pubkey, name, url }` | 50,000 |
-| `call_agentGrant` | `GrantAgentBalance { agent_id, asset_id, amount }` | 10,000 |
-| `call_agentRevoke` | `RevokeAgentBalance { agent_id, asset_id }` | 10,000 |
-| `call_submitRollbackSignature` | `SubmitRollbackSignature { validator_id, target_height, target_version_*, nonce, signature }` | 50,000 |
-| `call_governanceSubmitProposal` | `GovernanceSubmitProposal { proposal_type, title, description, execution_data }` | 200,000 |
-| `call_governanceVote` | `GovernanceVote { proposal_id, vote }` | 50,000 |
-| `call_governanceQueue` | `GovernanceQueue { proposal_id }` | 50,000 |
-| `call_governanceExecute` | `GovernanceExecute { proposal_id }` | 100,000 |
-| `call_governanceEmergencyPause` | `GovernanceEmergencyPause { reason }` | 200,000 |
-| `call_governanceEmergencyResume` | `GovernanceEmergencyResume` | 200,000 |
-| `call_bridgeSubmitDeposit` | `ExternalBridgeDeposit { source_tx_hash, source_chain, ... }` | 200,000 |
-| `call_bridgeSubmitWithdraw` | `ExternalBridgeWithdraw { target_chain, target_address, ... }` | 200,000 |
-| `call_bridgeToEvm` | `BridgeToEvm { asset_id, to, amount }` | 25,000 |
-| `call_withdrawFromEvm` | `WithdrawFromEvm { asset_id, to, amount }` | 25,000 |
-| `call_validatorStake` | `ValidatorStake { ed25519_pubkey, self_stake }` | 200,000 |
-| `call_validatorUnstake` | `ValidatorUnstake { validator_id }` | 100,000 |
-| `call_validatorClaimUnbonded` | `ValidatorClaimUnbonded { validator_id }` | 100,000 |
+```json
+POST / HTTP/1.1
+{
+  "jsonrpc": "2.0",
+  "method": "call_submit",
+  "params": {
+    "sender": "0x...",
+    "nonce": 1,
+    "instructions": [
+      {
+        "type": "Transfer",
+        "asset_id": 1,
+        "to": "0x...",
+        "amount": "5000",
+        "memo": { "message": "hello" }
+      }
+    ],
+    "signature": "0x..."
+  },
+  "id": 1
+}
+```
 
-All instruction-based endpoints require:
+Response:
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "txHash": "0x...",
+    "status": "pending"
+  },
+  "id": 1
+}
+```
+
+#### Supported Instruction Types
+
+Each instruction in the `instructions` array must have a `"type"` field. Supported types:
+
+| Type | Fields | Gas |
+|------|--------|-----|
+| `Transfer` | `asset_id`, `to`, `amount`, `memo?` | 100,000 |
+| `RegisterAsset` | `symbol`, `name`, `decimals` | 200,000 |
+| `RegisterAgent` | `pubkey`, `name`, `url` | 50,000 |
+| `GrantAgentBalance` | `agent_id`, `asset_id`, `amount` | 10,000 |
+| `RevokeAgentBalance` | `agent_id`, `asset_id` | 10,000 |
+| `GovernanceSubmitProposal` | `proposal_type`, `title`, `description`, `execution_data` | 200,000 |
+| `GovernanceVote` | `proposal_id`, `vote` | 50,000 |
+| `GovernanceQueue` | `proposal_id` | 50,000 |
+| `GovernanceExecute` | `proposal_id` | 100,000 |
+| `GovernanceEmergencyPause` | `reason` | 200,000 |
+| `GovernanceEmergencyResume` | — | 200,000 |
+| `ExternalBridgeDeposit` | `source_tx_hash`, `source_chain`, ... | 200,000 |
+| `ExternalBridgeWithdraw` | `target_chain`, `target_address`, ... | 200,000 |
+| `BridgeToEvm` | `asset_id`, `to`, `amount` | 25,000 |
+| `WithdrawFromEvm` | `asset_id`, `to`, `amount` | 25,000 |
+| `ValidatorStake` | `ed25519_pubkey`, `self_stake` | 200,000 |
+| `ValidatorUnstake` | `validator_id` | 100,000 |
+| `ValidatorClaimUnbonded` | `validator_id` | 100,000 |
+| `SubmitRollbackSignature` | `validator_id`, `target_height`, `target_version_major`, `target_version_minor`, `target_version_patch`, `nonce`, `signature` | 50,000 |
+
+All `call_submit` requests require:
 - `sender`: the signer's address
 - `nonce`: transaction nonce for replay protection
-- `signature`: 65-byte secp256k1 signature (`r || s || v`)
+- `signature`: 65-byte secp256k1 signature (`r || s || v`) over `compute_tx_hash()`
 
-`call_submitRollbackSignature` additionally requires:
-- `txSignature`: 65-byte secp256k1 signature for the `ProtocolTransaction` auth
-- `rollbackSignature`: 64-byte Ed25519 signature embedded in the instruction payload
-
-### Direct Execution RPC (Not Yet Instruction-Based)
-
-These endpoints still execute state changes directly in the RPC handler and bypass the mempool/consensus flow. They should be migrated to Instruction-based models.
-
-| Endpoint | Behavior |
-|----------|----------|
-| `call_lightClientBridgeDeposit` | Directly calls `process_light_client_deposit` with mutable `balance_state` and `bridge_state` access. Only available when the `light-client-bridge` feature is enabled. |
+Multiple instructions can be included in a single `ProtocolTransaction` for atomic batch execution.
 
 ---
 
@@ -127,13 +166,16 @@ These endpoints still execute state changes directly in the RPC handler and bypa
 │                                                             │
 │  ┌────────────────────┐  ┌──────────────────────────────┐  │
 │  │ Standard RPC        │  │ Callchain Extension RPC       │  │
-│  │ eth_getBalance      │  │ call_sendPayment              │  │
-│  │ eth_call            │  │ call_registerAsset            │  │
-│  │ eth_sendRawTx       │  │ call_agentRegister            │  │
-│  │ eth_getReceipt      │  │ call_governanceSubmitProposal │  │
-│  │ eth_blockNumber     │  │ call_bridgeSubmitDeposit      │  │
-│  │ eth_getLogs         │  │ call_validatorStake           │  │
-│  │ eth_getProof        │  │ call_submitRollbackSignature  │  │
+│  │ eth_getBalance      │  │ call_assetInfo                │  │
+│  │ eth_call            │  │ call_protocolBalance          │  │
+│  │ eth_sendRawTx       │  │ call_getNonce                 │  │
+│  │ eth_getReceipt      │  │ call_getTransactionReceipt    │  │
+│  │ eth_blockNumber     │  │ call_validatorList            │  │
+│  │ eth_getLogs         │  │ call_governanceGetProposal    │  │
+│  │ eth_getProof        │  │ call_oracleGetPrice           │  │
+│  │ eth_chainId         │  │ call_submit  ← unified write  │  │
+│  │ eth_gasPrice        │  │                               │  │
+│  │ eth_estimateGas     │  │                               │  │
 │  └────────────────────┘  └──────────────────────────────┘  │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────────┐│
@@ -160,43 +202,49 @@ These endpoints still execute state changes directly in the RPC handler and bypa
 
 ## Execution Flow
 
-### Instruction-Based Flow (Preferred)
+### Unified Write Flow (via `call_submit`)
 
 ```
-RPC Handler
+Client
     ↓
-Parse JSON params → construct Instruction(s)
+POST call_submit { sender, nonce, instructions, signature }
     ↓
-Build ProtocolTransaction { sender, nonce, instructions, signature, ... }
+RPC Handler parses JSON → converts "type" to externally-tagged Instruction
     ↓
-state.insert_protocol_tx(tx) → Mempool
+Build ProtocolTransaction { sender, nonce, instructions, auth, ... }
+    ↓
+tx.verify_signature() → state.insert_protocol_tx(tx) → Mempool
+    ↓
+Return pending tx hash { txHash, status: "pending" }
     ↓
 Block production (consensus) selects tx from mempool
     ↓
-Block::execute → execute_agent_instruction / execute_rollback_instruction / ...
+Block::execute → execute_agent_instruction / execute_governance_instruction / ...
     ↓
-State transition committed atomically
+State transition committed atomically → receipt stored
 ```
 
-### Direct Execution Flow (Deprecated)
+### EVM Transaction Flow (via `eth_sendRawTransaction`)
 
 ```
-RPC Handler
+Client
     ↓
-Parse JSON params
+POST eth_sendRawTransaction { raw_rlp_tx }
     ↓
-Directly acquire write lock on subsystem state
+RPC Handler decodes RLP → recovers signer
     ↓
-Mutate state immediately
+Validates nonce + balance (read-only checks)
     ↓
-Return result
+Mempool defense (rate limit, dedup)
+    ↓
+Inserts into EVM mempool → returns tx hash
+    ↓
+Block production includes tx → EVM execution in Block::execute
+    ↓
+Receipt stored after block finalization
 ```
 
-Direct execution lacks:
-- Consensus ordering and replay protection
-- Uniform gas accounting
-- Atomic rollback on failure
-- Deterministic replay across nodes
+**Important:** `eth_sendRawTransaction` does NOT execute the transaction immediately. The previous double-execution bug (executing in RPC handler AND in block production) has been fixed.
 
 ---
 
@@ -226,8 +274,8 @@ Subscribers that fall behind receive a `Lagged { dropped: N }` notification.
 |------|------|
 | `lib.rs` | `RpcConfig`, `start_http_server()`, `build_rpc_module()` |
 | `handlers.rs` | `RpcState`, `NodeProposalExecutor`, `submit_payment()`, `submit_evm_tx()` |
-| `standard.rs` | Ethereum-compatible RPC endpoints (7 methods) |
-| `callchain.rs` | Callchain-native RPC endpoints (~60 methods) |
+| `standard.rs` | Ethereum-compatible RPC endpoints (17 methods) |
+| `callchain.rs` | Callchain-native RPC endpoints: read-only queries + unified `call_submit` |
 | `ws.rs` | WebSocket subscription manager and registration |
 
 ### Prover Service (`crates/prover/`)
@@ -254,13 +302,14 @@ Uses `RealProver::global()` from `call-shielded` which loads production ceremony
 | Component | Status | Notes |
 |-----------|--------|-------|
 | HTTP JSON-RPC server | Ready | jsonrpsee is production-grade, TLS + rate limiting configured |
-| Standard Ethereum RPC | Ready | Address-indexed logs, real account proofs, pending receipt marking |
-| Instruction-based RPC | Ready | All state mutations go through `ProtocolTransaction` → mempool → consensus |
-| Agent RPC | Ready | `call_agentRegister` / `Grant` / `Revoke` are now Instruction-based |
-| Rollback RPC | Ready | `call_submitRollbackSignature` is now Instruction-based |
-| Governance RPC | Ready | Signature + nonce-based replay protection on all endpoints |
+| Standard Ethereum RPC | Ready | 17 endpoints including gas estimation, block queries, code/storage |
+| Unified write endpoint (`call_submit`) | Ready | Single entry point for all state mutations; multi-instruction batch support |
+| Instruction-based flow | Ready | All state mutations go through `ProtocolTransaction` → mempool → consensus |
+| Agent RPC | Ready | `RegisterAgent` / `GrantAgentBalance` / `RevokeAgentBalance` via `call_submit` |
+| Rollback RPC | Ready | `SubmitRollbackSignature` via `call_submit` |
+| Governance RPC | Ready | Read-only queries + `call_submit` for state changes |
 | Oracle RPC | Ready | Read-only price and TWAP queries; submission is via consensus |
-| Bridge RPC | Ready | Deposit + withdraw are Instruction-based; per-deposit status lookup |
+| Bridge RPC | Ready | Deposit + withdraw via `call_submit`; per-deposit status lookup |
 | Shielded RPC | Ready | Proving via dedicated service (`call-prover`), balance query wired |
 | Light client RPC | Ready | Real Merkle proofs, shielded validation correct |
 | WebSocket subscriptions | Ready | Lag notifications sent to subscribers |

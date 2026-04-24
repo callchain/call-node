@@ -307,7 +307,7 @@ mod tests {
         let to = test_addr(2);
         let asset_id: AssetId = 1;
 
-        // Set up protocol balance
+        // Set up protocol balance (not required for mempool insertion, but harmless)
         state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 10_000).unwrap();
 
         // Build tx to compute canonical hash for signing
@@ -334,34 +334,29 @@ mod tests {
             },
         };
         let tx_hash = tx.compute_tx_hash();
-        // Sign with EIP-191 personal_sign prefix (matching call_sendPayment handler)
-        let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
-        let mut eip191_msg = Vec::with_capacity(eip191_prefix.len() + 32);
-        eip191_msg.extend_from_slice(eip191_prefix);
-        eip191_msg.extend_from_slice(&tx_hash);
-        let eip191_hash = call_crypto::keccak256(&eip191_msg);
-        let signature = sign_tx_hash(&eip191_hash.0);
+        let signature = sign_tx_hash(&tx_hash);
 
-        let tx_hash = state.submit_payment(
+        let returned_hash = state.submit_payment(
             sender, 1, asset_id, to, 5_000,
             Some("test payment".into()),
             100_000, 1_000_000,
             Some(signature),
         ).unwrap();
 
-        assert_eq!(tx_hash.as_slice().len(), 32);
+        assert_eq!(returned_hash.as_slice().len(), 32);
 
-        // Verify balance was transferred
+        // Balances are NOT changed immediately — execution is deferred to block production
         let balance = state.get_balance(asset_id, &sender);
-        assert_eq!(balance, 5_000);
+        assert_eq!(balance, 10_000);
         let to_balance = state.get_balance(asset_id, &to);
-        assert_eq!(to_balance, 5_000);
+        assert_eq!(to_balance, 0);
 
-        // Receipt is stored
-        let receipt = state.get_receipt(&tx_hash).unwrap();
-        assert_eq!(receipt.tx_hash, tx_hash);
-        assert!(matches!(receipt.status, call_primitives::ExecutionStatus::Success));
-        assert_eq!(receipt.gas_payer, sender);
+        // No receipt stored yet — receipt is produced during block execution
+        assert!(state.get_receipt(&returned_hash).is_none());
+
+        // Transaction should be in the mempool
+        let mempool_size = state.mempool.read().unwrap().protocol_pool.len();
+        assert_eq!(mempool_size, 1);
     }
 
     #[test]
@@ -371,9 +366,10 @@ mod tests {
         let to = test_addr(2);
         let asset_id: AssetId = 1;
 
+        // Low balance — but mempool insertion does not validate balance
         state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 100).unwrap();
 
-        // Build tx and sign it (signature is valid, but balance is insufficient)
+        // Build tx and sign it
         let tx = call_protocol::transaction::ProtocolTransaction {
             sender,
             nonce: 1,
@@ -394,12 +390,17 @@ mod tests {
         };
         let signature = sign_tx_hash(&tx.compute_tx_hash());
 
+        // Mempool insertion succeeds — balance check is deferred to block execution
         let result = state.submit_payment(
             sender, 1, asset_id, to, 5_000,
             None, 100_000, 1_000_000,
             Some(signature),
         );
-        assert!(result.is_err());
+        assert!(result.is_ok(), "mempool should accept tx even with insufficient balance");
+
+        // Balances unchanged — execution not yet performed
+        assert_eq!(state.get_balance(asset_id, &sender), 100);
+        assert_eq!(state.get_balance(asset_id, &to), 0);
     }
 
     #[test]
@@ -443,14 +444,23 @@ mod tests {
         let mut raw_tx_bytes = Vec::new();
         alloy_rlp::Encodable::encode(&envelope, &mut raw_tx_bytes);
 
-        // Submit to mempool + execute
+        // Submit to mempool only — execution is deferred to block production
         let result = state.submit_evm_tx(&raw_tx_bytes);
         assert!(result.is_ok(), "submit_evm_tx failed: {:?}", result);
         let tx_hash = result.unwrap();
         assert_eq!(tx_hash.as_slice().len(), 32);
 
-        // Verify receipt was stored
-        let receipt = state.get_receipt(&tx_hash).unwrap();
-        assert!(matches!(receipt.status, call_primitives::ExecutionStatus::Success));
+        // No receipt stored yet — execution is deferred to consensus
+        assert!(state.get_receipt(&tx_hash).is_none());
+
+        // EVM state unchanged — balance not transferred yet
+        assert_eq!(
+            state.evm_state.read().unwrap().get_balance(&signer_address),
+            alloy_primitives::U256::from(1_000_000_000_000i128)
+        );
+
+        // Transaction should be in the EVM mempool
+        let mempool_evm_count = state.mempool.read().unwrap().evm_pool.len();
+        assert_eq!(mempool_evm_count, 1);
     }
 }

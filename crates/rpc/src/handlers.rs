@@ -1,6 +1,6 @@
 //! Core handler trait and RPC state management.
 
-use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, ProtocolReceipt, InstructionExecResult, FeeParams, FeeCurrencyRegistry};
+use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, ProtocolReceipt, FeeParams, FeeCurrencyRegistry};
 use call_protocol::security::MempoolDefense;
 use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_oracle::OracleManager;
@@ -439,120 +439,17 @@ impl RpcState {
             let _ = mempool.insert_evm_tx(evm_tx);
         }
 
-        // Execute immediately
-        let tx = match &envelope {
-            TxEnvelope::Legacy(signed) => {
-                let tx = signed.tx();
-                EvmTransaction {
-                    caller,
-                    nonce: tx.nonce(),
-                    gas_limit: tx.gas_limit(),
-                    gas_price: tx.gas_price().unwrap_or(0),
-                    to: tx.to(),
-                    value: tx.value(),
-                    data: tx.input().clone(),
-                    chain_id: tx.chain_id().unwrap_or(self.chain_id),
-                }
-            }
-            TxEnvelope::Eip1559(signed) => {
-                let tx = signed.tx();
-                EvmTransaction {
-                    caller,
-                    nonce: tx.nonce(),
-                    gas_limit: tx.gas_limit(),
-                    gas_price: tx.max_fee_per_gas(),
-                    to: tx.to(),
-                    value: tx.value(),
-                    data: tx.input().clone(),
-                    chain_id: tx.chain_id().unwrap_or(self.chain_id),
-                }
-            }
-            TxEnvelope::Eip2930(signed) => {
-                let tx = signed.tx();
-                EvmTransaction {
-                    caller,
-                    nonce: tx.nonce(),
-                    gas_limit: tx.gas_limit(),
-                    gas_price: tx.gas_price().unwrap_or(0),
-                    to: tx.to(),
-                    value: tx.value(),
-                    data: tx.input().clone(),
-                    chain_id: tx.chain_id().unwrap_or(self.chain_id),
-                }
-            }
-            TxEnvelope::Eip7702(signed) => {
-                let tx = signed.tx();
-                EvmTransaction {
-                    caller,
-                    nonce: tx.nonce(),
-                    gas_limit: tx.gas_limit(),
-                    gas_price: tx.max_fee_per_gas(),
-                    to: tx.to(),
-                    value: tx.value(),
-                    data: tx.input().clone(),
-                    chain_id: tx.chain_id().unwrap_or(self.chain_id),
-                }
-            }
-            TxEnvelope::Eip4844(signed) => {
-                let tx = signed.tx();
-                EvmTransaction {
-                    caller,
-                    nonce: tx.nonce(),
-                    gas_limit: tx.gas_limit(),
-                    gas_price: tx.max_fee_per_gas(),
-                    to: tx.to(),
-                    value: tx.value(),
-                    data: tx.input().clone(),
-                    chain_id: tx.chain_id().unwrap_or(self.chain_id),
-                }
-            }
-        };
-
-        let executor = EvmExecutor::new(self.chain_id);
-        let mut state = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let result = executor.execute_tx(tx, &mut state).map_err(|e| format!("{e}"))?;
-
-        // Store receipt
-        use call_primitives::ExecutionStatus;
-        let status = if result.success {
-            ExecutionStatus::Success
-        } else {
-            ExecutionStatus::Reverted { reason: "execution reverted".into() }
-        };
-        let receipt = ProtocolReceipt {
-            tx_hash,
-            status,
-            gas_used: result.gas_used,
-            gas_payer: caller,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            fee_amount: result.gas_used as u128 * gas_price,
-            block_number: 0, // pending — not yet included in a finalized block
-            instruction_results: vec![InstructionExecResult {
-                success: result.success,
-                gas_used: result.gas_used,
-                revert_reason: if result.success { None } else { Some("reverted".into()) },
-            }],
-            logs: vec![],
-            memos: vec![],
-            state_changes: vec![],
-        };
-        self.store_receipt(tx_hash, receipt);
-
-        // Broadcast EVM transaction to WebSocket subscribers
-        self.subscriptions.broadcast_payment(
-            format!("0x{}", hex::encode(tx_hash)),
-            format!("0x{}", hex::encode(caller.as_slice())),
-            to_addr.map(|a| format!("0x{}", hex::encode(a.as_slice()))).unwrap_or_else(|| "contract_creation".into()),
-            0,
-            value.try_into().unwrap_or(0),
-        );
-
+        // Transaction is now in the mempool and will be picked up by block production.
+        // Do NOT execute immediately — that would cause double-execution when the
+        // consensus layer includes this tx in a block.
         Ok(tx_hash)
     }
 
     // ── Protocol transaction submission (inserts into mempool + executes) ────────
 
-    /// Submit a protocol payment transaction: validates, inserts into mempool, and executes
+    /// Submit a protocol payment transaction: validates and inserts into mempool only.
+    /// Execution is deferred to block production via Block::execute.
+    #[allow(dead_code)]
     pub fn submit_payment(
         &self,
         sender: Address,
@@ -567,17 +464,7 @@ impl RpcState {
     ) -> Result<TxHash, String> {
         use call_protocol::{
             Instruction, PaymentMemo,
-            execute_protocol_instructions,
         };
-
-        // Check balance sufficiency
-        {
-            let balances = self.balance_state.read().map_err(|_| "lock poisoned".to_string())?;
-            let balance = balances.get_balance(asset_id, &sender);
-            if balance < amount {
-                return Err("insufficient balance".into());
-            }
-        }
 
         // Build instructions
         let instructions = vec![Instruction::Transfer {
@@ -596,7 +483,7 @@ impl RpcState {
         let tx = call_protocol::transaction::ProtocolTransaction {
             sender,
             nonce,
-            instructions: instructions.clone(),
+            instructions,
             gas_config: call_protocol::transaction::GasConfig::SelfPay,
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit,
@@ -607,113 +494,8 @@ impl RpcState {
             },
         };
 
-        // Canonical tx hash — must match what the client signed
-        let raw_tx_hash = tx.compute_tx_hash();
-        let tx_hash = TxHash::from_slice(&raw_tx_hash);
-
-        // Verify signature using EIP-191 personal_sign (matching call_sendPayment RPC handler)
-        let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
-        let mut eip191_msg = Vec::with_capacity(eip191_prefix.len() + 32);
-        eip191_msg.extend_from_slice(eip191_prefix);
-        eip191_msg.extend_from_slice(&raw_tx_hash);
-        let eip191_hash = call_crypto::keccak256(&eip191_msg);
-        let recovered = call_crypto::recover_secp256k1_signer(&eip191_hash, &sig)
-            .map_err(|e| format!("signature verification failed: {e}"))?;
-        if recovered != sender {
-            return Err(format!("signature does not match sender: recovered {:?}, expected {:?}", recovered, sender));
-        }
-
-        // Mempool defense: rate limit, replay protection, address saturation
-        {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-            let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
-            defense.validate_tx_submission(sender, tx_hash, now_ms)
-                .map_err(|e| format!("mempool defense: {e}"))?;
-        }
-
-        // Insert into mempool (for tracking/dedup)
-        {
-            let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
-            let _ = mempool.insert_protocol_tx(tx);
-        }
-
-        // Execute immediately
-        let mut balances = self.balance_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let mut registry_guard = self.asset_registry.write().map_err(|_| "lock poisoned".to_string())?;
-        let mut compliance_guard = self.compliance_engine.write().map_err(|_| "lock poisoned".to_string())?;
-        let mut shielded_state = self.shielded_state.write().map_err(|_| "lock poisoned".to_string())?;
-
-        match execute_protocol_instructions(&instructions, &mut balances, &mut registry_guard, &mut compliance_guard, &mut shielded_state, sender, None, &mut None, None) {
-            Ok(results) => {
-                let status = call_primitives::ExecutionStatus::Success;
-                let gas_used = results.iter().map(|r| match r {
-                    call_protocol::InstructionResult::Success => 10_000u64,
-                    call_protocol::InstructionResult::Reverted { .. } => 0u64,
-                }).sum();
-                let receipt = ProtocolReceipt {
-                    tx_hash,
-                    status,
-                    gas_used,
-                    gas_payer: sender,
-                    fee_currency: call_primitives::FeeCurrency::Call,
-                    fee_amount: gas_used as u128 * 10,
-                    block_number: 0, // pending — not yet included in a finalized block
-                    instruction_results: results.into_iter().map(|r| InstructionExecResult {
-                        success: matches!(r, call_protocol::InstructionResult::Success),
-                        gas_used: 10_000,
-                        revert_reason: None,
-                    }).collect(),
-                    logs: vec![],
-                    memos: vec![],
-                    state_changes: vec![],
-                };
-                drop(balances);
-                self.store_receipt(tx_hash, receipt);
-
-                // Broadcast payment to WebSocket subscribers
-                self.subscriptions.broadcast_payment(
-                    format!("0x{}", hex::encode(tx_hash)),
-                    format!("0x{}", hex::encode(sender.as_slice())),
-                    format!("0x{}", hex::encode(to.as_slice())),
-                    asset_id,
-                    amount,
-                );
-
-                // Decrement mempool defense counter since tx executed immediately
-                if let Ok(mut defense) = self.mempool_defense.write() {
-                    defense.on_tx_confirmed(sender);
-                }
-
-                Ok(tx_hash)
-            }
-            Err(e) => {
-                let receipt = ProtocolReceipt {
-                    tx_hash,
-                    status: call_primitives::ExecutionStatus::Reverted { reason: e.to_string() },
-                    gas_used: 0,
-                    gas_payer: sender,
-                    fee_currency: call_primitives::FeeCurrency::Call,
-                    fee_amount: 0,
-                    block_number: 0, // pending — not yet included in a finalized block
-                    instruction_results: vec![],
-                    logs: vec![],
-                    memos: vec![],
-                    state_changes: vec![],
-                };
-                drop(balances);
-                self.store_receipt(tx_hash, receipt);
-
-                // Decrement mempool defense counter since tx failed immediately
-                if let Ok(mut defense) = self.mempool_defense.write() {
-                    defense.on_tx_confirmed(sender);
-                }
-
-                Err(format!("execution failed: {e}"))
-            }
-        }
+        // Verify signature and insert into mempool (execution deferred to consensus)
+        self.insert_protocol_tx(tx)
     }
 
     /// Insert a pre-built protocol transaction into the mempool without executing.
