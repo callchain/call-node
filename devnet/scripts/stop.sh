@@ -5,4 +5,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "=== Stopping Callchain devnet ==="
-docker compose -f devnet/docker-compose.yml down
+docker compose -f docker-compose.yml down

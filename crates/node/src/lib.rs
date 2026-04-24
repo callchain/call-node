@@ -724,6 +724,10 @@ impl CallNode {
         // Exit channel for epoch rotation
         let (exit_tx, exit_rx) = oneshot::channel::<EpochRotationReason>();
 
+        // Shutdown channel: when signaled, the BFT OS thread exits and releases
+        // the consensus P2P port so the next epoch can bind it cleanly.
+        let (bft_shutdown_tx, bft_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
         // Spawn BFT engine in a dedicated background OS thread
         let thread_port = consensus_p2p_port;
         let bft_data_dir = data_dir.join("bft_journal");
@@ -812,8 +816,11 @@ impl CallNode {
                     (resolve_s, resolve_r),
                 );
 
-                // Keep the background thread alive indefinitely
-                std::future::pending::<()>().await;
+                // Wait for the epoch-rotation shutdown signal.  When signaled the
+                // async fn returns, the TokioRunner shuts down, and the OS thread
+                // exits — releasing the consensus P2P port so the next epoch can
+                // bind it without a BindFailed panic.
+                let _ = bft_shutdown_rx.await;
             });
         });
 
@@ -845,7 +852,15 @@ impl CallNode {
             .await
             .map_err(|e| format!("exit channel canceled: {e:?}"));
         event_loop_handle.abort();
-        let _ = bft_handle;
+
+        // Signal the BFT OS thread to stop and wait for it to exit so that the
+        // consensus P2P port is released before the next epoch tries to bind it.
+        let _ = bft_shutdown_tx.send(());
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = bft_handle.join();
+        })
+        .await;
+
         reason
     }
 

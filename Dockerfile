@@ -3,7 +3,7 @@ FROM rust:1.94-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates libclang-dev clang \
+    pkg-config libssl-dev protobuf-compiler git ca-certificates libclang-dev clang mold \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true

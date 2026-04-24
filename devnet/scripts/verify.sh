@@ -50,7 +50,7 @@ info() { echo "  $(color yellow '[INFO]') $*"; }
 get_height() {
     local port="$1"
     local resp
-    resp=$(curl -fsS --max-time 3 -X POST "http://127.0.0.1:${port}" \
+    resp=$(curl -fsS --max-time 5 -H "Connection: close" -X POST "http://127.0.0.1:${port}" \
         -H "Content-Type: application/json" \
         -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' 2>/dev/null) || {
         echo ""

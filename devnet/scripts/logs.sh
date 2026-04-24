@@ -21,4 +21,4 @@ if [[ -z "$SERVICE" ]]; then
     echo "Tip: run '$0 node1 -f' to follow a single node"
 fi
 
-docker compose -f devnet/docker-compose.yml logs $ARGS
+docker compose -f docker-compose.yml logs $ARGS
