@@ -221,6 +221,7 @@ impl SimplexConsensus {
             None,
             None, None, None, None,
             Some(&mut self.validators),
+            None,
         )
     }
 

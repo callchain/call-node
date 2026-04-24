@@ -242,7 +242,7 @@ impl PayloadBuilder {
             None,
             None,
             None, bridge_config, None, None,
-            None,
+            None, None,
         )?;
 
         // Verify EVM state root matches expected (if non-zero)
@@ -614,7 +614,7 @@ mod tests {
                 "CALL",
                 "CALL",
                 18,
-                call_primitives::U256::ZERO,
+                call_protocol::BRIDGE_EVM_ADDRESS,
             )
             .unwrap();
         assert!(deploy_result.success);

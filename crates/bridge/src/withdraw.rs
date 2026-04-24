@@ -205,7 +205,10 @@ mod tests {
     fn test_withdraw_success_with_contract() {
         let mut protocol_account = AccountState::new();
         let mut evm_state = EvmState::new();
+        let bridge = Address::repeat_byte(0xFF);
         evm_state.set_balance(test_addr(1), U256::from(100_000_000_000_000u128));
+        evm_state.set_balance(bridge, U256::from(100_000_000_000_000u128));
+        evm_state.create_account(bridge);
 
         let evm_executor = EvmExecutor::new(1);
         let mut bridge_state = BridgeStateManager::default();
@@ -220,15 +223,15 @@ mod tests {
                 "CALL",
                 "CALL",
                 18,
-                U256::ZERO,
+                bridge,
             )
             .unwrap();
         assert!(deploy_result.success);
         registry.set_evm_contract_address(1, contract_addr);
 
-        // Mint 1_000 tokens to test_addr(1) in EVM
+        // Mint 1_000 tokens to test_addr(1) in EVM (caller must be the bridge)
         let mint_result = evm_executor.evm_call_bridge_mint(
-            test_addr(1),
+            bridge,
             contract_addr,
             &mut evm_state,
             test_addr(1),

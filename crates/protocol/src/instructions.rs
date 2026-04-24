@@ -72,6 +72,17 @@ pub enum Instruction {
         asset_id: AssetId,
         proof: Vec<u8>,
     },
+    /// Register a new protocol asset and auto-deploy an EVM wrapped token
+    RegisterAsset {
+        symbol: String,
+        name: String,
+        decimals: u8,
+    },
+    /// Link an existing protocol asset to a custom EVM ERC-20 contract
+    RegisterEvmBridge {
+        asset_id: AssetId,
+        evm_contract_address: Address,
+    },
     /// Bridge protocol balance to EVM (native CALL or ERC-20 wrapped asset)
     BridgeToEvm {
         asset_id: AssetId,
@@ -187,6 +198,36 @@ pub enum Instruction {
     /// Transfers staked CALL from the escrow back to the original staker.
     ValidatorClaimUnbonded {
         validator_id: u32,
+    },
+    /// Register a new agent. The transaction sender becomes the owner.
+    /// Deducts `fee_params.base_fee` from the sender's CALL balance.
+    RegisterAgent {
+        pubkey: Vec<u8>,
+        name: String,
+        url: String,
+    },
+    /// Grant protocol balance to an agent. Only the agent owner can grant.
+    GrantAgentBalance {
+        agent_id: u64,
+        asset_id: AssetId,
+        amount: Balance,
+    },
+    /// Revoke all protocol balance from an agent for a given asset.
+    /// Only the agent owner can revoke. Funds are not returned to owner.
+    RevokeAgentBalance {
+        agent_id: u64,
+        asset_id: AssetId,
+    },
+    /// Submit an Ed25519-signed emergency rollback signature.
+    /// When quorum is reached, a RollbackPlan is produced in the block result.
+    SubmitRollbackSignature {
+        validator_id: u32,
+        target_height: u64,
+        target_version_major: u16,
+        target_version_minor: u16,
+        target_version_patch: u16,
+        nonce: u64,
+        signature: Vec<u8>,
     },
 }
 
@@ -660,6 +701,16 @@ pub fn execute_instruction(
                 "ChallengeBridgeDeposit must be executed inline in Block::execute".into(),
             ))
         }
+        Instruction::RegisterAsset { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RegisterAsset must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::RegisterEvmBridge { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RegisterEvmBridge must be executed inline in Block::execute".into(),
+            ))
+        }
         Instruction::BridgeToEvm { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "BridgeToEvm must be executed inline in Block::execute".into(),
@@ -683,6 +734,26 @@ pub fn execute_instruction(
         Instruction::ValidatorClaimUnbonded { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ValidatorClaimUnbonded must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::RegisterAgent { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RegisterAgent must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::GrantAgentBalance { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "GrantAgentBalance must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::RevokeAgentBalance { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RevokeAgentBalance must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::SubmitRollbackSignature { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "SubmitRollbackSignature must be executed inline in Block::execute".into(),
             ))
         }
     }

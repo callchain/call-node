@@ -25,10 +25,14 @@ pub use receipts::*;
 pub use issuer::*;
 pub use economics::*;
 
+use alloy_primitives::Address;
 use thiserror::Error;
 
 /// Asset ID for CALL (native token)
 pub const CALL_ASSET_ID: u64 = 1;
+
+/// Fixed EVM address used by the protocol bridge for bridgeMint operations.
+pub const BRIDGE_EVM_ADDRESS: Address = Address::repeat_byte(0xFF);
 
 /// Error type for protocol operations
 #[derive(Debug, Error)]

@@ -101,6 +101,7 @@ fn bench_block_execution(c: &mut Criterion) {
                             None,
                             None,
                             None,
+                            None,
                         );
                         black_box(result);
                     },

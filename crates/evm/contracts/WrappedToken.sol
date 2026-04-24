@@ -10,16 +10,17 @@ contract WrappedToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
+    address public bridge;
+
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    constructor(string memory _name, string memory _symbol, uint8 _decimals, uint256 _initialSupply) {
+    constructor(string memory _name, string memory _symbol, uint8 _decimals, address _bridge) {
         name = _name;
         symbol = _symbol;
         decimals = _decimals;
-        totalSupply = _initialSupply;
-        balanceOf[msg.sender] = _initialSupply;
-        emit Transfer(address(0), msg.sender, _initialSupply);
+        totalSupply = 0;
+        bridge = _bridge;
     }
 
     function transfer(address _to, uint256 _value) public returns (bool) {
@@ -47,6 +48,7 @@ contract WrappedToken {
     }
 
     function bridgeMint(address _to, uint256 _value) public {
+        require(msg.sender == bridge, "only bridge");
         totalSupply += _value;
         balanceOf[_to] += _value;
         emit Transfer(address(0), _to, _value);

@@ -962,16 +962,17 @@ impl CallNode {
                                             let mut fee_params = state.fee_params.write().unwrap();
                                             let mut evm_state = state.evm_state.write().unwrap();
                                             let mut agent_balances = state.agent_balances.write().unwrap();
-                                            let agent_registry = state.agent_registry.read().unwrap();
+                                            let mut agent_registry = state.agent_registry.write().unwrap();
 
                                             block.execute(
                                                 &mut balances, &mut registry, &mut compliance, &mut bridge_state,
                                                 &mut shielded_state, &mut fee_params, height, &mut evm_state,
                                                 None, None,
                                                 Some(&mut *agent_balances),
-                                                Some(&*agent_registry),
+                                                Some(&mut *agent_registry),
                                                 None, None, None, None,
                                                 Some(&mut *state.validator_state.write().unwrap()),
+                                                None,
                                             )
                                         };
 
@@ -1846,7 +1847,7 @@ async fn block_production_loop(
             let mut evm_state = state.evm_state.write().unwrap();
             let mut oracle = state.oracle.write().unwrap();
             let mut agent_balances = state.agent_balances.write().unwrap();
-            let agent_registry = state.agent_registry.read().unwrap();
+            let mut agent_registry = state.agent_registry.write().unwrap();
 
             block.execute(
                 &mut balances,
@@ -1860,9 +1861,10 @@ async fn block_production_loop(
                 Some(&mut *oracle),
                 None,
                 Some(&mut *agent_balances),
-                Some(&*agent_registry),
+                Some(&mut *agent_registry),
                 None, None, None, None,
                 Some(&mut *state.validator_state.write().unwrap()),
+                None,
             )
         };
         let exec_duration = exec_start.elapsed().as_millis() as u64;
@@ -2434,7 +2436,7 @@ async fn bft_event_loop(
                     let mut evm_state = state.evm_state.write().unwrap();
                     let mut oracle = state.oracle.write().unwrap();
                     let mut agent_balances = state.agent_balances.write().unwrap();
-                    let agent_registry = state.agent_registry.read().unwrap();
+                    let mut agent_registry = state.agent_registry.write().unwrap();
 
                     block.execute(
                         &mut balances,
@@ -2448,9 +2450,10 @@ async fn bft_event_loop(
                         Some(&mut *oracle),
                         None,
                         Some(&mut *agent_balances),
-                        Some(&*agent_registry),
+                        Some(&mut *agent_registry),
                         None, None, None, None,
                         Some(&mut *state.validator_state.write().unwrap()),
+                        None,
                     )
                 };
                 telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
@@ -2542,7 +2545,7 @@ async fn bft_event_loop(
                         let mut evm_state = state.evm_state.write().unwrap();
                         let mut oracle = state.oracle.write().unwrap();
                         let mut agent_balances = state.agent_balances.write().unwrap();
-                        let agent_registry = state.agent_registry.read().unwrap();
+                        let mut agent_registry = state.agent_registry.write().unwrap();
 
                         block.execute(
                             &mut balances,
@@ -2556,9 +2559,10 @@ async fn bft_event_loop(
                             Some(&mut *oracle),
                             None,
                             Some(&mut *agent_balances),
-                            Some(&*agent_registry),
+                            Some(&mut *agent_registry),
                             None, None, None, None,
                             Some(&mut *state.validator_state.write().unwrap()),
+                            None,
                         )
                     };
                     telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
@@ -2605,7 +2609,7 @@ async fn bft_event_loop(
                             let mut evm_state = state.evm_state.write().unwrap();
                             let mut oracle = state.oracle.write().unwrap();
                             let mut agent_balances = state.agent_balances.write().unwrap();
-                            let agent_registry = state.agent_registry.read().unwrap();
+                            let mut agent_registry = state.agent_registry.write().unwrap();
 
                             match block.execute(
                                 &mut balances,
@@ -2619,9 +2623,10 @@ async fn bft_event_loop(
                                 Some(&mut *oracle),
                                 None,
                                 Some(&mut *agent_balances),
-                                Some(&*agent_registry),
+                                Some(&mut *agent_registry),
                                 None, None, None, None,
                                 Some(&mut *state.validator_state.write().unwrap()),
+                                None,
                             ) {
                                 Ok(r) => r,
                                 Err(e) => {
@@ -3458,6 +3463,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("execution");
         block.finalize(&result);
@@ -3543,6 +3549,7 @@ mod tests {
                 &mut fee_params,
                 height,
                 &mut evm_state,
+                None,
                 None,
                 None,
                 None,
@@ -3652,7 +3659,7 @@ mod tests {
         let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None)
+            .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -3760,7 +3767,7 @@ mod tests {
         let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None)
+            .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None, None)
             .expect("execution");
         block.finalize(&result);
 
@@ -3869,7 +3876,7 @@ mod tests {
                 let mut vs = node.state.validator_state.write().unwrap();
                 block.execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state,
                               &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None,
-                              Some(&mut *vs))
+                              Some(&mut *vs), None)
                     .expect("execution")
             };
             block.finalize(&result);
