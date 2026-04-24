@@ -211,68 +211,62 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_registerAsset
     module
         .register_async_method("call_registerAsset", |params, state, _ctx| async move {
-            let (symbol, name, decimals, issuer, signature_hex): (String, String, u8, String, String) =
-                params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let issuer_addr = issuer.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
 
-            // Parse signature
-            let sig_bytes = hex::decode(signature_hex.trim_start_matches("0x"))
-                .map_err(|e| invalid_params(format!("invalid signature hex: {e}")))?;
+            let symbol = call_obj.get("symbol")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'symbol' field".into()))?
+                .to_string();
+            let name = call_obj.get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'name' field".into()))?
+                .to_string();
+            let decimals = call_obj.get("decimals")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'decimals' field".into()))? as u8;
+            let sender_str = call_obj.get("sender")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
+            let sender = sender_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let nonce = call_obj.get("nonce")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
+            let sig_hex = call_obj.get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
+            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
             if sig_bytes.len() != 65 {
-                return Err(invalid_params(format!("signature must be 65 bytes, got {}", sig_bytes.len())));
+                return Err(invalid_params("signature must be 65 bytes".into()));
             }
             let mut signature = [0u8; 65];
             signature.copy_from_slice(&sig_bytes);
 
-            // Canonical registration message: keccak256("RegisterAsset:{symbol}:{name}:{decimals}:{issuer}")
-            let canonical = format!("RegisterAsset:{symbol}:{name}:{decimals}:{}", hex::encode(issuer_addr.as_slice()));
-            let raw_hash: [u8; 32] = call_crypto::keccak256(canonical.as_bytes()).into();
+            let instructions = vec![call_protocol::Instruction::RegisterAsset {
+                symbol: symbol.clone(),
+                name: name.clone(),
+                decimals,
+            }];
 
-            // Apply EIP-191 personal_sign prefix
-            let eip191_prefix = b"\x19Ethereum Signed Message:\n32";
-            let mut eip191_msg = Vec::with_capacity(eip191_prefix.len() + 32);
-            eip191_msg.extend_from_slice(eip191_prefix);
-            eip191_msg.extend_from_slice(&raw_hash);
-            let eip191_hash = {
-                let h = call_crypto::keccak256(&eip191_msg);
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(h.as_slice());
-                arr
+            let tx = call_protocol::transaction::ProtocolTransaction {
+                sender,
+                nonce,
+                instructions,
+                gas_config: call_protocol::transaction::GasConfig::SelfPay,
+                fee_currency: call_primitives::FeeCurrency::Call,
+                gas_limit: 200_000,
+                max_fee: 200_000 * 10,
+                expires_at: 0,
+                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
             };
 
-            // Recover signer and verify it matches issuer
-            let recovered = call_crypto::recover_secp256k1_signer(&eip191_hash, &signature)
-                .map_err(|e| invalid_params(format!("signature recovery failed: {e:?}")))?;
-            if recovered != issuer_addr {
-                return Err(invalid_params("signature does not match issuer address".into()));
-            }
+            let tx_hash = state.insert_protocol_tx(tx)
+                .map_err(|e| invalid_params(e))?;
 
-            // Check and collect asset registration fee
-            let fee = {
-                let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                gov.config.asset_registration_fee
-            };
-            if fee > 0 {
-                let issuer_balance = state.get_balance(1, &issuer_addr); // asset 1 = CALL
-                if issuer_balance < fee {
-                    return Err(invalid_params(format!(
-                        "insufficient CALL balance for registration fee: need {fee}, have {issuer_balance}"
-                    )));
-                }
-                state.balance_state.write()
-                    .map_err(|_| internal_error("lock poisoned".into()))?
-                    .deduct_balance(1, issuer_addr, fee)
-                    .map_err(|e| internal_error(format!("fee deduction failed: {e:?}")))?;
-            }
-
-            let mut registry = state.asset_registry.write().map_err(|_| internal_error("lock poisoned".into()))?;
-            let id = registry.register_asset(symbol.clone(), name, decimals, issuer_addr, 0, 0)
-                .map_err(|e| invalid_params(e.to_string()))?;
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "assetId": id,
+                "txHash": format!("0x{}", hex::encode(tx_hash)),
                 "symbol": symbol,
-                "feePaid": fee.to_string(),
-                "status": "registered",
+                "status": "pending",
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;

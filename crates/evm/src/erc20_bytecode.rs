@@ -2,7 +2,7 @@
 //!
 //! Generated via: `solc --bin --optimize --optimize-runs 200 WrappedToken.sol`
 
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, Bytes};
 
 /// Hex-encoded init bytecode (constructor + runtime embedded).
 const INIT_BYTECODE_HEX: &str = include_str!("../contracts/WrappedToken.bin");
@@ -23,12 +23,12 @@ pub fn runtime_bytecode() -> Vec<u8> {
 }
 
 /// ABI-encode constructor args for WrappedToken:
-/// `(string name, string symbol, uint8 decimals, uint256 initialSupply)`
+/// `(string name, string symbol, uint8 decimals, address bridge)`
 pub fn build_erc20_init_code(
     name: &str,
     symbol: &str,
     decimals: u8,
-    initial_supply: U256,
+    bridge: Address,
 ) -> Bytes {
     let name_len = name.len();
     let symbol_len = symbol.len();
@@ -37,7 +37,7 @@ pub fn build_erc20_init_code(
     // [0:32]   offset to name
     // [32:64]  offset to symbol
     // [64:96]  decimals
-    // [96:128] initialSupply
+    // [96:128] bridge address (left-padded to 32 bytes)
     let name_offset: u32 = 128;
     let symbol_offset: u32 = name_offset + 32 + ((name_len as u32 + 31) / 32) * 32;
 
@@ -57,7 +57,10 @@ pub fn build_erc20_init_code(
     encoded.extend_from_slice(&u32_buf);
     encoded.extend_from_slice(&[0u8; 31]);
     encoded.push(decimals);
-    encoded.extend_from_slice(&initial_supply.to_be_bytes::<32>());
+    // bridge address: left-padded to 32 bytes
+    let mut bridge_bytes = [0u8; 32];
+    bridge_bytes[12..].copy_from_slice(bridge.as_slice());
+    encoded.extend_from_slice(&bridge_bytes);
 
     // Name string
     u32_buf[28..32].copy_from_slice(&(name_len as u32).to_be_bytes());

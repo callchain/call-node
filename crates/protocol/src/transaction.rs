@@ -256,6 +256,8 @@ pub fn base_gas_units(instruction: &Instruction) -> u64 {
         Instruction::ValidatorStake { .. } => 50_000,
         Instruction::ValidatorUnstake { .. } => 25_000,
         Instruction::ValidatorClaimUnbonded { .. } => 25_000,
+        Instruction::RegisterAsset { .. } => 50_000,
+        Instruction::RegisterEvmBridge { .. } => 50_000,
     }
 }
 

@@ -415,7 +415,7 @@ impl Block {
             // Increment nonce (consumed on inclusion, regardless of execution result)
             account.increment_nonce(tx.sender);
 
-            // Separate instructions by type: bridge, agent, validator, regular
+            // Separate instructions by type: bridge, agent, validator, asset, regular
             let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
                 .instructions
                 .iter()
@@ -425,10 +425,14 @@ impl Block {
                 .iter()
                 .cloned()
                 .partition(|i| is_agent_instruction(i));
-            let (validator_instrs, other_instrs): (Vec<_>, Vec<_>) = non_agent
+            let (validator_instrs, non_validator): (Vec<_>, Vec<_>) = non_agent
                 .iter()
                 .cloned()
                 .partition(|i| is_validator_instruction(i));
+            let (asset_instrs, other_instrs): (Vec<_>, Vec<_>) = non_validator
+                .iter()
+                .cloned()
+                .partition(|i| is_asset_instruction(i));
 
             // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
             let balance_snapshot = account.clone();
@@ -456,6 +460,23 @@ impl Block {
                         ConsensusError::InvalidBlock(format!("protocol tx: {e}"))
                     })?;
                     tx_results.extend(results);
+                }
+
+                // Execute asset registration instructions inline
+                if !asset_instrs.is_empty() {
+                    for instr in &asset_instrs {
+                        let r = execute_asset_instruction(
+                            instr,
+                            tx.sender,
+                            account,
+                            registry,
+                            governance.as_deref_mut(),
+                            evm_state,
+                            &executor,
+                            current_block_height,
+                        )?;
+                        tx_results.push(r);
+                    }
                 }
 
                 // Execute bridge deposit instructions inline
@@ -923,6 +944,158 @@ fn execute_agent_instruction(
     }
 }
 
+// ── Asset instruction helpers ─────────────────────────────────────────
+
+fn is_asset_instruction(instr: &Instruction) -> bool {
+    matches!(
+        instr,
+        Instruction::RegisterAsset { .. } | Instruction::RegisterEvmBridge { .. }
+    )
+}
+
+fn execute_asset_instruction(
+    instruction: &Instruction,
+    sender: call_primitives::Address,
+    account: &mut AccountState,
+    registry: &mut AssetRegistry,
+    governance: Option<&mut GovernanceManager>,
+    evm_state: &mut call_evm::EvmState,
+    evm_executor: &call_evm::EvmExecutor,
+    current_block_height: u64,
+) -> Result<InstructionResult, ConsensusError> {
+    match instruction {
+        Instruction::RegisterAsset {
+            symbol,
+            name,
+            decimals,
+        } => {
+            // 1. Collect asset registration fee
+            let fee = {
+                let gov = governance.as_ref().ok_or_else(|| {
+                    ConsensusError::InvalidBlock("governance not available".into())
+                })?;
+                gov.config.asset_registration_fee
+            };
+            if fee > 0 {
+                let sender_balance = account.get_balance(call_protocol::CALL_ASSET_ID, &sender);
+                if sender_balance < fee {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "RegisterAsset: insufficient CALL balance for fee: need {fee}, have {sender_balance}"
+                    )));
+                }
+                account
+                    .deduct_balance(call_protocol::CALL_ASSET_ID, sender, fee)
+                    .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterAsset: {e}")))?;
+            }
+
+            // 2. Register asset
+            let asset_id = registry
+                .register_asset(symbol.clone(), name.clone(), *decimals, sender, 0, current_block_height)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterAsset: {e}")))?;
+
+            // 3. Deploy EVM wrapped token via system deployer
+            let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
+            evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
+            evm_state.create_account(deployer);
+
+            let (contract_addr, deploy_result) = evm_executor
+                .deploy_erc20_template(
+                    deployer,
+                    evm_state,
+                    name,
+                    symbol,
+                    *decimals,
+                    call_protocol::BRIDGE_EVM_ADDRESS,
+                )
+                .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterAsset: ERC-20 deploy failed: {e:?}")))?;
+
+            if !deploy_result.success {
+                return Err(ConsensusError::InvalidBlock(
+                    "RegisterAsset: ERC-20 deployment reverted".into(),
+                ));
+            }
+
+            // 4. Bind contract address
+            registry.set_evm_contract_address(asset_id, contract_addr);
+
+            Ok(InstructionResult::Success)
+        }
+        Instruction::RegisterEvmBridge {
+            asset_id,
+            evm_contract_address,
+        } => {
+            // 1. Verify asset exists
+            let asset = registry.get_asset(*asset_id).ok_or_else(|| {
+                ConsensusError::InvalidBlock(format!(
+                    "RegisterEvmBridge: asset {} not registered",
+                    asset_id
+                ))
+            })?;
+
+            // 2. Verify sender is the issuer
+            if asset.issuer != sender {
+                return Err(ConsensusError::InvalidBlock(
+                    "RegisterEvmBridge: only the asset issuer can register an EVM bridge".into(),
+                ));
+            }
+
+            // 3. Check evm_contract_address is not already set
+            if asset.evm_contract_address.is_some() {
+                return Err(ConsensusError::InvalidBlock(
+                    "RegisterEvmBridge: EVM contract address already set".into(),
+                ));
+            }
+
+            // 4. Verify contract has code
+            let code = evm_state.get_code(evm_contract_address);
+            if code.is_empty() {
+                return Err(ConsensusError::InvalidBlock(
+                    "RegisterEvmBridge: no code at contract address".into(),
+                ));
+            }
+
+            // 5. Static call totalSupply() — reject if > 0
+            // selector for totalSupply(): 0x18160ddd
+            let tx = call_evm::EvmTransaction {
+                caller: sender,
+                nonce: evm_state.get_nonce(&sender),
+                gas_limit: 50_000,
+                gas_price: 10,
+                to: Some(*evm_contract_address),
+                value: call_primitives::U256::ZERO,
+                data: call_evm::Bytes::from(vec![0x18, 0x16, 0x0d, 0xdd]),
+                chain_id: evm_executor.chain_id,
+            };
+            let static_result = evm_executor
+                .execute_tx(tx, evm_state)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterEvmBridge: static call failed: {e:?}")))?;
+
+            if !static_result.success {
+                return Err(ConsensusError::InvalidBlock(
+                    "RegisterEvmBridge: totalSupply() static call reverted".into(),
+                ));
+            }
+
+            if static_result.output.len() >= 32 {
+                let total_supply_bytes: [u8; 32] = static_result.output[..32].try_into().unwrap_or([0u8; 32]);
+                let total_supply = call_primitives::U256::from_be_bytes(total_supply_bytes);
+                if total_supply > call_primitives::U256::ZERO {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "RegisterEvmBridge: totalSupply must be 0, got {}",
+                        total_supply
+                    )));
+                }
+            }
+
+            // 6. Bind contract address
+            registry.set_evm_contract_address(*asset_id, *evm_contract_address);
+
+            Ok(InstructionResult::Success)
+        }
+        _ => Err(ConsensusError::InvalidBlock("not an asset instruction".into())),
+    }
+}
+
 // ── Bridge instruction helpers ────────────────────────────────────────
 
 fn is_bridge_instruction(instr: &Instruction) -> bool {
@@ -1171,7 +1344,7 @@ fn execute_bridge_instruction(
                 };
                 evm_executor
                     .evm_call_bridge_mint(
-                        sender,
+                        call_protocol::BRIDGE_EVM_ADDRESS,
                         contract_addr,
                         evm_state,
                         *to,
@@ -1768,7 +1941,7 @@ mod tests {
                 "CALL",
                 "CALL",
                 18,
-                call_primitives::U256::ZERO,
+                call_protocol::BRIDGE_EVM_ADDRESS,
             )
             .unwrap();
         assert!(deploy_result.success, "ERC-20 deploy failed");

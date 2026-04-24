@@ -235,8 +235,8 @@ impl GenesisExecutor {
         // Step 5: Register fee currencies
         let fee_currencies = self.register_fee_currencies(&mut registry)?;
 
-        // Step 6: Deploy EVM ERC-20 templates
-        self.deploy_evm_templates(&mut evm_state)?;
+        // Step 6: Deploy EVM ERC-20 templates for non-CALL genesis assets
+        self.deploy_evm_templates(&mut registry, &mut evm_state)?;
 
         // Step 7: Initialize oracle with genesis validators and tracked assets
         let mut oracle = OracleManager::new(OracleConfig::default());
@@ -379,31 +379,44 @@ impl GenesisExecutor {
         Ok(ids)
     }
 
-    /// Deploy EVM ERC-20 templates for assets
+    /// Deploy EVM ERC-20 templates for non-CALL genesis assets.
+    /// CALL (asset_id == 1) bridges as native EVM balance and does not
+    /// require a WrappedToken contract.
     fn deploy_evm_templates(
         &self,
+        registry: &mut AssetRegistry,
         evm_state: &mut EvmState,
     ) -> Result<(), GenesisError> {
         let executor = EvmExecutor::new(self.genesis.chain_id);
 
         for asset in &self.genesis.initial_assets {
-            if asset.asset_id == 1 {
-                // Deploy CALL token as ERC-20 template
-                let deployer = Address::repeat_byte(0xFF); // System deployer
-                evm_state.set_balance(deployer, U256::from(100_000_000_000i128));
-                evm_state.create_account(deployer);
-
-                executor
-                    .deploy_erc20_template(
-                        deployer,
-                        evm_state,
-                        &asset.name,
-                        &asset.symbol,
-                        asset.decimals,
-                        U256::from(asset.initial_supply),
-                    )
-                    .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
+            if asset.asset_id == call_protocol::CALL_ASSET_ID {
+                // CALL bridges as native EVM balance — no WrappedToken needed
+                continue;
             }
+
+            let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
+            evm_state.set_balance(deployer, U256::from(100_000_000_000u128));
+            evm_state.create_account(deployer);
+
+            let (contract_addr, deploy_result) = executor
+                .deploy_erc20_template(
+                    deployer,
+                    evm_state,
+                    &asset.name,
+                    &asset.symbol,
+                    asset.decimals,
+                    call_protocol::BRIDGE_EVM_ADDRESS,
+                )
+                .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
+
+            if !deploy_result.success {
+                return Err(GenesisError::ExecutionFailed(
+                    "ERC-20 deployment reverted".into(),
+                ));
+            }
+
+            registry.set_evm_contract_address(asset.asset_id, contract_addr);
         }
 
         Ok(())

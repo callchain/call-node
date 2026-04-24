@@ -221,6 +221,7 @@ mod tests {
         let mut registry = setup_registry();
 
         // Deploy wrapped token contract for asset 1
+        let bridge = Address::repeat_byte(0xFF);
         let (contract_addr, deploy_result) = evm_executor
             .deploy_erc20_template(
                 test_addr(1),
@@ -228,7 +229,7 @@ mod tests {
                 "CALL",
                 "CALL",
                 18,
-                U256::ZERO,
+                bridge,
             )
             .unwrap();
         assert!(deploy_result.success);

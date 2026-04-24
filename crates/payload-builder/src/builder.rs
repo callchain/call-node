@@ -614,7 +614,7 @@ mod tests {
                 "CALL",
                 "CALL",
                 18,
-                call_primitives::U256::ZERO,
+                call_protocol::BRIDGE_EVM_ADDRESS,
             )
             .unwrap();
         assert!(deploy_result.success);

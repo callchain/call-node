@@ -72,6 +72,17 @@ pub enum Instruction {
         asset_id: AssetId,
         proof: Vec<u8>,
     },
+    /// Register a new protocol asset and auto-deploy an EVM wrapped token
+    RegisterAsset {
+        symbol: String,
+        name: String,
+        decimals: u8,
+    },
+    /// Link an existing protocol asset to a custom EVM ERC-20 contract
+    RegisterEvmBridge {
+        asset_id: AssetId,
+        evm_contract_address: Address,
+    },
     /// Bridge protocol balance to EVM (native CALL or ERC-20 wrapped asset)
     BridgeToEvm {
         asset_id: AssetId,
@@ -658,6 +669,16 @@ pub fn execute_instruction(
         Instruction::ChallengeBridgeDeposit { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "ChallengeBridgeDeposit must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::RegisterAsset { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RegisterAsset must be executed inline in Block::execute".into(),
+            ))
+        }
+        Instruction::RegisterEvmBridge { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "RegisterEvmBridge must be executed inline in Block::execute".into(),
             ))
         }
         Instruction::BridgeToEvm { .. } => {

@@ -29,6 +29,7 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
 
     let executor = call_evm::EvmExecutor::new(1);
     let mut evm_state = node.state.evm_state.write().unwrap();
+    let bridge = alloy_primitives::Address::repeat_byte(0xFF);
     let (contract_addr, result) = executor
         .deploy_erc20_template(
             sender,
@@ -36,7 +37,7 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
             "TEST",
             "TST",
             18,
-            alloy_primitives::U256::ZERO,
+            bridge,
         )
         .unwrap();
     assert!(result.success, "ERC-20 deploy failed");

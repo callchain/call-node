@@ -152,10 +152,10 @@ impl EvmExecutor {
         name: &str,
         symbol: &str,
         decimals: u8,
-        initial_supply: U256,
+        bridge: Address,
     ) -> Result<(Address, EvmExecutionResult), EvmError> {
         let init_code = crate::erc20_bytecode::build_erc20_init_code(
-            name, symbol, decimals, initial_supply,
+            name, symbol, decimals, bridge,
         );
 
         // Derive CREATE contract address from deployer + nonce
@@ -447,8 +447,9 @@ mod tests {
 
         let expected_addr = derive_create_address(deployer, 0);
 
+        let bridge = test_addr(0xFF);
         let (addr, result) = executor
-            .deploy_erc20_template(deployer, &mut state, "Test", "TST", 18, U256::from(1_000_000))
+            .deploy_erc20_template(deployer, &mut state, "Test", "TST", 18, bridge)
             .unwrap();
         assert_eq!(addr, expected_addr);
         assert!(result.success, "ERC-20 deploy failed: gas_used={}, output={:?}", result.gas_used, result.output);
