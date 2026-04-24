@@ -312,14 +312,16 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             // Derive the BFT consensus P2P bootstrap list from the gossip P2P
             // bootstrap peers: validators reuse their identity key (same ed25519
             // pubkey) for both networks, but the BFT engine listens on
-            // `gossip_port + 1`, so we shift each peer's port accordingly.
+            // `gossip_port + 1`. Use *each peer's* gossip port + 1 (not the
+            // local node's), since in setups where validators run on different
+            // ports (e.g. a single-host devnet) every peer has its own offset.
             let bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)> = bootstrap
                 .iter()
                 .filter_map(|(peer_hex, addr)| {
                     let bytes = hex::decode(peer_hex).ok()?;
                     let pk = ed25519::PublicKey::decode(&bytes[..]).ok()?;
                     let mut bft_addr = *addr;
-                    bft_addr.set_port(consensus_p2p_port);
+                    bft_addr.set_port(addr.port().saturating_add(1));
                     Some((pk, bft_addr))
                 })
                 .collect();

@@ -2951,9 +2951,13 @@ fn apply_synced_blocks(
         match execute_result {
             Ok(result) => {
                 block.finalize(&result);
-                let _ = persist_block(data_dir, block_height, &block);
+                if let Err(e) = persist_block(data_dir, block_height, &block) {
+                    tracing::warn!(height = block_height, error = %e, "sync: failed to persist block to disk");
+                }
                 if let Ok(mut c) = consensus.write() {
-                    let _ = c.commit_block(&block, &result);
+                    if let Err(e) = c.commit_block(&block, &result) {
+                        tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
+                    }
                 }
                 state.set_current_block(block_height + 1);
                 applied += 1;
