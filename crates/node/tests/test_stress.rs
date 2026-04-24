@@ -168,7 +168,7 @@ async fn test_no_double_spend_concurrent_nonce() {
         consensus.refresh_proposer_subset();
     }
 
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
+    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
 
     // Two txs with same nonce — second should be rejected during execution
     node.insert_tx(make_tx(&secret, sender, 0, test_addr(10), 500));
@@ -198,7 +198,7 @@ async fn test_final_state_consistency_after_load() {
         consensus.refresh_proposer_subset();
     }
 
-    let initial_balance = 1_000_000u128;
+    let initial_balance = 200_000_000u128;
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, initial_balance).unwrap();
 
     let num_txs = 100;
@@ -243,7 +243,7 @@ async fn test_multi_sender_stress() {
     let mut sender_keys: Vec<([u8; 32], Address)> = Vec::new();
     for _ in 0..20 {
         let kp = test_keypair();
-        node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 50_000).unwrap();
+        node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 20_000_000).unwrap();
         sender_keys.push(kp);
     }
 
@@ -316,7 +316,7 @@ async fn test_rapid_block_production() {
         consensus.refresh_proposer_subset();
     }
 
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 1_000_000).unwrap();
+    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 600_000_000).unwrap();
 
     // Produce 500 blocks rapidly (no real delay)
     for i in 0..500 {

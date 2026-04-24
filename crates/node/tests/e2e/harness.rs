@@ -226,11 +226,13 @@ impl TestNode {
         };
 
         // Deserialize protocol txs
-        let protocol_txs: Vec<ProtocolTransaction> = selection
+        let mut protocol_txs: Vec<ProtocolTransaction> = selection
             .protocol_txs
             .into_iter()
             .filter_map(|e| serde_json::from_slice(&e.data).ok())
             .collect();
+        // Sort by (sender, nonce) so sequential nonce validation works correctly
+        protocol_txs.sort_by_key(|tx| (tx.sender, tx.nonce));
 
         let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 

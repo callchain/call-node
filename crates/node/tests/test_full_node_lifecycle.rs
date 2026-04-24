@@ -82,7 +82,7 @@ async fn test_node_process_transactions() {
 
     // Fund sender
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
+        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }
 
     // Insert tx
@@ -95,7 +95,7 @@ async fn test_node_process_transactions() {
     // Mempool cleared, balance updated
     assert_eq!(node.mempool_size(), 0);
     assert_eq!(node.balance(1, &receiver), 3_000);
-    assert!(node.balance(1, &sender) <= 7_000); // may have gas deducted
+    assert!(node.balance(1, &sender) <= 10_000_000 - 3_000); // may have gas deducted
     assert_eq!(block.header.height, 0);
 }
 
@@ -111,7 +111,7 @@ async fn test_node_persist_and_recover() {
         consensus.refresh_proposer_subset();
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
+        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }
 
     // Produce 3 blocks

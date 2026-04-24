@@ -3031,16 +3031,17 @@ fn apply_synced_blocks(
             let mut fee_params = state.fee_params.write().unwrap();
             let mut evm_state = state.evm_state.write().unwrap();
             let mut agent_balances = state.agent_balances.write().unwrap();
-            let agent_registry = state.agent_registry.read().unwrap();
+            let mut agent_registry = state.agent_registry.write().unwrap();
 
             block.execute(
                 &mut balances, &mut registry, &mut compliance, &mut bridge_state,
                 &mut shielded_state, &mut fee_params, block_height, &mut evm_state,
                 None, None,
                 Some(&mut *agent_balances),
-                Some(&*agent_registry),
+                Some(&mut *agent_registry),
                 None, None, None, None,
                 Some(&mut *state.validator_state.write().unwrap()),
+                Some(&mut *state.fork_manager.write().unwrap()),
             )
         };
 
@@ -3798,7 +3799,7 @@ mod tests {
             "call-node-persist-restart-{}",
             std::process::id()
         ));
-        let initial_balance: u128 = 50_000;
+        let initial_balance: u128 = 10_000_000;
         let transfer_amount: u128 = 5_000;
 
         // === Phase 1: Create node, fund account, produce block, persist state ===
@@ -3928,14 +3929,13 @@ mod tests {
 
         let node = CallNode::new(tmp.clone()).expect("node creation");
 
-        // Fund a proposer address with enough CALL for deposit
+        let proposer = call_primitives::Address::repeat_byte(0xAA);
+
+        // Fund proposer in AccountState (asset_id 1 = CALL) — governance reads from balance_source
         {
             let mut balances = node.state.balance_state.write().unwrap();
-            let proposer = call_primitives::Address::repeat_byte(0xAA);
-            balances.balances.credit_balance(0, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5).expect("fund proposer");
+            balances.balances.set_balance(1, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5).expect("fund proposer");
         }
-
-        let proposer = call_primitives::Address::repeat_byte(0xAA);
 
         // Register some validators so quorum can be met
         {

@@ -595,7 +595,7 @@ mod tests {
         }];
 
         let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
+        account.balances.set_balance(1, test_sender(), 10_000_000).unwrap();
         let mut registry = AssetRegistry::new();
         registry.register_asset("CALL".into(), "Callchain".into(), 18, test_sender(), 0, 0).unwrap();
         let mut compliance = ComplianceEngine::new();
@@ -721,7 +721,7 @@ mod tests {
         };
 
         let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
+        account.balances.set_balance(1, test_sender(), 10_000_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();

@@ -109,7 +109,7 @@ async fn test_invalid_tx_causes_block_failure() {
     }
     // Fund sender with enough for tx + gas
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
+        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }
 
     // Valid tx should work
