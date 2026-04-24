@@ -9,3 +9,5 @@ devnet/local/data/
 devnet/local/logs/
 devnet/local/run/
 ~/
+*.log
+*.swp

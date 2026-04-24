@@ -68,6 +68,7 @@ use commonware_cryptography::Signer;
 use commonware_parallel::Sequential;
 use commonware_p2p::AddressableManager;
 use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
+use commonware_p2p::utils::mux::Muxer;
 use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
 use commonware_runtime::{Quota, Runner, Metrics};
 use commonware_runtime::buffer::paged::CacheRef;
@@ -545,7 +546,7 @@ impl CallNode {
         ed25519_private_key: ed25519::PrivateKey,
         consensus_p2p_port: u16,
         bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)>,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> std::thread::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let mempool = Arc::clone(&self.mempool);
         let consensus = Arc::clone(&self.consensus);
@@ -558,186 +559,13 @@ impl CallNode {
         let telemetry = Arc::clone(&self.telemetry);
         let audit_log = Arc::clone(&self.audit_log);
 
-        tokio::spawn(async move {
-            let mut epoch_number: u64 = 0;
-
-            loop {
-                // Read current qualified validators and compute VRF subset
-                let (parent_hash, subset, my_index) = {
-                    let c = consensus.read().unwrap();
-                    let ph = c.last_block_hash();
-                    let seed = derive_vrf_seed(&ph, epoch_number);
-                    let vs = state.validator_state.read().unwrap();
-                    let qualified = vs.get_qualified_validators();
-                    let pubkeys: std::collections::HashMap<
-                        call_primitives::ValidatorId,
-                        call_primitives::Ed25519PublicKey,
-                    > = vs
-                        .get_all_validators()
-                        .iter()
-                        .map(|(id, stake)| (*id, stake.ed25519_pubkey))
-                        .collect();
-                    let params = state.consensus_params.read().unwrap();
-                    let subset =
-                        select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
-
-                    // Check if we are in the subset
-                    let my_pk = ed25519_private_key.public_key();
-                    let my_encoded = commonware_codec::Encode::encode(&my_pk);
-                    let my_index = subset
-                        .iter()
-                        .enumerate()
-                        .find(|(_, id)| {
-                            pubkeys
-                                .get(id)
-                                .is_some_and(|pk| pk.as_slice() == my_encoded.as_ref())
-                        })
-                        .map(|(i, _)| i);
-
-                    (ph, subset, my_index)
-                };
-
-                if my_index.is_some() {
-                    tracing::info!(
-                        epoch = epoch_number,
-                        subset_size = subset.len(),
-                        "BFT: selected for epoch, starting engine"
-                    );
-                    let result = Self::start_bft_engine_inner(
-                        ed25519_private_key.clone(),
-                        consensus_p2p_port,
-                        bft_bootstrap_peers.clone(),
-                        state.clone(),
-                        mempool.clone(),
-                        consensus.clone(),
-                        db.clone(),
-                        prune_state.clone(),
-                        subscriptions.clone(),
-                        block_cache.clone(),
-                        network.clone(),
-                        data_dir.clone(),
-                        telemetry.clone(),
-                        audit_log.clone(),
-                        &subset,
-                        epoch_number,
-                        parent_hash,
-                    )
-                    .await;
-
-                    match result {
-                        Ok(reason) => {
-                            tracing::info!(
-                                ?reason,
-                                epoch = epoch_number,
-                                "BFT: engine exited for epoch rotation"
-                            );
-                            epoch_number += 1;
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::error!(?e, "BFT: engine exited with error");
-                            epoch_number += 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    // Not selected — wait until next epoch boundary
-                    let epoch_length = {
-                        state.consensus_params.read().unwrap().epoch_length
-                    };
-                    let current_height = {
-                        consensus.read().unwrap().current_height()
-                    };
-                    let next_epoch_height =
-                        (current_height / epoch_length + 1) * epoch_length;
-                    let blocks_to_wait = next_epoch_height.saturating_sub(current_height);
-                    let sleep_secs =
-                        Duration::from_secs(blocks_to_wait.saturating_mul(2).max(1));
-                    tracing::info!(
-                        epoch = epoch_number,
-                        wait_blocks = blocks_to_wait,
-                        "BFT: not selected for epoch, sleeping"
-                    );
-                    tokio::time::sleep(sleep_secs).await;
-                    epoch_number += 1;
-                }
-            }
-        })
-    }
-
-    /// Start a single epoch of the BFT engine. Returns the rotation reason
-    /// when the event loop exits.
-    #[allow(clippy::too_many_arguments)]
-    async fn start_bft_engine_inner(
-        ed25519_private_key: ed25519::PrivateKey,
-        consensus_p2p_port: u16,
-        bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)>,
-        state: Arc<RpcState>,
-        mempool: Arc<RwLock<Mempool>>,
-        consensus: Arc<RwLock<SimplexConsensus>>,
-        db: CallDb,
-        prune_state: PruneState,
-        subscriptions: SubscriptionManager,
-        block_cache: Arc<std::sync::Mutex<BlockCache>>,
-        network: Option<Arc<dyn Network>>,
-        data_dir: PathBuf,
-        telemetry: Arc<crate::telemetry::TelemetryRegistry>,
-        audit_log: Arc<RwLock<crate::logging::AuditLog>>,
-        subset: &[call_primitives::ValidatorId],
-        epoch_number: u64,
-        parent_hash: BlockHash,
-    ) -> Result<EpochRotationReason, String> {
-        // Build participants set from VRF subset
-        let mut keys: Vec<ed25519::PublicKey> = Vec::new();
-        {
-            let vs = state.validator_state.read().unwrap();
-            let all_validators = vs.get_all_validators();
-            for id in subset {
-                if let Some(stake) = all_validators.get(id) {
-                    if let Ok(pk) = ed25519::PublicKey::decode(&stake.ed25519_pubkey[..]) {
-                        keys.push(pk);
-                    }
-                }
-            }
-        }
-        let participants = Set::from_iter_dedup(keys);
-
-        // Build signing scheme
-        let scheme = Ed25519Scheme::signer(
-            b"callchain-consensus",
-            participants.clone(),
-            ed25519_private_key.clone(),
-        )
-        .expect("ed25519 key must be in participant set");
-
-        // Bridge channels (BFT engine -> tokio event loop)
-        let (propose_tx, propose_rx) = mpsc::channel::<ProposeRequest>(16);
-        let (verify_tx, verify_rx) = mpsc::channel::<VerifyRequest>(16);
-        let (finalize_tx, finalize_rx) = mpsc::channel::<FinalizationInfo>(16);
-        let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(64);
-
-        // Build BFT trait bridges
-        let automaton = CallAutomaton::new(propose_tx, verify_tx);
-        let relay = CallRelay::new(Arc::clone(&block_cache), broadcast_tx);
-        let reporter = CallReporter::new(finalize_tx);
-
-        // Exit channel for epoch rotation
-        let (exit_tx, exit_rx) = oneshot::channel::<EpochRotationReason>();
-
-        // Shutdown channel to gracefully stop the background P2P thread
-        let (bft_shutdown_tx, bft_shutdown_rx) =
-            std::sync::mpsc::channel::<()>();
-
-        // Spawn BFT engine in a dedicated background OS thread
-        let thread_port = consensus_p2p_port;
-        let bft_data_dir = data_dir.join("bft_journal");
-        let bft_handle = std::thread::spawn(move || {
-            std::fs::create_dir_all(&bft_data_dir).ok();
+        std::thread::spawn(move || {
+            let bft_data_dir = data_dir.join("bft_journal");
             let runtime_cfg = RuntimeConfig::new().with_storage_directory(&bft_data_dir);
             let runner = TokioRunner::new(runtime_cfg);
             runner.start(|context| async move {
-                let signer = ed25519_private_key;
-                let listen_addr = std::net::SocketAddr::from(([0, 0, 0, 0], thread_port));
+                let signer = ed25519_private_key.clone();
+                let listen_addr = std::net::SocketAddr::from(([0, 0, 0, 0], consensus_p2p_port));
 
                 let p2p_cfg = P2PConfig::local(
                     signer,
@@ -745,115 +573,231 @@ impl CallNode {
                     listen_addr,
                     10 * 1024 * 1024,
                 );
-                let (mut network, mut oracle) = p2p_lookup::Network::new(
+                let (mut network_p2p, mut oracle) = p2p_lookup::Network::new(
                     context.with_label("consensus-p2p"),
                     p2p_cfg,
                 );
 
-                // Register the other validators' BFT P2P endpoints with the oracle so
-                // that the simplex engine can connect to them. Without this step the
-                // consensus P2P listener has no peer addresses and votes/certificates
-                // never reach the other validators (which is why the 4-node devnet
-                // never finalized a block).
+                // Register bootstrap peers
                 if !bft_bootstrap_peers.is_empty() {
                     let entries: Vec<(ed25519::PublicKey, commonware_p2p::Address)> =
                         bft_bootstrap_peers
                             .iter()
                             .map(|(pk, addr)| (pk.clone(), commonware_p2p::Address::Symmetric(*addr)))
                             .collect();
-                    let peer_map: commonware_utils::ordered::Map<
-                        ed25519::PublicKey,
-                        commonware_p2p::Address,
-                    > = commonware_utils::ordered::Map::from_iter_dedup(entries);
+                    let peer_map = commonware_utils::ordered::Map::from_iter_dedup(entries);
                     oracle.track(0, peer_map).await;
                 }
 
-                // Register 3 consensus channels (vote, certificate, resolver)
+                // Register 3 consensus channels and wrap each in a Muxer
                 let quota = Quota::per_second(NonZeroU32::new(10000).unwrap());
-                let (vote_s, vote_r) = network.register(1, quota.clone(), 100_000);
-                let (cert_s, cert_r) = network.register(2, quota.clone(), 100_000);
-                let (resolve_s, resolve_r) = network.register(3, quota, 100_000);
+                let (vote_s, vote_r) = network_p2p.register(1, quota.clone(), 100_000);
+                let (cert_s, cert_r) = network_p2p.register(2, quota.clone(), 100_000);
+                let (resolve_s, resolve_r) = network_p2p.register(3, quota, 100_000);
+                let _net_handle = network_p2p.start();
 
-                // Start the p2p network
-                let _net_handle = network.start();
-
-                // Build page cache for the consensus journal
-                let page_cache = CacheRef::from_pooler(
-                    &context,
-                    NonZeroU16::new(4096).unwrap(),
-                    NonZeroUsize::new(1024).unwrap(),
+                let (vote_mux, mut vote_handle) = Muxer::new(
+                    context.with_label("vote_mux"),
+                    vote_s,
+                    vote_r,
+                    1024,
                 );
-
-                // Build and start the simplex BFT engine
-                let cfg = SimplexConfig {
-                    scheme,
-                    elector: RoundRobin::<commonware_cryptography::Sha256>::default(),
-                    blocker: oracle,
-                    automaton,
-                    relay,
-                    reporter,
-                    strategy: Sequential,
-                    partition: "callchain".to_string(),
-                    mailbox_size: 1024,
-                    epoch: Epoch::new(epoch_number),
-                    replay_buffer: NonZeroUsize::new(1024).unwrap(),
-                    write_buffer: NonZeroUsize::new(1024).unwrap(),
-                    page_cache,
-                    leader_timeout: Duration::from_millis(500),
-                    certification_timeout: Duration::from_millis(750),
-                    timeout_retry: Duration::from_millis(250),
-                    activity_timeout: ViewDelta::new(10),
-                    skip_timeout: ViewDelta::new(5),
-                    fetch_timeout: Duration::from_secs(2),
-                    fetch_concurrent: 4,
-                    forwarding: ForwardingPolicy::SilentVoters,
-                };
-
-                let engine = Engine::new(context, cfg);
-                let _engine_handle = engine.start(
-                    (vote_s, vote_r),
-                    (cert_s, cert_r),
-                    (resolve_s, resolve_r),
+                let (cert_mux, mut cert_handle) = Muxer::new(
+                    context.with_label("cert_mux"),
+                    cert_s,
+                    cert_r,
+                    1024,
                 );
+                let (resolve_mux, mut resolve_handle) = Muxer::new(
+                    context.with_label("resolve_mux"),
+                    resolve_s,
+                    resolve_r,
+                    1024,
+                );
+                vote_mux.start();
+                cert_mux.start();
+                resolve_mux.start();
 
-                // Keep the background thread alive until shutdown is signaled
-                let _ = bft_shutdown_rx.recv();
+                let mut epoch_number: u64 = 0;
+
+                loop {
+                    let (parent_hash, subset, my_index) = {
+                        let c = consensus.read().unwrap();
+                        let ph = c.last_block_hash();
+                        let seed = derive_vrf_seed(&ph, epoch_number);
+                        let vs = state.validator_state.read().unwrap();
+                        let qualified = vs.get_qualified_validators();
+                        let pubkeys: std::collections::HashMap<
+                            call_primitives::ValidatorId,
+                            call_primitives::Ed25519PublicKey,
+                        > = vs
+                            .get_all_validators()
+                            .iter()
+                            .map(|(id, stake)| (*id, stake.ed25519_pubkey))
+                            .collect();
+                        let params = state.consensus_params.read().unwrap();
+                        let subset =
+                            select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
+
+                        let my_pk = ed25519_private_key.public_key();
+                        let my_encoded = commonware_codec::Encode::encode(&my_pk);
+                        let my_index = subset
+                            .iter()
+                            .enumerate()
+                            .find(|(_, id)| {
+                                pubkeys
+                                    .get(id)
+                                    .is_some_and(|pk| pk.as_slice() == my_encoded.as_ref())
+                            })
+                            .map(|(i, _)| i);
+
+                        (ph, subset, my_index)
+                    };
+
+                    if my_index.is_some() {
+                        tracing::info!(
+                            epoch = epoch_number,
+                            subset_size = subset.len(),
+                            "BFT: selected for epoch, starting engine"
+                        );
+
+                        let mut keys: Vec<ed25519::PublicKey> = Vec::new();
+                        {
+                            let vs = state.validator_state.read().unwrap();
+                            let all_validators = vs.get_all_validators();
+                            for id in &subset {
+                                if let Some(stake) = all_validators.get(id) {
+                                    if let Ok(pk) = ed25519::PublicKey::decode(&stake.ed25519_pubkey[..]) {
+                                        keys.push(pk);
+                                    }
+                                }
+                            }
+                        }
+                        let participants = Set::from_iter_dedup(keys);
+
+                        let scheme = Ed25519Scheme::signer(
+                            b"callchain-consensus",
+                            participants,
+                            ed25519_private_key.clone(),
+                        )
+                        .expect("ed25519 key must be in participant set");
+
+                        let (propose_tx, propose_rx) = mpsc::channel::<ProposeRequest>(16);
+                        let (verify_tx, verify_rx) = mpsc::channel::<VerifyRequest>(16);
+                        let (finalize_tx, finalize_rx) = mpsc::channel::<FinalizationInfo>(16);
+                        let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(64);
+
+                        let automaton = CallAutomaton::new(propose_tx, verify_tx);
+                        let relay = CallRelay::new(Arc::clone(&block_cache), broadcast_tx);
+                        let reporter = CallReporter::new(finalize_tx);
+
+                        let (exit_tx, exit_rx) = oneshot::channel::<EpochRotationReason>();
+
+                        let (vote_sub_s, vote_sub_r) = vote_handle.register(epoch_number).await.unwrap();
+                        let (cert_sub_s, cert_sub_r) = cert_handle.register(epoch_number).await.unwrap();
+                        let (resolve_sub_s, resolve_sub_r) = resolve_handle.register(epoch_number).await.unwrap();
+
+                        let page_cache = CacheRef::from_pooler(
+                            &context,
+                            NonZeroU16::new(4096).unwrap(),
+                            NonZeroUsize::new(1024).unwrap(),
+                        );
+
+                        let cfg = SimplexConfig {
+                            scheme,
+                            elector: RoundRobin::<commonware_cryptography::Sha256>::default(),
+                            blocker: oracle.clone(),
+                            automaton,
+                            relay,
+                            reporter,
+                            strategy: Sequential,
+                            partition: "callchain".to_string(),
+                            mailbox_size: 1024,
+                            epoch: Epoch::new(epoch_number),
+                            replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                            write_buffer: NonZeroUsize::new(1024).unwrap(),
+                            page_cache,
+                            leader_timeout: Duration::from_millis(500),
+                            certification_timeout: Duration::from_millis(750),
+                            timeout_retry: Duration::from_millis(250),
+                            activity_timeout: ViewDelta::new(10),
+                            skip_timeout: ViewDelta::new(5),
+                            fetch_timeout: Duration::from_secs(2),
+                            fetch_concurrent: 4,
+                            forwarding: ForwardingPolicy::SilentVoters,
+                        };
+
+                        let engine = Engine::new(
+                            context.with_label("simplex"),
+                            cfg,
+                        );
+                        let engine_handle = engine.start(
+                            (vote_sub_s, vote_sub_r),
+                            (cert_sub_s, cert_sub_r),
+                            (resolve_sub_s, resolve_sub_r),
+                        );
+
+                        let event_loop_handle = tokio::spawn(bft_event_loop(
+                            propose_rx,
+                            verify_rx,
+                            finalize_rx,
+                            broadcast_rx,
+                            state.clone(),
+                            mempool.clone(),
+                            consensus.clone(),
+                            block_cache.clone(),
+                            db.clone(),
+                            prune_state.clone(),
+                            subscriptions.clone(),
+                            parent_hash,
+                            network.clone(),
+                            data_dir.clone(),
+                            telemetry.clone(),
+                            audit_log.clone(),
+                            epoch_number,
+                            exit_tx,
+                        ));
+
+                        let reason = exit_rx.await;
+                        event_loop_handle.abort();
+                        engine_handle.abort();
+
+                        match reason {
+                            Ok(r) => {
+                                tracing::info!(
+                                    ?r,
+                                    epoch = epoch_number,
+                                    "BFT: engine exited for epoch rotation"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(?e, "BFT: exit channel canceled");
+                            }
+                        }
+                        epoch_number += 1;
+                    } else {
+                        let epoch_length = {
+                            state.consensus_params.read().unwrap().epoch_length
+                        };
+                        let current_height = {
+                            consensus.read().unwrap().current_height()
+                        };
+                        let next_epoch_height =
+                            (current_height / epoch_length + 1) * epoch_length;
+                        let blocks_to_wait = next_epoch_height.saturating_sub(current_height);
+                        let sleep_secs =
+                            Duration::from_secs(blocks_to_wait.saturating_mul(2).max(1));
+                        tracing::info!(
+                            epoch = epoch_number,
+                            wait_blocks = blocks_to_wait,
+                            "BFT: not selected for epoch, sleeping"
+                        );
+                        tokio::time::sleep(sleep_secs).await;
+                        epoch_number += 1;
+                    }
+                }
             });
-        });
-
-        // Spawn the tokio-side event loop that handles BFT requests
-        let event_loop_handle = tokio::spawn(bft_event_loop(
-            propose_rx,
-            verify_rx,
-            finalize_rx,
-            broadcast_rx,
-            state,
-            mempool,
-            consensus,
-            block_cache,
-            db,
-            prune_state,
-            subscriptions,
-            parent_hash,
-            network,
-            data_dir,
-            telemetry,
-            audit_log,
-            epoch_number,
-            exit_tx,
-        ));
-
-        // Wait for exit_rx to fire (event loop sends reason before breaking)
-        // The event loop handle will complete shortly after.
-        let reason = exit_rx
-            .await
-            .map_err(|e| format!("exit channel canceled: {e:?}"));
-        event_loop_handle.abort();
-        // Signal the background P2P thread to shut down so the port is
-        // released before the next epoch starts.
-        let _ = bft_shutdown_tx.send(());
-        let _ = bft_handle.join();
-        reason
+        })
     }
 
     /// Start P2P sync: compare local height with peer height and catch up if behind.
