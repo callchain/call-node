@@ -45,6 +45,11 @@ class CallchainNode:
     def get_balance(self, asset_id: int, address: str) -> Dict:
         return self._call("call_protocolBalance", [asset_id, address])
 
+    def get_nonce(self, address: str) -> int:
+        """Query the current protocol nonce for an address."""
+        result = self._call("call_getNonce", [address])
+        return result.get("nonce", 0) if isinstance(result, dict) else 0
+
     def txpool_status(self) -> Dict:
         return self._call("txpool_status")
 

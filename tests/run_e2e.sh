@@ -54,6 +54,10 @@ echo
 # ── Run tests ──
 echo "[4/5] Running E2E tests..."
 cd "$SCRIPT_DIR"
+
+# Clean shared nonce state before a fresh devnet run
+rm -f .nonce_state.json
+
 BASIC_OK=true
 STRESS_OK=true
 
@@ -61,8 +65,11 @@ TX_OK=true
 VAL_OK=true
 
 python3 test_basic.py || BASIC_OK=false
+rm -f .nonce_state.json
 python3 test_stress.py || STRESS_OK=false
+rm -f .nonce_state.json
 python3 test_transactions.py || TX_OK=false
+rm -f .nonce_state.json
 python3 test_validator.py || VAL_OK=false
 
 # ── Report ──

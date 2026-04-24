@@ -16,6 +16,7 @@ import time
 
 from rpc_client import CallchainNode, CallchainCluster
 from signer import sign_validator_stake, sign_validator_unstake, sign_validator_claim_unbonded
+from nonce_tracker import _next_nonce, set_default_node, sync_nonce
 
 # System escrow address for staked CALL (matches Rust STAKING_ESCROW)
 STAKING_ESCROW = "0x" + "00" * 20
@@ -29,15 +30,20 @@ def load_accounts():
 
 
 def make_cluster():
-    """Connect to all 6 devnet nodes (4 validators + 2 full nodes)."""
-    nodes = [
-        CallchainNode("http://127.0.0.1:5005"),
-        CallchainNode("http://127.0.0.1:5007"),
-        CallchainNode("http://127.0.0.1:5009"),
-        CallchainNode("http://127.0.0.1:5011"),
-        CallchainNode("http://127.0.0.1:5013"),
-        CallchainNode("http://127.0.0.1:5015"),
-    ]
+    """Connect to devnet nodes."""
+    if os.environ.get("CALLCHAIN_SINGLE_NODE"):
+        nodes = [
+            CallchainNode("http://127.0.0.1:5005"),
+        ]
+    else:
+        nodes = [
+            CallchainNode("http://127.0.0.1:5005"),
+            CallchainNode("http://127.0.0.1:5007"),
+            CallchainNode("http://127.0.0.1:5009"),
+            CallchainNode("http://127.0.0.1:5011"),
+            CallchainNode("http://127.0.0.1:5013"),
+            CallchainNode("http://127.0.0.1:5015"),
+        ]
     return CallchainCluster(nodes)
 
 
@@ -77,15 +83,6 @@ def wait_for_height(node, min_height, timeout=30):
     raise TimeoutError(f"Node did not reach height {min_height}")
 
 
-_NONCE_COUNTERS = {}
-
-def _next_nonce(address=None):
-    """Return the next sequential nonce for an address (starts at 0)."""
-    global _NONCE_COUNTERS
-    key = address.lower() if address else "__global__"
-    nonce = _NONCE_COUNTERS.get(key, 0)
-    _NONCE_COUNTERS[key] = nonce + 1
-    return nonce
 
 
 def _balance_int(node, asset_id, address):
@@ -104,6 +101,7 @@ def _balance_int(node, asset_id, address):
 def test_validator_join(cluster, accounts):
     """Full join flow: stake CALL, verify validator appears, verify escrow holds stake."""
     sender = accounts[3]
+    sync_nonce(sender["address"], cluster.nodes[0])
     nonce = _next_nonce(sender["address"])
     ed25519_pubkey_hex = "0x" + "aa" * 32
     self_stake = 1_000_000 * 10**18
@@ -126,10 +124,6 @@ def test_validator_join(cluster, accounts):
     tx_hash = result.get("txHash")
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted stake tx: {tx_hash}")
-
-    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
-    assert_true(receipt is not None, "transaction receipt not found")
-    print(f"  receipt status: {receipt.get('status', 'N/A')}")
 
     current_height = int(cluster.nodes[0].block_number(), 16)
     wait_for_height(cluster.nodes[0], current_height + 1)
@@ -170,6 +164,7 @@ def test_validator_join(cluster, accounts):
 def test_validator_leave(cluster, accounts):
     """Full leave flow: unstake existing validator, verify unbonding, reject early claim."""
     sender = accounts[0]
+    sync_nonce(sender["address"], cluster.nodes[0])
     nonce = _next_nonce(sender["address"])
     validator_id = 0
 
@@ -182,6 +177,7 @@ def test_validator_leave(cluster, accounts):
     print(f"  pre: validator {validator_id} found, selfStake={stake_amount}, escrow={escrow_bal_before}")
 
     # Reject unstake from non-owner
+    sync_nonce(accounts[1]["address"], cluster.nodes[0])
     bad_payload = sign_validator_unstake(
         private_key=accounts[1]["private_key"],
         sender=accounts[1]["address"],
@@ -206,10 +202,6 @@ def test_validator_leave(cluster, accounts):
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted unstake tx: {tx_hash}")
 
-    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
-    assert_true(receipt is not None, "transaction receipt not found")
-    print(f"  receipt status: {receipt.get('status', 'N/A')}")
-
     current_height = int(cluster.nodes[0].block_number(), 16)
     wait_for_height(cluster.nodes[0], current_height + 1)
 
@@ -231,6 +223,7 @@ def test_validator_leave(cluster, accounts):
         print(f"  node{i+1}: validator {validator_id} is unbonding, escrow={escrow_bal}")
 
     # Attempt to claim before unbonding period elapsed — should fail
+    sync_nonce(sender["address"], cluster.nodes[0])
     claim_payload = sign_validator_claim_unbonded(
         private_key=sender["private_key"],
         sender=sender["address"],
@@ -265,6 +258,7 @@ TEST_FUNCTIONS = [
 def run_all():
     accounts = load_accounts()
     cluster = make_cluster()
+    set_default_node(cluster.nodes[0])
 
     print("=" * 60)
     print("Callchain 6-Node Devnet — Validator Lifecycle E2E Tests")

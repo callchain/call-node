@@ -97,6 +97,19 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // call_getNonce
+    module
+        .register_async_method("call_getNonce", |params, state, _ctx| async move {
+            let address: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let addr = address.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
+            let nonce = state.get_nonce(&addr);
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "address": address,
+                "nonce": nonce,
+            }))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
     // call_sendPayment
     module
         .register_async_method("call_sendPayment", |params, state, _ctx| async move {

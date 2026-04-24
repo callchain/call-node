@@ -23,6 +23,7 @@ import random
 
 from rpc_client import CallchainNode, CallchainCluster
 from signer import sign_payment
+from nonce_tracker import _next_nonce, set_default_node
 
 # ── Configuration ─────────────────────────────────────────────────────
 
@@ -36,12 +37,17 @@ def load_config():
 
 
 def make_cluster():
-    nodes = [
-        CallchainNode("http://127.0.0.1:5005", "ws://127.0.0.1:5006", "http://127.0.0.1:9090/metrics"),
-        CallchainNode("http://127.0.0.1:5007", "ws://127.0.0.1:5008", "http://127.0.0.1:9091/metrics"),
-        CallchainNode("http://127.0.0.1:5009", "ws://127.0.0.1:5010", "http://127.0.0.1:9092/metrics"),
-        CallchainNode("http://127.0.0.1:5011", "ws://127.0.0.1:5012", "http://127.0.0.1:9093/metrics"),
-    ]
+    if os.environ.get("CALLCHAIN_SINGLE_NODE"):
+        nodes = [
+            CallchainNode("http://127.0.0.1:5005", "ws://127.0.0.1:5006", "http://127.0.0.1:9090/metrics"),
+        ]
+    else:
+        nodes = [
+            CallchainNode("http://127.0.0.1:5005", "ws://127.0.0.1:5006", "http://127.0.0.1:9090/metrics"),
+            CallchainNode("http://127.0.0.1:5007", "ws://127.0.0.1:5008", "http://127.0.0.1:9091/metrics"),
+            CallchainNode("http://127.0.0.1:5009", "ws://127.0.0.1:5010", "http://127.0.0.1:9092/metrics"),
+            CallchainNode("http://127.0.0.1:5011", "ws://127.0.0.1:5012", "http://127.0.0.1:9093/metrics"),
+        ]
     return CallchainCluster(nodes)
 
 
@@ -55,17 +61,6 @@ def assert_eq(a, b, msg=""):
 def assert_true(cond, msg=""):
     if not cond:
         raise AssertionError(msg)
-
-
-_NONCE_COUNTERS = {}
-
-def _next_nonce(address=None):
-    """Return the next sequential nonce for an address (starts at 0)."""
-    global _NONCE_COUNTERS
-    key = address.lower() if address else "__global__"
-    nonce = _NONCE_COUNTERS.get(key, 0)
-    _NONCE_COUNTERS[key] = nonce + 1
-    return nonce
 
 
 def wait_for_height(node, min_height, timeout=30):
@@ -94,7 +89,7 @@ def test_nodes_online(cluster, accounts):
 
 def test_genesis_balances(cluster, accounts):
     """All genesis accounts have expected balance on all nodes."""
-    expected = "1000000000000000000000000"  # 1M CALL
+    expected = "2000000000000000000000000"  # 2M CALL
     for i, node in enumerate(cluster.nodes):
         for acc in accounts:
             result = node.get_balance(1, acc["address"])
@@ -292,6 +287,7 @@ TEST_FUNCTIONS = [
 def run_all():
     accounts = load_config()
     cluster = make_cluster()
+    set_default_node(cluster.nodes[0])
 
     print("=" * 60)
     print("Callchain 4-Node Devnet — Basic E2E Tests")

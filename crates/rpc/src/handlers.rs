@@ -117,6 +117,10 @@ impl RpcState {
         self.balance_state.read().map(|s| s.get_balance(asset_id, address)).unwrap_or(0)
     }
 
+    pub fn get_nonce(&self, address: &Address) -> u64 {
+        self.balance_state.read().map(|s| s.get_nonce(address)).unwrap_or(0)
+    }
+
     pub fn get_total_balance(&self, asset_id: AssetId) -> Balance {
         self.balance_state
             .read()

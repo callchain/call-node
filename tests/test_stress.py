@@ -22,6 +22,7 @@ import threading
 
 from rpc_client import CallchainNode, CallchainCluster
 from signer import sign_payment
+from nonce_tracker import _next_nonce, set_default_node
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -32,12 +33,17 @@ def load_accounts():
 
 
 def make_cluster():
-    nodes = [
-        CallchainNode("http://127.0.0.1:5005"),
-        CallchainNode("http://127.0.0.1:5007"),
-        CallchainNode("http://127.0.0.1:5009"),
-        CallchainNode("http://127.0.0.1:5011"),
-    ]
+    if os.environ.get("CALLCHAIN_SINGLE_NODE"):
+        nodes = [
+            CallchainNode("http://127.0.0.1:5005"),
+        ]
+    else:
+        nodes = [
+            CallchainNode("http://127.0.0.1:5005"),
+            CallchainNode("http://127.0.0.1:5007"),
+            CallchainNode("http://127.0.0.1:5009"),
+            CallchainNode("http://127.0.0.1:5011"),
+        ]
     return CallchainCluster(nodes)
 
 
@@ -47,15 +53,10 @@ class StressRunner:
         self.accounts = accounts
         self.results = []
         self.errors = []
-        # Per-account nonces start at 0 and increment sequentially.
-        self.next_nonce = [0] * len(accounts)
-        self._nonce_lock = threading.Lock()
 
     def _take_nonce(self, sender_idx: int) -> int:
-        with self._nonce_lock:
-            nonce = self.next_nonce[sender_idx]
-            self.next_nonce[sender_idx] += 1
-            return nonce
+        sender = self.accounts[sender_idx]
+        return _next_nonce(sender["address"])
 
     def submit_single(self, node_idx: int, sender_idx: int, amount: int):
         """Submit one transaction and record latency."""
@@ -270,6 +271,7 @@ TEST_FUNCTIONS = [
 def run_all():
     accounts = load_accounts()
     cluster = make_cluster()
+    set_default_node(cluster.nodes[0])
 
     print("=" * 60)
     print("Callchain 4-Node Devnet — Stress / Load Tests")
