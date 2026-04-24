@@ -264,7 +264,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         .unwrap_or(config.mode != NodeMode::Validator);
     let p2p_config = CommonwareConfig {
         listen_addr: config.p2p.listen_addr,
-        bootstrap_peers: bootstrap,
+        bootstrap_peers: bootstrap.clone(),
         max_message_size: 10 * 1024 * 1024,
         allow_private_ips,
         namespace: b"callchain".to_vec(),
@@ -308,11 +308,37 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             info!("step 7: starting BFT consensus engine");
             let ed25519_key = load_ed25519_key(&config.keys)?;
             let consensus_p2p_port = config.p2p.listen_addr.port().saturating_add(1);
-            let _handle = node.start_bft_engine(ed25519_key, consensus_p2p_port);
+
+            // Derive the BFT consensus P2P bootstrap list from the gossip P2P
+            // bootstrap peers: validators reuse their identity key (same ed25519
+            // pubkey) for both networks, but the BFT engine listens on
+            // `gossip_port + 1`, so we shift each peer's port accordingly.
+            let bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)> = bootstrap
+                .iter()
+                .filter_map(|(peer_hex, addr)| {
+                    let bytes = hex::decode(peer_hex).ok()?;
+                    let pk = ed25519::PublicKey::decode(&bytes[..]).ok()?;
+                    let mut bft_addr = *addr;
+                    bft_addr.set_port(consensus_p2p_port);
+                    Some((pk, bft_addr))
+                })
+                .collect();
+            info!(
+                bft_peers = bft_bootstrap_peers.len(),
+                consensus_p2p_port,
+                "BFT consensus P2P bootstrap peers configured"
+            );
+
+            let _handle = node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers);
         }
         NodeMode::Full | NodeMode::Archive => {
-            info!("step 7: starting full-node consensus loop");
-            let _handle = node.start_consensus_loop();
+            // Full / archive nodes must NOT produce blocks. They follow the
+            // canonical chain finalized by the validators by responding to
+            // BlockAnnouncement broadcasts (which trigger SyncRequests) and by
+            // applying SyncResponse payloads in the P2P receive loop. Running
+            // `start_consensus_loop` here would have each full node
+            // independently produce its own (divergent) blocks.
+            info!("step 7: full/archive node — passive sync only, no block production");
         }
     }
 

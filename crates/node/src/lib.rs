@@ -66,6 +66,7 @@ use commonware_cryptography::ed25519;
 use commonware_cryptography::Digest;
 use commonware_cryptography::Signer;
 use commonware_parallel::Sequential;
+use commonware_p2p::AddressableManager;
 use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
 use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
 use commonware_runtime::{Quota, Runner, Metrics};
@@ -309,6 +310,7 @@ impl CallNode {
         // Start receive loop
         let mempool = Arc::clone(&self.mempool);
         let state = Arc::clone(&self.state);
+        let consensus = Arc::clone(&self.consensus);
         let data_dir = self.db.data_dir.clone();
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
@@ -335,6 +337,22 @@ impl CallNode {
                             let resp_data = bincode::serialize(&NetworkMessage::SyncResponse(response))
                                 .expect("serialize sync response");
                             net_clone.send_to(vec![peer_id], resp_data).await;
+                        }
+                    } else if let Ok(NetworkMessage::SyncResponse(response)) = bincode::deserialize(&data) {
+                        // Apply blocks delivered by a peer in response to a SyncRequest.
+                        // This is the path full / archive nodes use to follow the
+                        // canonical chain finalized by the validators (a peer's
+                        // BlockAnnouncement triggers a SyncRequest in the
+                        // BLOCK_CHANNEL handler, the response lands here).
+                        let applied = apply_synced_blocks(&response, &state, &consensus, &data_dir);
+                        if applied > 0 {
+                            tracing::info!(
+                                peer_id,
+                                start = response.start_height,
+                                applied,
+                                local_height = state.get_current_block(),
+                                "sync: applied blocks from peer"
+                            );
                         }
                     }
                 } else if channel == BLOCK_CHANNEL {
@@ -435,6 +453,7 @@ impl CallNode {
         &self,
         ed25519_private_key: ed25519::PrivateKey,
         consensus_p2p_port: u16,
+        bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)>,
     ) -> tokio::task::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let mempool = Arc::clone(&self.mempool);
@@ -496,6 +515,7 @@ impl CallNode {
                     let result = Self::start_bft_engine_inner(
                         ed25519_private_key.clone(),
                         consensus_p2p_port,
+                        bft_bootstrap_peers.clone(),
                         state.clone(),
                         mempool.clone(),
                         consensus.clone(),
@@ -560,6 +580,7 @@ impl CallNode {
     async fn start_bft_engine_inner(
         ed25519_private_key: ed25519::PrivateKey,
         consensus_p2p_port: u16,
+        bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)>,
         state: Arc<RpcState>,
         mempool: Arc<RwLock<Mempool>>,
         consensus: Arc<RwLock<SimplexConsensus>>,
@@ -629,10 +650,28 @@ impl CallNode {
                     listen_addr,
                     10 * 1024 * 1024,
                 );
-                let (mut network, oracle) = p2p_lookup::Network::new(
+                let (mut network, mut oracle) = p2p_lookup::Network::new(
                     context.with_label("consensus-p2p"),
                     p2p_cfg,
                 );
+
+                // Register the other validators' BFT P2P endpoints with the oracle so
+                // that the simplex engine can connect to them. Without this step the
+                // consensus P2P listener has no peer addresses and votes/certificates
+                // never reach the other validators (which is why the 4-node devnet
+                // never finalized a block).
+                if !bft_bootstrap_peers.is_empty() {
+                    let entries: Vec<(ed25519::PublicKey, commonware_p2p::Address)> =
+                        bft_bootstrap_peers
+                            .iter()
+                            .map(|(pk, addr)| (pk.clone(), commonware_p2p::Address::Symmetric(*addr)))
+                            .collect();
+                    let peer_map: commonware_utils::ordered::Map<
+                        ed25519::PublicKey,
+                        commonware_p2p::Address,
+                    > = commonware_utils::ordered::Map::from_iter_dedup(entries);
+                    oracle.track(0, peer_map).await;
+                }
 
                 // Register 3 consensus channels (vote, certificate, resolver)
                 let quota = Quota::per_second(NonZeroU32::new(10000).unwrap());
@@ -2827,7 +2866,11 @@ fn handle_sync_request(data_dir: &Path, request: &SyncRequest) -> Option<SyncRes
     let end = request.start_height.saturating_add(request.count);
     for h in request.start_height..end {
         if let Some(block) = load_block(data_dir, h) {
-            if let Ok(serialized) = bincode::serialize(&block) {
+            // NOTE: Blocks are serialized as JSON for the SyncResponse payload
+            // because the receiving side (`apply_synced_blocks` and the legacy
+            // `start_sync` path) deserializes them with `serde_json::from_slice`.
+            // Using bincode here would silently produce undeliverable responses.
+            if let Ok(serialized) = serde_json::to_vec(&block) {
                 blocks.push(serialized);
             }
         } else {
@@ -2846,6 +2889,82 @@ fn handle_sync_request(data_dir: &Path, request: &SyncRequest) -> Option<SyncRes
         blocks,
         state_root,
     })
+}
+
+/// Apply blocks received in a `SyncResponse` to local state.
+///
+/// Used by full / archive nodes (and any validator catching up) to import
+/// finalized blocks broadcast by validators. Returns the number of blocks
+/// successfully applied.
+///
+/// Only blocks at `local_height` or above are applied; out-of-order /
+/// already-known heights are skipped without error. Blocks are persisted to
+/// disk and committed to the in-memory `SimplexConsensus` so that subsequent
+/// `BlockAnnouncement`s correctly compare heights.
+fn apply_synced_blocks(
+    response: &SyncResponse,
+    state: &Arc<RpcState>,
+    consensus: &Arc<RwLock<SimplexConsensus>>,
+    data_dir: &Path,
+) -> usize {
+    let mut applied = 0usize;
+    for (i, block_data) in response.blocks.iter().enumerate() {
+        let block_height = response.start_height.saturating_add(i as u64);
+        let local_height = state.get_current_block();
+        if block_height < local_height {
+            continue; // already have this block
+        }
+        if block_height > local_height {
+            // We can't apply blocks out of order — wait for an earlier batch.
+            break;
+        }
+        let mut block: Block = match serde_json::from_slice(block_data) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(height = block_height, error = %e, "sync: failed to deserialize block");
+                continue;
+            }
+        };
+
+        let execute_result = {
+            let mut balances = state.balance_state.write().unwrap();
+            let mut registry = state.asset_registry.write().unwrap();
+            let mut compliance = state.compliance_engine.write().unwrap();
+            let mut bridge_state = state.bridge_state.write().unwrap();
+            let mut shielded_state = state.shielded_state.write().unwrap();
+            let mut fee_params = state.fee_params.write().unwrap();
+            let mut evm_state = state.evm_state.write().unwrap();
+            let mut agent_balances = state.agent_balances.write().unwrap();
+            let agent_registry = state.agent_registry.read().unwrap();
+
+            block.execute(
+                &mut balances, &mut registry, &mut compliance, &mut bridge_state,
+                &mut shielded_state, &mut fee_params, block_height, &mut evm_state,
+                None, None,
+                Some(&mut *agent_balances),
+                Some(&*agent_registry),
+                None, None, None, None,
+                Some(&mut *state.validator_state.write().unwrap()),
+            )
+        };
+
+        match execute_result {
+            Ok(result) => {
+                block.finalize(&result);
+                let _ = persist_block(data_dir, block_height, &block);
+                if let Ok(mut c) = consensus.write() {
+                    let _ = c.commit_block(&block, &result);
+                }
+                state.set_current_block(block_height + 1);
+                applied += 1;
+            }
+            Err(e) => {
+                tracing::warn!(height = block_height, error = %e, "sync: block execution failed");
+                break;
+            }
+        }
+    }
+    applied
 }
 
 fn handle_network_message(
