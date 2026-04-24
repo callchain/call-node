@@ -111,9 +111,11 @@ pub struct CliArgs {
 
     // ── Storage ───────────────────────────────────────────────────────
 
-    /// Data directory for block/chain storage
-    #[arg(long, default_value = "~/.callchain")]
-    pub data_dir: PathBuf,
+    /// Data directory for block/chain storage. When omitted, the value from
+    /// the loaded TOML's `[storage] data_dir` is used, or otherwise
+    /// `~/.callchain` (expanded via `dirs::home_dir`).
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
 
     /// DB cache size in MB (default: 1024)
     #[arg(long)]

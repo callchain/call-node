@@ -319,8 +319,14 @@ impl NodeConfig {
         }
 
         // Storage
-        if args.data_dir != Self::default().storage.data_dir {
-            self.storage.data_dir.clone_from(&args.data_dir);
+        // Only override the loaded TOML value when the user actually passed
+        // `--data-dir` on the command line. The previous logic compared the
+        // CLI string `~/.callchain` against the home-expanded default and
+        // therefore *always* clobbered the per-config data_dir, which made
+        // every node in a multi-node devnet collide on a single database
+        // directory.
+        if let Some(ref dir) = args.data_dir {
+            self.storage.data_dir.clone_from(dir);
         }
         if let Some(cache) = args.db_cache_size {
             self.storage.db_cache_size = cache;
@@ -461,7 +467,7 @@ mod tests {
         assert_eq!(args.http_addr, "127.0.0.1:9545".parse().unwrap());
         assert_eq!(args.ws_addr, "127.0.0.1:9546".parse().unwrap());
         assert_eq!(args.rpc_max_connections, Some(200));
-        assert_eq!(args.data_dir, PathBuf::from("/tmp/callchain"));
+        assert_eq!(args.data_dir, Some(PathBuf::from("/tmp/callchain")));
         assert_eq!(args.db_cache_size, Some(2048));
         assert_eq!(args.metrics_addr, "0.0.0.0:9091".parse().unwrap());
         assert_eq!(args.log_level, "debug");

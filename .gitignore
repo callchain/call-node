@@ -8,3 +8,4 @@ tests/.nonce_state.json
 devnet/local/data/
 devnet/local/logs/
 devnet/local/run/
+~/

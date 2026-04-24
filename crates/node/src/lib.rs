@@ -360,17 +360,16 @@ impl CallNode {
                     //   1) `NetworkMessage::BlockAnnouncement` (bincode) — the
                     //      post-finalize broadcast emitted by validators in the
                     //      BFT event loop.
-                    //   2) A bincode-serialized `Block` — the BFT relay's
+                    //   2) A serde_json-serialized `Block` — the BFT relay's
                     //      block dissemination so peers can satisfy proposals
-                    //      under verification.
-                    // The receiver must use the *same* codec as the sender;
-                    // serde_json was used historically and silently dropped
-                    // every announcement (full nodes never learned to sync).
+                    //      under verification (see `CallRelay::broadcast`).
+                    // Each codec MUST match its sender; mixing them silently
+                    // dropped traffic in the past.
                     if let Ok(NetworkMessage::BlockAnnouncement(_)) =
                         bincode::deserialize::<NetworkMessage>(&data)
                     {
                         handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone);
-                    } else if let Ok(block) = bincode::deserialize::<Block>(&data) {
+                    } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
                         block_cache.lock().unwrap().insert(digest, block);
