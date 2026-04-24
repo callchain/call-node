@@ -336,7 +336,7 @@ impl CallNode {
                         if let Some(response) = handle_sync_request(&data_dir, &request) {
                             let resp_data = bincode::serialize(&NetworkMessage::SyncResponse(response))
                                 .expect("serialize sync response");
-                            net_clone.send_to(vec![peer_id], resp_data).await;
+                            net_clone.send_to(SYNC_CHANNEL, vec![peer_id], resp_data).await;
                         }
                     } else if let Ok(NetworkMessage::SyncResponse(response)) = bincode::deserialize(&data) {
                         // Apply blocks delivered by a peer in response to a SyncRequest.
@@ -356,10 +356,21 @@ impl CallNode {
                         }
                     }
                 } else if channel == BLOCK_CHANNEL {
-                    // Try BlockAnnouncement first (post-commit announcements)
-                    if let Ok(_announcement) = serde_json::from_slice::<BlockAnnouncement>(&data) {
+                    // Two valid payload kinds on this channel:
+                    //   1) `NetworkMessage::BlockAnnouncement` (bincode) — the
+                    //      post-finalize broadcast emitted by validators in the
+                    //      BFT event loop.
+                    //   2) A bincode-serialized `Block` — the BFT relay's
+                    //      block dissemination so peers can satisfy proposals
+                    //      under verification.
+                    // The receiver must use the *same* codec as the sender;
+                    // serde_json was used historically and silently dropped
+                    // every announcement (full nodes never learned to sync).
+                    if let Ok(NetworkMessage::BlockAnnouncement(_)) =
+                        bincode::deserialize::<NetworkMessage>(&data)
+                    {
                         handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone);
-                    } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
+                    } else if let Ok(block) = bincode::deserialize::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
                         block_cache.lock().unwrap().insert(digest, block);
@@ -2992,41 +3003,46 @@ fn handle_network_message(
             }
         }
         BLOCK_CHANNEL => {
-            // Handle block announcements (post-commit) — trigger sync if behind
-            if let Ok(announcement) = serde_json::from_slice::<BlockAnnouncement>(data) {
-                let local_height = state.get_current_block();
-                if announcement.height > local_height {
-                    tracing::info!(
-                        peer_id,
-                        height = announcement.height,
-                        local = local_height,
-                        "block announcement: peer ahead, requesting sync"
-                    );
-                    let request = SyncRequest {
-                        start_height: local_height,
-                        // Smaller batch (was 100) to keep SyncResponse messages
-                        // well under the 10 MB max_message_size and reduce the
-                        // chance of a single slow batch stalling sync. The
-                        // sender will keep issuing further requests as new
-                        // BlockAnnouncements arrive.
-                        count: 20,
-                        full_state: false,
-                    };
-                    let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
-                        .expect("serialize sync request");
-                    let peer_id_owned = peer_id.to_string();
-                    let net = Arc::clone(network);
-                    tokio::spawn(async move {
-                        net.send_to(vec![peer_id_owned], req_data).await;
-                    });
-                } else {
-                    tracing::debug!(
-                        peer_id,
-                        height = announcement.height,
-                        local = local_height,
-                        "block announcement: already caught up"
-                    );
-                }
+            // Handle block announcements (post-commit) — trigger sync if behind.
+            // The sender wraps the announcement in `NetworkMessage::BlockAnnouncement`
+            // and uses bincode (see the BFT event-loop broadcast path); the
+            // receiver MUST use the same codec to deserialize.
+            let announcement = match bincode::deserialize::<NetworkMessage>(data) {
+                Ok(NetworkMessage::BlockAnnouncement(a)) => a,
+                _ => return,
+            };
+            let local_height = state.get_current_block();
+            if announcement.height > local_height {
+                tracing::info!(
+                    peer_id,
+                    height = announcement.height,
+                    local = local_height,
+                    "block announcement: peer ahead, requesting sync"
+                );
+                let request = SyncRequest {
+                    start_height: local_height,
+                    // Smaller batch (was 100) to keep SyncResponse messages
+                    // well under the 10 MB max_message_size and reduce the
+                    // chance of a single slow batch stalling sync. The
+                    // sender will keep issuing further requests as new
+                    // BlockAnnouncements arrive.
+                    count: 20,
+                    full_state: false,
+                };
+                let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
+                    .expect("serialize sync request");
+                let peer_id_owned = peer_id.to_string();
+                let net = Arc::clone(network);
+                tokio::spawn(async move {
+                    net.send_to(SYNC_CHANNEL, vec![peer_id_owned], req_data).await;
+                });
+            } else {
+                tracing::debug!(
+                    peer_id,
+                    height = announcement.height,
+                    local = local_height,
+                    "block announcement: already caught up"
+                );
             }
         }
         SYNC_CHANNEL => {
@@ -3071,7 +3087,7 @@ fn handle_network_message(
                                     sources: vec!["local_oracle".into()],
                                 };
                                 if let Ok(msg) = bincode::serialize(&NetworkMessage::OraclePriceSubmission(submission)) {
-                                    net_clone.send_to(vec![peer_id_owned.clone()], msg).await;
+                                    net_clone.send_to(ORACLE_CHANNEL, vec![peer_id_owned.clone()], msg).await;
                                 }
                             }
                         }

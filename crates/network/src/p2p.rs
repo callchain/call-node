@@ -197,8 +197,13 @@ pub trait Network: Send + Sync + 'static {
     /// Send a message to all connected peers
     async fn broadcast(&self, channel: u64, message: Vec<u8>);
 
-    /// Send a message to specific peers
-    async fn send_to(&self, peers: Vec<String>, message: Vec<u8>);
+    /// Send a message to specific peers on the given channel.
+    ///
+    /// Like `broadcast`, the channel byte is prepended to the payload so the
+    /// receiving node's dispatch loop (`decode_with_channel`) routes the
+    /// message to the correct handler. Forgetting the channel here used to
+    /// silently drop SyncRequest/SyncResponse traffic on the floor.
+    async fn send_to(&self, channel: u64, peers: Vec<String>, message: Vec<u8>);
 
     /// Receive messages from the network
     async fn receive(&self) -> Result<(String, u64, Vec<u8>), NetworkError>;
@@ -812,7 +817,7 @@ impl Network for CommonwareNetwork {
         let _ = sender.send(Recipients::All, buf, false).await;
     }
 
-    async fn send_to(&self, peers: Vec<String>, message: Vec<u8>) {
+    async fn send_to(&self, channel: u64, peers: Vec<String>, message: Vec<u8>) {
         if peers.is_empty() {
             return;
         }
@@ -836,7 +841,12 @@ impl Network for CommonwareNetwork {
             Recipients::Some(pub_keys)
         };
 
-        let buf = IoBuf::copy_from_slice(&message);
+        // IMPORTANT: prepend the channel byte (matches `broadcast`) so the
+        // receiver can decode and dispatch on the correct channel. Without
+        // this, SyncResponse / SyncRequest / OraclePriceSubmission payloads
+        // were arriving with a garbage leading byte and being dropped.
+        let data = encode_with_channel(channel, &message);
+        let buf = IoBuf::copy_from_slice(&data);
         let _ = sender.send(recipients, buf, false).await;
     }
 
@@ -1012,10 +1022,10 @@ impl Network for InMemoryNetwork {
         }
     }
 
-    async fn send_to(&self, peers: Vec<String>, message: Vec<u8>) {
+    async fn send_to(&self, channel: u64, peers: Vec<String>, message: Vec<u8>) {
         if let Ok(mut buffer) = self.message_buffer.lock() {
             for peer in &peers {
-                buffer.push((peer.clone(), 0, message.clone()));
+                buffer.push((peer.clone(), channel, message.clone()));
             }
         }
     }
