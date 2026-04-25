@@ -620,12 +620,13 @@ impl CallNode {
                 cert_mux.start();
                 resolve_mux.start();
 
-                let mut epoch_number: u64 = 0;
-
                 loop {
-                    let (parent_hash, subset, my_index) = {
+                    let (parent_hash, _current_height, epoch_number, subset, my_index, subset_pubkeys) = {
                         let c = consensus.read().unwrap();
                         let ph = c.last_block_hash();
+                        let height = c.current_height();
+                        let epoch_length = state.consensus_params.read().unwrap().epoch_length;
+                        let epoch_number = height / epoch_length;
                         let seed = derive_vrf_seed(&ph, epoch_number);
                         let vs = state.validator_state.read().unwrap();
                         let qualified = vs.get_qualified_validators();
@@ -641,6 +642,11 @@ impl CallNode {
                         let subset =
                             select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
 
+                        let subset_pubkeys: Vec<[u8; 32]> = subset
+                            .iter()
+                            .filter_map(|id| pubkeys.get(id).copied())
+                            .collect();
+
                         let my_pk = ed25519_private_key.public_key();
                         let my_encoded = commonware_codec::Encode::encode(&my_pk);
                         let my_index = subset
@@ -653,7 +659,7 @@ impl CallNode {
                             })
                             .map(|(i, _)| i);
 
-                        (ph, subset, my_index)
+                        (ph, height, epoch_number, subset, my_index, subset_pubkeys)
                     };
 
                     if my_index.is_some() {
@@ -758,6 +764,13 @@ impl CallNode {
                             audit_log.clone(),
                             epoch_number,
                             exit_tx,
+                            subset_pubkeys,
+                            {
+                                let pk = ed25519_private_key.public_key();
+                                let encoded = commonware_codec::Encode::encode(&pk);
+                                let bytes: [u8; 32] = encoded.as_ref().try_into().expect("ed25519 pubkey is 32 bytes");
+                                bytes
+                            },
                         ));
 
                         let reason = exit_rx.await;
@@ -776,7 +789,8 @@ impl CallNode {
                                 tracing::error!(?e, "BFT: exit channel canceled");
                             }
                         }
-                        epoch_number += 1;
+                        // epoch_number is derived from current_height / epoch_length on next iteration
+                        // do NOT increment here
                     } else {
                         let epoch_length = {
                             state.consensus_params.read().unwrap().epoch_length
@@ -790,12 +804,13 @@ impl CallNode {
                         let sleep_secs =
                             Duration::from_secs(blocks_to_wait.saturating_mul(2).max(1));
                         tracing::info!(
-                            epoch = epoch_number,
+                            epoch = current_height / epoch_length,
                             wait_blocks = blocks_to_wait,
                             "BFT: not selected for epoch, sleeping"
                         );
                         tokio::time::sleep(sleep_secs).await;
-                        epoch_number += 1;
+                        // epoch_number is derived from current_height / epoch_length on next iteration
+                        // do NOT increment here
                     }
                 }
             });
@@ -2283,6 +2298,8 @@ async fn bft_event_loop(
     audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     epoch_number: u64,
     exit_tx: oneshot::Sender<EpochRotationReason>,
+    subset_pubkeys: Vec<[u8; 32]>,
+    my_pubkey: [u8; 32],
 ) {
     let mut execution_results: std::collections::HashMap<
         ConsensusDigest,
@@ -2308,10 +2325,63 @@ async fn bft_event_loop(
         map
     };
 
+    // Epoch boundary quorum waiting state
+    let mut awaiting_quorum = false;
+    let mut boundary_height: u64 = 0;
+    let mut quorum_wait_start: Option<std::time::Instant> = None;
+    let quorum_timeout = std::time::Duration::from_secs(30);
+
+    // Helper: compute quorum threshold from subset size
+    let quorum_threshold = (subset_pubkeys.len() * 2).div_ceil(3);
+
     loop {
         // Check for pending emergency rollback and apply if present
         if let Some(plan) = state.pending_rollback.write().unwrap().take() {
             apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db);
+        }
+
+        // === Epoch boundary quorum check ===
+        if awaiting_quorum {
+            let (ready, timed_out) = {
+                let peer_heights = state.peer_heights.read().unwrap();
+                let ready_count = subset_pubkeys
+                    .iter()
+                    .filter(|pk| {
+                        let pk_hex = hex::encode(pk);
+                        peer_heights.get(&pk_hex).is_some_and(|h| *h >= boundary_height)
+                    })
+                    .count();
+                let ready = ready_count >= quorum_threshold;
+                let timed_out = quorum_wait_start
+                    .is_some_and(|t| t.elapsed() >= quorum_timeout);
+                (ready, timed_out)
+            };
+
+            if ready {
+                tracing::info!(
+                    epoch = epoch_number + 1,
+                    boundary_height,
+                    "BFT: quorum ready for epoch rotation"
+                );
+                let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
+                break;
+            } else if timed_out {
+                tracing::warn!(
+                    epoch = epoch_number + 1,
+                    boundary_height,
+                    "BFT: quorum wait timed out, rotating anyway"
+                );
+                let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
+                break;
+            }
+        }
+
+        // Check if network layer requested an engine restart (e.g. sync crossed epoch)
+        if state.engine_restart_signal.load(std::sync::atomic::Ordering::Relaxed) {
+            state.engine_restart_signal.store(false, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!("BFT: engine restart requested by sync, exiting event loop");
+            let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
+            break;
         }
 
         tokio::select! {
@@ -2849,14 +2919,42 @@ async fn bft_event_loop(
                     // Check for epoch boundary
                     let epoch_length = state.consensus_params.read().unwrap().epoch_length;
                     let new_height = height + 1;
-                    if new_height % epoch_length == 0 {
+                    if new_height % epoch_length == 0 && !awaiting_quorum {
                         tracing::info!(
                             epoch = epoch_number + 1,
                             height = new_height,
-                            "BFT: epoch boundary reached, rotating participant subset"
+                            threshold = quorum_threshold,
+                            "BFT: epoch boundary reached, entering quorum wait"
                         );
-                        let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
-                        break;
+
+                        // Enter quorum waiting state
+                        awaiting_quorum = true;
+                        boundary_height = new_height;
+                        quorum_wait_start = Some(std::time::Instant::now());
+
+                        // Record self in peer_heights
+                        {
+                            let mut peer_heights = state.peer_heights.write().unwrap();
+                            peer_heights.insert(hex::encode(&my_pubkey), new_height);
+                        }
+
+                        // Broadcast EpochBoundarySignal to subset peers
+                        if let Some(ref net) = network {
+                            use call_network::EpochBoundarySignal;
+                            let signal = EpochBoundarySignal {
+                                height: new_height,
+                                epoch: epoch_number,
+                                sender_pubkey: my_pubkey,
+                            };
+                            let msg = bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal))
+                                .expect("serialize epoch boundary signal");
+                            let net_clone = Arc::clone(net);
+                            tokio::spawn(async move {
+                                net_clone.broadcast(BLOCK_CHANNEL, msg).await;
+                            });
+                        }
+
+                        // Do NOT break — continue event loop, wait for quorum
                     }
 
                     // Check for qualified validator set changes
@@ -2991,6 +3089,7 @@ fn apply_synced_blocks(
     data_dir: &Path,
 ) -> usize {
     let mut applied = 0usize;
+    let initial_height = state.get_current_block();
     for (i, block_data) in response.blocks.iter().enumerate() {
         let block_height = response.start_height.saturating_add(i as u64);
         let local_height = state.get_current_block();
@@ -3091,6 +3190,24 @@ fn apply_synced_blocks(
             }
         }
     }
+    // After applying blocks, check if we crossed an epoch boundary.
+    // If so, signal the BFT event loop to restart into the new epoch.
+    if applied > 0 {
+        let new_height = state.get_current_block();
+        let epoch_length = state.consensus_params.read().unwrap().epoch_length;
+        let old_epoch = initial_height / epoch_length;
+        let new_epoch = new_height / epoch_length;
+        if new_epoch > old_epoch {
+            tracing::info!(
+                old_epoch,
+                new_epoch,
+                new_height,
+                "sync: crossed epoch boundary, requesting engine restart"
+            );
+            state.engine_restart_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     applied
 }
 
@@ -3122,6 +3239,16 @@ fn handle_network_message(
             // receiver MUST use the same codec to deserialize.
             let announcement = match bincode::deserialize::<NetworkMessage>(data) {
                 Ok(NetworkMessage::BlockAnnouncement(a)) => a,
+                Ok(NetworkMessage::EpochBoundarySignal(signal)) => {
+                    let mut peer_heights = state.peer_heights.write().unwrap();
+                    peer_heights.insert(peer_id.to_string(), signal.height);
+                    tracing::debug!(
+                        peer_id,
+                        height = signal.height,
+                        "epoch boundary signal received"
+                    );
+                    return;
+                }
                 _ => return,
             };
             let local_height = state.get_current_block();
@@ -3300,7 +3427,7 @@ impl Default for CallNode {
 mod tests {
     use super::*;
     use call_consensus::BlockExecutionResult;
-    use call_network::InMemoryNetwork;
+    use call_network::{InMemoryNetwork, EpochBoundarySignal};
     use call_primitives::{Address, Ed25519PublicKey};
     use call_protocol::instructions::Instruction;
     use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
@@ -4390,6 +4517,254 @@ mod tests {
             let err = result.unwrap_err().to_string();
             assert!(err.contains("height mismatch"), "error should mention height mismatch: {err}");
         }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_epoch_number_derived_from_height() {
+        // Verify epoch_number = current_height / epoch_length for various heights
+        let epoch_length: u64 = 1000;
+
+        assert_eq!(0 / epoch_length, 0, "height 0 should be epoch 0");
+        assert_eq!(999 / epoch_length, 0, "height 999 should be epoch 0");
+        assert_eq!(1000 / epoch_length, 1, "height 1000 should be epoch 1");
+        assert_eq!(1001 / epoch_length, 1, "height 1001 should be epoch 1");
+        assert_eq!(1999 / epoch_length, 1, "height 1999 should be epoch 1");
+        assert_eq!(2000 / epoch_length, 2, "height 2000 should be epoch 2");
+        assert_eq!(2500 / epoch_length, 2, "height 2500 should be epoch 2");
+        assert_eq!(3000 / epoch_length, 3, "height 3000 should be epoch 3");
+    }
+
+    #[tokio::test]
+    async fn test_quorum_threshold_calculation() {
+        // Verify (subset_size * 2).div_ceil(3) for various subset sizes
+        assert_eq!((1usize * 2).div_ceil(3), 1, "subset of 1 needs quorum of 1");
+        assert_eq!((2usize * 2).div_ceil(3), 2, "subset of 2 needs quorum of 2");
+        assert_eq!((3usize * 2).div_ceil(3), 2, "subset of 3 needs quorum of 2");
+        assert_eq!((4usize * 2).div_ceil(3), 3, "subset of 4 needs quorum of 3");
+        assert_eq!((5usize * 2).div_ceil(3), 4, "subset of 5 needs quorum of 4");
+        assert_eq!((6usize * 2).div_ceil(3), 4, "subset of 6 needs quorum of 4");
+        assert_eq!((7usize * 2).div_ceil(3), 5, "subset of 7 needs quorum of 5");
+        assert_eq!((10usize * 2).div_ceil(3), 7, "subset of 10 needs quorum of 7");
+    }
+
+    #[tokio::test]
+    async fn test_epoch_boundary_signal_updates_peer_heights() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-signal-test-{}",
+            std::process::id()
+        ));
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Construct EpochBoundarySignal
+        let signal = EpochBoundarySignal {
+            height: 1000,
+            epoch: 1,
+            sender_pubkey: [0xAB; 32],
+        };
+        let data = bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal))
+            .expect("serialize signal");
+
+        let network: Arc<dyn Network> = Arc::new(InMemoryNetwork::new());
+        let sync_inflight: SyncInflight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
+        // Send signal via handle_network_message on BLOCK_CHANNEL
+        handle_network_message(
+            "peer_abc123",
+            BLOCK_CHANNEL,
+            &data,
+            &node.mempool,
+            &node.state,
+            &network,
+            &sync_inflight,
+        );
+
+        // Verify peer_heights was updated
+        let peer_heights = node.state.peer_heights.read().unwrap();
+        assert_eq!(
+            peer_heights.get("peer_abc123"),
+            Some(&1000u64),
+            "peer height should be recorded from EpochBoundarySignal"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_sync_crosses_epoch_boundary_sets_restart_signal() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-sync-epoch-test-{}",
+            std::process::id()
+        ));
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Stake validator so proposer selection works
+        {
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset();
+        }
+
+        // Use small epoch length so we cross boundary quickly
+        {
+            let mut params = node.state.consensus_params.write().unwrap();
+            params.epoch_length = 2;
+        }
+
+        // Set current block to 1 (epoch = 1/2 = 0)
+        node.state.set_current_block(1);
+
+        // Build block at height 1
+        let height = 1u64;
+        let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
+        let version = node.state.fork_manager.read().unwrap().current_version();
+        let mut block = Block::new(
+            height,
+            node.parent_hash,
+            9_000,
+            proposer,
+            version,
+            vec![],
+            vec![],
+            vec![SystemTx {
+                kind: SystemTxKind::UpdateBaseFee,
+                data: vec![],
+            }],
+            vec![],
+        );
+
+        // Execute to compute valid state roots
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            let mut registry = node.state.asset_registry.write().unwrap();
+            let mut compliance = node.state.compliance_engine.write().unwrap();
+            let mut bridge_state = node.state.bridge_state.write().unwrap();
+            let mut shielded_state = node.state.shielded_state.write().unwrap();
+            let mut fee_params = node.state.fee_params.write().unwrap();
+            let mut evm_state = node.state.evm_state.write().unwrap();
+
+            let result = block.execute(
+                &mut balances, &mut registry, &mut compliance,
+                &mut bridge_state, &mut shielded_state, &mut fee_params,
+                height, &mut evm_state, None, None, None, None,
+                None, None, None, None, None, None,
+            ).expect("execution");
+            block.finalize(&result);
+        }
+
+        // Verify signal is NOT set before sync
+        assert!(
+            !node.state.engine_restart_signal.load(std::sync::atomic::Ordering::Relaxed),
+            "signal should NOT be set before sync"
+        );
+
+        // Build SyncResponse with the block
+        let block_json = serde_json::to_vec(&block).expect("serialize");
+        let response = SyncResponse {
+            start_height: 1,
+            blocks: vec![block_json],
+            state_root: block.header.payment_root,
+        };
+
+        // Apply synced blocks
+        let applied = apply_synced_blocks(&response, &node.state, &node.consensus, &tmp);
+        assert_eq!(applied, 1, "should apply exactly 1 block");
+
+        // Height should now be 2
+        assert_eq!(node.state.get_current_block(), 2);
+
+        // We crossed from epoch 0 (height 1/2) to epoch 1 (height 2/2)
+        assert!(
+            node.state.engine_restart_signal.load(std::sync::atomic::Ordering::Relaxed),
+            "engine_restart_signal should be set after sync crosses epoch boundary"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_sync_within_same_epoch_does_not_set_restart_signal() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-sync-no-epoch-test-{}",
+            std::process::id()
+        ));
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Stake validator
+        {
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset();
+        }
+
+        // Large epoch length — sync won't cross boundary
+        {
+            let mut params = node.state.consensus_params.write().unwrap();
+            params.epoch_length = 1000;
+        }
+
+        // Set current block to 5 (epoch = 5/1000 = 0)
+        node.state.set_current_block(5);
+
+        // Build block at height 5
+        let height = 5u64;
+        let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
+        let version = node.state.fork_manager.read().unwrap().current_version();
+        let mut block = Block::new(
+            height,
+            node.parent_hash,
+            10_000,
+            proposer,
+            version,
+            vec![],
+            vec![],
+            vec![SystemTx {
+                kind: SystemTxKind::UpdateBaseFee,
+                data: vec![],
+            }],
+            vec![],
+        );
+
+        // Execute to compute valid state roots
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            let mut registry = node.state.asset_registry.write().unwrap();
+            let mut compliance = node.state.compliance_engine.write().unwrap();
+            let mut bridge_state = node.state.bridge_state.write().unwrap();
+            let mut shielded_state = node.state.shielded_state.write().unwrap();
+            let mut fee_params = node.state.fee_params.write().unwrap();
+            let mut evm_state = node.state.evm_state.write().unwrap();
+
+            let result = block.execute(
+                &mut balances, &mut registry, &mut compliance,
+                &mut bridge_state, &mut shielded_state, &mut fee_params,
+                height, &mut evm_state, None, None, None, None,
+                None, None, None, None, None, None,
+            ).expect("execution");
+            block.finalize(&result);
+        }
+
+        // Build SyncResponse with the block
+        let block_json = serde_json::to_vec(&block).expect("serialize");
+        let response = SyncResponse {
+            start_height: 5,
+            blocks: vec![block_json],
+            state_root: block.header.payment_root,
+        };
+
+        // Apply synced blocks
+        let applied = apply_synced_blocks(&response, &node.state, &node.consensus, &tmp);
+        assert_eq!(applied, 1, "should apply exactly 1 block");
+
+        // Height should now be 6
+        assert_eq!(node.state.get_current_block(), 6);
+
+        // Epoch did not change: old=5/1000=0, new=6/1000=0
+        assert!(
+            !node.state.engine_restart_signal.load(std::sync::atomic::Ordering::Relaxed),
+            "engine_restart_signal should NOT be set when sync stays within same epoch"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

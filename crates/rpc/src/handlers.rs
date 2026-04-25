@@ -60,6 +60,12 @@ pub struct RpcState {
     pub log_index: RwLock<HashMap<Address, Vec<(u64, TxHash, usize)>>>,
     /// Data directory for loading persisted blocks from disk.
     pub data_dir: RwLock<Option<PathBuf>>,
+    /// Peer → height tracking for epoch boundary quorum waiting.
+    /// Key is peer_id hex string, value is the highest finalized height reported.
+    pub peer_heights: Arc<RwLock<HashMap<String, u64>>>,
+    /// Set to true by the network layer when sync crosses an epoch boundary,
+    /// signaling the BFT event loop to restart the engine.
+    pub engine_restart_signal: AtomicBool,
 }
 
 impl RpcState {
@@ -114,6 +120,8 @@ impl RpcState {
             pending_rollback: RwLock::new(None),
             log_index: RwLock::new(HashMap::new()),
             data_dir: RwLock::new(None),
+            peer_heights: Arc::new(RwLock::new(HashMap::new())),
+            engine_restart_signal: AtomicBool::new(false),
         }
     }
 

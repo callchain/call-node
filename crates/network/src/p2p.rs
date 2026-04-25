@@ -46,6 +46,11 @@ pub enum NetworkMessage {
     UpgradeAnnouncement(UpgradeAnnouncement),
     /// Peer exchange — list of known peers for network discovery
     PeerExchange(PeerExchange),
+    /// Signal sent by a validator after finalizing an epoch boundary block
+    /// to coordinate epoch rotation across the subset.
+    EpochBoundarySignal(EpochBoundarySignal),
+    /// Internal request to restart the BFT engine (e.g. after sync crossed epoch)
+    EngineRestartRequest(EngineRestartRequest),
 }
 
 /// Transaction message for gossipsub propagation
@@ -163,6 +168,37 @@ impl PeerExchange {
     pub fn truncate(&mut self, max: usize) {
         self.peers.truncate(max);
     }
+}
+
+/// Signal sent by a validator after finalizing an epoch boundary block.
+/// Broadcast to the subset so peers can track quorum readiness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochBoundarySignal {
+    /// The epoch boundary height that was finalized
+    pub height: u64,
+    /// Current epoch number
+    pub epoch: u64,
+    /// Sender's Ed25519 public key (32 bytes)
+    pub sender_pubkey: [u8; 32],
+}
+
+/// Reason for requesting an engine restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EngineRestartReason {
+    /// Sync applied blocks that crossed an epoch boundary
+    SyncCrossedEpoch,
+    /// Validator set changed and requires re-evaluation
+    ValidatorSetChange,
+}
+
+/// Internal request to restart the BFT engine.
+/// Sent from the network/sync task to the BFT event loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineRestartRequest {
+    /// Why the restart is needed
+    pub reason: EngineRestartReason,
+    /// Target epoch to restart into
+    pub target_epoch: u64,
 }
 
 /// Oracle price submission — signed price data from a validator
