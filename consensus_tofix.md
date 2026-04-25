@@ -182,7 +182,7 @@ The actual connectivity issue is caused by 12.4 (`allow_private_ips = false`), n
 
 以下是对每个问题的源码级根因分析及具体修复建议。
 
-### 12.1 Epoch 轮换后节点 epoch 不一致（Critical）
+### 12.1 Epoch 轮换后节点 epoch 不一致（Critical）✅ 已修复
 
 **源码定位：**
 
@@ -707,3 +707,409 @@ pub fn finalize(&mut self, result: &BlockExecutionResult) {
    - `test_commit_block_height_replay_protection` — 同一 block 重复 commit 被高度检查拒绝 ✅
 4. **State Root 校验测试**: 修改一个 state root 后验证 block 被拒绝 ✅（通过 `test_state_root_mismatch_rejects_block`）
 5. **Devnet 验证**: 待运行 6 节点 devnet 确认
+
+---
+
+## 15. Epoch Number 由链上高度推导 + Quorum 等待 — 修复 12.1 的完整方案 ✅ 已实现
+
+### 15.1 问题分析
+
+#### 15.1.1 方案 A（Quorum 等待）的局限性
+
+Quorum 等待的核心是：到达 epoch boundary 后不立刻换 epoch，而是等当前 subset 中 ≥2/3 节点 finalize 边界块后再统一退出。但它**无法解决落后节点恢复**。
+
+以 devnet 故障为例：
+- 4 个 validator，threshold = (4 × 2).div_ceil(3) = 3
+- 节点 2/3/4 到达 1000，3/4 ≥ 3，满足 quorum
+- 节点 1 卡在 773
+
+结果：2/3/4 照样换 epoch，节点 1 仍被抛下。**方案 A 只解决活跃节点之间的协调问题，不解决落后节点重新加入。**
+
+#### 15.1.2 根本问题：`epoch_number` 是本地计数器
+
+```rust
+let mut epoch_number: u64 = 0;
+loop {
+    let engine = Engine::new(..., Epoch::new(epoch_number), ...);
+    // event loop ...
+    epoch_number += 1;  // ← 只能 +1，不能跳！
+}
+```
+
+节点 1 sync 到 1000 后只能 `+= 1` → epoch 1。如果网络中其他节点因多走了几个 round 已经在 epoch 2，节点 1 永远追不上。
+
+#### 15.1.3 只用 A / 只用 B / A+B 对比
+
+| 方案 | 作用层级 | 解决什么 | 不解决什么 | 结果 |
+|------|---------|---------|-----------|------|
+| **只用 A** | event loop 内部 | 活跃节点统一退出时机 | 落后节点恢复 | 2/3/4 协调换 epoch，1 永远掉队 |
+| **只用 B** | 外层 loop | 新 Engine 用正确 epoch | 活跃节点分裂 | 1 能追上，但 2 换 epoch 时 3 还在旧 epoch，临时分裂 |
+| **A + B** | event loop + 外层 loop | 两者都解决 | — | 活跃节点协调退出，落后节点追上后跳到正确 epoch |
+
+**结论：A 和 B 作用于不同层级，天然互补，必须叠加。**
+
+---
+
+### 15.2 核心修复（方案 B）：epoch_number 由 `current_height` 推导
+
+**原则**：epoch 是高度的函数，不是本地状态。
+
+```rust
+let epoch_number = current_height / epoch_length;
+```
+
+| 节点 | 高度 | 计算出的 epoch |
+|------|------|---------------|
+| 节点 2/3/4 | 1000 | 1 |
+| 节点 1 | 773 | 0 |
+| 节点 1 sync 到 1000 后 | 1000 | 1 |
+
+VRF seed 也用同一 `epoch_number` 计算，所有同高度的节点选出同一 subset。
+
+---
+
+### 15.3 方案 A 完整实现：Quorum 等待 + `EpochBoundarySignal`
+
+#### 15.3.1 新增 P2P 消息：`EpochBoundarySignal`
+
+```rust
+// crates/network/src/p2p.rs
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochBoundarySignal {
+    /// 到达的边界高度
+    pub height: u64,
+    /// 当前 epoch 编号
+    pub epoch: u64,
+    /// 发送者的 Ed25519 公钥
+    pub sender_pubkey: [u8; 32],
+}
+
+// NetworkMessage 枚举新增变体
+pub enum NetworkMessage {
+    // ... 现有变体 ...
+    EpochBoundarySignal(EpochBoundarySignal),
+}
+```
+
+#### 15.3.2 `PeerFinalizationTracker`
+
+```rust
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use call_primitives::Ed25519PublicKey;
+
+#[derive(Debug)]
+struct PeerFinalizationTracker {
+    peer_heights: HashMap<Ed25519PublicKey, u64>,
+    subset_pubkeys: Vec<Ed25519PublicKey>,
+    boundary_height: u64,
+    wait_started_at: Option<Instant>,
+}
+
+impl PeerFinalizationTracker {
+    fn new(subset_pubkeys: Vec<Ed25519PublicKey>, boundary_height: u64) -> Self {
+        Self {
+            peer_heights: HashMap::new(),
+            subset_pubkeys,
+            boundary_height,
+            wait_started_at: None,
+        }
+    }
+
+    fn record_height(&mut self, peer: &Ed25519PublicKey, height: u64) {
+        self.peer_heights
+            .entry(*peer)
+            .and_modify(|h| *h = height.max(*h))
+            .or_insert(height);
+    }
+
+    fn is_quorum_ready(&self) -> bool {
+        let threshold = (self.subset_pubkeys.len() * 2).div_ceil(3);
+        let ready = self
+            .subset_pubkeys
+            .iter()
+            .filter(|pk| {
+                self.peer_heights
+                    .get(pk)
+                    .is_some_and(|h| *h >= self.boundary_height)
+            })
+            .count();
+        ready >= threshold
+    }
+
+    fn is_timed_out(&self, timeout: Duration) -> bool {
+        self.wait_started_at
+            .is_some_and(|t| t.elapsed() >= timeout)
+    }
+
+    fn start_waiting(&mut self) {
+        if self.wait_started_at.is_none() {
+            self.wait_started_at = Some(Instant::now());
+        }
+    }
+}
+```
+
+#### 15.3.3 信号发出时机
+
+**只有一个时刻：finalize handler 处理完 epoch boundary block 之后。**
+
+```rust
+Some(info) = finalize_rx.recv() => {
+    // ... 现有逻辑：执行 block、commit、persist ...
+
+    let new_height = height + 1;
+    let epoch_length = state.consensus_params.read().unwrap().epoch_length;
+
+    if new_height % epoch_length == 0 && !awaiting_quorum {
+        awaiting_quorum = true;
+
+        // 初始化 tracker，把自己算进去
+        let mut tracker = peer_tracker.write().unwrap();
+        let mut t = PeerFinalizationTracker::new(subset_pubkeys.clone(), new_height);
+        t.record_height(&my_pk, new_height);
+        t.start_waiting();
+        *tracker = Some(t);
+
+        // ===== 发出 EpochBoundarySignal =====
+        if let Some(ref net) = network {
+            let signal = EpochBoundarySignal {
+                height: new_height,
+                epoch: epoch_number,
+                sender_pubkey: my_pk_bytes,
+            };
+            let msg = bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal))
+                .expect("serialize");
+            let net_clone = Arc::clone(net);
+            tokio::spawn(async move {
+                net_clone.broadcast(BLOCK_CHANNEL, msg).await;
+            });
+        }
+
+        // 关键：不 break！Engine 继续运行，只是不再 propose
+        // 等待 quorum 达成或超时后再 break
+    }
+}
+```
+
+**为什么在这个时候发**：只有 finalize 了边界块，才**真正确认**自己到达了该高度。propose/verify 可能失败，不能提前发。
+
+#### 15.3.4 信号接收与 quorum 检查
+
+```rust
+// event loop 的 select! 中新增分支
+Some((peer_id, _channel, data)) = network_receive(network) => {
+    if let Ok(NetworkMessage::EpochBoundarySignal(signal)) = bincode::deserialize(&data) {
+        let mut tracker = peer_tracker.write().unwrap();
+        if let Some(ref mut t) = *tracker {
+            if signal.height == t.boundary_height {
+                if let Ok(pk_bytes) = hex::decode(&peer_id) {
+                    if let Ok(pk) = Ed25519PublicKey::try_from(pk_bytes.as_slice()) {
+                        t.record_height(&pk, signal.height);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 每次 loop 开头检查
+if awaiting_quorum {
+    let (ready, timed_out) = {
+        let tracker = peer_tracker.read().unwrap();
+        tracker.as_ref().map(|t| {
+            (t.is_quorum_ready(), t.is_timed_out(Duration::from_secs(30)))
+        }).unwrap_or((true, true))
+    };
+
+    if ready || timed_out {
+        let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
+        break;
+    }
+}
+```
+
+---
+
+### 15.4 方案 B 完整实现：epoch 由高度推导 + sync 跨 epoch 通知
+
+#### 15.4.1 外层 loop 删除 `epoch_number` 计数器
+
+```rust
+// 删除：let mut epoch_number: u64 = 0;
+
+loop {
+    let (parent_hash, current_height, subset, my_index) = {
+        let c = consensus.read().unwrap();
+        let ph = c.last_block_hash();
+        let height = c.current_height();
+        let epoch_length = state.consensus_params.read().unwrap().epoch_length;
+        let epoch_number = height / epoch_length;  // ← 由高度推导
+
+        let seed = derive_vrf_seed(&ph, epoch_number);
+        let vs = state.validator_state.read().unwrap();
+        let qualified = vs.get_qualified_validators();
+        let pubkeys = /* ... */;
+        let subset = select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
+        // ...
+        (ph, height, subset, my_index)
+    };
+
+    // 用推导出的 epoch_number 创建 Engine
+    let engine = Engine::new(..., Epoch::new(epoch_number), ...);
+    // ...
+}
+```
+
+#### 15.4.2 外层 loop 收到退出后不再 `+= 1`
+
+```rust
+let reason = exit_rx.await;
+match reason {
+    Ok(EpochRotationReason::EpochBoundary) |
+    Ok(EpochRotationReason::ValidatorSetChange) => {
+        // 不执行 epoch_number += 1
+        // loop 继续，下一次迭代根据 current_height 重新计算
+    }
+    Err(_) => { /* ... */ }
+}
+// loop continues
+```
+
+#### 15.4.3 sync 跨 epoch 后通知 Engine 退出
+
+```rust
+// start_network receive loop 中
+if ann.height > local_height + epoch_length / 2 {
+    let applied = apply_synced_blocks(&response, &state, &consensus, &data_dir);
+    if applied > 0 {
+        let new_local = state.get_current_block();
+        let new_epoch = new_local / epoch_length;
+        let old_epoch = local_height / epoch_length;
+
+        if new_epoch > old_epoch {
+            // 通过 broadcast_tx 通知 event loop
+            let _ = broadcast_tx.send(
+                bincode::serialize(&NetworkMessage::EngineRestartRequest {
+                    reason: EngineRestartReason::SyncCrossedEpoch,
+                    target_epoch: new_epoch,
+                }).unwrap()
+            );
+        }
+    }
+}
+```
+
+event loop 中处理：
+
+```rust
+Some(block_bytes) = broadcast_rx.recv() => {
+    if let Ok(NetworkMessage::EngineRestartRequest { reason, .. }) =
+        bincode::deserialize(&block_bytes)
+    {
+        tracing::info!(?reason, "BFT: restart requested by sync");
+        let _ = exit_tx.send(EpochRotationReason::SyncCatchUp);
+        break;
+    }
+    // 否则正常广播
+}
+```
+
+---
+
+### 15.5 A + B 叠加的完整时序
+
+#### 场景 1：活跃节点正常换 epoch
+
+```
+节点 2          节点 3          节点 4
+  |               |               |
+  | finalize 999  |               |
+  | new_height=1000               |
+  | awaiting=true |               |
+  | broadcast Signal(1000)        |
+  |------------->|  finalize 999  |
+  |              |  new_height=1000|
+  |  recv Signal  |  awaiting=true |
+  |  from node 3  |  broadcast Signal|
+  |              |  ------------->|
+  |  recv Signal  |  recv Signal   |
+  |  from node 4  |  from node 2   |
+  |              |                |
+  |  tracker: 3/4 ready           |
+  |  === QUORUM ===               |
+  |  exit_tx → break              |
+  |              |  exit_tx → break|
+  |              |                |
+  |  外层 loop: height=1000       |
+  |  epoch = 1000/1000 = 1        |
+  |  Engine::new(Epoch(1))        |
+```
+
+#### 场景 2：落后节点（节点 1）追赶
+
+```
+节点 1 (epoch 0, height 773)
+  |
+  |  收不到 2/3/4 的 BFT 消息（epoch mismatch）
+  |  但收到 BlockAnnouncement(height=1000+)
+  |
+  |  触发 sync，apply blocks
+  |  new_local = 1000
+  |  new_epoch = 1000/1000 = 1 > old_epoch 0
+  |
+  |  broadcast EngineRestartRequest
+  |  → event_loop 收到 → exit_tx → break
+  |
+  |  外层 loop: height=1000
+  |  epoch = 1
+  |  Engine::new(Epoch(1))   ← 和其他节点对齐
+```
+
+---
+
+### 15.6 延迟影响分析
+
+#### 250ms 延迟在方案 A 中的影响
+
+| 场景 | 影响 | 严重性 |
+|------|------|--------|
+| Engine 重启耗时 250ms | 新 epoch Engine 晚启动 250ms | 无。Simplex BFT `leader_timeout` 秒级，250ms 不触发 view skip |
+| quorum 信号传播延迟 250ms | block 1000 共识启动延迟 250ms | 无。boundary 触发时 block 1000 的共识**尚未开始**，只是晚启动 |
+| sync 应用 blocks 耗时 250ms | 节点 1 的 P2P task 阻塞 250ms | 无。`apply_synced_blocks` 在独立 task 中，不阻塞 event loop |
+
+**关键：方案 A 把 Engine 死时间变成了活时间。**
+
+当前代码（无 A）：
+```
+到达 1000 → break → Engine 死亡（250ms）→ 重启 → 开始 block 1000
+```
+250ms 里 Engine 不存在，votes/certificates 全丢。
+
+方案 A：
+```
+到达 1000 → awaiting_quorum → Engine 活着处理消息（250ms）→ break → 重启
+```
+Engine 在 waiting 期间正常处理 votes/certificates，只是不再 propose。
+
+---
+
+### 15.7 修改文件清单
+
+| 文件 | 修改内容 | 优先级 |
+|------|----------|--------|
+| `crates/network/src/p2p.rs` | 新增 `EpochBoundarySignal`、`EngineRestartRequest` 结构体 | P0 |
+| `crates/node/src/lib.rs` | 外层 loop 删除 `epoch_number` 计数器，改为 `height / epoch_length` 推导 | P0 |
+| `crates/node/src/lib.rs` | `bft_event_loop` 新增 `awaiting_quorum`、`peer_tracker`、`network` 参数；修改 finalize handler 进入 waiting 态；新增网络消息监听分支 | P0 |
+| `crates/node/src/lib.rs` | `start_network` receive loop 中 sync 跨 epoch 后发送 `EngineRestartRequest` | P1 |
+| `crates/rpc/src/handlers.rs` | `RpcState` 新增 `peer_tracker: Arc<RwLock<Option<PeerFinalizationTracker>>>` | P1 |
+
+---
+
+### 15.8 结论
+
+- **方案 A 单独不够**：quorum 等待协调活跃节点，但落后节点仍被抛下。
+- **方案 B 单独不够**：高度推导让落后节点能跳到正确 epoch，但活跃节点先到先换会导致临时分裂。
+- **A + B 叠加**：A 决定**何时退出**（协调活跃节点），B 决定**退出后创建什么**（落后节点能追上）。两者作用于不同层级，必须同时实施。
+- **250ms 延迟无害**：边界触发时下一个 block 的共识尚未开始，延迟只会轻微推迟启动，不会导致回滚或分裂。方案 A 的 waiting 态反而让 Engine 在延迟期间保持运行，比当前代码的死时间更安全。
