@@ -361,7 +361,7 @@ mod tests {
     fn setup_registry() -> AssetRegistry {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("TEST".into(), "Test".into(), 18, test_addr(1), 0, 100)
+            .register_asset("TEST".into(), "Test".into(), 18, test_addr(1), 0, 100, 0)
             .ok();
         registry
     }
@@ -538,7 +538,7 @@ mod tests {
         let config = BridgeConfig::default();
         let mut registry = setup_registry();
         // Register a second asset so asset_id=2 exists in registry
-        registry.register_asset("TEST2".into(), "Test2".into(), 18, test_addr(1), 0, 100).ok();
+        registry.register_asset("TEST2".into(), "Test2".into(), 18, test_addr(1), 0, 100, 0).ok();
         let owner = test_addr(1);
 
         agent_balances.grant_funds(owner, 0, asset_id, 500, &mut protocol_account).unwrap();

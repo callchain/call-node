@@ -52,11 +52,21 @@ impl IssuerState {
             return Err(ProtocolError::Unauthorized);
         }
 
+        // Reject frozen or delisted assets
+        if asset.status != crate::registry::AssetStatus::Active {
+            return Err(ProtocolError::AssetError(format!(
+                "asset is not active (status: {:?})",
+                asset.status
+            )));
+        }
+
         match action {
             IssuerAction::Mint { to, amount } => {
+                registry.mint_supply(asset_id, &caller, amount)?;
                 account.mint(asset_id, &caller, to, amount)?;
             }
             IssuerAction::Burn { from, amount } => {
+                registry.burn_supply(asset_id, &caller, amount)?;
                 account.burn(asset_id, from, amount)?;
             }
             IssuerAction::FreezeAddress { target } => {
@@ -186,7 +196,7 @@ mod tests {
     fn test_issuer_freeze_address() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100, 0)
             .unwrap();
         let id = 1;
 
@@ -212,7 +222,7 @@ mod tests {
     fn test_issuer_unfreeze_address() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100, 0)
             .unwrap();
         let id = 1;
 
@@ -263,7 +273,7 @@ mod tests {
     fn test_issuer_transfer_ownership() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100, 0)
             .unwrap();
 
         let mut issuer_state = IssuerState::new();
@@ -276,7 +286,7 @@ mod tests {
     fn test_non_issuer_cannot_freeze() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100)
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100, 0)
             .unwrap();
 
         let mut issuer_state = IssuerState::new();
@@ -298,10 +308,10 @@ mod tests {
     fn test_issuer_cannot_modify_other_assets() {
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("A".into(), "A".into(), 18, test_addr(1), 0, 100)
+            .register_asset("A".into(), "A".into(), 18, test_addr(1), 0, 100, 0)
             .unwrap();
         registry
-            .register_asset("B".into(), "B".into(), 18, test_addr(2), 0, 100)
+            .register_asset("B".into(), "B".into(), 18, test_addr(2), 0, 100, 0)
             .unwrap();
 
         // test_addr(1) owns asset 1, cannot mint on asset 2
@@ -330,5 +340,57 @@ mod tests {
         let result = compliance.check_compliance(&test_addr(1), crate::compliance::CompliancePolicy::None);
         assert!(result.is_ok()); // None policy = no checks
         // With OfacBlacklist, compliance would be enforced regardless of issuer
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_issuer_mint() {
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100, 0)
+            .unwrap();
+        registry.freeze_asset(1, &test_addr(1)).unwrap();
+
+        let mut issuer_state = IssuerState::new();
+        let mut account = AccountState::new();
+
+        let result = issuer_state.execute_issuer_action(
+            1,
+            test_addr(1),
+            IssuerAction::Mint {
+                to: test_addr(2),
+                amount: 100,
+            },
+            &mut registry,
+            &mut account,
+        );
+        assert!(result.is_err(), "issuer mint on frozen asset should fail");
+        assert!(result.unwrap_err().to_string().contains("not active"));
+    }
+
+    #[test]
+    fn test_delisted_asset_rejects_issuer_burn() {
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("X".into(), "X".into(), 18, test_addr(1), 0, 100, 0)
+            .unwrap();
+        registry.mint_supply(1, &test_addr(1), 1_000).unwrap();
+        registry.delist_asset(1, &test_addr(1)).unwrap();
+
+        let mut issuer_state = IssuerState::new();
+        let mut account = AccountState::new();
+        account.balances.set_balance(1, test_addr(2), 1_000).unwrap();
+
+        let result = issuer_state.execute_issuer_action(
+            1,
+            test_addr(1),
+            IssuerAction::Burn {
+                from: test_addr(2),
+                amount: 100,
+            },
+            &mut registry,
+            &mut account,
+        );
+        assert!(result.is_err(), "issuer burn on delisted asset should fail");
+        assert!(result.unwrap_err().to_string().contains("not active"));
     }
 }

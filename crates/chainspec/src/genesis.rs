@@ -318,21 +318,33 @@ impl GenesisExecutor {
                     Address::ZERO, // Genesis assets have no specific issuer
                     0,             // Default compliance policy
                     0,             // registered_at (genesis block)
+                    0,             // max_supply (uncapped for genesis assets)
                 )
                 .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
 
             // Distribute initial account
+            let mut total_allocated: Balance = 0;
             for (address_str, amount) in &asset.distribution {
                 let addr = parse_address(address_str)?;
                 account
                     .balances
                     .set_balance(asset.asset_id, addr, *amount)
                     .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
+                total_allocated = total_allocated
+                    .checked_add(*amount)
+                    .ok_or_else(|| GenesisError::ExecutionFailed("supply overflow".into()))?;
 
                 // If asset is CALL (asset_id 1), also set EVM balance
                 if asset.asset_id == 1 {
                     evm_state.set_balance(addr, U256::from(*amount));
                 }
+            }
+
+            // Set protocol_supply to total distributed amount
+            if total_allocated > 0 {
+                registry
+                    .mint_supply(asset.asset_id, &Address::ZERO, total_allocated)
+                    .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
             }
         }
         Ok(())
@@ -372,6 +384,7 @@ impl GenesisExecutor {
                         Address::ZERO,
                         0,
                         0, // registered_at (genesis block)
+                        0, // max_supply (uncapped for genesis fee currencies)
                     )
                     .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
             }
@@ -407,6 +420,9 @@ impl GenesisExecutor {
                     &asset.symbol,
                     asset.decimals,
                     call_protocol::BRIDGE_EVM_ADDRESS,
+                    Address::ZERO,
+                    alloy_primitives::U256::ZERO,
+                    alloy_primitives::U256::from(asset.asset_id),
                 )
                 .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
 

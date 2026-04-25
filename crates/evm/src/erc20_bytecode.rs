@@ -2,7 +2,7 @@
 //!
 //! Generated via: `solc --bin --optimize --optimize-runs 200 WrappedToken.sol`
 
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, U256};
 
 /// Hex-encoded init bytecode (constructor + runtime embedded).
 const INIT_BYTECODE_HEX: &str = include_str!("../contracts/WrappedToken.bin");
@@ -23,27 +23,33 @@ pub fn runtime_bytecode() -> Vec<u8> {
 }
 
 /// ABI-encode constructor args for WrappedToken:
-/// `(string name, string symbol, uint8 decimals, address bridge)`
+/// `(string name, string symbol, uint8 decimals, address bridge, address issuer, uint256 maxSupply, uint256 assetId)`
 pub fn build_erc20_init_code(
     name: &str,
     symbol: &str,
     decimals: u8,
     bridge: Address,
+    issuer: Address,
+    max_supply: U256,
+    asset_id: U256,
 ) -> Bytes {
     let name_len = name.len();
     let symbol_len = symbol.len();
 
-    // Head section: 4 * 32 = 128 bytes
-    // [0:32]   offset to name
-    // [32:64]  offset to symbol
-    // [64:96]  decimals
-    // [96:128] bridge address (left-padded to 32 bytes)
-    let name_offset: u32 = 128;
+    // Head section: 7 * 32 = 224 bytes
+    // [0:32]    offset to name
+    // [32:64]   offset to symbol
+    // [64:96]   decimals
+    // [96:128]  bridge address (left-padded to 32 bytes)
+    // [128:160] issuer address (left-padded to 32 bytes)
+    // [160:192] maxSupply (uint256)
+    // [192:224] assetId (uint256)
+    let name_offset: u32 = 224;
     let symbol_offset: u32 = name_offset + 32 + ((name_len as u32 + 31) / 32) * 32;
 
     let init = init_bytecode();
     let mut encoded = Vec::with_capacity(
-        init.len() + 128 + 64 + name_len + symbol_len + 64,
+        init.len() + 224 + 64 + name_len + symbol_len + 64,
     );
 
     // Init code
@@ -61,6 +67,14 @@ pub fn build_erc20_init_code(
     let mut bridge_bytes = [0u8; 32];
     bridge_bytes[12..].copy_from_slice(bridge.as_slice());
     encoded.extend_from_slice(&bridge_bytes);
+    // issuer address: left-padded to 32 bytes
+    let mut issuer_bytes = [0u8; 32];
+    issuer_bytes[12..].copy_from_slice(issuer.as_slice());
+    encoded.extend_from_slice(&issuer_bytes);
+    // maxSupply
+    encoded.extend_from_slice(&max_supply.to_be_bytes::<32>());
+    // assetId
+    encoded.extend_from_slice(&asset_id.to_be_bytes::<32>());
 
     // Name string
     u32_buf[28..32].copy_from_slice(&(name_len as u32).to_be_bytes());

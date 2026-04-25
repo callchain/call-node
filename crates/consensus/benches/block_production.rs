@@ -61,7 +61,7 @@ fn bench_block_execution(c: &mut Criterion) {
                     || {
                         let mut account = AccountState::new();
                         let mut registry = AssetRegistry::new();
-                        registry.register_asset("CALL".into(), "Call Token".into(), 18, Address::ZERO, 0, 0).unwrap();
+                        registry.register_asset("CALL".into(), "Call Token".into(), 18, Address::ZERO, 0, 0, 0).unwrap();
                         account.balances.set_balance(1, Address::repeat_byte(1), 1_000_000_000_000u128).unwrap();
                         let mut evm_state = EvmState::new();
                         let mut fee_params = call_protocol::transaction::FeeParams::default();

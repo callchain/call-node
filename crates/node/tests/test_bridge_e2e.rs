@@ -23,7 +23,7 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
     {
         let mut registry = node.state.asset_registry.write().unwrap();
         registry
-            .register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0)
+            .register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0)
             .unwrap();
     }
 
@@ -38,6 +38,9 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
             "TST",
             18,
             bridge,
+            sender,
+            alloy_primitives::U256::ZERO,
+            alloy_primitives::U256::from(1u64),
         )
         .unwrap();
     assert!(result.success, "ERC-20 deploy failed");

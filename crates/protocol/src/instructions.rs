@@ -77,11 +77,7 @@ pub enum Instruction {
         symbol: String,
         name: String,
         decimals: u8,
-    },
-    /// Link an existing protocol asset to a custom EVM ERC-20 contract
-    RegisterEvmBridge {
-        asset_id: AssetId,
-        evm_contract_address: Address,
+        max_supply: Balance,
     },
     /// Bridge protocol balance to EVM (native CALL or ERC-20 wrapped asset)
     BridgeToEvm {
@@ -89,8 +85,14 @@ pub enum Instruction {
         to: Address,
         amount: Balance,
     },
-    /// Withdraw EVM balance back to protocol (native CALL or ERC-20 wrapped asset)
-    WithdrawFromEvm {
+    /// Bridge EVM balance back to protocol (native CALL or ERC-20 wrapped asset)
+    BridgeToProtocol {
+        asset_id: AssetId,
+        to: Address,
+        amount: Balance,
+    },
+    /// Mint wrapped ERC-20 tokens directly on EVM (issuer only)
+    EvmIssuerMint {
         asset_id: AssetId,
         to: Address,
         amount: Balance,
@@ -348,6 +350,23 @@ pub fn execute_protocol_instructions(
     Ok(results)
 }
 
+/// Check if an asset is active (not frozen or delisted).
+/// Returns an error if the asset is frozen or delisted.
+fn check_asset_active(registry: &AssetRegistry, asset_id: AssetId) -> ProtocolResult<()> {
+    let asset = registry
+        .get_asset(asset_id)
+        .ok_or(ProtocolError::AssetError("asset not found".into()))?;
+    match asset.status {
+        crate::registry::AssetStatus::Active => Ok(()),
+        crate::registry::AssetStatus::Frozen => Err(ProtocolError::AssetError(
+            "asset is frozen".into(),
+        )),
+        crate::registry::AssetStatus::Delisted => Err(ProtocolError::AssetError(
+            "asset is delisted".into(),
+        )),
+    }
+}
+
 /// Execute a single instruction
 pub fn execute_instruction(
     instruction: &Instruction,
@@ -374,6 +393,7 @@ pub fn execute_instruction(
             amount,
             memo,
         } => {
+            check_asset_active(registry, *asset_id)?;
             if let Some(m) = memo {
                 m.validate()?;
             }
@@ -385,6 +405,7 @@ pub fn execute_instruction(
             Ok(InstructionResult::Success)
         }
         Instruction::BatchTransfer { asset_id, payments } => {
+            check_asset_active(registry, *asset_id)?;
             let policy_id = registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0);
             compliance.check_compliance_by_policy_id(&sender, policy_id)?;
             for p in payments {
@@ -402,6 +423,7 @@ pub fn execute_instruction(
             spender,
             amount,
         } => {
+            check_asset_active(registry, *asset_id)?;
             account.allowances.set_allowance(*asset_id, sender, *spender, *amount);
             Ok(InstructionResult::Success)
         }
@@ -411,6 +433,7 @@ pub fn execute_instruction(
             to,
             amount,
         } => {
+            check_asset_active(registry, *asset_id)?;
             // Gap 6 — Check compliance for sender (spender), from, and to
             let policy_id = registry.get_asset(*asset_id).map(|a| a.compliance_policy).unwrap_or(0);
             compliance.check_compliance_by_policy_id(&sender, policy_id)?;
@@ -425,6 +448,7 @@ pub fn execute_instruction(
             to,
             amount,
         } => {
+            check_asset_active(registry, *asset_id)?;
             // Verify sender is the asset issuer
             let asset = registry
                 .get_asset(*asset_id)
@@ -442,6 +466,7 @@ pub fn execute_instruction(
             from,
             amount,
         } => {
+            check_asset_active(registry, *asset_id)?;
             // Verify sender is the asset issuer
             let asset = registry
                 .get_asset(*asset_id)
@@ -706,19 +731,14 @@ pub fn execute_instruction(
                 "RegisterAsset must be executed inline in Block::execute".into(),
             ))
         }
-        Instruction::RegisterEvmBridge { .. } => {
-            Err(ProtocolError::InvalidInstruction(
-                "RegisterEvmBridge must be executed inline in Block::execute".into(),
-            ))
-        }
         Instruction::BridgeToEvm { .. } => {
             Err(ProtocolError::InvalidInstruction(
                 "BridgeToEvm must be executed inline in Block::execute".into(),
             ))
         }
-        Instruction::WithdrawFromEvm { .. } => {
+        Instruction::BridgeToProtocol { .. } => {
             Err(ProtocolError::InvalidInstruction(
-                "WithdrawFromEvm must be executed inline in Block::execute".into(),
+                "BridgeToProtocol must be executed inline in Block::execute".into(),
             ))
         }
         Instruction::ValidatorStake { .. } => {
@@ -756,6 +776,11 @@ pub fn execute_instruction(
                 "SubmitRollbackSignature must be executed inline in Block::execute".into(),
             ))
         }
+        Instruction::EvmIssuerMint { .. } => {
+            Err(ProtocolError::InvalidInstruction(
+                "EvmIssuerMint must be executed inline in Block::execute".into(),
+            ))
+        }
     }
 }
 
@@ -783,6 +808,9 @@ mod tests {
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
         let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, test_addr(1), 0, 0, 0)
+            .unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -819,6 +847,9 @@ mod tests {
             .set_balance(1, test_addr(1), 3000)
             .unwrap();
         let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, test_addr(1), 0, 0, 0)
+            .unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -862,6 +893,9 @@ mod tests {
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
         let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, test_addr(1), 0, 0, 0)
+            .unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 
@@ -901,7 +935,7 @@ mod tests {
         let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100)
+            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100, 0)
             .unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
@@ -946,7 +980,7 @@ mod tests {
         let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100)
+            .register_asset("T".into(), "Test".into(), 18, test_addr(1), 0, 100, 0)
             .unwrap();
         account
             .balances
@@ -1072,6 +1106,9 @@ mod tests {
             .set_balance(1, test_addr(1), 1000)
             .unwrap();
         let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, test_addr(1), 0, 0, 0)
+            .unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut shielded_state = ShieldedState::new();
 

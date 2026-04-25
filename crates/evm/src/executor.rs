@@ -143,8 +143,7 @@ impl EvmExecutor {
     /// Deploy ERC-20 template contract for an asset.
     ///
     /// Uses pre-compiled `WrappedToken.sol` bytecode with ABI-encoded
-    /// constructor arguments. The deployed contract supports `transfer`,
-    /// `approve`, `transferFrom`, `balanceOf`, `bridgeMint`, and `bridgeBurn`.
+    /// constructor arguments `(name, symbol, decimals, bridge, issuer, maxSupply, assetId)`.
     pub fn deploy_erc20_template(
         &self,
         deployer: Address,
@@ -153,9 +152,12 @@ impl EvmExecutor {
         symbol: &str,
         decimals: u8,
         bridge: Address,
+        issuer: Address,
+        max_supply: U256,
+        asset_id: U256,
     ) -> Result<(Address, EvmExecutionResult), EvmError> {
         let init_code = crate::erc20_bytecode::build_erc20_init_code(
-            name, symbol, decimals, bridge,
+            name, symbol, decimals, bridge, issuer, max_supply, asset_id,
         );
 
         // Derive CREATE contract address from deployer + nonce
@@ -234,6 +236,42 @@ impl EvmExecutor {
         );
         let mut data = Vec::new();
         data.extend_from_slice(&selector[..]);
+        // ABI-encode uint256
+        data.extend_from_slice(&amount.to_be_bytes::<32>());
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: state.get_nonce(&caller),
+            gas_limit: 500_000,
+            gas_price: 10,
+            to: Some(contract),
+            value: U256::ZERO,
+            data: Bytes::from(data),
+            chain_id: self.chain_id,
+        };
+
+        self.execute_tx(tx, state)
+    }
+
+    /// Helper: EVM call for issuer mint operations on WrappedToken
+    pub fn evm_call_issuer_mint(
+        &self,
+        caller: Address,
+        contract: Address,
+        state: &mut EvmState,
+        to: Address,
+        amount: U256,
+    ) -> Result<EvmExecutionResult, EvmError> {
+        // keccak256("issuerMint(address,uint256)")[:4]
+        let selector: FixedBytes<4> = FixedBytes::from_slice(
+            &keccak256("issuerMint(address,uint256)")[..4],
+        );
+        let mut data = Vec::new();
+        data.extend_from_slice(&selector[..]);
+        // ABI-encode address (32 bytes, left-padded)
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[12..].copy_from_slice(to.as_slice());
+        data.extend_from_slice(&addr_bytes);
         // ABI-encode uint256
         data.extend_from_slice(&amount.to_be_bytes::<32>());
 
@@ -448,8 +486,9 @@ mod tests {
         let expected_addr = derive_create_address(deployer, 0);
 
         let bridge = test_addr(0xFF);
+        let issuer = test_addr(1);
         let (addr, result) = executor
-            .deploy_erc20_template(deployer, &mut state, "Test", "TST", 18, bridge)
+            .deploy_erc20_template(deployer, &mut state, "Test", "TST", 18, bridge, issuer, U256::from(0), U256::from(1))
             .unwrap();
         assert_eq!(addr, expected_addr);
         assert!(result.success, "ERC-20 deploy failed: gas_used={}, output={:?}", result.gas_used, result.output);

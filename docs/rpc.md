@@ -140,7 +140,7 @@ Each instruction in the `instructions` array must have a `"type"` field. Support
 | `ExternalBridgeDeposit` | `source_tx_hash`, `source_chain`, ... | 200,000 |
 | `ExternalBridgeWithdraw` | `target_chain`, `target_address`, ... | 200,000 |
 | `BridgeToEvm` | `asset_id`, `to`, `amount` | 25,000 |
-| `WithdrawFromEvm` | `asset_id`, `to`, `amount` | 25,000 |
+| `BridgeToProtocol` | `asset_id`, `to`, `amount` | 25,000 |
 | `ValidatorStake` | `ed25519_pubkey`, `self_stake` | 200,000 |
 | `ValidatorUnstake` | `validator_id` | 100,000 |
 | `ValidatorClaimUnbonded` | `validator_id` | 100,000 |

@@ -159,6 +159,7 @@ mod tests {
                 test_addr(1),
                 0, // compliance_policy: None
                 100, // registered_at
+                0, // max_supply (uncapped)
             )
             .ok();
         registry
@@ -230,6 +231,9 @@ mod tests {
                 "CALL",
                 18,
                 bridge,
+                test_addr(1),
+                alloy_primitives::U256::ZERO,
+                alloy_primitives::U256::from(1u64),
             )
             .unwrap();
         assert!(deploy_result.success);

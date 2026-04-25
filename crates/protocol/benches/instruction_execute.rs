@@ -21,7 +21,7 @@ fn setup_state() -> (AccountState, AssetRegistry, ComplianceEngine, ShieldedStat
     let shielded = ShieldedState::new();
 
     // Register CALL asset
-    registry.register_asset("CALL".into(), "Call Token".into(), 18, Address::ZERO, 0, 0).unwrap();
+    registry.register_asset("CALL".into(), "Call Token".into(), 18, Address::ZERO, 0, 0, 0).unwrap();
 
     // Seed sender balance
     let sender = Address::repeat_byte(1);

@@ -597,7 +597,7 @@ mod tests {
         let mut account = AccountState::new();
         account.balances.set_balance(1, test_sender(), 10_000_000).unwrap();
         let mut registry = AssetRegistry::new();
-        registry.register_asset("CALL".into(), "Callchain".into(), 18, test_sender(), 0, 0).unwrap();
+        registry.register_asset("CALL".into(), "Callchain".into(), 18, test_sender(), 0, 0, 0).unwrap();
         let mut compliance = ComplianceEngine::new();
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
@@ -615,6 +615,9 @@ mod tests {
                 "CALL",
                 18,
                 call_protocol::BRIDGE_EVM_ADDRESS,
+                test_sender(),
+                call_primitives::U256::ZERO,
+                call_primitives::U256::from(1u64),
             )
             .unwrap();
         assert!(deploy_result.success);

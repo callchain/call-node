@@ -22,7 +22,7 @@ Internal bridge operations are **atomic** and execute within a single block. If 
 │  │ (protocol)   │◄──────►│ (EVM layer)                  │  │
 │  └──────────────┘        └──────────────────────────────┘  │
 │         ▲                           ▲                       │
-│         │    BridgeToEvm            │   WithdrawFromEvm     │
+│         │    BridgeToEvm            │   BridgeToProtocol     │
 │         │    (deduct protocol       │   (burn ERC-20 /      │
 │         │     → mint ERC-20 or      │    deduct native       │
 │         │      set native balance)  │    → credit protocol)  │
@@ -87,7 +87,7 @@ pub enum Instruction {
         to: Address,
         amount: Balance,
     },
-    WithdrawFromEvm {
+    BridgeToProtocol {
         asset_id: AssetId,
         to: Address,
         amount: Balance,
@@ -97,7 +97,7 @@ pub enum Instruction {
 
 These instructions are **not** executed by the generic `execute_instruction` in `call_protocol`. Instead, they are recognized by `is_bridge_instruction` and routed to `execute_bridge_instruction` inside `Block::execute`, where they share the same inline execution logic as `BridgeOp` but with user-submitted transaction semantics (gas metering, nonce checks, signature verification).
 
-**Gas cost:** Both `BridgeToEvm` and `WithdrawFromEvm` cost **25,000 gas**.
+**Gas cost:** Both `BridgeToEvm` and `BridgeToProtocol` cost **25,000 gas**.
 
 ---
 
@@ -115,7 +115,7 @@ fn is_bridge_instruction(instr: &Instruction) -> bool {
         | Instruction::BridgeDeposit { .. }
         | Instruction::ChallengeBridgeDeposit { .. }
         | Instruction::BridgeToEvm { .. }
-        | Instruction::WithdrawFromEvm { .. }
+        | Instruction::BridgeToProtocol { .. }
     )
 }
 ```
@@ -147,7 +147,7 @@ Bridge instructions are extracted and executed via `execute_bridge_instruction`,
 9. **Record deposit** in `bridge_state`
 10. If EVM operation reverts → entire transaction fails, snapshot rollback restores protocol balance
 
-### WithdrawFromEvm Execution Flow
+### BridgeToProtocol Execution Flow
 
 1. **Reject asset_id == 0** (virtual USD)
 2. **Validate asset registered**
@@ -179,7 +179,7 @@ If any bridge instruction fails, all three states are restored:
 *bridge_state = bridge_snapshot;
 ```
 
-This ensures that a failed `BridgeToEvm` does not leave the user's protocol balance deducted without corresponding EVM credit, and a failed `WithdrawFromEvm` does not burn EVM tokens without protocol credit.
+This ensures that a failed `BridgeToEvm` does not leave the user's protocol balance deducted without corresponding EVM credit, and a failed `BridgeToProtocol` does not burn EVM tokens without protocol credit.
 
 ---
 
@@ -209,7 +209,7 @@ Submit a user-initiated bridge from protocol to EVM.
 }
 ```
 
-### `call_withdrawFromEvm`
+### `call_bridgeToProtocol`
 
 Submit a user-initiated withdrawal from EVM to protocol.
 
@@ -252,7 +252,7 @@ def sign_bridge_to_evm(
 ) -> dict:
     """Build a signed BridgeToEvm payload."""
 
-def sign_withdraw_from_evm(
+def sign_bridge_to_protocol(
     private_key: str,
     sender: str,
     nonce: int,
@@ -262,7 +262,7 @@ def sign_withdraw_from_evm(
     gas_limit: int = 25_000,
     max_fee: int = 250_000,
 ) -> dict:
-    """Build a signed WithdrawFromEvm payload."""
+    """Build a signed BridgeToProtocol payload."""
 ```
 
 Both helpers:
@@ -277,8 +277,8 @@ Both helpers:
 def bridge_to_evm(self, params: Dict) -> Dict:
     return self._call("call_bridgeToEvm", [params])
 
-def withdraw_from_evm(self, params: Dict) -> Dict:
-    return self._call("call_withdrawFromEvm", [params])
+def bridge_to_protocol(self, params: Dict) -> Dict:
+    return self._call("call_bridgeToProtocol", [params])
 ```
 
 ---
@@ -305,10 +305,10 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 |------|------|
 | `crates/bridge/src/deposit.rs` | `execute_deposit` — Protocol → EVM (BridgeOp::DepositToEvm) |
 | `crates/bridge/src/withdraw.rs` | `execute_withdraw` — EVM → Protocol (BridgeOp::WithdrawToProtocol) |
-| `crates/consensus/src/block.rs` | `execute_bridge_instruction` — inline execution for user BridgeToEvm / WithdrawFromEvm instructions |
-| `crates/protocol/src/instructions.rs` | `Instruction::BridgeToEvm` and `Instruction::WithdrawFromEvm` enum variants |
+| `crates/consensus/src/block.rs` | `execute_bridge_instruction` — inline execution for user BridgeToEvm / BridgeToProtocol instructions |
+| `crates/protocol/src/instructions.rs` | `Instruction::BridgeToEvm` and `Instruction::BridgeToProtocol` enum variants |
 | `crates/protocol/src/transaction.rs` | Gas cost assignment (25,000) for bridge instructions |
-| `crates/rpc/src/callchain.rs` | `call_bridgeToEvm` and `call_withdrawFromEvm` RPC handlers |
+| `crates/rpc/src/callchain.rs` | `call_bridgeToEvm` and `call_bridgeToProtocol` RPC handlers |
 | `tests/signer.py` | Python signing helpers for bridge instructions |
 | `tests/rpc_client.py` | Python RPC client methods for bridge endpoints |
 
@@ -324,5 +324,5 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 | Atomic rollback | Ready | Snapshot of account + evm_state + bridge_state before each tx; full restore on failure |
 | Rate limiting | Ready | Per-tx and daily limits enforced; auto-reset per `blocks_per_day` |
 | Bridge pause | Ready | Per-asset pause via `BridgeStateManager` |
-| User-facing RPC | Ready | `call_bridgeToEvm` and `call_withdrawFromEvm` with signature verification and mempool submission |
+| User-facing RPC | Ready | `call_bridgeToEvm` and `call_bridgeToProtocol` with signature verification and mempool submission |
 | E2E test helpers | Ready | Python signing and RPC wrappers in `tests/signer.py` and `tests/rpc_client.py` |

@@ -388,7 +388,7 @@ def sign_bridge_to_evm(
     }
 
 
-def sign_withdraw_from_evm(
+def sign_bridge_to_protocol(
     private_key: str,
     sender: str,
     nonce: int,
@@ -398,9 +398,9 @@ def sign_withdraw_from_evm(
     gas_limit: int = 25_000,
     max_fee: int = 250_000,
 ) -> dict:
-    """Build a signed WithdrawFromEvm payload for call_withdrawFromEvm RPC."""
+    """Build a signed BridgeToProtocol payload for call_bridgeToProtocol RPC."""
     instructions = [{
-        "WithdrawFromEvm": {
+        "BridgeToProtocol": {
             "asset_id": asset_id,
             "to": _norm_addr(to),
             "amount": amount,

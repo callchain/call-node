@@ -83,7 +83,7 @@ pub fn setup_asset(
     // Register CALL first so user assets get IDs >= 2 and don't collide with gas asset.
     if registry.get_asset(call_protocol::CALL_ASSET_ID).is_none() {
         registry
-            .register_asset("CALL".into(), "Callchain".into(), 18, issuer, 0, 100)
+            .register_asset("CALL".into(), "Callchain".into(), 18, issuer, 0, 100, 0)
             .ok();
     }
     let id = registry
@@ -94,6 +94,7 @@ pub fn setup_asset(
             issuer,
             0, // no compliance
             100, // registered_at
+            0, // max_supply (uncapped)
         )
         .unwrap();
     account.balances.set_balance(id, holder, initial).unwrap();

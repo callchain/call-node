@@ -185,8 +185,8 @@ class CallchainNode:
         """Bridge protocol balance to EVM via call_submit."""
         return self._call_submit(params)
 
-    def withdraw_from_evm(self, params: Dict) -> Dict:
-        """Withdraw EVM balance to protocol via call_submit."""
+    def bridge_to_protocol(self, params: Dict) -> Dict:
+        """Bridge EVM balance to protocol via call_submit."""
         return self._call_submit(params)
 
     # ── Validator ─────────────────────────────────────────────────────

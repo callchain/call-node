@@ -353,4 +353,288 @@ mod test_payment_flow_impl {
         }
         assert!(params.base_fee < congested_fee);
     }
+
+    // ── Frozen / Delisted Asset Restrictions ───────────────────────────────
+
+    #[test]
+    fn test_frozen_asset_rejects_transfer() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+        let receiver = addr(3);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "FROZEN", issuer, holder, 10_000);
+        registry.freeze_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            holder,
+            1,
+            vec![make_transfer(asset_id, receiver, 1_000)],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "transfer on frozen asset should fail");
+        assert!(result.unwrap_err().contains("frozen"));
+    }
+
+    #[test]
+    fn test_delisted_asset_rejects_transfer() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+        let receiver = addr(3);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "DELISTED", issuer, holder, 10_000);
+        registry.delist_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            holder,
+            1,
+            vec![make_transfer(asset_id, receiver, 1_000)],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "transfer on delisted asset should fail");
+        assert!(result.unwrap_err().contains("delisted"));
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_batch_transfer() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "FROZEN2", issuer, holder, 10_000);
+        registry.freeze_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            holder,
+            1,
+            vec![Instruction::BatchTransfer {
+                asset_id,
+                payments: vec![PaymentEntry {
+                    to: addr(3),
+                    amount: 1_000,
+                    memo: None,
+                }],
+            }],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "batch transfer on frozen asset should fail");
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_approve() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "FROZEN3", issuer, holder, 10_000);
+        registry.freeze_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            holder,
+            1,
+            vec![Instruction::Approve {
+                asset_id,
+                spender: addr(3),
+                amount: 1_000,
+            }],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "approve on frozen asset should fail");
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_transfer_from() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+        let spender = addr(3);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "FROZEN4", issuer, holder, 10_000);
+        account.allowances.set_allowance(asset_id, holder, spender, 5_000);
+        registry.freeze_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            spender,
+            1,
+            vec![Instruction::TransferFrom {
+                asset_id,
+                from: holder,
+                to: addr(4),
+                amount: 1_000,
+            }],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "transfer_from on frozen asset should fail");
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_mint() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "FROZEN5", issuer, holder, 0);
+        registry.freeze_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            issuer,
+            1,
+            vec![Instruction::Mint {
+                asset_id,
+                to: holder,
+                amount: 1_000,
+            }],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "mint on frozen asset should fail");
+    }
+
+    #[test]
+    fn test_delisted_asset_rejects_mint() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "DELISTED2", issuer, holder, 0);
+        registry.delist_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            issuer,
+            1,
+            vec![Instruction::Mint {
+                asset_id,
+                to: holder,
+                amount: 1_000,
+            }],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "mint on delisted asset should fail");
+        assert!(result.unwrap_err().contains("delisted"));
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_burn() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "FROZEN6", issuer, holder, 1_000);
+        registry.freeze_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            issuer,
+            1,
+            vec![Instruction::Burn {
+                asset_id,
+                from: holder,
+                amount: 500,
+            }],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "burn on frozen asset should fail");
+    }
+
+    #[test]
+    fn test_delisted_asset_rejects_burn() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "DELISTED3", issuer, holder, 1_000);
+        registry.delist_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            issuer,
+            1,
+            vec![Instruction::Burn {
+                asset_id,
+                from: holder,
+                amount: 500,
+            }],
+            GasConfig::SelfPay,
+        );
+        let result = execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params);
+        assert!(result.is_err(), "burn on delisted asset should fail");
+        assert!(result.unwrap_err().contains("delisted"));
+    }
+
+    #[test]
+    fn test_unfrozen_asset_allows_transfer() {
+        let mut account = AccountState::new();
+        let mut registry = AssetRegistry::new();
+        let mut compliance = ComplianceEngine::new();
+        let mut shielded_state = ShieldedState::new();
+        let fee_params = FeeParams::default();
+
+        let issuer = addr(1);
+        let holder = addr(2);
+        let receiver = addr(3);
+
+        let asset_id = setup_asset(&mut account, &mut registry, "UNFROZEN", issuer, holder, 10_000);
+        registry.freeze_asset(asset_id, &issuer).unwrap();
+        registry.unfreeze_asset(asset_id, &issuer).unwrap();
+
+        let tx = make_tx(
+            holder,
+            1,
+            vec![make_transfer(asset_id, receiver, 1_000)],
+            GasConfig::SelfPay,
+        );
+        execute_tx(&tx, &mut account, &mut registry, &mut compliance, &mut shielded_state, &fee_params).unwrap();
+        assert_eq!(account.get_balance(asset_id, &receiver), 1_000);
+    }
 }

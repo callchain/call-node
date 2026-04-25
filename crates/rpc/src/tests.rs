@@ -73,7 +73,9 @@ mod tests {
         // Register an asset
         let issuer = test_addr(1);
         let mut registry = state.asset_registry.write().unwrap();
-        let id = registry.register_asset("TEST".into(), "Test Token".into(), 18, issuer, 0, 0).unwrap();
+        let id = registry.register_asset("TEST".into(), "Test Token".into(), 18, issuer, 0, 0, 0).unwrap();
+        registry.mint_supply(id, &issuer, 5_000).unwrap();
+        registry.add_evm_supply(id, 3_000).unwrap();
         drop(registry);
 
         let info = state.get_asset_info(id).expect("asset info");
@@ -81,9 +83,29 @@ mod tests {
         assert_eq!(info.name, "Test Token");
         assert_eq!(info.decimals, 18);
         assert_eq!(info.issuer, issuer);
+        assert_eq!(info.protocol_supply, 5_000);
+        assert_eq!(info.evm_supply, 3_000);
+        assert_eq!(info.all_supply, 8_000);
+        assert_eq!(info.max_supply, 0);
+        assert_eq!(info.status, "Active");
 
         // Non-existent asset
         assert!(state.get_asset_info(999).is_none());
+    }
+
+    #[test]
+    fn test_rpc_call_asset_info_capped() {
+        let state = make_test_state();
+        let issuer = test_addr(1);
+        let mut registry = state.asset_registry.write().unwrap();
+        let id = registry.register_asset("CAPPED".into(), "Capped Token".into(), 18, issuer, 0, 0, 10_000).unwrap();
+        registry.freeze_asset(id, &issuer).unwrap();
+        drop(registry);
+
+        let info = state.get_asset_info(id).expect("asset info");
+        assert_eq!(info.max_supply, 10_000);
+        assert_eq!(info.status, "Frozen");
+        assert_eq!(info.all_supply, 0);
     }
 
     #[test]

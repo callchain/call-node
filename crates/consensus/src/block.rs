@@ -8,7 +8,7 @@ use call_governance::GovernanceManager;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion};
 use call_protocol::account::AccountState;
 use call_protocol::instructions::{execute_protocol_instructions, Instruction, InstructionResult};
-use call_protocol::registry::AssetRegistry;
+use call_protocol::registry::{AssetRegistry, AssetStatus};
 use call_protocol::transaction::ProtocolTransaction;
 use call_protocol::FeeParams;
 use call_shielded::ShieldedState;
@@ -616,6 +616,15 @@ impl Block {
         if let Some(config) = bridge_config {
             for op in &self.bridge_operations {
                 let asset_id = op.asset_id();
+                // Reject bridge ops on frozen or delisted assets
+                if let Some(asset) = registry.get_asset(asset_id) {
+                    if asset.status != AssetStatus::Active {
+                        return Err(ConsensusError::InvalidBlock(format!(
+                            "bridge op: asset {} is not active (status: {:?})",
+                            asset_id, asset.status
+                        )));
+                    }
+                }
                 let Some(contract_addr) = registry.get_evm_contract_address(asset_id) else {
                     // Asset has no deployed wrapped token — skip
                     continue;
@@ -654,6 +663,15 @@ impl Block {
 
                 match exec_result {
                     Ok(_) => {
+                        // Update EVM supply tracking in asset registry
+                        match op {
+                            BridgeOp::DepositToEvm { asset_id, amount, .. } => {
+                                let _ = registry.add_evm_supply(*asset_id, *amount);
+                            }
+                            BridgeOp::WithdrawToProtocol { asset_id, amount, .. } => {
+                                let _ = registry.sub_evm_supply(*asset_id, *amount);
+                            }
+                        }
                         bridge_state.add_pending_op(op.clone(), current_block_height);
                         result.bridge_op_count += 1;
                     }
@@ -777,7 +795,7 @@ fn execute_agent_instruction(
     account: &mut AccountState,
     evm_state: &mut EvmState,
     bridge_state: &mut call_bridge::BridgeStateManager,
-    registry: &AssetRegistry,
+    registry: &mut AssetRegistry,
     evm_executor: &EvmExecutor,
     current_block_height: u64,
     fee_params: &FeeParams,
@@ -950,6 +968,7 @@ fn execute_agent_instruction(
                 bridge_address, sender, current_block_height,
             ) {
                 Ok(exec) if exec.success => {
+                    let _ = registry.add_evm_supply(*asset_id, *amount);
                     agent_events.push(call_agent::AgentEvent {
                         event_type: call_agent::AgentEventType::AgentBridgeDeposit,
                         agent_id: *agent_id,
@@ -1067,10 +1086,7 @@ fn execute_agent_instruction(
 // ── Asset instruction helpers ─────────────────────────────────────────
 
 fn is_asset_instruction(instr: &Instruction) -> bool {
-    matches!(
-        instr,
-        Instruction::RegisterAsset { .. } | Instruction::RegisterEvmBridge { .. }
-    )
+    matches!(instr, Instruction::RegisterAsset { .. } | Instruction::EvmIssuerMint { .. })
 }
 
 fn execute_asset_instruction(
@@ -1088,6 +1104,7 @@ fn execute_asset_instruction(
             symbol,
             name,
             decimals,
+            max_supply,
         } => {
             // 1. Collect asset registration fee
             let fee = {
@@ -1110,7 +1127,7 @@ fn execute_asset_instruction(
 
             // 2. Register asset
             let asset_id = registry
-                .register_asset(symbol.clone(), name.clone(), *decimals, sender, 0, current_block_height)
+                .register_asset(symbol.clone(), name.clone(), *decimals, sender, 0, current_block_height, *max_supply)
                 .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterAsset: {e}")))?;
 
             // 3. Deploy EVM wrapped token via system deployer
@@ -1126,6 +1143,9 @@ fn execute_asset_instruction(
                     symbol,
                     *decimals,
                     call_protocol::BRIDGE_EVM_ADDRESS,
+                    sender,
+                    call_primitives::U256::from(*max_supply),
+                    call_primitives::U256::from(asset_id),
                 )
                 .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterAsset: ERC-20 deploy failed: {e:?}")))?;
 
@@ -1140,75 +1160,77 @@ fn execute_asset_instruction(
 
             Ok(InstructionResult::Success)
         }
-        Instruction::RegisterEvmBridge {
+        Instruction::EvmIssuerMint {
             asset_id,
-            evm_contract_address,
+            to,
+            amount,
         } => {
-            // 1. Verify asset exists
-            let asset = registry.get_asset(*asset_id).ok_or_else(|| {
+            // 1. Asset must exist and be active
+            let asset = registry
+                .get_asset(*asset_id)
+                .ok_or_else(|| {
+                    ConsensusError::InvalidBlock(format!(
+                        "EvmIssuerMint: asset {} not found",
+                        asset_id
+                    ))
+                })?;
+            if asset.status != AssetStatus::Active {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "EvmIssuerMint: asset {} is not active (status: {:?})",
+                    asset_id, asset.status
+                )));
+            }
+
+            // 2. Only issuer can mint
+            if asset.issuer != sender {
+                return Err(ConsensusError::InvalidBlock(
+                    "EvmIssuerMint: caller is not asset issuer".into(),
+                ));
+            }
+
+            // 3. CALL (asset_id == 1) has no wrapped ERC-20 contract
+            if *asset_id == call_protocol::CALL_ASSET_ID {
+                return Err(ConsensusError::InvalidBlock(
+                    "EvmIssuerMint: CALL asset has no EVM wrapped token".into(),
+                ));
+            }
+
+            // 4. Cap check (read-only on registry)
+            if asset.would_exceed_cap(*amount) {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "EvmIssuerMint: cap exceeded for asset {}",
+                    asset_id
+                )));
+            }
+
+            // 5. Must have an EVM contract address
+            let contract_addr = asset.evm_contract_address.ok_or_else(|| {
                 ConsensusError::InvalidBlock(format!(
-                    "RegisterEvmBridge: asset {} not registered",
+                    "EvmIssuerMint: no EVM contract registered for asset {}",
                     asset_id
                 ))
             })?;
 
-            // 2. Verify sender is the issuer
-            if asset.issuer != sender {
+            // 6. Execute EVM issuerMint
+            let amount_u256 = call_evm::U256::from(*amount);
+            let mint_result = evm_executor
+                .evm_call_issuer_mint(sender, contract_addr, evm_state, *to, amount_u256)
+                .map_err(|e| {
+                    ConsensusError::InvalidBlock(format!(
+                        "EvmIssuerMint: EVM call failed: {e:?}"
+                    ))
+                })?;
+
+            if !mint_result.success {
                 return Err(ConsensusError::InvalidBlock(
-                    "RegisterEvmBridge: only the asset issuer can register an EVM bridge".into(),
+                    "EvmIssuerMint: EVM issuerMint reverted".into(),
                 ));
             }
 
-            // 3. Check evm_contract_address is not already set
-            if asset.evm_contract_address.is_some() {
-                return Err(ConsensusError::InvalidBlock(
-                    "RegisterEvmBridge: EVM contract address already set".into(),
-                ));
-            }
-
-            // 4. Verify contract has code
-            let code = evm_state.get_code(evm_contract_address);
-            if code.is_empty() {
-                return Err(ConsensusError::InvalidBlock(
-                    "RegisterEvmBridge: no code at contract address".into(),
-                ));
-            }
-
-            // 5. Static call totalSupply() — reject if > 0
-            // selector for totalSupply(): 0x18160ddd
-            let tx = call_evm::EvmTransaction {
-                caller: sender,
-                nonce: evm_state.get_nonce(&sender),
-                gas_limit: 50_000,
-                gas_price: 10,
-                to: Some(*evm_contract_address),
-                value: call_primitives::U256::ZERO,
-                data: call_evm::Bytes::from(vec![0x18, 0x16, 0x0d, 0xdd]),
-                chain_id: evm_executor.chain_id,
-            };
-            let static_result = evm_executor
-                .execute_tx(tx, evm_state)
-                .map_err(|e| ConsensusError::InvalidBlock(format!("RegisterEvmBridge: static call failed: {e:?}")))?;
-
-            if !static_result.success {
-                return Err(ConsensusError::InvalidBlock(
-                    "RegisterEvmBridge: totalSupply() static call reverted".into(),
-                ));
-            }
-
-            if static_result.output.len() >= 32 {
-                let total_supply_bytes: [u8; 32] = static_result.output[..32].try_into().unwrap_or([0u8; 32]);
-                let total_supply = call_primitives::U256::from_be_bytes(total_supply_bytes);
-                if total_supply > call_primitives::U256::ZERO {
-                    return Err(ConsensusError::InvalidBlock(format!(
-                        "RegisterEvmBridge: totalSupply must be 0, got {}",
-                        total_supply
-                    )));
-                }
-            }
-
-            // 6. Bind contract address
-            registry.set_evm_contract_address(*asset_id, *evm_contract_address);
+            // 7. Update evm_supply (cap already verified)
+            registry
+                .add_evm_supply(*asset_id, *amount)
+                .map_err(|e| ConsensusError::InvalidBlock(format!("EvmIssuerMint: {e}")))?;
 
             Ok(InstructionResult::Success)
         }
@@ -1219,7 +1241,7 @@ fn execute_asset_instruction(
 // ── Bridge instruction helpers ────────────────────────────────────────
 
 fn is_bridge_instruction(instr: &Instruction) -> bool {
-    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ExternalBridgeWithdraw { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. } | Instruction::BridgeToEvm { .. } | Instruction::WithdrawFromEvm { .. })
+    matches!(instr, Instruction::ExternalBridgeDeposit { .. } | Instruction::ExternalBridgeWithdraw { .. } | Instruction::ChallengeBridgeDeposit { .. } | Instruction::BridgeDeposit { .. } | Instruction::BridgeToEvm { .. } | Instruction::BridgeToProtocol { .. })
 }
 
 fn execute_bridge_instruction(
@@ -1232,7 +1254,7 @@ fn execute_bridge_instruction(
     current_block_height: u64,
     evm_state: &mut call_evm::EvmState,
     evm_executor: &call_evm::EvmExecutor,
-    registry: &call_protocol::registry::AssetRegistry,
+    registry: &mut call_protocol::registry::AssetRegistry,
 ) -> Result<InstructionResult, ConsensusError> {
     match instruction {
         Instruction::ExternalBridgeDeposit {
@@ -1397,10 +1419,16 @@ fn execute_bridge_instruction(
             }
 
             // 2. Validate asset is registered
-            if registry.get_asset(*asset_id).is_none() {
-                return Err(ConsensusError::InvalidBlock(format!(
+            let asset = registry.get_asset(*asset_id).ok_or_else(|| {
+                ConsensusError::InvalidBlock(format!(
                     "BridgeToEvm: asset {} not registered",
                     asset_id
+                ))
+            })?;
+            if asset.status != AssetStatus::Active {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "BridgeToEvm: asset {} is not active (status: {:?})",
+                    asset_id, asset.status
                 )));
             }
 
@@ -1476,6 +1504,7 @@ fn execute_bridge_instruction(
             match exec_result {
                 Ok(execution) => {
                     if execution.success {
+                        let _ = registry.add_evm_supply(*asset_id, *amount);
                         bridge_state.record_deposit(*asset_id, *amount);
                         Ok(InstructionResult::Success)
                     } else {
@@ -1487,7 +1516,7 @@ fn execute_bridge_instruction(
                 Err(e) => Err(e),
             }
         }
-        Instruction::WithdrawFromEvm {
+        Instruction::BridgeToProtocol {
             asset_id,
             to,
             amount,
@@ -1495,22 +1524,28 @@ fn execute_bridge_instruction(
             // 1. Reject virtual USD (asset_id == 0)
             if *asset_id == 0 {
                 return Err(ConsensusError::InvalidBlock(
-                    "WithdrawFromEvm: asset 0 (USD) is not bridgeable".into(),
+                    "BridgeToProtocol: asset 0 (USD) is not bridgeable".into(),
                 ));
             }
 
             // 2. Validate asset is registered
-            if registry.get_asset(*asset_id).is_none() {
-                return Err(ConsensusError::InvalidBlock(format!(
-                    "WithdrawFromEvm: asset {} not registered",
+            let asset = registry.get_asset(*asset_id).ok_or_else(|| {
+                ConsensusError::InvalidBlock(format!(
+                    "BridgeToProtocol: asset {} not registered",
                     asset_id
+                ))
+            })?;
+            if asset.status != AssetStatus::Active {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "BridgeToProtocol: asset {} is not active (status: {:?})",
+                    asset_id, asset.status
                 )));
             }
 
             // 3. Check bridge not paused
             if bridge_state.is_paused(*asset_id) {
                 return Err(ConsensusError::InvalidBlock(format!(
-                    "WithdrawFromEvm: bridge paused for asset {}",
+                    "BridgeToProtocol: bridge paused for asset {}",
                     asset_id
                 )));
             }
@@ -1518,7 +1553,7 @@ fn execute_bridge_instruction(
             // 4. Check per-tx limit
             bridge_state
                 .check_per_tx_limit(*amount, config.max_per_tx)
-                .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e}")))?;
+                .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToProtocol: {e}")))?;
 
             // 5. Check daily limit
             bridge_state
@@ -1529,7 +1564,7 @@ fn execute_bridge_instruction(
                     current_block_height,
                     config.blocks_per_day,
                 )
-                .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e}")))?;
+                .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToProtocol: {e}")))?;
 
             let amount_u256 = call_evm::U256::from(*amount);
 
@@ -1539,7 +1574,7 @@ fn execute_bridge_instruction(
                 let evm_balance = evm_state.get_balance(&sender);
                 if evm_balance < amount_u256 {
                     return Err(ConsensusError::InvalidBlock(format!(
-                        "WithdrawFromEvm: insufficient EVM native balance for CALL: have {}, need {}",
+                        "BridgeToProtocol: insufficient EVM native balance for CALL: have {}, need {}",
                         evm_balance, amount_u256
                     )));
                 }
@@ -1554,7 +1589,7 @@ fn execute_bridge_instruction(
                 // User-defined asset: burn ERC-20 wrapped token
                 let Some(contract_addr) = registry.get_evm_contract_address(*asset_id) else {
                     return Err(ConsensusError::InvalidBlock(format!(
-                        "WithdrawFromEvm: no EVM contract registered for asset {}",
+                        "BridgeToProtocol: no EVM contract registered for asset {}",
                         asset_id
                     )));
                 };
@@ -1565,7 +1600,7 @@ fn execute_bridge_instruction(
                         evm_state,
                         amount_u256,
                     )
-                    .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e:?}")))
+                    .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToProtocol: {e:?}")))
             };
 
             match exec_result {
@@ -1574,12 +1609,13 @@ fn execute_bridge_instruction(
                         // 7. Credit protocol balance
                         account
                             .credit_balance(*asset_id, *to, *amount)
-                            .map_err(|e| ConsensusError::InvalidBlock(format!("WithdrawFromEvm: {e}")))?;
+                            .map_err(|e| ConsensusError::InvalidBlock(format!("BridgeToProtocol: {e}")))?;
+                        let _ = registry.sub_evm_supply(*asset_id, *amount);
                         bridge_state.record_withdrawal(*asset_id, *amount);
                         Ok(InstructionResult::Success)
                     } else {
                         Err(ConsensusError::InvalidBlock(
-                            "WithdrawFromEvm: EVM operation reverted".into(),
+                            "BridgeToProtocol: EVM operation reverted".into(),
                         ))
                     }
                 }
@@ -2107,7 +2143,7 @@ mod tests {
             .unwrap();
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0)
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
             .unwrap();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000_000u128));
@@ -2123,6 +2159,9 @@ mod tests {
                 "CALL",
                 18,
                 call_protocol::BRIDGE_EVM_ADDRESS,
+                sender,
+                call_primitives::U256::ZERO,
+                call_primitives::U256::from(1u64),
             )
             .unwrap();
         assert!(deploy_result.success, "ERC-20 deploy failed");
@@ -2343,7 +2382,7 @@ mod tests {
 
         let mut registry = AssetRegistry::new();
         registry
-            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0)
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
             .unwrap();
         let mut compliance = call_protocol::compliance::ComplianceEngine::new();
         let mut bridge_state = call_bridge::BridgeStateManager::default();
@@ -2464,5 +2503,745 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(err_msg.contains("expired"), "expected expiry error, got: {err_msg}");
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_bridge_to_evm() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 0,
+            instructions: vec![Instruction::BridgeToEvm {
+                asset_id: call_protocol::CALL_ASSET_ID,
+                to: test_addr(2),
+                amount: 500,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut account = AccountState::new();
+        account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000).unwrap();
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        // Freeze CALL asset
+        registry.freeze_asset(call_protocol::CALL_ASSET_ID, &sender).unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
+        let bridge_config = call_bridge::BridgeConfig::default();
+
+        let validators: Vec<Address> = vec![sender];
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&bridge_config),
+            Some(&validators),
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err(), "BridgeToEvm on frozen asset should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("not active"), "expected not-active error, got: {err_msg}");
+    }
+
+    #[test]
+    fn test_delisted_asset_rejects_bridge_to_protocol() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 0,
+            instructions: vec![Instruction::BridgeToProtocol {
+                asset_id: call_protocol::CALL_ASSET_ID,
+                to: test_addr(2),
+                amount: 500,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 100_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut account = AccountState::new();
+        account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000).unwrap();
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        // Delist CALL asset
+        registry.delist_asset(call_protocol::CALL_ASSET_ID, &sender).unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        let bridge_config = call_bridge::BridgeConfig::default();
+
+        let validators: Vec<Address> = vec![sender];
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&bridge_config),
+            Some(&validators),
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err(), "BridgeToProtocol on delisted asset should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("not active"), "expected not-active error, got: {err_msg}");
+    }
+
+    #[test]
+    fn test_frozen_asset_rejects_bridge_op_deposit() {
+        let sender = test_addr(1);
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![],
+            vec![],
+            vec![],
+            vec![BridgeOp::DepositToEvm {
+                asset_id: call_protocol::CALL_ASSET_ID,
+                from: sender,
+                to: test_addr(2),
+                amount: 500,
+            }],
+        );
+
+        let mut account = AccountState::new();
+        account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000).unwrap();
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        registry.freeze_asset(call_protocol::CALL_ASSET_ID, &sender).unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
+        let bridge_config = call_bridge::BridgeConfig::default();
+
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&bridge_config),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err(), "BridgeOp DepositToEvm on frozen asset should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("not active"), "expected not-active error, got: {err_msg}");
+    }
+
+    #[test]
+    fn test_evm_issuer_mint_success() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+        let recipient = test_addr(2);
+
+        // Deploy ERC-20 contract first
+        let executor = EvmExecutor::new(1);
+        let mut evm_state = call_evm::EvmState::new();
+        let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
+        evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
+        evm_state.create_account(deployer);
+        evm_state.create_account(sender);
+        evm_state.set_balance(sender, call_primitives::U256::from(10_000_000u128));
+
+        let (contract_addr, deploy_result) = executor
+            .deploy_erc20_template(
+                deployer,
+                &mut evm_state,
+                "Test Token",
+                "TST",
+                18,
+                deployer,
+                sender,
+                call_primitives::U256::from(10_000),
+                call_primitives::U256::from(2u64),
+            )
+            .unwrap();
+        assert!(deploy_result.success, "ERC-20 deploy failed");
+
+        // Register asset with max_supply cap
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        registry
+            .register_asset("TST".into(), "Test Token".into(), 18, sender, 0, 0, 10_000)
+            .unwrap();
+        registry.set_evm_contract_address(2, contract_addr);
+
+        // Build EvmIssuerMint instruction
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 0,
+            instructions: vec![Instruction::EvmIssuerMint {
+                asset_id: 2,
+                to: recipient,
+                amount: 5_000,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 200_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut account = AccountState::new();
+        account
+            .balances
+            .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
+            .unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok(), "EvmIssuerMint should succeed: {:?}", result);
+
+        // evm_supply should be updated
+        let asset = registry.get_asset(2).unwrap();
+        assert_eq!(asset.evm_supply, 5_000);
+        assert_eq!(asset.protocol_supply, 0);
+        assert_eq!(asset.all_supply(), 5_000);
+
+        // EVM state reflects the mint (contract storage updated, verified by success + supply tracking)
+    }
+
+    #[test]
+    fn test_evm_issuer_mint_cap_enforcement() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        // Deploy ERC-20 with small cap
+        let executor = EvmExecutor::new(1);
+        let mut evm_state = call_evm::EvmState::new();
+        let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
+        evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
+        evm_state.create_account(deployer);
+
+        let (contract_addr, deploy_result) = executor
+            .deploy_erc20_template(
+                deployer,
+                &mut evm_state,
+                "Capped",
+                "CAP",
+                18,
+                deployer,
+                sender,
+                call_primitives::U256::from(1_000),
+                call_primitives::U256::from(2u64),
+            )
+            .unwrap();
+        assert!(deploy_result.success);
+
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        registry
+            .register_asset("CAP".into(), "Capped".into(), 18, sender, 0, 0, 1_000)
+            .unwrap();
+        registry.set_evm_contract_address(2, contract_addr);
+
+        // Try to mint more than cap
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 0,
+            instructions: vec![Instruction::EvmIssuerMint {
+                asset_id: 2,
+                to: test_addr(2),
+                amount: 1_001,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 200_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut account = AccountState::new();
+        account
+            .balances
+            .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
+            .unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err(), "EvmIssuerMint over cap should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("cap exceeded"), "expected cap error, got: {err_msg}");
+    }
+
+    #[test]
+    fn test_evm_issuer_mint_non_issuer_rejected() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+        let issuer = test_addr(1); // different from sender
+
+        let executor = EvmExecutor::new(1);
+        let mut evm_state = call_evm::EvmState::new();
+        let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
+        evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
+        evm_state.create_account(deployer);
+
+        let (contract_addr, deploy_result) = executor
+            .deploy_erc20_template(
+                deployer,
+                &mut evm_state,
+                "Test",
+                "TST",
+                18,
+                deployer,
+                issuer,
+                call_primitives::U256::from(0),
+                call_primitives::U256::from(2u64),
+            )
+            .unwrap();
+        assert!(deploy_result.success);
+
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        registry
+            .register_asset("TST".into(), "Test".into(), 18, issuer, 0, 0, 0)
+            .unwrap();
+        registry.set_evm_contract_address(2, contract_addr);
+
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 0,
+            instructions: vec![Instruction::EvmIssuerMint {
+                asset_id: 2,
+                to: test_addr(2),
+                amount: 500,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 200_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut account = AccountState::new();
+        account
+            .balances
+            .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
+            .unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err(), "non-issuer EvmIssuerMint should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("not asset issuer"), "expected unauthorized error, got: {err_msg}");
+    }
+
+    #[test]
+    fn test_evm_issuer_mint_frozen_asset_rejected() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        let executor = EvmExecutor::new(1);
+        let mut evm_state = call_evm::EvmState::new();
+        let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
+        evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
+        evm_state.create_account(deployer);
+
+        let (contract_addr, deploy_result) = executor
+            .deploy_erc20_template(
+                deployer,
+                &mut evm_state,
+                "Test",
+                "TST",
+                18,
+                deployer,
+                sender,
+                call_primitives::U256::from(0),
+                call_primitives::U256::from(2u64),
+            )
+            .unwrap();
+        assert!(deploy_result.success);
+
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        registry
+            .register_asset("TST".into(), "Test".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+        registry.set_evm_contract_address(2, contract_addr);
+        registry.freeze_asset(2, &sender).unwrap();
+
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 0,
+            instructions: vec![Instruction::EvmIssuerMint {
+                asset_id: 2,
+                to: test_addr(2),
+                amount: 500,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 200_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut account = AccountState::new();
+        account
+            .balances
+            .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
+            .unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err(), "EvmIssuerMint on frozen asset should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("not active"), "expected not-active error, got: {err_msg}");
+    }
+
+    #[test]
+    fn test_evm_issuer_mint_call_asset_rejected() {
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let sender = call_crypto::pubkey_to_address(&pubkey);
+
+        let mut tx = ProtocolTransaction {
+            sender,
+            nonce: 0,
+            instructions: vec![Instruction::EvmIssuerMint {
+                asset_id: call_protocol::CALL_ASSET_ID,
+                to: test_addr(2),
+                amount: 500,
+            }],
+            gas_config: GasConfig::SelfPay,
+            fee_currency: call_primitives::FeeCurrency::Call,
+            gas_limit: 200_000,
+            max_fee: 1_000_000,
+            expires_at: 0,
+            auth: AuthScheme::SingleSig {
+                signature: [0u8; 65],
+            },
+        };
+        let tx_hash = tx.compute_tx_hash();
+        let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
+        tx.auth = AuthScheme::SingleSig { signature };
+
+        let block = Block::new(
+            1,
+            BlockHash::ZERO,
+            1000,
+            1,
+            TEST_VERSION,
+            vec![tx],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut account = AccountState::new();
+        account
+            .balances
+            .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
+            .unwrap();
+        let mut registry = AssetRegistry::new();
+        registry
+            .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
+            .unwrap();
+
+        let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+        let mut bridge_state = call_bridge::BridgeStateManager::default();
+        let mut shielded_state = call_shielded::ShieldedState::new();
+        let mut fee_params = FeeParams::default();
+        let mut evm_state = call_evm::EvmState::new();
+
+        let result = block.execute(
+            &mut account,
+            &mut registry,
+            &mut compliance,
+            &mut bridge_state,
+            &mut shielded_state,
+            &mut fee_params,
+            1,
+            &mut evm_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err(), "EvmIssuerMint on CALL asset should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("CALL asset has no EVM wrapped token"), "expected CALL rejection, got: {err_msg}");
     }
 }

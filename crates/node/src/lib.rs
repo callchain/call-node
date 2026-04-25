@@ -39,6 +39,7 @@ use call_storage::reth_db::{
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
     CallGovernanceState, CallComplianceState, CallConsensusState,
     CallReceipts, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
+    CallProtocolAssets,
 };
 use call_protocol::ProtocolReceipt;
 use call_primitives::TxHash;
@@ -161,12 +162,13 @@ impl CallNode {
         let fresh_start = recovery_needed || !blocks_exist;
 
         // Load persisted state from reth-db (skip if recovery needed)
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, receipts, fork_manager) = if recovery_needed {
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, mut asset_registry, receipts, fork_manager) = if recovery_needed {
             (
                 AccountState::new(), EvmState::new(), BridgeStateManager::default(),
                 ShieldedState::new(), ValidatorStateManager::default(),
                 AgentRegistry::new(), AgentBalances::new(), call_agent::AgentNonces::new(),
                 OracleManager::default(), GovernanceManager::new(), ComplianceEngine::new(),
+                AssetRegistry::new(),
                 std::collections::HashMap::new(),
                 ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1),
             )
@@ -199,8 +201,14 @@ impl CallNode {
                     )
                 }
             };
-            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, loaded.7, oracle, governance, loaded.9, receipts, fork_manager)
+            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, loaded.7, oracle, governance, loaded.9, loaded.10, receipts, fork_manager)
         };
+
+        // Replay AssetRegistry from block history if db snapshot is empty/missing.
+        // This ensures asset IDs and metadata are reconstructible from canonical history.
+        if asset_registry.is_empty() && !fresh_start {
+            asset_registry = replay_asset_registry(&data_dir);
+        }
 
         // Try to load persisted consensus state; fall back to genesis
         let consensus = if recovery_needed {
@@ -224,7 +232,7 @@ impl CallNode {
 
         let state = Arc::new(RpcState::new(
             balance_state,
-            AssetRegistry::new(),
+            asset_registry,
             compliance_engine,
             evm_state,
             bridge_state,
@@ -1056,7 +1064,7 @@ impl CallNode {
 fn load_state_from_db(
     db_env: &Arc<DatabaseEnv>,
 ) -> (AccountState, EvmState, BridgeStateManager, ShieldedState,
-      ValidatorStateManager, AgentRegistry, AgentBalances, call_agent::AgentNonces, GovernanceManager, ComplianceEngine) {
+      ValidatorStateManager, AgentRegistry, AgentBalances, call_agent::AgentNonces, GovernanceManager, ComplianceEngine, AssetRegistry) {
     // Load balances
     let (balances, allowances) = match db_load_balances(db_env) {
         Ok(b) => b,
@@ -1145,7 +1153,16 @@ fn load_state_from_db(
         }
     };
 
-    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, agent_nonces, governance, compliance)
+    // Load asset registry
+    let asset_registry = match load_asset_registry_inner(db_env) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load asset registry");
+            AssetRegistry::new()
+        }
+    };
+
+    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, agent_nonces, governance, compliance, asset_registry)
 }
 
 /// Persist all state types to the reth-db database.
@@ -1230,6 +1247,13 @@ fn persist_state_to_db(
             .map_err(|e| format!("save compliance: {e}"))?;
     }
 
+    // Persist asset registry
+    {
+        let asset_registry = state.asset_registry.read().unwrap();
+        save_asset_registry_inner(db_env, &asset_registry)
+            .map_err(|e| format!("save asset registry: {e}"))?;
+    }
+
     // Persist consensus state
     {
         let c = consensus.read().unwrap();
@@ -1296,6 +1320,22 @@ fn save_bridge_state_inner(db: &DatabaseEnv, state: &BridgeStateManager) -> Resu
     let data = serde_json::to_vec(state).map_err(|e: serde_json::Error| e.to_string())?;
     db_clear::<CallBridgeOps>(db).map_err(|e: StorageError| e.to_string())?;
     db_put::<CallBridgeOps>(db, vec![0], data).map_err(|e: StorageError| e.to_string())?;
+    Ok(())
+}
+
+/// Load asset registry from DB
+fn load_asset_registry_inner(db: &DatabaseEnv) -> Result<AssetRegistry, String> {
+    match db_get::<CallProtocolAssets>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e: serde_json::Error| e.to_string()),
+        None => Ok(AssetRegistry::new()),
+    }
+}
+
+/// Save asset registry to DB
+fn save_asset_registry_inner(db: &DatabaseEnv, registry: &AssetRegistry) -> Result<(), String> {
+    let data = serde_json::to_vec(registry).map_err(|e: serde_json::Error| e.to_string())?;
+    db_clear::<CallProtocolAssets>(db).map_err(|e: StorageError| e.to_string())?;
+    db_put::<CallProtocolAssets>(db, vec![0], data).map_err(|e: StorageError| e.to_string())?;
     Ok(())
 }
 
@@ -1669,6 +1709,13 @@ fn persist_state_incremental(
         let governance = state.governance.read().map_err(|_| "governance lock poisoned".to_string())?;
         save_governance_state(db_env, &governance)
             .map_err(|e| format!("save governance: {e}"))?;
+    }
+
+    // Persist asset registry (overwrite)
+    {
+        let asset_registry = state.asset_registry.read().map_err(|_| "asset registry lock poisoned".to_string())?;
+        save_asset_registry_inner(db_env, &asset_registry)
+            .map_err(|e| format!("save asset registry: {e}"))?;
     }
 
     // Persist consensus state
@@ -3020,6 +3067,66 @@ fn load_block(data_dir: &Path, height: u64) -> Option<Block> {
     serde_json::from_slice(&data).ok()
 }
 
+/// Replay AssetRegistry from canonical block history.
+/// Scans blocks/*.json in height order and re-executes RegisterAsset instructions
+/// to reconstruct asset IDs and metadata deterministically.
+fn replay_asset_registry(data_dir: &Path) -> AssetRegistry {
+    let mut registry = AssetRegistry::new();
+    let latest = find_latest_height(data_dir);
+    if latest == 0 {
+        return registry;
+    }
+
+    tracing::info!(height = latest, "replaying AssetRegistry from block history");
+    let mut replayed = 0u64;
+
+    for height in 1..=latest {
+        let Some(block) = load_block(data_dir, height) else {
+            continue;
+        };
+        for tx in &block.protocol_txs {
+            for instr in &tx.instructions {
+                if let call_protocol::Instruction::RegisterAsset {
+                    symbol,
+                    name,
+                    decimals,
+                    max_supply,
+                } = instr
+                {
+                    // Replay registration with the same parameters
+                    // compliance_policy = 0, registered_at = height
+                    if let Err(e) = registry.register_asset(
+                        symbol.clone(),
+                        name.clone(),
+                        *decimals,
+                        tx.sender,
+                        0,
+                        height,
+                        *max_supply,
+                    ) {
+                        tracing::warn!(
+                            height,
+                            sender = ?tx.sender,
+                            symbol,
+                            error = %e,
+                            "AssetRegistry replay: register_asset failed"
+                        );
+                    } else {
+                        replayed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        replayed,
+        next_id = registry.next_id(),
+        "AssetRegistry replay complete"
+    );
+    registry
+}
+
 /// Find the highest block height on disk by scanning the blocks directory.
 fn find_latest_height(data_dir: &Path) -> u64 {
     let dir = data_dir.join("blocks");
@@ -3502,6 +3609,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn test_asset_registry_persistence_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-registry-test-{}",
+            std::process::id()
+        ));
+
+        // Phase 1: Direct db test — save and load registry
+        {
+            let db = open_db(tmp.clone()).expect("open db");
+            let mut registry = AssetRegistry::new();
+            let id = registry
+                .register_asset("PERSIST".into(), "Persist Token".into(), 18, test_addr(1), 0, 100, 1_000_000)
+                .unwrap();
+            registry.mint_supply(id, &test_addr(1), 5_000).unwrap();
+            registry.add_evm_supply(id, 3_000).unwrap();
+            save_asset_registry_inner(&db.db, &registry).expect("save");
+        }
+
+        // Give MDBX a moment to release file locks before reopening
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Phase 2: Reopen db and load registry
+        {
+            let db = open_db(tmp.clone()).expect("reopen db");
+            let registry = load_asset_registry_inner(&db.db).expect("load");
+            let asset = registry.get_asset(1).expect("asset should exist after reload");
+            assert_eq!(asset.symbol, "PERSIST");
+            assert_eq!(asset.name, "Persist Token");
+            assert_eq!(asset.decimals, 18);
+            assert_eq!(asset.issuer, test_addr(1));
+            assert_eq!(asset.protocol_supply, 5_000);
+            assert_eq!(asset.evm_supply, 3_000);
+            assert_eq!(asset.max_supply, 1_000_000);
+            assert_eq!(asset.status, call_protocol::registry::AssetStatus::Active);
+            assert_eq!(asset.registered_at, 100);
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[tokio::test]
     async fn test_node_mempool_stats() {
         let tmp = std::env::temp_dir().join(format!(
@@ -3973,6 +4121,14 @@ mod tests {
                 balances.balances.set_balance(1, *test_sender(), initial_balance).unwrap();
             }
 
+            // Register CALL asset so transfer instruction can validate it
+            {
+                let mut registry = node.state.asset_registry.write().unwrap();
+                registry
+                    .register_asset("CALL".into(), "Callchain".into(), 18, *test_sender(), 0, 0, 0)
+                    .unwrap();
+            }
+
             // Insert a transfer tx
             let mut tx = ProtocolTransaction {
                 sender: *test_sender(),
@@ -4199,6 +4355,14 @@ mod tests {
             balances.balances.set_balance(1, *test_sender(), 10_000_000).unwrap();
         }
 
+        // Register CALL asset so Transfer instructions succeed
+        {
+            let mut registry = node.state.asset_registry.write().unwrap();
+            registry
+                .register_asset("CALL".into(), "Callchain".into(), 18, *test_sender(), 0, 0, 0)
+                .unwrap();
+        }
+
         // Insert tx into mempool
         let tx = make_test_tx(0);
         {
@@ -4334,6 +4498,14 @@ mod tests {
         {
             let mut balances = node.state.balance_state.write().unwrap();
             balances.balances.set_balance(1, *test_sender(), 10_000_000).unwrap();
+        }
+
+        // Register CALL asset so Transfer instructions succeed
+        {
+            let mut registry = node.state.asset_registry.write().unwrap();
+            registry
+                .register_asset("CALL".into(), "Callchain".into(), 18, *test_sender(), 0, 0, 0)
+                .unwrap();
         }
 
         let tx = make_test_tx(0);

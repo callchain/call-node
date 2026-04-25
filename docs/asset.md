@@ -118,7 +118,7 @@ Instruction::RegisterEvmBridge {
 
 - Only the asset issuer can link an EVM contract.
 - The link is immutable: once set, it cannot be changed by anyone (including the issuer). If the wrong address is registered, the bridge operations for that asset will revert, and the asset must be delisted or governance must intervene.
-- The EVM contract must start with `totalSupply == 0`. This prevents an attacker from linking a pre-minted contract and using `WithdrawFromEvm` to drain protocol balances.
+- The EVM contract must start with `totalSupply == 0`. This prevents an attacker from linking a pre-minted contract and using `BridgeToProtocol` to drain protocol balances.
 - The `bridgeMint` function on the EVM contract must be restricted to the protocol bridge address (`Address::repeat_byte(0xFF)` or a configurable bridge address). Otherwise, anyone could mint EVM tokens arbitrarily, breaking the bridge invariant.
 
 ## Bridge Invariants
@@ -127,14 +127,14 @@ For any asset with an active EVM bridge:
 
 ```
 sum(protocol balance deductions via BridgeToEvm)
-  == sum(protocol balance credits via WithdrawFromEvm)
+  == sum(protocol balance credits via BridgeToProtocol)
   == evm_wrapped_token.totalSupply()
 ```
 
 This invariant is maintained by the bridge execution logic in `execute_bridge_instruction`:
 
 - `BridgeToEvm`: Deduct protocol balance, then call `bridgeMint` on the EVM contract (via the bridge address).
-- `WithdrawFromEvm`: Call `bridgeBurn` on the EVM contract (burning the sender's EVM balance), then credit protocol balance.
+- `BridgeToProtocol`: Call `bridgeBurn` on the EVM contract (burning the sender's EVM balance), then credit protocol balance.
 
 ## EVM Wrapped Token Reference Template
 
@@ -252,7 +252,7 @@ With the introduction of `onlyBridge` access control on `WrappedToken.sol`, `Bri
 **Details:**
 
 - `evm_call_bridge_mint` must be called with `caller = BRIDGE_EVM_ADDRESS` so that `WrappedToken.bridgeMint` passes the `onlyBridge` check.
-- `WithdrawFromEvm` does **not** need this change because `bridgeBurn` burns the caller's own balance and requires no special access control.
+- `BridgeToProtocol` does **not** need this change because `bridgeBurn` burns the caller's own balance and requires no special access control.
 - A protocol-level constant `BRIDGE_EVM_ADDRESS` should be defined (e.g. in `crates/protocol/src/lib.rs`) and used consistently across genesis deployment, instruction execution, and any system-initiated EVM calls.
 
 ### Why This Matters
@@ -264,7 +264,7 @@ With the introduction of `onlyBridge` access control on `WrappedToken.sol`, `Bri
 
 ## Related Documents
 
-- [internal_bridge.md](internal_bridge.md) — BridgeToEvm and WithdrawFromEvm execution details
+- [internal_bridge.md](internal_bridge.md) — BridgeToEvm and BridgeToProtocol execution details
 - [protocol.md](protocol.md) — Instruction execution and atomicity guarantees
 - [transaction.md](transaction.md) — Transaction format, fees, and nonce rules
 - [rpc.md](rpc.md) — RPC method reference
