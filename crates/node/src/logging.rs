@@ -15,13 +15,48 @@ use std::time::SystemTime;
 // ── Log Entry ────────────────────────────────────────────────────────
 
 /// JSON log value types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum LogValue {
     String(String),
     Number(f64),
     Bool(bool),
     Null,
+}
+
+impl Serialize for LogValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            LogValue::String(s) => serializer.serialize_str(s),
+            LogValue::Number(n) => serializer.serialize_f64(*n),
+            LogValue::Bool(b) => serializer.serialize_bool(*b),
+            LogValue::Null => serializer.serialize_unit(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LogValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => Ok(LogValue::String(s)),
+            serde_json::Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    Ok(LogValue::Number(f))
+                } else {
+                    Err(serde::de::Error::custom("invalid number"))
+                }
+            }
+            serde_json::Value::Bool(b) => Ok(LogValue::Bool(b)),
+            serde_json::Value::Null => Ok(LogValue::Null),
+            _ => Err(serde::de::Error::custom("invalid log value")),
+        }
+    }
 }
 
 /// Structured log entry (per spec §24.1)

@@ -3299,6 +3299,7 @@ impl Default for CallNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use call_consensus::BlockExecutionResult;
     use call_network::InMemoryNetwork;
     use call_primitives::{Address, Ed25519PublicKey};
     use call_protocol::instructions::Instruction;
@@ -4042,6 +4043,352 @@ mod tests {
         {
             let fp = node.state.fee_params.read().unwrap();
             assert_eq!(fp.base_fee, 100); // Should match the JSON in execution_data
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── State isolation tests (Phase 1) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_state_isolation_propose_does_not_modify_shared_state() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-isolation-test-{}",
+            std::process::id()
+        ));
+
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Stake validator
+        {
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset();
+        }
+
+        // Fund sender with ample balance for fees + transfer
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            balances.balances.set_balance(1, *test_sender(), 10_000_000).unwrap();
+        }
+
+        // Insert tx into mempool
+        let tx = make_test_tx(0);
+        {
+            let mut mempool = node.mempool.write().unwrap();
+            let _ = mempool.insert_protocol_tx(tx);
+        }
+
+        let selection = { node.mempool.write().unwrap().select_transactions() };
+        let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
+        let height = node.consensus.read().unwrap().current_height();
+
+        let protocol_txs: Vec<ProtocolTransaction> = selection
+            .protocol_txs
+            .into_iter()
+            .filter_map(|e| serde_json::from_slice(&e.data).ok())
+            .collect();
+
+        let version = node.state.fork_manager.read().unwrap().current_version();
+        let mut block = Block::new(
+            height,
+            node.parent_hash,
+            5_000,
+            proposer,
+            version,
+            protocol_txs,
+            vec![],
+            vec![SystemTx {
+                kind: SystemTxKind::UpdateBaseFee,
+                data: vec![],
+            }],
+            selection.bridge_ops,
+        );
+
+        // Capture shared state BEFORE propose-phase execution
+        let balance_before = {
+            let balances = node.state.balance_state.read().unwrap();
+            balances.balances.get_balance(1, test_sender())
+        };
+
+        // Simulate PROPOSE phase: execute on CLONED state
+        {
+            let mut balances = node.state.balance_state.read().unwrap().clone();
+            let mut registry = node.state.asset_registry.read().unwrap().clone();
+            let mut compliance = node.state.compliance_engine.read().unwrap().clone();
+            let mut bridge_state = node.state.bridge_state.read().unwrap().clone();
+            let mut shielded_state = node.state.shielded_state.read().unwrap().clone();
+            let mut fee_params = node.state.fee_params.read().unwrap().clone();
+            let mut evm_state = node.state.evm_state.read().unwrap().clone();
+
+            let result = block
+                .execute(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut fee_params,
+                    height, &mut evm_state, None, None, None, None,
+                    None, None, None, None, None, None,
+                )
+                .expect("propose execution on clone");
+
+            block.finalize(&result);
+        }
+
+        // Verify shared state is UNCHANGED after propose
+        let balance_after_propose = {
+            let balances = node.state.balance_state.read().unwrap();
+            balances.balances.get_balance(1, test_sender())
+        };
+        assert_eq!(
+            balance_after_propose, balance_before,
+            "shared state must NOT be modified by propose-phase execution"
+        );
+
+        // Simulate FINALIZE phase: execute on SHARED state (write locks)
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            let mut registry = node.state.asset_registry.write().unwrap();
+            let mut compliance = node.state.compliance_engine.write().unwrap();
+            let mut bridge_state = node.state.bridge_state.write().unwrap();
+            let mut shielded_state = node.state.shielded_state.write().unwrap();
+            let mut fee_params = node.state.fee_params.write().unwrap();
+            let mut evm_state = node.state.evm_state.write().unwrap();
+
+            let result = block
+                .execute(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut fee_params,
+                    height, &mut evm_state, None, None, None, None,
+                    None, None, None, None, None, None,
+                )
+                .expect("finalize execution on shared state");
+
+            // Verify state roots match header
+            assert_eq!(result.payment_root, block.header.payment_root, "payment_root mismatch");
+            assert_eq!(result.evm_state_root, block.header.evm_state_root, "evm_state_root mismatch");
+            assert_eq!(result.bridge_root, block.header.bridge_root, "bridge_root mismatch");
+            assert_eq!(result.receipt_root, block.header.receipt_root, "receipt_root mismatch");
+
+            block.finalize(&result);
+
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.commit_block(&block, &result).expect("commit");
+        }
+
+        // Verify shared state IS modified after finalize
+        let balance_after_finalize = {
+            let balances = node.state.balance_state.read().unwrap();
+            balances.balances.get_balance(1, test_sender())
+        };
+        assert!(
+            balance_after_finalize < balance_before,
+            "shared state must be modified by finalize-phase execution, before={balance_before}, after={balance_after_finalize}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_state_root_mismatch_rejects_block() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-root-mismatch-test-{}",
+            std::process::id()
+        ));
+
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Stake validator
+        {
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset();
+        }
+
+        // Fund sender with ample balance for fees + transfer
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            balances.balances.set_balance(1, *test_sender(), 10_000_000).unwrap();
+        }
+
+        let tx = make_test_tx(0);
+        {
+            let mut mempool = node.mempool.write().unwrap();
+            let _ = mempool.insert_protocol_tx(tx);
+        }
+
+        let selection = { node.mempool.write().unwrap().select_transactions() };
+        let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
+        let height = node.consensus.read().unwrap().current_height();
+
+        let protocol_txs: Vec<ProtocolTransaction> = selection
+            .protocol_txs
+            .into_iter()
+            .filter_map(|e| serde_json::from_slice(&e.data).ok())
+            .collect();
+
+        let version = node.state.fork_manager.read().unwrap().current_version();
+        let mut block = Block::new(
+            height,
+            node.parent_hash,
+            6_000,
+            proposer,
+            version,
+            protocol_txs,
+            vec![],
+            vec![SystemTx {
+                kind: SystemTxKind::UpdateBaseFee,
+                data: vec![],
+            }],
+            selection.bridge_ops,
+        );
+
+        // Execute on cloned state to get valid roots
+        let result = {
+            let mut balances = node.state.balance_state.read().unwrap().clone();
+            let mut registry = node.state.asset_registry.read().unwrap().clone();
+            let mut compliance = node.state.compliance_engine.read().unwrap().clone();
+            let mut bridge_state = node.state.bridge_state.read().unwrap().clone();
+            let mut shielded_state = node.state.shielded_state.read().unwrap().clone();
+            let mut fee_params = node.state.fee_params.read().unwrap().clone();
+            let mut evm_state = node.state.evm_state.read().unwrap().clone();
+
+            block.execute(
+                &mut balances, &mut registry, &mut compliance,
+                &mut bridge_state, &mut shielded_state, &mut fee_params,
+                height, &mut evm_state, None, None, None, None,
+                None, None, None, None, None, None,
+            )
+            .expect("execution")
+        };
+
+        block.finalize(&result);
+
+        // Tamper with a state root in the header
+        let original_payment_root = block.header.payment_root;
+        block.header.payment_root = call_primitives::Hash::repeat_byte(0xDE);
+
+        // Verify: re-execution on clone detects root mismatch
+        {
+            let mut balances = node.state.balance_state.read().unwrap().clone();
+            let mut registry = node.state.asset_registry.read().unwrap().clone();
+            let mut compliance = node.state.compliance_engine.read().unwrap().clone();
+            let mut bridge_state = node.state.bridge_state.read().unwrap().clone();
+            let mut shielded_state = node.state.shielded_state.read().unwrap().clone();
+            let mut fee_params = node.state.fee_params.read().unwrap().clone();
+            let mut evm_state = node.state.evm_state.read().unwrap().clone();
+
+            let result2 = block.execute(
+                &mut balances, &mut registry, &mut compliance,
+                &mut bridge_state, &mut shielded_state, &mut fee_params,
+                height, &mut evm_state, None, None, None, None,
+                None, None, None, None, None, None,
+            )
+            .expect("re-execution");
+
+            assert_ne!(
+                result2.payment_root, block.header.payment_root,
+                "tampered payment_root should mismatch re-computed root"
+            );
+        }
+
+        // Verify: finalize with tampered root is caught by root check
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            let mut registry = node.state.asset_registry.write().unwrap();
+            let mut compliance = node.state.compliance_engine.write().unwrap();
+            let mut bridge_state = node.state.bridge_state.write().unwrap();
+            let mut shielded_state = node.state.shielded_state.write().unwrap();
+            let mut fee_params = node.state.fee_params.write().unwrap();
+            let mut evm_state = node.state.evm_state.write().unwrap();
+
+            let result3 = block.execute(
+                &mut balances, &mut registry, &mut compliance,
+                &mut bridge_state, &mut shielded_state, &mut fee_params,
+                height, &mut evm_state, None, None, None, None,
+                None, None, None, None, None, None,
+            )
+            .expect("execution on shared state");
+
+            // The re-computed result3 should have the ORIGINAL correct root
+            assert_eq!(result3.payment_root, original_payment_root, "re-computed root should match original");
+            // But the block header has the tampered root
+            assert_ne!(result3.payment_root, block.header.payment_root, "tampered block should fail root check");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_commit_block_height_replay_protection() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-node-replay-test-{}",
+            std::process::id()
+        ));
+
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Stake validator
+        {
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset();
+        }
+
+        let height = node.consensus.read().unwrap().current_height();
+        let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
+        let version = node.state.fork_manager.read().unwrap().current_version();
+
+        let mut block = Block::new(
+            height,
+            node.parent_hash,
+            7_000,
+            proposer,
+            version,
+            vec![],
+            vec![],
+            vec![SystemTx {
+                kind: SystemTxKind::UpdateBaseFee,
+                data: vec![],
+            }],
+            vec![],
+        );
+
+        // Execute and commit once
+        {
+            let mut balances = node.state.balance_state.write().unwrap();
+            let mut registry = node.state.asset_registry.write().unwrap();
+            let mut compliance = node.state.compliance_engine.write().unwrap();
+            let mut bridge_state = node.state.bridge_state.write().unwrap();
+            let mut shielded_state = node.state.shielded_state.write().unwrap();
+            let mut fee_params = node.state.fee_params.write().unwrap();
+            let mut evm_state = node.state.evm_state.write().unwrap();
+
+            let result = block.execute(
+                &mut balances, &mut registry, &mut compliance,
+                &mut bridge_state, &mut shielded_state, &mut fee_params,
+                height, &mut evm_state, None, None, None, None,
+                None, None, None, None, None, None,
+            )
+            .expect("execution");
+
+            block.finalize(&result);
+
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.commit_block(&block, &result).expect("first commit");
+        }
+
+        // Consensus height should have advanced
+        assert_eq!(node.consensus.read().unwrap().current_height(), height + 1);
+
+        // Attempt to commit the SAME block again should fail due to height mismatch
+        {
+            let mut consensus = node.consensus.write().unwrap();
+            let result = consensus.commit_block(&block, &BlockExecutionResult::default());
+            assert!(
+                result.is_err(),
+                "double-commit of same block should be rejected"
+            );
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("height mismatch"), "error should mention height mismatch: {err}");
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
