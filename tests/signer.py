@@ -1,13 +1,7 @@
 """Transaction signing utilities for Callchain E2E tests.
 
-Uses eth_keys for secp256k1 signing. Supports EIP-191 personal_sign
-(required by call_sendPayment RPC) and raw tx_hash signing.
-
-KNOWN ISSUE: The current codebase has a signature verification mismatch:
-- RPC handler call_sendPayment verifies EIP-191 signatures
-- Block execution (Block::execute) verifies raw tx_hash signatures
-This means transactions submitted via RPC currently fail during block execution.
-For E2E testing, we use EIP-191 to match the RPC handler.
+Uses eth_keys for secp256k1 signing. All write operations now use the unified
+`call_submit` endpoint which verifies raw tx_hash signatures.
 """
 
 import json
@@ -140,18 +134,16 @@ def sign_payment(
     gas_limit: int = 100_000,
     max_fee: int = 1_000_000,
 ) -> dict:
-    """Build a signed payment payload for call_sendPayment RPC."""
+    """Build a signed payment payload for call_submit."""
     instructions = [build_transfer_instruction(asset_id, to, amount, memo)]
     tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
-    signature = sign_eip191(private_key, tx_hash)
+    signature = sign_raw(private_key, tx_hash)
 
     return {
-        "from": sender,
-        "to": to,
-        "amount": str(amount),
+        "sender": sender,
         "nonce": nonce,
-        "assetId": asset_id,
         "signature": signature,
+        "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
     }
@@ -159,16 +151,65 @@ def sign_payment(
 
 def sign_asset_registration(
     private_key: str,
+    sender: str,
+    nonce: int,
     symbol: str,
     name: str,
     decimals: int,
-    issuer: str,
-) -> str:
-    """Sign an asset registration message for call_registerAsset RPC."""
-    issuer_hex = issuer.removeprefix("0x").lower()
-    canonical = f"RegisterAsset:{symbol}:{name}:{decimals}:{issuer_hex}"
-    raw_hash = keccak256(canonical.encode("utf-8"))
-    return sign_eip191(private_key, raw_hash)
+    gas_limit: int = 200_000,
+    max_fee: int = 2_000_000,
+) -> dict:
+    """Build a signed asset registration payload for call_submit."""
+    instructions = [{
+        "RegisterAsset": {
+            "symbol": symbol,
+            "name": name,
+            "decimals": decimals,
+        }
+    }]
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    signature = sign_raw(private_key, tx_hash)
+
+    return {
+        "sender": sender,
+        "nonce": nonce,
+        "signature": signature,
+        "instructions": instructions,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
+    }
+
+
+def sign_agent_register(
+    private_key: str,
+    sender: str,
+    nonce: int,
+    pubkey_hex: str,
+    name: str,
+    url: str,
+    gas_limit: int = 100_000,
+    max_fee: int = 1_000_000,
+) -> dict:
+    """Build a signed agent registration payload for call_submit."""
+    pubkey_bytes = bytes.fromhex(pubkey_hex.removeprefix("0x"))
+    instructions = [{
+        "RegisterAgent": {
+            "pubkey": list(pubkey_bytes),
+            "name": name,
+            "url": url,
+        }
+    }]
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    signature = sign_raw(private_key, tx_hash)
+
+    return {
+        "sender": sender,
+        "nonce": nonce,
+        "signature": signature,
+        "instructions": instructions,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
+    }
 
 
 def sign_governance_proposal(
@@ -209,7 +250,7 @@ def sign_governance_proposal(
     signature = sign_raw(private_key, tx_hash)
 
     return {
-        "proposer": sender,
+        "sender": sender,
         "nonce": nonce,
         "proposalType": pt,
         "type": proposal_type,
@@ -217,6 +258,9 @@ def sign_governance_proposal(
         "description": description,
         "executionData": execution_data.hex() if execution_data else "",
         "signature": signature,
+        "instructions": instructions,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
     }
 
 
@@ -242,11 +286,14 @@ def sign_governance_vote(
     signature = sign_raw(private_key, tx_hash)
 
     return {
-        "voter": voter,
+        "sender": voter,
         "nonce": nonce,
         "proposalId": proposal_id,
         "vote": vote,
         "signature": signature,
+        "instructions": instructions,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
     }
 
 
@@ -276,6 +323,9 @@ def sign_validator_stake(
         "ed25519Pubkey": ed25519_pubkey_hex,
         "selfStake": str(self_stake),
         "signature": signature,
+        "instructions": instructions,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
     }
 
 
@@ -301,6 +351,9 @@ def sign_validator_unstake(
         "nonce": nonce,
         "validatorId": validator_id,
         "signature": signature,
+        "instructions": instructions,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
     }
 
 
@@ -388,4 +441,7 @@ def sign_validator_claim_unbonded(
         "nonce": nonce,
         "validatorId": validator_id,
         "signature": signature,
+        "instructions": instructions,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
     }

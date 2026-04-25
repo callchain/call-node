@@ -65,46 +65,69 @@ class CallchainNode:
     def protocol_config(self) -> Dict:
         return self._call("call_protocolConfig")
 
+    # ── Unified submission helper ─────────────────────────────────────
+
+    @staticmethod
+    def _convert_instructions(instructions: List[Dict]) -> List[Dict]:
+        """Convert externally-tagged instructions to internally-tagged format."""
+        result = []
+        for instr in instructions:
+            if not isinstance(instr, dict):
+                continue
+            if "type" in instr:
+                result.append(instr)
+                continue
+            for type_str, fields in instr.items():
+                internal = dict(fields) if isinstance(fields, dict) else {}
+                internal["type"] = type_str
+                result.append(internal)
+                break
+        return result
+
+    def _call_submit(self, params: Dict) -> Dict:
+        """Submit a signed transaction via the unified call_submit endpoint."""
+        sender = params.get("sender") or params.get("from") or params.get("proposer") or params.get("voter")
+        nonce = params.get("nonce", 0)
+        signature = params.get("signature", "0x")
+        instructions = self._convert_instructions(params.get("instructions", []))
+
+        payload = {
+            "sender": sender,
+            "nonce": nonce,
+            "signature": signature,
+            "instructions": instructions,
+        }
+        if "gasLimit" in params:
+            payload["gasLimit"] = params["gasLimit"]
+        if "maxFee" in params:
+            payload["maxFee"] = params["maxFee"]
+        return self._call("call_submit", [payload])
+
     # ── Submission methods ────────────────────────────────────────────
 
     def send_payment(self, params: Dict) -> Dict:
-        """Submit a signed payment via call_sendPayment.
+        """Submit a signed payment via call_submit."""
+        return self._call_submit(params)
 
-        params must include:
-          from, to, amount, nonce, signature
-        and optionally:
-          assetId, memo, gasLimit, maxFee
-        """
-        return self._call("call_sendPayment", [params])
-
-    def register_asset(
-        self,
-        symbol: str,
-        name: str,
-        decimals: int,
-        issuer: str,
-        signature: str,
-    ) -> Dict:
-        return self._call(
-            "call_registerAsset",
-            [symbol, name, decimals, issuer, signature],
-        )
+    def register_asset(self, params: Dict) -> Dict:
+        """Submit a signed asset registration via call_submit."""
+        return self._call_submit(params)
 
     def submit_proposal(self, params: Dict) -> Dict:
-        return self._call("call_submitProposal", [params])
+        return self._call_submit(params)
 
     def cast_vote(self, params: Dict) -> Dict:
-        return self._call("call_castVote", [params])
+        return self._call_submit(params)
 
     # ── Governance ────────────────────────────────────────────────────
 
     def governance_submit_proposal(self, params: Dict) -> Dict:
         """Submit a governance proposal."""
-        return self._call("call_governanceSubmitProposal", [params])
+        return self._call_submit(params)
 
     def governance_vote(self, params: Dict) -> Dict:
         """Cast a vote on a governance proposal."""
-        return self._call("call_governanceVote", [params])
+        return self._call_submit(params)
 
     def governance_get_proposal(self, proposal_id: int) -> Optional[Dict]:
         return self._call("call_governanceGetProposal", [proposal_id])
@@ -119,8 +142,9 @@ class CallchainNode:
 
     # ── Agent ─────────────────────────────────────────────────────────
 
-    def agent_register(self, owner: str, pubkey_hex: str, name: str, url: str) -> Dict:
-        return self._call("call_agentRegister", [owner, pubkey_hex, name, url])
+    def agent_register(self, params: Dict) -> Dict:
+        """Submit an agent registration via call_submit."""
+        return self._call_submit(params)
 
     def agent_info(self, agent_id: int) -> Optional[Dict]:
         return self._call("call_agentInfo", [agent_id])
@@ -152,40 +176,32 @@ class CallchainNode:
     # ── Bridge ────────────────────────────────────────────────────────
 
     def bridge_submit_deposit(self, params: Dict) -> Dict:
-        return self._call("call_bridgeSubmitDeposit", [params])
+        return self._call_submit(params)
 
     def bridge_submit_withdraw(self, params: Dict) -> Dict:
-        return self._call("call_bridgeSubmitWithdraw", [params])
+        return self._call_submit(params)
 
     def bridge_to_evm(self, params: Dict) -> Dict:
-        """Bridge protocol balance to EVM via call_bridgeToEvm.
-
-        params must include:
-          sender, to, assetId, amount, nonce, signature
-        """
-        return self._call("call_bridgeToEvm", [params])
+        """Bridge protocol balance to EVM via call_submit."""
+        return self._call_submit(params)
 
     def withdraw_from_evm(self, params: Dict) -> Dict:
-        """Withdraw EVM balance to protocol via call_withdrawFromEvm.
-
-        params must include:
-          sender, to, assetId, amount, nonce, signature
-        """
-        return self._call("call_withdrawFromEvm", [params])
+        """Withdraw EVM balance to protocol via call_submit."""
+        return self._call_submit(params)
 
     # ── Validator ─────────────────────────────────────────────────────
 
     def validator_stake(self, params: Dict) -> Dict:
-        """Submit a validator stake transaction via call_validatorStake."""
-        return self._call("call_validatorStake", [params])
+        """Submit a validator stake transaction via call_submit."""
+        return self._call_submit(params)
 
     def validator_unstake(self, params: Dict) -> Dict:
-        """Submit a validator unstake transaction via call_validatorUnstake."""
-        return self._call("call_validatorUnstake", [params])
+        """Submit a validator unstake transaction via call_submit."""
+        return self._call_submit(params)
 
     def validator_claim_unbonded(self, params: Dict) -> Dict:
-        """Submit a validator claim unbonded transaction via call_validatorClaimUnbonded."""
-        return self._call("call_validatorClaimUnbonded", [params])
+        """Submit a validator claim unbonded transaction via call_submit."""
+        return self._call_submit(params)
 
     def validator_list(self) -> List[Dict]:
         """List all validators via call_validatorList."""

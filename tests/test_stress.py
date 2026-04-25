@@ -6,8 +6,6 @@ Measures throughput, latency, and consistency under concurrent load.
 Run after starting the devnet with:
     ./devnet/scripts/start.sh
 
-KNOWN LIMITATION:
-See test_basic.py docstring for the RPC signature verification mismatch.
 These tests measure RPC submission throughput and mempool behavior.
 Full execution throughput should be validated via the in-memory harness.
 """

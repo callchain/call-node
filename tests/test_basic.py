@@ -6,13 +6,6 @@ Run after starting the devnet with:
 
 These tests exercise the RPC layer, balance queries, transaction submission,
 mempool propagation, and cross-node consistency.
-
-KNOWN LIMITATION:
-The current codebase has a signature verification mismatch between the RPC
-handler (EIP-191) and block execution (raw tx_hash). Transactions submitted
-via RPC are accepted into the mempool but fail during block execution.
-Therefore, these tests verify RPC-layer behavior; full end-to-end execution
-tests should use the in-memory test harness (cargo test -p call-node).
 """
 
 import json
