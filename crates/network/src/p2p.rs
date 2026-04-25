@@ -864,9 +864,10 @@ impl Network for CommonwareNetwork {
                 NetworkError::NetworkError("empty message received".into())
             })?;
 
-            // Apply gossip rate limiting per peer
-            // Auto-register unknown peers (discovered via oracle, not explicit connect)
-            {
+            // Apply gossip rate limiting per peer only to transaction propagation
+            // (channel 1). Exempt block announcements, sync, oracle, and upgrade
+            // channels so consensus-critical traffic is never dropped.
+            if channel == 1 {
                 let mut gossip = self.gossip.lock().await;
                 if gossip.peers.contains_key(&peer_id) {
                     let peer_state = gossip.peers.get_mut(&peer_id).unwrap();

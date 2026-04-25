@@ -20,6 +20,7 @@ use jsonrpsee::types::ErrorObjectOwned;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
 /// Shared RPC state — all handlers read from this.
 pub struct RpcState {
     pub balance_state: RwLock<AccountState>,
@@ -57,6 +58,8 @@ pub struct RpcState {
     pub pending_rollback: RwLock<Option<RollbackPlan>>,
     /// Address → (block, tx_hash, log_index) for efficient eth_getLogs queries.
     pub log_index: RwLock<HashMap<Address, Vec<(u64, TxHash, usize)>>>,
+    /// Data directory for loading persisted blocks from disk.
+    pub data_dir: RwLock<Option<PathBuf>>,
 }
 
 impl RpcState {
@@ -110,6 +113,7 @@ impl RpcState {
             light_client: RwLock::new(None),
             pending_rollback: RwLock::new(None),
             log_index: RwLock::new(HashMap::new()),
+            data_dir: RwLock::new(None),
         }
     }
 
@@ -230,6 +234,24 @@ impl RpcState {
         if let Ok(mut b) = self.current_block.write() {
             *b = block;
         }
+    }
+
+    /// Set the data directory for loading persisted blocks from disk.
+    pub fn set_data_dir(&self, dir: PathBuf) {
+        if let Ok(mut d) = self.data_dir.write() {
+            *d = Some(dir);
+        }
+    }
+
+    /// Load a block from disk by height. Returns None if the file is missing
+    /// or cannot be deserialized.
+    pub fn load_block(&self,
+        height: u64,
+    ) -> Option<call_consensus::Block> {
+        let dir = self.data_dir.read().ok()?.clone()?;
+        let path = dir.join("blocks").join(format!("{height:012}.json"));
+        let data = std::fs::read(&path).ok()?;
+        serde_json::from_slice(&data).ok()
     }
 
     /// Enable or disable governance signature requirements.

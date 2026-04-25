@@ -362,12 +362,37 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 num => num.parse::<u64>().unwrap_or(current),
             };
 
+            // Try loading from disk first (works for both historical and current blocks)
+            if let Some(block) = state.load_block(block_number) {
+                return Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                    "number": format!("0x{:x}", block.header.height),
+                    "hash": format!("0x{}", hex::encode(block.header.hash())),
+                    "parentHash": format!("0x{}", hex::encode(block.header.parent_hash)),
+                    "timestamp": format!("0x{:x}", block.header.timestamp_millis / 1000),
+                    "gasLimit": "0x1c9c380",
+                    "gasUsed": "0x0",
+                    "transactions": [],
+                    "logsBloom": format!("0x{}", hex::encode([0u8; 256])),
+                    "miner": format!("0x{}", hex::encode([0u8; 20])),
+                    "difficulty": "0x0",
+                    "totalDifficulty": "0x0",
+                    "nonce": "0x0000000000000000",
+                    "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
+                    "receiptsRoot": format!("0x{}", hex::encode(block.header.receipt_root)),
+                    "transactionsRoot": format!("0x{}", hex::encode(block.header.payment_root)),
+                    "stateRoot": format!("0x{}", hex::encode(block.header.evm_state_root)),
+                    "size": "0x0",
+                    "extraData": "0x",
+                    "mixHash": format!("0x{}", hex::encode([0u8; 32])),
+                    "baseFeePerGas": format!("0x{:x}", state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee),
+                }));
+            }
+
             if block_number != current {
-                // Historical blocks are not stored in RPC state
                 return Ok::<_, ErrorObjectOwned>(serde_json::Value::Null);
             }
 
-            // Minimal block response for current block
+            // Fallback stub for current block when disk load fails
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "number": format!("0x{:x}", block_number),
                 "hash": format!("0x{}", hex::encode([0u8; 32])),
