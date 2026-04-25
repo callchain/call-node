@@ -8,6 +8,9 @@ tests/.nonce_state.json
 devnet/local/data/
 devnet/local/logs/
 devnet/local/run/
+devnet/single/data/
+devnet/single/logs/
+devnet/single/run/
 ~/
 *.log
 *.swp
