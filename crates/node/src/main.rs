@@ -34,7 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_logging(&config)?;
 
     tracing::info!("Starting Callchain node...");
-    tracing::info!("  Mode:      {:?}", config.mode);
+    if config.solo {
+        tracing::info!("  Mode:      {:?} (solo)", config.mode);
+    } else {
+        tracing::info!("  Mode:      {:?}", config.mode);
+    }
     tracing::info!("  HTTP RPC:  {}", config.rpc.http_addr);
     tracing::info!("  WS RPC:    {}", config.rpc.ws_addr);
     tracing::info!("  P2P:       {}", config.p2p.listen_addr);

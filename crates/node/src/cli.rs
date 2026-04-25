@@ -17,6 +17,10 @@ pub struct CliArgs {
     #[arg(long, default_value_t = false)]
     pub validator: bool,
 
+    /// Solo mode: single-node validator that produces blocks without BFT consensus
+    #[arg(long, default_value_t = false)]
+    pub solo: bool,
+
     // ── Keys ──────────────────────────────────────────────────────────
 
     /// Validator consensus key (hex-encoded, devnet only)

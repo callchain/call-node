@@ -11,6 +11,10 @@ use std::path::PathBuf;
 pub struct NodeConfig {
     #[serde(default)]
     pub mode: NodeMode,
+    /// Solo mode: single-node validator that produces blocks without BFT consensus.
+    /// Not loaded from TOML — set via CLI `--solo` only.
+    #[serde(skip)]
+    pub solo: bool,
     #[serde(default)]
     pub keys: KeysConfig,
     #[serde(default)]
@@ -244,6 +248,10 @@ impl NodeConfig {
     pub fn merge_from_cli(mut self, args: &CliArgs) -> Self {
         // Mode
         if args.validator {
+            self.mode = NodeMode::Validator;
+        }
+        if args.solo {
+            self.solo = true;
             self.mode = NodeMode::Validator;
         }
 

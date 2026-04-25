@@ -1,9 +1,17 @@
 # Build stage
 FROM rust:1.94-slim AS builder
 
+# Install build dependencies in stages to avoid OOM during image build.
+# `libllvm19` + `clang` are very large; installing them together with
+# everything else can exhaust the Docker builder memory limit.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev protobuf-compiler git ca-certificates libclang-dev clang \
+    ca-certificates git pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libclang-dev clang \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true

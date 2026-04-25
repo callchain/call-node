@@ -305,70 +305,75 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     // Step 7: Start consensus block production
     match config.mode {
         NodeMode::Validator => {
-            info!("step 7: starting BFT consensus engine");
-            let ed25519_key = load_ed25519_key(&config.keys)?;
-            let consensus_p2p_port = config.p2p.listen_addr.port().saturating_add(1);
+            if config.solo {
+                info!("step 7: solo validator mode — starting local block production (no BFT)");
+                let _handle = node.start_consensus_loop();
+            } else {
+                info!("step 7: starting BFT consensus engine");
+                let ed25519_key = load_ed25519_key(&config.keys)?;
+                let consensus_p2p_port = config.p2p.listen_addr.port().saturating_add(1);
 
-            // Build the set of validator pubkeys from the genesis we just
-            // applied. Only entries whose pubkey is in this set may appear in
-            // the BFT P2P bootstrap list — the gossip bootstrap may legally
-            // contain non-validator peers (full / archive nodes added so the
-            // validator's authenticated p2p layer accepts inbound connections
-            // from them), and including those in the BFT bootstrap would have
-            // the consensus network try to dial nodes that aren't running a
-            // BFT engine at all.
-            let validator_pubkeys: std::collections::HashSet<Vec<u8>> = node
-                .state
-                .validator_state
-                .read()
-                .map_err(|_| "validator_state poisoned")?
-                .get_all_validators()
-                .values()
-                .map(|s| s.ed25519_pubkey.as_slice().to_vec())
-                .collect();
+                // Build the set of validator pubkeys from the genesis we just
+                // applied. Only entries whose pubkey is in this set may appear in
+                // the BFT P2P bootstrap list — the gossip bootstrap may legally
+                // contain non-validator peers (full / archive nodes added so the
+                // validator's authenticated p2p layer accepts inbound connections
+                // from them), and including those in the BFT bootstrap would have
+                // the consensus network try to dial nodes that aren't running a
+                // BFT engine at all.
+                let validator_pubkeys: std::collections::HashSet<Vec<u8>> = node
+                    .state
+                    .validator_state
+                    .read()
+                    .map_err(|_| "validator_state poisoned")?
+                    .get_all_validators()
+                    .values()
+                    .map(|s| s.ed25519_pubkey.as_slice().to_vec())
+                    .collect();
 
-            // Derive the BFT consensus P2P bootstrap list from the gossip P2P
-            // bootstrap peers: validators reuse their identity key (same ed25519
-            // pubkey) for both networks, but the BFT engine listens on
-            // `gossip_port + 1`. Use *each peer's* gossip port + 1 (not the
-            // local node's), since in setups where validators run on different
-            // ports (e.g. a single-host devnet) every peer has its own offset.
-            let bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)> = bootstrap
-                .iter()
-                .filter_map(|(peer_hex, addr)| {
-                    let bytes = match hex::decode(peer_hex) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            tracing::warn!(peer = peer_hex, error = %e, "skipping BFT bootstrap peer: invalid hex");
+                // Derive the BFT consensus P2P bootstrap list from the gossip P2P
+                // bootstrap peers: validators reuse their identity key (same ed25519
+                // pubkey) for both networks, but the BFT engine listens on
+                // `gossip_port + 1`. Use *each peer's* gossip port + 1 (not the
+                // local node's), since in setups where validators run on different
+                // ports (e.g. a single-host devnet) every peer has its own offset.
+                let bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)> = bootstrap
+                    .iter()
+                    .filter_map(|(peer_hex, addr)| {
+                        let bytes = match hex::decode(peer_hex) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                tracing::warn!(peer = peer_hex, error = %e, "skipping BFT bootstrap peer: invalid hex");
+                                return None;
+                            }
+                        };
+                        if !validator_pubkeys.contains(&bytes) {
+                            tracing::debug!(
+                                peer = peer_hex,
+                                "skipping non-validator gossip peer when building BFT bootstrap"
+                            );
                             return None;
                         }
-                    };
-                    if !validator_pubkeys.contains(&bytes) {
-                        tracing::debug!(
-                            peer = peer_hex,
-                            "skipping non-validator gossip peer when building BFT bootstrap"
-                        );
-                        return None;
-                    }
-                    let pk = match ed25519::PublicKey::decode(&bytes[..]) {
-                        Ok(pk) => pk,
-                        Err(e) => {
-                            tracing::warn!(peer = peer_hex, error = %e, "skipping BFT bootstrap peer: invalid ed25519 public key");
-                            return None;
-                        }
-                    };
-                    let mut bft_addr = *addr;
-                    bft_addr.set_port(addr.port().saturating_add(1));
-                    Some((pk, bft_addr))
-                })
-                .collect();
-            info!(
-                bft_peers = bft_bootstrap_peers.len(),
-                consensus_p2p_port,
-                "BFT consensus P2P bootstrap peers configured"
-            );
+                        let pk = match ed25519::PublicKey::decode(&bytes[..]) {
+                            Ok(pk) => pk,
+                            Err(e) => {
+                                tracing::warn!(peer = peer_hex, error = %e, "skipping BFT bootstrap peer: invalid ed25519 public key");
+                                return None;
+                            }
+                        };
+                        let mut bft_addr = *addr;
+                        bft_addr.set_port(addr.port().saturating_add(1));
+                        Some((pk, bft_addr))
+                    })
+                    .collect();
+                info!(
+                    bft_peers = bft_bootstrap_peers.len(),
+                    consensus_p2p_port,
+                    "BFT consensus P2P bootstrap peers configured"
+                );
 
-            let _handle = node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers);
+                let _handle = node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers);
+            }
         }
         NodeMode::Full | NodeMode::Archive => {
             // Full / archive nodes must NOT produce blocks. They follow the
