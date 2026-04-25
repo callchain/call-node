@@ -71,6 +71,7 @@ pub struct BlockHeader {
     pub evm_state_root: Hash,
     pub bridge_root: Hash,
     pub receipt_root: Hash,
+    pub state_root: Hash,
     pub proposer: call_primitives::ValidatorId,
     pub signature: BlockSignature,
     /// Protocol version of this block (per spec §19)
@@ -92,6 +93,7 @@ impl BlockHeader {
         data.extend_from_slice(self.evm_state_root.as_slice());
         data.extend_from_slice(self.bridge_root.as_slice());
         data.extend_from_slice(self.receipt_root.as_slice());
+        data.extend_from_slice(self.state_root.as_slice());
         data.extend_from_slice(&self.proposer.to_le_bytes());
         data.extend_from_slice(&self.signature.0);
         data.extend_from_slice(&self.version.major.to_le_bytes());
@@ -198,6 +200,7 @@ impl Block {
             evm_state_root: Hash::ZERO,
             bridge_root: Hash::ZERO,
             receipt_root: Hash::ZERO,
+            state_root: Hash::ZERO,
             proposer,
             signature: BlockSignature::default(),
             version,
@@ -713,6 +716,12 @@ impl Block {
         self.header.evm_state_root = result.evm_state_root;
         self.header.bridge_root = result.bridge_root;
         self.header.receipt_root = result.receipt_root;
+        self.header.state_root = keccak256(&[
+            self.header.payment_root.as_slice(),
+            self.header.evm_state_root.as_slice(),
+            self.header.bridge_root.as_slice(),
+            self.header.receipt_root.as_slice(),
+        ].concat());
     }
 }
 
@@ -1984,6 +1993,7 @@ mod tests {
             evm_state_root: Hash::ZERO,
             bridge_root: Hash::ZERO,
             receipt_root: Hash::ZERO,
+            state_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
             version: TEST_VERSION,
@@ -2009,6 +2019,7 @@ mod tests {
             evm_state_root: Hash::ZERO,
             bridge_root: Hash::ZERO,
             receipt_root: Hash::ZERO,
+            state_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
             version: TEST_VERSION,

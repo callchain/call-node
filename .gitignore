@@ -14,3 +14,7 @@ devnet/single/run/
 ~/
 *.log
 *.swp
+
+arc-node/
+tempo/
+

@@ -36,6 +36,20 @@ pub struct AgentRegistry {
     domain_verifier: Option<Box<dyn DomainVerifier>>,
 }
 
+impl Clone for AgentRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            agents: self.agents.clone(),
+            agents_by_owner: self.agents_by_owner.clone(),
+            agents_by_name: self.agents_by_name.clone(),
+            next_id: self.next_id,
+            registration_fee: self.registration_fee,
+            fee_asset_id: self.fee_asset_id,
+            domain_verifier: None, // domain_verifier is not clonable; set to None
+        }
+    }
+}
+
 impl std::fmt::Debug for AgentRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentRegistry")

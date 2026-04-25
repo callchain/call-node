@@ -105,7 +105,7 @@ pub struct EmergencyRollback {
 }
 
 /// Fork manager state
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ForkManager {
     /// Current protocol version
     pub current_version: ProtocolVersion,

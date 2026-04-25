@@ -590,6 +590,7 @@ mod tests {
             evm_state_root: Hash::ZERO,
             bridge_root: Hash::ZERO,
             receipt_root: Hash::ZERO,
+            state_root: Hash::ZERO,
             proposer: 1,
             signature: BlockSignature::default(),
             version: ProtocolVersion::new(1, 0, 0),

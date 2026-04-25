@@ -238,6 +238,8 @@ impl CallNode {
             oracle_manager,
         ));
 
+        state.set_data_dir(data_dir.clone());
+
         // Inject loaded receipts
         *state.receipts.write().unwrap() = receipts;
 
@@ -2381,19 +2383,21 @@ async fn bft_event_loop(
                     selection.bridge_ops,
                 );
 
-                // Execute the block
+                // Execute the block on cloned state — do NOT modify shared state.
+                // State changes are only applied after BFT finalization.
                 let exec_start = Instant::now();
                 let result = {
-                    let mut balances = state.balance_state.write().unwrap();
-                    let mut registry = state.asset_registry.write().unwrap();
-                    let mut compliance = state.compliance_engine.write().unwrap();
-                    let mut bridge_state = state.bridge_state.write().unwrap();
-                    let mut shielded_state = state.shielded_state.write().unwrap();
-                    let mut fee_params = state.fee_params.write().unwrap();
-                    let mut evm_state = state.evm_state.write().unwrap();
-                    let mut oracle = state.oracle.write().unwrap();
-                    let mut agent_balances = state.agent_balances.write().unwrap();
-                    let mut agent_registry = state.agent_registry.write().unwrap();
+                    let mut balances = state.balance_state.read().unwrap().clone();
+                    let mut registry = state.asset_registry.read().unwrap().clone();
+                    let mut compliance = state.compliance_engine.read().unwrap().clone();
+                    let mut bridge_state = state.bridge_state.read().unwrap().clone();
+                    let mut shielded_state = state.shielded_state.read().unwrap().clone();
+                    let mut fee_params = state.fee_params.read().unwrap().clone();
+                    let mut evm_state = state.evm_state.read().unwrap().clone();
+                    let mut oracle = state.oracle.read().unwrap().clone();
+                    let mut agent_balances = state.agent_balances.read().unwrap().clone();
+                    let mut agent_registry = state.agent_registry.read().unwrap().clone();
+                    let mut validator_state = state.validator_state.read().unwrap().clone();
 
                     block.execute(
                         &mut balances,
@@ -2404,12 +2408,12 @@ async fn bft_event_loop(
                         &mut fee_params,
                         height,
                         &mut evm_state,
-                        Some(&mut *oracle),
+                        Some(&mut oracle),
                         None,
-                        Some(&mut *agent_balances),
-                        Some(&mut *agent_registry),
+                        Some(&mut agent_balances),
+                        Some(&mut agent_registry),
                         None, None, None, None,
-                        Some(&mut *state.validator_state.write().unwrap()),
+                        Some(&mut validator_state),
                         None,
                     )
                 };
@@ -2419,36 +2423,6 @@ async fn bft_event_loop(
                     Ok(result) => {
                         block.finalize(&result);
                         telemetry.record_block_produced();
-
-                        // Handle oracle period transitions at boundary heights
-                        if is_oracle_boundary {
-                            let mut oracle = state.oracle.write().unwrap();
-                            oracle.advance_period(height);
-                            let outliers: Vec<u32> = oracle.last_outliers().to_vec();
-                            drop(oracle);
-                            if !outliers.is_empty() {
-                                let mut c = consensus.write().unwrap();
-                                for vid in &outliers {
-                                    if let Err(e) = c.handle_oracle_outlier(*vid) {
-                                        tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
-                                    }
-                                }
-                                tracing::info!(outliers = ?outliers, "slashed oracle outliers");
-                            }
-                            let contributions = {
-                                state.oracle.write().unwrap().distribute_rewards()
-                            };
-                            if !contributions.is_empty() {
-                                let mut c = consensus.write().unwrap();
-                                for (vid, amount) in &contributions {
-                                    if let Err(e) = c.distribute_oracle_reward(*vid, *amount) {
-                                        tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
-                                    }
-                                }
-                                tracing::info!(count = contributions.len(), "distributed oracle rewards");
-                            }
-                            state.oracle.write().unwrap().clear_tracking();
-                        }
 
                         let digest = ConsensusDigest::from(block.header.hash());
 
@@ -2492,17 +2466,21 @@ async fn bft_event_loop(
                 let valid = if let Some(block) = block {
                     let height = block.header.height;
                     let exec_start = Instant::now();
+
+                    // Verify on cloned state — do NOT modify shared state.
+                    // State root check ensures the proposer computed roots honestly.
                     let result = {
-                        let mut balances = state.balance_state.write().unwrap();
-                        let mut registry = state.asset_registry.write().unwrap();
-                        let mut compliance = state.compliance_engine.write().unwrap();
-                        let mut bridge_state = state.bridge_state.write().unwrap();
-                        let mut shielded_state = state.shielded_state.write().unwrap();
-                        let mut fee_params = state.fee_params.write().unwrap();
-                        let mut evm_state = state.evm_state.write().unwrap();
-                        let mut oracle = state.oracle.write().unwrap();
-                        let mut agent_balances = state.agent_balances.write().unwrap();
-                        let mut agent_registry = state.agent_registry.write().unwrap();
+                        let mut balances = state.balance_state.read().unwrap().clone();
+                        let mut registry = state.asset_registry.read().unwrap().clone();
+                        let mut compliance = state.compliance_engine.read().unwrap().clone();
+                        let mut bridge_state = state.bridge_state.read().unwrap().clone();
+                        let mut shielded_state = state.shielded_state.read().unwrap().clone();
+                        let mut fee_params = state.fee_params.read().unwrap().clone();
+                        let mut evm_state = state.evm_state.read().unwrap().clone();
+                        let mut oracle = state.oracle.read().unwrap().clone();
+                        let mut agent_balances = state.agent_balances.read().unwrap().clone();
+                        let mut agent_registry = state.agent_registry.read().unwrap().clone();
+                        let mut validator_state = state.validator_state.read().unwrap().clone();
 
                         block.execute(
                             &mut balances,
@@ -2513,21 +2491,33 @@ async fn bft_event_loop(
                             &mut fee_params,
                             height,
                             &mut evm_state,
-                            Some(&mut *oracle),
+                            Some(&mut oracle),
                             None,
-                            Some(&mut *agent_balances),
-                            Some(&mut *agent_registry),
+                            Some(&mut agent_balances),
+                            Some(&mut agent_registry),
                             None, None, None, None,
-                            Some(&mut *state.validator_state.write().unwrap()),
+                            Some(&mut validator_state),
                             None,
                         )
                     };
                     telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
 
                     match result {
-                        Ok(r) => {
-                            execution_results.insert(digest, r);
-                            true
+                        Ok(result) => {
+                            // State root verification: re-computed roots must match header roots
+                            let roots_match =
+                                result.payment_root == block.header.payment_root
+                                    && result.evm_state_root == block.header.evm_state_root
+                                    && result.bridge_root == block.header.bridge_root
+                                    && result.receipt_root == block.header.receipt_root;
+                            if !roots_match {
+                                tracing::warn!(
+                                    digest = %digest,
+                                    height,
+                                    "BFT verify: state root mismatch — block rejected"
+                                );
+                            }
+                            roots_match
                         }
                         Err(e) => {
                             tracing::warn!(error = ?e, digest = %digest, "BFT verify: execution failed");
@@ -2578,48 +2568,63 @@ async fn bft_event_loop(
                 if let Some(block) = block {
                     let height = block.header.height;
 
-                    // Use cached execution result if available
-                    let result = execution_results.remove(&info.digest);
-                    let result = match result {
-                        Some(r) => r,
-                        None => {
-                            // Re-execute if cache missed (should be rare)
-                            let mut balances = state.balance_state.write().unwrap();
-                            let mut registry = state.asset_registry.write().unwrap();
-                            let mut compliance = state.compliance_engine.write().unwrap();
-                            let mut bridge_state = state.bridge_state.write().unwrap();
-                            let mut shielded_state = state.shielded_state.write().unwrap();
-                            let mut fee_params = state.fee_params.write().unwrap();
-                            let mut evm_state = state.evm_state.write().unwrap();
-                            let mut oracle = state.oracle.write().unwrap();
-                            let mut agent_balances = state.agent_balances.write().unwrap();
-                            let mut agent_registry = state.agent_registry.write().unwrap();
+                    // Height replay protection
+                    let current_height = {
+                        let c = consensus.read().unwrap();
+                        c.current_height()
+                    };
+                    if height < current_height {
+                        tracing::debug!(height, current = current_height, "BFT finalize: already finalized");
+                        continue;
+                    }
 
-                            match block.execute(
-                                &mut balances,
-                                &mut registry,
-                                &mut compliance,
-                                &mut bridge_state,
-                                &mut shielded_state,
-                                &mut fee_params,
-                                height,
-                                &mut evm_state,
-                                Some(&mut *oracle),
-                                None,
-                                Some(&mut *agent_balances),
-                                Some(&mut *agent_registry),
-                                None, None, None, None,
-                                Some(&mut *state.validator_state.write().unwrap()),
-                                None,
-                            ) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    tracing::warn!(error = ?e, height, "BFT finalize: re-execution failed");
-                                    continue;
-                                }
+                    // Execute block on shared state — this is the ONLY place state is committed.
+                    let result = {
+                        let mut balances = state.balance_state.write().unwrap();
+                        let mut registry = state.asset_registry.write().unwrap();
+                        let mut compliance = state.compliance_engine.write().unwrap();
+                        let mut bridge_state = state.bridge_state.write().unwrap();
+                        let mut shielded_state = state.shielded_state.write().unwrap();
+                        let mut fee_params = state.fee_params.write().unwrap();
+                        let mut evm_state = state.evm_state.write().unwrap();
+                        let mut oracle = state.oracle.write().unwrap();
+                        let mut agent_balances = state.agent_balances.write().unwrap();
+                        let mut agent_registry = state.agent_registry.write().unwrap();
+
+                        match block.execute(
+                            &mut balances,
+                            &mut registry,
+                            &mut compliance,
+                            &mut bridge_state,
+                            &mut shielded_state,
+                            &mut fee_params,
+                            height,
+                            &mut evm_state,
+                            Some(&mut *oracle),
+                            None,
+                            Some(&mut *agent_balances),
+                            Some(&mut *agent_registry),
+                            None, None, None, None,
+                            Some(&mut *state.validator_state.write().unwrap()),
+                            None,
+                        ) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::warn!(error = ?e, height, "BFT finalize: execution failed");
+                                continue;
                             }
                         }
                     };
+
+                    // State root check: computed roots must match header roots
+                    if result.payment_root != block.header.payment_root
+                        || result.evm_state_root != block.header.evm_state_root
+                        || result.bridge_root != block.header.bridge_root
+                        || result.receipt_root != block.header.receipt_root
+                    {
+                        tracing::error!(height, "BFT finalize: state root mismatch — block rejected");
+                        continue;
+                    }
 
                     // Handle oracle period transitions at boundary heights
                     // (non-proposing validators advance period but don't broadcast requests — proposer already did)
@@ -3004,6 +3009,45 @@ fn apply_synced_blocks(
             }
         };
 
+        // State root verification on cloned state before applying to shared state
+        let roots_valid = {
+            let mut balances = state.balance_state.read().unwrap().clone();
+            let mut registry = state.asset_registry.read().unwrap().clone();
+            let mut compliance = state.compliance_engine.read().unwrap().clone();
+            let mut bridge_state = state.bridge_state.read().unwrap().clone();
+            let mut shielded_state = state.shielded_state.read().unwrap().clone();
+            let mut fee_params = state.fee_params.read().unwrap().clone();
+            let mut evm_state = state.evm_state.read().unwrap().clone();
+            let mut agent_balances = state.agent_balances.read().unwrap().clone();
+            let mut agent_registry = state.agent_registry.read().unwrap().clone();
+            let mut validator_state = state.validator_state.read().unwrap().clone();
+
+            match block.execute(
+                &mut balances, &mut registry, &mut compliance, &mut bridge_state,
+                &mut shielded_state, &mut fee_params, block_height, &mut evm_state,
+                None, None,
+                Some(&mut agent_balances),
+                Some(&mut agent_registry),
+                None, None, None, None,
+                Some(&mut validator_state),
+                Some(&mut state.fork_manager.write().unwrap().clone()),
+            ) {
+                Ok(result) => {
+                    result.payment_root == block.header.payment_root
+                        && result.evm_state_root == block.header.evm_state_root
+                        && result.bridge_root == block.header.bridge_root
+                        && result.receipt_root == block.header.receipt_root
+                }
+                Err(_) => false,
+            }
+        };
+
+        if !roots_valid {
+            tracing::error!(height = block_height, "sync: state root mismatch — rejecting synced block");
+            break;
+        }
+
+        // Apply to shared state
         let execute_result = {
             let mut balances = state.balance_state.write().unwrap();
             let mut registry = state.asset_registry.write().unwrap();

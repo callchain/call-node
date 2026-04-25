@@ -31,7 +31,7 @@ pub struct Asset {
 }
 
 /// Asset registry state
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AssetRegistry {
     assets_by_id: HashMap<AssetId, Asset>,
     assets_by_symbol: HashMap<String, AssetId>,

@@ -10,7 +10,7 @@ use crate::AgentError;
 ///
 /// Per spec §6.4: agents have separate balances from the owner.
 /// Owners fund agents via Grant/TopUp, and can Revoke funds.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentBalances {
     /// (owner, agent_id, asset_id) -> balance
     balances: std::collections::HashMap<(Address, u64, AssetId), u128>,

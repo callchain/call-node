@@ -113,7 +113,7 @@ impl Default for OracleConfig {
 // ─── Oracle State ───────────────────────────────────────────────
 
 /// Full oracle state manager
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleManager {
     pub config: OracleConfig,
     validators: HashMap<u32, OracleValidatorInfo>,

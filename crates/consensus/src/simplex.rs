@@ -231,6 +231,14 @@ impl SimplexConsensus {
         block: &Block,
         result: &BlockExecutionResult,
     ) -> Result<(), ConsensusError> {
+        // Replay protection: only commit blocks at the expected height
+        if block.header.height != self.current_height {
+            return Err(ConsensusError::InvalidBlock(format!(
+                "height mismatch: expected {}, got {}",
+                self.current_height, block.header.height
+            )));
+        }
+
         // Distribute validator reward
         if result.total_validator_reward > 0 {
             let proposer = block.header.proposer;
