@@ -226,6 +226,54 @@ mod tests {
     }
 
     #[test]
+    fn test_rpc_get_transaction_receipt_reverted() {
+        let state = make_test_state();
+        use call_primitives::ExecutionStatus;
+        use call_protocol::{ProtocolReceipt, InstructionExecResult};
+        use call_primitives::FeeCurrency;
+
+        let tx_hash = call_primitives::TxHash::repeat_byte(0xCD);
+        let receipt = ProtocolReceipt {
+            tx_hash,
+            status: ExecutionStatus::Reverted {
+                reason: "insufficient balance for asset 1: have 0, need 1000".into(),
+            },
+            gas_used: 21_000,
+            gas_payer: test_addr(2),
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 500_000,
+            block_number: 42,
+            instruction_results: vec![InstructionExecResult {
+                success: false,
+                gas_used: 21_000,
+                revert_reason: Some("insufficient balance".into()),
+            }],
+            logs: vec![],
+            memos: vec![],
+            state_changes: vec![],
+        };
+        state.store_receipt(tx_hash, receipt);
+
+        let found = state.get_receipt(&tx_hash).expect("receipt exists");
+        match &found.status {
+            ExecutionStatus::Reverted { reason } => {
+                assert!(reason.contains("insufficient balance"), "expected revert reason, got: {}", reason);
+            }
+            other => panic!("expected Reverted, got {:?}", other),
+        }
+        assert_eq!(found.gas_used, 21_000);
+        assert_eq!(found.block_number, 42);
+
+        // Verify receipt_to_json exposes revertReason
+        let json = crate::standard::receipt_to_json(&found);
+        assert_eq!(json["status"], "0x0", "reverted status should be 0x0");
+        assert!(
+            json["revertReason"].as_str().unwrap().contains("insufficient balance"),
+            "revertReason should be present in JSON"
+        );
+    }
+
+    #[test]
     fn test_rpc_get_block_receipts() {
         let state = make_test_state();
         use call_primitives::ExecutionStatus;

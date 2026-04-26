@@ -452,10 +452,10 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     Ok(())
 }
 
-fn receipt_to_json(receipt: &call_protocol::ProtocolReceipt) -> serde_json::Value {
-    let status = match &receipt.status {
-        call_primitives::ExecutionStatus::Success => "0x1",
-        call_primitives::ExecutionStatus::Reverted { .. } => "0x0",
+pub(crate) fn receipt_to_json(receipt: &call_protocol::ProtocolReceipt) -> serde_json::Value {
+    let (status, revert_reason) = match &receipt.status {
+        call_primitives::ExecutionStatus::Success => ("0x1", None),
+        call_primitives::ExecutionStatus::Reverted { reason } => ("0x0", Some(reason.as_str())),
     };
     let logs: Vec<serde_json::Value> = receipt
         .logs
@@ -468,7 +468,7 @@ fn receipt_to_json(receipt: &call_protocol::ProtocolReceipt) -> serde_json::Valu
             })
         })
         .collect();
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "transactionHash": format!("{:?}", receipt.tx_hash),
         "status": status,
         "gasUsed": format!("0x{:x}", receipt.gas_used),
@@ -478,5 +478,9 @@ fn receipt_to_json(receipt: &call_protocol::ProtocolReceipt) -> serde_json::Valu
         "blockNumber": if receipt.block_number == 0 { "pending".to_string() } else { format!("0x{:x}", receipt.block_number) },
         "pending": receipt.block_number == 0,
         "logs": logs,
-    })
+    });
+    if let Some(reason) = revert_reason {
+        value["revertReason"] = serde_json::Value::String(reason.to_string());
+    }
+    value
 }
