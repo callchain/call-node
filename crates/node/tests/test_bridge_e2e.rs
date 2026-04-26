@@ -6,7 +6,7 @@
 mod e2e;
 use e2e::harness::*;
 
-use call_primitives::Address;
+use call_primitives::{Address, ExecutionStatus};
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 
@@ -249,9 +249,9 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
 
     let result = node.last_result.clone().expect("execution result should exist");
     assert_eq!(result.protocol_tx_count, 1, "tx should be included");
-    let instr_result = result.instruction_results.get(0).expect("one instruction result");
-    match instr_result {
-        call_protocol::instructions::InstructionResult::Reverted { reason } => {
+    let tx_result = result.transaction_results.get(0).expect("one transaction result");
+    match &tx_result.status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(
                 reason.contains("bridge deposit:"),
                 "expected bridge deposit failure, got: {}",

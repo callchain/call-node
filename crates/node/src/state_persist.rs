@@ -21,7 +21,7 @@ use call_storage::{
     CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
     CallGovernanceState, CallComplianceState, CallConsensusState,
-    CallReceipts, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
+    CallReceipts, CallReceiptsByBlock, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
     CallProtocolAssets, CallFeeParams, CallFeeCurrencyRegistry,
 };
 use reth_db::DatabaseEnv;
@@ -603,7 +603,21 @@ pub(crate) fn save_receipts(db: &DatabaseEnv, receipts: &std::collections::HashM
         })
         .collect();
     db_clear::<CallReceipts>(db).map_err(|e: StorageError| e.to_string())?;
-    db_batch_put::<CallReceipts>(db, entries).map_err(|e: StorageError| e.to_string())
+    db_batch_put::<CallReceipts>(db, entries).map_err(|e: StorageError| e.to_string())?;
+
+    // Build block_number -> tx_hashes index
+    let mut by_block: std::collections::HashMap<u64, Vec<TxHash>> = std::collections::HashMap::new();
+    for (tx_hash, receipt) in receipts {
+        by_block.entry(receipt.block_number).or_default().push(*tx_hash);
+    }
+    let index_entries: Vec<(Vec<u8>, Vec<u8>)> = by_block
+        .iter()
+        .map(|(block, hashes)| {
+            (block.to_be_bytes().to_vec(), serde_json::to_vec(hashes).unwrap())
+        })
+        .collect();
+    db_clear::<CallReceiptsByBlock>(db).map_err(|e: StorageError| e.to_string())?;
+    db_batch_put::<CallReceiptsByBlock>(db, index_entries).map_err(|e: StorageError| e.to_string())
 }
 
 pub(crate) fn load_receipts(db: &DatabaseEnv) -> Result<std::collections::HashMap<TxHash, ProtocolReceipt>, String> {
@@ -617,16 +631,21 @@ pub(crate) fn load_receipts(db: &DatabaseEnv) -> Result<std::collections::HashMa
     Ok(receipts)
 }
 
-#[allow(dead_code)]
-pub(crate) fn delete_receipts_by_block(db: &DatabaseEnv, block_number: u64) -> Result<(), String> {
-    let all = db_iter_all::<CallReceipts>(db).map_err(|e: StorageError| e.to_string())?;
-    for (k, v) in all {
-        let receipt: ProtocolReceipt = serde_json::from_slice(&v).map_err(|e| format!("deserialize receipt: {e}"))?;
-        if receipt.block_number == block_number {
-            db_del::<CallReceipts>(db, &k).map_err(|e: StorageError| e.to_string())?;
-        }
+pub(crate) fn load_receipts_by_block(db: &DatabaseEnv, block_number: u64) -> Result<Vec<TxHash>, String> {
+    let key = block_number.to_be_bytes().to_vec();
+    match db_get::<CallReceiptsByBlock>(db, &key) {
+        Ok(Some(v)) => serde_json::from_slice(&v).map_err(|e| e.to_string()),
+        Ok(None) => Ok(vec![]),
+        Err(e) => Err(e.to_string()),
     }
-    Ok(())
+}
+
+pub(crate) fn delete_receipts_by_block(db: &DatabaseEnv, block_number: u64) -> Result<(), String> {
+    let tx_hashes = load_receipts_by_block(db, block_number)?;
+    for tx_hash in tx_hashes {
+        db_del::<CallReceipts>(db, tx_hash.as_slice()).map_err(|e: StorageError| e.to_string())?;
+    }
+    db_del::<CallReceiptsByBlock>(db, &block_number.to_be_bytes()).map_err(|e: StorageError| e.to_string())
 }
 
 // ── Checkpoint / WAL persistence ──────────────────────────────────────

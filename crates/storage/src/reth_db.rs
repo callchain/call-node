@@ -277,6 +277,16 @@ impl Table for CallReceipts {
     type Value = Vec<u8>;
 }
 
+/// Receipt index: block_number -> Vec<TxHash> for efficient block-level queries and pruning
+#[derive(Debug)]
+pub struct CallReceiptsByBlock;
+impl Table for CallReceiptsByBlock {
+    const NAME: &'static str = "call_receipts_by_block";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// Logs: serialized (block_number, log_index) -> serialized LogEntry
 #[derive(Debug)]
 pub struct CallLogs;
@@ -467,6 +477,7 @@ impl TableSet for CallTables {
                 box_info::<CallMetadataCompliance>,
                 box_info::<CallMetadataAgents>,
                 box_info::<CallReceipts>,
+                box_info::<CallReceiptsByBlock>,
                 box_info::<CallLogs>,
                 box_info::<CallMemos>,
                 box_info::<CallFeeCurrencyRegistry>,

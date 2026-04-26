@@ -6,6 +6,7 @@ use std::path::Path;
 use call_consensus::{Block, SimplexConsensus};
 use call_primitives::BlockHash;
 use call_network::SyncResponse;
+use call_protocol::ProtocolReceipt;
 use call_rpc::RpcState;
 use crate::persist_block;
 
@@ -100,6 +101,30 @@ pub(crate) fn apply_synced_blocks(
                 if let Err(e) = persist_block(data_dir, block_height, &block) {
                     tracing::warn!(height = block_height, error = %e, "sync: failed to persist block to disk");
                 }
+
+                // Generate and store receipts for protocol transactions
+                for tr in &result.transaction_results {
+                    let tx_hash = tr.tx_hash;
+                    let Some(tx) = block.protocol_txs.iter().find(|t| {
+                        call_primitives::TxHash::from(t.compute_tx_hash()) == tx_hash
+                    }) else { continue; };
+
+                    let receipt = ProtocolReceipt {
+                        tx_hash,
+                        status: tr.status.clone(),
+                        gas_used: tr.gas_used,
+                        gas_payer: tx.sender,
+                        fee_currency: tx.fee_currency,
+                        fee_amount: tr.fee_amount,
+                        block_number: block_height,
+                        instruction_results: vec![],
+                        logs: vec![],
+                        memos: vec![],
+                        state_changes: vec![],
+                    };
+                    state.store_receipt(tx_hash, receipt);
+                }
+
                 if let Ok(mut c) = consensus.write() {
                     if let Err(e) = c.commit_block(&block, &result) {
                         tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");

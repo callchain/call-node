@@ -9,7 +9,7 @@ use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
 use call_oracle::ORACLE_UPDATE_INTERVAL;
 use call_primitives::Address;
-use call_protocol::transaction::ProtocolTransaction;
+use call_protocol::{ProtocolReceipt, transaction::ProtocolTransaction};
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
 use call_transaction_pool::Mempool;
@@ -296,7 +296,30 @@ pub(crate) async fn block_production_loop(
             }
         }
 
-        // 11. Persist block to disk
+        // 11. Generate and store receipts for protocol transactions
+        for tr in &result.transaction_results {
+            let tx_hash = tr.tx_hash;
+            let Some(tx) = block.protocol_txs.iter().find(|t| {
+                call_primitives::TxHash::from(t.compute_tx_hash()) == tx_hash
+            }) else { continue; };
+
+            let receipt = ProtocolReceipt {
+                tx_hash,
+                status: tr.status.clone(),
+                gas_used: tr.gas_used,
+                gas_payer: tx.sender,
+                fee_currency: tx.fee_currency,
+                fee_amount: tr.fee_amount,
+                block_number: height,
+                instruction_results: vec![],
+                logs: vec![],
+                memos: vec![],
+                state_changes: vec![],
+            };
+            state.store_receipt(tx_hash, receipt);
+        }
+
+        // 12. Persist block to disk
         if let Err(ref e) = persist_block(&db.data_dir, height, &block) {
             tracing::warn!(error = %e, "failed to persist block");
         }

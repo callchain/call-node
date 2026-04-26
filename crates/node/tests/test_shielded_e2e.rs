@@ -12,7 +12,7 @@
 
 mod e2e;
 use e2e::harness::{NodeBuilder, DeterministicRuntime, test_keypair, sign_tx};
-use call_primitives::{Address, FeeCurrency, Hash};
+use call_primitives::{Address, ExecutionStatus, FeeCurrency, Hash};
 use call_protocol::{
     instructions::Instruction,
     transaction::{AuthScheme, GasConfig, ProtocolTransaction},
@@ -178,9 +178,9 @@ async fn test_e2e_shielded_double_spend_rejected() {
     let block = node.produce_block(2_000);
     assert!(block.is_some(), "block should be produced");
     let result = node.last_result.clone().expect("execution result should exist");
-    let instr_result = result.instruction_results.get(0).expect("one instruction result");
-    match instr_result {
-        call_protocol::instructions::InstructionResult::Reverted { reason } => {
+    let tx_result = result.transaction_results.get(0).expect("one transaction result");
+    match &tx_result.status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(
                 reason.contains("shielded transfer:"),
                 "expected shielded transfer failure, got: {}",
@@ -216,9 +216,9 @@ async fn test_e2e_shielded_invalid_proof_rejected() {
     let block = node.produce_block(1_000);
     assert!(block.is_some(), "block should be produced");
     let result = node.last_result.clone().expect("execution result should exist");
-    let instr_result = result.instruction_results.get(0).expect("one instruction result");
-    match instr_result {
-        call_protocol::instructions::InstructionResult::Reverted { reason } => {
+    let tx_result = result.transaction_results.get(0).expect("one transaction result");
+    match &tx_result.status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(
                 reason.contains("shielded transfer:"),
                 "expected shielded transfer failure, got: {}",

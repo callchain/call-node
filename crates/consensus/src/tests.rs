@@ -1,6 +1,6 @@
 use crate::*;
 use crate::ForkManager;
-use call_primitives::{Address, BlockHash, Hash, ProtocolVersion};
+use call_primitives::{Address, BlockHash, Hash, ProtocolVersion, ExecutionStatus};
 use call_protocol::instructions::{Instruction, InstructionResult};
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 use call_bridge::BridgeOp;
@@ -638,9 +638,9 @@ fn test_frozen_asset_rejects_bridge_to_evm() {
     );
 
     let result = result.expect("block execute should not fail");
-    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
-    match &result.instruction_results[0] {
-        InstructionResult::Reverted { reason } => {
+    assert!(!result.transaction_results.is_empty(), "expected at least one transaction result");
+    match &result.transaction_results[0].status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(reason.contains("not active"), "expected not-active error, got: {reason}");
         }
         other => panic!("expected Reverted, got {:?}", other),
@@ -717,9 +717,9 @@ fn test_delisted_asset_rejects_bridge_to_protocol() {
     );
 
     let result = result.expect("block execute should not fail");
-    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
-    match &result.instruction_results[0] {
-        InstructionResult::Reverted { reason } => {
+    assert!(!result.transaction_results.is_empty(), "expected at least one transaction result");
+    match &result.transaction_results[0].status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(reason.contains("not active"), "expected not-active error, got: {reason}");
         }
         other => panic!("expected Reverted, got {:?}", other),
@@ -973,9 +973,9 @@ fn test_evm_issuer_mint_cap_enforcement() {
     );
 
     let result = result.expect("block execute should not fail");
-    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
-    match &result.instruction_results[0] {
-        InstructionResult::Reverted { reason } => {
+    assert!(!result.transaction_results.is_empty(), "expected at least one transaction result");
+    match &result.transaction_results[0].status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(reason.contains("cap exceeded"), "expected cap error, got: {reason}");
         }
         other => panic!("expected Reverted, got {:?}", other),
@@ -1071,9 +1071,9 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
     );
 
     let result = result.expect("block execute should not fail");
-    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
-    match &result.instruction_results[0] {
-        InstructionResult::Reverted { reason } => {
+    assert!(!result.transaction_results.is_empty(), "expected at least one transaction result");
+    match &result.transaction_results[0].status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(reason.contains("not asset issuer"), "expected unauthorized error, got: {reason}");
         }
         other => panic!("expected Reverted, got {:?}", other),
@@ -1169,9 +1169,9 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
     );
 
     let result = result.expect("block execute should not fail");
-    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
-    match &result.instruction_results[0] {
-        InstructionResult::Reverted { reason } => {
+    assert!(!result.transaction_results.is_empty(), "expected at least one transaction result");
+    match &result.transaction_results[0].status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(reason.contains("not active"), "expected not-active error, got: {reason}");
         }
         other => panic!("expected Reverted, got {:?}", other),
@@ -1241,9 +1241,9 @@ fn test_evm_issuer_mint_call_asset_rejected() {
     );
 
     let result = result.expect("block execute should not fail");
-    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
-    match &result.instruction_results[0] {
-        InstructionResult::Reverted { reason } => {
+    assert!(!result.transaction_results.is_empty(), "expected at least one transaction result");
+    match &result.transaction_results[0].status {
+        ExecutionStatus::Reverted { reason } => {
             assert!(reason.contains("CALL asset has no EVM wrapped token"), "expected CALL rejection, got: {reason}");
         }
         other => panic!("expected Reverted, got {:?}", other),

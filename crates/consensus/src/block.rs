@@ -5,7 +5,8 @@
 use call_bridge::{BridgeOp, BridgeConfig};
 use call_crypto::{build_merkle_root, keccak256};
 use call_governance::GovernanceManager;
-use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion};
+use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
+use call_primitives::ExecutionStatus;
 use call_protocol::account::AccountState;
 use call_protocol::instructions::{execute_protocol_instructions, InstructionResult};
 use call_protocol::registry::{AssetRegistry, AssetStatus};
@@ -658,13 +659,25 @@ impl Block {
                     }
                 }
                 result.protocol_tx_count += 1;
-                result.instruction_results.push(InstructionResult::Reverted {
-                    reason: e.to_string(),
+                result.transaction_results.push(TransactionResult {
+                    tx_hash: tx.compute_tx_hash().into(),
+                    status: ExecutionStatus::Reverted { reason: e.to_string() },
+                    gas_used: gas_units,
+                    fee_amount: fee,
+                    instruction_count: 0,
+                    agent_events: vec![],
                 });
                 tracing::warn!(error = %e, sender = ?tx.sender, nonce = tx.nonce, "block: tx execution failed, included as reverted");
             } else {
                 result.protocol_tx_count += 1;
-                result.instruction_results.extend(tx_results);
+                result.transaction_results.push(TransactionResult {
+                    tx_hash: tx.compute_tx_hash().into(),
+                    status: ExecutionStatus::Success,
+                    gas_used: gas_units,
+                    fee_amount: fee,
+                    instruction_count: tx_results.len(),
+                    agent_events: tx_agent_events.clone(),
+                });
                 result.agent_events.extend(tx_agent_events);
             }
         }
@@ -805,14 +818,26 @@ impl Block {
 
 // ── Block Execution Result ────────────────────────────────────────────
 
+/// Result of executing a single protocol transaction
+#[derive(Debug, Clone)]
+pub struct TransactionResult {
+    pub tx_hash: TxHash,
+    pub status: ExecutionStatus,
+    pub gas_used: u64,
+    pub fee_amount: u128,
+    pub instruction_count: usize,
+    pub agent_events: Vec<call_agent::AgentEvent>,
+}
+
 /// Result of executing all transactions in a block
 #[derive(Debug, Default, Clone)]
 pub struct BlockExecutionResult {
-    pub instruction_results: Vec<InstructionResult>,
+    pub transaction_results: Vec<TransactionResult>,
     pub payment_root: Hash,
     pub evm_state_root: Hash,
     pub bridge_root: Hash,
     pub receipt_root: Hash,
+    pub state_root: Hash,
     pub evm_tx_count: usize,
     pub protocol_tx_count: usize,
     pub bridge_op_count: usize,
@@ -898,14 +923,13 @@ pub(crate) fn compute_receipt_root(result: &BlockExecutionResult) -> Hash {
     data.extend_from_slice(&(result.evm_tx_count as u64).to_le_bytes());
     data.extend_from_slice(&(result.protocol_tx_count as u64).to_le_bytes());
     data.extend_from_slice(&(result.bridge_op_count as u64).to_le_bytes());
-    for instr_result in &result.instruction_results {
-        match instr_result {
-            InstructionResult::Success => data.push(1),
-            InstructionResult::Reverted { reason } => {
-                data.push(0);
-                data.extend_from_slice(reason.as_bytes());
-            }
-        }
+    for tr in &result.transaction_results {
+        let mut leaf = Vec::new();
+        leaf.extend_from_slice(tr.tx_hash.as_slice());
+        leaf.push(if tr.status.is_success() { 1 } else { 0 });
+        leaf.extend_from_slice(&tr.gas_used.to_be_bytes());
+        leaf.extend_from_slice(&tr.fee_amount.to_be_bytes());
+        data.extend_from_slice(keccak256(&leaf).as_slice());
     }
     for event in &result.agent_events {
         data.extend_from_slice(&event.agent_id.to_be_bytes());
