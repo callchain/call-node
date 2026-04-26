@@ -54,6 +54,18 @@ The internal bridge treats assets differently based on `asset_id`:
 
 **Key design decision:** CALL (asset_id=1) bridges as **native EVM gas balance**, not as a wrapped ERC-20. This allows bridged CALL to be used directly for EVM transaction gas and native transfers. User-defined assets are always bridged as wrapped ERC-20 contracts deployed via `EvmExecutor::deploy_erc20_template`.
 
+### Supply Tracking
+
+Bridge operations update `Asset.evm_supply` in `AssetRegistry`:
+
+| Operation | `protocol_supply` | `evm_supply` | Source |
+|-----------|------------------|-------------|--------|
+| `BridgeToEvm` (deposit) | — | +amount | `registry.add_evm_supply()` |
+| `BridgeToProtocol` (withdraw) | — | -amount | `registry.sub_evm_supply()` |
+| `EvmIssuerMint` | — | +amount | `registry.add_evm_supply()` |
+
+`evm_supply` is the protocol layer's tracked view of EVM circulation. It is used for cap enforcement (`all_supply() = protocol_supply + evm_supply`) but is not the source of truth for individual EVM balances — that remains `WrappedToken.balanceOf`.
+
 ---
 
 ## Entry Points
@@ -325,4 +337,5 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 | Rate limiting | Ready | Per-tx and daily limits enforced; auto-reset per `blocks_per_day` |
 | Bridge pause | Ready | Per-asset pause via `BridgeStateManager` |
 | User-facing RPC | Ready | `call_bridgeToEvm` and `call_bridgeToProtocol` with signature verification and mempool submission |
+| EVM issuer mint | Ready | `Instruction::EvmIssuerMint` + `WrappedToken.issuerMint`; cap enforced at protocol layer |
 | E2E test helpers | Ready | Python signing and RPC wrappers in `tests/signer.py` and `tests/rpc_client.py` |

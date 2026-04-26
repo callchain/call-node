@@ -53,7 +53,7 @@ The only write endpoint is `call_submit`, which accepts a `ProtocolTransaction` 
 | `call_protocolBalance` | Returns protocol-layer balance for an address and asset |
 | `call_getNonce` | Returns the next nonce for an address |
 | `call_compliancePolicy` | Returns compliance policy for an asset |
-| `call_totalBalance` | Returns total minted supply for an asset |
+| `call_totalBalance` | Returns total protocol-layer balance sum for an asset (equivalent to `protocol_supply`) |
 | `call_agentInfo` | Returns agent metadata by `agent_id` |
 | `call_agentBalance` | Returns total balance held by an agent |
 | `call_agentHistory` | Returns receipt history filtered by agent owner |
@@ -127,7 +127,7 @@ Each instruction in the `instructions` array must have a `"type"` field. Support
 | Type | Fields | Gas |
 |------|--------|-----|
 | `Transfer` | `asset_id`, `to`, `amount`, `memo?` | 100,000 |
-| `RegisterAsset` | `symbol`, `name`, `decimals` | 200,000 |
+| `RegisterAsset` | `symbol`, `name`, `decimals`, `max_supply` | 200,000 |
 | `RegisterAgent` | `pubkey`, `name`, `url` | 50,000 |
 | `GrantAgentBalance` | `agent_id`, `asset_id`, `amount` | 10,000 |
 | `RevokeAgentBalance` | `agent_id`, `asset_id` | 10,000 |
@@ -141,6 +141,7 @@ Each instruction in the `instructions` array must have a `"type"` field. Support
 | `ExternalBridgeWithdraw` | `target_chain`, `target_address`, ... | 200,000 |
 | `BridgeToEvm` | `asset_id`, `to`, `amount` | 25,000 |
 | `BridgeToProtocol` | `asset_id`, `to`, `amount` | 25,000 |
+| `EvmIssuerMint` | `asset_id`, `to`, `amount` | 50,000 |
 | `ValidatorStake` | `ed25519_pubkey`, `self_stake` | 200,000 |
 | `ValidatorUnstake` | `validator_id` | 100,000 |
 | `ValidatorClaimUnbonded` | `validator_id` | 100,000 |

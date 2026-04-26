@@ -15,6 +15,7 @@ Instruction::RegisterAsset {
     symbol: String,
     name: String,
     decimals: u8,
+    max_supply: Balance,  // 0 = uncapped
 }
 ```
 
@@ -25,12 +26,15 @@ During block execution, `execute_protocol_instructions` processes `RegisterAsset
 1. **Fee collection**: Deduct `asset_registration_fee` (in CALL, asset_id = 1) from the sender's balance. The fee amount is read from `GovernanceManager::config.asset_registration_fee`.
 2. **Asset allocation**: Register the asset in `AssetRegistry`:
    - Allocate a monotonically increasing `asset_id` (starting from 1).
-   - Store metadata: `symbol`, `name`, `decimals`, `issuer = sender`, `total_supply = 0`, `status = Active`, `compliance_policy = 0`, `registered_at = current_block_height`.
+   - Store metadata: `symbol`, `name`, `decimals`, `issuer = sender`, `protocol_supply = 0`, `evm_supply = 0`, `max_supply` (from tx), `status = Active`, `compliance_policy = 0`, `registered_at = current_block_height`.
 3. **EVM wrapped token deployment** (if `register_evm_bridge` is enabled): The system deployer (`Address::repeat_byte(0xFF)`) deploys a `WrappedToken` contract on the EVM layer with:
    - `name = asset.name`
    - `symbol = asset.symbol`
    - `decimals = asset.decimals`
-   - `initial_supply = 0`
+   - `bridge = system deployer address`
+   - `issuer = sender`
+   - `maxSupply = max_supply`
+   - `assetId = allocated asset_id`
 4. **EVM contract address binding**: Set `asset.evm_contract_address` to the deployed contract address. This binding is immutable once set.
 
 All four steps are atomic. If any step fails, the transaction reverts and no partial state is committed.
@@ -82,7 +86,9 @@ pub struct Asset {
     pub name: String,
     pub decimals: u8,
     pub issuer: Address,                    // who registered the asset
-    pub total_supply: Balance,
+    pub protocol_supply: Balance,           // protocol-layer circulation
+    pub evm_supply: Balance,                // EVM wrapped token circulation
+    pub max_supply: Balance,                // 0 = uncapped
     pub status: AssetStatus,                // Active | Frozen | Delisted
     pub compliance_policy: u8,
     pub registered_at: u64,
@@ -90,36 +96,25 @@ pub struct Asset {
 }
 ```
 
-## EVM Bridge Registration
+| Field | Meaning | Source of truth |
+|-------|---------|-----------------|
+| `protocol_supply` | Total asset balance held in `AccountState` (protocol layer) | Protocol ledger |
+| `evm_supply` | Total wrapped ERC-20 supply on EVM (`WrappedToken.totalSupply`) | EVM contract |
+| `all_supply()` | Entire system circulation = protocol + EVM | Computed |
+| `max_supply` | Hard cap (0 = uncapped). Set at registration, immutable. | Registration tx |
 
-For assets that require a custom EVM contract (rather than the system-deployed `WrappedToken`), a separate `RegisterEvmBridge` instruction is used. This is an opt-in path for advanced users who deploy their own ERC-20 contracts on EVM and want to link them to an existing protocol asset.
+### Supply Cap Enforcement
 
-### Instruction
+The cap is checked **exactly once in protocol `Block::execute`**, never in the EVM contract. The EVM contract only sees `evm_supply`; it cannot know `protocol_supply`. Checking the cap in the contract would allow bypass (e.g., mint 8000 on protocol, then mint 3000 on EVM — contract sees 0 + 3000 <= 10000 and passes, but real `all_supply = 11000`).
 
 ```rust
-Instruction::RegisterEvmBridge {
-    asset_id: AssetId,
-    evm_contract_address: Address,
+let asset = registry.get_asset(asset_id).unwrap();
+if asset.would_exceed_cap(amount) {
+    return Err(ConsensusError::InvalidBlock("max supply exceeded".into()));
 }
 ```
 
-### Execution Flow
-
-1. **Issuer verification**: `sender == asset.issuer`.
-2. **Immutability check**: `asset.evm_contract_address` must be `None` (already bound assets cannot be relinked).
-3. **Contract validation** (EVM static call): Call `totalSupply()` on the EVM contract at `evm_contract_address`. Reject if `totalSupply > 0`. This guarantees the EVM contract starts with zero supply, ensuring the bridge can maintain the invariant:
-   ```
-   protocol_asset_total_minted_to_evm == evm_wrapped_token_total_supply
-   ```
-4. **Optional code-hash whitelist** (governance-configurable): Verify the deployed bytecode hash matches an approved template. If disabled, any contract that exposes `bridgeMint(address,uint256)` and `bridgeBurn(uint256)` is accepted.
-5. **Binding**: Set `asset.evm_contract_address = evm_contract_address`.
-
-### Security Guarantees
-
-- Only the asset issuer can link an EVM contract.
-- The link is immutable: once set, it cannot be changed by anyone (including the issuer). If the wrong address is registered, the bridge operations for that asset will revert, and the asset must be delisted or governance must intervene.
-- The EVM contract must start with `totalSupply == 0`. This prevents an attacker from linking a pre-minted contract and using `BridgeToProtocol` to drain protocol balances.
-- The `bridgeMint` function on the EVM contract must be restricted to the protocol bridge address (`Address::repeat_byte(0xFF)` or a configurable bridge address). Otherwise, anyone could mint EVM tokens arbitrarily, breaking the bridge invariant.
+The EVM `WrappedToken` contract does **not** enforce the cap — protocol layer is the single source of truth.
 
 ## Bridge Invariants
 
@@ -151,17 +146,33 @@ contract WrappedToken {
     mapping(address => mapping(address => uint256)) public allowance;
 
     address public bridge;
+    address public issuer;
+    uint256 private _maxSupply;  // 0 = uncapped
+    uint256 public assetId;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    constructor(string memory _name, string memory _symbol, uint8 _decimals) {
+    constructor(
+        string memory _name,
+        string memory _symbol,
+        uint8 _decimals,
+        address _bridge,
+        address _issuer,
+        uint256 maxSupply_,
+        uint256 _assetId
+    ) {
         name = _name;
         symbol = _symbol;
         decimals = _decimals;
         totalSupply = 0;
-        bridge = msg.sender; // set to system deployer, later restricted
+        bridge = _bridge;
+        issuer = _issuer;
+        _maxSupply = maxSupply_;
+        assetId = _assetId;
     }
+
+    function cap() public view returns (uint256) { return _maxSupply; }
 
     function transfer(address _to, uint256 _value) public returns (bool) { /* ... */ }
     function approve(address _spender, uint256 _value) public returns (bool) { /* ... */ }
@@ -180,10 +191,45 @@ contract WrappedToken {
         balanceOf[msg.sender] -= _value;
         emit Transfer(msg.sender, address(0), _value);
     }
+
+    function issuerMint(address _to, uint256 _value) public {
+        require(msg.sender == issuer, "only issuer");
+        totalSupply += _value;
+        balanceOf[_to] += _value;
+        emit Transfer(address(0), _to, _value);
+    }
 }
 ```
 
-Note: The `bridge` address is set at construction time to the system deployer. During `RegisterAsset` execution, the bridge execution path must use this same address as the `caller` for `bridgeMint` calls.
+Note: The `bridge` address is passed as a constructor argument and must match the protocol bridge address (`Address::repeat_byte(0xFF)`) used in `BridgeToEvm`. The contract does **not** enforce `max_supply` — cap checks happen in protocol `Block::execute` where both `protocol_supply` and `evm_supply` are visible.
+
+## EVM Issuer Mint
+
+Asset issuers can mint wrapped ERC-20 tokens directly on the EVM layer via `Instruction::EvmIssuerMint`:
+
+```rust
+Instruction::EvmIssuerMint {
+    asset_id: AssetId,
+    to: Address,
+    amount: Balance,
+}
+```
+
+### Execution Flow
+
+1. **Issuer verification**: `sender == asset.issuer`.
+2. **Asset status check**: `asset.status == AssetStatus::Active`.
+3. **Cap check**: `asset.all_supply() + amount <= max_supply` (protocol layer).
+4. **EVM call**: `evm_executor.evm_call_issuer_mint(issuer, contract_addr, evm_state, to, amount)`.
+5. **Supply tracking**: `registry.add_evm_supply(asset_id, amount)`.
+
+No protocol-layer balance is created. The minted tokens exist only on EVM and can be withdrawn back to protocol via `BridgeToProtocol`.
+
+### Security Properties
+
+- Only the asset issuer can call `issuerMint`.
+- The cap is enforced at the protocol layer, not in the EVM contract (the contract has no visibility into `protocol_supply`).
+- Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`, which has no private key. Therefore, no one can `EvmIssuerMint` genesis assets. Supply changes for genesis assets happen only through `SystemTx` (block rewards).
 
 ## Governance Parameters
 
@@ -193,74 +239,96 @@ The following parameters affect asset registration and can be updated via govern
 |-----------|---------|-------------|
 | `asset_registration_fee` | `1_000_000` CALL | Fee paid by the issuer to register an asset |
 | `register_evm_bridge` | `true` | Whether to auto-deploy a wrapped token on EVM during registration |
-| `evm_bridge_whitelist_required` | `false` | Whether `RegisterEvmBridge` requires the contract bytecode to match a whitelist |
 
 ## Delisting and Lifecycle
 
 Assets can transition through the following states:
 
+| Status | `Mint` (issuer) | `Burn` (issuer) | `Transfer` | `BridgeToEvm` | `BridgeToProtocol` | `EvmIssuerMint` |
+|--------|-----------------|-----------------|------------|---------------|--------------------|-----------------|
+| `Active` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Frozen` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `Delisted` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
 - **Active**: All operations permitted.
-- **Frozen**: Transfers, mints, and burns are blocked. Bridge operations are paused.
-- **Delisted**: The asset is permanently removed from the active registry. Existing balances remain in `AccountState` but the asset cannot be used in new transactions.
+- **Frozen**: All user-facing operations are blocked. Can be unfrozen by the issuer via `registry.unfreeze_asset`.
+- **Delisted**: Permanently retired by the issuer. Cannot be unfrozen.
 
-State transitions are controlled by the asset issuer (via `Instruction::UpdateCompliance`) or by governance (via `GovernanceEmergencyPause`).
+State transitions are controlled by the asset issuer:
+- `freeze_asset(id, caller)` — caller must be issuer; reversible.
+- `unfreeze_asset(id, caller)` — caller must be issuer; only works on `Frozen` assets.
+- `delist_asset(id, caller)` — caller must be issuer; permanent.
 
-## Roadmap / Enhancement: Convert Direct-State RPCs to Instruction-Based Transactions
+Governance can also pause the entire chain via `GovernanceEmergencyPause`.
 
-Several RPC endpoints currently modify shared state directly (bypassing the transaction mempool and consensus pipeline). This causes state divergence across nodes, removes atomic rollback guarantees, and skips fee/nonce enforcement. The following RPCs should be converted to use `Instruction`-based `ProtocolTransaction` flows.
+## AssetRegistry Persistence
 
-### Asset and Payment Layer
+`AssetRegistry` is both **persisted to reth-db** and **replay-reconstructed from block history** on startup:
 
-| RPC | Current Behavior | Target Instruction | Files Affected |
-|-----|------------------|-------------------|----------------|
-| `call_registerAsset` | Directly writes `asset_registry` and `balance_state` | `Instruction::RegisterAsset` | `crates/rpc/src/callchain.rs`, `crates/protocol/src/instructions.rs`, `crates/consensus/src/block.rs` |
-| `call_sendPayment` | Inserts into mempool but executes immediately in RPC | Standard `Instruction::Transfer` via `state.insert_protocol_tx` | `crates/rpc/src/callchain.rs`, `crates/rpc/src/handlers.rs` |
+### Persistence Layer
 
-### Agent Layer
+- **Save**: `persist_state_to_db` serializes the full registry via `serde_json` to the `CallProtocolAssets` DB table.
+- **Load**: `load_state_from_db` deserializes the registry from the same table.
 
-| RPC | Current Behavior | Target Instruction | Files Affected |
-|-----|------------------|-------------------|----------------|
-| `call_agentRegister` | Directly writes `agent_registry` and `balance_state` | `Instruction::AgentRegister` | `crates/rpc/src/callchain.rs`, `crates/protocol/src/instructions.rs`, `crates/consensus/src/block.rs` |
-| `call_agentGrant` | Directly writes `balance_state` and `agent_balances` | `Instruction::AgentGrant` | `crates/rpc/src/callchain.rs`, `crates/protocol/src/instructions.rs`, `crates/consensus/src/block.rs` |
-| `call_agentRevoke` | Directly writes `agent_balances` | `Instruction::AgentRevoke` | `crates/rpc/src/callchain.rs`, `crates/protocol/src/instructions.rs`, `crates/consensus/src/block.rs` |
+### Replay Layer (Correctness Fallback)
 
-### Consensus / Governance Layer
+If the DB snapshot is empty or missing (e.g., after unclean shutdown, or on a new node), `replay_asset_registry` scans `data_dir/blocks/*.json` in height order and re-executes every `Instruction::RegisterAsset` to rebuild the registry deterministically:
 
-| RPC | Current Behavior | Target Instruction | Files Affected |
-|-----|------------------|-------------------|----------------|
-| `call_submitRollbackSignature` | Directly writes `fork_manager` and `pending_rollback` | `Instruction::SubmitRollbackSignature` | `crates/rpc/src/callchain.rs`, `crates/protocol/src/instructions.rs`, `crates/consensus/src/block.rs` |
+```rust
+for height in 1..=latest {
+    let block = load_block(data_dir, height)?;
+    for tx in &block.protocol_txs {
+        for instr in &tx.instructions {
+            if let Instruction::RegisterAsset { symbol, name, decimals, max_supply } = instr {
+                registry.register_asset(symbol, name, decimals, tx.sender, 0, height, max_supply)?;
+            }
+        }
+    }
+}
+```
 
-### Implementation Checklist
+This guarantees that every node reconstructs the exact same registry from canonical block history, preserving `asset_id` assignment order and `next_id` consistency across restarts.
 
-1. **Define new `Instruction` variants** in `crates/protocol/src/instructions.rs`.
-2. **Add execution logic** in `execute_protocol_instructions` (and `execute_bridge_instruction` / `execute_validator_instruction` where applicable) in `crates/consensus/src/block.rs`.
-3. **Update RPC handlers** in `crates/rpc/src/callchain.rs` to construct `ProtocolTransaction` and call `state.insert_protocol_tx(tx)` instead of direct state writes.
-4. **Update `submit_payment`** in `crates/rpc/src/handlers.rs` to remove immediate execution; rely on the normal block-building pipeline.
-5. **Add tests** for each new instruction in block execution and E2E tests.
-6. **Update docs** (`rpc.md`, `protocol.md`) to reflect the new transaction-based flows.
+### EVM Contract Address Consistency
 
-### Bridge Execution Fix: Fixed Bridge Address for `bridgeMint`
+`RegisterAsset` auto-deploys a wrapped ERC-20 via `deploy_erc20_template`. The contract address depends on the deployer nonce. Replay produces the same contract addresses as the original execution because the nonce sequence is deterministic. However, the replay only reconstructs the registry metadata; the actual EVM state (including deployed contract code) is loaded separately from `CallEvmAccounts`.
 
-With the introduction of `onlyBridge` access control on `WrappedToken.sol`, `BridgeToEvm` must use a fixed protocol bridge address as the EVM caller instead of the transaction sender.
+## Genesis Asset Supply Initialization
 
-| Change | Current | Target | Files Affected |
-|--------|---------|--------|----------------|
-| `BridgeToEvm` caller for `bridgeMint` | `sender` (protocol user address) | `BRIDGE_EVM_ADDRESS` (e.g. `Address::repeat_byte(0xFF)`) | `crates/consensus/src/block.rs`, `crates/protocol/src/lib.rs` |
-| `WrappedToken` constructor | `bridge = msg.sender` | Accept `bridge` as constructor argument | `crates/evm/contracts/WrappedToken.sol` |
-| Genesis CALL deployment | Auto-deploys `WrappedToken` for asset_id == 1 | Remove (CALL bridges as native EVM balance) | `crates/chainspec/src/genesis.rs` |
+Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`. This is an intentional security design:
 
-**Details:**
+- **No one can issuer-mint**: `Address::ZERO` has no corresponding private key, so `Instruction::Mint`, `Instruction::Burn`, and `Instruction::EvmIssuerMint` are all impossible for genesis assets.
+- **Supply changes only via system path**: Block rewards, validator incentives, and other protocol-level issuance go through `SystemTx` in `Block::execute`, not through user-signed instructions.
+- **Protocol-controlled monetary policy**: The chain itself controls how much CALL enters circulation.
 
-- `evm_call_bridge_mint` must be called with `caller = BRIDGE_EVM_ADDRESS` so that `WrappedToken.bridgeMint` passes the `onlyBridge` check.
-- `BridgeToProtocol` does **not** need this change because `bridgeBurn` burns the caller's own balance and requires no special access control.
-- A protocol-level constant `BRIDGE_EVM_ADDRESS` should be defined (e.g. in `crates/protocol/src/lib.rs`) and used consistently across genesis deployment, instruction execution, and any system-initiated EVM calls.
+After genesis block execution, `protocol_supply` for CALL must be initialized to the total distributed amount. Subsequent block rewards update it via `account.mint` + `registry.mint_supply` system paths.
 
-### Why This Matters
+Genesis assets should use `max_supply = 0` (uncapped) because protocol-level issuance has its own economic rules.
 
-- **Atomicity**: Direct state writes cannot be rolled back if a subsequent step fails. Instructions are executed atomically during block building.
-- **Consensus**: Only transactions included in a block are agreed upon by validators. Direct writes create divergent local state.
-- **Replay protection**: The transaction pipeline enforces nonces, fees, and mempool defense rules. Direct writes bypass all of these.
-- **Auditability**: Instruction execution produces receipts and events. Direct writes leave no trace.
+## Asset System Roadmap
+
+### Completed
+
+| Item | Status |
+|------|--------|
+| Supply redesign (`protocol_supply`, `evm_supply`, `max_supply`, `all_supply()`) | ✅ Done |
+| Supply cap enforcement in `Block::execute` | ✅ Done |
+| EVM issuer mint (`Instruction::EvmIssuerMint` + `WrappedToken.issuerMint`) | ✅ Done |
+| Frozen/Delisted asset enforcement in transaction execution | ✅ Done |
+| AssetRegistry serde + DB persistence | ✅ Done |
+| AssetRegistry block replay reconstruction on startup | ✅ Done |
+| `RegisterEvmBridge` instruction removal | ✅ Done |
+| `WithdrawFromEvm` → `BridgeToProtocol` rename | ✅ Done |
+| `call_assetInfo` extended with supply fields | ✅ Done |
+| Unified write endpoint (`call_submit`) for all state mutations | ✅ Done |
+| Fixed bridge address for `bridgeMint` | ✅ Done |
+
+### Remaining
+
+| Item | Status | Notes |
+|------|--------|-------|
+| WrappedToken runtime bytecode | ⚠️ Partial | `.bin` is valid and deployed correctly; `.bin-runtime` is empty but unused at runtime. Regenerate if needed for external verification. |
+| `call_totalBalance` RPC | ⚠️ Legacy | Returns `Asset.total_supply` which no longer exists; should return `all_supply()` or be deprecated in favor of `call_assetInfo`. |
 
 ## Related Documents
 
