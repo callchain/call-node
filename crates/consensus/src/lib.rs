@@ -7,10 +7,14 @@ pub mod bft;
 pub mod block;
 pub mod block_cache;
 pub mod digest;
+pub mod exec;
 pub mod fork;
 pub mod proposer;
 pub mod simplex;
 pub mod validator;
+
+#[cfg(test)]
+mod tests;
 
 pub use bft::*;
 pub use block::*;
