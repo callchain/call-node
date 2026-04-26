@@ -7,7 +7,7 @@ use call_oracle::OracleManager;
 use crate::ProtocolResult;
 use crate::ProtocolError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FeeCurrencyEntry {
     pub asset_id: AssetId,
     pub name: String,
@@ -17,7 +17,7 @@ pub struct FeeCurrencyEntry {
     pub added_by_proposal: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FeeCurrencyRegistry {
     pub allowed_currencies: Vec<FeeCurrencyEntry>,
     pub stablecoin_cap_bps: u32, // default 5000 = 50%

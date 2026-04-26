@@ -282,7 +282,7 @@ pub fn calculate_gas_units(instructions: &[Instruction]) -> u64 {
 
 // ── Fee parameters (per spec §12.2.3) ─────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FeeParams {
     /// Current base fee in wei
     pub base_fee: u128,

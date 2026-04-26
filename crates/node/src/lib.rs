@@ -24,7 +24,7 @@ use call_consensus::{
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, UpgradeAnnouncement};
 use call_primitives::{BlockHash, Hash, Address};
 use call_protocol::{
-    AccountState, AssetRegistry, ComplianceEngine,
+    AccountState, AssetRegistry, ComplianceEngine, FeeParams, FeeCurrencyRegistry,
     transaction::ProtocolTransaction,
     security::P2PDefense,
 };
@@ -40,7 +40,7 @@ use call_storage::reth_db::{
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
     CallGovernanceState, CallComplianceState, CallConsensusState,
     CallReceipts, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
-    CallProtocolAssets,
+    CallProtocolAssets, CallFeeParams, CallFeeCurrencyRegistry,
 };
 use call_protocol::ProtocolReceipt;
 use call_primitives::TxHash;
@@ -163,7 +163,7 @@ impl CallNode {
         let fresh_start = recovery_needed || !blocks_exist;
 
         // Load persisted state from reth-db (skip if recovery needed)
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, mut asset_registry, receipts, fork_manager) = if recovery_needed {
+        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, mut asset_registry, receipts, fork_manager, fee_params, fee_currency_registry) = if recovery_needed {
             (
                 AccountState::new(), EvmState::new(), BridgeStateManager::default(),
                 ShieldedState::new(), ValidatorStateManager::default(),
@@ -172,6 +172,8 @@ impl CallNode {
                 AssetRegistry::new(),
                 std::collections::HashMap::new(),
                 ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1),
+                FeeParams::default(),
+                FeeCurrencyRegistry::new(),
             )
         } else {
             let loaded = load_state_from_db(db_env);
@@ -202,7 +204,7 @@ impl CallNode {
                     )
                 }
             };
-            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, loaded.7, oracle, governance, loaded.9, loaded.10, receipts, fork_manager)
+            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, loaded.7, oracle, governance, loaded.9, loaded.10, receipts, fork_manager, loaded.11, loaded.12)
         };
 
         // Replay AssetRegistry from block history if db snapshot is empty/missing.
@@ -249,6 +251,18 @@ impl CallNode {
 
         state.set_data_dir(data_dir.clone());
 
+        // Rebuild log_index from loaded receipts so eth_getLogs queries work correctly after restart
+        for (tx_hash, receipt) in &receipts {
+            for (idx, log) in receipt.logs.iter().enumerate() {
+                if let Ok(mut index) = state.log_index.write() {
+                    index
+                        .entry(log.address)
+                        .or_insert_with(Vec::new)
+                        .push((receipt.block_number, *tx_hash, idx));
+                }
+            }
+        }
+
         // Inject loaded receipts
         *state.receipts.write().unwrap() = receipts;
 
@@ -266,6 +280,13 @@ impl CallNode {
 
         // Sync consensus params from SimplexConsensus into RpcState for governance updates
         *state.consensus_params.write().unwrap() = *consensus.params();
+
+        // Sync current_block from consensus height so RPCs report correct block number after restart
+        state.set_current_block(consensus.current_height());
+
+        // Inject loaded fee params and fee currency registry
+        *state.fee_params.write().unwrap() = fee_params;
+        *state.fee_currency_registry.write().unwrap() = fee_currency_registry;
 
         // Set parent_hash to the last committed block hash from persisted state
         let parent_hash = consensus.last_block_hash();
@@ -1068,7 +1089,7 @@ impl CallNode {
 fn load_state_from_db(
     db_env: &Arc<DatabaseEnv>,
 ) -> (AccountState, EvmState, BridgeStateManager, ShieldedState,
-      ValidatorStateManager, AgentRegistry, AgentBalances, call_agent::AgentNonces, GovernanceManager, ComplianceEngine, AssetRegistry) {
+      ValidatorStateManager, AgentRegistry, AgentBalances, call_agent::AgentNonces, GovernanceManager, ComplianceEngine, AssetRegistry, FeeParams, FeeCurrencyRegistry) {
     // Load balances
     let (balances, allowances) = match db_load_balances(db_env) {
         Ok(b) => b,
@@ -1166,7 +1187,25 @@ fn load_state_from_db(
         }
     };
 
-    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, agent_nonces, governance, compliance, asset_registry)
+    // Load fee params
+    let fee_params = match load_fee_params(db_env) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load fee params");
+            FeeParams::default()
+        }
+    };
+
+    // Load fee currency registry
+    let fee_currency_registry = match load_fee_currency_registry(db_env) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load fee currency registry");
+            FeeCurrencyRegistry::new()
+        }
+    };
+
+    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, agent_nonces, governance, compliance, asset_registry, fee_params, fee_currency_registry)
 }
 
 /// Persist all state types to the reth-db database.
@@ -1249,6 +1288,20 @@ fn persist_state_to_db(
         let compliance = state.compliance_engine.read().unwrap();
         save_compliance_state(db_env, &compliance)
             .map_err(|e| format!("save compliance: {e}"))?;
+    }
+
+    // Persist fee params
+    {
+        let fee_params = state.fee_params.read().unwrap();
+        save_fee_params(db_env, &fee_params)
+            .map_err(|e| format!("save fee params: {e}"))?;
+    }
+
+    // Persist fee currency registry
+    {
+        let fee_currency_registry = state.fee_currency_registry.read().unwrap();
+        save_fee_currency_registry(db_env, &fee_currency_registry)
+            .map_err(|e| format!("save fee currency registry: {e}"))?;
     }
 
     // Persist asset registry
@@ -1472,6 +1525,34 @@ fn load_oracle_state(db: &DatabaseEnv) -> Result<OracleManager, String> {
     match db_get::<CallOracleState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize oracle: {e}")),
         None => Ok(OracleManager::default()),
+    }
+}
+
+/// Save fee params to the database.
+fn save_fee_params(db: &DatabaseEnv, fee_params: &FeeParams) -> Result<(), String> {
+    let data = serde_json::to_vec(fee_params).map_err(|e| format!("serialize fee params: {e}"))?;
+    db_put::<CallFeeParams>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+/// Load fee params from the database.
+fn load_fee_params(db: &DatabaseEnv) -> Result<FeeParams, String> {
+    match db_get::<CallFeeParams>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize fee params: {e}")),
+        None => Ok(FeeParams::default()),
+    }
+}
+
+/// Save fee currency registry to the database.
+fn save_fee_currency_registry(db: &DatabaseEnv, registry: &FeeCurrencyRegistry) -> Result<(), String> {
+    let data = serde_json::to_vec(registry).map_err(|e| format!("serialize fee currency registry: {e}"))?;
+    db_put::<CallFeeCurrencyRegistry>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
+}
+
+/// Load fee currency registry from the database.
+fn load_fee_currency_registry(db: &DatabaseEnv) -> Result<FeeCurrencyRegistry, String> {
+    match db_get::<CallFeeCurrencyRegistry>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize fee currency registry: {e}")),
+        None => Ok(FeeCurrencyRegistry::new()),
     }
 }
 

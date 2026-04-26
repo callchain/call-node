@@ -307,6 +307,16 @@ impl Table for CallFeeCurrencyRegistry {
     type Value = Vec<u8>;
 }
 
+/// Fee params: single entry () -> serialized FeeParams
+#[derive(Debug)]
+pub struct CallFeeParams;
+impl Table for CallFeeParams {
+    const NAME: &'static str = "call_fee_params";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// Oracle prices: serialized (asset_id, block_number) -> serialized price
 #[derive(Debug)]
 pub struct CallOraclePrices;
@@ -460,6 +470,7 @@ impl TableSet for CallTables {
                 box_info::<CallLogs>,
                 box_info::<CallMemos>,
                 box_info::<CallFeeCurrencyRegistry>,
+                box_info::<CallFeeParams>,
                 box_info::<CallOraclePrices>,
                 box_info::<CallOracleValidatorInfo>,
                 box_info::<CallGovernanceProposals>,
