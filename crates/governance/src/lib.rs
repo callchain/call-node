@@ -374,6 +374,48 @@ pub struct GovernanceManager {
     pub validator_pubkeys: HashMap<ValidatorId, [u8; 32]>,
 }
 
+impl std::fmt::Debug for GovernanceManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GovernanceManager")
+            .field("proposals", &self.proposals.len())
+            .field("next_proposal_id", &self.next_proposal_id)
+            .field("validator_addresses", &self.validator_addresses.len())
+            .field("current_block", &self.current_block)
+            .field("emergency_pause", &self.emergency_pause)
+            .field("scheduled_upgrades", &self.scheduled_upgrades.len())
+            .field("fee_currency_cap_bps", &self.fee_currency_cap_bps)
+            .finish()
+    }
+}
+
+impl Clone for GovernanceManager {
+    fn clone(&self) -> Self {
+        Self {
+            proposals: self.proposals.clone(),
+            next_proposal_id: self.next_proposal_id,
+            validator_addresses: self.validator_addresses.clone(),
+            call_balances: self.call_balances.clone(),
+            asset_issuers: self.asset_issuers.clone(),
+            delegations: self.delegations.clone(),
+            deposits: self.deposits.clone(),
+            voted_addresses: self.voted_addresses.clone(),
+            last_submission_block: self.last_submission_block.clone(),
+            current_block: self.current_block,
+            emergency_pause: self.emergency_pause.clone(),
+            config: self.config.clone(),
+            events: Vec::new(), // events are drained each block, not preserved across clones
+            executor: None,     // not clonable — rewired after load
+            balance_source: None, // not clonable
+            scheduled_upgrades: self.scheduled_upgrades.clone(),
+            compliance_policies: self.compliance_policies.clone(),
+            fee_currencies: self.fee_currencies.clone(),
+            fee_currencies_pending_removal: self.fee_currencies_pending_removal.clone(),
+            fee_currency_cap_bps: self.fee_currency_cap_bps,
+            validator_pubkeys: self.validator_pubkeys.clone(),
+        }
+    }
+}
+
 impl Default for GovernanceManager {
     fn default() -> Self {
         Self::new()

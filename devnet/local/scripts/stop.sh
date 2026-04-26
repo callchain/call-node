@@ -12,10 +12,14 @@ for i in 1 2 3 4 5 6; do
     pid=$(cat "$pid_file" 2>/dev/null || true)
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
         echo "  stopping node$i (pid $pid)"
-        # We started each node with `setsid`, so it leads its own process
-        # group. SIGTERM the group to kill the whole tree, then fall back to
-        # SIGTERM on the parent PID alone if that fails.
-        kill -TERM "-${pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        # On Linux, `setsid` creates a new process group — kill the group first.
+        # On macOS (no setsid), kill child PIDs via pkill, then the parent.
+        if command -v setsid >/dev/null 2>&1; then
+            kill -TERM "-${pid}" 2>/dev/null || true
+        elif command -v pkill >/dev/null 2>&1; then
+            pkill -TERM -P "$pid" 2>/dev/null || true
+        fi
+        kill -TERM "$pid" 2>/dev/null || true
         STOPPED_PIDS+=("$pid")
     else
         echo "  node$i not running (stale pid file)"
@@ -36,7 +40,12 @@ if (( ${#STOPPED_PIDS[@]} > 0 )); then
     for pid in "${STOPPED_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             echo "  force-killing pid $pid"
-            kill -KILL "-${pid}" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+            if command -v setsid >/dev/null 2>&1; then
+                kill -KILL "-${pid}" 2>/dev/null || true
+            elif command -v pkill >/dev/null 2>&1; then
+                pkill -KILL -P "$pid" 2>/dev/null || true
+            fi
+            kill -KILL "$pid" 2>/dev/null || true
         fi
     done
 fi

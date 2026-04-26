@@ -84,8 +84,6 @@ pub const CALLCHAIN_CHAIN_ID: u64 = 1337;
 enum EpochRotationReason {
     /// Epoch boundary reached (height % epoch_length == 0)
     EpochBoundary,
-    /// Qualified validator set changed
-    ValidatorSetChange,
 }
 
 /// P2P message channels
@@ -356,6 +354,11 @@ impl CallNode {
         let network: Arc<dyn Network> = Arc::new(network);
         self.network = Some(Arc::clone(&network));
 
+        // Wire network into RpcState so RPC handlers can gossip protocol txs
+        if let Ok(mut net_guard) = self.state.network.write() {
+            *net_guard = Some(Arc::clone(&network));
+        }
+
         // Start receive loop
         let mempool = Arc::clone(&self.mempool);
         let state = Arc::clone(&self.state);
@@ -364,7 +367,7 @@ impl CallNode {
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
         let telemetry = Arc::clone(&self.telemetry);
-        let p2p_defense = std::sync::Mutex::new(P2PDefense::new(100, 1000, 10 * 1024 * 1024));
+        let p2p_defense = std::sync::Mutex::new(P2PDefense::new(10000, 1000, 10 * 1024 * 1024));
         // Tracks SyncRequests we've sent recently. Both the announcement
         // handler (BLOCK_CHANNEL) and the response handler (SYNC_CHANNEL)
         // share this map so an in-flight request for a given peer suppresses
@@ -486,8 +489,12 @@ impl CallNode {
                     } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
-                        block_cache.lock().unwrap().insert(digest, block);
-                        tracing::debug!(digest = %digest, peer_id, "BFT: relayed block received, inserted into cache");
+                        let cache_size = {
+                            let mut cache = block_cache.lock().unwrap();
+                            cache.insert(digest, block);
+                            cache.len()
+                        };
+                        tracing::info!(digest = %digest, peer_id, cache_size, "BFT: relayed block received, inserted into cache");
                     } else {
                         tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
@@ -651,8 +658,14 @@ impl CallNode {
                 resolve_mux.start();
 
                 let mut subchannel_counter: u64 = 100;
+                // Monotonic epoch counter for commonware-consensus.
+                // Each engine restart (epoch boundary or validator-set change)
+                // must use a unique epoch so stale BFT messages from the old
+                // engine are rejected rather than causing panics.
+                let mut epoch_counter: u64 = 0;
 
                 loop {
+                    epoch_counter += 1;
                     let (parent_hash, _current_height, epoch_number, subset, my_index, subset_pubkeys) = {
                         let c = consensus.read().unwrap();
                         let ph = c.last_block_hash();
@@ -725,7 +738,7 @@ impl CallNode {
                         let (propose_tx, propose_rx) = mpsc::channel::<ProposeRequest>(16);
                         let (verify_tx, verify_rx) = mpsc::channel::<VerifyRequest>(16);
                         let (finalize_tx, finalize_rx) = mpsc::channel::<FinalizationInfo>(16);
-                        let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(64);
+                        let (broadcast_tx, broadcast_rx) = mpsc::channel::<Vec<u8>>(256);
 
                         let automaton = CallAutomaton::new(propose_tx, verify_tx);
                         let relay = CallRelay::new(Arc::clone(&block_cache), broadcast_tx);
@@ -754,7 +767,7 @@ impl CallNode {
                             strategy: Sequential,
                             partition: "callchain".to_string(),
                             mailbox_size: 1024,
-                            epoch: Epoch::new(epoch_number),
+                            epoch: Epoch::new(epoch_counter),
                             replay_buffer: NonZeroUsize::new(8192).unwrap(),
                             write_buffer: NonZeroUsize::new(8192).unwrap(),
                             page_cache,
@@ -809,6 +822,12 @@ impl CallNode {
                         let reason = exit_rx.await;
                         event_loop_handle.abort();
                         engine_handle.abort();
+
+                        // Grace period: old engine tasks need time to cancel and
+                        // SubReceivers need time to deregister before we re-register
+                        // on the next loop iteration. Without this, stale BFT messages
+                        // from the old engine can leak into the new one.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
 
                         match reason {
                             Ok(r) => {
@@ -2439,12 +2458,6 @@ async fn bft_event_loop(
     > = std::collections::HashMap::new();
     let prune_config = call_storage::PruneConfig::default();
 
-    // Track qualified validator count to detect changes
-    let mut qualified_validator_count = {
-        let vs = state.validator_state.read().unwrap();
-        vs.get_qualified_validators().len()
-    };
-
     // Build a mapping from ed25519 pubkey -> validator id for propose lookups
     let pubkey_to_id = {
         let vs = state.validator_state.read().unwrap();
@@ -2600,6 +2613,7 @@ async fn bft_event_loop(
                     let mut agent_balances = state.agent_balances.read().unwrap().clone();
                     let mut agent_registry = state.agent_registry.read().unwrap().clone();
                     let mut validator_state = state.validator_state.read().unwrap().clone();
+                    let mut governance = state.governance.read().unwrap().clone();
 
                     block.execute(
                         &mut ExecutionState::new(
@@ -2612,6 +2626,7 @@ async fn bft_event_loop(
                             agent_balances: Some(&mut agent_balances),
                             agent_registry: Some(&mut agent_registry),
                             validator_state: Some(&mut validator_state),
+                            governance: Some(&mut governance),
                             ..Subsystems::none()
                         },
                     )
@@ -2648,7 +2663,7 @@ async fn bft_event_loop(
                 };
 
                 if block.is_none() {
-                    for attempt in 1..=5 {
+                    for attempt in 1..=30 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         let cache = block_cache.lock().unwrap();
                         if let Some(b) = cache.get(&digest) {
@@ -2656,8 +2671,9 @@ async fn bft_event_loop(
                             break;
                         }
                         drop(cache);
-                        if attempt == 5 {
-                            tracing::warn!(digest = %digest, "BFT verify: block not in cache after waiting");
+                        if attempt == 30 {
+                            let cache_size = block_cache.lock().unwrap().len();
+                            tracing::warn!(digest = %digest, cache_size, "BFT verify: block not in cache after waiting 3s");
                         }
                     }
                 }
@@ -2680,6 +2696,7 @@ async fn bft_event_loop(
                         let mut agent_balances = state.agent_balances.read().unwrap().clone();
                         let mut agent_registry = state.agent_registry.read().unwrap().clone();
                         let mut validator_state = state.validator_state.read().unwrap().clone();
+                        let mut governance = state.governance.read().unwrap().clone();
 
                         block.execute(
                             &mut ExecutionState::new(
@@ -2692,6 +2709,7 @@ async fn bft_event_loop(
                                 agent_balances: Some(&mut agent_balances),
                                 agent_registry: Some(&mut agent_registry),
                                 validator_state: Some(&mut validator_state),
+                                governance: Some(&mut governance),
                                 ..Subsystems::none()
                             },
                         )
@@ -2798,6 +2816,7 @@ async fn bft_event_loop(
                                 agent_balances: Some(&mut *agent_balances),
                                 agent_registry: Some(&mut *agent_registry),
                                 validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                                governance: Some(&mut *state.governance.write().unwrap()),
                                 ..Subsystems::none()
                             },
                         ) {
@@ -3080,26 +3099,12 @@ async fn bft_event_loop(
                         // Do NOT break — continue event loop, wait for quorum
                     }
 
-                    // Check for qualified validator set changes
-                    let current_qualified = {
-                        let vs = state.validator_state.read().unwrap();
-                        vs.get_qualified_validators().len()
-                    };
-                    if qualified_validator_count != current_qualified {
-                        tracing::warn!(
-                            old = qualified_validator_count,
-                            new = current_qualified,
-                            "BFT: qualified validator set changed — rotating epoch"
-                        );
-                        let _ = exit_tx.send(EpochRotationReason::ValidatorSetChange);
-                        break;
-                    }
-                    qualified_validator_count = current_qualified;
                 }
             }
 
             Some(block_bytes) = broadcast_rx.recv() => {
                 // Relay wants us to broadcast a block via the app P2P network
+                tracing::info!(bytes = block_bytes.len(), "BFT: broadcasting block via P2P");
                 if let Some(ref net) = network {
                     let net_clone = Arc::clone(net);
                     tokio::spawn(async move {
@@ -3303,6 +3308,7 @@ fn apply_synced_blocks(
             let mut agent_balances = state.agent_balances.read().unwrap().clone();
             let mut agent_registry = state.agent_registry.read().unwrap().clone();
             let mut validator_state = state.validator_state.read().unwrap().clone();
+            let mut governance = state.governance.read().unwrap().clone();
 
             match block.execute(
                 &mut ExecutionState::new(
@@ -3314,6 +3320,7 @@ fn apply_synced_blocks(
                     agent_balances: Some(&mut agent_balances),
                     agent_registry: Some(&mut agent_registry),
                     validator_state: Some(&mut validator_state),
+                    governance: Some(&mut governance),
                     fork_manager: Some(&mut state.fork_manager.write().unwrap().clone()),
                     ..Subsystems::none()
                 },
@@ -3416,8 +3423,12 @@ fn handle_network_message(
             if let Ok(tx_msg) = serde_json::from_slice::<TransactionMessage>(data) {
                 if tx_msg.verify_checksum() {
                     if let Ok(mut pool) = mempool.write() {
+                        // Try EVM transaction first
                         if let Ok(evm_tx) = serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data) {
                             let _ = pool.insert_evm_tx(evm_tx);
+                        } else if let Ok(proto_tx) = serde_json::from_slice::<call_protocol::transaction::ProtocolTransaction>(&tx_msg.data) {
+                            // Protocol transaction (ValidatorStake, etc.)
+                            let _ = pool.insert_protocol_tx(proto_tx);
                         }
                     }
                 }

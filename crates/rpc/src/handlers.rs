@@ -12,6 +12,7 @@ use call_shielded::ShieldedState;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash, PublicKey};
 use call_crypto::SignerRef;
 use call_transaction_pool::Mempool;
+use call_network::{Network, TransactionMessage};
 use alloy_consensus::{TxEnvelope, Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
@@ -66,6 +67,9 @@ pub struct RpcState {
     /// Set to true by the network layer when sync crosses an epoch boundary,
     /// signaling the BFT event loop to restart the engine.
     pub engine_restart_signal: AtomicBool,
+    /// P2P network handle — set after `start_network` is called.
+    /// Used to gossip protocol transactions submitted via RPC.
+    pub network: Arc<RwLock<Option<Arc<dyn Network>>>>,
 }
 
 impl RpcState {
@@ -122,6 +126,7 @@ impl RpcState {
             data_dir: RwLock::new(None),
             peer_heights: Arc::new(RwLock::new(HashMap::new())),
             engine_restart_signal: AtomicBool::new(false),
+            network: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -542,8 +547,60 @@ impl RpcState {
         tx.verify_signature()
             .map_err(|e| format!("signature verification failed: {e}"))?;
 
+        // Pre-validate validator instructions to prevent obviously-invalid txs
+        // from entering the mempool and poisoning block proposals.
+        for instr in &tx.instructions {
+            match instr {
+                call_protocol::Instruction::ValidatorUnstake { validator_id } => {
+                    let vs = self.validator_state.read()
+                        .map_err(|_| "validator lock poisoned".to_string())?;
+                    if let Some(stake) = vs.get_validator_stake(*validator_id) {
+                        if stake.address != tx.sender {
+                            return Err("unstake: sender must be the validator owner".into());
+                        }
+                    }
+                }
+                call_protocol::Instruction::ValidatorClaimUnbonded { validator_id } => {
+                    let vs = self.validator_state.read()
+                        .map_err(|_| "validator lock poisoned".to_string())?;
+                    if let Some(stake) = vs.get_validator_stake(*validator_id) {
+                        if stake.address != tx.sender {
+                            return Err("claim: sender must be the validator owner".into());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
-        let _ = mempool.insert_protocol_tx(tx);
+        let _ = mempool.insert_protocol_tx(tx.clone());
+        drop(mempool);
+
+        // Gossip to peers so non-proposer validators also see the tx
+        if let Ok(net_guard) = self.network.read() {
+            if let Some(ref net) = *net_guard {
+                let data = match serde_json::to_vec(&tx) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to serialize protocol tx for gossip");
+                        return Ok(tx_hash);
+                    }
+                };
+                let msg = TransactionMessage::new(data, tx_hash);
+                let net_clone = Arc::clone(net);
+                tokio::spawn(async move {
+                    let payload = match serde_json::to_vec(&msg) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to serialize TransactionMessage");
+                            return;
+                        }
+                    };
+                    net_clone.broadcast(1, payload).await;
+                });
+            }
+        }
 
         Ok(tx_hash)
     }

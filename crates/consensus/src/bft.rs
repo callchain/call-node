@@ -139,6 +139,7 @@ impl Relay for CallRelay {
         if let Some(block) = block {
             match serde_json::to_vec(&block) {
                 Ok(bytes) => {
+                    tracing::info!(digest = %payload, bytes = bytes.len(), "BFT relay: sending block to broadcast channel");
                     let _ = self.broadcast_tx.send(bytes).await;
                 }
                 Err(e) => {

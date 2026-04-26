@@ -909,7 +909,7 @@ impl Network for CommonwareNetwork {
                     let peer_state = gossip.peers.get_mut(&peer_id).unwrap();
                     if let Err(e) = peer_state.record_message() {
                         tracing::warn!(peer_id = %peer_id, "gossip rate limit hit: {e}");
-                        return Err(e);
+                        continue;
                     }
                 } else {
                     // Auto-register peer seen for the first time

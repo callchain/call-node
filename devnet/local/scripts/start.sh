@@ -84,9 +84,13 @@ start_node() {
         exit 1
     fi
     echo "  starting node${n} (config=${config#"$ROOT_DIR"/}, log=${log#"$ROOT_DIR"/})"
-    # nohup + setsid so children survive this script's shell and form their own
-    # process group (so stop.sh can clean them up reliably).
-    nohup setsid "$CALLD_BIN" --config "$config" >>"$log" 2>&1 &
+    # Use setsid on Linux for proper process-group isolation; on macOS setsid
+    # is unavailable, so fall back to plain nohup + background.
+    if command -v setsid >/dev/null 2>&1; then
+        nohup setsid "$CALLD_BIN" --config "$config" >>"$log" 2>&1 &
+    else
+        nohup "$CALLD_BIN" --config "$config" >>"$log" 2>&1 &
+    fi
     echo $! >"$pid_file"
 }
 

@@ -646,7 +646,8 @@ impl Block {
             })();
 
             if let Err(e) = exec_result {
-                // Rollback balance/EVM/bridge but nonce stays consumed
+                // Rollback balance/EVM/bridge but nonce stays consumed.
+                // Include the failed tx in the block with a Reverted result.
                 *state.account = balance_snapshot;
                 *state.evm_state = evm_snapshot;
                 *state.bridge_state = bridge_snapshot;
@@ -655,12 +656,16 @@ impl Block {
                         **vs = snapshot.clone();
                     }
                 }
-                return Err(e);
+                result.protocol_tx_count += 1;
+                result.instruction_results.push(InstructionResult::Reverted {
+                    reason: e.to_string(),
+                });
+                tracing::warn!(error = %e, sender = ?tx.sender, nonce = tx.nonce, "block: tx execution failed, included as reverted");
+            } else {
+                result.protocol_tx_count += 1;
+                result.instruction_results.extend(tx_results);
+                result.agent_events.extend(tx_agent_events);
             }
-
-            result.protocol_tx_count += 1;
-            result.instruction_results.extend(tx_results);
-            result.agent_events.extend(tx_agent_events);
         }
 
         // Step 3: Bridge operations
