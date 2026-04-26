@@ -28,11 +28,26 @@ use reth_db::DatabaseEnv;
 
 // ── State Persistence ─────────────────────────────────────────────────
 
+/// All on-chain state loaded from reth-db in one struct.
+/// Replaces the previous 13-element tuple so callers use named fields.
+pub(crate) struct LoadedState {
+    pub balance_state: AccountState,
+    pub evm_state: EvmState,
+    pub bridge_state: BridgeStateManager,
+    pub shielded_state: ShieldedState,
+    pub validators: ValidatorStateManager,
+    pub agent_registry: AgentRegistry,
+    pub agent_balances: AgentBalances,
+    pub agent_nonces: call_agent::AgentNonces,
+    pub governance: GovernanceManager,
+    pub compliance: ComplianceEngine,
+    pub asset_registry: AssetRegistry,
+    pub fee_params: FeeParams,
+    pub fee_currency_registry: FeeCurrencyRegistry,
+}
+
 /// Load all state types from the reth-db database.
-pub(crate) fn load_state_from_db(
-    db_env: &Arc<DatabaseEnv>,
-) -> (AccountState, EvmState, BridgeStateManager, ShieldedState,
-      ValidatorStateManager, AgentRegistry, AgentBalances, call_agent::AgentNonces, GovernanceManager, ComplianceEngine, AssetRegistry, FeeParams, FeeCurrencyRegistry) {
+pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
     // Load balances
     let (balances, allowances) = match db_load_balances(db_env) {
         Ok(b) => b,
@@ -148,7 +163,21 @@ pub(crate) fn load_state_from_db(
         }
     };
 
-    (balance_state, evm_state, bridge_state, shielded_state, validators, registry, agent_balances, agent_nonces, governance, compliance, asset_registry, fee_params, fee_currency_registry)
+    LoadedState {
+        balance_state,
+        evm_state,
+        bridge_state,
+        shielded_state,
+        validators,
+        agent_registry: registry,
+        agent_balances,
+        agent_nonces,
+        governance,
+        compliance,
+        asset_registry,
+        fee_params,
+        fee_currency_registry,
+    }
 }
 
 /// Persist all state types to the reth-db database.

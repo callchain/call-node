@@ -150,61 +150,77 @@ impl CallNode {
         let fresh_start = recovery_needed || !blocks_exist;
 
         // Load persisted state from reth-db (skip if recovery needed)
-        let (balance_state, evm_state, bridge_state, shielded_state, consensus_validators, registry, agent_balances, agent_nonces, oracle_manager, governance_manager, compliance_engine, mut asset_registry, receipts, fork_manager, fee_params, fee_currency_registry) = if recovery_needed {
-            (
-                AccountState::new(), EvmState::new(), BridgeStateManager::default(),
-                ShieldedState::new(), ValidatorStateManager::default(),
-                AgentRegistry::new(), AgentBalances::new(), call_agent::AgentNonces::new(),
-                OracleManager::default(), GovernanceManager::new(), ComplianceEngine::new(),
-                AssetRegistry::new(),
-                std::collections::HashMap::new(),
-                ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1),
-                FeeParams::default(),
-                FeeCurrencyRegistry::new(),
-            )
+        let mut loaded = if recovery_needed {
+            state_persist::LoadedState {
+                balance_state: AccountState::new(),
+                evm_state: EvmState::new(),
+                bridge_state: BridgeStateManager::default(),
+                shielded_state: ShieldedState::new(),
+                validators: ValidatorStateManager::default(),
+                agent_registry: AgentRegistry::new(),
+                agent_balances: AgentBalances::new(),
+                agent_nonces: call_agent::AgentNonces::new(),
+                governance: GovernanceManager::new(),
+                compliance: ComplianceEngine::new(),
+                asset_registry: AssetRegistry::new(),
+                fee_params: FeeParams::default(),
+                fee_currency_registry: FeeCurrencyRegistry::new(),
+            }
         } else {
-            let loaded = load_state_from_db(db_env);
-            let oracle = load_oracle_state(db_env)
-                .map_err(|e| format!("failed to load oracle state: {e}"))?;
-            let governance = load_governance_state(db_env)
-                .map_err(|e| format!("failed to load governance state: {e}"))?;
-            let receipts = match load_receipts(db_env) {
+            load_state_from_db(db_env)
+        };
+
+        let oracle_manager = if recovery_needed {
+            OracleManager::default()
+        } else {
+            load_oracle_state(db_env)
+                .map_err(|e| format!("failed to load oracle state: {e}"))?
+        };
+
+        let receipts = if recovery_needed {
+            std::collections::HashMap::new()
+        } else {
+            match load_receipts(db_env) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load receipts");
                     std::collections::HashMap::new()
                 }
-            };
-            let fork_manager = match load_fork_state(db_env) {
+            }
+        };
+
+        let fork_manager = if recovery_needed {
+            ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1)
+        } else {
+            match load_fork_state(db_env) {
                 Ok(Some(fm)) => fm,
                 Ok(None) => {
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        loaded.4.get_all_validators().len() as u32,
+                        loaded.validators.get_all_validators().len() as u32,
                     )
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load fork state");
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        loaded.4.get_all_validators().len() as u32,
+                        loaded.validators.get_all_validators().len() as u32,
                     )
                 }
-            };
-            (loaded.0, loaded.1, loaded.2, loaded.3, loaded.4, loaded.5, loaded.6, loaded.7, oracle, governance, loaded.9, loaded.10, receipts, fork_manager, loaded.11, loaded.12)
+            }
         };
 
         // Replay AssetRegistry from block history if db snapshot is empty/missing.
         // This ensures asset IDs and metadata are reconstructible from canonical history.
-        if asset_registry.is_empty() && !fresh_start {
-            asset_registry = replay_asset_registry(&data_dir);
+        if loaded.asset_registry.is_empty() && !fresh_start {
+            loaded.asset_registry = replay_asset_registry(&data_dir);
         }
 
         // Try to load persisted consensus state; fall back to genesis
         let consensus = if recovery_needed {
-            SimplexConsensus::new(ConsensusParams::default(), consensus_validators.clone())
+            SimplexConsensus::new(ConsensusParams::default(), loaded.validators.clone())
         } else {
-            match load_consensus_state_inner(db_env, &consensus_validators) {
+            match load_consensus_state_inner(db_env, &loaded.validators) {
                 Ok(consensus) => {
                     tracing::info!(
                         height = consensus.current_height(),
@@ -215,22 +231,22 @@ impl CallNode {
                 }
                 Err(e) => {
                     tracing::info!(error = %e, "no persisted consensus state, starting from genesis");
-                    SimplexConsensus::new(ConsensusParams::default(), consensus_validators.clone())
+                    SimplexConsensus::new(ConsensusParams::default(), loaded.validators.clone())
                 }
             }
         };
 
         let state = Arc::new(RpcState::new(
-            balance_state,
-            asset_registry,
-            compliance_engine,
-            evm_state,
-            bridge_state,
+            loaded.balance_state,
+            loaded.asset_registry,
+            loaded.compliance,
+            loaded.evm_state,
+            loaded.bridge_state,
             ValidatorStateManager::default(),
-            registry,
-            agent_balances,
-            agent_nonces,
-            shielded_state,
+            loaded.agent_registry,
+            loaded.agent_balances,
+            loaded.agent_nonces,
+            loaded.shielded_state,
             mempool.clone(),
             chain_id.unwrap_or(CALLCHAIN_CHAIN_ID),
             oracle_manager,
@@ -260,7 +276,7 @@ impl CallNode {
         call_precompiles::set_live_oracle(Arc::clone(&state.oracle));
 
         // Replace default governance with persisted state
-        *state.governance.write().unwrap() = governance_manager;
+        *state.governance.write().unwrap() = loaded.governance;
 
         // Wire governance executor so proposals can trigger real side effects
         wire_governance_executor(&state);
@@ -272,8 +288,8 @@ impl CallNode {
         state.set_current_block(consensus.current_height());
 
         // Inject loaded fee params and fee currency registry
-        *state.fee_params.write().unwrap() = fee_params;
-        *state.fee_currency_registry.write().unwrap() = fee_currency_registry;
+        *state.fee_params.write().unwrap() = loaded.fee_params;
+        *state.fee_currency_registry.write().unwrap() = loaded.fee_currency_registry;
 
         // Set parent_hash to the last committed block hash from persisted state
         let parent_hash = consensus.last_block_hash();
