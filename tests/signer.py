@@ -156,6 +156,7 @@ def sign_asset_registration(
     symbol: str,
     name: str,
     decimals: int,
+    max_supply: int = 0,
     gas_limit: int = 200_000,
     max_fee: int = 2_000_000,
 ) -> dict:
@@ -165,6 +166,7 @@ def sign_asset_registration(
             "symbol": symbol,
             "name": name,
             "decimals": decimals,
+            "max_supply": max_supply,
         }
     }]
     tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)

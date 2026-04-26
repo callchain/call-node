@@ -1872,11 +1872,18 @@ fn compute_bridge_root(
 ) -> Hash {
     let mut data = Vec::new();
     data.extend_from_slice(&(bridge_state.pending_ops.len() as u64).to_le_bytes());
-    for (asset_id, total) in &bridge_state.total_deposits {
+
+    // Sort by asset_id to ensure deterministic ordering across nodes
+    let mut deposits: Vec<_> = bridge_state.total_deposits.iter().collect();
+    deposits.sort_by_key(|(asset_id, _)| *asset_id);
+    for (asset_id, total) in deposits {
         data.extend_from_slice(&asset_id.to_le_bytes());
         data.extend_from_slice(&total.to_le_bytes());
     }
-    for (asset_id, total) in &bridge_state.total_withdrawals {
+
+    let mut withdrawals: Vec<_> = bridge_state.total_withdrawals.iter().collect();
+    withdrawals.sort_by_key(|(asset_id, _)| *asset_id);
+    for (asset_id, total) in withdrawals {
         data.extend_from_slice(&asset_id.to_le_bytes());
         data.extend_from_slice(&total.to_le_bytes());
     }

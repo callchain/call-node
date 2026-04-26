@@ -184,6 +184,7 @@ def test_register_asset(cluster, accounts):
         symbol=symbol,
         name=name,
         decimals=decimals,
+        max_supply=1_000_000,
     )
 
     result = cluster.nodes[0].register_asset(payload)
@@ -204,6 +205,7 @@ def test_register_asset_duplicate_rejected(cluster, accounts):
         symbol="DUP",
         name="Duplicate",
         decimals=18,
+        max_supply=0,
     )
 
     # First registration accepted into mempool
@@ -220,6 +222,7 @@ def test_register_asset_duplicate_rejected(cluster, accounts):
         symbol="DUP",
         name="Duplicate2",
         decimals=18,
+        max_supply=0,
     )
     r2 = cluster.nodes[0].register_asset(payload2)
     print(f"  second registration submitted: {r2.get('txHash')}")

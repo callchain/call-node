@@ -983,6 +983,8 @@ impl CallNode {
                                             let mut evm_state = state.evm_state.write().unwrap();
                                             let mut agent_balances = state.agent_balances.write().unwrap();
                                             let mut agent_registry = state.agent_registry.write().unwrap();
+                                            let mut governance = state.governance.write().unwrap();
+                                            let mut oracle = state.oracle.write().unwrap();
 
                                             block.execute(
                                                 &mut ExecutionState::new(
@@ -994,6 +996,8 @@ impl CallNode {
                                                     agent_balances: Some(&mut *agent_balances),
                                                     agent_registry: Some(&mut *agent_registry),
                                                     validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                                                    governance: Some(&mut *governance),
+                                                    oracle: Some(&mut *oracle),
                                                     ..Subsystems::none()
                                                 },
                                             )
@@ -1970,6 +1974,7 @@ async fn block_production_loop(
             let mut oracle = state.oracle.write().unwrap();
             let mut agent_balances = state.agent_balances.write().unwrap();
             let mut agent_registry = state.agent_registry.write().unwrap();
+            let mut governance = state.governance.write().unwrap();
 
             block.execute(
                 &mut ExecutionState::new(
@@ -1982,6 +1987,7 @@ async fn block_production_loop(
                     agent_balances: Some(&mut *agent_balances),
                     agent_registry: Some(&mut *agent_registry),
                     validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                    governance: Some(&mut *governance),
                     ..Subsystems::none()
                 },
             )
@@ -3351,6 +3357,8 @@ fn apply_synced_blocks(
             let mut evm_state = state.evm_state.write().unwrap();
             let mut agent_balances = state.agent_balances.write().unwrap();
             let mut agent_registry = state.agent_registry.write().unwrap();
+            let mut governance = state.governance.write().unwrap();
+            let mut oracle = state.oracle.write().unwrap();
 
             block.execute(
                 &mut ExecutionState::new(
@@ -3362,7 +3370,9 @@ fn apply_synced_blocks(
                     agent_balances: Some(&mut *agent_balances),
                     agent_registry: Some(&mut *agent_registry),
                     validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                    governance: Some(&mut *governance),
                     fork_manager: Some(&mut *state.fork_manager.write().unwrap()),
+                    oracle: Some(&mut *oracle),
                     ..Subsystems::none()
                 },
             )
