@@ -650,6 +650,8 @@ impl CallNode {
                 cert_mux.start();
                 resolve_mux.start();
 
+                let mut subchannel_counter: u64 = 100;
+
                 loop {
                     let (parent_hash, _current_height, epoch_number, subset, my_index, subset_pubkeys) = {
                         let c = consensus.read().unwrap();
@@ -731,9 +733,10 @@ impl CallNode {
 
                         let (exit_tx, exit_rx) = oneshot::channel::<EpochRotationReason>();
 
-                        let (vote_sub_s, vote_sub_r) = vote_handle.register(epoch_number).await.unwrap();
-                        let (cert_sub_s, cert_sub_r) = cert_handle.register(epoch_number).await.unwrap();
-                        let (resolve_sub_s, resolve_sub_r) = resolve_handle.register(epoch_number).await.unwrap();
+                        let (vote_sub_s, vote_sub_r) = vote_handle.register(subchannel_counter).await.unwrap();
+                        let (cert_sub_s, cert_sub_r) = cert_handle.register(subchannel_counter + 1).await.unwrap();
+                        let (resolve_sub_s, resolve_sub_r) = resolve_handle.register(subchannel_counter + 2).await.unwrap();
+                        subchannel_counter += 3;
 
                         let page_cache = CacheRef::from_pooler(
                             &context,
