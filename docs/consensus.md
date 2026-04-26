@@ -192,6 +192,52 @@ No tests currently exercise the actual BFT engine background thread.
 
 ---
 
+## Design Decisions
+
+### State Isolation (propose / verify / finalize)
+
+`propose` and `verify` execute blocks on **cloned state snapshots**; only `finalize` writes to shared state.
+
+| Phase | State Access | Effect |
+|-------|-------------|--------|
+| `propose` | `read().unwrap().clone()` → execute | Computes roots, caches block + result; shared state untouched |
+| `verify` | `read().unwrap().clone()` → execute | Re-runs block, compares computed roots against header roots |
+| `finalize` | `write().unwrap()` → execute on shared state | Commits state changes after BFT majority confirmation |
+
+This prevents state divergence when a proposed block fails to reach consensus (e.g. a validator stakes in a proposal that gets rejected by peers).
+
+### Epoch Number Derivation
+
+Epoch number is derived from chain height rather than maintained as a local counter:
+
+```rust
+let epoch_number = current_height / epoch_length;
+```
+
+Benefits:
+- Lagging nodes sync to the correct height and automatically join the right epoch
+- No `+= 1` counter that falls behind after multiple missed rotations
+- VRF seed uses the same derivation, so all nodes at the same height select the same subset
+
+Combined with a quorum wait before epoch rotation (signal broadcast after finalizing the boundary block, exit only when ≥2/3 of the subset have signaled), this prevents the "epoch desync" issue where some nodes rotate while others lag.
+
+### P2P Rate Limiting
+
+Gossip rate limiting applies **only** to transaction propagation (`TX_CHANNEL`). Consensus messages (BFT votes, certificates, finalizations) and sync traffic (`BLOCK_CHANNEL`, `SYNC_CHANNEL`) bypass the limiter. This prevents critical consensus traffic from being dropped under load while still protecting against transaction spam.
+
+### Full Node Private IPs
+
+Full nodes connecting over RFC-1918 private networks (e.g. Docker `172.x.x.x`) must set:
+
+```toml
+[p2p]
+allow_private_ips = true
+```
+
+Without this, commonware-p2p rejects private-address peers and full nodes cannot bootstrap to validators.
+
+---
+
 ## See Also
 
 - [Commonware Simplex BFT docs](https://docs.rs/commonware-consensus/2026.4.0/commonware_consensus/simplex/index.html)
