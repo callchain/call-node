@@ -923,67 +923,133 @@ impl CallNode {
                 let mut batch_applied = 0;
                 let mut received_any = false;
 
-                // Listen for responses with timeout
-                for _ in 0..5 {
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(3),
-                        network.receive(),
-                    ).await;
+                // Dynamic response collection: adapt to peer count instead of hardcoded 5.
+                //
+                // Algorithm:
+                //   1. expected = min(peer_count, 10).max(1)
+                //   2. First response waits up to 5s (network latency + processing).
+                //   3. After first response, shorten timeout to 1s for fast convergence.
+                //   4. Hard ceiling: 30s per request round to avoid hanging forever.
+                //   5. Process the first valid SyncResponse with the most blocks and
+                //      skip the rest—every peer serves the same range.
+                let peer_count = network.peer_count();
+                let expected_responses = (peer_count as usize).clamp(1, 10);
+                let first_timeout = Duration::from_secs(5);
+                let subsequent_timeout = Duration::from_secs(1);
+                let round_deadline = Duration::from_secs(30);
 
-                    if let Ok(Ok((_peer_id, channel, data))) = result {
-                        if channel == SYNC_CHANNEL {
-                            if let Ok(NetworkMessage::SyncResponse(response)) = bincode::deserialize(&data) {
+                let mut timeout = first_timeout;
+                let round_start = std::time::Instant::now();
+                let mut responses_received = 0usize;
+                let mut best_response: Option<call_network::SyncResponse> = None;
+                let mut best_peer: String = String::new();
+
+                while responses_received < expected_responses
+                    && round_start.elapsed() < round_deadline
+                {
+                    let remaining = round_deadline.saturating_sub(round_start.elapsed());
+                    let wait = timeout.min(remaining);
+
+                    let result = tokio::time::timeout(wait, network.receive()).await;
+
+                    match result {
+                        Ok(Ok((peer_id, channel, data))) => {
+                            if channel != SYNC_CHANNEL {
+                                continue;
+                            }
+                            if let Ok(NetworkMessage::SyncResponse(response)) =
+                                bincode::deserialize(&data)
+                            {
                                 received_any = true;
+                                responses_received += 1;
                                 tracing::info!(
-                                    peer_id = _peer_id,
+                                    peer_id = %peer_id,
                                     start = response.start_height,
                                     block_count = response.blocks.len(),
                                     "sync: received blocks from peer"
                                 );
 
-                                for block_data in &response.blocks {
-                                    if let Ok(mut block) = serde_json::from_slice::<Block>(block_data) {
-                                        let height = block.header.height;
+                                // Keep the response with the most blocks.
+                                if best_response.as_ref().map_or(
+                                    true,
+                                    |best| response.blocks.len() > best.blocks.len(),
+                                ) {
+                                    best_peer = peer_id;
+                                    best_response = Some(response);
+                                }
 
-                                        // Light client verification
-                                        let sig = &block.header.signature;
-                                        let signatures = BlockSignatures {
-                                            block_hash: block.header.hash(),
-                                            signatures: vec![(
-                                                block.header.proposer,
-                                                PubKeyBytes([0u8; 32]),
-                                                SigBytes(sig.0),
-                                            )],
-                                        };
+                                // After first valid response, switch to shorter timeout
+                                // for fast convergence.
+                                timeout = subsequent_timeout;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!(error = %e, "sync: network receive error");
+                        }
+                        Err(_) => {
+                            // Timeout on this iteration. If we already have a valid
+                            // response, stop waiting; otherwise keep looping until
+                            // round_deadline.
+                            if best_response.is_some() {
+                                tracing::debug!(
+                                    received = responses_received,
+                                    expected = expected_responses,
+                                    "sync: early stop after timeout with valid response"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
 
-                                        if let Err(e) = light_client.verify_header(&block.header, &signatures) {
-                                            tracing::warn!(height, error = %e, "sync: header verification failed, skipping");
-                                            continue;
-                                        }
+                // Apply the best response (if any)
+                if let Some(response) = best_response {
+                    tracing::info!(
+                        peer_id = %best_peer,
+                        block_count = response.blocks.len(),
+                        "sync: applying best response"
+                    );
 
-                                        // Execute block
-                                        let execute_result = state.write_all().execute_block(&block, height);
+                    for block_data in &response.blocks {
+                        if let Ok(mut block) = serde_json::from_slice::<Block>(block_data) {
+                            let height = block.header.height;
 
-                                        if let Ok(result) = execute_result {
-                                            block.finalize(&result);
-                                            let _ = persist_block(&data_dir, height, &block);
+                            // Light client verification
+                            let sig = &block.header.signature;
+                            let signatures = BlockSignatures {
+                                block_hash: block.header.hash(),
+                                signatures: vec![(
+                                    block.header.proposer,
+                                    PubKeyBytes([0u8; 32]),
+                                    SigBytes(sig.0),
+                                )],
+                            };
 
-                                            if let Ok(mut c) = consensus.write() {
-                                                let _ = c.commit_block(&block, &result);
-                                            }
+                            if let Err(e) = light_client.verify_header(&block.header, &signatures) {
+                                tracing::warn!(height, error = %e, "sync: header verification failed, skipping");
+                                continue;
+                            }
 
-                                            let _ = light_client.sync_incremental(&block.header, &signatures);
-                                            state.set_current_block(height + 1);
-                                            local_height = height + 1;
-                                            batch_applied += 1;
+                            // Execute block
+                            let execute_result = state.write_all().execute_block(&block, height);
 
-                                            // Periodically save consensus state during sync
-                                            if local_height % 100 == 0 {
-                                                if let Ok(c) = consensus.read() {
-                                                    let _ = save_consensus_state_inner(&db_env, &c);
-                                                }
-                                            }
-                                        }
+                            if let Ok(result) = execute_result {
+                                block.finalize(&result);
+                                let _ = persist_block(&data_dir, height, &block);
+
+                                if let Ok(mut c) = consensus.write() {
+                                    let _ = c.commit_block(&block, &result);
+                                }
+
+                                let _ = light_client.sync_incremental(&block.header, &signatures);
+                                state.set_current_block(height + 1);
+                                local_height = height + 1;
+                                batch_applied += 1;
+
+                                // Periodically save consensus state during sync
+                                if local_height % 100 == 0 {
+                                    if let Ok(c) = consensus.read() {
+                                        let _ = save_consensus_state_inner(&db_env, &c);
                                     }
                                 }
                             }
