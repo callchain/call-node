@@ -5,6 +5,7 @@ pub mod standard;
 pub mod callchain;
 pub mod ws;
 pub mod rate_limit;
+pub mod state_bundle;
 
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,7 @@ pub use standard::*;
 pub use callchain::*;
 pub use ws::*;
 pub use rate_limit::RateLimiter;
+pub use state_bundle::*;
 
 use jsonrpsee::server::{Server, ServerHandle, stop_channel, serve_with_graceful_shutdown, Methods};
 use jsonrpsee::RpcModule;
