@@ -1,7 +1,7 @@
 use crate::*;
 use crate::ForkManager;
 use call_primitives::{Address, BlockHash, Hash, ProtocolVersion};
-use call_protocol::instructions::Instruction;
+use call_protocol::instructions::{Instruction, InstructionResult};
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 use call_bridge::BridgeOp;
 use call_evm::{EvmExecutor, EvmTransaction};
@@ -637,9 +637,14 @@ fn test_frozen_asset_rejects_bridge_to_evm() {
         &mut Subsystems::none(),
     );
 
-    assert!(result.is_err(), "BridgeToEvm on frozen asset should fail");
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(err_msg.contains("not active"), "expected not-active error, got: {err_msg}");
+    let result = result.expect("block execute should not fail");
+    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
+    match &result.instruction_results[0] {
+        InstructionResult::Reverted { reason } => {
+            assert!(reason.contains("not active"), "expected not-active error, got: {reason}");
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
 
 #[test]
@@ -711,9 +716,14 @@ fn test_delisted_asset_rejects_bridge_to_protocol() {
         &mut Subsystems::none(),
     );
 
-    assert!(result.is_err(), "BridgeToProtocol on delisted asset should fail");
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(err_msg.contains("not active"), "expected not-active error, got: {err_msg}");
+    let result = result.expect("block execute should not fail");
+    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
+    match &result.instruction_results[0] {
+        InstructionResult::Reverted { reason } => {
+            assert!(reason.contains("not active"), "expected not-active error, got: {reason}");
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
 
 #[test]
@@ -962,9 +972,14 @@ fn test_evm_issuer_mint_cap_enforcement() {
         &mut Subsystems::none(),
     );
 
-    assert!(result.is_err(), "EvmIssuerMint over cap should fail");
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(err_msg.contains("cap exceeded"), "expected cap error, got: {err_msg}");
+    let result = result.expect("block execute should not fail");
+    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
+    match &result.instruction_results[0] {
+        InstructionResult::Reverted { reason } => {
+            assert!(reason.contains("cap exceeded"), "expected cap error, got: {reason}");
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1055,9 +1070,14 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
         &mut Subsystems::none(),
     );
 
-    assert!(result.is_err(), "non-issuer EvmIssuerMint should fail");
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(err_msg.contains("not asset issuer"), "expected unauthorized error, got: {err_msg}");
+    let result = result.expect("block execute should not fail");
+    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
+    match &result.instruction_results[0] {
+        InstructionResult::Reverted { reason } => {
+            assert!(reason.contains("not asset issuer"), "expected unauthorized error, got: {reason}");
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1148,9 +1168,14 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
         &mut Subsystems::none(),
     );
 
-    assert!(result.is_err(), "EvmIssuerMint on frozen asset should fail");
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(err_msg.contains("not active"), "expected not-active error, got: {err_msg}");
+    let result = result.expect("block execute should not fail");
+    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
+    match &result.instruction_results[0] {
+        InstructionResult::Reverted { reason } => {
+            assert!(reason.contains("not active"), "expected not-active error, got: {reason}");
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1215,7 +1240,12 @@ fn test_evm_issuer_mint_call_asset_rejected() {
         &mut Subsystems::none(),
     );
 
-    assert!(result.is_err(), "EvmIssuerMint on CALL asset should fail");
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(err_msg.contains("CALL asset has no EVM wrapped token"), "expected CALL rejection, got: {err_msg}");
+    let result = result.expect("block execute should not fail");
+    assert!(!result.instruction_results.is_empty(), "expected at least one instruction result");
+    match &result.instruction_results[0] {
+        InstructionResult::Reverted { reason } => {
+            assert!(reason.contains("CALL asset has no EVM wrapped token"), "expected CALL rejection, got: {reason}");
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
