@@ -23,7 +23,7 @@ impl Default for NetworkLimits {
     fn default() -> Self {
         Self {
             max_peers: 50,
-            max_messages_per_second: 100,
+            max_messages_per_second: 1000,
             max_message_size: 10 * 1024 * 1024, // 10 MB
             known_txs_cache_size: 1_000_000,
             ban_duration_seconds: 3600, // 1 hour
@@ -116,7 +116,7 @@ mod tests {
     fn test_network_limits_defaults() {
         let limits = NetworkLimits::default();
         assert_eq!(limits.max_peers, 50);
-        assert_eq!(limits.max_messages_per_second, 100);
+        assert_eq!(limits.max_messages_per_second, 1000);
         assert_eq!(limits.max_message_size, 10 * 1024 * 1024);
         assert_eq!(limits.known_txs_cache_size, 1_000_000);
         assert_eq!(limits.ban_duration_seconds, 3600);
@@ -126,7 +126,7 @@ mod tests {
     fn test_network_limits_custom() {
         let limits = NetworkLimits::new(100, 200, 5 * 1024 * 1024, 500_000, 7200);
         assert_eq!(limits.max_peers, 100);
-        assert_eq!(limits.max_messages_per_second, 200);
+        assert_eq!(limits.max_messages_per_second, 1000);
         assert_eq!(limits.max_message_size, 5 * 1024 * 1024);
         assert_eq!(limits.known_txs_cache_size, 500_000);
         assert_eq!(limits.ban_duration_seconds, 7200);
