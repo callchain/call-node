@@ -9,7 +9,7 @@
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use call_agent::{AgentBalances, AgentRegistry};
-use call_bridge::BridgeStateManager;
+use call_bridge::{BridgeConfig, BridgeStateManager};
 use call_consensus::{
     block::{BlockContext, ExecutionState, Subsystems},
     Block, BlockExecutionResult, ConsensusError, ForkManager, ValidatorStateManager,
@@ -17,6 +17,7 @@ use call_consensus::{
 use call_evm::EvmState;
 use call_governance::GovernanceManager;
 use call_oracle::OracleManager;
+use call_primitives::Address;
 use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, FeeParams};
 use call_shielded::ShieldedState;
 
@@ -118,6 +119,12 @@ impl<'a> StateWriteBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
+        let bridge_config = BridgeConfig::default();
+        let validators: Vec<Address> = self.validator_state
+            .get_all_validators()
+            .values()
+            .map(|v| v.address)
+            .collect();
         block.execute(
             &mut ExecutionState::new(
                 &mut self.balances,
@@ -127,7 +134,12 @@ impl<'a> StateWriteBundle<'a> {
                 &mut self.shielded,
                 &mut self.evm,
             ),
-            &mut BlockContext::new(height, &mut self.fee_params),
+            &mut BlockContext {
+                current_block_height: height,
+                fee_params: &mut self.fee_params,
+                bridge_config: Some(&bridge_config),
+                validators: if validators.is_empty() { None } else { Some(&validators) },
+            },
             &mut Subsystems {
                 oracle: Some(&mut self.oracle),
                 agent_balances: Some(&mut self.agent_balances),
@@ -186,6 +198,12 @@ impl<'a> StateReadBundle<'a> {
         let mut validator_state = self.validator_state.clone();
         let mut governance = self.governance.clone();
         let mut fork_manager = self.fork_manager.clone();
+        let bridge_config = BridgeConfig::default();
+        let validators: Vec<Address> = self.validator_state
+            .get_all_validators()
+            .values()
+            .map(|v| v.address)
+            .collect();
 
         block.execute(
             &mut ExecutionState::new(
@@ -196,7 +214,12 @@ impl<'a> StateReadBundle<'a> {
                 &mut shielded,
                 &mut evm,
             ),
-            &mut BlockContext::new(height, &mut fee_params),
+            &mut BlockContext {
+                current_block_height: height,
+                fee_params: &mut fee_params,
+                bridge_config: Some(&bridge_config),
+                validators: if validators.is_empty() { None } else { Some(&validators) },
+            },
             &mut Subsystems {
                 oracle: Some(&mut oracle),
                 agent_balances: Some(&mut agent_balances),

@@ -174,11 +174,21 @@ async fn test_e2e_shielded_double_spend_rejected() {
     }]);
     node.insert_tx(tx2);
 
-    // Second block should panic because the double spend is rejected during execution
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        node.produce_block(2_000)
-    }));
-    assert!(result.is_err(), "double spend should cause block execution to panic");
+    // Second block should be produced but the tx reverted due to double spend
+    let block = node.produce_block(2_000);
+    assert!(block.is_some(), "block should be produced");
+    let result = node.last_result.clone().expect("execution result should exist");
+    let instr_result = result.instruction_results.get(0).expect("one instruction result");
+    match instr_result {
+        call_protocol::instructions::InstructionResult::Reverted { reason } => {
+            assert!(
+                reason.contains("shielded transfer:"),
+                "expected shielded transfer failure, got: {}",
+                reason
+            );
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
 
 // ── E2E Shielded Invalid Proof Rejected ─────────────────────────────────
@@ -202,11 +212,21 @@ async fn test_e2e_shielded_invalid_proof_rejected() {
     }]);
     node.insert_tx(tx);
 
-    // Block should panic because the invalid proof is rejected
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        node.produce_block(1_000)
-    }));
-    assert!(result.is_err(), "invalid proof should cause block execution to panic");
+    // Block should be produced but the tx reverted due to invalid proof
+    let block = node.produce_block(1_000);
+    assert!(block.is_some(), "block should be produced");
+    let result = node.last_result.clone().expect("execution result should exist");
+    let instr_result = result.instruction_results.get(0).expect("one instruction result");
+    match instr_result {
+        call_protocol::instructions::InstructionResult::Reverted { reason } => {
+            assert!(
+                reason.contains("shielded transfer:"),
+                "expected shielded transfer failure, got: {}",
+                reason
+            );
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
 
 // ── E2E Shielded Per-Block Limit ────────────────────────────────────────

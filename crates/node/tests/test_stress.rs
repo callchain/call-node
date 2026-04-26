@@ -170,6 +170,12 @@ async fn test_no_double_spend_concurrent_nonce() {
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
 
+    // Register asset 1 for transfers
+    {
+        let mut registry = node.state.asset_registry.write().unwrap();
+        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+    }
+
     // Two txs with same nonce — second should be rejected during execution
     node.insert_tx(make_tx(&secret, sender, 0, test_addr(10), 500));
     node.insert_tx(make_tx(&secret, sender, 0, test_addr(20), 500));
@@ -200,6 +206,12 @@ async fn test_final_state_consistency_after_load() {
 
     let initial_balance = 200_000_000u128;
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, initial_balance).unwrap();
+
+    // Register asset 1 for transfers
+    {
+        let mut registry = node.state.asset_registry.write().unwrap();
+        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+    }
 
     let num_txs = 100;
     let transfer_amount = 100u128;
@@ -247,6 +259,12 @@ async fn test_multi_sender_stress() {
         sender_keys.push(kp);
     }
 
+    // Register asset 1 for transfers
+    {
+        let mut registry = node.state.asset_registry.write().unwrap();
+        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+    }
+
     // Each sender submits 10 transactions
     for (secret, sender_addr) in &sender_keys {
         for j in 0..10 {
@@ -278,6 +296,12 @@ async fn test_high_volume_block_production() {
     }
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
+
+    // Register asset 1 for transfers
+    {
+        let mut registry = node.state.asset_registry.write().unwrap();
+        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+    }
 
     // Inject many transactions
     let tx_count = 500;

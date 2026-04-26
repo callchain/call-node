@@ -80,7 +80,11 @@ async fn test_node_process_transactions() {
         consensus.refresh_proposer_subset();
     }
 
-    // Fund sender
+    // Register asset 1 and fund sender
+    {
+        let mut registry = node.state.asset_registry.write().unwrap();
+        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+    }
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }

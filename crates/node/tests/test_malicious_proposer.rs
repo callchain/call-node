@@ -107,7 +107,11 @@ async fn test_invalid_tx_causes_block_failure() {
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
         consensus.refresh_proposer_subset();
     }
-    // Fund sender with enough for tx + gas
+    // Register asset 1 and fund sender
+    {
+        let mut registry = node.state.asset_registry.write().unwrap();
+        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+    }
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }

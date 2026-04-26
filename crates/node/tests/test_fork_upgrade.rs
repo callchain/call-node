@@ -110,19 +110,10 @@ async fn test_height_activated_upgrade() {
             selection.bridge_ops,
         );
 
-        let result = {
-            let mut balances = node.state.balance_state.write().unwrap();
-            let mut registry = node.state.asset_registry.write().unwrap();
-            let mut compliance = node.state.compliance_engine.write().unwrap();
-            let mut bridge_state = node.state.bridge_state.write().unwrap();
-            let mut shielded_state = node.state.shielded_state.write().unwrap();
-            let mut fee_params = node.state.fee_params.write().unwrap();
-            let mut evm_state = node.state.evm_state.write().unwrap();
-
-            block
-                .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None, None)
-                .expect("execution")
-        };
+        let result = node.state
+            .write_all()
+            .execute_block_no_subsystems(&block, height)
+            .expect("execution");
         block.finalize(&result);
 
         {

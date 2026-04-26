@@ -5,7 +5,7 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use call_consensus::{Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind};
+use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey};
 use call_protocol::{
@@ -161,6 +161,7 @@ impl NodeBuilder {
             data_dir,
             height: 0,
             blocks_produced: Vec::new(),
+            last_result: None,
         }
     }
 }
@@ -180,6 +181,8 @@ pub struct TestNode {
     pub data_dir: PathBuf,
     pub height: u64,
     pub blocks_produced: Vec<Block>,
+    /// The execution result of the most recent `produce_block()` call.
+    pub last_result: Option<BlockExecutionResult>,
 }
 
 impl TestNode {
@@ -254,45 +257,9 @@ impl TestNode {
 
         // Execute
         let result = {
-            let mut balances = self.state.balance_state.write().unwrap();
-            let mut registry = self.state.asset_registry.write().unwrap();
-            let mut compliance = self.state.compliance_engine.write().unwrap();
-            let mut bridge_state = self.state.bridge_state.write().unwrap();
-            let mut shielded_state = self.state.shielded_state.write().unwrap();
-            let mut fee_params = self.state.fee_params.write().unwrap();
-            let mut evm_state = self.state.evm_state.write().unwrap();
-            let mut oracle = self.state.oracle.write().unwrap();
-            let mut governance = self.state.governance.write().unwrap();
-            governance.set_current_block(height);
-            let bridge_config = call_bridge::BridgeConfig::default();
-            let validator_mgr = self.state.validator_state.read().unwrap();
-            let validators: Vec<Address> = validator_mgr
-                .get_all_validators()
-                .values()
-                .map(|v| v.address)
-                .collect();
-
-            block
-                .execute(
-                    &mut balances,
-                    &mut registry,
-                    &mut compliance,
-                    &mut bridge_state,
-                    &mut shielded_state,
-                    &mut fee_params,
-                    height,
-                    &mut evm_state,
-                    Some(&mut *oracle),
-                    None,
-                    None,
-                    None,
-                    Some(&mut *governance),
-                    Some(&bridge_config),
-                    if validators.is_empty() { None } else { Some(&validators) },
-                    None,
-                    None,
-                    None,
-                )
+            let mut s = self.state.write_all();
+            s.governance.set_current_block(height);
+            s.execute_block(&block, height)
                 .expect("block execution")
         };
         block.finalize(&result);
@@ -302,6 +269,7 @@ impl TestNode {
             let mut consensus = self.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit block");
         }
+        self.last_result = Some(result.clone());
 
         let new_height = height + 1;
         self.state.set_current_block(new_height);

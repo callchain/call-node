@@ -1810,7 +1810,7 @@ fn execute_rollback_instruction(
 // ── Block Execution Result ────────────────────────────────────────────
 
 /// Result of executing all transactions in a block
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BlockExecutionResult {
     pub instruction_results: Vec<InstructionResult>,
     pub payment_root: Hash,

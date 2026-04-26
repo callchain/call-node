@@ -175,7 +175,6 @@ fn test_bridge_withdraw_records_outflow() {
 
 /// `ExternalBridgeDeposit` instruction with insufficient signatures is rejected.
 #[test]
-#[should_panic(expected = "bridge deposit:")]
 fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     let mut node = TestNode::new();
 
@@ -245,5 +244,20 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     );
     node.insert_tx(tx);
 
-    node.produce_block(1_000_000);
+    let block = node.produce_block(1_000_000);
+    assert!(block.is_some(), "block should be produced");
+
+    let result = node.last_result.clone().expect("execution result should exist");
+    assert_eq!(result.protocol_tx_count, 1, "tx should be included");
+    let instr_result = result.instruction_results.get(0).expect("one instruction result");
+    match instr_result {
+        call_protocol::instructions::InstructionResult::Reverted { reason } => {
+            assert!(
+                reason.contains("bridge deposit:"),
+                "expected bridge deposit failure, got: {}",
+                reason
+            );
+        }
+        other => panic!("expected Reverted, got {:?}", other),
+    }
 }
