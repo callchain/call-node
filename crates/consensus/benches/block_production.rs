@@ -4,7 +4,7 @@
 //! transaction counts.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use call_consensus::{Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind};
+use call_consensus::{Block, BlockContext, ConsensusParams, ExecutionState, SimplexConsensus, Subsystems, SystemTx, SystemTxKind};
 use call_primitives::{Address, BlockHash, ValidatorId};
 use call_protocol::{
     AccountState, AssetRegistry, ComplianceEngine,
@@ -84,24 +84,25 @@ fn bench_block_execution(c: &mut Criterion) {
                             vec![],
                         );
                         let result = block.execute(
-                            &mut account,
-                            &mut registry,
-                            &mut ComplianceEngine::new(),
-                            &mut call_bridge::BridgeStateManager::default(),
-                            &mut call_shielded::ShieldedState::new(),
-                            &mut fee_params,
-                            1,
-                            &mut evm_state,
-                            Some(&mut OracleManager::default()),
-                            None,
-                            None,
-                            None,
-                            Some(&mut governance),
-                            Some(&bridge_config),
-                            None,
-                            None,
-                            None,
-                            None,
+                            &mut ExecutionState::new(
+                                &mut account,
+                                &mut registry,
+                                &mut ComplianceEngine::new(),
+                                &mut call_bridge::BridgeStateManager::default(),
+                                &mut call_shielded::ShieldedState::new(),
+                                &mut evm_state,
+                            ),
+                            &mut BlockContext {
+                                current_block_height: 1,
+                                fee_params: &mut fee_params,
+                                bridge_config: Some(&bridge_config),
+                                validators: None,
+                            },
+                            &mut Subsystems {
+                                oracle: Some(&mut OracleManager::default()),
+                                governance: Some(&mut governance),
+                                ..Subsystems::none()
+                            },
                         );
                         black_box(result);
                     },

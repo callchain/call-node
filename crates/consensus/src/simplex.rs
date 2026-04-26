@@ -3,7 +3,7 @@
 //! Lightweight wrapper around commonware-consensus providing Callchain-specific
 //! consensus driver with proposer selection, validator management, and block lifecycle.
 
-use crate::block::{Block, BlockExecutionResult};
+use crate::block::{Block, BlockExecutionResult, ExecutionState, BlockContext, Subsystems};
 use crate::fork::ForkManager;
 use crate::proposer::{
     derive_vrf_seed, select_proposer, select_proposer_subset, verify_proposer_in_subset,
@@ -207,21 +207,12 @@ impl SimplexConsensus {
         evm_state: &mut call_evm::EvmState,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(
-            balances,
-            registry,
-            compliance,
-            bridge_state,
-            shielded_state,
-            fee_params,
-            self.current_height,
-            evm_state,
-            None,
-            None,
-            None,
-            None,
-            None, None, None, None,
-            Some(&mut self.validators),
-            None,
+            &mut ExecutionState::new(balances, registry, compliance, bridge_state, shielded_state, evm_state),
+            &mut BlockContext::new(self.current_height, fee_params),
+            &mut Subsystems {
+                validator_state: Some(&mut self.validators),
+                ..Subsystems::none()
+            },
         )
     }
 

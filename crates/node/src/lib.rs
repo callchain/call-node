@@ -17,6 +17,7 @@ use call_consensus::{
     PersistedConsensusState, ForkManager,
     bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
     block_cache::BlockCache,
+    block::{ExecutionState, BlockContext, Subsystems},
     digest::ConsensusDigest,
     proposer::{derive_vrf_seed, select_proposer_subset},
 };
@@ -941,14 +942,17 @@ impl CallNode {
                                             let mut agent_registry = state.agent_registry.write().unwrap();
 
                                             block.execute(
-                                                &mut balances, &mut registry, &mut compliance, &mut bridge_state,
-                                                &mut shielded_state, &mut fee_params, height, &mut evm_state,
-                                                None, None,
-                                                Some(&mut *agent_balances),
-                                                Some(&mut *agent_registry),
-                                                None, None, None, None,
-                                                Some(&mut *state.validator_state.write().unwrap()),
-                                                None,
+                                                &mut ExecutionState::new(
+                                                    &mut balances, &mut registry, &mut compliance,
+                                                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                                                ),
+                                                &mut BlockContext::new(height, &mut fee_params),
+                                                &mut Subsystems {
+                                                    agent_balances: Some(&mut *agent_balances),
+                                                    agent_registry: Some(&mut *agent_registry),
+                                                    validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                                                    ..Subsystems::none()
+                                                },
                                             )
                                         };
 
@@ -1865,21 +1869,18 @@ async fn block_production_loop(
             let mut agent_registry = state.agent_registry.write().unwrap();
 
             block.execute(
-                &mut balances,
-                &mut registry,
-                &mut compliance,
-                &mut bridge_state,
-                &mut shielded_state,
-                &mut fee_params,
-                height,
-                &mut evm_state,
-                Some(&mut *oracle),
-                None,
-                Some(&mut *agent_balances),
-                Some(&mut *agent_registry),
-                None, None, None, None,
-                Some(&mut *state.validator_state.write().unwrap()),
-                None,
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems {
+                    oracle: Some(&mut *oracle),
+                    agent_balances: Some(&mut *agent_balances),
+                    agent_registry: Some(&mut *agent_registry),
+                    validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                    ..Subsystems::none()
+                },
             )
         };
         let exec_duration = exec_start.elapsed().as_millis() as u64;
@@ -2517,21 +2518,18 @@ async fn bft_event_loop(
                     let mut validator_state = state.validator_state.read().unwrap().clone();
 
                     block.execute(
-                        &mut balances,
-                        &mut registry,
-                        &mut compliance,
-                        &mut bridge_state,
-                        &mut shielded_state,
-                        &mut fee_params,
-                        height,
-                        &mut evm_state,
-                        Some(&mut oracle),
-                        None,
-                        Some(&mut agent_balances),
-                        Some(&mut agent_registry),
-                        None, None, None, None,
-                        Some(&mut validator_state),
-                        None,
+                        &mut ExecutionState::new(
+                            &mut balances, &mut registry, &mut compliance,
+                            &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+                        &mut BlockContext::new(height, &mut fee_params),
+                        &mut Subsystems {
+                            oracle: Some(&mut oracle),
+                            agent_balances: Some(&mut agent_balances),
+                            agent_registry: Some(&mut agent_registry),
+                            validator_state: Some(&mut validator_state),
+                            ..Subsystems::none()
+                        },
                     )
                 };
                 telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
@@ -2600,21 +2598,18 @@ async fn bft_event_loop(
                         let mut validator_state = state.validator_state.read().unwrap().clone();
 
                         block.execute(
-                            &mut balances,
-                            &mut registry,
-                            &mut compliance,
-                            &mut bridge_state,
-                            &mut shielded_state,
-                            &mut fee_params,
-                            height,
-                            &mut evm_state,
-                            Some(&mut oracle),
-                            None,
-                            Some(&mut agent_balances),
-                            Some(&mut agent_registry),
-                            None, None, None, None,
-                            Some(&mut validator_state),
-                            None,
+                            &mut ExecutionState::new(
+                                &mut balances, &mut registry, &mut compliance,
+                                &mut bridge_state, &mut shielded_state, &mut evm_state,
+                            ),
+                            &mut BlockContext::new(height, &mut fee_params),
+                            &mut Subsystems {
+                                oracle: Some(&mut oracle),
+                                agent_balances: Some(&mut agent_balances),
+                                agent_registry: Some(&mut agent_registry),
+                                validator_state: Some(&mut validator_state),
+                                ..Subsystems::none()
+                            },
                         )
                     };
                     telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
@@ -2709,21 +2704,18 @@ async fn bft_event_loop(
                         let mut agent_registry = state.agent_registry.write().unwrap();
 
                         match block.execute(
-                            &mut balances,
-                            &mut registry,
-                            &mut compliance,
-                            &mut bridge_state,
-                            &mut shielded_state,
-                            &mut fee_params,
-                            height,
-                            &mut evm_state,
-                            Some(&mut *oracle),
-                            None,
-                            Some(&mut *agent_balances),
-                            Some(&mut *agent_registry),
-                            None, None, None, None,
-                            Some(&mut *state.validator_state.write().unwrap()),
-                            None,
+                            &mut ExecutionState::new(
+                                &mut balances, &mut registry, &mut compliance,
+                                &mut bridge_state, &mut shielded_state, &mut evm_state,
+                            ),
+                            &mut BlockContext::new(height, &mut fee_params),
+                            &mut Subsystems {
+                                oracle: Some(&mut *oracle),
+                                agent_balances: Some(&mut *agent_balances),
+                                agent_registry: Some(&mut *agent_registry),
+                                validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                                ..Subsystems::none()
+                            },
                         ) {
                             Ok(r) => r,
                             Err(e) => {
@@ -3229,14 +3221,18 @@ fn apply_synced_blocks(
             let mut validator_state = state.validator_state.read().unwrap().clone();
 
             match block.execute(
-                &mut balances, &mut registry, &mut compliance, &mut bridge_state,
-                &mut shielded_state, &mut fee_params, block_height, &mut evm_state,
-                None, None,
-                Some(&mut agent_balances),
-                Some(&mut agent_registry),
-                None, None, None, None,
-                Some(&mut validator_state),
-                Some(&mut state.fork_manager.write().unwrap().clone()),
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(block_height, &mut fee_params),
+                &mut Subsystems {
+                    agent_balances: Some(&mut agent_balances),
+                    agent_registry: Some(&mut agent_registry),
+                    validator_state: Some(&mut validator_state),
+                    fork_manager: Some(&mut state.fork_manager.write().unwrap().clone()),
+                    ..Subsystems::none()
+                },
             ) {
                 Ok(result) => {
                     result.payment_root == block.header.payment_root
@@ -3266,14 +3262,18 @@ fn apply_synced_blocks(
             let mut agent_registry = state.agent_registry.write().unwrap();
 
             block.execute(
-                &mut balances, &mut registry, &mut compliance, &mut bridge_state,
-                &mut shielded_state, &mut fee_params, block_height, &mut evm_state,
-                None, None,
-                Some(&mut *agent_balances),
-                Some(&mut *agent_registry),
-                None, None, None, None,
-                Some(&mut *state.validator_state.write().unwrap()),
-                Some(&mut *state.fork_manager.write().unwrap()),
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(block_height, &mut fee_params),
+                &mut Subsystems {
+                    agent_balances: Some(&mut *agent_balances),
+                    agent_registry: Some(&mut *agent_registry),
+                    validator_state: Some(&mut *state.validator_state.write().unwrap()),
+                    fork_manager: Some(&mut *state.fork_manager.write().unwrap()),
+                    ..Subsystems::none()
+                },
             )
         };
 
@@ -3749,24 +3749,9 @@ mod tests {
 
         let result = block
             .execute(
-                &mut balances,
-                &mut registry,
-                &mut compliance,
-                &mut bridge_state,
-                &mut shielded_state,
-                &mut fee_params,
-                height,
-                &mut evm_state,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                &mut ExecutionState::new(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             )
             .expect("execution");
         block.finalize(&result);
@@ -3844,26 +3829,12 @@ mod tests {
 
         let result = block
             .execute(
-                &mut balances,
-                &mut registry,
-                &mut compliance,
-                &mut bridge_state,
-                &mut shielded_state,
-                &mut fee_params,
-                height,
-                &mut evm_state,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                &mut ExecutionState::new(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             )
             .expect("empty block execution");
+        block.finalize(&result);
         block.finalize(&result);
 
         // Commit
@@ -3962,8 +3933,11 @@ mod tests {
         let mut evm_state = node1.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None, None)
-            .expect("execution");
+            .execute(
+            &mut ExecutionState::new(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state),
+            &mut BlockContext::new(height, &mut fee_params),
+            &mut Subsystems::none(),
+        )            .expect("execution");
         block.finalize(&result);
 
         // Commit on node1
@@ -4070,8 +4044,11 @@ mod tests {
         let mut evm_state = node.state.evm_state.write().unwrap();
 
         let result = block
-            .execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None, None, None)
-            .expect("execution");
+            .execute(
+            &mut ExecutionState::new(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state),
+            &mut BlockContext::new(height, &mut fee_params),
+            &mut Subsystems::none(),
+        )            .expect("execution");
         block.finalize(&result);
 
         {
@@ -4185,9 +4162,17 @@ mod tests {
                 let mut evm_state = node.state.evm_state.write().unwrap();
 
                 let mut vs = node.state.validator_state.write().unwrap();
-                block.execute(&mut balances, &mut registry, &mut compliance, &mut bridge_state,
-                              &mut shielded_state, &mut fee_params, height, &mut evm_state, None, None, None, None, None, None, None, None,
-                              Some(&mut *vs), None)
+                block.execute(
+                    &mut ExecutionState::new(
+                        &mut balances, &mut registry, &mut compliance,
+                        &mut bridge_state, &mut shielded_state, &mut evm_state,
+                    ),
+                    &mut BlockContext::new(height, &mut fee_params),
+                    &mut Subsystems {
+                        validator_state: Some(&mut *vs),
+                        ..Subsystems::none()
+                    },
+                )
                     .expect("execution")
             };
             block.finalize(&result);
@@ -4414,10 +4399,9 @@ mod tests {
 
             let result = block
                 .execute(
-                    &mut balances, &mut registry, &mut compliance,
-                    &mut bridge_state, &mut shielded_state, &mut fee_params,
-                    height, &mut evm_state, None, None, None, None,
-                    None, None, None, None, None, None,
+                    &mut ExecutionState::new(&mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state),
+                    &mut BlockContext::new(height, &mut fee_params),
+                    &mut Subsystems::none(),
                 )
                 .expect("propose execution on clone");
 
@@ -4446,10 +4430,10 @@ mod tests {
 
             let result = block
                 .execute(
-                    &mut balances, &mut registry, &mut compliance,
-                    &mut bridge_state, &mut shielded_state, &mut fee_params,
-                    height, &mut evm_state, None, None, None, None,
-                    None, None, None, None, None, None,
+                    &mut ExecutionState::new(
+                        &mut balances, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state),
+                    &mut BlockContext::new(height, &mut fee_params),
+                    &mut Subsystems::none(),
                 )
                 .expect("finalize execution on shared state");
 
@@ -4551,10 +4535,12 @@ mod tests {
             let mut evm_state = node.state.evm_state.read().unwrap().clone();
 
             block.execute(
-                &mut balances, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut fee_params,
-                height, &mut evm_state, None, None, None, None,
-                None, None, None, None, None, None,
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             )
             .expect("execution")
         };
@@ -4576,10 +4562,12 @@ mod tests {
             let mut evm_state = node.state.evm_state.read().unwrap().clone();
 
             let result2 = block.execute(
-                &mut balances, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut fee_params,
-                height, &mut evm_state, None, None, None, None,
-                None, None, None, None, None, None,
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             )
             .expect("re-execution");
 
@@ -4600,10 +4588,12 @@ mod tests {
             let mut evm_state = node.state.evm_state.write().unwrap();
 
             let result3 = block.execute(
-                &mut balances, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut fee_params,
-                height, &mut evm_state, None, None, None, None,
-                None, None, None, None, None, None,
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             )
             .expect("execution on shared state");
 
@@ -4662,10 +4652,12 @@ mod tests {
             let mut evm_state = node.state.evm_state.write().unwrap();
 
             let result = block.execute(
-                &mut balances, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut fee_params,
-                height, &mut evm_state, None, None, None, None,
-                None, None, None, None, None, None,
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             )
             .expect("execution");
 
@@ -4817,10 +4809,12 @@ mod tests {
             let mut evm_state = node.state.evm_state.write().unwrap();
 
             let result = block.execute(
-                &mut balances, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut fee_params,
-                height, &mut evm_state, None, None, None, None,
-                None, None, None, None, None, None,
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             ).expect("execution");
             block.finalize(&result);
         }
@@ -4909,10 +4903,12 @@ mod tests {
             let mut evm_state = node.state.evm_state.write().unwrap();
 
             let result = block.execute(
-                &mut balances, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut fee_params,
-                height, &mut evm_state, None, None, None, None,
-                None, None, None, None, None, None,
+                &mut ExecutionState::new(
+                    &mut balances, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext::new(height, &mut fee_params),
+                &mut Subsystems::none(),
             ).expect("execution");
             block.finalize(&result);
         }

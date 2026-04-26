@@ -4,7 +4,7 @@
 //! execution ordering, and state root computation.
 
 use call_bridge::{BridgeOp, BridgeStateManager};
-use call_consensus::block::{Block, BlockExecutionResult, SystemTx, SystemTxKind};
+use call_consensus::block::{Block, BlockExecutionResult, BlockContext, ExecutionState, Subsystems, SystemTx, SystemTxKind};
 use call_consensus::validator::ConsensusError;
 use call_primitives::{Balance, BlockHash, Hash};
 use call_protocol::AccountState;
@@ -228,21 +228,16 @@ impl PayloadBuilder {
         );
 
         // Execute the block
+        let mut fee_params = self.fee_params.clone();
         let result = block.execute(
-            account,
-            registry,
-            compliance,
-            bridge_state,
-            shielded_state,
-            &mut self.fee_params.clone(),
-            attrs.height,
-            evm_state,
-            None,
-            None,
-            None,
-            None,
-            None, bridge_config, None, None,
-            None, None,
+            &mut ExecutionState::new(account, registry, compliance, bridge_state, shielded_state, evm_state),
+            &mut BlockContext {
+                current_block_height: attrs.height,
+                fee_params: &mut fee_params,
+                bridge_config,
+                validators: None,
+            },
+            &mut Subsystems::none(),
         )?;
 
         // Verify EVM state root matches expected (if non-zero)

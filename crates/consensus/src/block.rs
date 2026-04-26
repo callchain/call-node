@@ -166,6 +166,76 @@ pub enum SystemTxKind {
 /// Deserialized into `EvmTransaction` during execution.
 pub type EvmTx = Vec<u8>;
 
+// ── Execution Parameter Grouping ──────────────────────────────────────
+
+/// Core mutable protocol state passed to every block execution.
+pub struct ExecutionState<'a> {
+    pub account: &'a mut AccountState,
+    pub registry: &'a mut AssetRegistry,
+    pub compliance: &'a mut call_protocol::compliance::ComplianceEngine,
+    pub bridge_state: &'a mut call_bridge::BridgeStateManager,
+    pub shielded_state: &'a mut ShieldedState,
+    pub evm_state: &'a mut EvmState,
+}
+
+/// Block-level context and configuration.
+pub struct BlockContext<'a> {
+    pub current_block_height: u64,
+    pub fee_params: &'a mut FeeParams,
+    pub bridge_config: Option<&'a BridgeConfig>,
+    pub validators: Option<&'a [Address]>,
+}
+
+/// Optional subsystem extensions. Each field is `None` when the subsystem
+/// is not active for the current execution context.
+pub struct Subsystems<'a> {
+    pub oracle: Option<&'a mut call_oracle::OracleManager>,
+    pub agent_executor: Option<call_protocol::instructions::AgentExecutor<'a>>,
+    pub agent_balances: Option<&'a mut call_agent::AgentBalances>,
+    pub agent_registry: Option<&'a mut call_agent::AgentRegistry>,
+    pub governance: Option<&'a mut GovernanceManager>,
+    pub smart_accounts: Option<&'a call_protocol::smart_accounts::SmartAccountRegistry>,
+    pub validator_state: Option<&'a mut ValidatorStateManager>,
+    pub fork_manager: Option<&'a mut ForkManager>,
+}
+
+impl<'a> ExecutionState<'a> {
+    pub fn new(
+        account: &'a mut AccountState,
+        registry: &'a mut AssetRegistry,
+        compliance: &'a mut call_protocol::compliance::ComplianceEngine,
+        bridge_state: &'a mut call_bridge::BridgeStateManager,
+        shielded_state: &'a mut ShieldedState,
+        evm_state: &'a mut EvmState,
+    ) -> Self {
+        Self { account, registry, compliance, bridge_state, shielded_state, evm_state }
+    }
+}
+
+impl<'a> BlockContext<'a> {
+    pub fn new(
+        current_block_height: u64,
+        fee_params: &'a mut FeeParams,
+    ) -> Self {
+        Self { current_block_height, fee_params, bridge_config: None, validators: None }
+    }
+}
+
+impl<'a> Subsystems<'a> {
+    pub fn none() -> Self {
+        Self {
+            oracle: None,
+            agent_executor: None,
+            agent_balances: None,
+            agent_registry: None,
+            governance: None,
+            smart_accounts: None,
+            validator_state: None,
+            fork_manager: None,
+        }
+    }
+}
+
 // ── Block ─────────────────────────────────────────────────────────────
 
 /// Full block structure (per spec §2.4)
@@ -250,27 +320,11 @@ impl Block {
     /// 4. System transactions (system_txs)
     ///
     /// Returns all instruction results.
-    #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &self,
-        account: &mut AccountState,
-        registry: &mut AssetRegistry,
-        compliance: &mut call_protocol::compliance::ComplianceEngine,
-        bridge_state: &mut call_bridge::BridgeStateManager,
-        shielded_state: &mut ShieldedState,
-        fee_params: &mut FeeParams,
-        current_block_height: u64,
-        evm_state: &mut EvmState,
-        mut oracle: Option<&mut call_oracle::OracleManager>,
-        mut agent_executor: Option<call_protocol::instructions::AgentExecutor>,
-        mut agent_balances: Option<&mut call_agent::AgentBalances>,
-        mut agent_registry: Option<&mut call_agent::AgentRegistry>,
-        mut governance: Option<&mut GovernanceManager>,
-        bridge_config: Option<&BridgeConfig>,
-        validators: Option<&[Address]>,
-        smart_accounts: Option<&call_protocol::smart_accounts::SmartAccountRegistry>,
-        mut validator_state: Option<&mut ValidatorStateManager>,
-        mut fork_manager: Option<&mut ForkManager>,
+        state: &mut ExecutionState,
+        ctx: &mut BlockContext,
+        subsystems: &mut Subsystems,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -291,7 +345,7 @@ impl Block {
                 }
 
                 // Validate nonce and balance before execution
-                if call_evm::validate_evm_tx(&tx, evm_state).is_err() {
+                if call_evm::validate_evm_tx(&tx, state.evm_state).is_err() {
                     continue;
                 }
 
@@ -300,28 +354,28 @@ impl Block {
                     .saturating_mul(call_evm::U256::from(tx.gas_price));
                 let gas_cost_u128: u128 = gas_cost_u256.try_into().unwrap_or(u128::MAX);
                 let evm_balance_u128: u128 =
-                    evm_state.get_balance(&caller).try_into().unwrap_or(0);
+                    state.evm_state.get_balance(&caller).try_into().unwrap_or(0);
 
                 if evm_balance_u128 < gas_cost_u128 {
                     let needed = gas_cost_u128 - evm_balance_u128;
                     let protocol_balance =
-                        account.get_balance(call_protocol::CALL_ASSET_ID, &caller);
+                        state.account.get_balance(call_protocol::CALL_ASSET_ID, &caller);
                     if protocol_balance < needed {
                         continue; // insufficient unified gas
                     }
-                    if account
+                    if state.account
                         .deduct_balance(call_protocol::CALL_ASSET_ID, caller, needed)
                         .is_ok()
                     {
-                        let new_evm = evm_state.get_balance(&caller)
+                        let new_evm = state.evm_state.get_balance(&caller)
                             + call_evm::U256::from(needed);
-                        evm_state.set_balance(caller, new_evm);
+                        state.evm_state.set_balance(caller, new_evm);
                     } else {
                         continue;
                     }
                 }
 
-                if let Ok(exec_result) = executor.execute_tx(tx, evm_state) {
+                if let Ok(exec_result) = executor.execute_tx(tx, state.evm_state) {
                     if gas_tracker.add_gas(exec_result.gas_used).is_err() {
                         continue;
                     }
@@ -335,13 +389,13 @@ impl Block {
         // Step 2: Protocol transactions
         for tx in &self.protocol_txs {
             // Validate nonce against state (nonce consumed on inclusion)
-            if let Err(_e) = account.validate_nonce(&tx.sender, tx.nonce) {
+            if let Err(_e) = state.account.validate_nonce(&tx.sender, tx.nonce) {
                 // Nonce mismatch or already used — skip this tx
                 continue;
             }
 
             // Verify transaction signature before execution
-            if let Err(e) = tx.verify_signature_with_registry(smart_accounts) {
+            if let Err(e) = tx.verify_signature_with_registry(subsystems.smart_accounts) {
                 return Err(ConsensusError::InvalidBlock(format!(
                     "signature verification failed for tx from {:?}: {e}",
                     tx.sender
@@ -349,10 +403,10 @@ impl Block {
             }
 
             // Check transaction expiry
-            if tx.expires_at != 0 && current_block_height > tx.expires_at {
+            if tx.expires_at != 0 && ctx.current_block_height > tx.expires_at {
                 return Err(ConsensusError::InvalidBlock(format!(
                     "transaction from {:?} expired at block {} (current: {})",
-                    tx.sender, tx.expires_at, current_block_height
+                    tx.sender, tx.expires_at, ctx.current_block_height
                 )));
             }
 
@@ -361,30 +415,30 @@ impl Block {
             let fee = call_protocol::transaction::compute_fee(
                 gas_units,
                 call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS,
-                fee_params.base_fee,
+                ctx.fee_params.base_fee,
             )
             .min(tx.max_fee);
 
             // Unified gas balance: auto-bridge EVM→Protocol if needed
             let mut bridged_from_evm = 0u128;
-            let protocol_balance = account.get_balance(call_protocol::CALL_ASSET_ID, &tx.sender);
+            let protocol_balance = state.account.get_balance(call_protocol::CALL_ASSET_ID, &tx.sender);
             if protocol_balance < fee {
                 let needed = fee - protocol_balance;
                 let evm_balance_u128: u128 =
-                    evm_state.get_balance(&tx.sender).try_into().unwrap_or(0);
+                    state.evm_state.get_balance(&tx.sender).try_into().unwrap_or(0);
                 if evm_balance_u128 < needed {
                     continue; // insufficient unified gas
                 }
-                let current_evm = evm_state.get_balance(&tx.sender);
-                evm_state.set_balance(
+                let current_evm = state.evm_state.get_balance(&tx.sender);
+                state.evm_state.set_balance(
                     tx.sender,
                     current_evm - call_evm::U256::from(needed),
                 );
-                if account
+                if state.account
                     .credit_balance(call_protocol::CALL_ASSET_ID, tx.sender, needed)
                     .is_err()
                 {
-                    evm_state.set_balance(tx.sender, current_evm);
+                    state.evm_state.set_balance(tx.sender, current_evm);
                     continue;
                 }
                 bridged_from_evm = needed;
@@ -392,22 +446,22 @@ impl Block {
 
             // Deduct gas fee from protocol balance
             let gas_ok = match tx.fee_currency {
-                call_primitives::FeeCurrency::Call => account
+                call_primitives::FeeCurrency::Call => state.account
                     .deduct_balance(call_protocol::CALL_ASSET_ID, tx.sender, fee)
                     .is_ok(),
-                call_primitives::FeeCurrency::Stablecoin(asset_id) => account
+                call_primitives::FeeCurrency::Stablecoin(asset_id) => state.account
                     .deduct_balance(asset_id, tx.sender, fee)
                     .is_ok(),
             };
             if !gas_ok {
                 // Rollback EVM bridge if we bridged
                 if bridged_from_evm > 0 {
-                    let current_evm = evm_state.get_balance(&tx.sender);
-                    evm_state.set_balance(
+                    let current_evm = state.evm_state.get_balance(&tx.sender);
+                    state.evm_state.set_balance(
                         tx.sender,
                         current_evm + call_evm::U256::from(bridged_from_evm),
                     );
-                    let _ = account.deduct_balance(
+                    let _ = state.account.deduct_balance(
                         call_protocol::CALL_ASSET_ID,
                         tx.sender,
                         bridged_from_evm,
@@ -417,7 +471,7 @@ impl Block {
             }
 
             // Increment nonce (consumed on inclusion, regardless of execution result)
-            account.increment_nonce(tx.sender);
+            state.account.increment_nonce(tx.sender);
 
             // Separate instructions by type: bridge, agent, validator, asset, regular
             let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
@@ -443,26 +497,26 @@ impl Block {
                 .partition(|i| is_rollback_instruction(i));
 
             // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
-            let balance_snapshot = account.clone();
-            let evm_snapshot = evm_state.clone();
-            let bridge_snapshot = bridge_state.clone();
-            let validator_snapshot = validator_state.as_ref().map(|vs| (*vs).clone());
+            let balance_snapshot = state.account.clone();
+            let evm_snapshot = state.evm_state.clone();
+            let bridge_snapshot = state.bridge_state.clone();
+            let validator_snapshot = subsystems.validator_state.as_ref().map(|vs| (*vs).clone());
             let mut tx_results = Vec::new();
             let mut tx_agent_events = Vec::new();
 
             let exec_result = (|| -> Result<(), ConsensusError> {
-                // Execute regular instructions via protocol engine (includes governance)
+                // Execute regular instructions via protocol engine (includes subsystems.governance)
                 if !other_instrs.is_empty() {
                     let results = execute_protocol_instructions(
                         &other_instrs,
-                        account,
-                        registry,
-                        compliance,
-                        shielded_state,
+                        state.account,
+                        state.registry,
+                        state.compliance,
+                        state.shielded_state,
                         tx.sender,
-                        oracle.as_deref_mut(),
-                        &mut agent_executor,
-                        governance.as_deref_mut(),
+                        subsystems.oracle.as_deref_mut(),
+                        &mut subsystems.agent_executor,
+                        subsystems.governance.as_deref_mut(),
                     )
                     .map_err(|e| {
                         ConsensusError::InvalidBlock(format!("protocol tx: {e}"))
@@ -476,12 +530,12 @@ impl Block {
                         let r = execute_asset_instruction(
                             instr,
                             tx.sender,
-                            account,
-                            registry,
-                            governance.as_deref_mut(),
-                            evm_state,
+                            state.account,
+                            state.registry,
+                            subsystems.governance.as_deref_mut(),
+                            state.evm_state,
                             &executor,
-                            current_block_height,
+                            ctx.current_block_height,
                         )?;
                         tx_results.push(r);
                     }
@@ -489,12 +543,12 @@ impl Block {
 
                 // Execute bridge deposit instructions inline
                 if !bridge_instrs.is_empty() {
-                    let config = bridge_config.ok_or_else(|| {
+                    let config = ctx.bridge_config.ok_or_else(|| {
                         ConsensusError::InvalidBlock(
                             "bridge instructions require bridge config".into(),
                         )
                     })?;
-                    let vals = validators.ok_or_else(|| {
+                    let vals = ctx.validators.ok_or_else(|| {
                         ConsensusError::InvalidBlock(
                             "bridge instructions require validator set".into(),
                         )
@@ -503,14 +557,14 @@ impl Block {
                         let r = execute_bridge_instruction(
                             instr,
                             tx.sender,
-                            account,
-                            bridge_state,
+                            state.account,
+                            state.bridge_state,
                             config,
                             vals,
-                            current_block_height,
-                            evm_state,
+                            ctx.current_block_height,
+                            state.evm_state,
                             &executor,
-                            registry,
+                            state.registry,
                         )?;
                         tx_results.push(r);
                     }
@@ -518,14 +572,14 @@ impl Block {
 
                 // Execute agent instructions inline
                 if !agent_instrs.is_empty() {
-                    let ab = agent_balances
+                    let ab = subsystems.agent_balances
                         .as_mut()
                         .ok_or_else(|| {
                             ConsensusError::InvalidBlock(
                                 "agent instructions require agent state".into(),
                             )
                         })?;
-                    let ar = agent_registry.as_mut().ok_or_else(|| {
+                    let ar = subsystems.agent_registry.as_mut().ok_or_else(|| {
                         ConsensusError::InvalidBlock(
                             "agent instructions require agent registry".into(),
                         )
@@ -536,13 +590,13 @@ impl Block {
                             tx.sender,
                             ab,
                             ar,
-                            account,
-                            evm_state,
-                            bridge_state,
-                            registry,
+                            state.account,
+                            state.evm_state,
+                            state.bridge_state,
+                            state.registry,
                             &executor,
-                            current_block_height,
-                            fee_params,
+                            ctx.current_block_height,
+                            ctx.fee_params,
                             &mut tx_agent_events,
                         )?;
                         tx_results.push(r);
@@ -551,7 +605,7 @@ impl Block {
 
                 // Execute validator instructions inline
                 if !validator_instrs.is_empty() {
-                    let vs = validator_state.as_mut().ok_or_else(|| {
+                    let vs = subsystems.validator_state.as_mut().ok_or_else(|| {
                         ConsensusError::InvalidBlock(
                             "validator instructions require validator state".into(),
                         )
@@ -560,9 +614,9 @@ impl Block {
                         let r = execute_validator_instruction(
                             instr,
                             tx.sender,
-                            account,
+                            state.account,
                             vs,
-                            current_block_height,
+                            ctx.current_block_height,
                         )?;
                         tx_results.push(r);
                     }
@@ -570,7 +624,7 @@ impl Block {
 
                 // Execute rollback instructions inline
                 if !rollback_instrs.is_empty() {
-                    let fm = fork_manager.as_mut().ok_or_else(|| {
+                    let fm = subsystems.fork_manager.as_mut().ok_or_else(|| {
                         ConsensusError::InvalidBlock(
                             "rollback instructions require fork manager".into(),
                         )
@@ -579,7 +633,7 @@ impl Block {
                         let maybe_plan = execute_rollback_instruction(
                             instr,
                             fm,
-                            current_block_height,
+                            ctx.current_block_height,
                         )?;
                         if let Some(plan) = maybe_plan {
                             result.pending_rollback = Some(plan);
@@ -593,11 +647,11 @@ impl Block {
 
             if let Err(e) = exec_result {
                 // Rollback balance/EVM/bridge but nonce stays consumed
-                *account = balance_snapshot;
-                *evm_state = evm_snapshot;
-                *bridge_state = bridge_snapshot;
+                *state.account = balance_snapshot;
+                *state.evm_state = evm_snapshot;
+                *state.bridge_state = bridge_snapshot;
                 if let Some(ref snapshot) = validator_snapshot {
-                    if let Some(ref mut vs) = validator_state {
+                    if let Some(ref mut vs) = subsystems.validator_state {
                         **vs = snapshot.clone();
                     }
                 }
@@ -613,11 +667,11 @@ impl Block {
         // Execute internal bridge deposits/withdrawals atomically.
         // Each operation deducts/credits protocol account and mints/burns
         // wrapped ERC-20 tokens in the EVM layer.
-        if let Some(config) = bridge_config {
+        if let Some(config) = ctx.bridge_config {
             for op in &self.bridge_operations {
                 let asset_id = op.asset_id();
                 // Reject bridge ops on frozen or delisted assets
-                if let Some(asset) = registry.get_asset(asset_id) {
+                if let Some(asset) = state.registry.get_asset(asset_id) {
                     if asset.status != AssetStatus::Active {
                         return Err(ConsensusError::InvalidBlock(format!(
                             "bridge op: asset {} is not active (status: {:?})",
@@ -625,7 +679,7 @@ impl Block {
                         )));
                     }
                 }
-                let Some(contract_addr) = registry.get_evm_contract_address(asset_id) else {
+                let Some(contract_addr) = state.registry.get_evm_contract_address(asset_id) else {
                     // Asset has no deployed wrapped token — skip
                     continue;
                 };
@@ -634,29 +688,29 @@ impl Block {
                     BridgeOp::DepositToEvm { from, .. } => {
                         call_bridge::execute_deposit(
                             op,
-                            account,
-                            evm_state,
+                            state.account,
+                            state.evm_state,
                             &executor,
-                            bridge_state,
+                            state.bridge_state,
                             config,
-                            registry,
+                            state.registry,
                             contract_addr,
                             *from,
-                            current_block_height,
+                            ctx.current_block_height,
                         )
                     }
                     BridgeOp::WithdrawToProtocol { from, .. } => {
                         call_bridge::execute_withdraw(
                             op,
-                            account,
-                            evm_state,
+                            state.account,
+                            state.evm_state,
                             &executor,
-                            bridge_state,
+                            state.bridge_state,
                             config,
-                            registry,
+                            state.registry,
                             contract_addr,
                             *from,
-                            current_block_height,
+                            ctx.current_block_height,
                         )
                     }
                 };
@@ -666,13 +720,13 @@ impl Block {
                         // Update EVM supply tracking in asset registry
                         match op {
                             BridgeOp::DepositToEvm { asset_id, amount, .. } => {
-                                let _ = registry.add_evm_supply(*asset_id, *amount);
+                                let _ = state.registry.add_evm_supply(*asset_id, *amount);
                             }
                             BridgeOp::WithdrawToProtocol { asset_id, amount, .. } => {
-                                let _ = registry.sub_evm_supply(*asset_id, *amount);
+                                let _ = state.registry.sub_evm_supply(*asset_id, *amount);
                             }
                         }
-                        bridge_state.add_pending_op(op.clone(), current_block_height);
+                        state.bridge_state.add_pending_op(op.clone(), ctx.current_block_height);
                         result.bridge_op_count += 1;
                     }
                     Err(_) => {
@@ -690,7 +744,7 @@ impl Block {
                 }
                 SystemTxKind::UpdateBaseFee => {
                     let gas_used = result.protocol_tx_count as u64 * 10_000; // rough estimate
-                    update_base_fee_after_block(fee_params, gas_used);
+                    update_base_fee_after_block(ctx.fee_params, gas_used);
                 }
                 SystemTxKind::ProtocolUpgrade(_) => {
                     // Version upgrade handled by node layer
@@ -700,29 +754,29 @@ impl Block {
         }
 
         // Step 4.5: Auto-finalize pending external deposits and bridge maintenance
-        if let Some(config) = bridge_config {
-            bridge_state.on_block_finalized(
-                current_block_height,
+        if let Some(config) = ctx.bridge_config {
+            state.bridge_state.on_block_finalized(
+                ctx.current_block_height,
                 config.challenge_period_blocks,
                 config.processed_tx_retention_blocks,
             );
         }
 
         // Step 5: Oracle reward pool allocation from block fees
-        if let Some(oracle) = oracle.as_mut() {
+        if let Some(oracle) = subsystems.oracle.as_mut() {
             // Approximate total gas used: EVM gas + protocol txs * base gas per tx
             let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
-            let total_fees = total_gas as u128 * fee_params.base_fee;
-            let oracle_share = total_fees * fee_params.oracle_fee_share_bps as u128 / 10_000;
+            let total_fees = total_gas as u128 * ctx.fee_params.base_fee;
+            let oracle_share = total_fees * ctx.fee_params.oracle_fee_share_bps as u128 / 10_000;
             oracle.add_reward(oracle_share);
             // Note: clear_tracking is NOT called here — the caller must call it
             // after processing outliers for slashing, otherwise outlier data is lost.
         }
 
         // Compute state roots
-        result.payment_root = compute_payment_root(account);
-        result.evm_state_root = compute_evm_state_root(evm_state);
-        result.bridge_root = compute_bridge_root(bridge_state);
+        result.payment_root = compute_payment_root(state.account);
+        result.evm_state_root = compute_evm_state_root(state.evm_state);
+        result.bridge_root = compute_bridge_root(state.bridge_state);
         result.receipt_root = compute_receipt_root(&result);
 
         Ok(result)
@@ -2175,24 +2229,17 @@ mod tests {
 
         let result = block
             .execute(
-                &mut account,
-                &mut registry,
-                &mut compliance,
-                &mut bridge_state,
-                &mut shielded_state,
-                &mut fee_params,
-                1,
-                &mut evm_state,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(&bridge_config),
-                None,
-                None,
-                None,
-                None,
+                &mut ExecutionState::new(
+                    &mut account, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext {
+                    current_block_height: 1,
+                    fee_params: &mut fee_params,
+                    bridge_config: Some(&bridge_config),
+                    validators: None,
+                },
+                &mut Subsystems::none(),
             )
             .unwrap();
 
@@ -2254,24 +2301,17 @@ mod tests {
 
         let result = block
             .execute(
-                &mut account,
-                &mut registry,
-                &mut compliance,
-                &mut bridge_state,
-                &mut shielded_state,
-                &mut fee_params,
-                1,
-                &mut evm_state,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(&bridge_config),
-                None,
-                None,
-                None,
-                None,
+                &mut ExecutionState::new(
+                    &mut account, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext {
+                    current_block_height: 1,
+                    fee_params: &mut fee_params,
+                    bridge_config: Some(&bridge_config),
+                    validators: None,
+                },
+                &mut Subsystems::none(),
             )
             .unwrap();
 
@@ -2393,24 +2433,21 @@ mod tests {
 
         let result = block
             .execute(
-                &mut account,
-                &mut registry,
-                &mut compliance,
-                &mut bridge_state,
-                &mut shielded_state,
-                &mut fee_params,
-                50, // current_block_height < expires_at
-                &mut evm_state,
-                None,
-                None,
-                Some(&mut agent_balances),
-                Some(&mut agent_registry),
-                None,
-                Some(&bridge_config),
-                None,
-                None,
-                None,
-                None,
+                &mut ExecutionState::new(
+                    &mut account, &mut registry, &mut compliance,
+                    &mut bridge_state, &mut shielded_state, &mut evm_state,
+                ),
+                &mut BlockContext {
+                    current_block_height: 50, // current_block_height < expires_at
+                    fee_params: &mut fee_params,
+                    bridge_config: Some(&bridge_config),
+                    validators: None,
+                },
+                &mut Subsystems {
+                    agent_balances: Some(&mut agent_balances),
+                    agent_registry: Some(&mut agent_registry),
+                    ..Subsystems::none()
+                },
             )
             .unwrap();
 
@@ -2480,24 +2517,17 @@ mod tests {
         let bridge_config = call_bridge::BridgeConfig::default();
 
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            51, // current_block_height > expires_at
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(&bridge_config),
-            None,
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state,
+                            &mut evm_state,
+                        ),
+            &mut BlockContext {
+                            current_block_height: 51,
+                            fee_params: &mut fee_params,
+                            bridge_config: Some(&bridge_config),
+                            validators: None,
+                        },
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err());
@@ -2561,24 +2591,16 @@ mod tests {
 
         let validators: Vec<Address> = vec![sender];
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(&bridge_config),
-            Some(&validators),
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext {
+                            current_block_height: 1,
+                            fee_params: &mut fee_params,
+                            bridge_config: Some(&bridge_config),
+                            validators: Some(&validators),
+                        },
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err(), "BridgeToEvm on frozen asset should fail");
@@ -2643,24 +2665,16 @@ mod tests {
 
         let validators: Vec<Address> = vec![sender];
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(&bridge_config),
-            Some(&validators),
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext {
+                            current_block_height: 1,
+                            fee_params: &mut fee_params,
+                            bridge_config: Some(&bridge_config),
+                            validators: Some(&validators),
+                        },
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err(), "BridgeToProtocol on delisted asset should fail");
@@ -2704,24 +2718,16 @@ mod tests {
         let bridge_config = call_bridge::BridgeConfig::default();
 
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(&bridge_config),
-            None,
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext {
+                            current_block_height: 1,
+                            fee_params: &mut fee_params,
+                            bridge_config: Some(&bridge_config),
+                            validators: None,
+                        },
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err(), "BridgeOp DepositToEvm on frozen asset should fail");
@@ -2815,24 +2821,11 @@ mod tests {
         let mut fee_params = FeeParams::default();
 
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext::new(1, &mut fee_params),
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_ok(), "EvmIssuerMint should succeed: {:?}", result);
@@ -2928,24 +2921,11 @@ mod tests {
         let mut fee_params = FeeParams::default();
 
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext::new(1, &mut fee_params),
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err(), "EvmIssuerMint over cap should fail");
@@ -3034,24 +3014,11 @@ mod tests {
         let mut fee_params = FeeParams::default();
 
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext::new(1, &mut fee_params),
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err(), "non-issuer EvmIssuerMint should fail");
@@ -3140,24 +3107,11 @@ mod tests {
         let mut fee_params = FeeParams::default();
 
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext::new(1, &mut fee_params),
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err(), "EvmIssuerMint on frozen asset should fail");
@@ -3220,24 +3174,11 @@ mod tests {
         let mut evm_state = call_evm::EvmState::new();
 
         let result = block.execute(
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut bridge_state,
-            &mut shielded_state,
-            &mut fee_params,
-            1,
-            &mut evm_state,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &mut ExecutionState::new(
+                            &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        ),
+            &mut BlockContext::new(1, &mut fee_params),
+            &mut Subsystems::none(),
         );
 
         assert!(result.is_err(), "EvmIssuerMint on CALL asset should fail");
