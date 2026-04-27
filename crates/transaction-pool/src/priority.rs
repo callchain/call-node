@@ -250,6 +250,11 @@ impl PriorityPool {
             .filter(|e| e.sender == *address)
             .count()
     }
+
+    /// Iterate over all entries (highest score first).
+    pub fn iter(&self) -> impl Iterator<Item = &MempoolEntry> {
+        self.entries.iter().rev().map(|(_, e)| e)
+    }
 }
 
 #[cfg(test)]

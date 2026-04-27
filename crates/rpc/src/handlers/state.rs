@@ -17,10 +17,11 @@ use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
 use crate::ws::SubscriptionManager;
 use crate::handlers::helpers::{AssetInfoResponse, AgentInfoResponse, ShieldedTreeStateResponse};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashMap, VecDeque, HashSet};
 use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-block fee data for eth_feeHistory queries.
 #[derive(Debug, Clone)]
@@ -28,6 +29,94 @@ pub struct BlockFeeEntry {
     pub base_fee: u128,
     pub gas_used_ratio: f64,
     pub priority_fee_rewards: Vec<u128>,
+}
+
+// ── Filter API ───────────────────────────────────────────────────────
+
+/// Filter variant for Ethereum-compatible filter API.
+#[derive(Debug, Clone)]
+pub enum Filter {
+    /// Log filter (eth_newFilter)
+    Log {
+        from_block: u64,
+        to_block: u64,
+        addresses: Vec<Address>,
+        topics: Vec<Option<Vec<Hash>>>,
+        /// Last block number scanned for changes.
+        last_block: u64,
+    },
+    /// Block filter (eth_newBlockFilter)
+    Block {
+        /// Last block height seen.
+        last_height: u64,
+    },
+    /// Pending transaction filter (eth_newPendingTransactionFilter)
+    PendingTransaction {
+        /// Tx hashes already seen (dedup).
+        seen: HashSet<TxHash>,
+    },
+}
+
+/// In-memory filter manager for eth_newFilter / eth_getFilterChanges etc.
+pub struct FilterManager {
+    next_id: AtomicU64,
+    filters: RwLock<HashMap<u64, Filter>>,
+}
+
+impl FilterManager {
+    pub fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            filters: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn create_filter(&self, filter: Filter) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut f) = self.filters.write() {
+            f.insert(id, filter);
+        }
+        id
+    }
+
+    pub fn get_filter(&self, id: u64) -> Option<Filter> {
+        self.filters.read().ok().and_then(|f| f.get(&id).cloned())
+    }
+
+    pub fn remove_filter(&self, id: u64) -> bool {
+        if let Ok(mut f) = self.filters.write() {
+            f.remove(&id).is_some()
+        } else {
+            false
+        }
+    }
+
+    pub fn update_filter(&self, id: u64, filter: Filter) {
+        if let Ok(mut f) = self.filters.write() {
+            f.insert(id, filter);
+        }
+    }
+
+    /// Remove filters older than `max_age_seconds`.
+    pub fn prune_old_filters(&self, max_age_seconds: u64) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Ok(mut f) = self.filters.write() {
+            // Note: Filter doesn't store creation time, so we skip time-based pruning.
+            // In a production system, wrap Filter with (created_at, filter).
+            let _ = (now, max_age_seconds, &mut *f);
+        }
+    }
+}
+
+/// Sync progress data for eth_syncing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncProgress {
+    pub starting_block: u64,
+    pub current_block: u64,
+    pub highest_block: u64,
 }
 
 /// Shared RPC state — all handlers read from this.
@@ -82,6 +171,10 @@ pub struct RpcState {
     pub fee_history: RwLock<VecDeque<(u64, BlockFeeEntry)>>,
     /// Block hash -> height index for eth_getBlockByHash.
     pub block_hash_index: RwLock<HashMap<Hash, u64>>,
+    /// In-memory filter manager for eth_newFilter / eth_getFilterChanges etc.
+    pub filter_manager: FilterManager,
+    /// Sync progress for eth_syncing. None when fully synced.
+    pub sync_progress: Arc<RwLock<Option<SyncProgress>>>,
 }
 
 impl RpcState {
@@ -141,6 +234,8 @@ impl RpcState {
             network: Arc::new(RwLock::new(None)),
             fee_history: RwLock::new(VecDeque::new()),
             block_hash_index: RwLock::new(HashMap::new()),
+            filter_manager: FilterManager::new(),
+            sync_progress: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -506,6 +601,10 @@ impl RpcState {
         // Transaction is now in the mempool and will be picked up by block production.
         // Do NOT execute immediately — that would cause double-execution when the
         // consensus layer includes this tx in a block.
+
+        // Broadcast pending tx for eth_subscribe("newPendingTransactions")
+        self.subscriptions.broadcast_eth_pending_tx(format!("0x{}", hex::encode(tx_hash.as_slice())));
+
         Ok(tx_hash)
     }
 
@@ -628,6 +727,9 @@ impl RpcState {
                 });
             }
         }
+
+        // Broadcast pending tx for eth_subscribe("newPendingTransactions")
+        self.subscriptions.broadcast_eth_pending_tx(format!("0x{}", hex::encode(tx_hash.as_slice())));
 
         Ok(tx_hash)
     }

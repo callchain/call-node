@@ -896,6 +896,20 @@ impl CallNode {
             const MAX_EMPTY_ROUNDS: u32 = 3;
             let mut empty_rounds = 0;
 
+            // Initialise sync progress for eth_syncing
+            {
+                let highest_block = {
+                    let heights = state.peer_heights.read().unwrap();
+                    heights.values().copied().max().unwrap_or(local_height)
+                };
+                let mut sp = state.sync_progress.write().unwrap();
+                *sp = Some(call_rpc::handlers::SyncProgress {
+                    starting_block: local_height,
+                    current_block: local_height,
+                    highest_block,
+                });
+            }
+
             // Build light client from current validator set once at the start
             let (trusted_validators, total_validators, bls_pubkeys) = {
                 let validator_state = state.validator_state.read().unwrap();
@@ -1086,6 +1100,13 @@ impl CallNode {
                                 local_height = height + 1;
                                 batch_applied += 1;
 
+                                // Update sync progress for eth_syncing
+                                if let Ok(mut sp) = state.sync_progress.write() {
+                                    if let Some(ref mut p) = *sp {
+                                        p.current_block = local_height;
+                                    }
+                                }
+
                                 // Periodically save consensus state during sync
                                 if local_height % 100 == 0 {
                                     if let Ok(c) = consensus.read() {
@@ -1118,6 +1139,9 @@ impl CallNode {
                     break;
                 }
             }
+
+            // Clear sync progress — node is fully synced (or gave up)
+            *state.sync_progress.write().unwrap() = None;
 
             if local_height > 0 {
                 tracing::info!(height = local_height, "sync: completed");

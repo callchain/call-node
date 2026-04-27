@@ -664,6 +664,47 @@ pub(crate) async fn bft_event_loop(
                         tx_index += 1;
                     }
 
+                    // Broadcast ETH WebSocket events (newHeads + logs)
+                    let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>()
+                        + result.transaction_results.iter().map(|t| t.gas_used).sum::<u64>();
+                    let base_fee = state.fee_params.read().map(|p| p.base_fee).unwrap_or(0);
+                    subscriptions.broadcast_eth_new_head(serde_json::json!({
+                        "hash": format!("0x{}", hex::encode(block_hash.as_slice())),
+                        "parentHash": format!("0x{}", hex::encode(block.header.parent_hash.as_slice())),
+                        "number": format!("0x{:x}", height),
+                        "timestamp": format!("0x{:x}", block.header.timestamp_millis / 1000),
+                        "gasLimit": "0x1c9c380",
+                        "gasUsed": format!("0x{:x}", gas_used),
+                        "miner": format!("0x{}", hex::encode([0u8; 20])),
+                        "difficulty": "0x0",
+                        "totalDifficulty": "0x0",
+                        "nonce": "0x0000000000000000",
+                        "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
+                        "receiptsRoot": format!("0x{}", hex::encode(block.header.receipt_root.as_slice())),
+                        "transactionsRoot": format!("0x{}", hex::encode(block.header.payment_root.as_slice())),
+                        "stateRoot": format!("0x{}", hex::encode(block.header.evm_state_root.as_slice())),
+                        "size": format!("0x{:x}", serde_json::to_vec(&block).map(|v| v.len()).unwrap_or(0)),
+                        "extraData": "0x",
+                        "mixHash": format!("0x{}", hex::encode([0u8; 32])),
+                        "baseFeePerGas": format!("0x{:x}", base_fee),
+                    }));
+
+                    for (idx, evm) in result.evm_tx_results.iter().enumerate() {
+                        for (log_idx, log) in evm.logs.iter().enumerate() {
+                            subscriptions.broadcast_eth_log(serde_json::json!({
+                                "address": format!("{:?}", log.address),
+                                "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
+                                "data": format!("0x{}", hex::encode(&log.data)),
+                                "blockNumber": format!("0x{:x}", height),
+                                "blockHash": format!("0x{}", hex::encode(block_hash.as_slice())),
+                                "transactionHash": format!("0x{}", hex::encode(evm.tx_hash.as_slice())),
+                                "transactionIndex": format!("0x{:x}", idx),
+                                "logIndex": format!("0x{:x}", log_idx),
+                                "removed": false,
+                            }));
+                        }
+                    }
+
                     // Persist block to disk
                     if let Err(e) = persist_block(&data_dir, height, &block) {
                         tracing::warn!(error = %e, height, "BFT finalize: persist block failed");

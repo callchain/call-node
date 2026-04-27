@@ -59,6 +59,23 @@ pub(crate) fn apply_synced_blocks(
 ) -> usize {
     let mut applied = 0usize;
     let initial_height = state.get_current_block();
+
+    // Initialise sync progress if not already tracking
+    {
+        let highest_block = {
+            let heights = state.peer_heights.read().unwrap();
+            heights.values().copied().max().unwrap_or(initial_height)
+        };
+        let mut sp = state.sync_progress.write().unwrap();
+        if sp.is_none() {
+            *sp = Some(call_rpc::handlers::SyncProgress {
+                starting_block: initial_height,
+                current_block: initial_height,
+                highest_block,
+            });
+        }
+    }
+
     for (i, block_data) in response.blocks.iter().enumerate() {
         let block_height = response.start_height.saturating_add(i as u64);
         let local_height = state.get_current_block();
@@ -220,6 +237,47 @@ pub(crate) fn apply_synced_blocks(
                     tx_index += 1;
                 }
 
+                // Broadcast ETH WebSocket events
+                let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>()
+                    + result.transaction_results.iter().map(|t| t.gas_used).sum::<u64>();
+                let base_fee = state.fee_params.read().map(|p| p.base_fee).unwrap_or(0);
+                state.subscriptions.broadcast_eth_new_head(serde_json::json!({
+                    "hash": format!("0x{}", hex::encode(block_hash.as_slice())),
+                    "parentHash": format!("0x{}", hex::encode(block.header.parent_hash.as_slice())),
+                    "number": format!("0x{:x}", block_height),
+                    "timestamp": format!("0x{:x}", block.header.timestamp_millis / 1000),
+                    "gasLimit": "0x1c9c380",
+                    "gasUsed": format!("0x{:x}", gas_used),
+                    "miner": format!("0x{}", hex::encode([0u8; 20])),
+                    "difficulty": "0x0",
+                    "totalDifficulty": "0x0",
+                    "nonce": "0x0000000000000000",
+                    "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
+                    "receiptsRoot": format!("0x{}", hex::encode(block.header.receipt_root.as_slice())),
+                    "transactionsRoot": format!("0x{}", hex::encode(block.header.payment_root.as_slice())),
+                    "stateRoot": format!("0x{}", hex::encode(block.header.evm_state_root.as_slice())),
+                    "size": format!("0x{:x}", serde_json::to_vec(&block).map(|v| v.len()).unwrap_or(0)),
+                    "extraData": "0x",
+                    "mixHash": format!("0x{}", hex::encode([0u8; 32])),
+                    "baseFeePerGas": format!("0x{:x}", base_fee),
+                }));
+
+                for (idx, evm) in result.evm_tx_results.iter().enumerate() {
+                    for (log_idx, log) in evm.logs.iter().enumerate() {
+                        state.subscriptions.broadcast_eth_log(serde_json::json!({
+                            "address": format!("{:?}", log.address),
+                            "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
+                            "data": format!("0x{}", hex::encode(&log.data)),
+                            "blockNumber": format!("0x{:x}", block_height),
+                            "blockHash": format!("0x{}", hex::encode(block_hash.as_slice())),
+                            "transactionHash": format!("0x{}", hex::encode(evm.tx_hash.as_slice())),
+                            "transactionIndex": format!("0x{:x}", idx),
+                            "logIndex": format!("0x{:x}", log_idx),
+                            "removed": false,
+                        }));
+                    }
+                }
+
                 if let Ok(mut c) = consensus.write() {
                     if let Err(e) = c.commit_block(&block, &result) {
                         tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
@@ -227,6 +285,13 @@ pub(crate) fn apply_synced_blocks(
                 }
                 state.set_current_block(block_height + 1);
                 applied += 1;
+
+                // Update sync progress
+                if let Ok(mut sp) = state.sync_progress.write() {
+                    if let Some(ref mut p) = *sp {
+                        p.current_block = block_height + 1;
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(height = block_height, error = %e, "sync: block execution failed");

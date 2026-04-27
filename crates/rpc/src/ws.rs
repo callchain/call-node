@@ -41,6 +41,12 @@ pub struct SubscriptionManager {
     shielded_deposit_tx: broadcast::Sender<WsEvent>,
     shielded_withdrawal_tx: broadcast::Sender<WsEvent>,
     governance_tx: broadcast::Sender<WsEvent>,
+    /// ETH-compatible newHeads subscription channel
+    pub eth_new_heads_tx: broadcast::Sender<serde_json::Value>,
+    /// ETH-compatible logs subscription channel
+    pub eth_logs_tx: broadcast::Sender<serde_json::Value>,
+    /// ETH-compatible newPendingTransactions subscription channel
+    pub eth_pending_tx_tx: broadcast::Sender<serde_json::Value>,
 }
 
 impl SubscriptionManager {
@@ -54,11 +60,15 @@ impl SubscriptionManager {
         let (shielded_deposit_tx, _) = broadcast::channel(512);
         let (shielded_withdrawal_tx, _) = broadcast::channel(512);
         let (governance_tx, _) = broadcast::channel(256);
+        let (eth_new_heads_tx, _) = broadcast::channel(256);
+        let (eth_logs_tx, _) = broadcast::channel(1024);
+        let (eth_pending_tx_tx, _) = broadcast::channel(2048);
         Self {
             block_tx, payment_tx, bridge_tx, asset_tx,
             agent_exec_tx, agent_revoked_tx,
             shielded_deposit_tx, shielded_withdrawal_tx,
             governance_tx,
+            eth_new_heads_tx, eth_logs_tx, eth_pending_tx_tx,
         }
     }
 
@@ -96,6 +106,21 @@ impl SubscriptionManager {
 
     pub fn broadcast_governance(&self, event: String, proposal_id: u64, details: String) {
         let _ = self.governance_tx.send(WsEvent::GovernanceEvent { event, proposal_id, details });
+    }
+
+    /// Broadcast a new block header for eth_subscribe("newHeads")
+    pub fn broadcast_eth_new_head(&self, head: serde_json::Value) {
+        let _ = self.eth_new_heads_tx.send(head);
+    }
+
+    /// Broadcast a log for eth_subscribe("logs")
+    pub fn broadcast_eth_log(&self, log: serde_json::Value) {
+        let _ = self.eth_logs_tx.send(log);
+    }
+
+    /// Broadcast a pending transaction hash for eth_subscribe("newPendingTransactions")
+    pub fn broadcast_eth_pending_tx(&self, tx_hash: String) {
+        let _ = self.eth_pending_tx_tx.send(serde_json::Value::String(tx_hash));
     }
 }
 
@@ -169,5 +194,139 @@ pub fn register_ws_subscriptions(
     register_subscription(module, "call_subscribeShieldedDeposit", "call_unsubscribeShieldedDeposit", subscriptions.shielded_deposit_tx.clone())?;
     register_subscription(module, "call_subscribeShieldedWithdrawal", "call_unsubscribeShieldedWithdrawal", subscriptions.shielded_withdrawal_tx.clone())?;
     register_subscription(module, "call_subscribeGovernance", "call_unsubscribeGovernance", subscriptions.governance_tx.clone())?;
+
+    // eth_subscribe / eth_unsubscribe
+    module
+        .register_subscription(
+            "eth_subscribe",
+            "eth_subscription",
+            "eth_unsubscribe",
+            move |params, pending, ctx, _conn| {
+                let state = ctx.clone();
+                async move {
+                    let params_arr: Vec<serde_json::Value> = params.parse()
+                        .map_err(|e| format!("invalid params: {e}"))?;
+                    let sub_type = params_arr.first()
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing subscription type")?;
+
+                    let sink = pending.accept().await.map_err(|e| format!("accept failed: {e}"))?;
+
+                    match sub_type {
+                        "newHeads" => {
+                            let mut rx = state.subscriptions.eth_new_heads_tx.subscribe();
+                            loop {
+                                match rx.recv().await {
+                                    Ok(event) => {
+                                        let msg = SubscriptionMessage::from_json(&event)
+                                            .map_err(|e| format!("json serialize failed: {e}"))?;
+                                        if sink.send(msg).await.is_err() { break; }
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        tracing::warn!(subscription = "eth_subscribe:newHeads", lagged = n, "subscriber lagged");
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                }
+                            }
+                        }
+                        "logs" => {
+                            let filter = params_arr.get(1).cloned();
+                            let addresses: Vec<String> = filter.as_ref()
+                                .and_then(|f| f.get("address"))
+                                .map(|v| match v {
+                                    serde_json::Value::String(s) => vec![s.to_lowercase()],
+                                    serde_json::Value::Array(arr) => arr.iter()
+                                        .filter_map(|x| x.as_str().map(|s| s.to_lowercase()))
+                                        .collect(),
+                                    _ => vec![],
+                                })
+                                .unwrap_or_default();
+                            let topics_filter: Vec<Option<Vec<String>>> = filter.as_ref()
+                                .and_then(|f| f.get("topics"))
+                                .and_then(|v| v.as_array())
+                                .map(|arr| arr.iter().map(|entry| match entry {
+                                    serde_json::Value::String(s) => Some(vec![s.to_lowercase()]),
+                                    serde_json::Value::Array(arr) => {
+                                        let vals: Vec<_> = arr.iter()
+                                            .filter_map(|x| x.as_str().map(|s| s.to_lowercase()))
+                                            .collect();
+                                        if vals.is_empty() { None } else { Some(vals) }
+                                    }
+                                    serde_json::Value::Null => None,
+                                    _ => None,
+                                }).collect())
+                                .unwrap_or_default();
+
+                            let mut rx = state.subscriptions.eth_logs_tx.subscribe();
+                            loop {
+                                match rx.recv().await {
+                                    Ok(log) => {
+                                        let log_address = log.get("address")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_lowercase())
+                                            .unwrap_or_default();
+                                        if !addresses.is_empty() && !addresses.contains(&log_address) {
+                                            continue;
+                                        }
+                                        if !topics_filter.is_empty() {
+                                            let log_topics: Vec<String> = log.get("topics")
+                                                .and_then(|v| v.as_array())
+                                                .map(|arr| arr.iter()
+                                                    .filter_map(|x| x.as_str().map(|s| s.to_lowercase()))
+                                                    .collect())
+                                                .unwrap_or_default();
+                                            let mut matched = true;
+                                            for (idx, topic_filter) in topics_filter.iter().enumerate() {
+                                                if let Some(filter_vals) = topic_filter {
+                                                    if let Some(log_topic) = log_topics.get(idx) {
+                                                        if !filter_vals.contains(log_topic) {
+                                                            matched = false;
+                                                            break;
+                                                        }
+                                                    } else {
+                                                        matched = false;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if !matched { continue; }
+                                        }
+                                        let msg = SubscriptionMessage::from_json(&log)
+                                            .map_err(|e| format!("json serialize failed: {e}"))?;
+                                        if sink.send(msg).await.is_err() { break; }
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        tracing::warn!(subscription = "eth_subscribe:logs", lagged = n, "subscriber lagged");
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                }
+                            }
+                        }
+                        "newPendingTransactions" => {
+                            let mut rx = state.subscriptions.eth_pending_tx_tx.subscribe();
+                            loop {
+                                match rx.recv().await {
+                                    Ok(event) => {
+                                        let msg = SubscriptionMessage::from_json(&event)
+                                            .map_err(|e| format!("json serialize failed: {e}"))?;
+                                        if sink.send(msg).await.is_err() { break; }
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        tracing::warn!(subscription = "eth_subscribe:newPendingTransactions", lagged = n, "subscriber lagged");
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                }
+                            }
+                        }
+                        other => {
+                            tracing::warn!(sub_type = other, "unsupported eth_subscribe type");
+                        }
+                    }
+                    Ok(())
+                }
+            },
+        )
+        .map_err(|e| internal_error(e.to_string()))?;
+
     Ok(())
 }

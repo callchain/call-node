@@ -119,6 +119,30 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     module
         .register_async_method("eth_getLogs", |params, state, _ctx| async move {
             let filter: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let logs = get_logs_from_filter(&filter, &state)?;
+            Ok::<_, ErrorObjectOwned>(logs)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_newFilter
+    module
+        .register_async_method("eth_newFilter", |params, state, _ctx| async move {
+            let filter: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let current = state.get_current_block();
+
+            let from_block = filter.get("fromBlock")
+                .and_then(|v| v.as_str())
+                .map(|s| parse_block_tag(s, current))
+                .unwrap_or(current);
+            let to_block = filter.get("toBlock")
+                .and_then(|v| v.as_str())
+                .map(|s| parse_block_tag(s, current))
+                .unwrap_or(current);
+            let block_hash = filter.get("blockHash")
+                .and_then(|v| v.as_str())
+                .map(|s| s.parse::<alloy_primitives::B256>())
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?;
 
             let addresses: Vec<call_primitives::Address> = filter.get("address")
                 .map(|v| match v {
@@ -132,43 +156,223 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 })
                 .unwrap_or_default();
 
-            let logs: Vec<serde_json::Value> = if let Some(indexed) = state.lookup_logs_by_address(&addresses) {
-                // Use log index for O(1) per-address lookup
-                let receipts = state.receipts.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                indexed
-                    .into_iter()
-                    .filter_map(|(_block, tx_hash, log_idx)| {
-                        let receipt = receipts.get(&tx_hash)?;
-                        let log = receipt.logs.get(log_idx)?;
-                        Some(serde_json::json!({
-                            "transactionHash": format!("0x{}", hex::encode(tx_hash)),
-                            "address": format!("{:?}", log.address),
-                            "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
-                            "data": format!("0x{}", hex::encode(&log.data)),
-                        }))
-                    })
-                    .collect()
+            let topics: Vec<Option<Vec<call_primitives::Hash>>> = filter.get("topics")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().map(|entry| {
+                    match entry {
+                        serde_json::Value::String(s) => {
+                            s.parse::<alloy_primitives::B256>().ok()
+                                .map(|h| vec![call_primitives::Hash::from(h.0)])
+                        }
+                        serde_json::Value::Array(arr) => {
+                            let hashes: Vec<_> = arr.iter()
+                                .filter_map(|x| x.as_str())
+                                .filter_map(|s| s.parse::<alloy_primitives::B256>().ok())
+                                .map(|h| call_primitives::Hash::from(h.0))
+                                .collect();
+                            if hashes.is_empty() { None } else { Some(hashes) }
+                        }
+                        serde_json::Value::Null => None,
+                        _ => None,
+                    }
+                }).collect())
+                .unwrap_or_default();
+
+            // If blockHash is given, override fromBlock/toBlock to that block's height
+            let (from_block, to_block) = if let Some(hash) = block_hash {
+                let cp_hash = call_primitives::Hash::from(hash.0);
+                let height = state.block_hash_index.read()
+                    .ok()
+                    .and_then(|idx| idx.get(&cp_hash).copied())
+                    .unwrap_or(current);
+                (height, height)
             } else {
-                // Fallback: scan all receipts when no address filter (limit to 10k receipts)
-                const MAX_RECEIPTS_SCAN: usize = 10_000;
-                let receipts = state.get_all_receipts();
-                receipts
-                    .iter()
-                    .take(MAX_RECEIPTS_SCAN)
-                    .flat_map(|r| r.logs.iter().map(|log| (r.tx_hash, log)))
-                    .filter(|(_, log)| {
-                        addresses.is_empty() || addresses.contains(&log.address)
-                    })
-                    .map(|(tx_hash, log)| serde_json::json!({
-                        "transactionHash": format!("0x{}", hex::encode(tx_hash)),
-                        "address": format!("{:?}", log.address),
-                        "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
-                        "data": format!("0x{}", hex::encode(&log.data)),
-                    }))
-                    .collect()
+                (from_block, to_block)
             };
 
-            Ok::<_, ErrorObjectOwned>(logs)
+            let filter_obj = crate::handlers::state::Filter::Log {
+                from_block,
+                to_block,
+                addresses,
+                topics,
+                last_block: from_block.saturating_sub(1),
+            };
+            let id = state.filter_manager.create_filter(filter_obj);
+            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", id))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_newBlockFilter
+    module
+        .register_async_method("eth_newBlockFilter", |_params, state, _ctx| async move {
+            let current = state.get_current_block();
+            let filter = crate::handlers::state::Filter::Block { last_height: current.saturating_sub(1) };
+            let id = state.filter_manager.create_filter(filter);
+            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", id))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_newPendingTransactionFilter
+    module
+        .register_async_method("eth_newPendingTransactionFilter", |_params, state, _ctx| async move {
+            let filter = crate::handlers::state::Filter::PendingTransaction { seen: std::collections::HashSet::new() };
+            let id = state.filter_manager.create_filter(filter);
+            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", id))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getFilterChanges
+    module
+        .register_async_method("eth_getFilterChanges", |params, state, _ctx| async move {
+            let id_hex: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let id = u64::from_str_radix(id_hex.trim_start_matches("0x"), 16)
+                .map_err(|e| invalid_params(e.to_string()))?;
+
+            let Some(filter) = state.filter_manager.get_filter(id) else {
+                return Err::<serde_json::Value, _>(invalid_params("filter not found".into()));
+            };
+
+            let result = match filter {
+                crate::handlers::state::Filter::Log { from_block, to_block, addresses, topics, last_block } => {
+                    let current = state.get_current_block();
+                    let effective_from = last_block.saturating_add(1).max(from_block);
+                    let effective_to = to_block.min(current);
+                    let mut results = Vec::new();
+                    for block_num in effective_from..=effective_to {
+                        let block_receipts = state.get_receipts_by_block(block_num);
+                        for receipt in block_receipts {
+                            for (log_idx, log) in receipt.logs.iter().enumerate() {
+                                if !addresses.is_empty() && !addresses.contains(&log.address) {
+                                    continue;
+                                }
+                                if !topics.is_empty() {
+                                    let mut matched = true;
+                                    for (topic_idx, topic_filter) in topics.iter().enumerate() {
+                                        if let Some(filter_hashes) = topic_filter {
+                                            if let Some(log_topic) = log.topics.get(topic_idx) {
+                                                if !filter_hashes.contains(log_topic) {
+                                                    matched = false;
+                                                    break;
+                                                }
+                                            } else {
+                                                matched = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if !matched { continue; }
+                                }
+                                results.push(log_to_json(log, &receipt, log_idx));
+                            }
+                        }
+                    }
+                    // Update cursor
+                    let new_filter = crate::handlers::state::Filter::Log {
+                        from_block, to_block, addresses, topics,
+                        last_block: effective_to,
+                    };
+                    state.filter_manager.update_filter(id, new_filter);
+                    serde_json::Value::Array(results)
+                }
+                crate::handlers::state::Filter::Block { last_height } => {
+                    let current = state.get_current_block();
+                    let mut results = Vec::new();
+                    for h in last_height.saturating_add(1)..=current {
+                        if let Some(block) = state.load_block(h) {
+                            results.push(serde_json::Value::String(format!("0x{}", hex::encode(block.header.hash().as_slice()))));
+                        }
+                    }
+                    state.filter_manager.update_filter(id, crate::handlers::state::Filter::Block { last_height: current });
+                    serde_json::Value::Array(results)
+                }
+                crate::handlers::state::Filter::PendingTransaction { mut seen } => {
+                    // Collect pending tx hashes from mempool
+                    let mut pending = Vec::new();
+                    {
+                        let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                        for entry in mempool.protocol_pool.iter() {
+                            if seen.insert(entry.hash) {
+                                pending.push(format!("0x{}", hex::encode(entry.hash.as_slice())));
+                            }
+                        }
+                        for entry in mempool.evm_pool.iter() {
+                            let hash = call_crypto::keccak256(&entry.data);
+                            let tx_hash = call_primitives::TxHash::from(hash.0);
+                            if seen.insert(tx_hash) {
+                                pending.push(format!("0x{}", hex::encode(hash.as_slice())));
+                            }
+                        }
+                    }
+                    state.filter_manager.update_filter(id, crate::handlers::state::Filter::PendingTransaction { seen });
+                    serde_json::Value::Array(pending.into_iter().map(serde_json::Value::String).collect())
+                }
+            };
+
+            Ok::<_, ErrorObjectOwned>(result)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getFilterLogs
+    module
+        .register_async_method("eth_getFilterLogs", |params, state, _ctx| async move {
+            let id_hex: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let id = u64::from_str_radix(id_hex.trim_start_matches("0x"), 16)
+                .map_err(|e| invalid_params(e.to_string()))?;
+
+            let Some(filter) = state.filter_manager.get_filter(id) else {
+                return Err::<serde_json::Value, _>(invalid_params("filter not found".into()));
+            };
+
+            let result = match filter {
+                crate::handlers::state::Filter::Log { from_block, to_block, addresses, topics, .. } => {
+                    let current = state.get_current_block();
+                    let effective_to = to_block.min(current);
+                    let mut results = Vec::new();
+                    for block_num in from_block..=effective_to {
+                        let block_receipts = state.get_receipts_by_block(block_num);
+                        for receipt in block_receipts {
+                            for (log_idx, log) in receipt.logs.iter().enumerate() {
+                                if !addresses.is_empty() && !addresses.contains(&log.address) {
+                                    continue;
+                                }
+                                if !topics.is_empty() {
+                                    let mut matched = true;
+                                    for (topic_idx, topic_filter) in topics.iter().enumerate() {
+                                        if let Some(filter_hashes) = topic_filter {
+                                            if let Some(log_topic) = log.topics.get(topic_idx) {
+                                                if !filter_hashes.contains(log_topic) {
+                                                    matched = false;
+                                                    break;
+                                                }
+                                            } else {
+                                                matched = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if !matched { continue; }
+                                }
+                                results.push(log_to_json(log, &receipt, log_idx));
+                            }
+                        }
+                    }
+                    serde_json::Value::Array(results)
+                }
+                _ => serde_json::Value::Array(vec![]),
+            };
+
+            Ok::<_, ErrorObjectOwned>(result)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_uninstallFilter
+    module
+        .register_async_method("eth_uninstallFilter", |params, state, _ctx| async move {
+            let id_hex: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let id = u64::from_str_radix(id_hex.trim_start_matches("0x"), 16)
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let removed = state.filter_manager.remove_filter(id);
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Bool(removed))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -313,10 +517,18 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
     // eth_syncing
     module
-        .register_async_method("eth_syncing", |_params, _state, _ctx| async move {
-            // Return false when node is fully synced; object when syncing.
-            // RPC state has no sync progress tracking — assume fully synced.
-            Ok::<_, ErrorObjectOwned>(serde_json::Value::Bool(false))
+        .register_async_method("eth_syncing", |_params, state, _ctx| async move {
+            let progress = state.sync_progress.read().map_err(|_| internal_error("lock poisoned".into()))?.clone();
+            match progress {
+                Some(p) if p.current_block < p.highest_block => {
+                    Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                        "startingBlock": format!("0x{:x}", p.starting_block),
+                        "currentBlock": format!("0x{:x}", p.current_block),
+                        "highestBlock": format!("0x{:x}", p.highest_block),
+                    }))
+                }
+                _ => Ok::<_, ErrorObjectOwned>(serde_json::Value::Bool(false)),
+            }
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -945,4 +1157,123 @@ fn protocol_tx_to_json(
         "r": "0x0",
         "s": "0x0",
     })
+}
+
+/// Convert a Protocol LogEntry to ETH JSON-RPC log format.
+fn log_to_json(
+    log: &call_protocol::LogEntry,
+    receipt: &call_protocol::ProtocolReceipt,
+    log_index: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "address": format!("{:?}", log.address),
+        "topics": log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect::<Vec<_>>(),
+        "data": format!("0x{}", hex::encode(&log.data)),
+        "blockNumber": format!("0x{:x}", receipt.block_number),
+        "blockHash": format!("0x{}", hex::encode(receipt.block_hash.as_slice())),
+        "transactionHash": format!("0x{}", hex::encode(receipt.tx_hash.as_slice())),
+        "transactionIndex": format!("0x{:x}", receipt.transaction_index),
+        "logIndex": format!("0x{:x}", log_index),
+        "removed": false,
+    })
+}
+
+/// Shared log query logic used by eth_getLogs and eth_getFilterLogs.
+fn get_logs_from_filter(
+    filter: &serde_json::Value,
+    state: &RpcState,
+) -> Result<Vec<serde_json::Value>, ErrorObjectOwned> {
+    let current = state.get_current_block();
+
+    let from_block = filter.get("fromBlock")
+        .and_then(|v| v.as_str())
+        .map(|s| parse_block_tag(s, current))
+        .unwrap_or(current);
+    let to_block = filter.get("toBlock")
+        .and_then(|v| v.as_str())
+        .map(|s| parse_block_tag(s, current))
+        .unwrap_or(current);
+    let block_hash = filter.get("blockHash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.parse::<alloy_primitives::B256>())
+        .transpose()
+        .map_err(|e| invalid_params(e.to_string()))?;
+
+    let addresses: Vec<call_primitives::Address> = filter.get("address")
+        .map(|v| match v {
+            serde_json::Value::String(s) => vec![s.parse::<alloy_primitives::Address>()]
+                .into_iter().filter_map(|r| r.ok()).collect(),
+            serde_json::Value::Array(arr) => arr.iter()
+                .filter_map(|x| x.as_str()
+                    .and_then(|s| s.parse::<alloy_primitives::Address>().ok()))
+                .collect(),
+            _ => vec![],
+        })
+        .unwrap_or_default();
+
+    let topics: Vec<Option<Vec<call_primitives::Hash>>> = filter.get("topics")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(|entry| {
+            match entry {
+                serde_json::Value::String(s) => {
+                    s.parse::<alloy_primitives::B256>().ok()
+                        .map(|h| vec![call_primitives::Hash::from(h.0)])
+                }
+                serde_json::Value::Array(arr) => {
+                    let hashes: Vec<_> = arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .filter_map(|s| s.parse::<alloy_primitives::B256>().ok())
+                        .map(|h| call_primitives::Hash::from(h.0))
+                        .collect();
+                    if hashes.is_empty() { None } else { Some(hashes) }
+                }
+                serde_json::Value::Null => None,
+                _ => None,
+            }
+        }).collect())
+        .unwrap_or_default();
+
+    // If blockHash is given, override fromBlock/toBlock to that block's height
+    let (from_block, to_block) = if let Some(hash) = block_hash {
+        let cp_hash = call_primitives::Hash::from(hash.0);
+        let height = state.block_hash_index.read()
+            .ok()
+            .and_then(|idx| idx.get(&cp_hash).copied())
+            .unwrap_or(current);
+        (height, height)
+    } else {
+        (from_block, to_block)
+    };
+
+    let mut results = Vec::new();
+    for block_num in from_block..=to_block {
+        let block_receipts = state.get_receipts_by_block(block_num);
+        for receipt in block_receipts {
+            for (log_idx, log) in receipt.logs.iter().enumerate() {
+                if !addresses.is_empty() && !addresses.contains(&log.address) {
+                    continue;
+                }
+                if !topics.is_empty() {
+                    let mut matched = true;
+                    for (topic_idx, topic_filter) in topics.iter().enumerate() {
+                        if let Some(filter_hashes) = topic_filter {
+                            if let Some(log_topic) = log.topics.get(topic_idx) {
+                                if !filter_hashes.contains(log_topic) {
+                                    matched = false;
+                                    break;
+                                }
+                            } else {
+                                matched = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !matched { continue; }
+                }
+                results.push(log_to_json(log, &receipt, log_idx));
+            }
+        }
+    }
+
+    Ok(results)
 }
