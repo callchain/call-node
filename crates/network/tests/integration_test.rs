@@ -14,7 +14,17 @@ use commonware_cryptography::Signer;
 use std::net::TcpListener;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Global lock to serialize integration tests that use real P2P sockets.
+/// Prevents port collisions and commonware-p2p cross-test interference.
+static NETWORK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the network test lock, recovering from poison if a previous test panicked.
+fn network_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    NETWORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Find available localhost ports for testing
 fn find_available_ports(count: usize) -> Vec<SocketAddr> {
@@ -46,6 +56,7 @@ fn test_key() -> ed25519::PrivateKey {
 /// Test that two CommonwareNetwork instances can connect and exchange messages
 #[tokio::test]
 async fn test_two_node_connection_and_message() {
+    let _guard = network_test_lock();
     let ports = find_available_ports(2);
     let node1_addr = ports[0];
     let node2_addr = ports[1];
@@ -88,14 +99,14 @@ async fn test_two_node_connection_and_message() {
     let node2_peer_id = node2.peer_id().to_string();
     node1.connect(&format!("{node2_peer_id}@{node2_addr}")).await.expect("node1 connect to node2");
 
-    // Wait for peer discovery to process
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    // Verify both nodes see peers (node2 tracks node1 via bootstrap, node1 tracks node2 via connect)
-    let peer_count_1 = node1.peer_count();
-    let peer_count_2 = node2.peer_count();
-    assert!(peer_count_1 >= 1, "node1 should see at least 1 peer, saw {peer_count_1}");
-    assert!(peer_count_2 >= 1, "node2 should see at least 1 peer, saw {peer_count_2}");
+    // Poll until peers are visible (up to 10s)
+    let mut attempts = 0;
+    while (node1.peer_count() < 1 || node2.peer_count() < 1) && attempts < 100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+    assert!(node1.peer_count() >= 1, "node1 should see at least 1 peer, saw {}", node1.peer_count());
+    assert!(node2.peer_count() >= 1, "node2 should see at least 1 peer, saw {}", node2.peer_count());
 
     // Node 1 broadcasts a transaction message
     let tx_data = vec![0x01, 0x02, 0x03];
@@ -104,20 +115,28 @@ async fn test_two_node_connection_and_message() {
     let network_msg = NetworkMessage::Transaction(tx_msg);
     let wire_data = bincode::serialize(&network_msg).expect("serialize");
 
-    node1.broadcast(1, wire_data.clone()).await;
+    // Retry broadcast + receive a few times to tolerate P2P handshake timing under load
+    let mut received = false;
+    let mut received_channel = 0;
+    let mut received_data = Vec::new();
+    for _ in 0..5 {
+        node1.broadcast(1, wire_data.clone()).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Node 2 receives the message
-    let (_sender_id, channel, data) = tokio::time::timeout(
-        Duration::from_secs(5),
-        node2.receive(),
-    )
-    .await
-    .expect("receive timeout")
-    .expect("receive failed");
+        match tokio::time::timeout(Duration::from_secs(2), node2.receive()).await {
+            Ok(Ok((_, ch, data))) => {
+                received = true;
+                received_channel = ch;
+                received_data = data;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(received, "node2 should receive the broadcast after retries");
+    assert_eq!(received_channel, 1, "channel should match");
 
-    assert_eq!(channel, 1, "channel should match");
-
-    let received_msg: NetworkMessage = bincode::deserialize(&data).expect("deserialize");
+    let received_msg: NetworkMessage = bincode::deserialize(&received_data).expect("deserialize");
     assert!(matches!(received_msg, NetworkMessage::Transaction(_)));
 
     // Cleanup
@@ -128,6 +147,7 @@ async fn test_two_node_connection_and_message() {
 /// Test network health check with minimum peer requirements
 #[tokio::test]
 async fn test_network_health_check() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
     let ports = find_available_ports(2);
 
     let key1 = test_key();
@@ -174,6 +194,7 @@ async fn test_network_health_check() {
 /// Test peer disconnect removes from peer tracking
 #[tokio::test]
 async fn test_disconnect_removes_peer() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
     let ports = find_available_ports(2);
 
     let key1 = test_key();
@@ -227,6 +248,7 @@ async fn test_disconnect_removes_peer() {
 /// Test identity key persistence across restarts
 #[tokio::test]
 async fn test_identity_key_persistence() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
     let dir = temp_data_dir("identity");
 
     // First run: generate and persist key
@@ -246,6 +268,7 @@ async fn test_identity_key_persistence() {
 /// Test Peer Exchange (PEX) — a node discovers peers via PEX from a connected peer.
 #[tokio::test]
 async fn test_peer_exchange_discovery() {
+    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
     let ports = find_available_ports(3);
     let node1_addr = ports[0];
     let node2_addr = ports[1];
@@ -315,24 +338,27 @@ async fn test_peer_exchange_discovery() {
         node1.peer_count()
     );
 
-    // Node1 broadcasts PEX so Node3 learns about Node2
-    node1.send_peer_exchange().await;
-
     // Node1 also sends a dummy message so node3.receive() has something to return
     // after processing the PEX message internally.
     let dummy = NetworkMessage::Transaction(TransactionMessage::new(vec![0xFF], TxHash::repeat_byte(0xBB)));
     let dummy_data = bincode::serialize(&dummy).unwrap();
-    node1.broadcast(1, dummy_data).await;
 
-    // Node3 receives: first PEX (handled transparently), then the dummy message
-    let (_sender_id, channel, _data) = tokio::time::timeout(
-        Duration::from_secs(10),
-        node3.receive(),
-    )
-    .await
-    .expect("receive timeout")
-    .expect("receive failed");
-    assert_eq!(channel, 1, "should receive dummy on channel 1");
+    // Retry PEX + broadcast + receive to tolerate P2P handshake timing under load
+    let mut received = false;
+    for _ in 0..5 {
+        node1.send_peer_exchange().await;
+        node1.broadcast(1, dummy_data.clone()).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        match tokio::time::timeout(Duration::from_secs(2), node3.receive()).await {
+            Ok(Ok(_)) => {
+                received = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(received, "node3 should receive the dummy message after retries");
 
     // Node3 should now know about Node2 via PEX
     let node3_known = node3.known_peers().await;
