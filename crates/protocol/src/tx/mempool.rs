@@ -123,6 +123,12 @@ pub fn accept_to_mempool(
 
     // Gap 5 — Fee sufficiency includes priority fee
     let gas_units = calculate_gas_units(&tx.instructions);
+    if tx.max_priority_fee < MIN_PRIORITY_FEE_PER_GAS {
+        return Err(ProtocolError::GasError(format!(
+            "max_priority_fee {} < minimum {}",
+            tx.max_priority_fee, MIN_PRIORITY_FEE_PER_GAS
+        )));
+    }
     let required_fee = compute_fee(gas_units, MIN_PRIORITY_FEE_PER_GAS, fee_params.base_fee);
     if tx.max_fee < required_fee {
         return Err(ProtocolError::GasError(format!(

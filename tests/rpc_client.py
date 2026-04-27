@@ -101,6 +101,8 @@ class CallchainNode:
             payload["gasLimit"] = params["gasLimit"]
         if "maxFee" in params:
             payload["maxFee"] = params["maxFee"]
+        if "maxPriorityFee" in params:
+            payload["maxPriorityFee"] = params["maxPriorityFee"]
         return self._call("call_submit", [payload])
 
     # ── Submission methods ────────────────────────────────────────────

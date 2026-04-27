@@ -537,6 +537,7 @@ impl RpcState {
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit,
             max_fee,
+            max_priority_fee: call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS,
             expires_at: 0,
             auth: call_protocol::transaction::AuthScheme::SingleSig {
                 signature: sig,

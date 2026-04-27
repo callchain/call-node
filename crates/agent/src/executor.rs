@@ -581,6 +581,7 @@ mod tests {
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit: 100_000,
             max_fee: 1000,
+            max_priority_fee: 1,
         };
 
         let hash = compute_agent_tx_hash(&tx, agent.agent_id);

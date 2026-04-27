@@ -78,6 +78,9 @@ pub struct ProtocolTransaction {
     pub fee_currency: FeeCurrency,
     pub gas_limit: u64,
     pub max_fee: u128,
+    /// Maximum priority fee per gas unit the user is willing to pay (wei)
+    #[serde(default)]
+    pub max_priority_fee: u128,
     /// Block height at which this transaction expires (0 = never)
     #[serde(default)]
     pub expires_at: u64,
@@ -125,6 +128,7 @@ impl ProtocolTransaction {
         preimage.extend_from_slice(&fee_currency_bytes);
         preimage.extend_from_slice(&self.gas_limit.to_be_bytes());
         preimage.extend_from_slice(&self.max_fee.to_be_bytes());
+        preimage.extend_from_slice(&self.max_priority_fee.to_be_bytes());
         preimage.extend_from_slice(&self.expires_at.to_be_bytes());
         let h = keccak256(&preimage);
         h.0

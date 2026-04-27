@@ -46,6 +46,7 @@ fn make_test_tx() -> ProtocolTransaction {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -71,6 +72,7 @@ fn make_signed_test_tx() -> (ProtocolTransaction, Address) {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -433,6 +435,7 @@ fn test_agent_instruction_emits_event() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 100,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -519,6 +522,7 @@ fn test_expired_transaction_rejected() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 50, // expires at block 50
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -586,6 +590,7 @@ fn test_frozen_asset_rejects_bridge_to_evm() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -664,6 +669,7 @@ fn test_delisted_asset_rejects_bridge_to_protocol() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -832,6 +838,7 @@ fn test_evm_issuer_mint_success() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 200_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -932,6 +939,7 @@ fn test_evm_issuer_mint_cap_enforcement() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 200_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -1030,6 +1038,7 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 200_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -1128,6 +1137,7 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 200_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -1195,6 +1205,7 @@ fn test_evm_issuer_mint_call_asset_rejected() {
         fee_currency: call_primitives::FeeCurrency::Call,
         gas_limit: 200_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],

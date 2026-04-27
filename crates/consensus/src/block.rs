@@ -414,9 +414,10 @@ impl Block {
 
             // Compute gas fee
             let gas_units = call_protocol::transaction::calculate_gas_units(&tx.instructions);
+            let priority_fee = tx.max_priority_fee.max(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS);
             let fee = call_protocol::transaction::compute_fee(
                 gas_units,
-                call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS,
+                priority_fee,
                 ctx.fee_params.base_fee,
             )
             .min(tx.max_fee);

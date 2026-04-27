@@ -191,6 +191,7 @@ fn test_mempool_accept_low_fee_rejected() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 20_000,
         max_fee: 1, // too low
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -216,6 +217,7 @@ fn test_mempool_accept_sufficient_balance() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 20_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -245,6 +247,7 @@ fn test_mempool_reject_stale_nonce() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 20_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -269,6 +272,7 @@ fn test_mempool_reject_too_many_instructions() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 20_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -304,6 +308,7 @@ fn test_mempool_reject_oversized_memo() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 20_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0u8; 65],
@@ -331,6 +336,7 @@ fn test_verify_signature_all_zeros() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
     };
@@ -347,6 +353,7 @@ fn test_verify_signature_all_ones() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: [0xFFu8; 65] },
     };
@@ -377,6 +384,7 @@ fn test_verify_signature_wrong_keypair() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: sig },
     };
@@ -407,6 +415,7 @@ fn test_verify_signature_malleated_recovery_id() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: sig },
     };
@@ -429,6 +438,7 @@ fn test_verify_signature_wrong_signer() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
     };
@@ -444,6 +454,7 @@ fn test_verify_signature_wrong_signer() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: sig },
     };
@@ -472,6 +483,7 @@ fn test_verify_signature_tampered_tx() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
     };
@@ -492,6 +504,7 @@ fn test_verify_signature_tampered_tx() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: sig },
     };
@@ -515,6 +528,7 @@ fn test_verify_signature_nonce_replay() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: [0u8; 65] },
     };
@@ -530,6 +544,7 @@ fn test_verify_signature_nonce_replay() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SingleSig { signature: sig },
     };
@@ -564,6 +579,7 @@ fn test_verify_signature_multi_sig_insufficient_threshold() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::MultiSig {
             signatures: vec![
@@ -589,6 +605,7 @@ fn test_verify_signature_session_key_mismatch() {
         fee_currency: FeeCurrency::Call,
         gas_limit: 100_000,
         max_fee: 1_000_000,
+        max_priority_fee: 1,
         expires_at: 0,
         auth: AuthScheme::SessionKey { key: session_key, signature: [0u8; 65] },
     };
@@ -608,6 +625,7 @@ proptest! {
         amount: u128,
         gas_limit: u64,
         max_fee: u128,
+        max_priority_fee: u128,
         expires_at: u64,
     ) {
         let sender = Address::from_slice(&sender_bytes);
@@ -626,6 +644,7 @@ proptest! {
             fee_currency: FeeCurrency::Call,
             gas_limit,
             max_fee,
+            max_priority_fee: 1,
             expires_at,
             auth: AuthScheme::SingleSig { signature: [0u8; 65] },
         };

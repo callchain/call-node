@@ -389,6 +389,7 @@ mod tests {
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit: 100_000,
             max_fee: 1_000_000,
+            max_priority_fee: 1,
             expires_at: 0,
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
@@ -554,6 +555,7 @@ mod tests {
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit: 100_000,
             max_fee: 1_000_000,
+            max_priority_fee: 1,
             expires_at: 0,
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],
@@ -770,6 +772,7 @@ mod tests {
             fee_currency: call_primitives::FeeCurrency::Call,
             gas_limit: 100_000,
             max_fee: 1_000_000,
+            max_priority_fee: 1,
             expires_at: 0,
             auth: AuthScheme::SingleSig {
                 signature: [0u8; 65],

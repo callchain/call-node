@@ -55,6 +55,7 @@ fn make_shielded_tx(
         fee_currency: FeeCurrency::Call,
         gas_limit: 10_000_000,
         max_fee: 1_000_000_000,
+            max_priority_fee: 1,
             expires_at: 0,
         auth: AuthScheme::SingleSig {
             signature: [0xAAu8; 65],

@@ -53,6 +53,7 @@ def compute_tx_hash(
     instructions: List[dict],
     gas_limit: int = 100_000,
     max_fee: int = 1_000_000,
+    max_priority_fee: int = 1,
     expires_at: int = 0,
 ) -> bytes:
     """Compute the canonical ProtocolTransaction hash.
@@ -65,8 +66,9 @@ def compute_tx_hash(
       5. fee_currency tag (1 byte: 0=Call)
       6. gas_limit (8 bytes, big-endian u64)
       7. max_fee (16 bytes, big-endian u128)
-      8. expires_at (8 bytes, big-endian u64)
-      9. keccak256(preimage)
+      8. max_priority_fee (16 bytes, big-endian u128)
+      9. expires_at (8 bytes, big-endian u64)
+     10. keccak256(preimage)
     """
     preimage = bytearray()
 
@@ -92,10 +94,13 @@ def compute_tx_hash(
     # 7. max_fee (u128 big-endian)
     preimage.extend(struct.pack(">QQ", max_fee >> 64, max_fee & 0xFFFFFFFFFFFFFFFF))
 
-    # 8. expires_at (u64 big-endian)
+    # 8. max_priority_fee (u128 big-endian)
+    preimage.extend(struct.pack(">QQ", max_priority_fee >> 64, max_priority_fee & 0xFFFFFFFFFFFFFFFF))
+
+    # 9. expires_at (u64 big-endian)
     preimage.extend(struct.pack(">Q", expires_at))
 
-    # 9. keccak256
+    # 10. keccak256
     return keccak256(bytes(preimage))
 
 
@@ -133,10 +138,11 @@ def sign_payment(
     memo: Optional[str] = None,
     gas_limit: int = 100_000,
     max_fee: int = 1_000_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed payment payload for call_submit."""
     instructions = [build_transfer_instruction(asset_id, to, amount, memo)]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -146,6 +152,7 @@ def sign_payment(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -159,6 +166,7 @@ def sign_asset_registration(
     max_supply: int = 0,
     gas_limit: int = 200_000,
     max_fee: int = 2_000_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed asset registration payload for call_submit."""
     instructions = [{
@@ -169,7 +177,7 @@ def sign_asset_registration(
             "max_supply": max_supply,
         }
     }]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -179,6 +187,7 @@ def sign_asset_registration(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -191,6 +200,7 @@ def sign_agent_register(
     url: str,
     gas_limit: int = 100_000,
     max_fee: int = 1_000_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed agent registration payload for call_submit."""
     pubkey_bytes = bytes.fromhex(pubkey_hex.removeprefix("0x"))
@@ -201,7 +211,7 @@ def sign_agent_register(
             "url": url,
         }
     }]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -211,6 +221,7 @@ def sign_agent_register(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -224,6 +235,7 @@ def sign_governance_proposal(
     execution_data: bytes = b"",
     gas_limit: int = 200_000,
     max_fee: int = 2_000_000,
+    max_priority_fee: int = 1,
     **type_params,
 ) -> dict:
     """Build a signed governance proposal payload."""
@@ -248,7 +260,7 @@ def sign_governance_proposal(
         }
     }]
 
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -263,6 +275,7 @@ def sign_governance_proposal(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -274,6 +287,7 @@ def sign_governance_vote(
     vote: str,
     gas_limit: int = 50_000,
     max_fee: int = 500_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed governance vote payload."""
     # Rust Vote enum serializes as "Yes" / "No" / "Abstain"
@@ -284,7 +298,7 @@ def sign_governance_vote(
             "vote": rust_vote,
         }
     }]
-    tx_hash = compute_tx_hash(voter, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(voter, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -296,6 +310,7 @@ def sign_governance_vote(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -307,6 +322,7 @@ def sign_validator_stake(
     self_stake: int,
     gas_limit: int = 200_000,
     max_fee: int = 2_000_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed validator stake payload for call_validatorStake RPC."""
     pubkey_bytes = bytes.fromhex(ed25519_pubkey_hex.removeprefix("0x"))
@@ -316,7 +332,7 @@ def sign_validator_stake(
             "self_stake": self_stake,
         }
     }]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -328,6 +344,7 @@ def sign_validator_stake(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -338,6 +355,7 @@ def sign_validator_unstake(
     validator_id: int,
     gas_limit: int = 100_000,
     max_fee: int = 1_000_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed validator unstake payload for call_validatorUnstake RPC."""
     instructions = [{
@@ -345,7 +363,7 @@ def sign_validator_unstake(
             "validator_id": validator_id,
         }
     }]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -356,6 +374,7 @@ def sign_validator_unstake(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -368,6 +387,7 @@ def sign_bridge_to_evm(
     amount: int,
     gas_limit: int = 25_000,
     max_fee: int = 250_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed BridgeToEvm payload for call_bridgeToEvm RPC."""
     instructions = [{
@@ -377,7 +397,7 @@ def sign_bridge_to_evm(
             "amount": amount,
         }
     }]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -387,6 +407,9 @@ def sign_bridge_to_evm(
         "to": to,
         "amount": str(amount),
         "signature": signature,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -399,6 +422,7 @@ def sign_bridge_to_protocol(
     amount: int,
     gas_limit: int = 25_000,
     max_fee: int = 250_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed BridgeToProtocol payload for call_bridgeToProtocol RPC."""
     instructions = [{
@@ -408,7 +432,7 @@ def sign_bridge_to_protocol(
             "amount": amount,
         }
     }]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -418,6 +442,9 @@ def sign_bridge_to_protocol(
         "to": to,
         "amount": str(amount),
         "signature": signature,
+        "gasLimit": gas_limit,
+        "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
 
 
@@ -428,6 +455,7 @@ def sign_validator_claim_unbonded(
     validator_id: int,
     gas_limit: int = 100_000,
     max_fee: int = 1_000_000,
+    max_priority_fee: int = 1,
 ) -> dict:
     """Build a signed validator claim unbonded payload for call_validatorClaimUnbonded RPC."""
     instructions = [{
@@ -435,7 +463,7 @@ def sign_validator_claim_unbonded(
             "validator_id": validator_id,
         }
     }]
-    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee)
+    tx_hash = compute_tx_hash(sender, nonce, instructions, gas_limit, max_fee, max_priority_fee)
     signature = sign_raw(private_key, tx_hash)
 
     return {
@@ -446,4 +474,5 @@ def sign_validator_claim_unbonded(
         "instructions": instructions,
         "gasLimit": gas_limit,
         "maxFee": max_fee,
+        "maxPriorityFee": max_priority_fee,
     }
