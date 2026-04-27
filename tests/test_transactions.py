@@ -451,7 +451,9 @@ def test_validator_join(cluster, accounts):
 
     receipt = wait_for_tx(cluster, tx_hash, timeout=30)
     assert_true(receipt is not None, "stake tx not found in any block within 30s")
-    print(f"  tx confirmed in block")
+    status = receipt.get("status", "N/A")
+    print(f"  tx confirmed in block, status={status}")
+    assert_true(status == "0x1", f"stake tx reverted: status={status}")
 
     # Ensure all nodes synced before querying state
     target_height = int(cluster.nodes[0].block_number(), 16)
