@@ -18,9 +18,17 @@ use alloy_rlp::Decodable;
 use crate::ws::SubscriptionManager;
 use crate::handlers::helpers::{AssetInfoResponse, AgentInfoResponse, ShieldedTreeStateResponse};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
+
+/// Per-block fee data for eth_feeHistory queries.
+#[derive(Debug, Clone)]
+pub struct BlockFeeEntry {
+    pub base_fee: u128,
+    pub gas_used_ratio: f64,
+    pub priority_fee_rewards: Vec<u128>,
+}
 
 /// Shared RPC state — all handlers read from this.
 pub struct RpcState {
@@ -70,6 +78,8 @@ pub struct RpcState {
     /// P2P network handle — set after `start_network` is called.
     /// Used to gossip protocol transactions submitted via RPC.
     pub network: Arc<RwLock<Option<Arc<dyn call_network::Network>>>>,
+    /// Ring buffer of per-block fee data for eth_feeHistory (max 1024 entries).
+    pub fee_history: RwLock<VecDeque<(u64, BlockFeeEntry)>>,
 }
 
 impl RpcState {
@@ -127,6 +137,7 @@ impl RpcState {
             peer_heights: Arc::new(RwLock::new(HashMap::new())),
             engine_restart_signal: AtomicBool::new(false),
             network: Arc::new(RwLock::new(None)),
+            fee_history: RwLock::new(VecDeque::new()),
         }
     }
 

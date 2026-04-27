@@ -534,6 +534,27 @@ pub(crate) async fn bft_event_loop(
                     parent_hash = block.header.hash();
                     state.finalize_block();
 
+                    // Push fee history entry
+                    {
+                        let fee_params = state.fee_params.read().unwrap();
+                        let base_fee = fee_params.base_fee;
+                        let max_gas = fee_params.max_gas_per_block.max(1);
+                        drop(fee_params);
+                        let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+                        let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
+                        let entry = call_rpc::handlers::BlockFeeEntry {
+                            base_fee,
+                            gas_used_ratio,
+                            priority_fee_rewards: vec![1],
+                        };
+                        if let Ok(mut history) = state.fee_history.write() {
+                            history.push_back((height, entry));
+                            while history.len() > 1024 {
+                                history.pop_front();
+                            }
+                        }
+                    }
+
                     // Advance governance
                     {
                         let mut gov = state.governance.write().unwrap();

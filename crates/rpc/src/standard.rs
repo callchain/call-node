@@ -245,7 +245,69 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     module
         .register_async_method("eth_gasPrice", |_params, state, _ctx| async move {
             let base_fee = state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee;
-            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", base_fee))
+            let gas_price = base_fee.saturating_add(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS);
+            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", gas_price))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_maxPriorityFeePerGas
+    module
+        .register_async_method("eth_maxPriorityFeePerGas", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_feeHistory
+    module
+        .register_async_method("eth_feeHistory", |params, state, _ctx| async move {
+            let (block_count, newest_block, reward_percentiles): (String, String, Option<Vec<f64>>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let block_count = u64::from_str_radix(block_count.trim_start_matches("0x"), 16)
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let newest_block_num = match newest_block.as_str() {
+                "latest" | "pending" => state.get_current_block(),
+                hex if hex.starts_with("0x") => u64::from_str_radix(&hex[2..], 16).unwrap_or(0),
+                _ => newest_block.parse().unwrap_or(0),
+            };
+
+            let history = state.fee_history.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let entries: Vec<_> = history.iter().rev().take(block_count as usize).cloned().collect();
+            let oldest_block = entries.last().map(|(n, _)| *n).unwrap_or(newest_block_num);
+
+            let mut base_fee_per_gas = Vec::new();
+            let mut gas_used_ratio = Vec::new();
+            let mut reward = Vec::new();
+
+            for (_, entry) in entries.iter().rev() {
+                base_fee_per_gas.push(format!("0x{:x}", entry.base_fee));
+                gas_used_ratio.push(entry.gas_used_ratio);
+                let percentiles = reward_percentiles.as_ref().map(|p| p.len()).unwrap_or(0);
+                let mut block_rewards = Vec::new();
+                for _ in 0..percentiles {
+                    block_rewards.push(format!("0x1"));
+                }
+                if !block_rewards.is_empty() {
+                    reward.push(block_rewards);
+                }
+            }
+
+            let next_base_fee = state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee;
+            base_fee_per_gas.push(format!("0x{:x}", next_base_fee));
+
+            let mut result = serde_json::json!({
+                "oldestBlock": format!("0x{:x}", oldest_block),
+                "baseFeePerGas": base_fee_per_gas,
+                "gasUsedRatio": gas_used_ratio,
+            });
+            if !reward.is_empty() {
+                result["reward"] = serde_json::Value::Array(
+                    reward
+                        .into_iter()
+                        .map(|r| serde_json::Value::Array(r.into_iter().map(serde_json::Value::String).collect()))
+                        .collect()
+                );
+            }
+            Ok::<_, ErrorObjectOwned>(result)
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -446,6 +508,111 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
             // Not found in receipts — may still be pending in mempool
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // ── Trivial mock methods (no consensus impact) ───────────────────────
+
+    // eth_protocolVersion
+    module
+        .register_async_method("eth_protocolVersion", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>("1")
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_accounts
+    module
+        .register_async_method("eth_accounts", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>(Vec::<String>::new())
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_mining
+    module
+        .register_async_method("eth_mining", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Bool(false))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_hashrate
+    module
+        .register_async_method("eth_hashrate", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>("0x0")
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_coinbase
+    module
+        .register_async_method("eth_coinbase", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode([0u8; 20])))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getUncleCountByBlockNumber
+    module
+        .register_async_method("eth_getUncleCountByBlockNumber", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>("0x0")
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getUncleCountByBlockHash
+    module
+        .register_async_method("eth_getUncleCountByBlockHash", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>("0x0")
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getUncleByBlockNumberAndIndex
+    module
+        .register_async_method("eth_getUncleByBlockNumberAndIndex", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getUncleByBlockHashAndIndex
+    module
+        .register_async_method("eth_getUncleByBlockHashAndIndex", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getWork — not supported
+    module
+        .register_async_method("eth_getWork", |_params, _state, _ctx| async move {
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "Method not found",
+                None::<&str>,
+            ))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_submitWork — not supported
+    module
+        .register_async_method("eth_submitWork", |_params, _state, _ctx| async move {
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "Method not found",
+                None::<&str>,
+            ))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_submitHashrate — not supported
+    module
+        .register_async_method("eth_submitHashrate", |_params, _state, _ctx| async move {
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "Method not found",
+                None::<&str>,
+            ))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getCompilers — deprecated, return empty array
+    module
+        .register_async_method("eth_getCompilers", |_params, _state, _ctx| async move {
+            Ok::<_, ErrorObjectOwned>(Vec::<String>::new())
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
