@@ -526,18 +526,28 @@ def test_validator_leave(cluster, accounts):
 
     receipt = wait_for_tx(cluster, tx_hash, timeout=30)
     assert_true(receipt is not None, "unstake tx not found in any block within 30s")
-    print(f"  tx confirmed in block")
+    status = receipt.get("status", "N/A")
+    print(f"  tx confirmed in block, status={status}")
+    assert_true(status == "0x1", f"unstake tx reverted: status={status}")
 
-    target_height = int(cluster.nodes[0].block_number(), 16)
+    # Use receipt block number to sync — node0 may lag behind the node that first has the receipt
+    receipt_block = int(receipt.get("blockNumber", "0x0"), 16)
     for node in cluster.nodes:
-        wait_for_height(node, target_height)
+        wait_for_height(node, receipt_block)
 
     # Verify validator is unbonding and escrow still holds stake
-    final_validators = cluster.nodes[0].validator_list()
-    target_after = next((v for v in final_validators if v.get("validatorId") == validator_id), None)
+    # Poll briefly to handle state-application lag
+    target_after = None
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        final_validators = cluster.nodes[0].validator_list()
+        target_after = next((v for v in final_validators if v.get("validatorId") == validator_id), None)
+        if target_after and target_after.get("isUnbonding") is True:
+            break
+        time.sleep(0.5)
     assert_true(target_after is not None, f"validator {validator_id} not found after unstake")
     assert_true(target_after.get("isUnbonding") is True,
-                f"validator {validator_id} should be unbonding")
+                f"validator {validator_id} should be unbonding (got {target_after})")
 
     escrow_bal_after = get_balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     assert_true(escrow_bal_after >= stake_amount,
