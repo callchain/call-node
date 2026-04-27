@@ -354,15 +354,27 @@ pub(crate) async fn bft_event_loop(
                     match result {
                         Ok(result) => {
                             // State root verification: re-computed roots must match header roots
-                            let roots_match =
-                                result.payment_root == block.header.payment_root
-                                    && result.evm_state_root == block.header.evm_state_root
-                                    && result.bridge_root == block.header.bridge_root
-                                    && result.receipt_root == block.header.receipt_root;
+                            let payment_ok = result.payment_root == block.header.payment_root;
+                            let evm_ok = result.evm_state_root == block.header.evm_state_root;
+                            let bridge_ok = result.bridge_root == block.header.bridge_root;
+                            let receipt_ok = result.receipt_root == block.header.receipt_root;
+                            let roots_match = payment_ok && evm_ok && bridge_ok && receipt_ok;
                             if !roots_match {
                                 tracing::warn!(
                                     digest = %digest,
                                     height,
+                                    payment_ok,
+                                    evm_ok,
+                                    bridge_ok,
+                                    receipt_ok,
+                                    result_payment = %result.payment_root,
+                                    header_payment = %block.header.payment_root,
+                                    result_evm = %result.evm_state_root,
+                                    header_evm = %block.header.evm_state_root,
+                                    result_bridge = %result.bridge_root,
+                                    header_bridge = %block.header.bridge_root,
+                                    result_receipt = %result.receipt_root,
+                                    header_receipt = %block.header.receipt_root,
                                     "BFT verify: state root mismatch — block rejected"
                                 );
                             }

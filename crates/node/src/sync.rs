@@ -79,16 +79,34 @@ pub(crate) fn apply_synced_blocks(
         // State root verification on cloned state before applying to shared state
         let roots_valid = match state.read_all().execute_block_cloned(&block, block_height) {
             Ok(result) => {
-                result.payment_root == block.header.payment_root
-                    && result.evm_state_root == block.header.evm_state_root
-                    && result.bridge_root == block.header.bridge_root
-                    && result.receipt_root == block.header.receipt_root
+                let payment_ok = result.payment_root == block.header.payment_root;
+                let evm_ok = result.evm_state_root == block.header.evm_state_root;
+                let bridge_ok = result.bridge_root == block.header.bridge_root;
+                let receipt_ok = result.receipt_root == block.header.receipt_root;
+                if !(payment_ok && evm_ok && bridge_ok && receipt_ok) {
+                    tracing::error!(
+                        height = block_height,
+                        payment_ok,
+                        evm_ok,
+                        bridge_ok,
+                        receipt_ok,
+                        result_payment = %result.payment_root,
+                        header_payment = %block.header.payment_root,
+                        result_evm = %result.evm_state_root,
+                        header_evm = %block.header.evm_state_root,
+                        result_bridge = %result.bridge_root,
+                        header_bridge = %block.header.bridge_root,
+                        result_receipt = %result.receipt_root,
+                        header_receipt = %block.header.receipt_root,
+                        "sync: state root mismatch — rejecting synced block"
+                    );
+                }
+                payment_ok && evm_ok && bridge_ok && receipt_ok
             }
             Err(_) => false,
         };
 
         if !roots_valid {
-            tracing::error!(height = block_height, "sync: state root mismatch — rejecting synced block");
             break;
         }
 
