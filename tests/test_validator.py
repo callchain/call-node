@@ -103,7 +103,8 @@ def test_validator_join(cluster, accounts):
     sender = accounts[3]
     sync_nonce(sender["address"], cluster.nodes[0])
     nonce = _next_nonce(sender["address"])
-    ed25519_pubkey_hex = "0x" + "aa" * 32
+    # Use a distinct pubkey to avoid collision with test_transactions.py
+    ed25519_pubkey_hex = "0x" + "bb" * 32
     self_stake = 1_000_000 * 10**18
 
     # Capture pre-state on node1
@@ -125,8 +126,15 @@ def test_validator_join(cluster, accounts):
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted stake tx: {tx_hash}")
 
-    current_height = int(cluster.nodes[0].block_number(), 16)
-    wait_for_height(cluster.nodes[0], current_height + 1)
+    # Wait for the tx to be included and confirmed (not just height + 1)
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "stake tx not found in any block within 30s")
+    print(f"  tx confirmed in block")
+
+    # Ensure all nodes have caught up to the block containing the tx
+    target_height = int(cluster.nodes[0].block_number(), 16)
+    for i, node in enumerate(cluster.nodes):
+        wait_for_height(node, target_height)
 
     # Verify every node sees the new validator and escrow holds the stake
     for i, node in enumerate(cluster.nodes):
@@ -202,8 +210,13 @@ def test_validator_leave(cluster, accounts):
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted unstake tx: {tx_hash}")
 
-    current_height = int(cluster.nodes[0].block_number(), 16)
-    wait_for_height(cluster.nodes[0], current_height + 1)
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "unstake tx not found in any block within 30s")
+    print(f"  tx confirmed in block")
+
+    target_height = int(cluster.nodes[0].block_number(), 16)
+    for i, node in enumerate(cluster.nodes):
+        wait_for_height(node, target_height)
 
     # Verify every node sees the validator as unbonding and escrow still holds stake
     for i, node in enumerate(cluster.nodes):

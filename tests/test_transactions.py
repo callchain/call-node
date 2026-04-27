@@ -449,8 +449,14 @@ def test_validator_join(cluster, accounts):
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted stake tx: {tx_hash}")
 
-    current_height = int(cluster.nodes[0].block_number(), 16)
-    wait_for_height(cluster.nodes[0], current_height + 1)
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "stake tx not found in any block within 30s")
+    print(f"  tx confirmed in block")
+
+    # Ensure all nodes synced before querying state
+    target_height = int(cluster.nodes[0].block_number(), 16)
+    for node in cluster.nodes:
+        wait_for_height(node, target_height)
 
     final_validators = cluster.nodes[0].validator_list()
     assert_true(len(final_validators) > len(initial_validators),
@@ -516,8 +522,13 @@ def test_validator_leave(cluster, accounts):
     assert_true(tx_hash, f"missing txHash in result: {result}")
     print(f"  submitted unstake tx: {tx_hash}")
 
-    current_height = int(cluster.nodes[0].block_number(), 16)
-    wait_for_height(cluster.nodes[0], current_height + 1)
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "unstake tx not found in any block within 30s")
+    print(f"  tx confirmed in block")
+
+    target_height = int(cluster.nodes[0].block_number(), 16)
+    for node in cluster.nodes:
+        wait_for_height(node, target_height)
 
     # Verify validator is unbonding and escrow still holds stake
     final_validators = cluster.nodes[0].validator_list()
