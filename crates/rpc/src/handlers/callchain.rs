@@ -4,7 +4,8 @@
 //! endpoint which accepts a ProtocolTransaction (one or more Instructions).
 //! Read-only endpoints remain as individual `call_*` methods.
 
-use crate::handlers::{RpcState, invalid_params, internal_error};
+use crate::handlers::state::RpcState;
+use crate::handlers::helpers::{invalid_params, internal_error};
 use call_primitives::Address;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -783,7 +784,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
 
             #[cfg(feature = "light-client-bridge")]
             async {
-                let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+                let call_obj: serde_json::Value = _params.one().map_err(|e| invalid_params(e.to_string()))?;
                 let header_hex = call_obj.get("headerRlp")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| invalid_params("missing 'headerRlp' field".into()))?;
@@ -836,13 +837,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                     asset_id,
                     amount,
                 };
-                let mut light_client_guard = state.light_client.write().map_err(|_| internal_error("lock poisoned".into()))?;
+                let mut light_client_guard = _state.light_client.write().map_err(|_| internal_error("lock poisoned".into()))?;
                 let light_client = light_client_guard.as_mut()
                     .ok_or_else(|| invalid_params("light client not initialized".into()))?;
                 let config = call_bridge::BridgeConfig::default();
-                let current_block = state.get_current_block();
-                let mut balances = state.balance_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
-                let mut bridge_state = state.bridge_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
+                let current_block = _state.get_current_block();
+                let mut balances = _state.balance_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
+                let mut bridge_state = _state.bridge_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
                 match call_bridge::process_light_client_deposit(light_client, &op, &mut balances, &mut bridge_state, &config, current_block) {
                     Ok(call_bridge::ExternalDepositResult::Queued { finalized_at_block, .. }) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                         "status": "queued",

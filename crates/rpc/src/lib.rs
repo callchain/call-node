@@ -2,7 +2,6 @@
 
 pub mod handlers;
 pub mod standard;
-pub mod callchain;
 pub mod ws;
 pub mod rate_limit;
 pub mod state_bundle;
@@ -12,7 +11,6 @@ mod tests;
 
 pub use handlers::*;
 pub use standard::*;
-pub use callchain::*;
 pub use ws::*;
 pub use rate_limit::RateLimiter;
 pub use state_bundle::*;
