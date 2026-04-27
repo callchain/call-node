@@ -1289,7 +1289,7 @@ mod tests {
     fn test_network_limits_integration() {
         let limits = NetworkLimits::default();
         assert_eq!(limits.max_peers, 50);
-        assert_eq!(limits.max_messages_per_second, 1000);
+        assert_eq!(limits.max_messages_per_second, 10_000);
     }
 
     #[tokio::test]
