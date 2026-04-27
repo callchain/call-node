@@ -53,7 +53,17 @@
     "block_time_millis": 250,
     "slashing_window": 10000,
     "oracle_request_delay_ms": 200,
-    "epoch_length": 1000
+    "epoch_length": 1000,
+    "min_self_stake": 1000000000000000000000000,
+    "unbonding_period_blocks": 1008,
+    "offline_slash_rate_bps": 10,
+    "key_rotation_grace_blocks": 100,
+    "churn_limit_quotient": 8,
+    "min_churn_limit": 2,
+    "safety_ratio_num": 4,
+    "safety_ratio_den": 3,
+    "unbonding_slash_extend": 2,
+    "max_unbonding_multiplier": 10
   },
   "oracle_assets": [1]
 }

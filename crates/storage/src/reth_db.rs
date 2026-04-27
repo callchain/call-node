@@ -105,6 +105,17 @@ impl Table for CallValidators {
     type Value = Vec<u8>;
 }
 
+/// Validator meta state: single entry () -> serialized ValidatorMetaSnapshot
+/// Stores queues, churn counters, next_id, and params.
+#[derive(Debug)]
+pub struct CallValidatorMeta;
+impl Table for CallValidatorMeta {
+    const NAME: &'static str = "call_validator_meta";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// Agent registrations: serialized agent_id -> serialized AgentRegistration
 #[derive(Debug)]
 pub struct CallAgents;
@@ -474,6 +485,7 @@ impl TableSet for CallTables {
                 box_info::<CallConsensusState>,
                 box_info::<CallMetadataChainId>,
                 box_info::<CallValidators>,
+                box_info::<CallValidatorMeta>,
                 box_info::<CallMetadataCompliance>,
                 box_info::<CallMetadataAgents>,
                 box_info::<CallReceipts>,

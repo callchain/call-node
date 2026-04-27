@@ -72,10 +72,34 @@ impl ProposalExecutor for NodeProposalExecutor {
                         } else if param_id.starts_with("validator.") {
                             let mut vs = self.state.validator_state.write().map_err(|_| "validator state lock poisoned".to_string())?;
                             if let Some(v) = val.get("min_self_stake").and_then(|v| v.as_u64()) {
-                                vs.min_self_stake = v as u128;
+                                vs.params.min_self_stake = v as u128;
+                            }
+                            if let Some(v) = val.get("unbonding_period_blocks").and_then(|v| v.as_u64()) {
+                                vs.params.unbonding_period_blocks = v;
                             }
                             if let Some(v) = val.get("offline_slash_rate_bps").and_then(|v| v.as_u64()) {
-                                vs.offline_slash_rate_bps = v as u128;
+                                vs.params.offline_slash_rate_bps = v as u128;
+                            }
+                            if let Some(v) = val.get("key_rotation_grace_blocks").and_then(|v| v.as_u64()) {
+                                vs.params.key_rotation_grace_blocks = v;
+                            }
+                            if let Some(v) = val.get("churn_limit_quotient").and_then(|v| v.as_u64()) {
+                                vs.params.churn_limit_quotient = v;
+                            }
+                            if let Some(v) = val.get("min_churn_limit").and_then(|v| v.as_u64()) {
+                                vs.params.min_churn_limit = v;
+                            }
+                            if let Some(v) = val.get("safety_ratio_num").and_then(|v| v.as_u64()) {
+                                vs.params.safety_ratio_num = v as u32;
+                            }
+                            if let Some(v) = val.get("safety_ratio_den").and_then(|v| v.as_u64()) {
+                                vs.params.safety_ratio_den = v as u32;
+                            }
+                            if let Some(v) = val.get("unbonding_slash_extend").and_then(|v| v.as_u64()) {
+                                vs.params.unbonding_slash_extend = v as u32;
+                            }
+                            if let Some(v) = val.get("max_unbonding_multiplier").and_then(|v| v.as_u64()) {
+                                vs.params.max_unbonding_multiplier = v as u32;
                             }
                             tracing::info!(param_id, new_value, "validator params updated via executor");
                         } else if param_id.starts_with("oracle.") {

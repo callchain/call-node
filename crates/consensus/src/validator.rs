@@ -2,23 +2,12 @@
 //!
 //! Validator stake management, slashing, rewards, staking/unbonding.
 
+use crate::proposer::ConsensusParams;
 use call_primitives::{Address, Ed25519PublicKey, ValidatorId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ── Constants ─────────────────────────────────────────────────────────
-
-/// Minimum self-stake required: 1,000,000 CALL (18 decimals)
-pub const MIN_SELF_STAKE: u128 = 1_000_000 * 10u128.pow(18);
-
-/// Unbonding period: 7 days
-pub const UNBONDING_PERIOD_SECS: u64 = 7 * 24 * 3600;
-
-/// Proportional offline slash rate per round (0.1% per round)
-pub const OFFLINE_SLASH_RATE_PER_ROUND: u128 = 10; // basis points (0.10%)
-
-/// Grace period for rotated keys — old key remains valid for this many blocks
-pub const KEY_ROTATION_GRACE_BLOCKS: u64 = 100;
 
 /// System escrow address for staked CALL tokens (Cosmos-style module account)
 pub const STAKING_ESCROW: Address = Address::repeat_byte(0);
@@ -74,6 +63,19 @@ pub struct KeyRotation {
     pub rotation_block: u64,
 }
 
+/// Snapshot of global validator state (queues, counters, params) for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorMetaSnapshot {
+    pub next_validator_id: ValidatorId,
+    pub unbonding_requests: Vec<UnbondingRequest>,
+    pub current_block: u64,
+    pub key_rotations: Vec<KeyRotation>,
+    pub stake_queue: Vec<Address>,
+    pub exit_queue: Vec<ValidatorId>,
+    pub epoch_churn_count: u64,
+    pub params: ConsensusParams,
+}
+
 /// Manages all validator stakes (per spec §12.6)
 #[derive(Debug, Clone)]
 pub struct ValidatorStateManager {
@@ -84,10 +86,14 @@ pub struct ValidatorStateManager {
     current_block: u64,
     /// Key rotation history — old pubkeys remain valid during grace period
     key_rotations: Vec<KeyRotation>,
-    /// Minimum self-stake required to become a validator
-    pub min_self_stake: u128,
-    /// Offline slash rate per round in basis points
-    pub offline_slash_rate_bps: u128,
+    /// FIFO queue for new stake requests when churn limit is reached
+    stake_queue: Vec<Address>,
+    /// FIFO queue for exit (unstake) requests when churn limit is reached
+    exit_queue: Vec<ValidatorId>,
+    /// Number of validators that have entered/exited in the current epoch
+    epoch_churn_count: u64,
+    /// Consensus parameters (includes min_self_stake, slash rates, churn config)
+    pub params: ConsensusParams,
 }
 
 impl Default for ValidatorStateManager {
@@ -98,8 +104,10 @@ impl Default for ValidatorStateManager {
             unbonding_requests: Vec::new(),
             current_block: 0,
             key_rotations: Vec::new(),
-            min_self_stake: MIN_SELF_STAKE,
-            offline_slash_rate_bps: OFFLINE_SLASH_RATE_PER_ROUND,
+            stake_queue: Vec::new(),
+            exit_queue: Vec::new(),
+            epoch_churn_count: 0,
+            params: ConsensusParams::default(),
         }
     }
 }
@@ -110,14 +118,48 @@ impl ValidatorStateManager {
         Self::default()
     }
 
+    /// Create with explicit consensus params (useful for tests / different networks)
+    pub fn with_params(params: ConsensusParams) -> Self {
+        Self {
+            params,
+            ..Self::default()
+        }
+    }
+
     /// Update minimum self-stake requirement
     pub fn set_min_self_stake(&mut self, min_self_stake: u128) {
-        self.min_self_stake = min_self_stake;
+        self.params.min_self_stake = min_self_stake;
     }
 
     /// Update offline slash rate
     pub fn set_offline_slash_rate_bps(&mut self, rate: u128) {
-        self.offline_slash_rate_bps = rate;
+        self.params.offline_slash_rate_bps = rate;
+    }
+
+    /// Build a snapshot of global meta-state for persistence.
+    pub fn meta_snapshot(&self) -> ValidatorMetaSnapshot {
+        ValidatorMetaSnapshot {
+            next_validator_id: self.next_validator_id,
+            unbonding_requests: self.unbonding_requests.clone(),
+            current_block: self.current_block,
+            key_rotations: self.key_rotations.clone(),
+            stake_queue: self.stake_queue.clone(),
+            exit_queue: self.exit_queue.clone(),
+            epoch_churn_count: self.epoch_churn_count,
+            params: self.params,
+        }
+    }
+
+    /// Restore global meta-state from a snapshot.
+    pub fn restore_meta_snapshot(&mut self, snapshot: ValidatorMetaSnapshot) {
+        self.next_validator_id = snapshot.next_validator_id;
+        self.unbonding_requests = snapshot.unbonding_requests;
+        self.current_block = snapshot.current_block;
+        self.key_rotations = snapshot.key_rotations;
+        self.stake_queue = snapshot.stake_queue;
+        self.exit_queue = snapshot.exit_queue;
+        self.epoch_churn_count = snapshot.epoch_churn_count;
+        self.params = snapshot.params;
     }
 
     /// Set current block height (for unbonding calculations)
@@ -149,7 +191,7 @@ impl ValidatorStateManager {
         ed25519_pubkey: Ed25519PublicKey,
         self_stake: u128,
     ) -> Result<ValidatorId, ConsensusError> {
-        if self_stake < self.min_self_stake {
+        if self_stake < self.params.min_self_stake {
             return Err(ConsensusError::InsufficientStake);
         }
 
@@ -238,10 +280,7 @@ impl ValidatorStateManager {
         validator.unbonding_start = Some(self.current_block);
 
         // Calculate block height when unbonding becomes eligible
-        // ~144 blocks per day at 250ms block time (216 * 4 * 60 * 60 / 1000)
-        // 7 days = ~1008 blocks
-        let blocks_in_unbonding = 1008u64;
-        let eligible_at = self.current_block + blocks_in_unbonding;
+        let eligible_at = self.current_block + self.params.unbonding_period_blocks;
 
         self.unbonding_requests.push(UnbondingRequest {
             validator_id,
@@ -277,6 +316,96 @@ impl ValidatorStateManager {
         self.unbonding_requests.remove(request_idx);
         self.validators.remove(&validator_id);
         Ok((amount, sender_address))
+    }
+
+    // ── Churn Control ─────────────────────────────────────────────────
+
+    /// Compute the current churn limit based on qualified validator count.
+    pub fn current_churn_limit(&self) -> u64 {
+        let qualified = self.get_qualified_validators().len() as u64;
+        self.params.churn_limit(qualified)
+    }
+
+    /// Compute the safety floor: minimum qualified validators required.
+    pub fn safety_floor(&self) -> u64 {
+        self.params.safety_floor()
+    }
+
+    /// Check if an unstake would drop below the safety floor.
+    pub fn can_unstake_safely(&self) -> bool {
+        let qualified = self.get_qualified_validators().len() as u64;
+        qualified.saturating_sub(1) >= self.safety_floor()
+    }
+
+    /// Reset the epoch churn counter. Called at epoch boundary.
+    pub fn reset_epoch_churn(&mut self) {
+        self.epoch_churn_count = 0;
+    }
+
+    /// Process pending stake/exit queues at epoch boundary, up to churn limit.
+    /// Returns the number of validators that entered and exited.
+    pub fn process_epoch_churn(&mut self) -> (u64, u64) {
+        let limit = self.current_churn_limit();
+        let mut entered = 0u64;
+        let mut exited = 0u64;
+
+        // Process exit queue (unstakes)
+        while exited < limit && !self.exit_queue.is_empty() {
+            let validator_id = self.exit_queue.remove(0);
+            // Perform the actual unstake if validator still exists and not already unbonding
+            if let Some(v) = self.validators.get_mut(&validator_id) {
+                if v.unbonding_start.is_none() {
+                    v.unbonding_start = Some(self.current_block);
+                    let eligible_at = self.current_block + self.params.unbonding_period_blocks;
+                    self.unbonding_requests.push(UnbondingRequest {
+                        validator_id,
+                        sender_address: v.address,
+                        amount: v.self_stake,
+                        requested_at_block: self.current_block,
+                        eligible_at_block: eligible_at,
+                    });
+                    exited += 1;
+                }
+            }
+        }
+
+        // Process stake queue (new validators)
+        // NOTE: stake_queue stores addresses; we need pubkeys and amounts to actually stake.
+        // For now, stake_queue entries are just placeholders — actual staking requires
+        // a full ValidatorStake instruction which is processed separately.
+        // This design reserves the queue slot; the tx is re-submitted in the next epoch.
+        //
+        // TODO: if we want true queued staking, we need to store (address, pubkey, amount)
+        // in the queue and call self.stake() here.
+
+        self.epoch_churn_count = entered + exited;
+        (entered, exited)
+    }
+
+    /// Queue an unstake request if churn limit is reached.
+    /// Returns true if queued, false if processed immediately.
+    pub fn try_unstake(
+        &mut self,
+        validator_id: ValidatorId,
+        sender: Address,
+    ) -> Result<bool, ConsensusError> {
+        // Safety floor check
+        if !self.can_unstake_safely() {
+            return Err(ConsensusError::ConsensusError(
+                format!("unstake rejected: would drop below safety threshold ({})", self.safety_floor())
+            ));
+        }
+
+        let limit = self.current_churn_limit();
+        if self.epoch_churn_count >= limit {
+            self.exit_queue.push(validator_id);
+            return Ok(true); // queued
+        }
+
+        // Process immediately
+        let amount = self.unstake(validator_id, sender)?;
+        self.epoch_churn_count += 1;
+        Ok(false) // not queued
     }
 
     // ── Slashing ──────────────────────────────────────────────────────
@@ -359,7 +488,7 @@ impl ValidatorStateManager {
             .ok_or(ConsensusError::ValidatorNotFound(validator_id))?;
 
         // Proportional slash: rounds * rate% of self_stake
-        let rate_total = self.offline_slash_rate_bps * rounds_offline as u128;
+        let rate_total = self.params.offline_slash_rate_bps * rounds_offline as u128;
         let slashed = (validator.self_stake * rate_total) / 10_000; // basis points
 
         validator.slash_history.push(SlashEvent {
@@ -371,7 +500,7 @@ impl ValidatorStateManager {
         validator.staked_call = validator.staked_call.saturating_sub(slashed);
 
         let remaining = validator.self_stake;
-        if remaining < self.min_self_stake {
+        if remaining < self.params.min_self_stake {
             self.validators.remove(&validator_id);
             tracing::warn!(
                 validator_id,
@@ -403,7 +532,7 @@ impl ValidatorStateManager {
         validator.staked_call = validator.staked_call.saturating_sub(slashed);
 
         let remaining = validator.self_stake;
-        if remaining < self.min_self_stake {
+        if remaining < self.params.min_self_stake {
             self.validators.remove(&validator_id);
             tracing::warn!(
                 validator_id,
@@ -439,7 +568,7 @@ impl ValidatorStateManager {
     // ── Key Rotation ──────────────────────────────────────────────────
 
     /// Rotate a validator's Ed25519 public key.
-    /// The old key remains valid during `KEY_ROTATION_GRACE_BLOCKS` for in-flight messages.
+    /// The old key remains valid during `params.key_rotation_grace_blocks` for in-flight messages.
     /// Returns the old key for historical record.
     pub fn rotate_key(
         &mut self,
@@ -472,7 +601,8 @@ impl ValidatorStateManager {
         tracing::info!(
             validator_id,
             rotation_block = self.current_block,
-            "validator key rotated — old key valid for {KEY_ROTATION_GRACE_BLOCKS} blocks"
+            grace_blocks = self.params.key_rotation_grace_blocks,
+            "validator key rotated — old key valid for grace period"
         );
 
         Ok(previous)
@@ -481,7 +611,7 @@ impl ValidatorStateManager {
     /// Check if a public key is valid for a validator at the given block height.
     /// Returns true if:
     /// - `pubkey` is the current key, OR
-    /// - `pubkey` was rotated out within `KEY_ROTATION_GRACE_BLOCKS` of `block`
+    /// - `pubkey` was rotated out within the key rotation grace period of `block`
     pub fn is_valid_pubkey(
         &self,
         validator_id: ValidatorId,
@@ -501,7 +631,7 @@ impl ValidatorStateManager {
         for rotation in &self.key_rotations {
             if rotation.validator_id == validator_id
                 && &rotation.old_pubkey == pubkey
-                && block <= rotation.rotation_block + KEY_ROTATION_GRACE_BLOCKS
+                && block <= rotation.rotation_block + self.params.key_rotation_grace_blocks
             {
                 return true;
             }
@@ -527,12 +657,12 @@ impl ValidatorStateManager {
             .collect()
     }
 
-    /// Get all validators with stake ≥ MIN_SELF_STAKE and not unbonding.
+    /// Get all validators with stake ≥ min_self_stake and not unbonding.
     /// Used for VRF participant subset selection in BFT epochs.
     pub fn get_qualified_validators(&self) -> Vec<ValidatorId> {
         self.validators
             .values()
-            .filter(|v| v.unbonding_start.is_none() && v.staked_call >= self.min_self_stake)
+            .filter(|v| v.unbonding_start.is_none() && v.staked_call >= self.params.min_self_stake)
             .map(|v| v.validator_id)
             .collect()
     }
@@ -622,11 +752,11 @@ mod tests {
         let mut state = ValidatorStateManager::new();
 
         // Below minimum — should fail
-        let result = state.stake(test_addr(1), test_pubkey(1), MIN_SELF_STAKE - 1);
+        let result = state.stake(test_addr(1), test_pubkey(1), state.params.min_self_stake - 1);
         assert!(matches!(result, Err(ConsensusError::InsufficientStake)));
 
         // At minimum — should succeed
-        let result = state.stake(test_addr(1), test_pubkey(1), MIN_SELF_STAKE);
+        let result = state.stake(test_addr(1), test_pubkey(1), state.params.min_self_stake);
         assert!(result.is_ok());
     }
 
@@ -656,8 +786,8 @@ mod tests {
             Err(ConsensusError::UnbondingNotElapsed)
         ));
 
-        // Advance past unbonding period (1008 blocks)
-        state.set_current_block(2000);
+        // Advance past unbonding period
+        state.set_current_block(state.params.unbonding_period_blocks + 100);
         let (claimed, _recipient) = state.claim_unbonded(id).unwrap();
         assert_eq!(claimed, one_million_call());
         assert!(!state.is_unbonding(id));
@@ -684,7 +814,7 @@ mod tests {
     #[test]
     fn test_slash_offline_proportional() {
         let mut state = ValidatorStateManager::new();
-        // Use 100x minimum stake so a 1% slash stays above MIN_SELF_STAKE
+        // Use 100x minimum stake so a 1% slash stays above minimum
         let stake_amount = one_million_call() * 100;
         let id = state
             .stake(test_addr(1), test_pubkey(1), stake_amount)
@@ -709,7 +839,7 @@ mod tests {
             .unwrap();
 
         // 10 rounds offline at 0.10% per round = 1% total = 10,000 CALL
-        // Remaining = 990,000 CALL < MIN_SELF_STAKE (1,000,000)
+        // Remaining = 990,000 CALL < minimum self-stake (1,000,000)
         let slashed = state.slash_offline(id, 10).unwrap();
         assert!(slashed > 0);
 
@@ -720,8 +850,8 @@ mod tests {
     #[test]
     fn test_slash_oracle_outlier() {
         let mut state = ValidatorStateManager::new();
-        // Use 100x minimum stake so a 0.1% slash stays above MIN_SELF_STAKE
-        let stake_amount = MIN_SELF_STAKE * 100;
+        // Use 100x minimum stake so a 0.1% slash stays above minimum
+        let stake_amount = state.params.min_self_stake * 100;
         let id = state
             .stake(test_addr(1), test_pubkey(1), stake_amount)
             .unwrap();
@@ -739,12 +869,12 @@ mod tests {
     #[test]
     fn test_slash_oracle_outlier_removes_validator_when_below_minimum() {
         let mut state = ValidatorStateManager::new();
-        let stake_amount = MIN_SELF_STAKE;
+        let stake_amount = state.params.min_self_stake;
         let id = state
             .stake(test_addr(1), test_pubkey(1), stake_amount)
             .unwrap();
 
-        // 0.1% slash on exactly MIN_SELF_STAKE drops below minimum
+        // 0.1% slash on exactly minimum self-stake drops below minimum
         let slashed = state.slash_oracle_outlier(id).unwrap();
         assert!(slashed > 0);
 
@@ -828,7 +958,7 @@ mod tests {
         assert!(eligible.is_empty());
 
         // After period: eligible
-        state.set_current_block(2000);
+        state.set_current_block(state.params.unbonding_period_blocks + 100);
         let eligible = state.eligible_unbonding_requests();
         assert_eq!(eligible, vec![id]);
     }

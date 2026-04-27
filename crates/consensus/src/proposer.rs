@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 pub const EPOCH_LENGTH: u64 = 100;
 
 /// Consensus configuration (per spec §2.3)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ConsensusParams {
+    // ── Core consensus ──
     /// Maximum validators in the active set (216)
     pub max_validators: u32,
     /// Validators selected per epoch (21)
@@ -31,17 +33,54 @@ pub struct ConsensusParams {
     pub oracle_request_delay_ms: u64,
     /// Number of blocks per epoch before rotating participant subset
     pub epoch_length: u64,
+
+    // ── Validator staking (migrated from validator.rs constants) ──
+    /// Minimum self-stake required to become a validator (1_000_000 CALL)
+    pub min_self_stake: u128,
+    /// Unbonding period in blocks (was UNBONDING_PERIOD_SECS)
+    pub unbonding_period_blocks: u64,
+    /// Offline slash rate per round in basis points (0.1% = 10)
+    pub offline_slash_rate_bps: u128,
+    /// Key rotation grace period in blocks
+    pub key_rotation_grace_blocks: u64,
+
+    // ── Churn control ──
+    /// Quotient for churn limit: churn_limit = max(min_churn_limit, qualified / quotient)
+    pub churn_limit_quotient: u64,
+    /// Minimum churn limit regardless of validator count
+    pub min_churn_limit: u64,
+    /// Safety ratio numerator (e.g. 4 for 4/3)
+    pub safety_ratio_num: u32,
+    /// Safety ratio denominator (e.g. 3 for 4/3)
+    pub safety_ratio_den: u32,
+    /// Unbonding period multiplier when slashed during unbonding
+    pub unbonding_slash_extend: u32,
+    /// Maximum multiplier for dynamic unbonding period
+    pub max_unbonding_multiplier: u32,
 }
 
 impl Default for ConsensusParams {
     fn default() -> Self {
         Self {
+            // Core consensus
             max_validators: 216,
             subset_size: 21,
             block_time_millis: 250,
             slashing_window: 10_000,
             oracle_request_delay_ms: 200,
             epoch_length: EPOCH_LENGTH,
+            // Validator staking (mainnet conservative defaults)
+            min_self_stake: 1_000_000 * 10u128.pow(18),
+            unbonding_period_blocks: 120_960, // ~8.4h at 250ms block time
+            offline_slash_rate_bps: 10,        // 0.1%
+            key_rotation_grace_blocks: 100,
+            // Churn control
+            churn_limit_quotient: 16,
+            min_churn_limit: 2,
+            safety_ratio_num: 4,
+            safety_ratio_den: 3,
+            unbonding_slash_extend: 2,
+            max_unbonding_multiplier: 10,
         }
     }
 }
@@ -62,6 +101,16 @@ impl ConsensusParams {
             slashing_window,
             oracle_request_delay_ms,
             epoch_length: EPOCH_LENGTH,
+            min_self_stake: 1_000_000 * 10u128.pow(18),
+            unbonding_period_blocks: 120_960,
+            offline_slash_rate_bps: 10,
+            key_rotation_grace_blocks: 100,
+            churn_limit_quotient: 16,
+            min_churn_limit: 2,
+            safety_ratio_num: 4,
+            safety_ratio_den: 3,
+            unbonding_slash_extend: 2,
+            max_unbonding_multiplier: 10,
         }
     }
 
@@ -79,6 +128,17 @@ impl ConsensusParams {
     /// Check if validator count is within valid range (100-216)
     pub fn is_valid_validator_count(&self, count: u32) -> bool {
         (100..=self.max_validators).contains(&count)
+    }
+
+    /// Compute the safety floor: ceil(subset_size * safety_ratio)
+    pub fn safety_floor(&self) -> u64 {
+        let num = self.subset_size as u64 * self.safety_ratio_num as u64;
+        (num + self.safety_ratio_den as u64 - 1) / self.safety_ratio_den as u64
+    }
+
+    /// Compute churn limit from qualified validator count
+    pub fn churn_limit(&self, qualified_count: u64) -> u64 {
+        std::cmp::max(self.min_churn_limit, qualified_count / self.churn_limit_quotient)
     }
 }
 

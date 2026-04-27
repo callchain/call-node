@@ -20,7 +20,7 @@ use call_storage::{
     save_balances as db_save_balances, load_balances as db_load_balances,
     CallOracleState, CallEvmAccounts, CallBridgeOps,
     CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
-    CallGovernanceState, CallComplianceState, CallConsensusState,
+    CallGovernanceState, CallComplianceState, CallConsensusState, CallValidatorMeta,
     CallReceipts, CallReceiptsByBlock, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
     CallProtocolAssets, CallFeeParams, CallFeeCurrencyRegistry,
 };
@@ -428,11 +428,25 @@ pub(crate) fn load_validator_state_inner(db: &DatabaseEnv) -> Result<ValidatorSt
         let id: call_primitives::ValidatorId = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
         manager.register_validator_from_stake(id, stake);
     }
+
+    // Load global meta-state (queues, counters, params)
+    match db_get::<CallValidatorMeta>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+        Some(meta_data) => {
+            let snapshot: call_consensus::validator::ValidatorMetaSnapshot =
+                serde_json::from_slice(&meta_data).map_err(|e| format!("deserialize validator meta: {e}"))?;
+            manager.restore_meta_snapshot(snapshot);
+        }
+        None => {
+            tracing::info!("no validator meta found in DB — using defaults");
+        }
+    }
+
     Ok(manager)
 }
 
 /// Save validator state to DB
 pub(crate) fn save_validator_state_inner(db: &DatabaseEnv, state: &ValidatorStateManager) -> Result<(), String> {
+    // Save individual validator stakes
     let entries: Vec<(Vec<u8>, Vec<u8>)> = state
         .get_all_validators()
         .iter()
@@ -440,6 +454,12 @@ pub(crate) fn save_validator_state_inner(db: &DatabaseEnv, state: &ValidatorStat
         .collect();
     db_clear::<CallValidators>(db).map_err(|e: StorageError| e.to_string())?;
     db_batch_put::<CallValidators>(db, entries).map_err(|e: StorageError| e.to_string())?;
+
+    // Save global meta-state (queues, counters, params)
+    let meta = state.meta_snapshot();
+    let meta_data = serde_json::to_vec(&meta).map_err(|e| format!("serialize validator meta: {e}"))?;
+    db_put::<CallValidatorMeta>(db, vec![0], meta_data).map_err(|e: StorageError| e.to_string())?;
+
     Ok(())
 }
 
@@ -833,6 +853,7 @@ pub(crate) fn save_evm_accounts_no_clear(db: &DatabaseEnv, state: &EvmState) -> 
 
 /// Save validator state without clearing the table first.
 pub(crate) fn save_validator_state_no_clear(db: &DatabaseEnv, state: &ValidatorStateManager) -> Result<(), String> {
+    // Save individual validator stakes
     let entries: Vec<(Vec<u8>, Vec<u8>)> = state
         .get_all_validators()
         .iter()
@@ -841,6 +862,12 @@ pub(crate) fn save_validator_state_no_clear(db: &DatabaseEnv, state: &ValidatorS
     for (k, v) in entries {
         db_put::<CallValidators>(db, k, v).map_err(|e: StorageError| e.to_string())?;
     }
+
+    // Save global meta-state
+    let meta = state.meta_snapshot();
+    let meta_data = serde_json::to_vec(&meta).map_err(|e| format!("serialize validator meta: {e}"))?;
+    db_put::<CallValidatorMeta>(db, vec![0], meta_data).map_err(|e: StorageError| e.to_string())?;
+
     Ok(())
 }
 

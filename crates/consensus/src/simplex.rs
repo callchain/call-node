@@ -144,9 +144,14 @@ impl SimplexConsensus {
         self.current_round += 1;
 
         // Refresh proposer subset periodically (every N rounds = epoch)
-        // For now, refresh every 100 rounds to balance stability and rotation
-        let epoch_length = 100u64;
+        let epoch_length = self.params.epoch_length;
         if self.current_round.is_multiple_of(epoch_length) {
+            // Process queued stake/exit requests at epoch boundary
+            let (entered, exited) = self.validators.process_epoch_churn();
+            self.validators.reset_epoch_churn();
+            if entered > 0 || exited > 0 {
+                info!(entered, exited, "processed epoch churn");
+            }
             self.recompute_proposer_subset();
             info!(
                 round = self.current_round,

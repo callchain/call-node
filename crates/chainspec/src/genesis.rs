@@ -516,7 +516,6 @@ fn parse_pubkey(s: &str) -> Result<Ed25519PublicKey, GenesisError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_consensus::validator::MIN_SELF_STAKE;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -553,7 +552,7 @@ mod tests {
             .with_validator(GenesisValidator {
                 address: addr_hex(&test_addr(10)),
                 ed25519_pubkey: pubkey_hex(),
-                self_stake: MIN_SELF_STAKE,
+                self_stake: call_consensus::proposer::ConsensusParams::default().min_self_stake,
             })
     }
 
