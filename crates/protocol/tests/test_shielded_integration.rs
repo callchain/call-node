@@ -112,6 +112,9 @@ mod test_shielded_integration_impl {
 
     #[test]
     fn test_shielded_transfer_updates_nullifier_set() {
+        if call_shielded::REAL_PROVER_ENABLED {
+            return;
+        }
         let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
@@ -145,6 +148,9 @@ mod test_shielded_integration_impl {
 
     #[test]
     fn test_shielded_transfer_double_spend_rejected() {
+        if call_shielded::REAL_PROVER_ENABLED {
+            return;
+        }
         let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();

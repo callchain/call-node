@@ -3,6 +3,7 @@
 #[cfg(feature = "real-prover")]
 mod shielded_flow {
     use call_shielded::*;
+    use call_primitives::Hash;
     use call_shielded::circuit_deposit::{DepositCircuit, DepositWitness};
     use call_shielded::circuit_withdraw::{WithdrawCircuit, WithdrawWitness};
     use call_shielded::circuit_transfer::{TransferCircuit, InputNoteWitness, OutputNoteWitness};
@@ -212,6 +213,262 @@ mod shielded_flow {
         fr_to_bytes(&nf_fr)
     }
 
+    /// Build a real Groth16 transfer proof with properly derived notes.
+    /// Returns the ShieldedTransfer and the input note's commitment.
+    fn make_real_transfer_zkproof(
+        input_value: u128,
+        output_value: u128,
+        asset_id: u64,
+    ) -> (ShieldedTransfer, NoteCommitment) {
+        let sk1 = test_spending_key(1);
+        let vk1 = ViewingKey::generate(&sk1);
+        let rho1 = test_hash(10).0;
+
+        let input_note = Note::new(input_value, asset_id, &vk1, test_hash(10));
+        let input_rcm = *input_note.rcm();
+        let input_cm = input_note.commitment();
+        let cm1: [u8; 32] = input_cm.0.into();
+        let nf1 = compute_poseidon_nullifier(&vk1.incoming_view_key, &rho1);
+
+        let mut tree = PoseidonMerkleTree::new(32);
+        tree.insert(&cm1);
+        let path1 = tree.proof_for_last();
+        let merkle_root = tree.root();
+
+        let out_sk = test_spending_key(2);
+        let out_vk = ViewingKey::generate(&out_sk);
+        let rho_out = test_hash(20).0;
+        let output_note = Note::new(output_value, asset_id, &out_vk, test_hash(20));
+        let out_rcm = *output_note.rcm();
+        let out_cm: [u8; 32] = output_note.commitment().0.into();
+
+        let input_witness = InputNoteWitness {
+            value: input_value,
+            rcm: input_rcm,
+            recipient_ivk: vk1.incoming_view_key,
+            rho: rho1,
+            spending_key: sk1,
+        };
+        let output_witness = OutputNoteWitness {
+            value: output_value,
+            rcm: out_rcm,
+            recipient_ivk: out_vk.incoming_view_key,
+            rho: rho_out,
+        };
+
+        let circuit = TransferCircuit::new(
+            vec![nf1],
+            vec![out_cm],
+            asset_id,
+            merkle_root,
+            vec![input_witness],
+            vec![output_witness],
+            vec![path1],
+        );
+
+        let prover = RealProver::setup();
+        let proof_data = prover.prove_transfer(&circuit).unwrap();
+
+        let zk_proof = ZkProof {
+            proof_data,
+            nullifiers: vec![Nullifier::new(Hash::from_slice(&nf1))],
+            commitments: vec![NoteCommitment::new(Hash::from_slice(&out_cm))],
+            asset_id,
+        };
+
+        let transfer = ShieldedTransfer {
+            input_notes: vec![input_note],
+            output_notes: vec![output_note],
+            proof: zk_proof,
+        };
+
+        (transfer, input_cm)
+    }
+
+    #[test]
+    fn test_real_process_transfer_valid() {
+        let mut state = ShieldedState::new();
+        let (transfer, input_cm) = make_real_transfer_zkproof(1000, 900, 1);
+
+        let leaf: [u8; 32] = input_cm.0.into();
+        state.merkle_tree.insert(&leaf);
+        state.note_registry.insert(input_cm, transfer.input_notes[0].clone());
+
+        state.process_transfer(&transfer).unwrap();
+        assert_eq!(state.merkle_tree.leaf_count(), 2);
+        assert!(state.nullifier_set.is_spent(&transfer.proof.nullifiers[0]));
+    }
+
+    #[test]
+    fn test_real_process_transfer_value_violation() {
+        // The transfer circuit enforces value conservation (T4 constraint):
+        // sum(outputs) <= sum(inputs).  A proof cannot be generated for an
+        // invalid transfer because constraint synthesis will fail.
+        let sk1 = test_spending_key(1);
+        let vk1 = ViewingKey::generate(&sk1);
+        let rho1 = test_hash(10).0;
+        let rcm1 = compute_rcm(&vk1, 500, 1, &rho1);
+        let cm1 = compute_poseidon_commitment(500, 1, &rcm1, &rho1);
+        let nf1 = compute_poseidon_nullifier(&vk1.incoming_view_key, &rho1);
+
+        let mut tree = PoseidonMerkleTree::new(32);
+        tree.insert(&cm1);
+        let path1 = tree.proof_for_last();
+        let merkle_root = tree.root();
+
+        let out_sk = test_spending_key(2);
+        let out_vk = ViewingKey::generate(&out_sk);
+        let rho_out = test_hash(20).0;
+        let rcm_out = compute_rcm(&out_vk, 1000, 1, &rho_out);
+        let out_cm = compute_poseidon_commitment(1000, 1, &rcm_out, &rho_out);
+
+        let input_witness = InputNoteWitness {
+            value: 500, rcm: rcm1, recipient_ivk: vk1.incoming_view_key, rho: rho1, spending_key: sk1,
+        };
+        let output_witness = OutputNoteWitness {
+            value: 1000, rcm: rcm_out, recipient_ivk: out_vk.incoming_view_key, rho: rho_out,
+        };
+
+        let circuit = TransferCircuit::new(
+            vec![nf1], vec![out_cm], 1, merkle_root,
+            vec![input_witness], vec![output_witness], vec![path1],
+        );
+
+        let prover = RealProver::setup();
+        // ark-groth16 panics on unsatisfied constraints rather than returning Err
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prover.prove_transfer(&circuit)
+        }));
+        assert!(
+            result.is_err(),
+            "proof generation should panic when output > input"
+        );
+    }
+
+    #[test]
+    fn test_real_proof_reject_double_spend() {
+        let mut state = ShieldedState::new();
+        let (transfer, input_cm) = make_real_transfer_zkproof(1000, 900, 1);
+
+        let leaf: [u8; 32] = input_cm.0.into();
+        state.merkle_tree.insert(&leaf);
+        state.note_registry.insert(input_cm, transfer.input_notes[0].clone());
+
+        // First transfer should succeed
+        state.process_transfer(&transfer).unwrap();
+        assert!(state.nullifier_set.is_spent(&transfer.proof.nullifiers[0]));
+
+        // Build a second valid proof against the updated tree (now has 2 leaves).
+        // ZK verification must pass so we reach the nullifier double-spend check.
+        let sk1 = test_spending_key(1);
+        let vk1 = ViewingKey::generate(&sk1);
+        let rho1 = test_hash(10).0;
+        let input_rcm = *transfer.input_notes[0].rcm();
+        let nf1 = compute_poseidon_nullifier(&vk1.incoming_view_key, &rho1);
+
+        let merkle_root = state.merkle_tree.root();
+        let path1 = state.merkle_tree.proof_for_index(0).unwrap();
+
+        let out_sk2 = test_spending_key(3);
+        let out_vk2 = ViewingKey::generate(&out_sk2);
+        let rho_out2 = test_hash(30).0;
+        let output_note2 = Note::new(900, 1, &out_vk2, test_hash(30));
+        let out_rcm2 = *output_note2.rcm();
+        let out_cm2: [u8; 32] = output_note2.commitment().0.into();
+
+        let input_witness = InputNoteWitness {
+            value: 1000, rcm: input_rcm, recipient_ivk: vk1.incoming_view_key, rho: rho1, spending_key: sk1,
+        };
+        let output_witness = OutputNoteWitness {
+            value: 900, rcm: out_rcm2, recipient_ivk: out_vk2.incoming_view_key, rho: rho_out2,
+        };
+
+        let circuit = TransferCircuit::new(
+            vec![nf1], vec![out_cm2], 1, merkle_root,
+            vec![input_witness], vec![output_witness], vec![path1],
+        );
+        let prover = RealProver::setup();
+        let proof_data = prover.prove_transfer(&circuit).unwrap();
+
+        let zk_proof = ZkProof {
+            proof_data,
+            nullifiers: vec![Nullifier::new(Hash::from_slice(&nf1))],
+            commitments: vec![NoteCommitment::new(Hash::from_slice(&out_cm2))],
+            asset_id: 1,
+        };
+        let transfer2 = ShieldedTransfer {
+            input_notes: transfer.input_notes.clone(),
+            output_notes: vec![output_note2],
+            proof: zk_proof,
+        };
+
+        assert!(matches!(
+            state.process_transfer(&transfer2),
+            Err(ShieldedError::DoubleSpend(_))
+        ));
+    }
+
+    #[test]
+    fn test_real_deposit_then_transfer_flow() {
+        let mut state = ShieldedState::new();
+
+        // Deposit a note
+        let deposited_note = Note::new(1000, 1, &ViewingKey::generate(&test_spending_key(1)), test_hash(1));
+        let cm = deposited_note.commitment();
+        state.process_deposit(cm.clone(), deposited_note.clone()).unwrap();
+        assert_eq!(state.merkle_tree.leaf_count(), 1);
+
+        // Build a real transfer proof spending the deposited note
+        let sk1 = test_spending_key(1);
+        let vk1 = ViewingKey::generate(&sk1);
+        let rho1 = test_hash(1).0;
+        let input_rcm = *deposited_note.rcm();
+        let input_cm: [u8; 32] = cm.0.into();
+        let nf1 = compute_poseidon_nullifier(&vk1.incoming_view_key, &rho1);
+
+        let mut tree = PoseidonMerkleTree::new(32);
+        tree.insert(&input_cm);
+        let path1 = tree.proof_for_last();
+        let merkle_root = tree.root();
+
+        let out_sk = test_spending_key(2);
+        let out_vk = ViewingKey::generate(&out_sk);
+        let rho_out = test_hash(20).0;
+        let output_note = Note::new(800, 1, &out_vk, test_hash(20));
+        let out_rcm = *output_note.rcm();
+        let out_cm: [u8; 32] = output_note.commitment().0.into();
+
+        let input_witness = InputNoteWitness {
+            value: 1000, rcm: input_rcm, recipient_ivk: vk1.incoming_view_key, rho: rho1, spending_key: sk1,
+        };
+        let output_witness = OutputNoteWitness {
+            value: 800, rcm: out_rcm, recipient_ivk: out_vk.incoming_view_key, rho: rho_out,
+        };
+
+        let circuit = TransferCircuit::new(
+            vec![nf1], vec![out_cm], 1, merkle_root,
+            vec![input_witness], vec![output_witness], vec![path1],
+        );
+
+        let prover = RealProver::setup();
+        let proof_data = prover.prove_transfer(&circuit).unwrap();
+
+        let zk_proof = ZkProof {
+            proof_data,
+            nullifiers: vec![Nullifier::new(Hash::from_slice(&nf1))],
+            commitments: vec![NoteCommitment::new(Hash::from_slice(&out_cm))],
+            asset_id: 1,
+        };
+        let transfer = ShieldedTransfer {
+            input_notes: vec![deposited_note],
+            output_notes: vec![output_note],
+            proof: zk_proof,
+        };
+
+        state.process_transfer(&transfer).unwrap();
+        assert_eq!(state.merkle_tree.leaf_count(), 2);
+    }
+
     #[test]
     fn test_real_proof_verify_valid() {
         let circuit = make_deposit_circuit(5000, 1, 42);
@@ -231,70 +488,6 @@ mod shielded_flow {
 
         let result = prover.verify_deposit(&proof, &[]);
         assert!(result.is_err() || !result.unwrap_or(false), "tampered proof should be rejected");
-    }
-
-    #[test]
-    #[cfg(not(feature = "real-prover"))]
-    fn test_real_proof_reject_double_spend() {
-        let mut state = ShieldedState::new();
-
-        let note = test_note(1000, 1, 1);
-        let new_note = test_note(800, 1, 2);
-        let nf = note.nullifier();
-        let proof = ZkProof {
-            proof_data: vec![1u8; 200],
-            nullifiers: vec![nf.clone()],
-            commitments: vec![new_note.commitment()],
-            asset_id: 1,
-        };
-        let transfer = ShieldedTransfer {
-            input_notes: vec![note.clone()],
-            output_notes: vec![new_note],
-            proof,
-        };
-
-        state.process_transfer(&transfer).unwrap();
-
-        let transfer2 = ShieldedTransfer {
-            input_notes: vec![note],
-            output_notes: vec![test_note(800, 1, 3)],
-            proof: ZkProof {
-                proof_data: vec![1u8; 200],
-                nullifiers: vec![nf],
-                commitments: vec![NoteCommitment::new(test_hash(3))],
-                asset_id: 1,
-            },
-        };
-        assert!(matches!(
-            state.process_transfer(&transfer2),
-            Err(ShieldedError::DoubleSpend(_))
-        ));
-    }
-
-    #[test]
-    #[cfg(not(feature = "real-prover"))]
-    fn test_real_deposit_then_transfer_flow() {
-        let mut state = ShieldedState::new();
-
-        let deposited_note = test_note(1000, 1, 1);
-        let cm = deposited_note.commitment();
-        state.process_deposit(cm.clone(), deposited_note.clone()).unwrap();
-        assert_eq!(state.merkle_tree.leaf_count(), 1);
-
-        let new_note = test_note(800, 1, 2);
-        let proof = ZkProof {
-            proof_data: vec![1u8; 200],
-            nullifiers: vec![deposited_note.nullifier()],
-            commitments: vec![new_note.commitment()],
-            asset_id: 1,
-        };
-        let transfer = ShieldedTransfer {
-            input_notes: vec![deposited_note],
-            output_notes: vec![new_note.clone()],
-            proof,
-        };
-        state.process_transfer(&transfer).unwrap();
-        assert_eq!(state.merkle_tree.leaf_count(), 2);
     }
 
     #[test]

@@ -29,6 +29,11 @@ pub mod keygen;
 #[cfg(feature = "production-keys")]
 pub mod ceremony;
 
+/// Whether the `real-prover` feature is enabled at compile time.
+/// Tests in downstream crates can use this to skip mock-proof tests
+/// when the real Groth16 verifier is active.
+pub const REAL_PROVER_ENABLED: bool = cfg!(feature = "real-prover");
+
 pub use merkle::*;
 pub use merkle_poseidon::*;
 pub use notes::*;
@@ -285,17 +290,23 @@ impl ShieldedState {
             ));
         }
 
-        // 2. Verify ZK proof
+        // 2. Determine circuit type from proof structure (not input/output notes,
+        // because instruction handlers may pass empty vectors).
+        let circuit_type = if transfer.proof.nullifiers.is_empty() && !transfer.proof.commitments.is_empty() {
+            "deposit"
+        } else if transfer.proof.commitments.is_empty() && !transfer.proof.nullifiers.is_empty() {
+            "withdraw"
+        } else {
+            "transfer"
+        };
+
+        // 3. Verify ZK proof
         #[cfg(feature = "real-prover")]
         {
-            let circuit_type = if transfer.input_notes.is_empty() {
-                "deposit"
-            } else if transfer.output_notes.is_empty() {
-                "withdraw"
-            } else {
-                "transfer"
-            };
-            match verify_shielded_proof(&transfer.proof, circuit_type) {
+            let merkle_root = self.merkle_root();
+            let merkle_root_bytes: [u8; 32] = merkle_root.into();
+            let value = transfer.input_notes.first().map(|n| n.value);
+            match verify_shielded_proof(&transfer.proof, circuit_type, Some(&merkle_root_bytes), value) {
                 Ok(true) => {}
                 Ok(false) => return Err(ShieldedError::InvalidZkProof),
                 Err(e) => return Err(ShieldedError::InvalidZkProofWithReason(e)),
@@ -303,6 +314,7 @@ impl ShieldedState {
         }
         #[cfg(not(feature = "real-prover"))]
         {
+            let _ = circuit_type;
             if !verify_zk_proof(&transfer.proof) {
                 return Err(ShieldedError::InvalidZkProof);
             }
@@ -542,14 +554,16 @@ impl Default for ShieldedState {
 ///
 /// When `real-prover` is NOT enabled, this returns an error — structural-only
 /// validation is not acceptable in production builds.
+///
+/// `merkle_root` is required for transfer and withdraw circuits.
+/// `value` is required for withdraw circuits.
 #[cfg(not(feature = "real-prover"))]
 pub fn verify_shielded_proof(
     proof: &ZkProof,
-    _circuit_type: &str, // "deposit", "withdraw", "transfer"
+    _circuit_type: &str,
+    _merkle_root: Option<&[u8; 32]>,
+    _value: Option<u128>,
 ) -> Result<bool, String> {
-    // Without real-prover feature, reject outright — structural validation
-    // is insufficient for production security. Use --features real-prover
-    // to enable actual Groth16 verification.
     let _ = proof;
     Err("ZK proof verification requires the `real-prover` feature — structural-only validation is not acceptable in production".into())
 }
@@ -558,6 +572,8 @@ pub fn verify_shielded_proof(
 pub fn verify_shielded_proof(
     proof: &ZkProof,
     circuit_type: &str,
+    merkle_root: Option<&[u8; 32]>,
+    value: Option<u128>,
 ) -> Result<bool, String> {
     use crate::prover::{RealProver, ProverError};
 
@@ -566,22 +582,52 @@ pub fn verify_shielded_proof(
         return Ok(false);
     }
 
-    // Collect public inputs: nullifiers + commitments as raw bytes
-    let mut public_inputs = Vec::new();
-    for nf in &proof.nullifiers {
-        public_inputs.extend_from_slice(nf.0.as_slice());
-    }
-    for cm in &proof.commitments {
-        public_inputs.extend_from_slice(cm.0.as_slice());
-    }
-
-    // Use a singleton RealProver (setup is expensive — trusted setup)
     let prover = RealProver::global();
 
     let result: Result<bool, ProverError> = match circuit_type {
-        "deposit" => prover.verify_deposit(&proof.proof_data, &public_inputs),
-        "withdraw" => prover.verify_withdraw(&proof.proof_data, &public_inputs),
-        "transfer" => prover.verify_transfer(&proof.proof_data, &public_inputs),
+        "deposit" => {
+            if proof.commitments.is_empty() {
+                return Ok(false);
+            }
+            let mut public_inputs = Vec::new();
+            public_inputs.extend_from_slice(proof.commitments[0].0.as_slice());
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
+            public_inputs.extend_from_slice(&asset_bytes);
+            prover.verify_deposit(&proof.proof_data, &public_inputs)
+        }
+        "withdraw" => {
+            if proof.nullifiers.is_empty() {
+                return Ok(false);
+            }
+            let merkle_root = merkle_root.ok_or("merkle_root required for withdraw verification")?;
+            let value = value.ok_or("value required for withdraw verification")?;
+            let mut public_inputs = Vec::new();
+            public_inputs.extend_from_slice(proof.nullifiers[0].0.as_slice());
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
+            public_inputs.extend_from_slice(&asset_bytes);
+            public_inputs.extend_from_slice(merkle_root);
+            let mut value_bytes = [0u8; 32];
+            value_bytes[..16].copy_from_slice(&value.to_le_bytes());
+            public_inputs.extend_from_slice(&value_bytes);
+            prover.verify_withdraw(&proof.proof_data, &public_inputs)
+        }
+        "transfer" => {
+            let merkle_root = merkle_root.ok_or("merkle_root required for transfer verification")?;
+            let mut public_inputs = Vec::new();
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
+            public_inputs.extend_from_slice(&asset_bytes);
+            public_inputs.extend_from_slice(merkle_root);
+            for nf in &proof.nullifiers {
+                public_inputs.extend_from_slice(nf.0.as_slice());
+            }
+            for cm in &proof.commitments {
+                public_inputs.extend_from_slice(cm.0.as_slice());
+            }
+            prover.verify_transfer(&proof.proof_data, &public_inputs)
+        }
         other => return Err(format!("unknown circuit type: {other}")),
     };
 

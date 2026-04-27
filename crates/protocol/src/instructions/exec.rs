@@ -255,7 +255,10 @@ pub fn execute_instruction(
             }
             #[cfg(feature = "real-prover")]
             {
-                let valid = call_shielded::verify_shielded_proof(&zk_proof, "transfer")
+                let merkle_root = shielded_state.merkle_root();
+                let merkle_root_bytes: [u8; 32] = merkle_root.into();
+                let valid = call_shielded::verify_shielded_proof(
+                        &zk_proof, "transfer", Some(&merkle_root_bytes), None)
                     .map_err(|e| ProtocolError::InvalidInstruction(format!(
                         "shielded transfer: proof verification error: {e}"
                     )))?;
@@ -297,7 +300,10 @@ pub fn execute_instruction(
             // Real Groth16 verification when real-prover feature is enabled
             #[cfg(feature = "real-prover")]
             {
-                let valid = call_shielded::verify_shielded_proof(&zk_proof, "withdraw")
+                let merkle_root = shielded_state.merkle_root();
+                let merkle_root_bytes: [u8; 32] = merkle_root.into();
+                let valid = call_shielded::verify_shielded_proof(
+                        &zk_proof, "withdraw", Some(&merkle_root_bytes), Some(*amount))
                     .map_err(|e| ProtocolError::InvalidInstruction(format!(
                         "shielded withdraw: proof verification error: {e}"
                     )))?;
