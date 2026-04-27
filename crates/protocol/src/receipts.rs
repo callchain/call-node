@@ -55,6 +55,27 @@ pub struct ProtocolReceipt {
     pub fee_currency: FeeCurrency,
     pub fee_amount: u128,
     pub block_number: u64,
+    /// Block hash this receipt belongs to (for ETH-compatible RPC)
+    #[serde(default)]
+    pub block_hash: Hash,
+    /// Transaction index within the block (for ETH-compatible RPC)
+    #[serde(default)]
+    pub transaction_index: u64,
+    /// Recipient address (for ETH-compatible RPC; None for contract creation)
+    #[serde(default)]
+    pub to: Option<Address>,
+    /// Deployed contract address if this was a contract creation (for ETH-compatible RPC)
+    #[serde(default)]
+    pub contract_address: Option<Address>,
+    /// Cumulative gas used up to and including this tx in the block
+    #[serde(default)]
+    pub cumulative_gas_used: u64,
+    /// Effective gas price = fee_amount / gas_used (for ETH-compatible RPC)
+    #[serde(default)]
+    pub effective_gas_price: u128,
+    /// Logs bloom filter (256 bytes, for ETH-compatible RPC)
+    #[serde(default)]
+    pub logs_bloom: Vec<u8>,
     pub instruction_results: Vec<InstructionExecResult>,
     pub logs: Vec<LogEntry>,
     pub memos: Vec<MemoEntry>,
@@ -145,6 +166,13 @@ mod tests {
             fee_currency: FeeCurrency::Call,
             fee_amount: 1_000_000,
             block_number: 0,
+            block_hash: Hash::ZERO,
+            transaction_index: 0,
+            to: None,
+            contract_address: None,
+            cumulative_gas_used: 10_000,
+            effective_gas_price: 100,
+            logs_bloom: vec![],
             instruction_results: vec![InstructionExecResult {
                 success: true,
                 gas_used: 10_000,
@@ -170,6 +198,13 @@ mod tests {
             fee_currency: FeeCurrency::Call,
             fee_amount: 500_000,
             block_number: 0,
+            block_hash: Hash::ZERO,
+            transaction_index: 0,
+            to: None,
+            contract_address: None,
+            cumulative_gas_used: 5_000,
+            effective_gas_price: 100,
+            logs_bloom: vec![],
             instruction_results: vec![InstructionExecResult {
                 success: false,
                 gas_used: 5_000,
@@ -195,6 +230,13 @@ mod tests {
                     fee_currency: FeeCurrency::Call,
                     fee_amount: 0,
                     block_number: 0,
+                    block_hash: Hash::ZERO,
+                    transaction_index: 0,
+                    to: None,
+                    contract_address: None,
+                    cumulative_gas_used: 10_000,
+                    effective_gas_price: 0,
+                    logs_bloom: vec![],
                     instruction_results: vec![],
                     logs: vec![],
                     memos: vec![],
@@ -211,6 +253,13 @@ mod tests {
                     fee_currency: FeeCurrency::Call,
                     fee_amount: 0,
                     block_number: 1,
+                    block_hash: Hash::ZERO,
+                    transaction_index: 0,
+                    to: None,
+                    contract_address: None,
+                    cumulative_gas_used: 20_000,
+                    effective_gas_price: 0,
+                    logs_bloom: vec![],
                     instruction_results: vec![],
                     logs: vec![],
                     memos: vec![],

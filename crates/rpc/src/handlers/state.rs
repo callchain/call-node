@@ -80,6 +80,8 @@ pub struct RpcState {
     pub network: Arc<RwLock<Option<Arc<dyn call_network::Network>>>>,
     /// Ring buffer of per-block fee data for eth_feeHistory (max 1024 entries).
     pub fee_history: RwLock<VecDeque<(u64, BlockFeeEntry)>>,
+    /// Block hash -> height index for eth_getBlockByHash.
+    pub block_hash_index: RwLock<HashMap<Hash, u64>>,
 }
 
 impl RpcState {
@@ -138,6 +140,7 @@ impl RpcState {
             engine_restart_signal: AtomicBool::new(false),
             network: Arc::new(RwLock::new(None)),
             fee_history: RwLock::new(VecDeque::new()),
+            block_hash_index: RwLock::new(HashMap::new()),
         }
     }
 
@@ -191,6 +194,12 @@ impl RpcState {
                     .entry(log.address)
                     .or_insert_with(Vec::new)
                     .push((receipt.block_number, tx_hash, idx));
+            }
+        }
+        // Index block hash -> height for eth_getBlockByHash
+        if receipt.block_hash != Hash::ZERO {
+            if let Ok(mut index) = self.block_hash_index.write() {
+                index.insert(receipt.block_hash, receipt.block_number);
             }
         }
         if let Ok(mut receipts) = self.receipts.write() {
@@ -279,6 +288,12 @@ impl RpcState {
         let path = dir.join("blocks").join(format!("{height:012}.json"));
         let data = std::fs::read(&path).ok()?;
         serde_json::from_slice(&data).ok()
+    }
+
+    /// Load a block from disk by hash. Uses the in-memory hash index.
+    pub fn load_block_by_hash(&self, hash: &Hash) -> Option<call_consensus::Block> {
+        let height = self.block_hash_index.read().ok().and_then(|idx| idx.get(hash).copied())?;
+        self.load_block(height)
     }
 
     /// Enable or disable governance signature requirements.

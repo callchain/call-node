@@ -317,7 +317,7 @@ pub fn validate_evm_tx(
 // ── ERC-20 Init Code ─────────────────────────────────────────────────
 
 /// Derive CREATE opcode contract address from deployer + nonce
-fn derive_create_address(deployer: Address, nonce: u64) -> Address {
+pub fn derive_create_address(deployer: Address, nonce: u64) -> Address {
     // CREATE address = keccak256(rlp(deployer, nonce))[12:]
 
     // RLP encode [deployer, nonce]

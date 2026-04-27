@@ -415,75 +415,30 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getBlockByNumber
     module
         .register_async_method("eth_getBlockByNumber", |params, state, _ctx| async move {
-            let (block_tag, _full_txs): (String, Option<bool>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let (block_tag, full_txs): (String, Option<bool>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let current = state.get_current_block();
+            let block_number = parse_block_tag(&block_tag, current);
 
-            let block_number = match block_tag.as_str() {
-                "latest" | "pending" | "safe" | "finalized" => current,
-                hex if hex.starts_with("0x") => u64::from_str_radix(&hex[2..], 16).unwrap_or(current),
-                num => num.parse::<u64>().unwrap_or(current),
-            };
-
-            // Try loading from disk first (works for both historical and current blocks)
             if let Some(block) = state.load_block(block_number) {
-                return Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "number": format!("0x{:x}", block.header.height),
-                    "hash": format!("0x{}", hex::encode(block.header.hash())),
-                    "parentHash": format!("0x{}", hex::encode(block.header.parent_hash)),
-                    "timestamp": format!("0x{:x}", block.header.timestamp_millis / 1000),
-                    "gasLimit": "0x1c9c380",
-                    "gasUsed": "0x0",
-                    "transactions": [],
-                    "logsBloom": format!("0x{}", hex::encode([0u8; 256])),
-                    "miner": format!("0x{}", hex::encode([0u8; 20])),
-                    "difficulty": "0x0",
-                    "totalDifficulty": "0x0",
-                    "nonce": "0x0000000000000000",
-                    "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
-                    "receiptsRoot": format!("0x{}", hex::encode(block.header.receipt_root)),
-                    "transactionsRoot": format!("0x{}", hex::encode(block.header.payment_root)),
-                    "stateRoot": format!("0x{}", hex::encode(block.header.evm_state_root)),
-                    "size": "0x0",
-                    "extraData": "0x",
-                    "mixHash": format!("0x{}", hex::encode([0u8; 32])),
-                    "baseFeePerGas": format!("0x{:x}", state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee),
-                }));
+                return Ok::<_, ErrorObjectOwned>(block_to_json(&block, &state, full_txs.unwrap_or(false)));
             }
 
-            if block_number != current {
-                return Ok::<_, ErrorObjectOwned>(serde_json::Value::Null);
-            }
-
-            // Fallback stub for current block when disk load fails
-            Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "number": format!("0x{:x}", block_number),
-                "hash": format!("0x{}", hex::encode([0u8; 32])),
-                "parentHash": format!("0x{}", hex::encode([0u8; 32])),
-                "timestamp": format!("0x{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
-                "gasLimit": "0x1c9c380",
-                "gasUsed": "0x0",
-                "transactions": [],
-                "logsBloom": format!("0x{}", hex::encode([0u8; 256])),
-                "miner": format!("0x{}", hex::encode([0u8; 20])),
-                "difficulty": "0x0",
-                "totalDifficulty": "0x0",
-                "nonce": "0x0000000000000000",
-                "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
-                "receiptsRoot": format!("0x{}", hex::encode([0u8; 32])),
-                "transactionsRoot": format!("0x{}", hex::encode([0u8; 32])),
-                "stateRoot": format!("0x{}", hex::encode([0u8; 32])),
-                "size": "0x0",
-                "extraData": "0x",
-                "mixHash": format!("0x{}", hex::encode([0u8; 32])),
-                "baseFeePerGas": format!("0x{:x}", state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee),
-            }))
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getBlockByHash
     module
-        .register_async_method("eth_getBlockByHash", |_params, _state, _ctx| async move {
-            // Blocks are not stored in RPC state; full node stores them on disk.
+        .register_async_method("eth_getBlockByHash", |params, state, _ctx| async move {
+            let (block_hash_str, full_txs): (String, Option<bool>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let hash = block_hash_str.parse::<alloy_primitives::B256>()
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let cp_hash = call_primitives::Hash::from(hash.0);
+
+            if let Some(block) = state.load_block_by_hash(&cp_hash) {
+                return Ok::<_, ErrorObjectOwned>(block_to_json(&block, &state, full_txs.unwrap_or(false)));
+            }
+
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -494,20 +449,170 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let tx_hash_str: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
             let tx_hash = tx_hash_str.parse::<alloy_primitives::B256>()
                 .map_err(|e| invalid_params(e.to_string()))?;
+            let cp_hash = call_primitives::TxHash::from(tx_hash.0);
 
             // Try to find receipt (transaction may have been executed)
-            if let Some(receipt) = state.get_receipt(&tx_hash) {
+            if let Some(receipt) = state.get_receipt(&cp_hash) {
+                let block_number = receipt.block_number;
+                if let Some(block) = state.load_block(block_number) {
+                    // Search EVM txs
+                    for (idx, raw) in block.evm_txs.iter().enumerate() {
+                        let raw_hash = call_crypto::keccak256(raw);
+                        if raw_hash == cp_hash {
+                            if let Some(json) = evm_raw_tx_to_json(raw, receipt.block_hash, block_number, idx as u64) {
+                                return Ok::<_, ErrorObjectOwned>(json);
+                            }
+                        }
+                    }
+                    // Search protocol txs
+                    let evm_offset = block.evm_txs.len() as u64;
+                    for (idx, tx) in block.protocol_txs.iter().enumerate() {
+                        let proto_hash = call_primitives::TxHash::from(tx.compute_tx_hash());
+                        if proto_hash == cp_hash {
+                            return Ok::<_, ErrorObjectOwned>(protocol_tx_to_json(tx, receipt.block_hash, block_number, evm_offset + idx as u64));
+                        }
+                    }
+                }
+                // Fallback if block not available: return receipt-based minimal info
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!({
                     "hash": tx_hash_str,
+                    "blockHash": format!("0x{}", hex::encode(receipt.block_hash.as_slice())),
                     "blockNumber": format!("0x{:x}", receipt.block_number),
+                    "transactionIndex": format!("0x{:x}", receipt.transaction_index),
                     "status": if matches!(receipt.status, call_primitives::ExecutionStatus::Success) { "0x1" } else { "0x0" },
                     "gasUsed": format!("0x{:x}", receipt.gas_used),
                     "from": format!("{:?}", receipt.gas_payer),
+                    "to": receipt.to.map(|a| format!("{:?}", a)).unwrap_or_else(|| "0x".to_string()),
                 }));
             }
 
             // Not found in receipts — may still be pending in mempool
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getBlockReceipts
+    module
+        .register_async_method("eth_getBlockReceipts", |params, state, _ctx| async move {
+            let block_tag: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let current = state.get_current_block();
+            let block_number = parse_block_tag(&block_tag, current);
+
+            let receipts = state.get_receipts_by_block(block_number);
+            let json_receipts: Vec<serde_json::Value> = receipts
+                .iter()
+                .map(|r| receipt_to_json(r))
+                .collect();
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Array(json_receipts))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getBlockTransactionCountByHash
+    module
+        .register_async_method("eth_getBlockTransactionCountByHash", |params, state, _ctx| async move {
+            let block_hash_str: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let hash = block_hash_str.parse::<alloy_primitives::B256>()
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let cp_hash = call_primitives::Hash::from(hash.0);
+
+            if let Some(block) = state.load_block_by_hash(&cp_hash) {
+                let count = block.evm_txs.len() + block.protocol_txs.len();
+                return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(format!("0x{:x}", count)));
+            }
+            Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getBlockTransactionCountByNumber
+    module
+        .register_async_method("eth_getBlockTransactionCountByNumber", |params, state, _ctx| async move {
+            let block_tag: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let current = state.get_current_block();
+            let block_number = parse_block_tag(&block_tag, current);
+
+            if let Some(block) = state.load_block(block_number) {
+                let count = block.evm_txs.len() + block.protocol_txs.len();
+                return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(format!("0x{:x}", count)));
+            }
+            Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getTransactionByBlockHashAndIndex
+    module
+        .register_async_method("eth_getTransactionByBlockHashAndIndex", |params, state, _ctx| async move {
+            let (block_hash_str, idx_str): (String, String) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let hash = block_hash_str.parse::<alloy_primitives::B256>()
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let cp_hash = call_primitives::Hash::from(hash.0);
+            let idx = u64::from_str_radix(idx_str.trim_start_matches("0x"), 16)
+                .map_err(|e| invalid_params(e.to_string()))?;
+
+            if let Some(block) = state.load_block_by_hash(&cp_hash) {
+                let evm_len = block.evm_txs.len() as u64;
+                if idx < evm_len {
+                    let raw = &block.evm_txs[idx as usize];
+                    if let Some(json) = evm_raw_tx_to_json(raw, cp_hash, block.header.height, idx) {
+                        return Ok::<_, ErrorObjectOwned>(json);
+                    }
+                } else {
+                    let p_idx = (idx - evm_len) as usize;
+                    if let Some(tx) = block.protocol_txs.get(p_idx) {
+                        return Ok::<_, ErrorObjectOwned>(protocol_tx_to_json(tx, cp_hash, block.header.height, idx));
+                    }
+                }
+            }
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_getTransactionByBlockNumberAndIndex
+    module
+        .register_async_method("eth_getTransactionByBlockNumberAndIndex", |params, state, _ctx| async move {
+            let (block_tag, idx_str): (String, String) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let current = state.get_current_block();
+            let block_number = parse_block_tag(&block_tag, current);
+            let idx = u64::from_str_radix(idx_str.trim_start_matches("0x"), 16)
+                .map_err(|e| invalid_params(e.to_string()))?;
+
+            if let Some(block) = state.load_block(block_number) {
+                let block_hash = block.header.hash();
+                let evm_len = block.evm_txs.len() as u64;
+                if idx < evm_len {
+                    let raw = &block.evm_txs[idx as usize];
+                    if let Some(json) = evm_raw_tx_to_json(raw, block_hash, block_number, idx) {
+                        return Ok::<_, ErrorObjectOwned>(json);
+                    }
+                } else {
+                    let p_idx = (idx - evm_len) as usize;
+                    if let Some(tx) = block.protocol_txs.get(p_idx) {
+                        return Ok::<_, ErrorObjectOwned>(protocol_tx_to_json(tx, block_hash, block_number, idx));
+                    }
+                }
+            }
+            Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_sendTransaction — not supported
+    module
+        .register_async_method("eth_sendTransaction", |_params, _state, _ctx| async move {
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "eth_sendTransaction is not supported; use eth_sendRawTransaction",
+                None::<&str>,
+            ))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_createAccessList — not supported
+    module
+        .register_async_method("eth_createAccessList", |_params, _state, _ctx| async move {
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "eth_createAccessList is not supported",
+                None::<&str>,
+            ))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -627,27 +732,217 @@ pub(crate) fn receipt_to_json(receipt: &call_protocol::ProtocolReceipt) -> serde
     let logs: Vec<serde_json::Value> = receipt
         .logs
         .iter()
-        .map(|log| {
+        .enumerate()
+        .map(|(log_idx, log)| {
             serde_json::json!({
                 "address": format!("{:?}", log.address),
                 "topics": log.topics.iter().map(|t| format!("{:?}", t)).collect::<Vec<_>>(),
                 "data": format!("0x{}", hex::encode(&log.data)),
+                "blockNumber": format!("0x{:x}", receipt.block_number),
+                "blockHash": format!("0x{}", hex::encode(receipt.block_hash.as_slice())),
+                "transactionHash": format!("{:?}", receipt.tx_hash),
+                "transactionIndex": format!("0x{:x}", receipt.transaction_index),
+                "logIndex": format!("0x{:x}", log_idx),
+                "removed": false,
             })
         })
         .collect();
     let mut value = serde_json::json!({
         "transactionHash": format!("{:?}", receipt.tx_hash),
-        "status": status,
+        "transactionIndex": format!("0x{:x}", receipt.transaction_index),
+        "blockHash": format!("0x{}", hex::encode(receipt.block_hash.as_slice())),
+        "blockNumber": if receipt.block_number == 0 { serde_json::Value::Null } else { serde_json::Value::String(format!("0x{:x}", receipt.block_number)) },
+        "from": format!("{:?}", receipt.gas_payer),
+        "to": receipt.to.map(|a| format!("{:?}", a)).unwrap_or_else(|| "0x".to_string()),
+        "contractAddress": receipt.contract_address.map(|a| format!("{:?}", a)),
+        "cumulativeGasUsed": format!("0x{:x}", receipt.cumulative_gas_used),
         "gasUsed": format!("0x{:x}", receipt.gas_used),
+        "effectiveGasPrice": format!("0x{:x}", receipt.effective_gas_price),
+        "status": status,
+        "logsBloom": format!("0x{}", hex::encode(&receipt.logs_bloom)),
+        "logs": logs,
         "gasPayer": format!("{:?}", receipt.gas_payer),
         "feeCurrency": format!("{:?}", receipt.fee_currency),
         "feeAmount": format!("0x{:x}", receipt.fee_amount),
-        "blockNumber": if receipt.block_number == 0 { "pending".to_string() } else { format!("0x{:x}", receipt.block_number) },
-        "pending": receipt.block_number == 0,
-        "logs": logs,
     });
     if let Some(reason) = revert_reason {
         value["revertReason"] = serde_json::Value::String(reason.to_string());
     }
     value
+}
+
+/// Parse an Ethereum block tag (latest, pending, hex number, decimal number).
+fn parse_block_tag(tag: &str, current: u64) -> u64 {
+    match tag {
+        "latest" | "pending" | "safe" | "finalized" => current,
+        hex if hex.starts_with("0x") => u64::from_str_radix(&hex[2..], 16).unwrap_or(current),
+        num => num.parse::<u64>().unwrap_or(current),
+    }
+}
+
+/// Build a JSON representation of a block for eth_getBlockByNumber/Hash.
+fn block_to_json(
+    block: &call_consensus::Block,
+    state: &RpcState,
+    full_txs: bool,
+) -> serde_json::Value {
+    let height = block.header.height;
+    let block_hash = block.header.hash();
+    let receipts = state.get_receipts_by_block(height);
+    let gas_used: u64 = receipts.iter().map(|r| r.gas_used).sum();
+    let tx_count = block.evm_txs.len() + block.protocol_txs.len();
+
+    let mut transactions: Vec<serde_json::Value> = Vec::with_capacity(tx_count);
+
+    // EVM transactions
+    for (idx, raw) in block.evm_txs.iter().enumerate() {
+        let tx_hash = call_crypto::keccak256(raw);
+        if full_txs {
+            if let Some(json) = evm_raw_tx_to_json(raw, block_hash, height, idx as u64) {
+                transactions.push(json);
+            } else {
+                transactions.push(serde_json::json!({
+                    "hash": format!("0x{}", hex::encode(tx_hash.as_slice())),
+                    "blockHash": format!("0x{}", hex::encode(block_hash.as_slice())),
+                    "blockNumber": format!("0x{:x}", height),
+                    "transactionIndex": format!("0x{:x}", idx),
+                }));
+            }
+        } else {
+            transactions.push(serde_json::Value::String(format!(
+                "0x{}",
+                hex::encode(tx_hash.as_slice())
+            )));
+        }
+    }
+
+    // Protocol transactions
+    let evm_offset = block.evm_txs.len() as u64;
+    for (idx, tx) in block.protocol_txs.iter().enumerate() {
+        let tx_hash = call_primitives::TxHash::from(tx.compute_tx_hash());
+        if full_txs {
+            transactions.push(protocol_tx_to_json(tx, block_hash, height, evm_offset + idx as u64));
+        } else {
+            transactions.push(serde_json::Value::String(format!(
+                "0x{}",
+                hex::encode(tx_hash.as_slice())
+            )));
+        }
+    }
+
+    // Approximate size: serialized JSON of the block struct
+    let size = serde_json::to_vec(block).map(|v| v.len()).unwrap_or(0);
+
+    serde_json::json!({
+        "number": format!("0x{:x}", height),
+        "hash": format!("0x{}", hex::encode(block_hash.as_slice())),
+        "parentHash": format!("0x{}", hex::encode(block.header.parent_hash.as_slice())),
+        "timestamp": format!("0x{:x}", block.header.timestamp_millis / 1000),
+        "gasLimit": "0x1c9c380",
+        "gasUsed": format!("0x{:x}", gas_used),
+        "transactions": transactions,
+        "logsBloom": format!("0x{}", hex::encode([0u8; 256])),
+        "miner": format!("0x{}", hex::encode([0u8; 20])),
+        "difficulty": "0x0",
+        "totalDifficulty": "0x0",
+        "nonce": "0x0000000000000000",
+        "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
+        "receiptsRoot": format!("0x{}", hex::encode(block.header.receipt_root.as_slice())),
+        "transactionsRoot": format!("0x{}", hex::encode(block.header.payment_root.as_slice())),
+        "stateRoot": format!("0x{}", hex::encode(block.header.evm_state_root.as_slice())),
+        "size": format!("0x{:x}", size),
+        "extraData": "0x",
+        "mixHash": format!("0x{}", hex::encode([0u8; 32])),
+        "baseFeePerGas": format!("0x{:x}", state.fee_params.read().map(|p| p.base_fee).unwrap_or(0)),
+    })
+}
+
+/// Decode raw EVM tx bytes into an Ethereum JSON-RPC transaction object.
+fn evm_raw_tx_to_json(
+    raw: &[u8],
+    block_hash: call_primitives::Hash,
+    block_number: u64,
+    tx_index: u64,
+) -> Option<serde_json::Value> {
+    use alloy_consensus::{TxEnvelope, Transaction as _};
+    use alloy_rlp::Decodable;
+
+    let envelope = TxEnvelope::decode(&mut &raw[..]).ok()?;
+    let tx_hash = call_crypto::keccak256(raw);
+    let (nonce, gas_limit, gas_price, to, value, data, chain_id, from) = match &envelope {
+        TxEnvelope::Legacy(signed) => {
+            let tx = signed.tx();
+            let from = signed.recover_signer().ok()?;
+            (
+                tx.nonce(),
+                tx.gas_limit(),
+                tx.gas_price().unwrap_or(0),
+                tx.to(),
+                tx.value(),
+                tx.input().clone(),
+                tx.chain_id(),
+                from,
+            )
+        }
+        TxEnvelope::Eip1559(signed) => {
+            let tx = signed.tx();
+            let from = signed.recover_signer().ok()?;
+            (
+                tx.nonce(),
+                tx.gas_limit(),
+                tx.max_fee_per_gas(),
+                tx.to(),
+                tx.value(),
+                tx.input().clone(),
+                tx.chain_id(),
+                from,
+            )
+        }
+        _ => return None,
+    };
+
+    Some(serde_json::json!({
+        "hash": format!("0x{}", hex::encode(tx_hash.as_slice())),
+        "nonce": format!("0x{:x}", nonce),
+        "blockHash": format!("0x{}", hex::encode(block_hash.as_slice())),
+        "blockNumber": format!("0x{:x}", block_number),
+        "transactionIndex": format!("0x{:x}", tx_index),
+        "from": format!("{:?}", from),
+        "to": to.map(|a| format!("{:?}", a)),
+        "gas": format!("0x{:x}", gas_limit),
+        "gasPrice": format!("0x{:x}", gas_price),
+        "value": format!("0x{:x}", value),
+        "input": format!("0x{}", hex::encode(&data)),
+        "chainId": chain_id.map(|c| format!("0x{:x}", c)),
+        "v": "0x0",
+        "r": "0x0",
+        "s": "0x0",
+    }))
+}
+
+/// Build an Ethereum JSON-RPC transaction object for a protocol transaction.
+fn protocol_tx_to_json(
+    tx: &call_protocol::transaction::ProtocolTransaction,
+    block_hash: call_primitives::Hash,
+    block_number: u64,
+    tx_index: u64,
+) -> serde_json::Value {
+    let tx_hash = call_primitives::TxHash::from(tx.compute_tx_hash());
+    serde_json::json!({
+        "hash": format!("0x{}", hex::encode(tx_hash.as_slice())),
+        "nonce": format!("0x{:x}", tx.nonce),
+        "blockHash": format!("0x{}", hex::encode(block_hash.as_slice())),
+        "blockNumber": format!("0x{:x}", block_number),
+        "transactionIndex": format!("0x{:x}", tx_index),
+        "from": format!("{:?}", tx.sender),
+        "to": serde_json::Value::Null,
+        "gas": format!("0x{:x}", tx.gas_limit),
+        "gasPrice": format!("0x{:x}", tx.max_fee),
+        "value": "0x0",
+        "input": "0x",
+        "chainId": serde_json::Value::Null,
+        "v": "0x0",
+        "r": "0x0",
+        "s": "0x0",
+    })
 }

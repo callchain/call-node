@@ -377,12 +377,49 @@ impl Block {
                     }
                 }
 
+                let tx_to = tx.to;
+                let tx_gas_price = tx.gas_price;
                 if let Ok(exec_result) = executor.execute_tx(tx, state.evm_state) {
                     if gas_tracker.add_gas(exec_result.gas_used).is_err() {
                         continue;
                     }
                     result.evm_tx_count += 1;
                     result.evm_gas_used += exec_result.gas_used;
+
+                    // Compute contract address for CREATE transactions
+                    let contract_address = if tx_to.is_none() {
+                        Some(call_evm::derive_create_address(caller, nonce))
+                    } else {
+                        None
+                    };
+
+                    // Convert revm logs to protocol LogEntry
+                    let logs: Vec<call_protocol::LogEntry> = exec_result
+                        .logs
+                        .iter()
+                        .map(|log| call_protocol::LogEntry {
+                            address: log.address,
+                            topics: log
+                                .data
+                                .topics()
+                                .iter()
+                                .map(|t| call_primitives::Hash::from(t.0))
+                                .collect(),
+                            data: log.data.data.to_vec(),
+                        })
+                        .collect();
+
+                    let tx_hash = keccak256(raw_tx);
+                    result.evm_tx_results.push(EvmTxResult {
+                        tx_hash,
+                        gas_used: exec_result.gas_used,
+                        status: exec_result.success,
+                        caller,
+                        to: tx_to,
+                        contract_address,
+                        logs,
+                        gas_price: tx_gas_price,
+                    });
                 }
                 // Nonce consumed regardless of execution result (same as Ethereum)
             }
@@ -832,6 +869,19 @@ pub struct TransactionResult {
     pub agent_events: Vec<call_agent::AgentEvent>,
 }
 
+/// Result of executing a single EVM transaction
+#[derive(Debug, Clone)]
+pub struct EvmTxResult {
+    pub tx_hash: TxHash,
+    pub gas_used: u64,
+    pub status: bool,
+    pub caller: Address,
+    pub to: Option<Address>,
+    pub contract_address: Option<Address>,
+    pub logs: Vec<call_protocol::LogEntry>,
+    pub gas_price: u128,
+}
+
 /// Result of executing all transactions in a block
 #[derive(Debug, Default, Clone)]
 pub struct BlockExecutionResult {
@@ -854,6 +904,8 @@ pub struct BlockExecutionResult {
     pub pending_rollback: Option<RollbackPlan>,
     /// Priority fees paid by each protocol tx (for fee history percentile computation)
     pub protocol_priority_fees: Vec<u128>,
+    /// Per-EVM-tx results (for receipt generation)
+    pub evm_tx_results: Vec<EvmTxResult>,
 }
 
 impl BlockExecutionResult {

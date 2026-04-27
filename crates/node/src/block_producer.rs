@@ -8,7 +8,7 @@ use call_consensus::{Block, SimplexConsensus, SystemTx, SystemTxKind};
 use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
 use call_oracle::ORACLE_UPDATE_INTERVAL;
-use call_primitives::Address;
+use call_primitives::{Address, FeeCurrency};
 use call_protocol::{ProtocolReceipt, transaction::ProtocolTransaction};
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
@@ -320,13 +320,57 @@ pub(crate) async fn block_production_loop(
             }
         }
 
-        // 11. Generate and store receipts for protocol transactions
+        // 11. Generate and store receipts for EVM + protocol transactions
+        let block_hash = block.header.hash();
+        let mut cumulative_gas: u64 = 0;
+        let mut tx_index: u64 = 0;
+
+        for evm in &result.evm_tx_results {
+            let fee_amount = evm.gas_used as u128 * evm.gas_price;
+            let status = if evm.status {
+                call_primitives::ExecutionStatus::Success
+            } else {
+                call_primitives::ExecutionStatus::Reverted {
+                    reason: "evm execution failed".into(),
+                }
+            };
+            cumulative_gas += evm.gas_used;
+            let receipt = ProtocolReceipt {
+                tx_hash: evm.tx_hash,
+                status,
+                gas_used: evm.gas_used,
+                gas_payer: evm.caller,
+                fee_currency: FeeCurrency::Call,
+                fee_amount,
+                block_number: height,
+                block_hash,
+                transaction_index: tx_index,
+                to: evm.to,
+                contract_address: evm.contract_address,
+                cumulative_gas_used: cumulative_gas,
+                effective_gas_price: evm.gas_price,
+                logs_bloom: vec![],
+                instruction_results: vec![],
+                logs: evm.logs.clone(),
+                memos: vec![],
+                state_changes: vec![],
+            };
+            state.store_receipt(evm.tx_hash, receipt);
+            tx_index += 1;
+        }
+
         for tr in &result.transaction_results {
             let tx_hash = tr.tx_hash;
             let Some(tx) = block.protocol_txs.iter().find(|t| {
                 call_primitives::TxHash::from(t.compute_tx_hash()) == tx_hash
             }) else { continue; };
 
+            let effective_gas_price = if tr.gas_used > 0 {
+                tr.fee_amount / tr.gas_used as u128
+            } else {
+                0
+            };
+            cumulative_gas += tr.gas_used;
             let receipt = ProtocolReceipt {
                 tx_hash,
                 status: tr.status.clone(),
@@ -335,12 +379,20 @@ pub(crate) async fn block_production_loop(
                 fee_currency: tx.fee_currency,
                 fee_amount: tr.fee_amount,
                 block_number: height,
+                block_hash,
+                transaction_index: tx_index,
+                to: None,
+                contract_address: None,
+                cumulative_gas_used: cumulative_gas,
+                effective_gas_price,
+                logs_bloom: vec![],
                 instruction_results: vec![],
                 logs: vec![],
                 memos: vec![],
                 state_changes: vec![],
             };
             state.store_receipt(tx_hash, receipt);
+            tx_index += 1;
         }
 
         // 12. Persist block to disk
