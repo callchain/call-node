@@ -1053,6 +1053,30 @@ impl CallNode {
                                 block.finalize(&result);
                                 let _ = persist_block(&data_dir, height, &block);
 
+                                // Push fee history entry for light-client sync path
+                                {
+                                    let fee_params = state.fee_params.read().unwrap();
+                                    let base_fee = fee_params.base_fee;
+                                    let max_gas = fee_params.max_gas_per_block.max(1);
+                                    drop(fee_params);
+                                    let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+                                    let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
+                                    let priority_fee_rewards = result.priority_fee_percentiles(
+                                        &[0.0, 10.0, 50.0, 90.0, 100.0]
+                                    );
+                                    let entry = call_rpc::handlers::BlockFeeEntry {
+                                        base_fee,
+                                        gas_used_ratio,
+                                        priority_fee_rewards,
+                                    };
+                                    if let Ok(mut history) = state.fee_history.write() {
+                                        history.push_back((height, entry));
+                                        while history.len() > 1024 {
+                                            history.pop_front();
+                                        }
+                                    }
+                                }
+
                                 if let Ok(mut c) = consensus.write() {
                                     let _ = c.commit_block(&block, &result);
                                 }

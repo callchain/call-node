@@ -660,6 +660,7 @@ impl Block {
                     }
                 }
                 result.protocol_tx_count += 1;
+                result.protocol_priority_fees.push(priority_fee);
                 result.transaction_results.push(TransactionResult {
                     tx_hash: tx.compute_tx_hash().into(),
                     status: ExecutionStatus::Reverted { reason: e.to_string() },
@@ -671,6 +672,7 @@ impl Block {
                 tracing::warn!(error = %e, sender = ?tx.sender, nonce = tx.nonce, "block: tx execution failed, included as reverted");
             } else {
                 result.protocol_tx_count += 1;
+                result.protocol_priority_fees.push(priority_fee);
                 result.transaction_results.push(TransactionResult {
                     tx_hash: tx.compute_tx_hash().into(),
                     status: ExecutionStatus::Success,
@@ -850,12 +852,34 @@ pub struct BlockExecutionResult {
     pub agent_events: Vec<call_agent::AgentEvent>,
     /// Emergency rollback plan produced during block execution (quorum reached)
     pub pending_rollback: Option<RollbackPlan>,
+    /// Priority fees paid by each protocol tx (for fee history percentile computation)
+    pub protocol_priority_fees: Vec<u128>,
 }
 
 impl BlockExecutionResult {
     /// Total transactions processed
     pub fn total_tx_count(&self) -> usize {
         self.evm_tx_count + self.protocol_tx_count + self.bridge_op_count + self.system_tx_count
+    }
+
+    /// Compute priority fee percentiles for fee history.
+    ///
+    /// Returns a Vec of priority fees at the requested percentiles.
+    /// If no protocol transactions exist, returns a Vec filled with the minimum.
+    pub fn priority_fee_percentiles(&self, percentiles: &[f64]) -> Vec<u128> {
+        if self.protocol_priority_fees.is_empty() {
+            return vec![call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS; percentiles.len()];
+        }
+        let mut sorted = self.protocol_priority_fees.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        percentiles
+            .iter()
+            .map(|p| {
+                let idx = ((n - 1) as f64 * p.min(100.0).max(0.0) / 100.0).round() as usize;
+                sorted[idx.min(n - 1)]
+            })
+            .collect()
     }
 }
 

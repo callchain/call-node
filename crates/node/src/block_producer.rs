@@ -270,10 +270,13 @@ pub(crate) async fn block_production_loop(
             drop(fee_params);
             let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
             let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
+            let priority_fee_rewards = result.priority_fee_percentiles(
+                &[0.0, 10.0, 50.0, 90.0, 100.0]
+            );
             let entry = call_rpc::handlers::BlockFeeEntry {
                 base_fee,
                 gas_used_ratio,
-                priority_fee_rewards: vec![1],
+                priority_fee_rewards,
             };
             if let Ok(mut history) = state.fee_history.write() {
                 history.push_back((height, entry));
