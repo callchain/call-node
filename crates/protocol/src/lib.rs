@@ -13,6 +13,9 @@ pub mod receipts;
 pub mod issuer;
 pub mod economics;
 
+// Transaction submodules
+pub mod tx;
+
 pub use registry::*;
 pub use account::*;
 pub use compliance::*;
