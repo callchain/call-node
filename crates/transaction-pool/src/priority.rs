@@ -49,7 +49,7 @@ impl Default for PoolLimits {
             max_evm_txs: 100_000,
             max_agent_txs: 25_000,
             max_bridges: 1_000,
-            max_per_address: 256,
+            max_per_address: 2000,
             lifetime_blocks: 72,
         }
     }

@@ -211,7 +211,7 @@ impl RpcState {
             fee_params: RwLock::new(FeeParams::default()),
             consensus_params: RwLock::new(ConsensusParams::default()),
             mempool,
-            mempool_defense: RwLock::new(MempoolDefense::new(1000, 1000, 10000, 100)),
+            mempool_defense: RwLock::new(MempoolDefense::new(1000, 1000, 10000, 2000)),
             chain_id,
             subscriptions: SubscriptionManager::new(),
             governance: RwLock::new(GovernanceManager::new()),
