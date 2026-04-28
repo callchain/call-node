@@ -16,7 +16,7 @@ import threading
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _STATE_FILE = os.path.join(_TESTS_DIR, ".nonce_state.json")
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 
 def _load_state():
@@ -29,16 +29,17 @@ def _load_state():
     return {}
 
 
-def _save_state(state):
-    with open(_STATE_FILE, "w") as f:
-        json.dump(state, f)
+def _save_state():
+    with _LOCK:
+        payload = {"protocol": _NONCE_COUNTERS, "evm": _EVM_NONCE_COUNTERS}
+        with open(_STATE_FILE, "w") as f:
+            json.dump(payload, f)
 
 
 # Load existing state (shared across test files in the same devnet run)
-_NONCE_COUNTERS = _load_state()
-
-# Optional default RPC node used to query actual on-chain nonces
-_DEFAULT_NODE = None
+_state = _load_state()
+_NONCE_COUNTERS = _state.get("protocol", {})
+_EVM_NONCE_COUNTERS = _state.get("evm", {})
 
 
 def set_default_node(node):
@@ -57,7 +58,7 @@ def sync_nonce(address, node=None):
             actual = target.get_nonce(key)
             with _LOCK:
                 _NONCE_COUNTERS[key] = actual
-                _save_state(_NONCE_COUNTERS)
+                _save_state()
         except Exception:
             pass
 
@@ -85,13 +86,11 @@ def _next_nonce(address=None, node=None):
 
         nonce = _NONCE_COUNTERS[key]
         _NONCE_COUNTERS[key] = nonce + 1
-        _save_state(_NONCE_COUNTERS)
+        _save_state()
         return nonce
 
 
 # ── EVM nonce tracking (separate from protocol nonces) ───────────────
-
-_EVM_NONCE_COUNTERS = {}
 
 
 def sync_evm_nonce(address, node=None):
@@ -126,7 +125,54 @@ def _next_evm_nonce(address=None, node=None):
 
         nonce = _EVM_NONCE_COUNTERS[key]
         _EVM_NONCE_COUNTERS[key] = nonce + 1
+        _save_state()
         return nonce
+
+
+def reserve_evm_nonces(address, count):
+    """Atomically reserve a contiguous block of `count` EVM nonces.
+
+    Returns the starting nonce.  The caller must use these nonces
+    in strictly increasing order so that submission order matches
+    sequence order.
+
+    Before reserving, re-syncs with the node's pending nonce to avoid
+    drift when previous transactions failed and never entered the mempool.
+    """
+    global _EVM_NONCE_COUNTERS
+    key = address.lower() if address else "__global__"
+    with _LOCK:
+        target = _DEFAULT_NODE
+        if target is not None:
+            try:
+                actual = target.get_evm_transaction_count(key)
+                stored = _EVM_NONCE_COUNTERS.get(key, actual)
+                # Use the higher of stored or actual to avoid reusing nonces
+                # that may already be in-flight.
+                _EVM_NONCE_COUNTERS[key] = max(stored, actual)
+            except Exception:
+                if key not in _EVM_NONCE_COUNTERS:
+                    _EVM_NONCE_COUNTERS[key] = 0
+        else:
+            if key not in _EVM_NONCE_COUNTERS:
+                _EVM_NONCE_COUNTERS[key] = 0
+        start = _EVM_NONCE_COUNTERS[key]
+        _EVM_NONCE_COUNTERS[key] = start + count
+        _save_state()
+        return start
+
+
+def set_evm_nonce(address, nonce):
+    """Force-set the local EVM nonce counter for *address*.
+
+    Used after parsing the expected nonce from a failed submission so
+    the next reservation / allocation starts from the correct value.
+    """
+    global _EVM_NONCE_COUNTERS
+    key = address.lower() if address else "__global__"
+    with _LOCK:
+        _EVM_NONCE_COUNTERS[key] = nonce
+        _save_state()
 
 
 def reset_state():
