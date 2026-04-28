@@ -64,7 +64,7 @@ Beyond the policy-level checks, each `(address, policy_id)` pair can have a gran
 | `Flagged` | Informational — policy check still applies |
 | `Restricted` | **Hard block** — transaction fails regardless of policy check |
 
-`Instruction::UpdateCompliance { asset_id, target, status }` allows the asset issuer to set this status for any address under their asset's policy. When `status == Restricted`, `check_compliance_by_policy_id` returns `Err(ProtocolError::Compliance(...))` immediately.
+The Compliance precompile (`0x205`) `updateCompliance(uint64,address,uint8)` allows the asset issuer to set this status for any address under their asset's policy. When `status == Restricted`, `check_compliance_by_policy_id` returns `Err(ProtocolError::Compliance(...))` immediately.
 
 ## Precompile Alternative
 
@@ -117,9 +117,9 @@ Non-value instructions (`Approve`, `OracleSubmit`, `Governance*`, `Agent*`, `Upd
 |---|---|---|
 | `call_compliancePolicy(asset_id)` | query | Returns the `compliance_policy` u8 for an asset |
 
-There is no direct RPC mutation endpoint for compliance state. All changes flow through `ProtocolTransaction` instructions:
-- `UpdateCompliance` — issuer sets address status
-- `IssuerAction::UpdatePolicy` — issuer changes the asset's policy
+There is no direct RPC mutation endpoint for compliance state. All changes flow through EVM precompile calls:
+- `updateCompliance(uint64,address,uint8)` on `0x205` — issuer sets address status
+- Asset policy updates are done via the Asset precompile (`0x201`)
 
 ---
 
@@ -159,11 +159,11 @@ There is no direct RPC mutation endpoint for compliance state. All changes flow 
 
 #### No Dedicated Compliance RPC Mutations
 
-**Problem**: There are no direct RPC endpoints to add/remove addresses from the blacklist, KYC list, or whitelist. The only way to modify these sets is via `Instruction::UpdateCompliance` submitted as a `ProtocolTransaction`.
+**Problem**: There are no direct RPC endpoints to add/remove addresses from the blacklist, KYC list, or whitelist. The only way to modify these sets is via the Compliance precompile (`0x205`) `updateCompliance` function, submitted as a standard EVM transaction.
 
-**Impact**: Operators must construct and sign a full `ProtocolTransaction` to update compliance state.
+**Impact**: Operators must construct and sign an EVM transaction calling the Compliance precompile to update compliance state.
 
-**Status**: By design — compliance mutations go through consensus to ensure auditability and replay protection. The `UpdateCompliance` instruction is the intended path.
+**Status**: By design — compliance mutations go through consensus to ensure auditability and replay protection. The `updateCompliance` precompile call is the intended path.
 
 #### Frozen Addresses (IssuerState) Are Separate
 

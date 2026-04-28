@@ -9,11 +9,11 @@
 
 Provide a secure, deterministic, and economically sound transaction execution engine that:
 
-1. Supports both **native protocol operations** (`ProtocolTransaction`) and **EVM transactions** in the same block.
-2. Exposes all protocol features via **EVM precompiles** (`0x101`–`0x209`) so MetaMask, Solidity contracts, and standard Ethereum tooling can interact with the chain without ProtocolTransaction.
-3. Guarantees **atomic execution** — either all instructions in a transaction succeed, or none of them are committed.
-4. Enforces **replay protection** via nonces and cryptographic signatures.
-5. Meters **gas consumption** per instruction and charges fees fairly.
+1. Uses **standard EVM transactions exclusively** — all protocol operations are invoked via precompile addresses (`0x101`–`0x209`).
+2. Exposes all protocol features to MetaMask, Solidity contracts, and standard Ethereum tooling without any custom transaction format.
+3. Guarantees **atomic execution** via revm's built-in revert semantics; precompile state mutations are also snapshotted for rollback.
+4. Enforces **replay protection** via standard EVM nonces and cryptographic signatures.
+5. Meters **gas consumption** per precompile call using standard EVM gas accounting.
 6. Manages **mempool admission** to prevent spam and DoS.
 
 ---
@@ -38,67 +38,48 @@ Provide a secure, deterministic, and economically sound transaction execution en
 
 ### Transaction Model
 
-`ProtocolTransaction` (`crates/protocol/src/transaction.rs`):
+All transactions are standard **EVM transactions** (`EvmTransaction`, RLP-encoded). Protocol operations are invoked by setting the `to` field to a precompile address (`0x101`–`0x209`) and encoding the function selector + arguments in the `data` field.
 
 | Field | Type | Purpose |
 |---|---|---|
-| `sender` | `Address` | Transaction originator |
-| `nonce` | `u64` | Replay protection sequence number |
-| `instructions` | `Vec<Instruction>` | Ordered list of protocol operations |
-| `gas_config` | `GasConfig` | Fee payment strategy (SelfPay / Sponsor) |
-| `fee_currency` | `FeeCurrency` | CALL (asset_id=0) or stablecoin |
+| `nonce` | `u64` | Standard EVM replay protection sequence number |
+| `gas_price` / `max_fee_per_gas` | `u128` | EIP-1559 fee fields |
+| `max_priority_fee_per_gas` | `u128` | Priority tip per gas |
 | `gas_limit` | `u64` | Maximum gas units willing to consume |
-| `max_fee` | `u128` | Maximum total fee willing to pay |
-| `expires_at` | `u64` | Block height at which this transaction expires (0 = never) |
-| `auth` | `AuthScheme` | Cryptographic signature(s) |
+| `to` | `Option<Address>` | Precompile address (`0x101`–`0x209`) or contract address |
+| `value` | `u128` | Native CALL value transfer |
+| `data` | `Vec<u8>` | ABI-encoded function selector + arguments |
+| `v`, `r`, `s` | `u64`, `U256`, `U256` | Standard Ethereum ECDSA signature |
 
-**Auth schemes**:
+**Signature verification:** Standard secp256k1 ECDSA recovery. The signer address is recovered from `v/r/s` and must have sufficient balance to cover `gas_limit * max_fee_per_gas`.
 
-| Scheme | Verification |
-|---|---|
-| `SingleSig { signature }` | secp256k1 ECDSA recovery; recovered address must match `sender` |
-| `MultiSig { signatures }` | Each signature recovered; threshold read from `SmartAccountRegistry` (falls back to 2) |
-| `SessionKey { key, signature }` | Signature recovered; must match the delegated `key` address |
+### Precompile Operations
 
-The tx hash (`compute_tx_hash()`) covers all fields except `auth`, preventing signature malleability. It is domain-encoded with a gas_config variant byte (0=SelfPay, 1=AuthorizedSponsor, 2=PoolSponsor, 3=PerTxSponsor) to prevent cross-config replay.
+All protocol operations are exposed through EVM precompiles (`crates/precompiles/src/`):
 
-### Instruction Set
+| Address | Function | Gas (base) | Authorization |
+|---|---|---|---|
+| `0x201` | `transfer(uint64,address,uint128)` | 5,000 | Sender balance + compliance |
+| `0x201` | `batchTransfer(uint64,address[],uint128[])` | 5,000 per recipient | Sender balance + compliance |
+| `0x201` | `approve(uint64,address,uint128)` | 4,000 | Sender |
+| `0x201` | `transferFrom(uint64,address,address,uint128)` | 5,500 | Allowance holder |
+| `0x201` | `mint(uint64,address,uint128)` | 6,000 | Asset issuer only |
+| `0x201` | `burn(uint64,address,uint128)` | 5,000 | Asset issuer only |
+| `0x207` | `switchToEvm(uint64,address,uint128)` | 8,000 | Sender balance |
+| `0x207` | `switchToProtocol(uint64,address,uint128)` | 8,000 | Sender EVM balance |
+| `0x202` | `shieldedDeposit` / `shieldedWithdraw` | 50,000 | ZK proof + nullifier |
+| `0x202` | `shieldedTransfer` | 100,000 | ZK proof |
+| `0x101` | `submitPrice` | 3,000 | Registered validator |
+| `0x103` | `externalBridgeDeposit` | 10,000 | Validator signatures |
+| `0x103` | `externalBridgeWithdraw` | 8,000 | Sender balance |
+| `0x103` | `challengeBridgeDeposit` | 6,000 | Anyone |
+| `0x205` | `updateCompliance` | 6,000 | Asset issuer only |
+| `0x209` | `registerAgent` / `grantAgentBalance` / `revokeAgentBalance` | 6,000 | Sender / owner |
+| `0x203` | `submitProposal` / `vote` / `queue` / `execute` | 10,000–20,000 | CALL balance / validator |
+| `0x203` | `emergencyPause` / `emergencyResume` | 20,000 | Validator quorum |
+| `0x204` | `stake` / `unstake` / `claimUnbonded` | 20,000 | Sender balance |
 
-All protocol operations are `Instruction` variants (`crates/protocol/src/instructions/types.rs`):
-
-| Instruction | Gas (base) | Authorization |
-|---|---|---|
-| `Transfer` | 10,000 + memo bytes | Sender balance + compliance (sender + recipient) |
-| `BatchTransfer` | 1,000 per payment + memo | Sender balance + compliance |
-| `Approve` | 5,000 | Sender |
-| `TransferFrom` | 10,000 | Allowance holder + compliance (spender, from, to) |
-| `Mint` / `Burn` | 5,000 | Asset issuer only |
-| `BridgeDeposit` | 10,000 | Bridge proof validation (non-empty) |
-| `ShieldedDeposit` / `ShieldedWithdraw` | 20,000 | ZK proof + nullifier |
-| `ShieldedTransfer` | 50,000 | ZK proof + Merkle inclusion |
-| `OracleSubmit` | 50,000 | Registered validator |
-| `GovernanceSubmitProposal` | 50,000 | CALL balance >= deposit |
-| `GovernanceVote` | 10,000 | Registered validator or CALL holder |
-| `GovernanceQueue` / `GovernanceExecute` | 10,000 / 50,000 | Proposal state check |
-| `GovernanceEmergencyPause` / `EmergencyResume` | 100,000 | Validator quorum |
-| `ExternalBridgeDeposit` | 50,000 | Executed inline in `Block::execute` |
-| `ExternalBridgeWithdraw` | 50,000 | Executed inline in `Block::execute` |
-| `ChallengeBridgeDeposit` | 10,000 | Executed inline in `Block::execute` |
-| `UpdateCompliance` | 5,000 | Asset issuer only |
-| `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` | 5,000 | Delegated to agent executor |
-| `ValidatorStake` | 50,000 | Executed inline in `Block::execute` via validator state manager |
-| `ValidatorUnstake` | 25,000 | Executed inline in `Block::execute` via validator state manager |
-| `ValidatorClaimUnbonded` | 25,000 | Executed inline in `Block::execute` via validator state manager |
-| `RegisterAsset` | 50,000 | Asset registration authority |
-| `RegisterAgent` | 50,000 | Agent registration authority |
-| `GrantAgentBalance` / `RevokeAgentBalance` | 10,000 | Agent balance management |
-
-**Validator instructions** (`ValidatorStake`, `ValidatorUnstake`, `ValidatorClaimUnbonded`) are special-cased in `Block::execute` because they require direct access to `ValidatorStateManager` and `AccountState` for escrow transfers. They cannot be routed through the generic `execute_protocol_instructions()` path.
-
-**Multi-instruction gas discount**:
-- 1st instruction: 1.0x
-- 2nd–10th: 0.5x
-- 11th+: 0.25x
+All precompile functions use standard EVM gas accounting. A single EVM transaction can call multiple precompiles (e.g., via a Solidity contract) and revm's built-in revert mechanism ensures atomicity.
 
 ### Gas & Fee Model
 
@@ -140,43 +121,38 @@ Three sponsor modes, all wired through `SponsorRegistry`:
 
 ### Mempool (`transaction-pool`)
 
-Multi-pool structure with separate lanes:
+Single-pool structure for EVM transactions:
 
 | Pool | Type | Capacity | Sorting |
 |---|---|---|---|
-| `protocol_pool` | `ProtocolTransaction` | 50K | Priority score desc |
 | `evm_pool` | `EvmTransaction` | 100K | Gas price desc |
 | `pending_bridges` | `BridgeOp` | 1K | FIFO |
 
-**Admission checks** (`insert_protocol_tx`):
+**Admission checks** (`submit_evm_tx`):
 1. Deduplication — reject duplicate tx hash
-2. Sequential nonce — reject `nonce < expected_nonce`
-3. Instruction count — `instructions.len() <= 100`
-4. Memo size — `total_memo_bytes <= 1024`
-5. `PerTxSponsor` rejected at mempool until enabled
-6. Fee check — `priority_score >= min_fee` (score = `max_fee - gas_cost`)
-7. Gas limit — `gas_limit <= 10M`
-8. Per-address limit — max 256 txs per sender
-9. Capacity — evict lowest-score entry if full
+2. Sequential nonce — reject `nonce < current_evm_nonce`
+3. Balance check — `gas_limit * max_fee_per_gas <= sender_balance`
+4. Gas limit — `gas_limit <= 10M`
+5. Per-address limit — max 2000 pending txs per sender
+6. Capacity — evict lowest-gas-price entry if full
 
 **Maintenance**:
 - `prune_expired()` — remove txs older than 72 blocks
-- `confirm_transactions()` — remove included txs, increment expected nonces
-- `select_transactions()` — drain pools in priority order for block building
+- `confirm_transactions()` — remove included txs
+- `select_transactions()` — drain pool by gas price for block building
 
 ### Execution Pipeline
 
-1. **Block production** calls `select_transactions()` to get ordered txs
-2. For each `ProtocolTransaction` in the block:
-   - **Signature verification** — `tx.verify_signature_with_registry()` checks SingleSig/MultiSig/SessionKey
-   - Call `execute_protocol_instructions()`:
-     - Clone `BalanceState`, `ComplianceEngine`, and `ShieldedState` snapshots before execution
-     - Execute each instruction in order
-     - If any instruction fails, restore all snapshots (rollback)
-     - On success, deduct gas fee
-   - Validator instructions (`ValidatorStake`/`Unstake`/`ClaimUnbonded`) are executed inline via `execute_validator_instruction()` with direct access to `ValidatorStateManager`
-3. EVM transactions are executed via `revm` in the same block
-4. Block fees are allocated to validator reward pool / treasury / burn
+1. **Block production** calls `select_transactions()` to get ordered EVM txs by gas price
+2. For each `EvmTransaction` in the block:
+   - **Signature verification** — standard secp256k1 recovery from `v/r/s`
+   - **Balance check** — verify sender can cover `gas_limit * max_fee_per_gas`
+   - Execute via `revm`:
+     - If `to` is a precompile address (`0x101`–`0x209`), the corresponding Rust precompile function is called
+     - Precompile write operations snapshot `BalanceState`, `ComplianceEngine`, and `ShieldedState` before mutating
+     - If a precompile call fails, the snapshot is restored and revm reverts the transaction
+     - Standard EVM gas deduction applies
+3. Block fees are allocated to validator reward pool / treasury / burn
 
 ### Block Execution Result
 
@@ -188,7 +164,6 @@ pub struct TransactionResult {
     pub status: ExecutionStatus,        // Success | Reverted { reason }
     pub gas_used: u64,
     pub fee_amount: u128,
-    pub instruction_count: usize,
     pub agent_events: Vec<call_agent::AgentEvent>,
 }
 
@@ -200,7 +175,6 @@ pub struct BlockExecutionResult {
     pub receipt_root: Hash,
     pub state_root: Hash,
     pub evm_tx_count: usize,
-    pub protocol_tx_count: usize,
     pub bridge_op_count: usize,
     pub system_tx_count: usize,
     pub total_validator_reward: Balance,
@@ -211,8 +185,8 @@ pub struct BlockExecutionResult {
 ```
 
 **Key properties**:
-- `transaction_results` is a 1:1 mapping with protocol transactions in the block — each entry represents the full outcome of one tx (atomic success/failure).
-- On tx failure, all state snapshots (`BalanceState`, `EvmState`, `BridgeState`, `ValidatorState`) are restored, and a `TransactionResult` with `status = Reverted { reason }` is recorded.
+- `transaction_results` is a 1:1 mapping with EVM transactions in the block — each entry represents the full outcome of one tx (atomic success/failure).
+- On tx failure, revm automatically reverts all state. Precompile-level snapshots (`BalanceState`, `ComplianceEngine`, `ShieldedState`) are also restored.
 - `compute_receipt_root()` hashes `transaction_results` (tx hash + success flag + gas + fee) plus `agent_events` into the block header's `receipt_root`, making receipt availability verifiable.
 
 ### Receipts
@@ -296,7 +270,7 @@ All components are production-ready with no open gaps.
 
 | File | Role |
 |------|------|
-| `crates/protocol/src/transaction.rs` | `ProtocolTransaction`, `AuthScheme`, `GasConfig`, gas calculation, fee model, mempool admission |
+| `crates/protocol/src/transaction.rs` | `EvmTransaction` handling, gas calculation, fee model, mempool admission |
 | `crates/protocol/src/instructions/types.rs` | `Instruction` enum, all instruction variants |
 | `crates/protocol/src/instructions/exec.rs` | `execute_protocol_instructions()`, per-instruction execution logic |
 | `crates/protocol/src/tx/gas.rs` | Per-instruction gas cost table |

@@ -258,7 +258,7 @@ eth_getBlockByNumber(blockTag, fullTransactions)
 | `timestamp` | ✅ | |
 | `gasLimit` | ✅ (`0x1c9c380`) | |
 | `gasUsed` | ❌ | **固定 0x0** — 需要从 receipts 累加 |
-| `transactions` | ❌ | **始终 `[]`** — 需要从 block 的 evm_txs/protocol_txs 填充 |
+| `transactions` | ❌ | **始终 `[]`** — 需要从 block 的 evm_txs 填充 |
 | `logsBloom` | ✅ (`0x00...`) | |
 | `miner` | ✅ (`0x00...`) | |
 | `difficulty` | ✅ (`0x0`) | |
@@ -272,7 +272,7 @@ eth_getBlockByNumber(blockTag, fullTransactions)
 | `size` | ❌ | **固定 0x0** |
 
 **最关键缺失**：
-1. **`transactions` 数组** — `Block` 结构体已有 `evm_txs: Vec<Vec<u8>>` (RLP raw) 和 `protocol_txs: Vec<ProtocolTransaction>`。对于 `fullTransactions=false`，应返回 tx hash 列表；对于 `fullTransactions=true`，应将 EVM txs 反序列化为 Ethereum tx 对象
+1. **`transactions` 数组** — `Block` 结构体有 `evm_txs: Vec<Vec<u8>>` (RLP raw)。对于 `fullTransactions=false`，应返回 tx hash 列表；对于 `fullTransactions=true`，应将 EVM txs 反序列化为 Ethereum tx 对象
 2. **`gasUsed`** — 应累加 block 中所有 receipts 的 gas_used
 3. **`size`** — block JSON 序列化后的字节数
 
@@ -715,7 +715,7 @@ Callchain 已实现完整的动态 priority fee 市场，支持用户通过 `max
 |---|---|---|
 | `compute_fee()` 函数 | ✅ 支持 | `compute_fee(gas_units, priority_fee_per_gas, base_fee)` 接受 priority fee 参数（`crates/protocol/src/tx/fee.rs:10`） |
 | Fee 分配 | ✅ 支持 | `allocate_call_fee()` 区分 `base_fee_total`（50% burn + 50% validator）和 `priority_fee_total`（100% proposer）（`crates/protocol/src/tx/fee.rs:99`） |
-| `ProtocolTransaction` 字段 | ✅ 支持 | `max_priority_fee: u128` 已添加（`crates/protocol/src/tx/model.rs`） |
+| EVM precompile calls | ✅ 支持 | 所有协议操作通过 EVM 预编译 (`0x101`–`0x209`) 调用，标准 EIP-1559 交易 |
 | Mempool/Execution | ✅ 动态 | `Block::execute()` 从 tx 读取 `max_priority_fee`，最低值为 `MIN_PRIORITY_FEE_PER_GAS = 1` wei |
 
 **实际行为**：
@@ -835,7 +835,7 @@ let size = block_json.len() as u64;
 
 **实现 `transactions`**（最复杂）：
 
-`Block` 结构体有 `evm_txs: Vec<Vec<u8>>`（RLP raw）和 `protocol_txs: Vec<ProtocolTransaction>`。
+`Block` 结构体有 `evm_txs: Vec<Vec<u8>>`（RLP raw）。所有交易均为标准 EVM 交易。
 
 对于 `fullTransactions = false`：
 ```rust
@@ -846,10 +846,8 @@ for raw in &block.evm_txs {
     tx_hashes.push(format!("0x{}", hex::encode(hash)));
 }
 // Protocol txs: 用 compute_tx_hash()
-for tx in &block.protocol_txs {
-    let hash = tx.compute_tx_hash();
-    tx_hashes.push(format!("0x{}", hex::encode(hash)));
-}
+// All transactions are EVM transactions (RLP raw)
+// Precompile calls are included in evm_txs
 ```
 
 对于 `fullTransactions = true`：
@@ -883,7 +881,7 @@ for tx in &block.protocol_txs {
 
 ```rust
 let block = state.load_block(height)?;
-let count = block.evm_txs.len() + block.protocol_txs.len() + block.system_txs.len();
+let count = block.evm_txs.len() + block.system_txs.len();
 Ok(format!("0x{:x}", count))
 ```
 
@@ -910,10 +908,9 @@ Ok(format!("0x{:x}", count))
 **完整实现路径**：
 
 1. **查 receipt** → 获取 `block_number`
-2. **load block** → 在 `block.evm_txs` 和 `block.protocol_txs` 中匹配 tx hash
+2. **load block** → 在 `block.evm_txs` 中匹配 tx hash
 3. **EVM tx**：RLP decode → 填充所有 ETH 字段（nonce, gasPrice, gas, to, value, input, v, r, s, type）
-4. **Protocol tx**：映射为 ETH-compatible 格式（见 `eth_getBlockByNumber` 的 full tx 格式）
-5. **查 mempool**（如果 receipt 找不到）：在 `mempool.evm_pool` 和 `mempool.protocol_pool` 中查找 pending tx
+4. **查 mempool**（如果 receipt 找不到）：在 `mempool.evm_pool` 中查找 pending tx
 
 需要在 `RpcState` 添加 mempool by-hash 查询辅助方法：
 ```rust
@@ -926,7 +923,7 @@ pub fn get_mempool_tx_by_hash(&self, tx_hash: &TxHash) -> Option<MempoolTx> { ..
 
 **实现**：
 1. 通过 hash/number 加载 block
-2. 按 index 取 tx（evm_txs 在前，protocol_txs 在后）
+2. 按 index 取 tx（evm_txs）
 3. 序列化为 ETH tx 格式（同 `eth_getTransactionByHash`）
 
 ---

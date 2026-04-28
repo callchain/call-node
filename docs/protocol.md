@@ -2,11 +2,11 @@
 
 ## Overview
 
-The Protocol Payment Layer (`crates/protocol`) is Callchain's native transaction execution engine. It handles all protocol-level operations — asset transfers, staking, shielded transactions, oracle submissions, bridge operations, and compliance enforcement — independently from the EVM smart contract layer.
+The Protocol Payment Layer (`crates/protocol`) is Callchain's native state management engine. It handles all protocol-level state — asset balances, staking, shielded transactions, oracle submissions, bridge operations, and compliance enforcement — which is accessed exclusively through EVM precompiles.
 
-Every block contains a mix of protocol transactions (`ProtocolTransaction`) and EVM transactions. Protocol transactions are validated, executed, and committed atomically within the block execution pipeline.
+All user transactions are standard EVM transactions (`EvmTransaction`). Protocol operations are invoked by calling precompile addresses (`0x101`–`0x209`) within the EVM execution environment. This gives MetaMask, Solidity contracts, and all standard Ethereum tooling native access to protocol features without a separate transaction format.
 
-> **EVM Precompile Alternative**: All protocol instructions can also be executed via EVM precompiles at fixed addresses (`0x101`–`0x209`). This enables MetaMask, Solidity contracts, and all standard Ethereum tooling to interact with protocol features. See [precompile.md](precompile.md) for the full precompile reference.
+> **Historical Note**: The chain previously supported a native `ProtocolTransaction` format with an `Instruction` enum. This has been removed in favor of a pure precompile architecture. See [precompile.md](precompile.md) for the full precompile reference.
 
 ---
 
@@ -14,22 +14,21 @@ Every block contains a mix of protocol transactions (`ProtocolTransaction`) and 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  ProtocolTransaction                                        │
-│  ├── sender, nonce, instructions[], gas_config, auth        │
-│  └── fee_currency, gas_limit, max_fee                       │
+│  EVM Transaction → Precompile Call                          │
+│  (standard RLP-encoded Ethereum tx, to = 0x101–0x209)       │
 │                                                             │
-│  Instruction::Transfer ───────────────┐                    │
-│  Instruction::BatchTransfer ──────────┤                    │
-│  Instruction::Approve / TransferFrom ─┤  → execute_instruction() │
-│  Instruction::Mint / Burn ────────────┤  → atomic rollback       │
-│  Instruction::Shielded* ──────────────┤                    │
-│  Instruction::BridgeDeposit ──────────┤                    │
-│  Instruction::OracleSubmit ───────────┤                    │
-│  Instruction::Agent* ─────────────────┤                    │
-│  Instruction::UpdateCompliance ───────┘                    │
+│  transfer(uint64,address,uint128) ────┐                    │
+│  batchTransfer(uint64,address[],uint128[]) ┤              │
+│  approve / transferFrom ──────────────┤  → precompile_fn()     │
+│  mint / burn ─────────────────────────┤  → atomic rollback     │
+│  shieldedDeposit / Withdraw / Transfer ┤                    │
+│  externalBridgeDeposit / Withdraw ────┤                    │
+│  submitPrice ─────────────────────────┤                    │
+│  registerAgent / grant / revoke ──────┤                    │
+│  updateCompliance ────────────────────┘                    │
 │                                                             │
 │  ┌──────────────┐  ┌──────────┐  ┌──────────────┐        │
-│  │ BalanceState │  │AssetRegistry│ │ComplianceEngine│       │
+│  │ AccountState │  │AssetRegistry│ │ComplianceEngine│       │
 │  │  (balances + │  │ (asset     │  │ (blacklist,   │       │
 │  │   allowances)│  │  metadata) │  │  KYC, custom) │       │
 │  └──────────────┘  └──────────┘  └──────────────┘        │
@@ -40,68 +39,67 @@ Every block contains a mix of protocol transactions (`ProtocolTransaction`) and 
 
 ## Key Components
 
-### 1. Instruction Set (`instructions.rs`)
+### 1. Precompile Function Map
 
-| Instruction | Action | Authorization |
-|-------------|--------|---------------|
-| `Transfer` | Asset transfer with optional memo | Sender balance |
-| `BatchTransfer` | Multi-recipient transfer | Sender balance |
-| `Approve` | Set spending allowance | Sender |
-| `TransferFrom` | Spend allowance + transfer | Allowance holder |
-| `Mint` | Create new tokens | Asset issuer only |
-| `Burn` | Destroy tokens | Asset issuer only |
-| `AgentPay` / `AgentBatchPay` | Agent-mediated payment | Sender |
-| `AgentCall` | External contract via agent | No-op (EVM layer) |
-| `AgentBridgeDeposit` | Bridge via agent | No-op (bridge layer) |
-| `BridgeDeposit` | Cross-chain deposit | Bridge proof validation |
-| `ShieldedDeposit` | Transparent → shielded | Balance deduction |
-| `ShieldedWithdraw` | Shielded → transparent | ZK proof + nullifier |
-| `ShieldedTransfer` | Shielded → shielded | ZK proof |
-| `UpdateCompliance` | Set address compliance | Asset issuer only |
-| `OracleSubmit` | Price feed submission | Registered validator |
+All protocol operations are exposed as EVM precompile functions at fixed addresses:
 
-**Atomicity:** `execute_protocol_instructions()` snapshots `BalanceState`, `ComplianceEngine`, and `ShieldedState` before execution. If any instruction fails, all three are restored. `AssetRegistry` is passed as mutable reference and can be mutated during execution (e.g., supply tracking on Mint).
+| Address | Function | Action | Authorization |
+|---------|----------|--------|---------------|
+| `0x201` | `transfer` | Asset transfer | Sender balance + compliance |
+| `0x201` | `batchTransfer` | Multi-recipient transfer | Sender balance + compliance |
+| `0x201` | `approve` | Set spending allowance | Sender |
+| `0x201` | `transferFrom` | Spend allowance + transfer | Allowance holder |
+| `0x201` | `mint` | Create new tokens | Asset issuer only |
+| `0x201` | `burn` | Destroy tokens | Asset issuer only |
+| `0x209` | `registerAgent` / `grantAgentBalance` / `revokeAgentBalance` | Agent management | Sender / owner |
+| `0x103` | `externalBridgeDeposit` / `externalBridgeWithdraw` | Cross-chain bridge | Bridge proof / validator sigs |
+| `0x202` | `shieldedDeposit` / `shieldedWithdraw` / `shieldedTransfer` | Shielded pool ops | ZK proof + nullifier |
+| `0x205` | `updateCompliance` | Set address compliance | Asset issuer only |
+| `0x101` | `submitPrice` | Price feed submission | Registered validator |
+| `0x203` | `submitProposal` / `vote` / `queue` / `execute` | Governance | CALL balance / validator |
+| `0x204` | `stake` / `unstake` / `claimUnbonded` | Validator staking | Sender balance |
+| `0x207` | `switchToEvm` / `switchToProtocol` | Protocol ↔ EVM bridge | Sender balance |
 
-### 2. Transaction Model (`transaction.rs`)
+**Atomicity:** Precompiles run inside revm, which provides automatic state rollback on revert. Precompile write operations also use snapshot-based rollback for protocol state (`BalanceState`, `ComplianceEngine`, `ShieldedState`) when an individual precompile call fails within a larger EVM transaction.
 
-`ProtocolTransaction` fields:
-- `sender: Address` — transaction originator
-- `nonce: u64` — sequence number for replay protection
-- `instructions: Vec<Instruction>` — ordered instruction list
-- `gas_config: GasConfig` — fee payment strategy
-- `fee_currency: FeeCurrency` — CALL (asset_id=0) or stablecoin
-- `gas_limit: u64` — max gas units
-- `max_fee: u128` — max fee willing to pay
-- `auth: AuthScheme` — signature(s)
+### 2. Transaction Model
 
-**Auth schemes:**
-- `SingleSig { signature: [u8; 65] }` — ECDSA secp256k1 recovery signature
-- `MultiSig { signatures: Vec<[u8; 65]> }` — M-of-N multisig
-- `SessionKey { key: Address, signature: [u8; 65] }` — delegated session key
+All transactions are standard EVM transactions (`EvmTransaction`, RLP-encoded). Protocol operations are invoked by setting `to` to a precompile address and encoding the function selector + arguments in the `data` field.
 
-**Signature verification:** `ProtocolTransaction::verify_signature()` and `verify_signature_with_registry()` are fully implemented. Called in block execution (`block.rs`) and RPC handlers before instruction execution.
+**Signature verification:** Standard Ethereum secp256k1 ECDSA recovery (same as any EVM chain).
 
-**Nonce sequencing:** `accept_to_mempool` enforces sequential nonces via `expected_nonces` HashMap. Transactions with nonce < expected are rejected.
+**Nonce sequencing:** Standard EVM nonce, managed per address in `EvmState`.
 
-### 3. Gas & Fee Model (`transaction.rs`)
+### 3. Gas & Fee Model
 
 **Gas unit table (per instruction):**
 
-| Instruction | Base Gas |
-|-------------|----------|
-| Transfer (with memo) | 10,000 + memo bytes |
-| BatchTransfer | 1,000 per payment + memo bytes |
-| Approve / Mint / Burn | 5,000 |
-| TransferFrom | 10,000 |
-| BridgeDeposit | 10,000 |
-| ShieldedDeposit / Withdraw | 20,000 |
-| ShieldedTransfer | 50,000 |
-| OracleSubmit | 50,000 |
-
-**Multi-instruction discount:**
-- 1st instruction: 1.0x
-- 2nd–10th: 0.5x
-- 11th+: 0.25x
+| Precompile | Function | Base Gas |
+|------------|----------|----------|
+| `0x201` | `transfer` | 5,000 |
+| `0x201` | `batchTransfer` | 5,000 per recipient |
+| `0x201` | `approve` | 4,000 |
+| `0x201` | `transferFrom` | 5,500 |
+| `0x201` | `mint` | 6,000 |
+| `0x201` | `burn` | 5,000 |
+| `0x207` | `switchToEvm` / `switchToProtocol` | 8,000 |
+| `0x202` | `shieldedDeposit` / `shieldedWithdraw` | 50,000 |
+| `0x202` | `shieldedTransfer` | 100,000 |
+| `0x101` | `submitPrice` | 3,000 |
+| `0x103` | `externalBridgeDeposit` | 10,000 |
+| `0x103` | `externalBridgeWithdraw` | 8,000 |
+| `0x103` | `challengeBridgeDeposit` | 6,000 |
+| `0x209` | `registerAgent` | 6,000 |
+| `0x209` | `grantAgentBalance` | 6,000 |
+| `0x209` | `revokeAgentBalance` | 6,000 |
+| `0x205` | `updateCompliance` | 6,000 |
+| `0x203` | `submitProposal` | 20,000 |
+| `0x203` | `vote` | 10,000 |
+| `0x203` | `queue` / `execute` | 10,000 / 20,000 |
+| `0x203` | `emergencyPause` / `emergencyResume` | 20,000 |
+| `0x204` | `stake` | 20,000 |
+| `0x204` | `unstake` | 20,000 |
+| `0x204` | `claimUnbonded` | 20,000 |
 
 **Fee calculation:** `fee = gas_units * (base_fee + priority_fee)`
 
@@ -115,7 +113,7 @@ if gas_used < target:  decrease = base_fee * (|diff|/target) * (1/8)
 - CALL fees: 50% burned, 50% validator reward, 100% priority fee to proposer
 - Stablecoin fees: 50% treasury, 50% validator reward
 
-**Instruction limit:** `MAX_INSTRUCTIONS_PER_TX = 100` enforced at mempool boundary.
+**Precompile gas costs** are fixed per operation (see [precompile.md](precompile.md) for the full gas table). Standard EVM gas accounting applies: `fee = gas_used * (base_fee + priority_fee)`.
 
 ### 4. Balance State (`balances.rs`)
 

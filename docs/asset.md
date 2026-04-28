@@ -6,26 +6,13 @@ The Callchain asset system supports both protocol-native assets (registered on-c
 
 ## Asset Registration
 
-Assets are registered through either:
-1. A protocol transaction containing `Instruction::RegisterAsset` (legacy path), or
-2. An EVM transaction calling `registerAsset(string,string,uint8,uint128)` on the **Asset precompile at `0x201`** (recommended path for MetaMask / dApps).
+Assets are registered by calling `registerAsset(string,string,uint8,uint128)` on the **Asset precompile at `0x201`**. This is a standard EVM transaction that can be sent from MetaMask, Solidity contracts, or any Ethereum-compatible wallet.
 
-Both paths execute atomically during block execution, are ordered relative to other transactions, and are subject to the same consensus and fee rules.
-
-### Instruction
-
-```rust
-Instruction::RegisterAsset {
-    symbol: String,
-    name: String,
-    decimals: u8,
-    max_supply: Balance,  // 0 = uncapped
-}
-```
+Registration executes atomically during block execution, is ordered relative to other transactions, and is subject to the same consensus and fee rules as any EVM transaction.
 
 ### Execution Flow
 
-During block execution, `execute_protocol_instructions` processes `RegisterAsset` as follows:
+During block execution, the Asset precompile (`0x201`) processes `registerAsset` as follows:
 
 1. **Fee collection**: Deduct `asset_registration_fee` (in CALL, asset_id = 1) from the sender's balance. The fee amount is read from `GovernanceManager::config.asset_registration_fee`.
 2. **Asset allocation**: Register the asset in `AssetRegistry`:
@@ -43,30 +30,36 @@ During block execution, `execute_protocol_instructions` processes `RegisterAsset
 
 All four steps are atomic. If any step fails, the transaction reverts and no partial state is committed.
 
-### Why a Transaction Instead of Direct RPC
+### Why an EVM Transaction Instead of Direct RPC
 
-The legacy `call_registerAsset` RPC handler wrote directly to `AssetRegistry` memory without constructing a `ProtocolTransaction`. This approach had the following issues:
+Direct RPC state mutations (writing to `AssetRegistry` memory without an EVM transaction) would have the following issues:
 
-- **No consensus ordering**: Each node processed the registration independently, leading to potential state divergence under concurrent registrations.
+- **No consensus ordering**: Each node would process the registration independently, leading to potential state divergence under concurrent registrations.
 - **No atomic rollback**: If the RPC handler crashed or was interrupted, the registry could be left in an inconsistent state.
-- **No fee/nonce enforcement**: The registration bypassed the standard transaction validation pipeline.
+- **No fee/nonce enforcement**: The registration would bypass the standard transaction validation pipeline.
 
-Moving registration into an `Instruction` solves all of these by leveraging the existing transaction execution and block-building infrastructure.
+Using an EVM transaction to the Asset precompile (`0x201`) solves all of these by leveraging the existing EVM execution and block-building infrastructure.
 
 ### RPC Interface
 
-`call_registerAsset` is retained as a user-facing convenience RPC, but its implementation changes:
+`call_submit` with `type: "RegisterAsset"` is the user-facing convenience RPC:
 
 ```json
 POST /{
   "jsonrpc": "2.0",
-  "method": "call_registerAsset",
+  "method": "call_submit",
   "params": {
-    "symbol": "MYTOKEN",
-    "name": "My Token",
-    "decimals": 18,
     "sender": "0x...",
     "nonce": 42,
+    "instructions": [
+      {
+        "type": "RegisterAsset",
+        "symbol": "MYTOKEN",
+        "name": "My Token",
+        "decimals": 18,
+        "max_supply": "1000000000000000000000000"
+      }
+    ],
     "signature": "0x..."
   },
   "id": 1
@@ -75,11 +68,11 @@ POST /{
 
 The RPC handler:
 1. Parses parameters and validates the EIP-191 signature.
-2. Constructs a `ProtocolTransaction` containing a single `Instruction::RegisterAsset`.
-3. Inserts the transaction into the mempool via `state.insert_protocol_tx(tx)`.
+2. Maps the instruction to an EVM transaction targeting `0x201` with the `registerAsset` selector.
+3. Submits the EVM transaction via `eth_sendRawTransaction` → mempool.
 4. Returns the pending `txHash`.
 
-The actual registration is executed when the transaction is included in a block.
+The actual registration is executed when the EVM transaction is included in a block and the precompile is invoked by revm.
 
 ## Asset Metadata
 
@@ -209,31 +202,27 @@ Note: The `bridge` address is passed as a constructor argument and must match th
 
 ## EVM Issuer Mint
 
-Asset issuers can mint wrapped ERC-20 tokens directly on the EVM layer via `Instruction::EvmIssuerMint`:
+Asset issuers can mint wrapped ERC-20 tokens directly on the EVM layer via the Asset precompile (`0x201`) `mint` function:
 
-```rust
-Instruction::EvmIssuerMint {
-    asset_id: AssetId,
-    to: Address,
-    amount: Balance,
-}
+```solidity
+function mint(uint64 assetId, address to, uint128 amount) external returns (bool);
 ```
 
 ### Execution Flow
 
-1. **Issuer verification**: `sender == asset.issuer`.
+1. **Issuer verification**: `msg.sender == asset.issuer`.
 2. **Asset status check**: `asset.status == AssetStatus::Active`.
 3. **Cap check**: `asset.all_supply() + amount <= max_supply` (protocol layer).
-4. **EVM call**: `evm_executor.evm_call_issuer_mint(issuer, contract_addr, evm_state, to, amount)`.
+4. **EVM call**: The precompile calls `evm_executor.evm_call_issuer_mint(issuer, contract_addr, evm_state, to, amount)`.
 5. **Supply tracking**: `registry.add_evm_supply(asset_id, amount)`.
 
-No protocol-layer balance is created. The minted tokens exist only on EVM and can be withdrawn back to protocol via `BridgeToProtocol`.
+No protocol-layer balance is created. The minted tokens exist only on EVM and can be withdrawn back to protocol via `switchToProtocol` (`0x207`).
 
 ### Security Properties
 
-- Only the asset issuer can call `issuerMint`.
+- Only the asset issuer can call `mint`.
 - The cap is enforced at the protocol layer, not in the EVM contract (the contract has no visibility into `protocol_supply`).
-- Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`, which has no private key. Therefore, no one can `EvmIssuerMint` genesis assets. Supply changes for genesis assets happen only through `SystemTx` (block rewards).
+- Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`, which has no private key. Therefore, no one can mint genesis assets. Supply changes for genesis assets happen only through `SystemTx` (block rewards).
 
 ## Governance Parameters
 
@@ -255,13 +244,13 @@ Assets can transition through the following states:
 | `Delisted` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 - **Active**: All operations permitted.
-- **Frozen**: All user-facing operations are blocked. Can be unfrozen by the issuer via `registry.unfreeze_asset`.
+- **Frozen**: All user-facing operations are blocked. Can be unfrozen by the issuer via the Asset precompile.
 - **Delisted**: Permanently retired by the issuer. Cannot be unfrozen.
 
-State transitions are controlled by the asset issuer:
-- `freeze_asset(id, caller)` — caller must be issuer; reversible.
-- `unfreeze_asset(id, caller)` — caller must be issuer; only works on `Frozen` assets.
-- `delist_asset(id, caller)` — caller must be issuer; permanent.
+State transitions are controlled by the asset issuer through precompile calls:
+- `freezeAsset(assetId)` — caller must be issuer; reversible.
+- `unfreezeAsset(assetId)` — caller must be issuer; only works on `Frozen` assets.
+- `delistAsset(assetId)` — caller must be issuer; permanent.
 
 Governance can also pause the entire chain via `GovernanceEmergencyPause`.
 
@@ -308,6 +297,8 @@ Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`. This is 
 After genesis block execution, `protocol_supply` for CALL must be initialized to the total distributed amount. Subsequent block rewards update it via `account.mint` + `registry.mint_supply` system paths.
 
 Genesis assets should use `max_supply = 0` (uncapped) because protocol-level issuance has its own economic rules.
+
+> **Historical Note**: The chain previously supported a native `ProtocolTransaction` format with `Instruction` variants (e.g., `Instruction::RegisterAsset`, `Instruction::EvmIssuerMint`). These have been replaced by precompile calls. See [precompile.md](precompile.md) for the current ABI.
 
 ## Asset System Roadmap
 

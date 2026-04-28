@@ -13,14 +13,14 @@
 
 ## 1. 概述
 
-Callchain 是一个高性能 Layer-1 区块链，采用**双执行域架构**：协议支付层（Protocol Payment Layer）和智能合约层（EVM Contract Layer），通过统一的内部桥接机制实现资产在两层之间的无缝流转。
+Callchain 是一个高性能 Layer-1 区块链，采用**单一 EVM 执行域架构**：所有交易均为标准 EVM 交易，协议层功能（资产转账、桥接、Agent 支付、Shielded 隐私等）通过预编译合约地址（`0x101`–`0x209`）暴露给 EVM。协议状态与 EVM 状态通过内部桥接机制实现资产在两层之间的无缝流转。
 
 ### 1.1 设计原则
 
 - **资产一等公民**：稳定币等资产在协议层拥有原生余额映射，享受确定性执行和固定费用
 - **开放发行**：任何人都能在链上注册资产，无需许可
-- **EVM 兼容**：智能合约层完全兼容以太坊，现有 DeFi 生态可无缝迁移
-- **双域隔离**：协议层和 EVM 层各自独立，通过内部桥接转换，互不干扰
+- **EVM 兼容**：完全兼容以太坊，现有 DeFi 生态可无缝迁移
+- **单一执行域**：所有交易均为 EVM 交易，协议功能通过预编译地址暴露
 - **合规框架**：协议级合规策略引擎，发行方自主选择策略
 
 ### 1.2 核心架构
@@ -29,16 +29,20 @@ Callchain 是一个高性能 Layer-1 区块链，采用**双执行域架构**：
                     Callchain L1
               Simplex BFT 共识（单一验证者集）
                          │
-          ┌──────────────┴──────────────┐
-          ▼                             ▼
-   Protocol Payment              EVM Contract
-     (协议支付层)                 (智能合约层)
-          │                             │
-          ▼                             ▼
-   ProtocolBalances                ERC-20 Storage
-   (协议级余额映射)                (合约独立余额)
-          │                             │
-          └──────────┬──────────────────┘
+                         ▼
+                  EVM 执行域
+            （标准以太坊交易）
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+   预编译合约        EVM 合约        系统交易
+   (0x101-0x209)   (DeFi/ERC-20)   (奖励/费用结算)
+          │              │
+          ▼              ▼
+   ProtocolBalances   ERC-20 Storage
+   (协议级余额映射)   (合约独立余额)
+          │              │
+          └──────────┬───┘
                      ▼
             Internal Bridge
            (协议级内部桥接)
@@ -139,8 +143,7 @@ reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 ```rust
 struct Block {
     header: BlockHeader,
-    protocol_txs: Vec<ProtocolTransaction>, // 协议原生交易（多指令）
-    evm_txs: Vec<EvmTx>,                     // EVM 交易
+    evm_txs: Vec<EvmTx>,                     // EVM 交易（RLP 编码原始字节）
     system_txs: Vec<SystemTx>,               // 系统交易
     bridge_operations: Vec<BridgeOp>,         // 桥接操作
 }
@@ -164,15 +167,16 @@ struct BlockHeader {
 
 ```
 1. 执行 EVM 交易（evm_txs）
-2. 执行协议原生交易（protocol_txs）— 多指令原子执行
-3. 执行桥接操作（bridge_operations）
+   - 标准以太坊交易通过 revm 执行
+   - 协议操作通过调用预编译地址（0x101–0x209）触发
+2. 执行桥接操作（bridge_operations）
    - 处理 EVM → Protocol 的提取请求
    - 处理 Protocol → EVM 的存款请求
-4. 执行系统交易（system_txs）
+3. 执行系统交易（system_txs）
    - 验证者奖励分配
    - 费用结算
    - 合规策略更新
-5. 计算最终状态根，打包区块头
+4. 计算最终状态根，打包区块头
 ```
 
 ---
@@ -260,6 +264,7 @@ enum CompliancePolicy {
 
 ```rust
 fn check_compliance(
+    state: &ProtocolState,
     asset: &Asset,
     from: Address,
     to: Address,
@@ -280,526 +285,365 @@ fn check_compliance(
             Ok(())
         }
         CompliancePolicy::Custom { handler } => {
-            precompile_call(handler, from, to)
+            // 自定义合规策略通过调用 EVM 合约实现
+            evm_call(handler, abi_encode("checkCompliance(address,address)", from, to))?;
+            Ok(())
         }
     }
 }
 ```
 
-### 3.5 多指令交易模型 (Multi-Instruction Transaction Model)
+### 3.5 协议预编译调用模型 (Protocol Precompile Model)
 
-协议原生交易支持在单个交易内组合多个不同的指令（Instruction），所有指令原子执行。
+所有协议层功能（资产转账、桥接、Agent 支付、Shielded 隐私等）均通过 EVM 预编译地址暴露。用户发送标准 EVM 交易，目标地址为预编译地址，数据为 ABI 编码的操作参数。
+
+**预编译地址范围：** `0x101` – `0x209`
 
 ```rust
-/// 协议原生交易
-struct ProtocolTransaction {
-    sender: Address,                  // 交易发起者（账户地址）
-    nonce: u64,                       // 防重放
-    instructions: Vec<Instruction>,   // 一个或多个指令
-    gas_config: GasConfig,            // Gas 支付配置
-    fee_currency: FeeCurrency,        // Gas 支付币种（CALL 或协议批准的稳定币）
-    gas_limit: u64,                   // 最大 gas 消耗上限
-    max_fee: u128,                    // 用户愿意支付的最高总费用（以 fee_currency 计价）
-    max_priority_fee: u128,           // 优先级小费（以 fee_currency 计价，100% 给验证者）
-    auth: AuthScheme,                 // 身份认证方案（单签/多签/Session Key）
-}
-
-/// Gas 支付配置
-enum GasConfig {
-    /// 发送者自付（从 sender 的 CALL 余额扣除）
-    SelfPay,
-    /// 使用预授权的代付（代付者已签名授权，无需每笔签名）
-    AuthorizedSponsor {
-        sponsor: Address,
-    },
-    /// 使用代付者预存款池
-    PoolSponsor,
-    /// 单笔代付（需要代付者每笔签名）
-    PerTxSponsor {
-        sponsor: Address,
-        sponsor_signature: Signature,
-    },
-}
-
-/// Gas 支付币种
-enum FeeCurrency {
-    /// 原生 CALL
-    Call,
-    /// 协议批准的稳定币（AssetId 必须来自 FeeCurrencyRegistry）
-    Stablecoin(AssetId),
-}
-
-/// 单条指令（交易内的一个操作）
-enum Instruction {
-    /// 资产转账
-    Transfer {
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-        memo: Option<PaymentMemo>,
-    },
-    /// 批量转账
-    BatchTransfer {
-        asset_id: AssetId,
-        payments: Vec<PaymentEntry>,
-        memo: Option<PaymentMemo>,
-    },
-    /// 授权
-    Approve {
-        asset_id: AssetId,
-        spender: Address,
-        amount: u128,
-    },
-    /// 代授权转账
-    TransferFrom {
-        asset_id: AssetId,
-        from: Address,
-        to: Address,
-        amount: u128,
-    },
-    /// 发行方增发
-    Mint {
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// 发行方销毁
-    Burn {
-        asset_id: AssetId,
-        from: Address,
-        amount: u128,
-    },
-    /// Agent 代付
-    AgentPay {
-        agent_id: u64,
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// Agent 批量支付
-    AgentBatchPay {
-        agent_id: u64,
-        asset_id: AssetId,
-        payments: Vec<AgentPayment>,
-    },
-    /// Agent 调用 EVM 合约
-    AgentCall {
-        agent_id: u64,
-        asset_id: AssetId,
-        contract: Address,
-        data: Vec<u8>,
-        value: u128,
-    },
-    /// Agent 桥接：协议层 → EVM 层
-    AgentBridgeDeposit {
-        agent_id: u64,
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// 桥接：协议层 → EVM 层
-    BridgeDeposit {
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// 合规：更新地址合规状态
-    UpdateCompliance {
-        asset_id: AssetId,
-        address: Address,
-        status: ComplianceStatus,
-    },
-    /// 隐私转账：通过 Shielded Pool 隐藏发送方、接收方和金额
-    ShieldedTransfer {
-        asset_id: AssetId,
-        commitments: Vec<NoteCommitment>,  // 新输出承诺
-        nullifiers: Vec<Nullifier>,        // 输入花费
-        proof: ZkProof,                    // zk-SNARK 证明
-    },
-    /// 从 Shielded Pool 提取到透明地址
-    ShieldedWithdraw {
-        asset_id: AssetId,
-        to: Address,
-        nullifier: Nullifier,
-        proof: ZkProof,
-    },
-    /// 从透明地址存入 Shielded Pool
-    ShieldedDeposit {
-        asset_id: AssetId,
-        from: Address,
-        commitment: NoteCommitment,
-        amount: u128,
-    },
-}
-
-struct PaymentEntry {
-    to: Address,
-    amount: u128,
-    memo: Option<PaymentMemo>,
-}
-
-struct AgentPayment {
-    to: Address,
-    amount: u128,
-    memo: Option<PaymentMemo>,
-}
-
-/// 支付备注 — 附加到转账指令上，记录转账目的
-struct PaymentMemo {
-    message: String,                // 自由文本备注（如 "Invoice #1234"）
-    reference: Option<String>,      // 外部引用（订单号、发票号、合同编号）
-    metadata: Option<Vec<u8>>,      // 自定义二进制数据（序列化 JSON 等）
-}
+/// 预编译地址分配
+const PRECOMPILE_ASSET_REGISTRY: Address = address!(0x101);  // 资产注册
+const PRECOMPILE_TRANSFER: Address     = address!(0x102);  // 单笔转账
+const PRECOMPILE_BATCH_TRANSFER: Address = address!(0x103); // 批量转账
+const PRECOMPILE_APPROVE: Address      = address!(0x104);  // 授权
+const PRECOMPILE_TRANSFER_FROM: Address = address!(0x105); // 代授权转账
+const PRECOMPILE_MINT: Address         = address!(0x106);  // 发行方增发
+const PRECOMPILE_BURN: Address         = address!(0x107);  // 发行方销毁
+const PRECOMPILE_BRIDGE_DEPOSIT: Address = address!(0x108); // 协议层 → EVM 层桥接
+const PRECOMPILE_BRIDGE_WITHDRAW: Address = address!(0x109); // EVM 层 → 协议层桥接
+const PRECOMPILE_AGENT_PAY: Address    = address!(0x10A);  // Agent 代付
+const PRECOMPILE_AGENT_BATCH_PAY: Address = address!(0x10B); // Agent 批量支付
+const PRECOMPILE_AGENT_CALL: Address   = address!(0x10C);  // Agent 调用 EVM 合约
+const PRECOMPILE_SHIELDED_DEPOSIT: Address = address!(0x10D); // 存入 Shielded Pool
+const PRECOMPILE_SHIELDED_TRANSFER: Address = address!(0x10E); // 隐私转账
+const PRECOMPILE_SHIELDED_WITHDRAW: Address = address!(0x10F); // 从 Shielded Pool 提取
+const PRECOMPILE_UPDATE_COMPLIANCE: Address = address!(0x110); // 更新合规状态
+// ... 预留至 0x209
 ```
 
-**PaymentMemo 限制：**
-- `message` 最大 256 字节
-- `reference` 最大 128 字节
-- `metadata` 最大 1024 字节
-- 超出限制的交易被拒绝
+**预编译执行上下文：**
 
-**Gas 成本：** 备注数据需要存储到收据中（见 §18.4），每个额外字节增加 ~1 gas。小额备注成本极低。
+预编译合约通过 Thread-Local 状态共享（`StateHookGuard`）访问协议层状态，在 revm 执行框架内运行：
 
-**设计理由：** 将 `PaymentTx` 从"每个枚举变体是一笔完整交易"改为"交易包含多个指令"，实现了：
+```rust
+/// 预编译执行入口
+fn execute_precompile(
+    address: Address,
+    input: &Bytes,
+    gas_limit: u64,
+    evm_context: &mut Context,
+) -> PrecompileResult {
+    // 1. 通过 StateHookGuard 获取协议状态引用
+    let state = StateHookGuard::current();
 
-1. **组合性**：一个交易可同时做 "转账 + 授权 + 桥接"，无需分三笔交易
-2. **原子性**：要么所有指令都成功，要么整个交易回滚
-3. **费用优化**：首条指令付全费，后续指令享折扣
-4. **统一签名**：sender 只需签一次名，覆盖所有指令
-5. **可扩展性**：新指令类型只需添加到 `Instruction` 枚举
+    // 2. 解析 ABI 编码的输入
+    let decoded = abi_decode(address, input)?;
+
+    // 3. 执行协议操作
+    let result = match address {
+        PRECOMPILE_TRANSFER => execute_transfer(state, decoded)?,
+        PRECOMPILE_BATCH_TRANSFER => execute_batch_transfer(state, decoded)?,
+        PRECOMPILE_BRIDGE_DEPOSIT => execute_bridge_deposit(state, decoded)?,
+        PRECOMPILE_AGENT_PAY => execute_agent_pay(state, decoded)?,
+        PRECOMPILE_SHIELDED_TRANSFER => execute_shielded_transfer(state, decoded)?,
+        // ... 其他预编译
+        _ => return Err(PrecompileError::NotFound),
+    };
+
+    // 4. 返回 ABI 编码的输出
+    Ok(PrecompileOutput::new(gas_used, abi_encode(result)))
+}
+```
 
 **典型用例：**
 
-```rust
-// 用例 1：发工资 — 单笔交易批量支付给 100 人
-ProtocolTransaction {
-    sender: company_address,
-    nonce: 42,
-    instructions: vec![
-        Instruction::BatchTransfer {
-            asset_id: USDC_ID,
-            payments: vec![
-                PaymentEntry {
-                    to: employee1,
-                    amount: 5000_000000,
-                    memo: Some(PaymentMemo {
-                        message: "March 2026 salary".into(),
-                        reference: Some("PAYROLL-2026-03-001".into()),
-                        metadata: None,
-                    }),
-                },
-                PaymentEntry {
-                    to: employee2,
-                    amount: 5000_000000,
-                    memo: Some(PaymentMemo {
-                        message: "March 2026 salary".into(),
-                        reference: Some("PAYROLL-2026-03-002".into()),
-                        metadata: None,
-                    }),
-                },
-                // ... 98 more
-            ],
-            memo: Some(PaymentMemo {
-                message: "Monthly payroll batch".into(),
-                reference: Some("PAYROLL-MAR-2026".into()),
-                metadata: None,
-            }),
-        },
-    ],
-    gas_config: GasConfig::SelfPay,
-    fee_currency: FeeCurrency::Call,
-    gas_limit: 60_000,
-    max_fee: 1_000_000,          // 最高 1,000,000 wei
-    max_priority_fee: 5_000,     // 小费 5,000 wei
-    auth: AuthScheme::SingleSig { signature: company_sig },
-}
+```solidity
+// 用例 1：发工资 — 单笔 EVM 交易批量支付给 100 人
+// 调用预编译 0x103 (BatchTransfer)
+bytes memory data = abi.encode(
+    USDC_ASSET_ID,           // uint64 asset_id
+    recipients,              // address[] to
+    amounts,                 // uint128[] amounts
+    "PAYROLL-MAR-2026"       // string reference
+);
+address(PRECOMPILE_BATCH_TRANSFER).call(data);
 
-// 用例 2：DeFi 入场 — 桥接 + 授权 + 存款 一步完成
-ProtocolTransaction {
-    sender: user_address,
-    nonce: 7,
-    instructions: vec![
-        // 1. 先桥接 1000 USDC 到 EVM 层
-        Instruction::BridgeDeposit {
-            asset_id: USDC_ID,
-            to: user_address,
-            amount: 1000_000000,
-        },
-        // 2. 授权 DEX 合约使用 USDC
-        Instruction::Approve {
-            asset_id: USDC_ID,
-            spender: dex_router,
-            amount: u128::MAX,
-        },
-    ],
-    gas_config: GasConfig::SelfPay,
-    fee_currency: FeeCurrency::Call,
-    gas_limit: 16_000,
-    max_fee: 500_000,
-    max_priority_fee: 3_000,
-    auth: AuthScheme::SingleSig { signature: user_sig },
-}
+// 用例 2：DeFi 入场 — 桥接 + ERC-20 approve 一步完成
+// 交易 1：调用预编译 0x108 (BridgeDeposit) 将 USDC 桥到 EVM 层
+bytes memory bridgeData = abi.encode(USDC_ASSET_ID, user_address, 1000_000000);
+address(PRECOMPILE_BRIDGE_DEPOSIT).call(bridgeData);
 
-// 用例 3：Agent 自动付款 + Owner 预授权代付
-ProtocolTransaction {
-    sender: agent_public_key.to_address(),
-    nonce: 100,
-    instructions: vec![
-        Instruction::AgentPay {
-            agent_id: 5,
-            asset_id: USDC_ID,
-            to: vendor,
-            amount: 100_000000,
-        },
-        Instruction::AgentPay {
-            agent_id: 5,
-            asset_id: USDC_ID,
-            to: api_provider,
-            amount: 50_000000,
-        },
-    ],
-    gas_config: GasConfig::AuthorizedSponsor { sponsor: owner_address },
-    fee_currency: FeeCurrency::Call,
-    gas_limit: 5_000,
-    max_fee: 100_000,
-    max_priority_fee: 1_000,
-    auth: AuthScheme::SingleSig { signature: agent_sig },
+// 交易 2：调用标准 ERC-20 approve（EVM 合约层）
+usdcToken.approve(dexRouter, type(uint256).max);
+
+// 用例 3：Agent 自动付款 — 调用预编译 0x10A (AgentPay)
+bytes memory agentData = abi.encode(
+    agent_id,                // uint64 agent_id
+    USDC_ASSET_ID,           // uint64 asset_id
+    vendor,                  // address to
+    100_000000               // uint128 amount
+);
+address(PRECOMPILE_AGENT_PAY).call(agentData);
+```
+
+**设计理由：**
+
+1. **单一执行域**：所有交易均为标准 EVM 交易，无需自定义交易格式
+2. **工具兼容**：MetaMask、Foundry、Hardhat 等以太坊工具可直接使用
+3. **原子性**：单笔 EVM 交易内可组合多个预编译调用（通过合约或 multicall）
+4. **费用统一**：统一使用 EVM gas 模型，无需独立的费用计算
+5. **状态隔离**：预编译通过 `StateHookGuard` 访问协议状态，与 EVM 状态互不干扰
+
+**支付备注（PaymentMemo）：**
+
+预编译调用支持通过 ABI 编码附加备注信息：
+
+```solidity
+struct PaymentMemo {
+    string message;      // 最大 256 字节
+    string reference;    // 最大 128 字节
+    bytes metadata;      // 最大 1024 字节
 }
 ```
 
-### 3.6 指令执行语义
+备注数据写入交易收据，每个额外字节增加 ~1 gas。
+
+### 3.6 预编译执行语义
+
+预编译合约在 revm 执行框架内运行，使用快照机制保证协议状态操作的原子性。
 
 ```rust
-fn execute_protocol_tx(tx: &ProtocolTransaction) -> Result<()> {
-    // 1. 验证身份认证
-    verify_auth(tx.sender, &tx.auth)?;
+/// 预编译执行入口（由 revm 调用）
+fn execute_precompile(
+    address: Address,
+    input: &Bytes,
+    gas_limit: u64,
+    evm_context: &mut Context,
+) -> PrecompileResult {
+    // 1. 通过 StateHookGuard 获取协议状态的可变引用
+    let state = StateHookGuard::current();
 
-    // 2. 验证 nonce
-    ensure!(tx.nonce == get_nonce(&tx.sender), "Invalid nonce");
+    // 2. 保存协议状态快照（用于回滚）
+    let state_snapshot = state.take_snapshot();
 
-    // 3. 估算 gas 消耗
-    let estimated_gas = calculate_gas_units(&tx.instructions);
-    ensure!(estimated_gas <= tx.gas_limit, "Gas limit exceeded");
+    // 3. 解析 ABI 编码输入
+    let decoded = match abi_decode(address, input) {
+        Ok(d) => d,
+        Err(e) => return Err(PrecompileError::from(e)),
+    };
 
-    // 4. 计算实际费用
-    let base_fee = get_current_base_fee();
-    let actual_fee = base_fee * estimated_gas as u128 + tx.max_priority_fee;
-    ensure!(actual_fee <= tx.max_fee, "Fee exceeds max_fee");
-
-    // 5. 原子执行所有指令（使用事务性状态变更）
-    let state_snapshot = take_state_snapshot();
-    let tx_hash = tx.hash();
-
-    // 扣除费用
-    deduct_gas(&tx.sender, &tx.gas_config, actual_fee, tx_hash)?;
-
-    for (i, instruction) in tx.instructions.iter().enumerate() {
-        execute_instruction(instruction, i, &tx.sender)
-            .map_err(|e| {
-                // 任何指令失败，回滚整个交易
-                restore_state_snapshot(&state_snapshot);
-                e
-            })?;
-    }
-
-    // 6. 所有指令成功，提交状态变更，递增 nonce
-    commit_state_changes();
-    increment_nonce(&tx.sender);
-
-    Ok(())
-}
-
-/// Gas 扣除逻辑
-fn deduct_gas(
-    sender: &Address,
-    config: &GasConfig,
-    fee_currency: &FeeCurrency,
-    fee: u128,
-    tx_hash: Hash,
-) -> Result<()> {
-    // 按币种扣除
-    match fee_currency {
-        FeeCurrency::Call => {
-            deduct_call_from_payer(sender, config, fee, tx_hash)?;
+    // 4. 执行对应协议操作
+    let result = match address {
+        PRECOMPILE_TRANSFER => {
+            let (asset_id, to, amount) = decoded.as_transfer()?;
+            check_compliance(state, asset_id, msg_sender, to)?;
+            transfer_balance(state, asset_id, msg_sender, to, amount)?;
         }
-        FeeCurrency::Stablecoin(asset_id) => {
-            // 稳定币支付：验证在 FeeCurrencyRegistry 中，按 oracle 价格转换
-            ensure!(
-                FeeCurrencyRegistry::is_allowed(*asset_id),
-                "Fee currency not approved by governance"
-            );
-            let stablecoin_fee = convert_fee_to_stablecoin(*asset_id, fee)?;
-            deduct_stablecoin_from_payer(sender, config, asset_id, stablecoin_fee, tx_hash)?;
-        }
-    }
-    Ok(())
-}
-
-/// 从 payer 扣 CALL（支持代付）
-fn deduct_call_from_payer(
-    sender: &Address,
-    config: &GasConfig,
-    fee: u128,
-    tx_hash: Hash,
-) -> Result<()> {
-    match config {
-        GasConfig::SelfPay => {
-            deduct_call_balance(sender, fee)?;
-        }
-        GasConfig::AuthorizedSponsor { sponsor } => {
-            let auth = get_sponsor_auth(*sponsor)?;
-            ensure!(auth.is_valid(sender, fee), "Sponsor auth invalid");
-            update_sponsor_daily(*sponsor, fee)?;
-            deduct_call_balance(sponsor, fee)?;
-        }
-        GasConfig::PoolSponsor => {
-            deduct_from_sponsor_pool(sender, fee)?;
-        }
-        GasConfig::PerTxSponsor { sponsor, sponsor_signature } => {
-            verify_signature(sponsor, sponsor_signature, tx_hash)?;
-            deduct_call_balance(sponsor, fee)?;
-        }
-    }
-    Ok(())
-}
-
-/// 从 payer 扣稳定币（支持代付）
-fn deduct_stablecoin_from_payer(
-    sender: &Address,
-    config: &GasConfig,
-    asset_id: &AssetId,
-    stablecoin_fee: u128,
-    tx_hash: Hash,
-) -> Result<()> {
-    match config {
-        GasConfig::SelfPay => {
-            deduct_asset_balance(asset_id, sender, stablecoin_fee)?;
-        }
-        GasConfig::AuthorizedSponsor { sponsor } => {
-            let auth = get_sponsor_auth(*sponsor)?;
-            ensure!(auth.is_valid(sender, stablecoin_fee), "Sponsor auth invalid");
-            update_sponsor_daily(*sponsor, stablecoin_fee)?;
-            deduct_asset_balance(asset_id, sponsor, stablecoin_fee)?;
-        }
-        GasConfig::PoolSponsor => {
-            deduct_asset_from_sponsor_pool(asset_id, sender, stablecoin_fee)?;
-        }
-        GasConfig::PerTxSponsor { sponsor, sponsor_signature } => {
-            verify_signature(sponsor, sponsor_signature, tx_hash)?;
-            deduct_asset_balance(asset_id, sponsor, stablecoin_fee)?;
-        }
-    }
-    Ok(())
-}
-```
-
-fn execute_instruction(instr: &Instruction, index: usize, sender: &Address) -> Result<()> {
-    match instr {
-        Instruction::Transfer { asset_id, to, amount, memo } => {
-            check_compliance(&get_asset(*asset_id)?, *sender, *to)?;
-            transfer_balance(*asset_id, *sender, *to, *amount)?;
-            record_memo(tx_hash, memo)?;
-        }
-        Instruction::BatchTransfer { asset_id, payments, memo } => {
-            if let Some(m) = memo {
-                record_memo(tx_hash, Some(m))?;
-            }
+        PRECOMPILE_BATCH_TRANSFER => {
+            let (asset_id, payments) = decoded.as_batch_transfer()?;
             for payment in payments {
-                check_compliance(&get_asset(*asset_id)?, *sender, payment.to)?;
-                transfer_balance(*asset_id, *sender, payment.to, payment.amount)?;
-                record_memo(tx_hash, &payment.memo)?;
+                check_compliance(state, asset_id, msg_sender, payment.to)?;
+                transfer_balance(state, asset_id, msg_sender, payment.to, payment.amount)?;
             }
         }
-        Instruction::Approve { asset_id, spender, amount } => {
-            set_allowance(*asset_id, *sender, *spender, *amount)?;
+        PRECOMPILE_APPROVE => {
+            let (asset_id, spender, amount) = decoded.as_approve()?;
+            set_allowance(state, asset_id, msg_sender, spender, amount)?;
         }
-        Instruction::TransferFrom { asset_id, from, to, amount } => {
-            spend_allowance(*asset_id, *from, *sender, *to, *amount)?;
+        PRECOMPILE_TRANSFER_FROM => {
+            let (asset_id, from, to, amount) = decoded.as_transfer_from()?;
+            spend_allowance(state, asset_id, from, msg_sender, to, amount)?;
         }
-        Instruction::Mint { asset_id, to, amount } => {
-            let asset = get_asset(*asset_id)?;
-            ensure!(asset.issuer == *sender, "Only issuer can mint");
-            mint_balance(*asset_id, *to, *amount)?;
+        PRECOMPILE_MINT => {
+            let (asset_id, to, amount) = decoded.as_mint()?;
+            let asset = state.get_asset(asset_id)?;
+            ensure!(asset.issuer == msg_sender, "Only issuer can mint");
+            mint_balance(state, asset_id, to, amount)?;
         }
-        Instruction::Burn { asset_id, from, amount } => {
-            let asset = get_asset(*asset_id)?;
-            ensure!(asset.issuer == *sender, "Only issuer can burn");
-            burn_balance(*asset_id, *from, *amount)?;
+        PRECOMPILE_BURN => {
+            let (asset_id, from, amount) = decoded.as_burn()?;
+            let asset = state.get_asset(asset_id)?;
+            ensure!(asset.issuer == msg_sender, "Only issuer can burn");
+            burn_balance(state, asset_id, from, amount)?;
         }
-        Instruction::AgentPay { agent_id, asset_id, to, amount } => {
-            execute_agent_pay(*agent_id, *asset_id, *to, *amount)?;
+        PRECOMPILE_AGENT_PAY => {
+            let (agent_id, asset_id, to, amount) = decoded.as_agent_pay()?;
+            execute_agent_pay(state, agent_id, asset_id, to, amount)?;
         }
-        Instruction::AgentBatchPay { agent_id, asset_id, payments } => {
-            execute_agent_batch_pay(*agent_id, *asset_id, payments)?;
+        PRECOMPILE_AGENT_BATCH_PAY => {
+            let (agent_id, asset_id, payments) = decoded.as_agent_batch_pay()?;
+            execute_agent_batch_pay(state, agent_id, asset_id, payments)?;
         }
-        Instruction::AgentCall { agent_id, asset_id, contract, data, value } => {
-            execute_agent_call(*agent_id, *asset_id, *contract, data, *value)?;
+        PRECOMPILE_AGENT_CALL => {
+            let (agent_id, asset_id, contract, data, value) = decoded.as_agent_call()?;
+            execute_agent_call(state, agent_id, asset_id, contract, data, value)?;
         }
-        Instruction::AgentBridgeDeposit { agent_id, asset_id, to, amount } => {
-            execute_agent_bridge_deposit(*agent_id, *asset_id, *to, *amount)?;
+        PRECOMPILE_BRIDGE_DEPOSIT => {
+            let (asset_id, to, amount) = decoded.as_bridge_deposit()?;
+            execute_bridge_deposit(state, asset_id, msg_sender, to, amount)?;
         }
-        Instruction::BridgeDeposit { asset_id, to, amount } => {
-            execute_bridge_deposit(*asset_id, *sender, *to, *amount)?;
+        PRECOMPILE_UPDATE_COMPLIANCE => {
+            let (asset_id, target, status) = decoded.as_update_compliance()?;
+            let asset = state.get_asset(asset_id)?;
+            ensure!(asset.issuer == msg_sender, "Only issuer can update compliance");
+            update_compliance_status(state, target, asset_id, status)?;
         }
-        Instruction::UpdateCompliance { asset_id, address, status } => {
-            let asset = get_asset(*asset_id)?;
-            ensure!(asset.issuer == *sender, "Only issuer can update compliance");
-            update_compliance_status(*address, *asset_id, *status)?;
-        }
-        Instruction::ShieldedTransfer { asset_id, commitments, nullifiers, proof } => {
+        PRECOMPILE_SHIELDED_TRANSFER => {
+            let (asset_id, commitments, nullifiers, proof) = decoded.as_shielded_transfer()?;
             verify_zk_proof(proof)?;
-            for nf in nullifiers {
-                ensure!(!is_nullifier_spent(*asset_id, nf), "Nullifier already spent");
+            for nf in &nullifiers {
+                ensure!(!state.is_nullifier_spent(asset_id, *nf), "Nullifier already spent");
             }
-            // 检查 total_output <= total_input（不暴露具体金额）
-            let asset = get_asset(*asset_id)?;
-            verify_shielded_balance(&asset, nullifiers, commitments, proof)?;
+            let asset = state.get_asset(asset_id)?;
+            verify_shielded_balance(&asset, &nullifiers, &commitments, proof)?;
             for nf in nullifiers {
-                mark_nullifier_spent(*asset_id, nf);
+                state.mark_nullifier_spent(asset_id, nf);
             }
             for cm in commitments {
-                append_commitment(*asset_id, cm);
+                state.append_commitment(asset_id, cm);
             }
         }
-        Instruction::ShieldedDeposit { asset_id, from, commitment, amount } => {
-            let balance = get_owner_balance(*from, *asset_id)?;
-            ensure!(balance >= *amount, "Insufficient transparent balance");
-            deduct_owner_balance(*from, *asset_id, *amount)?;
-            append_commitment(*asset_id, *commitment);
+        PRECOMPILE_SHIELDED_DEPOSIT => {
+            let (asset_id, from, commitment, amount) = decoded.as_shielded_deposit()?;
+            let balance = state.get_owner_balance(from, asset_id)?;
+            ensure!(balance >= amount, "Insufficient transparent balance");
+            state.deduct_owner_balance(from, asset_id, amount)?;
+            state.append_commitment(asset_id, commitment);
         }
-        Instruction::ShieldedWithdraw { asset_id, to, nullifier, proof } => {
-            ensure!(!is_nullifier_spent(*asset_id, nullifier), "Nullifier already spent");
+        PRECOMPILE_SHIELDED_WITHDRAW => {
+            let (asset_id, to, nullifier, proof) = decoded.as_shielded_withdraw()?;
+            ensure!(!state.is_nullifier_spent(asset_id, nullifier), "Nullifier already spent");
             verify_zk_proof(proof)?;
-            let amount = extract_amount_from_proof(proof)?;  // 从证明中公开提取金额
-            mark_nullifier_spent(*asset_id, *nullifier);
-            credit_owner_balance(*to, *asset_id, amount)?;
+            let amount = extract_amount_from_proof(proof)?;
+            state.mark_nullifier_spent(asset_id, nullifier);
+            state.credit_owner_balance(to, asset_id, amount)?;
+        }
+        _ => return Err(PrecompileError::NotFound),
+    };
+
+    // 5. 计算 gas 消耗
+    let gas_used = calculate_precompile_gas(address, &decoded);
+    ensure!(gas_used <= gas_limit, "Out of gas");
+
+    // 6. 提交状态变更（revm 的 Journal 机制保证 EVM 状态原子性）
+    // 协议状态变更通过 StateHookGuard 直接写入，失败时由快照回滚
+    Ok(PrecompileOutput::new(gas_used, abi_encode(result)))
+}
+
+/// 快照回滚机制
+impl ProtocolState {
+    fn take_snapshot(&self) -> StateSnapshot {
+        StateSnapshot {
+            balances: self.balances.clone(),
+            allowances: self.allowances.clone(),
+            agent_balances: self.agent_balances.clone(),
+            shielded_tree: self.shielded_tree.clone(),
+            nullifier_set: self.nullifier_set.clone(),
         }
     }
-    Ok(())
+
+    fn restore_snapshot(&mut self, snapshot: StateSnapshot) {
+        self.balances = snapshot.balances;
+        self.allowances = snapshot.allowances;
+        self.agent_balances = snapshot.agent_balances;
+        self.shielded_tree = snapshot.shielded_tree;
+        self.nullifier_set = snapshot.nullifier_set;
+    }
 }
 ```
 
-**原子性保证：** 使用状态快照（state snapshot）机制。执行第一条指令前保存完整状态快照，任何指令失败时立即回滚到快照状态，已扣减的费用不退还（防止重放攻击）。
+**原子性保证：** 预编译执行使用两层保障：
+1. **EVM 层**：revm 的 Journal 机制保证单交易原子性（EVM 状态回滚）
+2. **协议层**：预编译内部保存状态快照，任何协议操作失败时回滚到快照状态
 
-**指令间依赖：** 同一交易内的指令按顺序执行，后一条指令可以依赖前一条指令的结果。例如 `AgentBridgeDeposit` + `AgentCall` 组合中，Agent 先将资产桥到 EVM 层，再用 EVM 层资产调用合约，原子完成跨层操作。
+预编译失败时返回 `PrecompileError`，revm 将该错误转换为 EVM revert，整笔交易回滚（已消耗的 gas 不退还）。
 
-### 3.7 多指令费用模型
+**Thread-Local 状态共享：** `StateHookGuard` 使用线程本地存储（TLS）在 revm 执行期间共享协议状态引用，避免跨层状态拷贝：
 
-多指令交易的费用计算基于指令数量和类型的 gas unit，结合动态 base_fee，详见 §12.2。
+```rust
+/// 状态钩子守卫 — 在 EVM 交易执行期间提供协议状态访问
+thread_local! {
+    static PROTOCOL_STATE: RefCell<Option<Rc<RefCell<ProtocolState>>>> = const { RefCell::new(None) };
+}
+
+struct StateHookGuard;
+
+impl StateHookGuard {
+    fn install(state: Rc<RefCell<ProtocolState>>) -> Self {
+        PROTOCOL_STATE.with(|s| *s.borrow_mut() = Some(state));
+        StateHookGuard
+    }
+
+    fn current() -> Rc<RefCell<ProtocolState>> {
+        PROTOCOL_STATE.with(|s| {
+            s.borrow().as_ref().expect("StateHookGuard not installed").clone()
+        })
+    }
+}
+
+impl Drop for StateHookGuard {
+    fn drop(&mut self) {
+        PROTOCOL_STATE.with(|s| *s.borrow_mut() = None);
+    }
+}
+```
+
+### 3.7 预编译 Gas 模型
+
+预编译调用使用标准 EVM gas 计费模型。每个预编译有固定的基础 gas 消耗，加上与输入数据大小相关的动态 gas。
+
+**预编译 Gas 定价（固定 + 动态）：**
+
+| 预编译操作 | 基础 Gas | 动态 Gas | 说明 |
+|-----------|---------|---------|------|
+| Transfer (0x102) | 10,000 | 16 × calldata 字节 | 单笔转账 |
+| BatchTransfer (0x103) | 10,000 | 1,000 × 收款人数 | 批量转账 |
+| Approve (0x104) | 5,000 | 16 × calldata 字节 | 授权 |
+| TransferFrom (0x105) | 8,000 | 16 × calldata 字节 | 代授权转账 |
+| Mint (0x106) | 10,000 | 16 × calldata 字节 | 发行方增发 |
+| Burn (0x107) | 8,000 | 16 × calldata 字节 | 发行方销毁 |
+| BridgeDeposit (0x108) | 15,000 | 16 × calldata 字节 | 协议层 → EVM 层 |
+| AgentPay (0x10A) | 8,000 | 16 × calldata 字节 | Agent 代付 |
+| AgentBatchPay (0x10B) | 8,000 | 800 × 收款人数 | Agent 批量支付 |
+| ShieldedTransfer (0x10E) | 50,000 | 16 × calldata 字节 | 隐私转账（含 ZK 验证） |
+| ShieldedDeposit (0x10D) | 20,000 | 16 × calldata 字节 | 存入 Shielded Pool |
+| ShieldedWithdraw (0x10F) | 25,000 | 16 × calldata 字节 | 从 Shielded Pool 提取 |
 
 **费用计算示例（假设 base_fee = 1 wei/gas，priority_fee = 0）：**
 
-| 交易组合 | Gas Unit 计算 | 总 Gas |
-|----------|-------------|--------|
-| 单笔转账 | 10,000 × 1.0 | 10,000 gas |
-| 转账 + 授权 | 10,000 × 1.0 + 5,000 × 0.5 | 12,500 gas |
-| 转账 + 授权 + 桥接 | 10,000 + 2,500 + 5,000 × 0.5 | 15,000 gas |
-| 100 人批量支付 | 10,000 + 99 × 1,000 × 0.5 | 59,500 gas |
-| 100 笔独立转账 | 100 × 10,000 | 1,000,000 gas |
-| Shielded 转账 | 50,000 × 1.0 | 50,000 gas |
-| Agent 桥接 + 调用 | (10,000 + 5,000) × 0.5 × 0.5 | 3,750 gas |
+| 操作 | Gas 计算 | 总 Gas |
+|------|---------|--------|
+| 单笔转账 | 10,000 + 16 × 128 | 12,048 gas |
+| 批量支付 100 人 | 10,000 + 1,000 × 100 | 110,000 gas |
+| 100 笔独立转账 | 100 × 12,048 | 1,204,800 gas |
+| Shielded 转账 | 50,000 + 16 × 512 | 58,192 gas |
+| Agent 桥接 + 调用 | 15,000 + 16 × 128 + EVM 调用 gas | ~50,000 gas |
 
-100 人批量支付使用多指令交易节省 **~94%** gas（对比 100 笔独立转账）。
+100 人批量支付使用预编译批量操作节省 **~91%** gas（对比 100 笔独立转账）。
+
+**Gas 计算逻辑：**
+
+```rust
+fn calculate_precompile_gas(address: Address, input_len: usize) -> u64 {
+    let base_gas = match address {
+        PRECOMPILE_TRANSFER => 10_000,
+        PRECOMPILE_BATCH_TRANSFER => 10_000,
+        PRECOMPILE_APPROVE => 5_000,
+        PRECOMPILE_TRANSFER_FROM => 8_000,
+        PRECOMPILE_MINT => 10_000,
+        PRECOMPILE_BURN => 8_000,
+        PRECOMPILE_BRIDGE_DEPOSIT => 15_000,
+        PRECOMPILE_AGENT_PAY => 8_000,
+        PRECOMPILE_AGENT_BATCH_PAY => 8_000,
+        PRECOMPILE_SHIELDED_TRANSFER => 50_000,
+        PRECOMPILE_SHIELDED_DEPOSIT => 20_000,
+        PRECOMPILE_SHIELDED_WITHDRAW => 25_000,
+        _ => 0,
+    };
+
+    let dynamic_gas = (input_len as u64).saturating_mul(16);
+    base_gas.saturating_add(dynamic_gas)
+}
+```
 
 ### 3.8 Shielded Pool（隐私屏蔽池）
 
@@ -959,14 +803,13 @@ enum ShieldedComplianceMode {
 
 ### 3.9 智能账户 (Smart Accounts)
 
-Callchain 协议层原生支持三种身份认证方案，通过 `AuthScheme` 统一抽象。身份认证（谁有权签名）与 Gas 支付（谁来付费）是**两个独立维度**，可以自由组合。
+Callchain 协议层原生支持三种身份认证方案，通过 `AuthScheme` 统一抽象。身份认证（谁有权签名）与 Gas 支付（谁来付费）是**两个独立维度**，可以自由组合。所有认证方案均通过标准 EVM 交易签名或授权机制实现。
 
 ```
-AuthScheme（谁签名）          GasConfig（谁付费）
-├── SingleSig                ├── SelfPay
-├── MultiSig                 ├── AuthorizedSponsor
-└── SessionKey               ├── PoolSponsor
-                             └── PerTxSponsor
+AuthScheme（谁签名）          Gas 支付（谁付费）
+├── SingleSig                ├── SelfPay（标准 EVM gas）
+├── MultiSig                 ├── 代付合约（EIP-7702）
+└── SessionKey               └── 第三方代付（EIP-4337 Paymaster）
 ```
 
 #### 3.9.1 AuthScheme 定义
@@ -1258,8 +1101,8 @@ struct SessionKeyConfig {
 
 /// Session Key 权限
 struct SessionPermissions {
-    /// 允许的操作类型（空 = 所有类型）
-    allowed_instructions: Vec<InstructionType>,
+    /// 允许的预编译地址（空 = 所有预编译）
+    allowed_precompiles: Vec<Address>,
     /// 单笔最大金额（0 = 无限制）
     max_per_tx: u128,
     /// 日累计金额上限（0 = 无限制）
@@ -1324,15 +1167,17 @@ fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
 
     // 4. 验证权限
     let perms = &config.permissions;
-    if !perms.allowed_instructions.is_empty() {
-        for instr in &tx.instructions {
-            ensure!(perms.allowed_instructions.contains(&instr.type_id()),
-                    "Instruction not allowed");
+    if !perms.allowed_precompiles.is_empty() {
+        let precompile_calls = decode_precompile_calls(&tx.data)?;
+        for call in &precompile_calls {
+            ensure!(perms.allowed_precompiles.contains(&call.precompile_address),
+                    "Precompile not allowed");
         }
     }
     if perms.max_per_tx > 0 {
-        let total_amount = tx.instructions.iter()
-            .filter_map(|i| i.amount())
+        let total_amount = decode_precompile_calls(&tx.data)?
+            .iter()
+            .filter_map(|c| c.amount())
             .max()
             .unwrap_or(0);
         ensure!(total_amount <= perms.max_per_tx,
@@ -1341,21 +1186,24 @@ fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
     if perms.max_daily > 0 {
         let today = current_timestamp() / 86400;
         let daily_spent = SessionKeyDailyUsage::get(account, *key, today);
-        let tx_amount = tx.instructions.iter()
-            .filter_map(|i| i.amount())
+        let tx_amount = decode_precompile_calls(&tx.data)?
+            .iter()
+            .filter_map(|c| c.amount())
             .sum::<u128>();
         ensure!(daily_spent + tx_amount <= perms.max_daily,
                 "Exceeds daily limit");
         SessionKeyDailyUsage::insert(account, *key, today, daily_spent + tx_amount);
     }
     if !perms.allowed_targets.is_empty() {
-        for target in tx.instructions.iter().filter_map(|i| i.target()) {
-            ensure!(perms.allowed_targets.contains(target),
+        if let Some(to) = tx.to {
+            ensure!(perms.allowed_targets.contains(&to),
                     "Target not allowed");
         }
     }
     if !perms.allowed_assets.is_empty() {
-        for asset_id in tx.instructions.iter().filter_map(|i| i.asset_id()) {
+        for asset_id in decode_precompile_calls(&tx.data)?
+            .iter()
+            .filter_map(|c| c.asset_id()) {
             ensure!(perms.allowed_assets.contains(&asset_id),
                     "Asset not allowed");
         }
@@ -1369,9 +1217,9 @@ fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
 
 | 场景 | 权限设置 | 有效期 |
 |------|---------|--------|
-| dApp 游戏 | 仅 Transfer，单笔 < 10 CALL，日累计 < 100 CALL | 24 小时 |
-| Agent 自动支付 | AgentPay + AgentCall，单笔 < 50 USDC | 7 天 |
-| DeFi 策略机器人 | 仅 Approve + TransferFrom，目标 = 指定 DEX | 1 小时 |
+| dApp 游戏 | 仅 Transfer 预编译，单笔 < 10 CALL，日累计 < 100 CALL | 24 小时 |
+| Agent 自动支付 | AgentPay + AgentCall 预编译，单笔 < 50 USDC | 7 天 |
+| DeFi 策略机器人 | 仅 Approve + TransferFrom 预编译，目标 = 指定 DEX | 1 小时 |
 | 钱包预览模式 | 仅 view 操作（无需签名） | 永久 |
 
 #### 3.9.5 统一认证流程
@@ -1624,20 +1472,18 @@ fn execute_withdraw(op: &BridgeOp) -> Result<()> {
 ### 5.4 桥接时机
 
 ```
-每个区块的执行顺序中，桥接操作在第三步执行：
+每个区块的执行顺序中，桥接操作在第二步执行：
 
 1. EVM 交易执行
    → 用户可能在 EVM 层触发 bridge_withdraw
    → 这些请求被加入待处理桥接队列
+   → 协议操作通过预编译调用在同一交易中完成
 
-2. 协议原生交易执行
-   → 用户可能发起协议层转账、桥接、授权等多指令组合交易
-
-3. 桥接操作执行
+2. 桥接操作执行
    → 处理待处理队列中的桥接请求
    → 保证在同一区块内完成
 
-4. 系统交易执行
+3. 系统交易执行
 ```
 
 这意味着 **Protocol → EVM 和 EVM → Protocol 的转换在同一个区块内完成**，无需等待。
@@ -1939,7 +1785,7 @@ enum FeePayer {
 }
 ```
 
-**Owner 代付是 Agent 支付的推荐模式。** Agent 只提交操作指令，Gas 通过 `GasConfig::AuthorizedSponsor` 从 Owner 账户扣除。Owner 一次签名授权，Agent 后续交易无需 Owner 再签名。Agent 可在单个交易内组合多条 `AgentPay` 指令，享受多指令边际费用折扣。
+**Owner 代付是 Agent 支付的推荐模式。** Agent 只提交操作指令（调用预编译地址），Gas 通过 EIP-7702 授权或代付合约从 Owner 账户扣除。Owner 一次签名授权，Agent 后续交易无需 Owner 再签名。Agent 可在单笔 EVM 交易中通过 multicall 组合多个预编译调用。
 
 ### 6.3 Agent 资金授权
 
@@ -1992,27 +1838,22 @@ type AgentNonces = HashMap<(Address, u64), u64>;
 
 ### 6.5 Agent 指令
 
-Agent 操作通过 `ProtocolTransaction` 中的 `Instruction` 变体实现：
+Agent 操作通过调用预编译地址实现：
 
-```rust
-// Agent 相关指令已整合到 ProtocolTransaction 的 Instruction 枚举中：
+```solidity
+// Agent 相关预编译地址：
+// 0x10A — AgentPay
+// 0x10B — AgentBatchPay
+// 0x10C — AgentCall
+// 0x10D — AgentBridgeDeposit
 //
-// Instruction::AgentPay { agent_id, asset_id, to, amount }
-// Instruction::AgentBatchPay { agent_id, asset_id, payments }
-// Instruction::AgentCall { agent_id, asset_id, contract, data, value }
-// Instruction::AgentBridgeDeposit { agent_id, asset_id, to, amount }
+// Agent 可以在单笔 EVM 交易中组合多个预编译调用（通过合约或 multicall）：
 //
-// Agent 可以组合多个指令在一个交易中：
+// bytes memory bridgeData = abi.encode(agent_id, asset_id, to, amount);
+// address(PRECOMPILE_AGENT_BRIDGE_DEPOSIT).call(bridgeData);
 //
-// ProtocolTransaction {
-//     sender: agent_address,
-//     instructions: vec![
-//         Instruction::AgentBridgeDeposit { ... },  // 先桥接
-//         Instruction::AgentCall { ... },           // 再调用合约
-//     ],
-//     gas_config: GasConfig::AuthorizedSponsor { sponsor: owner_address },
-//     auth: AuthScheme::SingleSig { signature: agent_sig },
-// }
+// bytes memory callData = abi.encode(agent_id, asset_id, contract, data, value);
+// address(PRECOMPILE_AGENT_CALL).call(callData);
 ```
 
 Agent 交易签名与封装：
@@ -2021,37 +1862,38 @@ Agent 交易签名与封装：
 
 ```rust
 struct SignedAgentTx {
-    protocol_tx: ProtocolTransaction, // 多指令协议交易
+    evm_tx: EvmTx,                    // 标准 EVM 交易（调用预编译）
     owner_signature: Option<Signature>,  // 大额交易需要 Owner 二次确认
 }
 ```
 
-**协议层验证流程：**
+**预编译层验证流程：**
 
 ```rust
 fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
-    let agent = get_agent_from_tx(&tx.protocol_tx)?;
+    let agent = get_agent_from_evm_tx(&tx.evm_tx)?;
 
-    // 1. 验证 Agent 签名
+    // 1. 验证 Agent 签名（EVM 交易签名）
     ensure!(
-        tx.protocol_tx.signature.verify(&agent.agent_public_key, &tx.protocol_tx.hash()),
+        recover_evm_signer(&tx.evm_tx) == agent.agent_public_key.to_address(),
         "Invalid agent signature"
     );
 
-    // 2. 验证 nonce 防重放
+    // 2. 验证 nonce 防重放（使用 EVM nonce）
     let current_nonce = get_agent_nonce(agent.owner, agent.agent_id);
-    ensure!(tx.protocol_tx.nonce == current_nonce, "Invalid nonce");
+    ensure!(tx.evm_tx.nonce == current_nonce, "Invalid nonce");
 
-    // 3. 验证每条指令的权限
-    for instr in &tx.protocol_tx.instructions {
+    // 3. 验证预编译调用的权限
+    let precompile_calls = decode_precompile_calls(&tx.evm_tx.data)?;
+    for call in &precompile_calls {
         let perms = &agent.permissions;
-        if let Some(asset_id) = instr.asset_id() {
+        if let Some(asset_id) = call.asset_id() {
             ensure!(perms.is_allowed(asset_id), "Asset not allowed");
         }
-        if let Some(counterparty) = instr.counterparty() {
+        if let Some(counterparty) = call.counterparty() {
             ensure!(perms.is_allowed_counterparty(counterparty), "Counterparty not allowed");
         }
-        if let Some(amount) = instr.amount() {
+        if let Some(amount) = call.amount() {
             if perms.per_tx_limit > 0 {
                 ensure!(amount <= perms.per_tx_limit, "Exceeds per-tx limit");
             }
@@ -2064,12 +1906,12 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
     }
 
     // 5. 大额交易需要 Owner 二次签名
-    let total_amount = tx.protocol_tx.instructions.iter().filter_map(|i| i.amount()).sum::<u128>();
+    let total_amount = precompile_calls.iter().filter_map(|c| c.amount()).sum::<u128>();
     if let Some(threshold) = agent.fee_config.require_owner_signature_above {
         if total_amount > threshold {
             ensure!(
                 tx.owner_signature.is_some()
-                    && tx.owner_signature.unwrap().verify(&agent.owner, &tx.protocol_tx.hash()),
+                    && tx.owner_signature.unwrap().verify(&agent.owner, &tx.evm_tx.hash()),
                 "Owner signature required"
             );
         }
@@ -2081,23 +1923,21 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 
 ### 6.7 Agent 交易执行与费用处理
 
-Agent 交易通过 `ProtocolTransaction` 的多指令执行引擎处理：
+Agent 交易通过 EVM 预编译执行引擎处理：
 
 ```rust
 fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
-    let agent = get_agent_from_tx(&tx.protocol_tx)?;
+    let agent = get_agent_from_evm_tx(&tx.evm_tx)?;
 
     verify_agent_tx(tx)?;
 
-    // 计算多指令总费用（享受 Agent 折扣）
-    let fee = calculate_multi_instruction_fee(&tx.protocol_tx.instructions, &tx.protocol_tx.gas_config);
+    // EVM gas 已由 revm 在执行期间扣除
+    // 预编译内部通过 StateHookGuard 访问协议状态
 
-    // 扣费（根据 gas_config 从不同账户扣除）
-    deduct_gas(&tx.protocol_tx.sender, &tx.protocol_tx.gas_config, fee, tx_hash)?;
-
-    // 执行所有指令（原子性由多指令引擎保证）
-    for instruction in &tx.protocol_tx.instructions {
-        execute_instruction(instruction, 0, &agent.address)?;
+    // 提取预编译调用并执行（原子性由 revm Journal 保证）
+    let precompile_calls = decode_precompile_calls(&tx.evm_tx.data)?;
+    for call in &precompile_calls {
+        execute_precompile_call(call, &agent.address)?;
     }
 
     // 更新 nonce
@@ -2109,7 +1949,7 @@ fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 
 ### 6.8 Agent 费用模型
 
-Agent 支付享受专属 Gas 折扣（详见 §12.2 费用表），所有 Agent 指令的基础费用为普通用户的 50%。Agent 的 Gas 通过 `GasConfig` 配置，通常使用 `AuthorizedSponsor` 模式由 Owner 代付，Agent 本身无需持有 CALL。
+Agent 支付享受专属 Gas 折扣（详见 §12.2 费用表），所有 Agent 预编译调用的基础费用为普通用户的 50%。Agent 的 Gas 通过标准 EVM gas 模型支付，通常使用代付合约或 EIP-7702 授权由 Owner 代付，Agent 本身无需持有 CALL。
 
 ### 6.9 Agent 身份验证层级
 
@@ -2172,7 +2012,6 @@ enum IssuerAction {
 ### 8.2 交易类型传播
 
 ```
-ProtocolTransaction → gossipsub, 高优先级（支付优先）
 EvmTx               → gossipsub, 标准优先级
 BridgeOp            → 打包在区块中，不单独传播
 SystemTx            → 仅验证者生成
@@ -2197,8 +2036,8 @@ struct NetworkMessage {
     checksum: u32,
 }
 
-impl alloy_rlp::Encodable for ProtocolTransaction { ... }
-impl alloy_rlp::Decodable for ProtocolTransaction { ... }
+impl alloy_rlp::Encodable for EvmTx { ... }
+impl alloy_rlp::Decodable for EvmTx { ... }
 
 impl alloy_rlp::Encodable for Block { ... }
 impl alloy_rlp::Decodable for Block { ... }
@@ -2256,7 +2095,7 @@ trait StorageCodec: Sized {
 
 | 数据类型 | P2P 传播 | 存储 | RPC 输出 |
 |----------|---------|------|---------|
-| ProtocolTransaction | RLP | StorageCodec | JSON |
+| EvmTx | RLP | StorageCodec | JSON |
 | SignedAgentTx | RLP | StorageCodec | JSON |
 | Block | RLP | StorageCodec | JSON |
 | ShieldedProof | RLP | 压缩二进制 | JSON（base64） |
@@ -2295,20 +2134,21 @@ impl<'de> Deserialize<'de> for Address { /* JSON: from hex string */ }
 
 ```rust
 // RLP 编码（P2P 传播）
-let tx = ProtocolTransaction {
-    sender: Address::from_hex("0x742d35..."),
+let tx = EvmTx {
     nonce: 42,
-    instructions: vec![Instruction::Transfer { ... }],
-    gas_config: GasConfig::SelfPay,
-    fee_currency: FeeCurrency::Call,
-    auth: AuthScheme::SingleSig { signature: sig },
+    gas_price: 10_000_000_000,
+    gas_limit: 21_000,
+    to: Some(PRECOMPILE_TRANSFER),  // 0x102
+    value: U256::ZERO,
+    data: Bytes::from(abi_encode_transfer(USDC_ID, recipient, amount)),
+    signature: sig,
 };
 let rlp_bytes = alloy_rlp::encode(&tx);  // → Vec<u8>
-let decoded = ProtocolTransaction::decode(&mut &rlp_bytes[..])?;
+let decoded = EvmTx::decode(&mut &rlp_bytes[..])?;
 
 // JSON 编码（RPC 输出）
 let json = serde_json::to_string(&tx)?;
-// → {"sender":"0x742d35...","nonce":42,"auth":"singlesig",...}
+// → {"nonce":"0x2a","gasPrice":"0x2540be400","to":"0x000...0102",...}
 ```
 
 ---
@@ -2920,22 +2760,26 @@ let total_fee = base_fee * total_gas + priority_fee;
 #### 12.2.7 MemPool 准入
 
 ```rust
-fn accept_to_mempool(tx: &ProtocolTransaction) -> Result<()> {
+fn accept_to_mempool(tx: &EvmTx) -> Result<()> {
     let current_base_fee = get_current_base_fee();
-    let estimated_gas = estimate_gas(&tx.instructions);
 
     // 1. gas_limit 检查
+    let estimated_gas = estimate_evm_gas(tx);
     ensure!(tx.gas_limit >= estimated_gas, "Gas limit too low");
 
-    // 2. 费用检查：max_fee 必须 >= 当前 base_fee × estimated_gas
-    let min_total_fee = current_base_fee * estimated_gas + tx.max_priority_fee;
-    ensure!(tx.max_fee >= min_total_fee,
+    // 2. 费用检查：max_fee_per_gas 必须 >= 当前 base_fee
+    ensure!(tx.max_fee_per_gas >= current_base_fee,
             "max_fee insufficient for current base_fee");
 
     // 3. 余额足够支付最大可能费用
-    let sender_balance = get_call_balance(tx.sender);
-    ensure!(sender_balance >= tx.max_fee + instruction_values(&tx.instructions),
-            "Insufficient balance");
+    let max_cost = tx.gas_limit * tx.max_fee_per_gas + tx.value;
+    let sender_balance = get_evm_balance(tx.sender);
+    ensure!(sender_balance >= max_cost, "Insufficient balance");
+
+    // 4. 预编译调用参数验证（如果目标地址是预编译）
+    if is_precompile_address(tx.to) {
+        validate_precompile_input(tx.to, &tx.data)?;
+    }
 
     Ok(())
 }
@@ -2943,27 +2787,31 @@ fn accept_to_mempool(tx: &ProtocolTransaction) -> Result<()> {
 
 ### 12.3 Gas 代付机制
 
-协议层原生支持 Gas 代付，无需智能合约。代付者不需要每笔交易都签名（除单笔代付模式外）。
+Gas 代付通过标准 EVM 机制实现：EIP-7702（授权委托）、EIP-4337 Paymaster、或自定义代付合约。
 
 #### 12.3.1 代付模式
 
 ```rust
-enum GasConfig {
-    /// 发送者自付
+enum GasSponsorMode {
+    /// 发送者自付（标准 EVM 交易）
     SelfPay,
 
-    /// 预授权代付（代付者签一次授权，之后无需再签名）
-    AuthorizedSponsor {
-        sponsor: Address,
+    /// EIP-7702 授权委托：Owner 授权 Agent 使用其地址发送交易
+    Eip7702Delegation {
+        delegator: Address,           // 被授权地址（如 Owner）
+        authorization: Eip7702Auth,   // 7702 授权签名
     },
 
-    /// 预存款池代付（代付者预存 CALL 到池中）
-    PoolSponsor,
+    /// EIP-4337 Paymaster：第三方代付合约支付 gas
+    Paymaster {
+        paymaster: Address,
+        paymaster_data: Bytes,
+    },
 
-    /// 单笔代付（代付者需对每笔交易签名）
-    PerTxSponsor {
-        sponsor: Address,
-        sponsor_signature: Signature,
+    /// 自定义代付合约：单笔交易由代付合约验证并支付
+    CustomSponsor {
+        sponsor_contract: Address,
+        sponsor_data: Bytes,
     },
 }
 
@@ -3032,12 +2880,12 @@ fn convert_fee_to_stablecoin(asset_id: AssetId, fee_call: u128) -> Result<u128> 
 **执行流程：**
 
 ```
-1. 用户提交交易: fee_currency = Stablecoin(USDC)
+1. 用户提交交易: 调用稳定币支付预编译（0x201）
 2. 协议验证: USDC 在 FeeCurrencyRegistry 中 ✓
 3. 查询 oracle: 1 USDC = 50 CALL
 4. 计算: fee_call = gas_used × base_fee
 5. 转换: fee_usdc = fee_call / 50（向上取整）
-6. 从 sender 扣 USDC 余额
+6. 从 sender 协议层 USDC 余额扣除
 7. USDC 计入区块费用汇总
 8. 验证者按比例获得 USDC 奖励
 ```
@@ -3073,17 +2921,11 @@ enum ProposalType {
 **Mempool 多币种优先级排序：**
 
 ```rust
-fn priority_score(tx: &ProtocolTransaction) -> u128 {
-    let priority_fee = tx.max_priority_fee;
-    match tx.fee_currency {
-        FeeCurrency::Call => priority_fee,
-        FeeCurrency::Stablecoin(asset_id) => {
-            let price = FeeCurrencyRegistry::get_call_price(asset_id)
-                .unwrap_or(0);
-            // 转换为 CALL 等价值排序
-            priority_fee * price / 10u128.pow(get_asset_decimals(asset_id) as u32)
-        }
-    }
+fn priority_score(tx: &EvmTx) -> u128 {
+    // EVM 交易统一按 effective_gas_price 排序
+    // 对于 EIP-1559 交易：min(max_fee_per_gas, base_fee + max_priority_fee)
+    // 对于 legacy 交易：gas_price
+    tx.effective_gas_price()
 }
 ```
 
@@ -3107,120 +2949,100 @@ fn priority_score(tx: &ProtocolTransaction) -> u128 {
 | 模式 | 适用场景 | 代付者需在线 | 控制粒度 |
 |------|---------|------------|---------|
 | SelfPay | 普通用户 | - | - |
-| AuthorizedSponsor | Agent 支付、平台补贴 | 不需要 | 按日限额 + 白名单 |
-| PoolSponsor | 平台批量补贴用户 | 不需要 | 存款总额控制 |
-| PerTxSponsor | 低频单笔代付 | 需要 | 单笔控制 |
+| EIP-7702 | Agent 支付、平台补贴 | 不需要 | 授权委托 |
+| Paymaster | 平台批量补贴用户 | 不需要 | Paymaster 合约控制 |
+| CustomSponsor | 低频单笔代付 | 需要 | 代付合约自定义逻辑 |
 
-#### 12.3.2 预授权代付（AuthorizedSponsor）
+#### 12.3.2 EIP-7702 授权委托
 
-代付者签署一次授权，允许指定地址使用其 CALL 支付 Gas。
+Owner 通过 EIP-7702 授权 Agent 使用其地址发送交易，Agent 交易直接从 Owner EVM 账户扣除 gas。
 
 ```rust
-struct GasSponsorAuth {
-    sponsor: Address,           // 代付者
-    allowed_senders: Vec<Address>,  // 可被代付的地址（空 = 任何人）
-    max_daily: u128,            // 每日 Gas 上限（0 = 无限制）
-    expires_at: u64,            // 过期时间戳（0 = 永不过期）
-    sponsor_signature: Signature,  // 代付者签名
+struct Eip7702Auth {
+    delegator: Address,           // 被授权地址（Owner）
+    delegate: Address,            // 被委托地址（Agent）
+    chain_id: u64,
+    nonce: u64,
+    expires_at: u64,              // 过期时间戳（0 = 永不过期）
+    signature: Signature,         // delegator 的 secp256k1 签名
 }
 ```
 
 **授权注册：**
 
 ```rust
-fn register_sponsor_auth(auth: GasSponsorAuth) -> Result<()> {
-    verify_signature(&auth.sponsor, &auth.sponsor_signature, &auth.hash())?;
-    GasSponsorAuths::insert(auth.sponsor, auth);
+fn register_eip7702_auth(auth: Eip7702Auth) -> Result<()> {
+    verify_signature(&auth.delegator, &auth.signature, &auth.hash())?;
+    Eip7702Auths::insert(auth.delegator, auth.delegate, auth);
 }
 
-// 代付者随时可撤销
-fn revoke_sponsor_auth(sponsor: Address) -> Result<()> {
-    GasSponsorAuths::remove(sponsor);
+// 授权者随时可撤销
+fn revoke_eip7702_auth(delegator: Address, delegate: Address) -> Result<()> {
+    Eip7702Auths::remove(delegator, delegate);
 }
 ```
 
-**执行时代付验证：**
+**执行时验证：**
 
 ```rust
-fn verify_and_deduct_authorized_sponsor(
-    sponsor: Address,
-    sender: Address,
-    fee: u128,
-) -> Result<()> {
-    let auth = GasSponsorAuths::get(sponsor).ok_or("No sponsor auth")?;
-
-    // 1. 验证未过期
-    if auth.expires_at > 0 {
-        ensure!(current_timestamp() < auth.expires_at, "Sponsor auth expired");
+fn verify_eip7702_tx(tx: &EvmTx) -> Result<()> {
+    let sender = recover_evm_signer(tx)?;
+    // 检查 sender 是否有 7702 授权
+    if let Some(auth) = Eip7702Auths::get(sender) {
+        ensure!(current_timestamp() < auth.expires_at, "Authorization expired");
+        // 交易由 delegate 签名，但 gas 从 delegator 扣除
+        ensure!(tx.authorization_list.contains(auth.delegate), "Invalid delegate");
     }
-
-    // 2. 验证 sender 在白名单
-    if !auth.allowed_senders.is_empty() {
-        ensure!(auth.allowed_senders.contains(&sender), "Sender not whitelisted");
-    }
-
-    // 3. 验证每日限额
-    if auth.max_daily > 0 {
-        let today = current_timestamp() / 86400;
-        let (last_date, spent) = GasSponsorDailyUsage::get(sponsor).unwrap_or((0, 0));
-        if today != last_date {
-            GasSponsorDailyUsage::insert(sponsor, (today, 0));
-        } else {
-            ensure!(spent + fee <= auth.max_daily, "Daily limit exceeded");
-            GasSponsorDailyUsage::insert(sponsor, (today, spent + fee));
-        }
-    }
-
-    // 4. 扣费
-    deduct_call_balance(sponsor, fee)?;
     Ok(())
 }
 ```
 
-#### 12.3.3 预存款池代付（PoolSponsor）
+#### 12.3.3 EIP-4337 Paymaster
 
-代付者在协议层预存一笔 CALL，授权给特定地址使用，系统自动从池中扣费。
+通过标准 EIP-4337 Paymaster 合约实现第三方代付。
 
 ```rust
-struct GasSponsorPool {
-    sponsor: Address,
-    balance: u128,                   // 预存余额
-    delegated_to: Vec<Address>,      // 授权地址（空 = 任何人）
-    per_tx_limit: u128,              // 单笔上限（0 = 无限制）
-}
+/// Paymaster 接口（标准 EIP-4337）
+interface IPaymaster {
+    function validatePaymasterUserOp(
+        PackedUserOperation calldata userOp,
+        bytes32 userOpHash,
+        uint256 maxCost
+    ) external returns (bytes memory context, uint256 validationData);
 
-fn deposit_to_pool(sponsor: Address, amount: u128) -> Result<()> {
-    deduct_call_balance(sponsor, amount)?;
-    let pool = GasSponsorPools::entry(sponsor).or_default();
-    pool.balance += amount;
-}
-
-fn withdraw_from_pool(sponsor: Address, amount: u128) -> Result<()> {
-    let pool = GasSponsorPools::get(sponsor).ok_or("No pool")?;
-    ensure!(pool.balance >= amount, "Insufficient pool balance");
-    pool.balance -= amount;
-    credit_call_balance(sponsor, amount)?;
+    function postOp(
+        PostOpMode mode,
+        bytes calldata context,
+        uint256 actualGasCost,
+        uint256 actualUserOpFeePerGas
+    ) external;
 }
 ```
 
-**使用场景：** 平台给新用户补贴 Gas，用户提交交易时选择 `GasConfig::PoolSponsor`，系统自动从平台池中扣 CALL。
+**使用场景：** 平台给新用户补贴 Gas，用户提交 UserOperation 时指定 Paymaster 地址，Paymaster 合约验证后代付 gas。
 
-#### 12.3.4 单笔代付（PerTxSponsor）
+#### 12.3.4 自定义代付合约（CustomSponsor）
 
-代付者对每笔交易签名确认，适合低频场景。
+通过自定义代付合约实现灵活的代付逻辑，适合特定业务场景。
 
 ```rust
-// 交易结构中包含代付者签名
-GasConfig::PerTxSponsor { sponsor, sponsor_signature }
+// 交易结构中包含代付合约地址和验证数据
+struct CustomSponsorTx {
+    evm_tx: EvmTx,
+    sponsor_contract: Address,
+    sponsor_data: Bytes,          // 代付合约自定义验证数据
+}
 
-fn verify_and_deduct_per_tx_sponsor(
-    sponsor: Address,
-    sponsor_signature: Signature,
-    tx_hash: Hash,
-    fee: u128,
+fn verify_custom_sponsor(
+    tx: &CustomSponsorTx,
 ) -> Result<()> {
-    verify_signature(&sponsor, &sponsor_signature, tx_hash)?;
-    deduct_call_balance(sponsor, fee)?;
+    // 调用代付合约验证函数
+    let valid = evm_staticcall(
+        tx.sponsor_contract,
+        abi_encode("verifySponsor(bytes,bytes)", tx.evm_tx.encode(), tx.sponsor_data),
+    )?;
+    ensure!(valid, "Sponsor verification failed");
+    Ok(())
 }
 ```
 
@@ -3485,8 +3307,8 @@ struct BlockLimits {
     /// Shielded 交易上限（ZK 证明验证成本高）
     max_shielded_per_block: u32,     // 默认 50
 
-    /// 单笔交易最大指令数量
-    max_instructions_per_tx: u32,    // 默认 1,000
+    /// 单笔交易最大 calldata 大小
+    max_calldata_size: u32,          // 默认 256 KB
 
     /// 单笔交易最大字节数
     max_tx_size: u32,                // 默认 256 KB
@@ -3508,7 +3330,7 @@ struct BlockLimits {
 | 交易洪泛 | 最低费用阈值 + 动态拒绝 | 低于动态阈值直接拒绝 |
 | 单地址占满 | 单地址 Pending 上限 | 256 tx/地址 |
 | 大交易攻击 | 交易大小上限 | 256 KB |
-| 多指令膨胀 | 指令数量上限 | 1,000 指令/tx |
+| 预编译调用膨胀 | calldata 大小上限 | 256 KB |
 | 批量转账膨胀 | 批量支付人数上限 | 5,000 人/tx |
 | 签名伪造 | 立即验证并丢弃 | 无效签名永不进入 mempool |
 | 重放攻击 | Nonce 检查 | 过时 nonce 立即拒绝 |
@@ -3517,40 +3339,36 @@ struct BlockLimits {
 
 ```rust
 /// Mempool 准入检查
-fn accept_tx(tx: &ProtocolTransaction) -> Result<()> {
+fn accept_tx(tx: &EvmTx) -> Result<()> {
     // 1. 交易大小检查
     let tx_size = alloy_rlp::encode(tx).len();
     ensure!(tx_size <= BLOCK_LIMITS.max_tx_size as usize, "Tx too large");
 
-    // 2. 指令数量检查
-    ensure!(tx.instructions.len() <= BLOCK_LIMITS.max_instructions_per_tx as usize,
-            "Too many instructions");
+    // 2. gas_limit 检查
+    ensure!(tx.gas_limit <= BLOCK_LIMITS.max_evm_gas_per_block, "Gas limit too high");
 
-    // 3. 最低费用检查
-    let fee = calculate_multi_instruction_fee(&tx.instructions, &tx.gas_config);
-    ensure!(fee >= current_min_acceptable_fee(), "Fee too low");
+    // 3. 最低 gas price 检查
+    ensure!(tx.effective_gas_price() >= current_min_gas_price(), "Gas price too low");
 
     // 4. 单地址 Pending 上限
     let pending_count = mempool.count_pending(&tx.sender);
     ensure!(pending_count < 256, "Pending limit exceeded");
 
-    // 5. 批量支付人数检查
-    for instr in &tx.instructions {
-        if let Instruction::BatchTransfer { payments, .. } = instr {
-            ensure!(payments.len() <= BLOCK_LIMITS.max_batch_payments as usize,
-                    "Batch too large");
+    // 5. 预编译调用参数验证（如果目标地址是预编译）
+    if let Some(to) = tx.to {
+        if is_precompile_address(to) {
+            validate_precompile_input(to, &tx.data)?;
         }
     }
 
     // 6. 签名验证
-    ensure!(verify_signature(&tx.sender, &tx.signature, &tx.hash()),
-            "Invalid signature");
+    ensure!(verify_evm_signature(tx), "Invalid signature");
 
     // 7. Nonce 检查
-    ensure!(tx.nonce == get_nonce(&tx.sender), "Invalid nonce");
+    ensure!(tx.nonce >= get_evm_nonce(&tx.sender), "Invalid nonce");
 
     // 8. Pool 容量检查
-    ensure!(mempool.protocol_pool.len() < 50_000, "Pool full");
+    ensure!(mempool.evm_pool.len() < 100_000, "Pool full");
 
     Ok(())
 }
@@ -3792,9 +3610,7 @@ struct ConsensusParams {
 
 ```rust
 struct Mempool {
-    protocol_pool: PriorityTxs<ProtocolTransaction>, // 协议原生交易，高优先级
-    agent_pool: PriorityTxs<SignedAgentTx>,          // Agent 交易，中高优先级
-    evm_pool: PriorityTxs<EvmTx>,                    // EVM 交易，标准优先级
+    evm_pool: PriorityTxs<EvmTx>,                    // EVM 交易（含预编译调用）
     pending_bridges: VecDeque<BridgeOp>,             // 待处理桥接
     known_txs: LruCache<TxHash, ()>,                 // 去重缓存
 }
@@ -3804,30 +3620,17 @@ struct Mempool {
 
 | 维度 | 策略 |
 |------|------|
-| ProtocolTransaction 排序 | 按 `priority_score()`（CALL 等值）降序 + 时间戳 FIFO |
-| AgentTx 排序 | 按 `priority_score()`（CALL 等值）降序 + 时间戳 FIFO |
 | EvmTx 排序 | 按 gas price 降序 + nonce 顺序 |
 | BridgeOp | 按到达顺序 FIFO，区块内批量处理 |
-| 跨池优先级 | ProtocolTransaction > AgentTx > EvmTx > BridgeOp |
 
-**`priority_score()` 计算（多币种统一）：**
-```rust
-fn priority_score(tx: &ProtocolTransaction) -> u128 {
-    match tx.fee_currency {
-        FeeCurrency::Call => tx.max_priority_fee,
-        FeeCurrency::Stablecoin(asset_id) => {
-            let price = FeeCurrencyRegistry::get_call_price(asset_id).unwrap_or(0);
-            tx.max_priority_fee * price / 10u128.pow(get_asset_decimals(asset_id) as u32)
-        }
-    }
-}
-```
+**预编译交易与普通 EVM 交易统一排序：**
+
+所有交易均为标准 EVM 交易，统一按 `gas_price` 降序排列。调用预编译地址的交易与普通合约调用交易在 mempool 中无区别，均通过 gas price 竞争打包优先级。
 
 ### 17.3 容量与驱逐
 
 | 参数 | 值 | 说明 |
 |------|------|------|
-| protocol_pool 上限 | 50,000 txs | 多指令交易，数量动态调整 |
 | evm_pool 上限 | 100,000 txs | 根据 gas limit 动态调整 |
 | 单地址 Pending 上限 | 256 txs | 防止单地址占满池 |
 | 最小 gas price | 动态 | 低于阈值自动驱逐 |
@@ -3840,8 +3643,7 @@ fn priority_score(tx: &ProtocolTransaction) -> u128 {
 
 ### 17.4 防垃圾机制
 
-- ProtocolTransaction：多指令 CALL 费用天然防垃圾（需支付费用）
-- EvmTx：最低 gas price 要求
+- EvmTx（含预编译调用）：最低 gas price 要求
 - 稳定币支付 Gas：需在 FeeCurrencyRegistry 中，且有有效 oracle 价格
 - 重复交易检测：已知 TxHash 直接拒绝
 - 无效签名交易立即丢弃并记录
@@ -3857,7 +3659,6 @@ State = (ProtocolBalances, EvmState, BridgeState, ShieldedState)
 
 apply_block(state, block) -> Result<State> {
     state = execute_evm_txs(state, block.evm_txs)?;
-    state = execute_protocol_txs(state, block.protocol_txs)?;
     state = execute_bridge(state, block.bridge_operations)?;
     state = execute_system_txs(state, block.system_txs)?;
     Ok(state)
@@ -3866,20 +3667,14 @@ apply_block(state, block) -> Result<State> {
 
 ### 18.2 交易有效性规则
 
-**ProtocolTransaction 验证：**
-- `AuthScheme` 认证通过（单签 / 多签 / Session Key 按 §3.9 验证）
-- 若指定 `GasConfig::PerTxSponsor`，代付者签名也必须有效
-- 发送者或代付者余额 >= 总费用 + 总转账金额
-- 所有指令的合规检查通过（`check_compliance`）
-- 所有涉及的资产存在且状态为 Active
-- 非重放（nonce 递增）
-- 单条指令执行失败则整个交易回滚
-
-**EvmTx 验证：**
+**EvmTx 验证（含预编译调用）：**
 - 签名有效（secp256k1，以太坊兼容）
 - nonce >= 账户当前 nonce
 - 发送者余额 >= gas_limit * gas_price + value
 - gas_limit <= 区块 gas 上限
+- 预编译调用参数通过 ABI 解码验证
+- 涉及资产存在且状态为 Active
+- 预编译内部合规检查通过（`check_compliance`）
 
 **BridgeOp 验证：**
 - 对应 EVM 层桥接合约已触发（WithdrawToProtocol）
@@ -3898,8 +3693,7 @@ apply_block(state, block) -> Result<State> {
 ### 18.3 原子性保证
 
 区块内所有操作要么全部成功，要么全部回滚：
-- EVM 交易：Revm 的 Journal 机制保证单 tx 原子性
-- 协议原生交易：状态快照机制保证多指令原子性——执行前保存快照，任何指令失败回滚整个交易（已扣费用不退还）
+- EVM 交易（含预编译调用）：Revm 的 Journal 机制保证单 tx 原子性。预编译内部使用快照机制保证协议状态操作原子性
 - 桥接操作：两步操作（扣减+铸造 / 销毁+恢复）在同一函数内完成
 - 区块级别：状态根在所有操作后计算，不一致则拒绝区块
 
@@ -3907,74 +3701,29 @@ apply_block(state, block) -> Result<State> {
 
 每个交易执行后生成一条收据，打包到区块中。收据是区块浏览器查询、合约日志读取、事件监听的唯一来源。
 
-#### 18.4.1 协议交易收据
+#### 18.4.1 预编译调用收据
+
+预编译调用生成标准 EVM 交易收据，额外附加协议层状态变更信息：
 
 ```rust
-/// 协议交易收据
-struct ProtocolReceipt {
-    /// 交易哈希
+/// 预编译调用收据（扩展标准 EVM 收据）
+struct PrecompileReceipt {
+    /// 标准 EVM 收据字段
     tx_hash: Hash,
+    status: bool,               // true = success, false = reverted
+    gas_used: u64,
+    contract_address: Option<Address>,
+    logs: Vec<EvmLogEntry>,
+    logs_bloom: Bloom,
 
-    /// 执行结果
-    status: ExecutionStatus,
-
-    /// 实际消耗的 Gas
-    gas_used: u128,
-
-    /// Gas 支付方
-    gas_payer: Address,
-
-    /// Gas 支付币种（CALL 或稳定币 AssetId）
-    fee_currency: FeeCurrency,
-
-    /// 实际扣除的 Gas 费用（以 fee_currency 计价）
-    fee_amount: u128,
-
-    /// 执行的指令结果（按顺序）
-    instruction_results: Vec<InstructionResult>,
-
-    /// 事件日志
-    logs: Vec<LogEntry>,
-
-    /// 支付备注（转账附言）
-    memos: Vec<MemoEntry>,
-
-    /// 状态变更摘要（余额变化等）
-    state_changes: Vec<StateChange>,
+    /// 协议层扩展信息
+    precompile_address: Address,    // 被调用的预编译地址
+    protocol_state_changes: Vec<ProtocolStateChange>,
+    memos: Vec<MemoEntry>,          // 支付备注
 }
 
-/// 收据中的备注条目
-struct MemoEntry {
-    instruction_index: u32,       // 指令索引
-    memo: PaymentMemo,
-}
-
-enum ExecutionStatus {
-    Success,
-    Reverted { reason: String },
-}
-
-struct InstructionResult {
-    instruction_type: InstructionType,
-    status: InstructionStatus,
-    gas_used: u128,
-    output: Vec<u8>,  // 指令返回数据
-}
-
-enum InstructionStatus {
-    Success,
-    Reverted { reason: String },
-}
-
-/// 事件日志
-struct LogEntry {
-    address: Address,         // 事件发起者地址
-    topics: Vec<Hash>,        // 索引字段（可过滤）
-    data: Vec<u8>,            // 非索引数据
-}
-
-/// 状态变更摘要
-struct StateChange {
+/// 协议层状态变更摘要
+struct ProtocolStateChange {
     asset_id: AssetId,
     address: Address,
     change_type: ChangeType,
@@ -3985,7 +3734,22 @@ struct StateChange {
 enum ChangeType {
     Balance,
     Allowance,
-    Nonce,
+    AgentBalance,
+    ShieldedCommitment,
+    NullifierSpent,
+}
+
+/// 收据中的备注条目
+struct MemoEntry {
+    precompile_address: Address,
+    memo: PaymentMemo,
+}
+
+/// 支付备注
+struct PaymentMemo {
+    message: String,                // 最大 256 字节
+    reference: Option<String>,      // 最大 128 字节
+    metadata: Option<Vec<u8>>,      // 最大 1024 字节
 }
 ```
 
@@ -4933,18 +4697,16 @@ contract MyDEX {
 
 ```
 1. 用户发起操作
-   ├── 协议支付 → 签名 ProtocolTransaction（可组合多指令）→ 广播到 mempool
+   ├── 协议支付 → 签名 EvmTx（调用预编译地址）→ 广播到 mempool
    ├── EVM 交易 → 签名 EvmTx → 广播到 mempool
    └── 桥接操作 → 通过钱包自动创建 → 广播
 
 2. 验证者收集交易
-   ├── 高优先级：ProtocolTransaction
-   ├── 标准优先级：EvmTx
+   ├── 标准优先级：EvmTx（含预编译调用）
    └── 内部队列：BridgeOp
 
 3. 验证者打包区块
-   ├── 执行 EVM 交易 → 更新 EVM 状态
-   ├── 执行协议支付 → 更新协议余额
+   ├── 执行 EVM 交易 → 更新 EVM 状态（预编译调用同步更新协议状态）
    ├── 执行桥接操作 → 同步两层余额
    └── 执行系统交易 → 奖励/费用结算
 

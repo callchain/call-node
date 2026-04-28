@@ -35,7 +35,7 @@ Internal bridge operations are **atomic** and execute within a single block. If 
 │                                                             │
 │  Two entry points:                                          │
 │  1. BridgeOp in block.bridge_operations (agent/block lvl)  │
-│  2. Instruction in ProtocolTransaction (user-initiated)    │
+│  2. EVM transaction calling Switch precompile (user-init)  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -99,28 +99,21 @@ Execution happens during `Block::execute` (Step 3, after EVM transactions and pr
 
 Both operations are rate-limited and support atomic rollback via snapshots.
 
-### 2. User-Facing Protocol Instructions
+### 2. User-Facing Precompile Calls
 
-Ordinary users can initiate bridging via signed `ProtocolTransaction` containing a single instruction:
+Ordinary users can initiate bridging by calling the Switch precompile (`0x207`) via a standard EVM transaction:
 
-```rust
-pub enum Instruction {
-    BridgeToEvm {
-        asset_id: AssetId,
-        to: Address,
-        amount: Balance,
-    },
-    BridgeToProtocol {
-        asset_id: AssetId,
-        to: Address,
-        amount: Balance,
-    },
-}
+```solidity
+// Protocol → EVM: deduct protocol balance, mint wrapped ERC-20
+function switchToEvm(uint64 assetId, address to, uint128 amount) external returns (bool);
+
+// EVM → Protocol: burn wrapped ERC-20, credit protocol balance
+function switchToProtocol(uint64 assetId, address to, uint128 amount) external returns (bool);
 ```
 
-These instructions are **not** executed by the generic `execute_instruction` in `call_protocol`. Instead, they are recognized by `is_bridge_instruction` and routed to `execute_bridge_instruction` inside `Block::execute`, where they share the same inline execution logic as `BridgeOp` but with user-submitted transaction semantics (gas metering, nonce checks, signature verification).
+These calls are executed by revm during `Block::execute`. The Switch precompile receives the caller address from the EVM context, accesses `AccountState` and `AssetRegistry` via the state hook, and performs the cross-layer transfer atomically.
 
-**Gas cost:** Both `BridgeToEvm` and `BridgeToProtocol` cost **25,000 gas**.
+**Gas cost:** Both `switchToEvm` and `switchToProtocol` cost **8,000 gas**.
 
 ---
 
@@ -128,24 +121,10 @@ These instructions are **not** executed by the generic `execute_instruction` in 
 
 ### Bridge Instruction Detection
 
-During block execution, each transaction's instructions are classified:
+During block execution, bridge-related EVM calls to precompiles (`0x103`, `0x207`) are handled by the respective precompile functions. The Switch precompile (`0x207`) handles `switchToEvm` / `switchToProtocol`, while the Bridge precompile (`0x103`) handles `externalBridgeDeposit` / `externalBridgeWithdraw` / `challengeBridgeDeposit`.
 
-```rust
-fn is_bridge_instruction(instr: &Instruction) -> bool {
-    matches!(instr,
-        Instruction::ExternalBridgeDeposit { .. }
-        | Instruction::ExternalBridgeWithdraw { .. }
-        | Instruction::BridgeDeposit { .. }
-        | Instruction::ChallengeBridgeDeposit { .. }
-        | Instruction::BridgeToEvm { .. }
-        | Instruction::BridgeToProtocol { .. }
-    )
-}
-```
-
-Bridge instructions are extracted and executed via `execute_bridge_instruction`, which receives:
-- `instruction`: the bridge instruction
-- `sender`: the transaction sender address
+Bridge precompiles receive:
+- `caller`: the EVM caller address (from revm context)
 - `account`: mutable `AccountState`
 - `bridge_state`: mutable `BridgeStateManager`
 - `config`: `BridgeConfig`
@@ -248,13 +227,12 @@ Submit a user-initiated withdrawal from EVM to protocol.
 }
 ```
 
-Both endpoints build a `ProtocolTransaction` with:
-- `gas_limit = 25_000`
-- `max_fee = 250_000`
-- Single bridge instruction
-- `AuthScheme::SingleSig` with the provided 65-byte secp256k1 signature
+Both endpoints build an EVM transaction calling the Switch precompile (`0x207`) with:
+- `gas_limit = 30_000`
+- Standard EIP-1559 fee fields
+- ABI-encoded `switchToEvm` or `switchToProtocol` call data
 
-The signature is verified against the canonical `ProtocolTransaction::compute_tx_hash()` using raw secp256k1 recovery (not EIP-191).
+The signature is a standard Ethereum ECDSA signature over the RLP-encoded EVM transaction.
 
 ---
 

@@ -13,11 +13,11 @@ The RPC layer is the primary interface for users, dApps, validators, and operato
 
 ## Architectural Rule
 
-**All state-mutating RPCs must construct a `ProtocolTransaction` and submit via `insert_protocol_tx` → mempool → consensus → `Block::execute`.**
+**All state-mutating RPCs construct standard EVM transactions targeting precompile addresses and submit via `eth_sendRawTransaction` → mempool → consensus → `Block::execute`.**
 
-Direct state mutations from RPC handlers are prohibited. State-changing operations are implemented as `Instruction` variants executed inline during block production. This ensures deterministic state transitions, replay protection through consensus ordering, and uniform gas accounting.
+Direct state mutations from RPC handlers are prohibited. State-changing operations are invoked by calling EVM precompiles (`0x101`–`0x209`) during block execution. This ensures deterministic state transitions, replay protection through standard EVM nonces, and uniform gas accounting.
 
-The unified write endpoint is `call_submit`, which accepts a `ProtocolTransaction` containing one or more `Instruction`s. All former individual write endpoints (`call_sendPayment`, `call_registerAsset`, `call_governanceVote`, etc.) have been removed and consolidated into this unified interface.
+The `call_submit` endpoint is a convenience wrapper that builds an EVM transaction targeting the appropriate precompile address from a JSON instruction description, signs it, and submits via the standard `eth_sendRawTransaction` path. All former individual write endpoints (`call_sendPayment`, `call_registerAsset`, `call_governanceVote`, etc.) have been removed and consolidated into this unified interface.
 
 **EVM Precompile Path**: All protocol features are also accessible via standard EVM transactions sent to precompile addresses (`0x101`–`0x209`). Users can call `eth_sendRawTransaction` with an RLP-encoded EVM transaction targeting any precompile. This is the recommended path for MetaMask, Solidity contracts, and dApp integrations. See [precompile.md](precompile.md) for the ABI reference.
 
@@ -122,39 +122,42 @@ Response:
 }
 ```
 
-#### Supported Instruction Types
+#### Supported Operation Types
 
-Each instruction in the `instructions` array must have a `"type"` field. Supported types:
+Each operation in the `instructions` array must have a `"type"` field. The RPC handler maps the type to a precompile address + function selector and builds an EVM transaction:
 
-| Type | Fields | Gas |
-|------|--------|-----|
-| `Transfer` | `asset_id`, `to`, `amount`, `memo?` | 100,000 |
-| `RegisterAsset` | `symbol`, `name`, `decimals`, `max_supply` | 200,000 |
-| `RegisterAgent` | `pubkey`, `name`, `url` | 50,000 |
-| `GrantAgentBalance` | `agent_id`, `asset_id`, `amount` | 10,000 |
-| `RevokeAgentBalance` | `agent_id`, `asset_id` | 10,000 |
-| `GovernanceSubmitProposal` | `proposal_type`, `title`, `description`, `execution_data` | 200,000 |
-| `GovernanceVote` | `proposal_id`, `vote` | 50,000 |
-| `GovernanceQueue` | `proposal_id` | 50,000 |
-| `GovernanceExecute` | `proposal_id` | 100,000 |
-| `GovernanceEmergencyPause` | `reason` | 200,000 |
-| `GovernanceEmergencyResume` | — | 200,000 |
-| `ExternalBridgeDeposit` | `source_tx_hash`, `source_chain`, ... | 200,000 |
-| `ExternalBridgeWithdraw` | `target_chain`, `target_address`, ... | 200,000 |
-| `BridgeToEvm` | `asset_id`, `to`, `amount` | 25,000 |
-| `BridgeToProtocol` | `asset_id`, `to`, `amount` | 25,000 |
-| `EvmIssuerMint` | `asset_id`, `to`, `amount` | 50,000 |
-| `ValidatorStake` | `ed25519_pubkey`, `self_stake` | 200,000 |
-| `ValidatorUnstake` | `validator_id` | 100,000 |
-| `ValidatorClaimUnbonded` | `validator_id` | 100,000 |
-| `SubmitRollbackSignature` | `validator_id`, `target_height`, `target_version_major`, `target_version_minor`, `target_version_patch`, `nonce`, `signature` | 50,000 |
+| Type | Precompile | Fields | Gas |
+|------|------------|--------|-----|
+| `Transfer` | `0x201` | `asset_id`, `to`, `amount` | 5,000 |
+| `BatchTransfer` | `0x201` | `asset_id`, `to[]`, `amounts[]` | 5,000 per recipient |
+| `RegisterAsset` | `0x201` | `symbol`, `name`, `decimals`, `max_supply` | 50,000 |
+| `Mint` | `0x201` | `asset_id`, `to`, `amount` | 6,000 |
+| `Burn` | `0x201` | `asset_id`, `from`, `amount` | 5,000 |
+| `RegisterAgent` | `0x209` | `pubkey`, `name`, `url` | 6,000 |
+| `GrantAgentBalance` | `0x209` | `agent_id`, `asset_id`, `amount` | 6,000 |
+| `RevokeAgentBalance` | `0x209` | `agent_id`, `asset_id` | 6,000 |
+| `GovernanceSubmitProposal` | `0x203` | `proposal_type`, `title`, `description`, `execution_data` | 20,000 |
+| `GovernanceVote` | `0x203` | `proposal_id`, `vote` | 10,000 |
+| `GovernanceQueue` | `0x203` | `proposal_id` | 10,000 |
+| `GovernanceExecute` | `0x203` | `proposal_id` | 20,000 |
+| `GovernanceEmergencyPause` | `0x203` | `reason` | 20,000 |
+| `GovernanceEmergencyResume` | `0x203` | — | 20,000 |
+| `ExternalBridgeDeposit` | `0x103` | `source_tx_hash`, `source_chain`, ... | 10,000 |
+| `ExternalBridgeWithdraw` | `0x103` | `target_chain`, `target_address`, ... | 8,000 |
+| `BridgeToEvm` | `0x207` | `asset_id`, `to`, `amount` | 8,000 |
+| `BridgeToProtocol` | `0x207` | `asset_id`, `to`, `amount` | 8,000 |
+| `EvmIssuerMint` | `0x201` | `asset_id`, `to`, `amount` | 6,000 |
+| `ValidatorStake` | `0x204` | `ed25519_pubkey`, `self_stake` | 20,000 |
+| `ValidatorUnstake` | `0x204` | `validator_id` | 20,000 |
+| `ValidatorClaimUnbonded` | `0x204` | `validator_id` | 20,000 |
+| `SubmitRollbackSignature` | `0x203` | `validator_id`, `target_height`, ... | 10,000 |
 
 All `call_submit` requests require:
 - `sender`: the signer's address
-- `nonce`: transaction nonce for replay protection
-- `signature`: 65-byte secp256k1 signature (`r || s || v`) over `compute_tx_hash()`
+- `nonce`: EVM transaction nonce for replay protection
+- `signature`: 65-byte secp256k1 signature (`r || s || v`) over the EVM tx hash
 
-Multiple instructions can be included in a single `ProtocolTransaction` for atomic batch execution.
+The built EVM transaction uses `gas_limit` derived from the operation type and `max_fee_per_gas` from current network conditions.
 
 ---
 
@@ -212,17 +215,17 @@ Client
     ↓
 POST call_submit { sender, nonce, instructions, signature }
     ↓
-RPC Handler parses JSON → converts "type" to externally-tagged Instruction
+RPC Handler parses JSON → maps "type" to precompile address + selector
     ↓
-Build ProtocolTransaction { sender, nonce, instructions, auth, ... }
+Build EVM transaction { to: precompile_addr, data: selector + args, ... }
     ↓
-tx.verify_signature() → state.insert_protocol_tx(tx) → Mempool
+Sign EVM tx → eth_sendRawTransaction → Mempool
     ↓
 Return pending tx hash { txHash, status: "pending" }
     ↓
-Block production (consensus) selects tx from mempool
+Block production (consensus) selects tx from mempool by gas price
     ↓
-Block::execute → execute_agent_instruction / execute_governance_instruction / ...
+Block::execute → revm executes tx → precompile_fn() called
     ↓
 State transition committed atomically → receipt stored
 ```
@@ -307,7 +310,7 @@ Uses `RealProver::global()` from `call-shielded` which loads production ceremony
 | HTTP JSON-RPC server | Ready | jsonrpsee is production-grade, TLS + rate limiting configured |
 | Standard Ethereum RPC | Ready | 17 endpoints including gas estimation, block queries, code/storage |
 | Unified write endpoint (`call_submit`) | Ready | Single entry point for all state mutations; multi-instruction batch support |
-| Instruction-based flow | Ready | All state mutations go through `ProtocolTransaction` → mempool → consensus |
+| Precompile-based flow | Ready | All state mutations go through EVM tx → precompile → mempool → consensus |
 | Agent RPC | Ready | `RegisterAgent` / `GrantAgentBalance` / `RevokeAgentBalance` via `call_submit` |
 | Rollback RPC | Ready | `SubmitRollbackSignature` via `call_submit` |
 | Governance RPC | Ready | Read-only queries + `call_submit` for state changes |

@@ -90,7 +90,7 @@ pub enum ExternalBridgeOp {
 }
 ```
 
-Bridge operations are included in the `bridge_operations` field of `Block` or submitted as `ExternalBridgeDeposit` / `ExternalBridgeWithdraw` instructions within `ProtocolTransaction`. Execution happens atomically during `Block::execute`.
+Bridge operations are included in the `bridge_operations` field of `Block` or submitted as standard EVM transactions calling the Bridge precompile (`0x103`). Execution happens atomically during `Block::execute`.
 
 ### 2. BridgeStateManager (`lib.rs`)
 

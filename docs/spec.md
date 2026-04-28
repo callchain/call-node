@@ -13,14 +13,14 @@
 
 ## 1. Overview
 
-Callchain is a high-performance Layer-1 blockchain featuring a **dual execution domain architecture**: a Protocol Payment Layer and an EVM Contract Layer, with seamless asset flow between the two layers through a unified internal bridge mechanism.
+Callchain is a high-performance Layer-1 blockchain featuring a **unified EVM execution domain**: all transactions execute within the EVM, with protocol-level operations (payments, asset management, compliance) accessed via native precompile addresses (`0x101`–`0x209`). Seamless asset flow between protocol-managed state and EVM contract state is achieved through a unified internal bridge mechanism.
 
 ### 1.1 Design Principles
 
 - **Assets as First-Class Citizens**: Assets such as stablecoins have native balance mappings at the protocol layer, enjoying deterministic execution and fixed fees
 - **Open Issuance**: Anyone can register assets on-chain without permission
 - **EVM Compatibility**: The smart contract layer is fully Ethereum-compatible, allowing existing DeFi ecosystems to migrate seamlessly
-- **Dual-Domain Isolation**: The protocol layer and EVM layer operate independently, converting through an internal bridge without interfering with each other
+- **Precompile-Based Protocol Access**: Protocol features (transfers, asset registry, compliance, shielded pool, agents) are invoked via EVM precompiles at fixed addresses (`0x101`–`0x209`), giving smart contracts direct access to native protocol state
 - **Compliance Framework**: Protocol-level compliance policy engine, with issuers choosing their own strategies
 
 ### 1.2 Core Architecture
@@ -29,16 +29,18 @@ Callchain is a high-performance Layer-1 blockchain featuring a **dual execution 
                     Callchain L1
               Simplex BFT Consensus (Single Validator Set)
                          │
-          ┌──────────────┴──────────────┐
-          ▼                             ▼
-   Protocol Payment              EVM Contract
-     (Protocol Payment Layer)     (Smart Contract Layer)
-          │                             │
-          ▼                             ▼
-   ProtocolBalances                ERC-20 Storage
-   (Protocol-Level Balance Mapping)  (Contract Independent Balances)
-          │                             │
-          └──────────┬──────────────────┘
+                         ▼
+                    EVM Contract
+                 (Unified Execution Layer)
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+   Protocol State    ERC-20 Storage   Precompiles
+   (Native Balance   (Contract        (0x101-0x209)
+    Mapping)          Independent
+                      Balances)
+          │              │
+          └──────────┬───┘
                      ▼
             Internal Bridge
            (Protocol-Level Internal Bridge)
@@ -139,8 +141,7 @@ reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 ```rust
 struct Block {
     header: BlockHeader,
-    protocol_txs: Vec<ProtocolTransaction>, // protocol-native transactions (multi-instruction)
-    evm_txs: Vec<EvmTx>,                     // EVM transactions
+    evm_txs: Vec<EvmTx>,                     // EVM transactions (raw RLP bytes; may call precompiles)
     system_txs: Vec<SystemTx>,               // system transactions
     bridge_operations: Vec<BridgeOp>,         // bridge operations
 }
@@ -164,15 +165,15 @@ Each block is processed in the following order:
 
 ```
 1. Execute EVM transactions (evm_txs)
-2. Execute protocol-native transactions (protocol_txs) -- multi-instruction atomic execution
-3. Execute bridge operations (bridge_operations)
+   - Standard EVM calls, including precompile invocations at 0x101–0x209
+2. Execute bridge operations (bridge_operations)
    - Process EVM → Protocol withdrawal requests
    - Process Protocol → EVM deposit requests
-4. Execute system transactions (system_txs)
+3. Execute system transactions (system_txs)
    - Validator reward distribution
    - Fee settlement
    - Compliance policy updates
-5. Compute final state root, pack block header
+4. Compute final state root, pack block header
 ```
 
 ---
@@ -286,520 +287,224 @@ fn check_compliance(
 }
 ```
 
-### 3.5 Multi-Instruction Transaction Model
+### 3.5 Protocol Precompile Invocation Model
 
-Protocol-native transactions support combining multiple different Instructions within a single transaction, with all instructions executed atomically.
+All protocol operations are invoked via standard EVM transactions calling precompile addresses in the range `0x101`–`0x209`. The EVM execution engine (revm) routes these calls to native Rust handlers that operate on protocol state. Each precompile call is a separate EVM call frame; composability is achieved by wrapping multiple calls in a smart contract or by submitting multiple EVM transactions atomically within the same block.
+
+**Precompile Address Ranges:**
+
+| Address Range | Function |
+|---------------|----------|
+| `0x101`       | Asset registry and queries |
+| `0x102`       | Protocol balance transfers |
+| `0x103`       | Batch transfers |
+| `0x104`       | Allowance management (approve/transferFrom) |
+| `0x105`       | Issuer mint/burn |
+| `0x106`       | Agent operations (pay, batchPay, call, bridgeDeposit) |
+| `0x107`       | Internal bridge (deposit/withdraw) |
+| `0x108`       | Compliance updates |
+| `0x109`       | Shielded pool (deposit/transfer/withdraw) |
+| `0x10a`–`0x1ff` | Reserved for future protocol operations |
+| `0x200`–`0x209` | Oracle and system precompiles |
+
+**EVM Transaction Calling a Precompile:**
 
 ```rust
-/// Protocol-native transaction
-struct ProtocolTransaction {
-    sender: Address,                  // transaction initiator (account address)
-    nonce: u64,                       // anti-replay
-    instructions: Vec<Instruction>,   // one or more instructions
-    gas_config: GasConfig,            // Gas payment configuration
-    fee_currency: FeeCurrency,        // Gas payment currency (CALL or protocol-approved stablecoin)
-    gas_limit: u64,                   // maximum gas consumption limit
-    max_fee: u128,                    // maximum total fee the user is willing to pay (in fee_currency)
-    max_priority_fee: u128,           // priority tip (in fee_currency, 100% to validator)
-    auth: AuthScheme,                 // authentication scheme (single-sig/multi-sig/Session Key)
-}
-
-/// Gas payment configuration
-enum GasConfig {
-    /// Self-pay (deducted from sender's CALL balance)
-    SelfPay,
-    /// Use pre-authorized sponsor (sponsor has signed authorization, no per-tx signature needed)
-    AuthorizedSponsor {
-        sponsor: Address,
-    },
-    /// Use sponsor deposit pool
-    PoolSponsor,
-    /// Per-transaction sponsor (requires sponsor signature per tx)
-    PerTxSponsor {
-        sponsor: Address,
-        sponsor_signature: Signature,
-    },
-}
-
-/// Gas payment currency
-enum FeeCurrency {
-    /// Native CALL
-    Call,
-    /// Protocol-approved stablecoin (AssetId must be from FeeCurrencyRegistry)
-    Stablecoin(AssetId),
-}
-
-/// Single instruction (one operation within a transaction)
-enum Instruction {
-    /// Asset transfer
-    Transfer {
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-        memo: Option<PaymentMemo>,
-    },
-    /// Batch transfer
-    BatchTransfer {
-        asset_id: AssetId,
-        payments: Vec<PaymentEntry>,
-        memo: Option<PaymentMemo>,
-    },
-    /// Approve
-    Approve {
-        asset_id: AssetId,
-        spender: Address,
-        amount: u128,
-    },
-    /// Approve-and-transfer on behalf
-    TransferFrom {
-        asset_id: AssetId,
-        from: Address,
-        to: Address,
-        amount: u128,
-    },
-    /// Issuer mint
-    Mint {
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// Issuer burn
-    Burn {
-        asset_id: AssetId,
-        from: Address,
-        amount: u128,
-    },
-    /// Agent pay
-    AgentPay {
-        agent_id: u64,
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// Agent batch pay
-    AgentBatchPay {
-        agent_id: u64,
-        asset_id: AssetId,
-        payments: Vec<AgentPayment>,
-    },
-    /// Agent call EVM contract
-    AgentCall {
-        agent_id: u64,
-        asset_id: AssetId,
-        contract: Address,
-        data: Vec<u8>,
-        value: u128,
-    },
-    /// Agent bridge: Protocol layer → EVM layer
-    AgentBridgeDeposit {
-        agent_id: u64,
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// Bridge: Protocol layer → EVM layer
-    BridgeDeposit {
-        asset_id: AssetId,
-        to: Address,
-        amount: u128,
-    },
-    /// Compliance: Update address compliance status
-    UpdateCompliance {
-        asset_id: AssetId,
-        address: Address,
-        status: ComplianceStatus,
-    },
-    /// Shielded transfer: Hide sender, receiver, and amount via Shielded Pool
-    ShieldedTransfer {
-        asset_id: AssetId,
-        commitments: Vec<NoteCommitment>,  // new output commitments
-        nullifiers: Vec<Nullifier>,        // input spends
-        proof: ZkProof,                    // zk-SNARK proof
-    },
-    /// Withdraw from Shielded Pool to transparent address
-    ShieldedWithdraw {
-        asset_id: AssetId,
-        to: Address,
-        nullifier: Nullifier,
-        proof: ZkProof,
-    },
-    /// Deposit from transparent address into Shielded Pool
-    ShieldedDeposit {
-        asset_id: AssetId,
-        from: Address,
-        commitment: NoteCommitment,
-        amount: u128,
-    },
-}
-
-struct PaymentEntry {
-    to: Address,
-    amount: u128,
-    memo: Option<PaymentMemo>,
-}
-
-struct AgentPayment {
-    to: Address,
-    amount: u128,
-    memo: Option<PaymentMemo>,
-}
-
-/// Payment memo -- attached to transfer instructions, records the purpose of the transfer
-struct PaymentMemo {
-    message: String,                // free-text memo (e.g., "Invoice #1234")
-    reference: Option<String>,      // external reference (order number, invoice number, contract number)
-    metadata: Option<Vec<u8>>,      // custom binary data (serialized JSON, etc.)
+/// Standard EVM transaction (EIP-1559 or legacy) targeting a protocol precompile
+struct EvmTx {
+    to: Address,           // precompile address, e.g. 0x102 for transfer
+    data: Vec<u8>,         // ABI-encoded precompile input
+    value: u128,           // CALL value (usually 0 for precompile calls)
+    gas_limit: u64,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
+    nonce: u64,
+    chain_id: u64,
+    signature: Signature,  // standard secp256k1 signature
 }
 ```
 
-**PaymentMemo Limits:**
-- `message` maximum 256 bytes
-- `reference` maximum 128 bytes
-- `metadata` maximum 1024 bytes
-- Transactions exceeding limits are rejected
+**Example: Protocol transfer via precompile**
 
-**Gas Cost:** Memo data needs to be stored in receipts (see §18.4), each additional byte adds ~1 gas. Small memos are very low cost.
+```solidity
+// Solidity interface for the transfer precompile at 0x102
+interface IProtocolTransfer {
+    function transfer(
+        uint64 assetId,
+        address to,
+        uint128 amount,
+        bytes calldata memo
+    ) external returns (bool);
+}
 
-**Design Rationale:** Changing `PaymentTx` from "each enum variant is a complete transaction" to "transaction contains multiple instructions" achieves:
+// Usage from a contract or wallet
+contract Example {
+    IProtocolTransfer constant TRANSFER =
+        IProtocolTransfer(0x0000000000000000000000000000000000000102);
 
-1. **Composability**: A single transaction can simultaneously do "transfer + approve + bridge", without splitting into three transactions
-2. **Atomicity**: Either all instructions succeed, or the entire transaction rolls back
-3. **Fee Optimization**: First instruction pays full fee, subsequent instructions get a discount
-4. **Unified Signing**: Sender only signs once, covering all instructions
-5. **Extensibility**: New instruction types only need to be added to the `Instruction` enum
+    function pay(uint64 assetId, address recipient, uint128 amount) external {
+        TRANSFER.transfer(assetId, recipient, amount, "");
+    }
+}
+```
 
-**Typical Use Cases:**
+**Raw transaction example (Rust):**
 
 ```rust
-// Use case 1: Payroll -- batch payment to 100 people in a single transaction
-ProtocolTransaction {
-    sender: company_address,
+let tx = EvmTx {
+    to: Address::from_hex("0x102"),          // transfer precompile
+    data: encode_abi("transfer", &[          // ABI-encoded arguments
+        Token::Uint(asset_id.into()),
+        Token::Address(recipient),
+        Token::Uint(amount.into()),
+        Token::Bytes(memo),
+    ]),
+    value: 0,
+    gas_limit: 21_000,
+    max_fee_per_gas: 10_000_000_000,
+    max_priority_fee_per_gas: 1_000_000_000,
     nonce: 42,
-    instructions: vec![
-        Instruction::BatchTransfer {
-            asset_id: USDC_ID,
-            payments: vec![
-                PaymentEntry {
-                    to: employee1,
-                    amount: 5000_000000,
-                    memo: Some(PaymentMemo {
-                        message: "March 2026 salary".into(),
-                        reference: Some("PAYROLL-2026-03-001".into()),
-                        metadata: None,
-                    }),
-                },
-                PaymentEntry {
-                    to: employee2,
-                    amount: 5000_000000,
-                    memo: Some(PaymentMemo {
-                        message: "March 2026 salary".into(),
-                        reference: Some("PAYROLL-2026-03-002".into()),
-                        metadata: None,
-                    }),
-                },
-                // ... 98 more
-            ],
-            memo: Some(PaymentMemo {
-                message: "Monthly payroll batch".into(),
-                reference: Some("PAYROLL-MAR-2026".into()),
-                metadata: None,
-            }),
-        },
-    ],
-    gas_config: GasConfig::SelfPay,
-    fee_currency: FeeCurrency::Call,
-    gas_limit: 60_000,
-    max_fee: 1_000_000,          // max 1,000,000 wei
-    max_priority_fee: 5_000,     // tip 5,000 wei
-    auth: AuthScheme::SingleSig { signature: company_sig },
-}
-
-// Use case 2: DeFi entry -- bridge + approve + deposit in one step
-ProtocolTransaction {
-    sender: user_address,
-    nonce: 7,
-    instructions: vec![
-        // 1. First bridge 1000 USDC to EVM layer
-        Instruction::BridgeDeposit {
-            asset_id: USDC_ID,
-            to: user_address,
-            amount: 1000_000000,
-        },
-        // 2. Approve DEX contract to use USDC
-        Instruction::Approve {
-            asset_id: USDC_ID,
-            spender: dex_router,
-            amount: u128::MAX,
-        },
-    ],
-    gas_config: GasConfig::SelfPay,
-    fee_currency: FeeCurrency::Call,
-    gas_limit: 16_000,
-    max_fee: 500_000,
-    max_priority_fee: 3_000,
-    auth: AuthScheme::SingleSig { signature: user_sig },
-}
-
-// Use case 3: Agent auto-pay + Owner pre-authorized sponsor
-ProtocolTransaction {
-    sender: agent_public_key.to_address(),
-    nonce: 100,
-    instructions: vec![
-        Instruction::AgentPay {
-            agent_id: 5,
-            asset_id: USDC_ID,
-            to: vendor,
-            amount: 100_000000,
-        },
-        Instruction::AgentPay {
-            agent_id: 5,
-            asset_id: USDC_ID,
-            to: api_provider,
-            amount: 50_000000,
-        },
-    ],
-    gas_config: GasConfig::AuthorizedSponsor { sponsor: owner_address },
-    fee_currency: FeeCurrency::Call,
-    gas_limit: 5_000,
-    max_fee: 100_000,
-    max_priority_fee: 1_000,
-    auth: AuthScheme::SingleSig { signature: agent_sig },
-}
+    chain_id: 1,
+    signature: sign_secp256k1(&private_key, &tx_hash),
+};
 ```
 
-### 3.6 Instruction Execution Semantics
+**Precompile execution inside revm:**
 
 ```rust
-fn execute_protocol_tx(tx: &ProtocolTransaction) -> Result<()> {
-    // 1. Verify authentication
-    verify_auth(tx.sender, &tx.auth)?;
-
-    // 2. Verify nonce
-    ensure!(tx.nonce == get_nonce(&tx.sender), "Invalid nonce");
-
-    // 3. Estimate gas consumption
-    let estimated_gas = calculate_gas_units(&tx.instructions);
-    ensure!(estimated_gas <= tx.gas_limit, "Gas limit exceeded");
-
-    // 4. Calculate actual fee
-    let base_fee = get_current_base_fee();
-    let actual_fee = base_fee * estimated_gas as u128 + tx.max_priority_fee;
-    ensure!(actual_fee <= tx.max_fee, "Fee exceeds max_fee");
-
-    // 5. Atomically execute all instructions (using transactional state changes)
-    let state_snapshot = take_state_snapshot();
-    let tx_hash = tx.hash();
-
-    // Deduct fee
-    deduct_gas(&tx.sender, &tx.gas_config, actual_fee, tx_hash)?;
-
-    for (i, instruction) in tx.instructions.iter().enumerate() {
-        execute_instruction(instruction, i, &tx.sender)
-            .map_err(|e| {
-                // Any instruction failure rolls back entire transaction
-                restore_state_snapshot(&state_snapshot);
-                e
-            })?;
+fn call_precompile(address: Address, input: &[u8], gas_limit: u64) -> PrecompileResult {
+    match address {
+        0x101 => asset_registry_precompile(input, gas_limit),
+        0x102 => protocol_transfer_precompile(input, gas_limit),
+        0x103 => batch_transfer_precompile(input, gas_limit),
+        0x104 => allowance_precompile(input, gas_limit),
+        0x105 => issuer_mint_burn_precompile(input, gas_limit),
+        0x106 => agent_precompile(input, gas_limit),
+        0x107 => bridge_precompile(input, gas_limit),
+        0x108 => compliance_precompile(input, gas_limit),
+        0x109 => shielded_pool_precompile(input, gas_limit),
+        0x200..=0x209 => system_precompile(address, input, gas_limit),
+        _ => Err(PrecompileError::NotFound),
     }
-
-    // 6. All instructions succeeded, commit state changes, increment nonce
-    commit_state_changes();
-    increment_nonce(&tx.sender);
-
-    Ok(())
-}
-
-/// Gas deduction logic
-fn deduct_gas(
-    sender: &Address,
-    config: &GasConfig,
-    fee_currency: &FeeCurrency,
-    fee: u128,
-    tx_hash: Hash,
-) -> Result<()> {
-    // Deduct by currency type
-    match fee_currency {
-        FeeCurrency::Call => {
-            deduct_call_from_payer(sender, config, fee, tx_hash)?;
-        }
-        FeeCurrency::Stablecoin(asset_id) => {
-            // Stablecoin payment: verify in FeeCurrencyRegistry, convert at oracle price
-            ensure!(
-                FeeCurrencyRegistry::is_allowed(*asset_id),
-                "Fee currency not approved by governance"
-            );
-            let stablecoin_fee = convert_fee_to_stablecoin(*asset_id, fee)?;
-            deduct_stablecoin_from_payer(sender, config, asset_id, stablecoin_fee, tx_hash)?;
-        }
-    }
-    Ok(())
-}
-
-/// Deduct CALL from payer (supports sponsor)
-fn deduct_call_from_payer(
-    sender: &Address,
-    config: &GasConfig,
-    fee: u128,
-    tx_hash: Hash,
-) -> Result<()> {
-    match config {
-        GasConfig::SelfPay => {
-            deduct_call_balance(sender, fee)?;
-        }
-        GasConfig::AuthorizedSponsor { sponsor } => {
-            let auth = get_sponsor_auth(*sponsor)?;
-            ensure!(auth.is_valid(sender, fee), "Sponsor auth invalid");
-            update_sponsor_daily(*sponsor, fee)?;
-            deduct_call_balance(sponsor, fee)?;
-        }
-        GasConfig::PoolSponsor => {
-            deduct_from_sponsor_pool(sender, fee)?;
-        }
-        GasConfig::PerTxSponsor { sponsor, sponsor_signature } => {
-            verify_signature(sponsor, sponsor_signature, tx_hash)?;
-            deduct_call_balance(sponsor, fee)?;
-        }
-    }
-    Ok(())
-}
-
-/// Deduct stablecoin from payer (supports sponsor)
-fn deduct_stablecoin_from_payer(
-    sender: &Address,
-    config: &GasConfig,
-    asset_id: &AssetId,
-    stablecoin_fee: u128,
-    tx_hash: Hash,
-) -> Result<()> {
-    match config {
-        GasConfig::SelfPay => {
-            deduct_asset_balance(asset_id, sender, stablecoin_fee)?;
-        }
-        GasConfig::AuthorizedSponsor { sponsor } => {
-            let auth = get_sponsor_auth(*sponsor)?;
-            ensure!(auth.is_valid(sender, stablecoin_fee), "Sponsor auth invalid");
-            update_sponsor_daily(*sponsor, stablecoin_fee)?;
-            deduct_asset_balance(asset_id, sponsor, stablecoin_fee)?;
-        }
-        GasConfig::PoolSponsor => {
-            deduct_asset_from_sponsor_pool(asset_id, sender, stablecoin_fee)?;
-        }
-        GasConfig::PerTxSponsor { sponsor, sponsor_signature } => {
-            verify_signature(sponsor, sponsor_signature, tx_hash)?;
-            deduct_asset_balance(asset_id, sponsor, stablecoin_fee)?;
-        }
-    }
-    Ok(())
 }
 ```
 
-fn execute_instruction(instr: &Instruction, index: usize, sender: &Address) -> Result<()> {
-    match instr {
-        Instruction::Transfer { asset_id, to, amount, memo } => {
-            check_compliance(&get_asset(*asset_id)?, *sender, *to)?;
-            transfer_balance(*asset_id, *sender, *to, *amount)?;
-            record_memo(tx_hash, memo)?;
-        }
-        Instruction::BatchTransfer { asset_id, payments, memo } => {
-            if let Some(m) = memo {
-                record_memo(tx_hash, Some(m))?;
-            }
-            for payment in payments {
-                check_compliance(&get_asset(*asset_id)?, *sender, payment.to)?;
-                transfer_balance(*asset_id, *sender, payment.to, payment.amount)?;
-                record_memo(tx_hash, &payment.memo)?;
-            }
-        }
-        Instruction::Approve { asset_id, spender, amount } => {
-            set_allowance(*asset_id, *sender, *spender, *amount)?;
-        }
-        Instruction::TransferFrom { asset_id, from, to, amount } => {
-            spend_allowance(*asset_id, *from, *sender, *to, *amount)?;
-        }
-        Instruction::Mint { asset_id, to, amount } => {
-            let asset = get_asset(*asset_id)?;
-            ensure!(asset.issuer == *sender, "Only issuer can mint");
-            mint_balance(*asset_id, *to, *amount)?;
-        }
-        Instruction::Burn { asset_id, from, amount } => {
-            let asset = get_asset(*asset_id)?;
-            ensure!(asset.issuer == *sender, "Only issuer can burn");
-            burn_balance(*asset_id, *from, *amount)?;
-        }
-        Instruction::AgentPay { agent_id, asset_id, to, amount } => {
-            execute_agent_pay(*agent_id, *asset_id, *to, *amount)?;
-        }
-        Instruction::AgentBatchPay { agent_id, asset_id, payments } => {
-            execute_agent_batch_pay(*agent_id, *asset_id, payments)?;
-        }
-        Instruction::AgentCall { agent_id, asset_id, contract, data, value } => {
-            execute_agent_call(*agent_id, *asset_id, *contract, data, *value)?;
-        }
-        Instruction::AgentBridgeDeposit { agent_id, asset_id, to, amount } => {
-            execute_agent_bridge_deposit(*agent_id, *asset_id, *to, *amount)?;
-        }
-        Instruction::BridgeDeposit { asset_id, to, amount } => {
-            execute_bridge_deposit(*asset_id, *sender, *to, *amount)?;
-        }
-        Instruction::UpdateCompliance { asset_id, address, status } => {
-            let asset = get_asset(*asset_id)?;
-            ensure!(asset.issuer == *sender, "Only issuer can update compliance");
-            update_compliance_status(*address, *asset_id, *status)?;
-        }
-        Instruction::ShieldedTransfer { asset_id, commitments, nullifiers, proof } => {
-            verify_zk_proof(proof)?;
-            for nf in nullifiers {
-                ensure!(!is_nullifier_spent(*asset_id, nf), "Nullifier already spent");
-            }
-            // Check total_output <= total_input (without exposing specific amounts)
-            let asset = get_asset(*asset_id)?;
-            verify_shielded_balance(&asset, nullifiers, commitments, proof)?;
-            for nf in nullifiers {
-                mark_nullifier_spent(*asset_id, nf);
-            }
-            for cm in commitments {
-                append_commitment(*asset_id, cm);
-            }
-        }
-        Instruction::ShieldedDeposit { asset_id, from, commitment, amount } => {
-            let balance = get_owner_balance(*from, *asset_id)?;
-            ensure!(balance >= *amount, "Insufficient transparent balance");
-            deduct_owner_balance(*from, *asset_id, *amount)?;
-            append_commitment(*asset_id, *commitment);
-        }
-        Instruction::ShieldedWithdraw { asset_id, to, nullifier, proof } => {
-            ensure!(!is_nullifier_spent(*asset_id, nullifier), "Nullifier already spent");
-            verify_zk_proof(proof)?;
-            let amount = extract_amount_from_proof(proof)?;  // publicly reveal amount from proof
-            mark_nullifier_spent(*asset_id, *nullifier);
-            credit_owner_balance(*to, *asset_id, amount)?;
-        }
+**Thread-Local State Sharing:**
+
+Precompiles access native protocol state through a thread-local `StateHookGuard`, which provides a snapshot-isolated view of protocol balances, allowances, and asset registry. This allows revm to execute precompile calls without modifying the EVM state trie directly.
+
+```rust
+thread_local! {
+    static PROTOCOL_STATE_HOOK: RefCell<Option<ProtocolStateHook>> = RefCell::new(None);
+}
+
+struct StateHookGuard {
+    _marker: PhantomData<()>,
+}
+
+impl StateHookGuard {
+    fn with_hook<R, F: FnOnce(&ProtocolStateHook) -> R>(f: F) -> R {
+        PROTOCOL_STATE_HOOK.with(|hook| {
+            let hook = hook.borrow();
+            f(hook.as_ref().expect("state hook not set"))
+        })
     }
-    Ok(())
 }
 ```
 
-**Atomicity Guarantee:** Uses state snapshot mechanism. A complete state snapshot is saved before executing the first instruction; any instruction failure immediately rolls back to the snapshot state. Deducted fees are not refunded (to prevent replay attacks).
+### 3.6 Precompile Execution Semantics
 
-**Inter-Instruction Dependencies:** Instructions within the same transaction are executed sequentially, and a later instruction can depend on the result of an earlier one. For example, in the `AgentBridgeDeposit` + `AgentCall` combination, the Agent first bridges assets to the EVM layer, then calls a contract with EVM-layer assets, atomically completing cross-layer operations.
+Protocol operations execute inside revm as standard EVM precompile calls. Each precompile receives ABI-encoded input data and operates on native protocol state through the thread-local `StateHookGuard`. Revm's existing Journal mechanism provides per-call atomicity; protocol state changes made by precompiles participate in this rollback model via snapshot-based isolation.
 
-### 3.7 Multi-Instruction Fee Model
+```rust
+/// Precompile execution entry point (called by revm during EVM execution)
+fn execute_precompile(address: Address, input: &[u8], gas_limit: u64) -> PrecompileResult {
+    // 1. Set up protocol state hook for this thread
+    let _guard = StateHookGuard::new();
 
-The fee calculation for multi-instruction transactions is based on the gas units of instruction count and types, combined with dynamic base_fee, detailed in §12.2.
+    // 2. Take a protocol-state snapshot before executing
+    let snapshot = take_protocol_snapshot();
 
-**Fee Calculation Example (assuming base_fee = 1 wei/gas, priority_fee = 0):**
+    // 3. Decode ABI input and dispatch to the appropriate handler
+    let result = dispatch_precompile(address, input, gas_limit);
 
-| Transaction Combination | Gas Unit Calculation | Total Gas |
-|----------|-------------|--------|
-| Single transfer | 10,000 × 1.0 | 10,000 gas |
-| Transfer + Approve | 10,000 × 1.0 + 5,000 × 0.5 | 12,500 gas |
-| Transfer + Approve + Bridge | 10,000 + 2,500 + 5,000 × 0.5 | 15,000 gas |
-| 100-person batch pay | 10,000 + 99 × 1,000 × 0.5 | 59,500 gas |
-| 100 independent transfers | 100 × 10,000 | 1,000,000 gas |
-| Shielded transfer | 50,000 × 1.0 | 50,000 gas |
-| Agent bridge + call | (10,000 + 5,000) × 0.5 × 0.5 | 3,750 gas |
+    // 4. On failure, roll back protocol state; revm rolls back EVM state independently
+    match &result {
+        Ok(_) => commit_protocol_changes(),
+        Err(_) => restore_protocol_snapshot(&snapshot),
+    }
 
-100-person batch pay using multi-instruction transactions saves **~94%** gas (compared to 100 independent transfers).
+    result
+}
+
+/// Dispatch table for protocol precompiles
+fn dispatch_precompile(address: Address, input: &[u8], gas_limit: u64) -> PrecompileResult {
+    match address {
+        0x101 => asset_registry_handler(input, gas_limit),
+        0x102 => protocol_transfer_handler(input, gas_limit),
+        0x103 => batch_transfer_handler(input, gas_limit),
+        0x104 => allowance_handler(input, gas_limit),
+        0x105 => issuer_mint_burn_handler(input, gas_limit),
+        0x106 => agent_handler(input, gas_limit),
+        0x107 => bridge_handler(input, gas_limit),
+        0x108 => compliance_handler(input, gas_limit),
+        0x109 => shielded_pool_handler(input, gas_limit),
+        0x200..=0x209 => system_precompile_handler(address, input, gas_limit),
+        _ => Err(PrecompileError::NotFound),
+    }
+}
+
+/// Example: transfer precompile handler
+fn protocol_transfer_handler(input: &[u8], gas_limit: u64) -> PrecompileResult {
+    let decoded = decode_abi_transfer(input)?;
+    let (asset_id, to, amount, memo) = decoded;
+
+    let sender = msg_sender(); // provided by revm call frame
+    let asset = get_asset(asset_id)?;
+
+    check_compliance(&asset, sender, to)?;
+    transfer_balance(asset_id, sender, to, amount)?;
+    if let Some(m) = memo {
+        record_memo(tx_hash(), &m)?;
+    }
+
+    Ok(PrecompileOutput {
+        gas_used: TRANSFER_BASE_GAS,
+        bytes: encode_abi_bool(true),
+    })
+}
+```
+
+**Atomicity Guarantee:** Revm's Journal already guarantees that any EVM call frame (including precompiles) rolls back on failure. Protocol state accessed through `StateHookGuard` mirrors this by taking a native snapshot before each precompile invocation and restoring it on error. Gas consumed by a failed precompile call is still charged (consistent with Ethereum semantics).
+
+**Composability via Smart Contracts:** Because precompiles are ordinary EVM call targets, a smart contract can call multiple precompiles in a single transaction. Atomicity across multiple precompile calls within one contract invocation is guaranteed by revm's transaction-level Journal. For example, a payroll contract can loop over `0x102` (transfer) calls, and if any one fails, the entire contract call reverts.
+
+### 3.7 EVM Gas Accounting for Precompile Calls
+
+Protocol operations consume EVM gas according to standard Ethereum accounting. Each precompile call is an independent EVM call frame with its own gas limit and cost. There is no multi-instruction discount; gas is charged per call based on the precompile's fixed gas schedule.
+
+**Precompile Gas Schedule:**
+
+| Operation | Gas Cost | Description |
+|-----------|----------|-------------|
+| Transfer (`0x102`) | 10,000 gas | Standard protocol transfer |
+| Batch transfer (`0x103`) | 10,000 + n × 1,000 gas | Base + per-recipient |
+| Approve / Mint / Burn (`0x104`/`0x105`) | 5,000 gas | Allowance or issuer ops |
+| Bridge deposit (`0x107`) | 10,000 gas | Protocol → EVM bridge |
+| Shielded deposit/withdraw (`0x109`) | 20,000 gas | Includes ZK proof verification |
+| Shielded transfer (`0x109`) | 50,000 gas | Includes ZK proof verification |
+| Agent operations (`0x106`) | 50% of base rate | Agent-exclusive discount |
+| External bridge deposit | 30,000 gas | Includes signature verification |
+
+**Fee Calculation:**
+
+```
+Total fee = base_fee × gas_used + priority_fee
+```
+
+Where `gas_used` is the cumulative EVM gas consumed by all call frames in the transaction (including precompile calls). Revm's standard gas metering applies; precompiles deduct gas before executing and return unused gas on success.
+
+**Example:** A smart contract performing 100 transfers by calling `0x102` in a loop consumes `100 × 10,000 = 1,000,000 gas`. A batch-transfer precompile call (`0x103`) with 100 recipients consumes `10,000 + 100 × 1,000 = 110,000 gas`, achieving similar savings through efficient batching at the precompile level.
 
 ### 3.8 Shielded Pool
 
@@ -959,37 +664,36 @@ With 21 validators per round subset, assuming 100 Shielded transactions:
 
 ### 3.9 Smart Accounts
 
-Callchain protocol layer natively supports three authentication schemes, unified through `AuthScheme` abstraction. Authentication (who has signing authority) and Gas payment (who pays) are **two independent dimensions** that can be freely combined.
+Callchain uses standard Ethereum transaction signing (secp256k1) for all transactions. Multi-signature and session-key functionality are supported via smart contract accounts (ERC-4337 style account abstraction) or via protocol precompiles that enforce additional authorization checks. Gas sponsorship is handled at the transaction level through EVM gas fields or sponsor precompiles.
 
 ```
-AuthScheme (who signs)           GasConfig (who pays)
-├── SingleSig                ├── SelfPay
-├── MultiSig                 ├── AuthorizedSponsor
-└── SessionKey               ├── PoolSponsor
-                             └── PerTxSponsor
+Authentication (who signs)       Gas Payment (who pays)
+├── EOA (standard secp256k1)     ├── SelfPay (tx.sender pays)
+├── MultiSig (contract account)  ├── AuthorizedSponsor (pre-authorized)
+└── SessionKey (contract account)├── PoolSponsor (pre-deposit pool)
+                                 └── PerTxSponsor (per-tx signature)
 ```
 
-#### 3.9.1 AuthScheme Definition
+#### 3.9.1 Authentication Schemes
+
+All transactions are standard Ethereum transactions signed with secp256k1. Additional authentication logic is implemented via smart contract accounts or precompile-level checks.
 
 ```rust
-/// Authentication scheme -- replaces traditional single signature
-enum AuthScheme {
-    /// Single signature: standard secp256k1 signature
-    SingleSig {
-        signature: Signature,
-    },
-
-    /// Multi-signature: m-of-n threshold signature
-    MultiSig {
-        signatures: Vec<Signature>,
-    },
-
-    /// Session Key: temporary key signature (for dApp authorization, Agent lightweight interaction)
-    SessionKey {
-        key: Address,
-        signature: Signature,
-    },
+/// Standard Ethereum transaction signature (used for all tx types)
+struct EcdsaSignature {
+    v: u64,
+    r: U256,
+    s: U256,
 }
+
+/// Multi-signature verification is performed by a smart contract account
+/// or by the multi-sig precompile at 0x110 (if implemented natively).
+/// The transaction sender is the contract address; the contract validates
+/// that sufficient signers have approved the operation.
+
+/// Session Key authorization is managed by a smart contract wallet
+/// or by the session-key precompile at 0x111. The owner registers
+/// session keys with permissions, expiry, and spending limits.
 ```
 
 #### 3.9.2 Multi-Signature Account (m-of-n)
@@ -1054,12 +758,9 @@ fn update_multi_sig(
 **Verification Logic:**
 
 ```rust
-fn verify_multisig(account: Address, auth: &AuthScheme) -> Result<()> {
+fn verify_multisig(account: Address, signatures: &[Signature]) -> Result<()> {
     let config = MultiSigConfigs::get(account)
         .ok_or("No multi-sig config")?;
-
-    let AuthScheme::MultiSig { signatures } = auth
-        else { return Err("Expected MultiSig auth"); };
 
     ensure!(signatures.len() >= config.threshold as usize,
             "Not enough signatures");
@@ -1307,55 +1008,47 @@ fn revoke_session_key(
 **Verification Logic:**
 
 ```rust
-fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
-    let AuthScheme::SessionKey { key, signature } = auth
-        else { return Err("Expected SessionKey auth"); };
-
+fn verify_session_key(account: Address, key: Address, signature: &Signature, tx_hash: &Hash, call_data: &[u8]) -> Result<()> {
     // 1. Verify Session Key signature
-    verify_signature(key, signature, &tx_hash)?;
+    verify_signature(&key, signature, tx_hash)?;
 
     // 2. Retrieve configuration
-    let config = SessionKeys::get(account, *key)
+    let config = SessionKeys::get(account, key)
         .ok_or("Session key not found")?;
 
     // 3. Verify not expired
     ensure!(current_timestamp() < config.expires_at,
             "Session key expired");
 
-    // 4. Verify permissions
+    // 4. Verify permissions against the precompile call being made
     let perms = &config.permissions;
-    if !perms.allowed_instructions.is_empty() {
-        for instr in &tx.instructions {
-            ensure!(perms.allowed_instructions.contains(&instr.type_id()),
-                    "Instruction not allowed");
-        }
+    let (precompile_addr, decoded) = decode_precompile_call(call_data)?;
+
+    if !perms.allowed_precompiles.is_empty() {
+        ensure!(perms.allowed_precompiles.contains(&precompile_addr),
+                "Precompile not allowed");
     }
     if perms.max_per_tx > 0 {
-        let total_amount = tx.instructions.iter()
-            .filter_map(|i| i.amount())
-            .max()
-            .unwrap_or(0);
-        ensure!(total_amount <= perms.max_per_tx,
+        let amount = decoded.amount().unwrap_or(0);
+        ensure!(amount <= perms.max_per_tx,
                 "Exceeds per-tx limit");
     }
     if perms.max_daily > 0 {
         let today = current_timestamp() / 86400;
-        let daily_spent = SessionKeyDailyUsage::get(account, *key, today);
-        let tx_amount = tx.instructions.iter()
-            .filter_map(|i| i.amount())
-            .sum::<u128>();
+        let daily_spent = SessionKeyDailyUsage::get(account, key, today);
+        let tx_amount = decoded.amount().unwrap_or(0);
         ensure!(daily_spent + tx_amount <= perms.max_daily,
                 "Exceeds daily limit");
-        SessionKeyDailyUsage::insert(account, *key, today, daily_spent + tx_amount);
+        SessionKeyDailyUsage::insert(account, key, today, daily_spent + tx_amount);
     }
     if !perms.allowed_targets.is_empty() {
-        for target in tx.instructions.iter().filter_map(|i| i.target()) {
-            ensure!(perms.allowed_targets.contains(target),
+        if let Some(target) = decoded.target() {
+            ensure!(perms.allowed_targets.contains(&target),
                     "Target not allowed");
         }
     }
     if !perms.allowed_assets.is_empty() {
-        for asset_id in tx.instructions.iter().filter_map(|i| i.asset_id()) {
+        if let Some(asset_id) = decoded.asset_id() {
             ensure!(perms.allowed_assets.contains(&asset_id),
                     "Asset not allowed");
         }
@@ -1376,38 +1069,32 @@ fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
 
 #### 3.9.5 Unified Authentication Flow
 
+All transactions use standard secp256k1 ECDSA recovery to derive the sender address. Additional authentication (multi-sig, session keys) is enforced by the sender contract or by precompile-level checks.
+
 ```rust
-/// Protocol-layer authentication entry point -- replaces original single signature verification
-fn verify_auth(account: Address, auth: &AuthScheme) -> Result<()> {
-    match auth {
-        AuthScheme::SingleSig { signature } => {
-            verify_single_sig(account, signature)?;
-        }
-        AuthScheme::MultiSig { signatures } => {
-            verify_multisig(account, signatures)?;
-        }
-        AuthScheme::SessionKey { key, signature } => {
-            verify_session_key(account, auth)?;
-        }
-    }
-    Ok(())
+/// Standard EVM sender recovery (used for every transaction)
+fn recover_sender(tx: &EvmTx) -> Result<Address> {
+    let msg_hash = keccak256(encode_tx_for_signing(tx));
+    let pubkey = recover_secp256k1(&tx.signature, &msg_hash)?;
+    Ok(pubkey_to_address(&pubkey))
 }
 
-fn verify_single_sig(account: Address, signature: &Signature) -> Result<()> {
-    // Check for pending social recovery request
+/// For contract accounts (multi-sig, session-key wallets), the transaction
+/// sender is the contract address. The contract's `validateUserOp` or
+/// equivalent entrypoint performs additional signer verification.
+
+/// For EOAs, verify no pending social recovery has replaced the key
+fn verify_eoa_sender(account: Address) -> Result<()> {
     if let Some(config) = SocialRecoveryConfigs::get(account) {
         if let Some(request) = &config.pending_recovery {
             if request.approved_by.len() >= config.threshold as usize {
                 let elapsed = current_timestamp() - request.initiated_at;
                 if elapsed >= config.recovery_delay_secs {
-                    // Recovery has taken effect, old key no longer valid
                     return Err("Account key has been recovered");
                 }
             }
         }
     }
-
-    verify_signature(&account, signature, &tx_hash)?;
     Ok(())
 }
 ```
@@ -1440,7 +1127,7 @@ Session Keys and Agent accounts are different abstraction layers:
 | Feature | Session Key | Agent Account |
 |------|------------|-----------|
 | Lifecycle | Temporary (hours/days) | Long-term (months/years) |
-| Permission Granularity | Instruction-level, amount limits | Asset-level, counterparty limits |
+| Permission Granularity | Precompile-level, amount limits | Asset-level, counterparty limits |
 | Fund Ownership | User primary account | Independent sub-account (allocated from Owner) |
 | Fee Payment | Typically SelfPay | Typically AuthorizedSponsor (Owner pays) |
 | Applicable Scenarios | dApp interaction, temporary authorization | AI Agent long-term auto-pay |
@@ -1624,20 +1311,18 @@ fn execute_withdraw(op: &BridgeOp) -> Result<()> {
 ### 5.4 Bridge Timing
 
 ```
-In each block's execution order, bridge operations execute in the third step:
+In each block's execution order, bridge operations execute in the second step:
 
 1. EVM transactions execute
    → Users may trigger bridge_withdraw on the EVM layer
    → These requests are added to the pending bridge queue
+   → Users may also call the bridge precompile (0x107) for protocol-layer deposits
 
-2. Protocol-native transactions execute
-   → Users may initiate multi-instruction combination transactions: protocol-layer transfers, bridges, approvals
-
-3. Bridge operations execute
+2. Bridge operations execute
    → Process bridge requests in the pending queue
    → Guaranteed to complete within the same block
 
-4. System transactions execute
+3. System transactions execute
 ```
 
 This means **Protocol → EVM and EVM → Protocol conversions complete within the same block**, no waiting required.
@@ -1939,7 +1624,7 @@ enum FeePayer {
 }
 ```
 
-**Owner-sponsored payment is the recommended mode for Agent payments.** The Agent only submits operation instructions, and Gas is deducted from the Owner account via `GasConfig::AuthorizedSponsor`. The Owner signs once to authorize, and the Agent's subsequent transactions do not require the Owner to sign again. Agents can combine multiple `AgentPay` instructions in a single transaction, enjoying multi-instruction marginal fee discounts.
+**Owner-sponsored payment is the recommended mode for Agent payments.** The Agent submits standard EVM transactions calling the Agent precompile (`0x106`), and Gas is deducted from the Owner account via an authorized sponsor precompile or ERC-4337 paymaster. The Owner signs once to authorize, and the Agent's subsequent transactions do not require the Owner to sign again. Agents can submit multiple Agent operations in separate calls within the same block or batch them via a smart contract.
 
 ### 6.3 Agent Fund Authorization
 
@@ -1990,71 +1675,96 @@ type AgentBalances = HashMap<(Address, u64, AssetId), u128>;
 type AgentNonces = HashMap<(Address, u64), u64>;
 ```
 
-### 6.5 Agent Instructions
+### 6.5 Agent Precompile Operations
 
-Agent operations are implemented through `Instruction` variants in `ProtocolTransaction`:
+Agent operations are invoked via the Agent precompile at address `0x106`. Agents submit standard EVM transactions calling this precompile with ABI-encoded arguments. The precompile verifies Agent permissions, deducts funds from the Agent sub-account, and executes the requested operation.
 
-```rust
-// Agent-related instructions are integrated into the Instruction enum of ProtocolTransaction:
-//
-// Instruction::AgentPay { agent_id, asset_id, to, amount }
-// Instruction::AgentBatchPay { agent_id, asset_id, payments }
-// Instruction::AgentCall { agent_id, asset_id, contract, data, value }
-// Instruction::AgentBridgeDeposit { agent_id, asset_id, to, amount }
-//
-// Agents can combine multiple instructions in a single transaction:
-//
-// ProtocolTransaction {
-//     sender: agent_address,
-//     instructions: vec![
-//         Instruction::AgentBridgeDeposit { ... },  // bridge first
-//         Instruction::AgentCall { ... },           // then call contract
-//     ],
-//     gas_config: GasConfig::AuthorizedSponsor { sponsor: owner_address },
-//     auth: AuthScheme::SingleSig { signature: agent_sig },
-// }
+**Supported Agent precompile functions:**
+
+```solidity
+interface IAgentPrecompile {
+    function agentPay(uint64 agentId, uint64 assetId, address to, uint128 amount) external returns (bool);
+    function agentBatchPay(uint64 agentId, uint64 assetId, address[] calldata tos, uint128[] calldata amounts) external returns (bool);
+    function agentCall(uint64 agentId, uint64 assetId, address contract, bytes calldata data, uint128 value) external returns (bytes memory);
+    function agentBridgeDeposit(uint64 agentId, uint64 assetId, address to, uint128 amount) external returns (bool);
+}
 ```
 
-Agent transaction signing and wrapping:
+**Example: Agent payment via precompile**
+
+```rust
+let tx = EvmTx {
+    to: Address::from_hex("0x106"),          // Agent precompile
+    data: encode_abi("agentPay", &[
+        Token::Uint(agent_id.into()),
+        Token::Uint(asset_id.into()),
+        Token::Address(recipient),
+        Token::Uint(amount.into()),
+    ]),
+    value: 0,
+    gas_limit: 21_000,
+    max_fee_per_gas: 10_000_000_000,
+    max_priority_fee_per_gas: 1_000_000_000,
+    nonce: agent_nonce,
+    chain_id: 1,
+    signature: sign_secp256k1(&agent_private_key, &tx_hash),
+};
+```
+
+**Composability via smart contracts:** An Agent can call a smart contract that in turn calls multiple precompiles. Because all calls happen within a single EVM transaction, revm's Journal guarantees atomicity.
+
+```solidity
+contract AgentRouter {
+    IAgentPrecompile constant AGENT = IAgentPrecompile(0x106);
+
+    function executeStrategy(uint64 agentId, uint64 assetId) external {
+        // Bridge to EVM
+        AGENT.agentBridgeDeposit(agentId, assetId, address(this), 1000_000000);
+        // Then interact with DeFi contracts using EVM-layer tokens
+        // ...
+    }
+}
+```
 
 ### 6.6 Agent Transaction Signing and Verification
 
+Agents sign standard EVM transactions with their secp256k1 key. The Agent precompile (`0x106`) performs additional verification before executing the operation.
+
 ```rust
 struct SignedAgentTx {
-    protocol_tx: ProtocolTransaction, // multi-instruction protocol transaction
+    evm_tx: EvmTx,                    // standard EVM transaction calling 0x106
     owner_signature: Option<Signature>,  // large transactions require Owner's second confirmation
 }
 ```
 
-**Protocol-layer Verification Process:**
+**Precompile-level Verification Process:**
 
 ```rust
 fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
-    let agent = get_agent_from_tx(&tx.protocol_tx)?;
+    let agent = get_agent_from_tx(&tx.evm_tx)?;
 
-    // 1. Verify Agent signature
-    ensure!(
-        tx.protocol_tx.signature.verify(&agent.agent_public_key, &tx.protocol_tx.hash()),
-        "Invalid agent signature"
-    );
+    // 1. Verify Agent signature (standard EVM recovery)
+    let recovered = recover_sender(&tx.evm_tx)?;
+    ensure!(recovered == agent.agent_address, "Invalid agent signature");
 
     // 2. Verify nonce anti-replay
     let current_nonce = get_agent_nonce(agent.owner, agent.agent_id);
-    ensure!(tx.protocol_tx.nonce == current_nonce, "Invalid nonce");
+    ensure!(tx.evm_tx.nonce == current_nonce, "Invalid nonce");
 
-    // 3. Verify permissions for each instruction
-    for instr in &tx.protocol_tx.instructions {
-        let perms = &agent.permissions;
-        if let Some(asset_id) = instr.asset_id() {
-            ensure!(perms.is_allowed(asset_id), "Asset not allowed");
-        }
-        if let Some(counterparty) = instr.counterparty() {
-            ensure!(perms.is_allowed_counterparty(counterparty), "Counterparty not allowed");
-        }
-        if let Some(amount) = instr.amount() {
-            if perms.per_tx_limit > 0 {
-                ensure!(amount <= perms.per_tx_limit, "Exceeds per-tx limit");
-            }
+    // 3. Decode precompile call and verify permissions
+    let (precompile_addr, decoded) = decode_precompile_call(&tx.evm_tx.data)?;
+    ensure!(precompile_addr == 0x106, "Not an agent precompile call");
+
+    let perms = &agent.permissions;
+    if let Some(asset_id) = decoded.asset_id() {
+        ensure!(perms.is_allowed(asset_id), "Asset not allowed");
+    }
+    if let Some(counterparty) = decoded.counterparty() {
+        ensure!(perms.is_allowed_counterparty(counterparty), "Counterparty not allowed");
+    }
+    if let Some(amount) = decoded.amount() {
+        if perms.per_tx_limit > 0 {
+            ensure!(amount <= perms.per_tx_limit, "Exceeds per-tx limit");
         }
     }
 
@@ -2064,12 +1774,12 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
     }
 
     // 5. Large transactions require Owner's second signature
-    let total_amount = tx.protocol_tx.instructions.iter().filter_map(|i| i.amount()).sum::<u128>();
+    let total_amount = decoded.amount().unwrap_or(0);
     if let Some(threshold) = agent.fee_config.require_owner_signature_above {
         if total_amount > threshold {
             ensure!(
                 tx.owner_signature.is_some()
-                    && tx.owner_signature.unwrap().verify(&agent.owner, &tx.protocol_tx.hash()),
+                    && tx.owner_signature.unwrap().verify(&agent.owner, &tx.evm_tx.hash()),
                 "Owner signature required"
             );
         }
@@ -2081,24 +1791,20 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 
 ### 6.7 Agent Transaction Execution and Fee Handling
 
-Agent transactions are processed through the multi-instruction execution engine of `ProtocolTransaction`:
+Agent transactions are standard EVM transactions that invoke the Agent precompile (`0x106`). They are executed by revm like any other EVM call, with the precompile performing Agent-specific validation and state changes.
 
 ```rust
 fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
-    let agent = get_agent_from_tx(&tx.protocol_tx)?;
+    let agent = get_agent_from_tx(&tx.evm_tx)?;
 
     verify_agent_tx(tx)?;
 
-    // Calculate total multi-instruction fee (with Agent discount)
-    let fee = calculate_multi_instruction_fee(&tx.protocol_tx.instructions, &tx.protocol_tx.gas_config);
+    // Gas is handled by standard EVM gas metering; any Agent discount is
+    // applied by the precompile returning a reduced gas cost.
+    let gas_used = AGENT_PRECOMPILE_GAS; // e.g., 50% of standard rate
 
-    // Deduct fee (deducted from different accounts according to gas_config)
-    deduct_gas(&tx.protocol_tx.sender, &tx.protocol_tx.gas_config, fee, tx_hash)?;
-
-    // Execute all instructions (atomicity guaranteed by multi-instruction engine)
-    for instruction in &tx.protocol_tx.instructions {
-        execute_instruction(instruction, 0, &agent.address)?;
-    }
+    // The precompile deducts Agent sub-account balances and performs the operation
+    dispatch_agent_precompile(&tx.evm_tx.data, &agent)?;
 
     // Update nonce
     increment_agent_nonce(agent.owner, agent.agent_id);
@@ -2109,7 +1815,7 @@ fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 
 ### 6.8 Agent Fee Model
 
-Agent payments enjoy exclusive Gas discounts (see §12.2 fee table), with all Agent instruction base fees at 50% of regular users. Agent Gas is configured through `GasConfig`, typically using `AuthorizedSponsor` mode sponsored by the Owner, so the Agent itself does not need to hold CALL.
+Agent payments enjoy exclusive Gas discounts (see §12.2 fee table), with all Agent precompile base fees at 50% of regular users. Agent Gas sponsorship is handled via standard EVM gas fields or sponsor precompiles, typically using `AuthorizedSponsor` mode sponsored by the Owner, so the Agent itself does not need to hold CALL.
 
 ### 6.9 Agent Authentication Layers
 
@@ -2172,10 +1878,9 @@ Uses **commonware-p2p** as the P2P network layer, seamlessly integrated with Sim
 ### 8.2 Transaction Type Propagation
 
 ```
-ProtocolTransaction → gossipsub, high priority (payments prioritized)
-EvmTx               → gossipsub, standard priority
-BridgeOp            → packed in blocks, not propagated separately
-SystemTx            → generated by validators only
+EvmTx (including precompile calls) → gossipsub, standard priority
+BridgeOp                           → packed in blocks, not propagated separately
+SystemTx                           → generated by validators only
 ```
 
 ---
@@ -2197,8 +1902,8 @@ struct NetworkMessage {
     checksum: u32,
 }
 
-impl alloy_rlp::Encodable for ProtocolTransaction { ... }
-impl alloy_rlp::Decodable for ProtocolTransaction { ... }
+impl alloy_rlp::Encodable for EvmTx { ... }
+impl alloy_rlp::Decodable for EvmTx { ... }
 
 impl alloy_rlp::Encodable for Block { ... }
 impl alloy_rlp::Decodable for Block { ... }
@@ -2256,7 +1961,7 @@ trait StorageCodec: Sized {
 
 | Data Type | P2P Propagation | Storage | RPC Output |
 |----------|---------|------|---------|
-| ProtocolTransaction | RLP | StorageCodec | JSON |
+| EvmTx | RLP | StorageCodec | JSON |
 | SignedAgentTx | RLP | StorageCodec | JSON |
 | Block | RLP | StorageCodec | JSON |
 | ShieldedProof | RLP | Compressed binary | JSON (base64) |
@@ -2295,20 +2000,23 @@ impl<'de> Deserialize<'de> for Address { /* JSON: from hex string */ }
 
 ```rust
 // RLP encoding (P2P propagation)
-let tx = ProtocolTransaction {
-    sender: Address::from_hex("0x742d35..."),
+let tx = EvmTx {
+    to: Address::from_hex("0x102"),          // transfer precompile
+    data: encode_abi("transfer", &[Token::Uint(asset_id.into()), Token::Address(to), Token::Uint(amount.into())]),
+    value: 0,
+    gas_limit: 21_000,
+    max_fee_per_gas: 10_000_000_000,
+    max_priority_fee_per_gas: 1_000_000_000,
     nonce: 42,
-    instructions: vec![Instruction::Transfer { ... }],
-    gas_config: GasConfig::SelfPay,
-    fee_currency: FeeCurrency::Call,
-    auth: AuthScheme::SingleSig { signature: sig },
+    chain_id: 1,
+    signature: sign_secp256k1(&private_key, &tx_hash),
 };
 let rlp_bytes = alloy_rlp::encode(&tx);  // → Vec<u8>
-let decoded = ProtocolTransaction::decode(&mut &rlp_bytes[..])?;
+let decoded = EvmTx::decode(&mut &rlp_bytes[..])?;
 
 // JSON encoding (RPC output)
 let json = serde_json::to_string(&tx)?;
-// → {"sender":"0x742d35...","nonce":42,"auth":"singlesig",...}
+// → {"to":"0x0000000000000000000000000000000000000102","nonce":42,"gasLimit":"0x5208",...}
 ```
 
 ---
@@ -2859,19 +2567,15 @@ fn update_base_fee(current_base_fee: u128, block_gas_used: u64, params: &FeePara
 #### 12.2.4 Fee Calculation Example
 
 ```rust
-// Example: 3-instruction transaction (Transfer + Approve + BridgeDeposit)
+// Example: smart contract calling two precompiles (Transfer + Approve)
 // Parameters: base_fee = 10 wei/gas, priority_fee = 50,000 wei
 
-let gas_units = vec![10_000, 5_000, 10_000];  // gas for three instructions
-let discounts = vec![1.0, 0.5, 0.5];           // marginal discounts
-
-let total_gas: u64 = gas_units.iter().zip(discounts.iter())
-    .map(|(g, d)| (*g as f64 * d) as u64)
-    .sum();
-// = 10,000 × 1.0 + 5,000 × 0.5 + 10,000 × 0.5 = 17,500 gas
+let gas_units = vec![10_000, 5_000];  // gas for two precompile calls
+let total_gas: u64 = gas_units.iter().sum();
+// = 10,000 + 5,000 = 15,000 gas
 
 let total_fee = base_fee * total_gas + priority_fee;
-// = 10 × 17,500 + 50,000 = 225,000 wei = 0.000000225 CALL
+// = 10 × 15,000 + 50,000 = 200,000 wei = 0.0000002 CALL
 ```
 
 #### 12.2.5 Fee Distribution
@@ -2920,21 +2624,23 @@ Validator A (weight 1/8) receives:
 #### 12.2.7 MemPool Admission
 
 ```rust
-fn accept_to_mempool(tx: &ProtocolTransaction) -> Result<()> {
+fn accept_to_mempool(tx: &EvmTx) -> Result<()> {
     let current_base_fee = get_current_base_fee();
-    let estimated_gas = estimate_gas(&tx.instructions);
+    let estimated_gas = estimate_evm_gas(tx);
 
     // 1. gas_limit check
     ensure!(tx.gas_limit >= estimated_gas, "Gas limit too low");
 
-    // 2. Fee check: max_fee must be >= current base_fee × estimated_gas
-    let min_total_fee = current_base_fee * estimated_gas + tx.max_priority_fee;
-    ensure!(tx.max_fee >= min_total_fee,
-            "max_fee insufficient for current base_fee");
+    // 2. Fee check: max_fee_per_gas must cover current base_fee
+    let min_max_fee = current_base_fee + tx.max_priority_fee_per_gas;
+    ensure!(tx.max_fee_per_gas >= min_max_fee,
+            "max_fee_per_gas insufficient for current base_fee");
 
-    // 3. Balance sufficient to cover maximum possible fee
-    let sender_balance = get_call_balance(tx.sender);
-    ensure!(sender_balance >= tx.max_fee + instruction_values(&tx.instructions),
+    // 3. Balance sufficient to cover maximum possible fee + value
+    let sender = recover_sender(tx)?;
+    let sender_balance = get_evm_balance(sender);
+    let max_fee_cost = tx.max_fee_per_gas * tx.gas_limit as u128;
+    ensure!(sender_balance >= max_fee_cost + tx.value,
             "Insufficient balance");
 
     Ok(())
@@ -3048,20 +2754,12 @@ enum ProposalType {
 | oracle_strikes_before_disable | 10 | Auto-disable after oracle anomaly strikes |
 | grace_period_blocks | 86,400 (~1 day) | Grace period before removal |
 
-**Mempool Multi-Currency Priority Sorting:**
+**Mempool Priority Sorting:**
 
 ```rust
-fn priority_score(tx: &ProtocolTransaction) -> u128 {
-    let priority_fee = tx.max_priority_fee;
-    match tx.fee_currency {
-        FeeCurrency::Call => priority_fee,
-        FeeCurrency::Stablecoin(asset_id) => {
-            let price = FeeCurrencyRegistry::get_call_price(asset_id)
-                .unwrap_or(0);
-            // Convert to CALL equivalent value for sorting
-            priority_fee * price / 10u128.pow(get_asset_decimals(asset_id) as u32)
-        }
-    }
+fn priority_score(tx: &EvmTx) -> u128 {
+    // Standard EIP-1559 priority: max_priority_fee_per_gas
+    tx.max_priority_fee_per_gas
 }
 ```
 
@@ -3181,15 +2879,15 @@ fn withdraw_from_pool(sponsor: Address, amount: u128) -> Result<()> {
 }
 ```
 
-**Use Case:** Platform subsidizes Gas for new users; when users submit transactions, they select `GasConfig::PoolSponsor`, and the system automatically deducts CALL from the platform pool.
+**Use Case:** Platform subsidizes Gas for new users; when users submit transactions, they use a sponsor precompile or ERC-4337 paymaster, and the system automatically deducts CALL from the platform pool.
 
 #### 12.3.4 Per-Transaction Sponsorship (PerTxSponsor)
 
 Sponsors sign confirmation for each transaction, suitable for low-frequency scenarios.
 
 ```rust
-// Transaction structure includes sponsor signature
-GasConfig::PerTxSponsor { sponsor, sponsor_signature }
+// Transaction structure includes sponsor signature via sponsor precompile or paymaster
+// The sponsor signs an authorization that is included in the transaction data
 
 fn verify_and_deduct_per_tx_sponsor(
     sponsor: Address,
@@ -3486,7 +3184,7 @@ Validators enforce these limits when packing blocks; excess is queued for the ne
 | Transaction flood | Minimum fee threshold + dynamic rejection | Directly reject below dynamic threshold |
 | Single address pool fill | Per-address Pending limit | 256 tx/address |
 | Large transaction attack | Transaction size limit | 256 KB |
-| Multi-instruction inflation | Instruction count limit | 1,000 instructions/tx |
+| Precompile call inflation | Call depth limit | 1,024 frames/tx |
 | Batch transfer inflation | Batch payment recipient limit | 5,000 recipients/tx |
 | Signature forgery | Immediate verification and discard | Invalid signatures never enter mempool |
 | Replay attack | Nonce check | Stale nonce immediately rejected |
@@ -3495,40 +3193,32 @@ Validators enforce these limits when packing blocks; excess is queued for the ne
 
 ```rust
 /// Mempool admission check
-fn accept_tx(tx: &ProtocolTransaction) -> Result<()> {
+fn accept_tx(tx: &EvmTx) -> Result<()> {
     // 1. Transaction size check
     let tx_size = alloy_rlp::encode(tx).len();
     ensure!(tx_size <= BLOCK_LIMITS.max_tx_size as usize, "Tx too large");
 
-    // 2. Instruction count check
-    ensure!(tx.instructions.len() <= BLOCK_LIMITS.max_instructions_per_tx as usize,
-            "Too many instructions");
+    // 2. Gas limit check
+    ensure!(tx.gas_limit <= BLOCK_LIMITS.max_evm_gas_per_block, "Gas limit too high");
 
-    // 3. Minimum fee check
-    let fee = calculate_multi_instruction_fee(&tx.instructions, &tx.gas_config);
-    ensure!(fee >= current_min_acceptable_fee(), "Fee too low");
+    // 3. Minimum fee check (max_fee_per_gas >= current base_fee)
+    let current_base_fee = get_current_base_fee();
+    ensure!(tx.max_fee_per_gas >= current_base_fee, "Fee too low");
 
     // 4. Per-address Pending limit
-    let pending_count = mempool.count_pending(&tx.sender);
+    let sender = recover_sender(tx)?;
+    let pending_count = mempool.count_pending(&sender);
     ensure!(pending_count < 256, "Pending limit exceeded");
 
-    // 5. Batch payment recipient count check
-    for instr in &tx.instructions {
-        if let Instruction::BatchTransfer { payments, .. } = instr {
-            ensure!(payments.len() <= BLOCK_LIMITS.max_batch_payments as usize,
-                    "Batch too large");
-        }
-    }
+    // 5. Signature verification (standard EVM recovery)
+    let recovered = recover_sender(tx)?;
+    ensure!(recovered != Address::zero(), "Invalid signature");
 
-    // 6. Signature verification
-    ensure!(verify_signature(&tx.sender, &tx.signature, &tx.hash()),
-            "Invalid signature");
+    // 6. Nonce check
+    ensure!(tx.nonce == get_evm_nonce(&sender), "Invalid nonce");
 
-    // 7. Nonce check
-    ensure!(tx.nonce == get_nonce(&tx.sender), "Invalid nonce");
-
-    // 8. Pool capacity check
-    ensure!(mempool.protocol_pool.len() < 50_000, "Pool full");
+    // 7. Pool capacity check
+    ensure!(mempool.evm_pool.len() < 100_000, "Pool full");
 
     Ok(())
 }
@@ -3766,15 +3456,13 @@ The genesis configuration is provided in JSON format:
 
 ### 17.1 Design
 
-The transaction pool maintains transactions waiting to be packed, managed in type-based buckets:
+The transaction pool maintains EVM transactions waiting to be packed. All transactions are standard EVM transactions (which may include precompile calls). Bridge operations and system transactions are generated by validators and not propagated through the mempool.
 
 ```rust
 struct Mempool {
-    protocol_pool: PriorityTxs<ProtocolTransaction>, // protocol-native transactions, high priority
-    agent_pool: PriorityTxs<SignedAgentTx>,          // Agent transactions, medium-high priority
-    evm_pool: PriorityTxs<EvmTx>,                    // EVM transactions, standard priority
-    pending_bridges: VecDeque<BridgeOp>,             // pending bridges
-    known_txs: LruCache<TxHash, ()>,                 // deduplication cache
+    evm_pool: PriorityTxs<EvmTx>,        // EVM transactions (including precompile calls)
+    pending_bridges: VecDeque<BridgeOp>, // pending bridges (validator-generated)
+    known_txs: LruCache<TxHash, ()>,     // deduplication cache
 }
 ```
 
@@ -3782,22 +3470,13 @@ struct Mempool {
 
 | Dimension | Strategy |
 |------|------|
-| ProtocolTransaction sorting | Descending by `priority_score()` (CALL equivalent) + timestamp FIFO |
-| AgentTx sorting | Descending by `priority_score()` (CALL equivalent) + timestamp FIFO |
-| EvmTx sorting | Descending by gas price + nonce order |
+| EvmTx sorting | Descending by `max_priority_fee_per_gas` + timestamp FIFO |
 | BridgeOp | FIFO by arrival order, batch processed within block |
-| Cross-pool priority | ProtocolTransaction > AgentTx > EvmTx > BridgeOp |
 
-**`priority_score()` calculation (multi-currency unified):**
+**Priority score:**
 ```rust
-fn priority_score(tx: &ProtocolTransaction) -> u128 {
-    match tx.fee_currency {
-        FeeCurrency::Call => tx.max_priority_fee,
-        FeeCurrency::Stablecoin(asset_id) => {
-            let price = FeeCurrencyRegistry::get_call_price(asset_id).unwrap_or(0);
-            tx.max_priority_fee * price / 10u128.pow(get_asset_decimals(asset_id) as u32)
-        }
-    }
+fn priority_score(tx: &EvmTx) -> u128 {
+    tx.max_priority_fee_per_gas
 }
 ```
 
@@ -3805,7 +3484,6 @@ fn priority_score(tx: &ProtocolTransaction) -> u128 {
 
 | Parameter | Value | Description |
 |------|------|------|
-| protocol_pool limit | 50,000 txs | Multi-instruction transactions, dynamically adjusted |
 | evm_pool limit | 100,000 txs | Dynamically adjusted based on gas limit |
 | Per-address Pending limit | 256 txs | Prevent single address from filling pool |
 | Minimum gas price | Dynamic | Automatically evicted below threshold |
@@ -3818,8 +3496,7 @@ fn priority_score(tx: &ProtocolTransaction) -> u128 {
 
 ### 17.4 Anti-Spam Mechanism
 
-- ProtocolTransaction: Multi-instruction CALL fees naturally anti-spam (requires fee payment)
-- EvmTx: Minimum gas price requirement
+- EvmTx: Minimum gas price requirement (including precompile calls)
 - Stablecoin Gas payment: Must be in FeeCurrencyRegistry with valid oracle price
 - Duplicate transaction detection: Known TxHash directly rejected
 - Invalid signature transactions immediately dropped and logged
@@ -3835,7 +3512,7 @@ State = (ProtocolBalances, EvmState, BridgeState, ShieldedState)
 
 apply_block(state, block) -> Result<State> {
     state = execute_evm_txs(state, block.evm_txs)?;
-    state = execute_protocol_txs(state, block.protocol_txs)?;
+    // Precompile calls inside evm_txs update ProtocolBalances atomically via StateHookGuard
     state = execute_bridge(state, block.bridge_operations)?;
     state = execute_system_txs(state, block.system_txs)?;
     Ok(state)
@@ -3844,14 +3521,13 @@ apply_block(state, block) -> Result<State> {
 
 ### 18.2 Transaction Validity Rules
 
-**ProtocolTransaction validation:**
-- `AuthScheme` authentication passes (single-sig / multi-sig / Session Key verified per §3.9)
-- If `GasConfig::PerTxSponsor` specified, sponsor signature must also be valid
-- Sender or sponsor balance >= total fee + total transfer amount
-- All instruction compliance checks pass (`check_compliance`)
-- All involved assets exist and are in Active status
-- Non-replay (incrementing nonce)
-- If any single instruction fails, the entire transaction is rolled back
+**EvmTx validation:**
+- Standard secp256k1 signature valid (Ethereum-compatible recovery)
+- nonce >= account's current nonce
+- Sender balance >= gas_limit * max_fee_per_gas + value
+- gas_limit <= block gas limit
+- For precompile calls: precompile address in allowed range (0x101–0x209)
+- For precompile calls: caller has required permissions (issuer, agent owner, etc.)
 
 **EvmTx validation:**
 - Signature valid (secp256k1, Ethereum compatible)
@@ -3876,8 +3552,7 @@ apply_block(state, block) -> Result<State> {
 ### 18.3 Atomicity Guarantee
 
 All operations within a block either all succeed or all roll back:
-- EVM transactions: Revm's Journal mechanism guarantees single-tx atomicity
-- Protocol-native transactions: State snapshot mechanism guarantees multi-instruction atomicity -- snapshot saved before execution, any instruction failure rolls back the entire transaction (deducted fees not refunded)
+- EVM transactions: Revm's Journal mechanism guarantees single-tx atomicity. Precompile calls share this guarantee via `StateHookGuard` snapshot isolation.
 - Bridge operations: Two-step operation (deduct+mint / burn+restore) completed within the same function
 - Block level: State root computed after all operations, inconsistent results reject the block
 
@@ -3885,93 +3560,12 @@ All operations within a block either all succeed or all roll back:
 
 After each transaction executes, a receipt is generated and packed into the block. Receipts are the sole source for block explorer queries, contract log reading, and event monitoring.
 
-#### 18.4.1 Protocol Transaction Receipt
+#### 18.4.1 EVM Transaction Receipt (including Precompile Calls)
+
+All transactions produce standard Ethereum-compatible receipts. Precompile calls emit EVM logs and return data just like regular contract calls.
 
 ```rust
-/// Protocol transaction receipt
-struct ProtocolReceipt {
-    /// Transaction hash
-    tx_hash: Hash,
-
-    /// Execution result
-    status: ExecutionStatus,
-
-    /// Actual gas consumed
-    gas_used: u128,
-
-    /// Gas payer
-    gas_payer: Address,
-
-    /// Gas payment currency (CALL or stablecoin AssetId)
-    fee_currency: FeeCurrency,
-
-    /// Actual gas fee deducted (in fee_currency)
-    fee_amount: u128,
-
-    /// Instruction results (in order)
-    instruction_results: Vec<InstructionResult>,
-
-    /// Event logs
-    logs: Vec<LogEntry>,
-
-    /// Payment memos (transfer notes)
-    memos: Vec<MemoEntry>,
-
-    /// State change summary (balance changes, etc.)
-    state_changes: Vec<StateChange>,
-}
-
-/// Memo entry in receipt
-struct MemoEntry {
-    instruction_index: u32,       // instruction index
-    memo: PaymentMemo,
-}
-
-enum ExecutionStatus {
-    Success,
-    Reverted { reason: String },
-}
-
-struct InstructionResult {
-    instruction_type: InstructionType,
-    status: InstructionStatus,
-    gas_used: u128,
-    output: Vec<u8>,  // instruction return data
-}
-
-enum InstructionStatus {
-    Success,
-    Reverted { reason: String },
-}
-
-/// Event log
-struct LogEntry {
-    address: Address,         // event initiator address
-    topics: Vec<Hash>,        // indexed fields (filterable)
-    data: Vec<u8>,            // non-indexed data
-}
-
-/// State change summary
-struct StateChange {
-    asset_id: AssetId,
-    address: Address,
-    change_type: ChangeType,
-    before: u128,
-    after: u128,
-}
-
-enum ChangeType {
-    Balance,
-    Allowance,
-    Nonce,
-}
-```
-
-#### 18.4.2 EVM Transaction Receipt
-
-EVM transaction receipts follow the Ethereum standard format, compatible with existing Ethereum toolchains:
-
-```rust
+/// EVM transaction receipt (standard Ethereum format)
 struct EvmReceipt {
     tx_hash: Hash,
     status: bool,               // true = success, false = reverted
@@ -3982,13 +3576,30 @@ struct EvmReceipt {
 }
 
 struct EvmLogEntry {
-    address: Address,
-    topics: Vec<H256>,
-    data: Vec<u8>,
+    address: Address,           // precompile address or contract address
+    topics: Vec<H256>,          // indexed fields
+    data: Vec<u8>,              // non-indexed data
 }
 ```
 
-#### 18.4.3 Shielded Transaction Receipt
+**Precompile event logs:** Protocol precompiles emit logs with their own address (e.g., `0x102` for transfers). Wallets and indexers can filter by precompile address to track protocol operations.
+
+```rust
+// Example: transfer precompile emits a log
+EvmLogEntry {
+    address: Address::from_hex("0x102"),
+    topics: vec![
+        keccak256("Transfer(uint64,address,address,uint128)"),
+        H256::from_low_u64_be(asset_id),
+        H256::from(sender),
+        H256::from(to),
+    ],
+    data: encode_abi_uint(amount),
+}
+```
+```
+
+#### 18.4.2 Shielded Transaction Receipt
 
 Shielded transaction receipts need to hide sensitive information (amounts, participants) while ensuring verifiability:
 
@@ -4015,7 +3626,22 @@ Characteristics of Shielded receipts:
 - `encrypted_event` is optional, contains encrypted details, only decryptable by view key holders
 - Block explorers only show "a Shielded operation occurred", not the specifics
 
-#### 18.4.4 External Bridge Transaction Receipt
+#### 18.4.3 External Bridge Transaction Receipt
+
+```rust
+struct ExternalBridgeReceipt {
+    tx_hash: Hash,
+    status: ExecutionStatus,
+    gas_used: u128,
+    bridge_op: ExternalBridgeOp,
+
+    // Bridge-specific information
+    source_tx_hash: Option<Hash>,     // source chain transaction hash
+    source_block: Option<u64>,        // source chain block height
+    confirmations: Option<u32>,       // source chain confirmations
+}
+
+#### 18.4.3 External Bridge Transaction Receipt
 
 ```rust
 struct ExternalBridgeReceipt {
@@ -4911,18 +4537,16 @@ contract MyDEX {
 
 ```
 1. User initiates operation
-   ├── Protocol payment → Sign ProtocolTransaction (composable multi-instruction) → broadcast to mempool
-   ├── EVM transaction → Sign EvmTx → broadcast to mempool
+   ├── Protocol operation → Sign EvmTx targeting precompile (0x101–0x209) → broadcast to mempool
+   ├── EVM contract call → Sign EvmTx → broadcast to mempool
    └── Bridge operation → Auto-created by wallet → broadcast
 
 2. Validators collect transactions
-   ├── High priority: ProtocolTransaction
-   ├── Standard priority: EvmTx
+   ├── EVM transactions (including precompile calls) → ordered by gas price
    └── Internal queue: BridgeOp
 
 3. Validators pack block
-   ├── Execute EVM transactions → update EVM state
-   ├── Execute protocol payments → update protocol balances
+   ├── Execute EVM transactions → update EVM state (precompiles update protocol state via StateHookGuard)
    ├── Execute bridge operations → synchronize two-layer balances
    └── Execute system transactions → reward/fee settlement
 
