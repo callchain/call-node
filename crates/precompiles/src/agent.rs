@@ -1,6 +1,14 @@
-//! Agent precompile at 0x209
+//! Agent precompile at 0x209 — fallback stub
 //!
-//! Agent registry operations: registerAgent, grantAgentBalance, revokeAgentBalance.
+//! The real implementation lives in `call-agent` at
+//! `crates/agent/src/precompile.rs` and is registered at node startup via
+//! `register_agent_precompile()`.  That registration replaces this stub in
+//! the OnceLock, so the full `registerAgent` / `grantAgentBalance` /
+//! `revokeAgentBalance` logic is used in production and tests that wire up
+//! the agent crate.
+//!
+//! This file only exists to provide a compile-time fallback (returning
+//! "not yet implemented") when no external implementation is registered.
 
 use alloy_primitives::address;
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -9,23 +17,19 @@ use revm_precompile::{PrecompileError, PrecompileResult};
 pub(crate) const AGENT_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000209");
 
-/// Agent precompile entry point
-pub fn agent_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
+/// Fallback agent precompile entry point.
+///
+/// Never invoked at runtime because `call-agent` registers its own
+/// implementation during node startup. Returns an error so callers get
+/// immediate feedback if the registration was accidentally skipped.
+pub fn agent_precompile_fn(_input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 10000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
     }
-
-    if input.len() < 4 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    // TODO: Implement selector dispatch
-    // registerAgent(bytes,string,string) -> uint64
-    // grantAgentBalance(uint64,uint64,uint256)
-    // revokeAgentBalance(uint64,uint64)
-
-    Err(PrecompileError::Other("not yet implemented".into()))
+    Err(PrecompileError::Other(
+        "agent precompile not registered — call register_agent_precompile()".into(),
+    ))
 }
 
 #[cfg(test)]

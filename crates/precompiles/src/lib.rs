@@ -3,7 +3,7 @@
 //! Precompiles expose protocol functionality to EVM contracts and EOAs:
 //! - `0x101` Oracle: getPrice, getTWAP, isStale, submitPrice
 //! - `0x103` Bridge: getTotalDeposits, getTotalWithdrawals, externalBridgeDeposit, externalBridgeWithdraw, challengeBridgeDeposit
-//! - `0x201` Asset: getBalance, getAssetInfo, transfer, approve, transferFrom, mint, burn, registerAsset
+//! - `0x201` Asset: getBalance, getAssetInfo, transfer, batchTransfer, approve, transferFrom, mint, burn, registerAsset
 //! - `0x202` Shielded: shieldedDeposit, shieldedWithdraw, shieldedTransfer
 //! - `0x203` Governance: submitProposal, vote, queue, execute, emergencyPause, emergencyResume
 //! - `0x204` Validator: stake, unstake, claimUnbonded
@@ -11,10 +11,7 @@
 //! - `0x207` Switch: switchToEvm, switchToProtocol
 //! - `0x209` Agent: registerAgent, grantAgentBalance, revokeAgentBalance
 //!
-//! > `0x102` (Balance) is deprecated — functionality merged into `0x201` Asset.
-
 mod oracle;
-mod balance;
 mod bridge;
 mod asset;
 mod switch;
@@ -26,7 +23,6 @@ mod agent;
 pub mod state_hook;
 
 pub use oracle::*;
-pub use balance::*;
 pub use bridge::*;
 pub use asset::*;
 pub use switch::*;
@@ -101,8 +97,6 @@ pub fn set_current_call_value(value: U256) {
 
 /// Precompile addresses
 pub const ORACLE_ADDRESS: Address = address!("0000000000000000000000000000000000000101");
-/// Deprecated — use `ASSET_ADDRESS` (`0x201`) instead.
-pub const BALANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000102");
 pub const BRIDGE_ADDRESS: Address = address!("0000000000000000000000000000000000000103");
 pub const ASSET_ADDRESS: Address = address!("0000000000000000000000000000000000000201");
 pub const SHIELDED_ADDRESS: Address = address!("0000000000000000000000000000000000000202");
@@ -114,9 +108,8 @@ pub const AGENT_ADDRESS: Address = address!("00000000000000000000000000000000000
 
 /// Register all precompile addresses
 pub fn all_precompiles() -> &'static [Address] {
-    static PRECOMPILES: [Address; 10] = [
+    static PRECOMPILES: [Address; 9] = [
         ORACLE_ADDRESS,
-        BALANCE_ADDRESS,
         BRIDGE_ADDRESS,
         ASSET_ADDRESS,
         SHIELDED_ADDRESS,
@@ -162,11 +155,6 @@ fn build_precompiles_for_spec(
             PrecompileId::Custom("call_oracle".into()),
             ORACLE_ADDRESS,
             oracle_precompile_fn,
-        ),
-        Precompile::new(
-            PrecompileId::Custom("call_balance".into()),
-            BALANCE_ADDRESS,
-            balance_precompile_fn,
         ),
         Precompile::new(
             PrecompileId::Custom("call_bridge".into()),
@@ -455,45 +443,6 @@ fn oracle_submit_price(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
 }
 
-/// Protocol balance precompile entry point (deprecated, use 0x201 Asset)
-///
-/// Input: selector (4) + asset_id (32) + address (32)
-/// Output: balance (32 bytes, uint256)
-pub fn balance_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 800;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-
-    if input.len() < 68 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let Some(balance_guard) = get_live_balance() else {
-        return Err(PrecompileError::Other("balance state not initialized".into()));
-    };
-    let balance_state: std::sync::RwLockReadGuard<_> =
-        balance_guard.read().map_err(|_| PrecompileError::Other("lock poisoned".into()))?;
-
-    let asset_id = u64::from_be_bytes({
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(&input[24..32]);
-        buf
-    });
-    let addr = Address::from_slice(&input[44..64]);
-    let balance = balance_state.get_balance(asset_id, &addr);
-
-    let mut output = [0u8; 32];
-    output[16..].copy_from_slice(&balance.to_be_bytes());
-
-    Ok(revm_precompile::PrecompileOutput {
-        bytes: alloy_primitives::Bytes::from(output.to_vec()),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
 /// Bridge precompile entry point
 ///
 /// Input: selector (4) + args
@@ -545,17 +494,16 @@ mod tests {
     #[test]
     fn test_precompile_addresses() {
         let precompiles = all_precompiles();
-        assert_eq!(precompiles.len(), 10);
+        assert_eq!(precompiles.len(), 9);
         assert_eq!(precompiles[0], ORACLE_ADDRESS);
-        assert_eq!(precompiles[1], BALANCE_ADDRESS);
-        assert_eq!(precompiles[2], BRIDGE_ADDRESS);
-        assert_eq!(precompiles[3], ASSET_ADDRESS);
-        assert_eq!(precompiles[4], SHIELDED_ADDRESS);
-        assert_eq!(precompiles[5], GOVERNANCE_ADDRESS);
-        assert_eq!(precompiles[6], VALIDATOR_ADDRESS);
-        assert_eq!(precompiles[7], COMPLIANCE_ADDRESS);
-        assert_eq!(precompiles[8], SWITCH_ADDRESS);
-        assert_eq!(precompiles[9], AGENT_ADDRESS);
+        assert_eq!(precompiles[1], BRIDGE_ADDRESS);
+        assert_eq!(precompiles[2], ASSET_ADDRESS);
+        assert_eq!(precompiles[3], SHIELDED_ADDRESS);
+        assert_eq!(precompiles[4], GOVERNANCE_ADDRESS);
+        assert_eq!(precompiles[5], VALIDATOR_ADDRESS);
+        assert_eq!(precompiles[6], COMPLIANCE_ADDRESS);
+        assert_eq!(precompiles[7], SWITCH_ADDRESS);
+        assert_eq!(precompiles[8], AGENT_ADDRESS);
     }
 
     #[test]
@@ -563,7 +511,6 @@ mod tests {
         let precompiles = build_precompiles();
         assert!(precompiles.contains(&Address::left_padding_from(&[1])));
         assert!(precompiles.contains(&ORACLE_ADDRESS));
-        assert!(precompiles.contains(&BALANCE_ADDRESS));
         assert!(precompiles.contains(&BRIDGE_ADDRESS));
         assert!(precompiles.contains(&ASSET_ADDRESS));
         assert!(precompiles.contains(&SHIELDED_ADDRESS));
@@ -572,7 +519,7 @@ mod tests {
         assert!(precompiles.contains(&COMPLIANCE_ADDRESS));
         assert!(precompiles.contains(&SWITCH_ADDRESS));
         assert!(precompiles.contains(&AGENT_ADDRESS));
-        assert_eq!(precompiles.len(), 20);
+        assert_eq!(precompiles.len(), 19);
     }
 
     #[test]
@@ -632,14 +579,6 @@ mod tests {
         let mut input = vec![0u8; 132];
         input[0..4].copy_from_slice(&[0x7a, 0xe9, 0x19, 0xf7]);
         let result = oracle_precompile_fn(&input, 1000);
-        assert!(matches!(result, Err(PrecompileError::OutOfGas)));
-    }
-
-    #[test]
-    fn test_balance_precompile_out_of_gas() {
-        let mut input = vec![0u8; 68];
-        input[0..4].copy_from_slice(&[0x00; 4]);
-        let result = balance_precompile_fn(&input, 100);
         assert!(matches!(result, Err(PrecompileError::OutOfGas)));
     }
 
