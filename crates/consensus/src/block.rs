@@ -328,6 +328,59 @@ impl Block {
         ctx: &mut BlockContext,
         subsystems: &mut Subsystems,
     ) -> Result<BlockExecutionResult, ConsensusError> {
+        // Inject protocol state into precompile hooks so EVM precompiles
+        // can access account state, registry, compliance, etc.
+        let _state_hook = unsafe {
+            call_precompiles::state_hook::StateHookGuard::from_raw(
+                state.account,
+                state.registry,
+                state.compliance,
+                state.shielded_state,
+                subsystems
+                    .oracle
+                    .as_mut()
+                    .map_or(std::ptr::null_mut(), |o| *o as *mut _),
+                subsystems
+                    .governance
+                    .as_mut()
+                    .map_or(std::ptr::null_mut(), |g| *g as *mut _),
+            )
+        };
+
+        // Inject validator state into precompile hooks for 0x204
+        let _validator_hook = subsystems.validator_state.as_mut().map(|vs| {
+            crate::validator_precompile::ValidatorStateHookGuard::new(
+                vs,
+                ctx.current_block_height,
+            )
+        });
+
+        // Inject agent state into precompile hooks for 0x209
+        let _agent_hook = if let (Some(ar), Some(ab)) = (
+            subsystems.agent_registry.as_mut(),
+            subsystems.agent_balances.as_mut(),
+        ) {
+            Some(call_agent::precompile::AgentStateHookGuard::new(
+                ar,
+                ab,
+                ctx.fee_params.base_fee,
+                ctx.current_block_height,
+            ))
+        } else {
+            None
+        };
+
+        // Inject bridge state into precompile hooks for 0x103
+        let _bridge_hook = unsafe {
+            crate::bridge_precompile::BridgeStateHookGuard::from_raw(
+                state.bridge_state as *mut _,
+                ctx.bridge_config.map_or(std::ptr::null(), |c| c as *const _),
+                ctx.validators.map_or(std::ptr::null(), |v| v.as_ptr()),
+                ctx.validators.map_or(0, |v| v.len()),
+                ctx.current_block_height,
+            )
+        };
+
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
         let max_evm_gas = 30_000_000u64; // default block gas limit (~30M for Ethereum-compatible)
@@ -337,50 +390,66 @@ impl Block {
 
         // Step 1: EVM transactions
         for raw_tx in &self.evm_txs {
-            if let Ok(tx) = decode_evm_tx(raw_tx) {
-                let caller = tx.caller;
-                let nonce = tx.nonce;
-
-                // Check for duplicate nonce within this block
-                if !used_evm_nonces.insert((caller, nonce)) {
-                    continue; // duplicate nonce in same block
-                }
-
-                // Validate nonce and balance before execution
-                if call_evm::validate_evm_tx(&tx, state.evm_state).is_err() {
+            let tx = match decode_evm_tx(raw_tx) {
+                Ok(t) => t,
+                Err(()) => {
+                    tracing::warn!("block: decode_evm_tx failed, skipping tx");
                     continue;
                 }
+            };
+            let caller = tx.caller;
+            let nonce = tx.nonce;
 
-                // Unified gas balance: auto-bridge Protocol→EVM if needed
-                let gas_cost_u256 = call_evm::U256::from(tx.gas_limit)
-                    .saturating_mul(call_evm::U256::from(tx.gas_price));
-                let gas_cost_u128: u128 = gas_cost_u256.try_into().unwrap_or(u128::MAX);
-                let evm_balance_u128: u128 =
-                    state.evm_state.get_balance(&caller).try_into().unwrap_or(0);
+            // Check for duplicate nonce within this block
+            if !used_evm_nonces.insert((caller, nonce)) {
+                tracing::warn!(?caller, nonce, "block: duplicate evm nonce in same block, skipping");
+                continue;
+            }
 
-                if evm_balance_u128 < gas_cost_u128 {
-                    let needed = gas_cost_u128 - evm_balance_u128;
-                    let protocol_balance =
-                        state.account.get_balance(call_protocol::CALL_ASSET_ID, &caller);
-                    if protocol_balance < needed {
-                        continue; // insufficient unified gas
-                    }
-                    if state.account
-                        .deduct_balance(call_protocol::CALL_ASSET_ID, caller, needed)
-                        .is_ok()
-                    {
-                        let new_evm = state.evm_state.get_balance(&caller)
-                            + call_evm::U256::from(needed);
-                        state.evm_state.set_balance(caller, new_evm);
-                    } else {
-                        continue;
-                    }
+            // Validate nonce and balance before execution
+            if let Err(e) = call_evm::validate_evm_tx(&tx, state.evm_state) {
+                let evm_nonce = state.evm_state.get_nonce(&caller);
+                let evm_bal = state.evm_state.get_balance(&caller);
+                tracing::warn!(?caller, tx_nonce = nonce, evm_nonce, ?evm_bal, error = ?e, "block: validate_evm_tx failed, skipping");
+                continue;
+            }
+
+            // Unified gas balance: auto-bridge Protocol→EVM if needed
+            let gas_cost_u256 = call_evm::U256::from(tx.gas_limit)
+                .saturating_mul(call_evm::U256::from(tx.gas_price));
+            let gas_cost_u128: u128 = gas_cost_u256.try_into().unwrap_or(u128::MAX);
+            let evm_balance_u128: u128 =
+                state.evm_state.get_balance(&caller).try_into().unwrap_or(0);
+
+            if evm_balance_u128 < gas_cost_u128 {
+                let needed = gas_cost_u128 - evm_balance_u128;
+                let protocol_balance =
+                    state.account.get_balance(call_protocol::CALL_ASSET_ID, &caller);
+                if protocol_balance < needed {
+                    tracing::warn!(?caller, needed, protocol_balance, evm_balance = evm_balance_u128, "block: insufficient unified gas, skipping");
+                    continue;
                 }
+                if state.account
+                    .deduct_balance(call_protocol::CALL_ASSET_ID, caller, needed)
+                    .is_ok()
+                {
+                    let new_evm = state.evm_state.get_balance(&caller)
+                        + call_evm::U256::from(needed);
+                    state.evm_state.set_balance(caller, new_evm);
+                } else {
+                    tracing::warn!(?caller, needed, "block: auto-bridge deduct_balance failed, skipping");
+                    continue;
+                }
+            }
 
-                let tx_to = tx.to;
-                let tx_gas_price = tx.gas_price;
-                if let Ok(exec_result) = executor.execute_tx(tx, state.evm_state) {
+            let tx_to = tx.to;
+            let tx_gas_price = tx.gas_price;
+            match executor.execute_tx(tx, state.evm_state) {
+                Ok(exec_result) => {
+                    let new_evm_nonce = state.evm_state.get_nonce(&caller);
+                    tracing::info!(?caller, tx_nonce = nonce, new_evm_nonce, gas_used = exec_result.gas_used, success = exec_result.success, "block: evm tx executed");
                     if gas_tracker.add_gas(exec_result.gas_used).is_err() {
+                        tracing::warn!(?caller, gas_used = exec_result.gas_used, "block: block gas limit exceeded, skipping");
                         continue;
                     }
                     result.evm_tx_count += 1;
@@ -421,8 +490,11 @@ impl Block {
                         gas_price: tx_gas_price,
                     });
                 }
-                // Nonce consumed regardless of execution result (same as Ethereum)
+                Err(e) => {
+                    tracing::warn!(?caller, error = ?e, "block: executor.execute_tx failed, skipping");
+                }
             }
+            // Nonce consumed regardless of execution result (same as Ethereum)
         }
 
         // Step 2: Protocol transactions

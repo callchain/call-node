@@ -275,6 +275,15 @@ impl CallNode {
         // Wire live oracle into precompiles so EVM contracts can read prices
         call_precompiles::set_live_oracle(Arc::clone(&state.oracle));
 
+        // Register validator precompile implementation from call-consensus
+        call_consensus::validator_precompile::register_validator_precompile();
+
+        // Register bridge extension precompile implementation from call-consensus
+        call_consensus::bridge_precompile::register_bridge_precompile();
+
+        // Register agent precompile implementation from call-agent
+        call_agent::precompile::register_agent_precompile();
+
         // Replace default governance with persisted state
         *state.governance.write().unwrap() = loaded.governance;
 

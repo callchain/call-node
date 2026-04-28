@@ -283,7 +283,8 @@ impl Mempool {
         &mut self,
         tx: EvmTransaction,
     ) -> Result<TxHash, MempoolError> {
-        let data = serde_json::to_vec(&tx).map_err(|e| MempoolError::Generic(e.to_string()))?;
+        // Store raw RLP bytes for block execution (decode_evm_tx expects RLP, not JSON)
+        let data = tx.data.to_vec();
         let hash = keccak256(&data);
 
         // Deduplication check
@@ -356,17 +357,13 @@ impl Mempool {
         let protocol_txs = self.protocol_pool.drain_sorted();
         let evm_txs = self.evm_pool.drain_sorted();
 
-        // Clear known_txs for selected transactions
-        for tx in &protocol_txs {
-            self.known_txs.remove(&tx.hash);
-        }
-        for tx in &evm_txs {
-            self.known_txs.remove(&tx.hash);
-        }
-
-        // Clear pools
-        self.protocol_pool.clear();
-        self.evm_pool.clear();
+        // NOTE: Pools are NOT cleared here. Transactions remain in the mempool
+        // until they are confirmed in a committed block via `confirm_transactions`.
+        // This prevents nonce-validation races where RPC sees an empty mempool
+        // between selection and block commitment.
+        //
+        // `known_txs` is also kept so duplicate submissions are still rejected
+        // while a tx is awaiting block inclusion.
 
         MempoolSelection {
             protocol_txs,
@@ -427,6 +424,13 @@ impl Mempool {
         self.expected_nonces.insert(sender, current.saturating_add(1));
     }
 
+    /// Get the expected next EVM nonce for a sender, accounting for pending mempool txs.
+    /// Returns max(committed_nonce, highest_pending_nonce + 1).
+    pub fn get_expected_evm_nonce(&self, sender: Address, committed_nonce: u64) -> u64 {
+        let pending_nonce = self.evm_pool.get_address_nonce(&sender);
+        committed_nonce.max(pending_nonce)
+    }
+
     /// Get total number of pending transactions
     pub fn total_pending(&self) -> usize {
         self.protocol_pool.len()
@@ -447,8 +451,9 @@ impl Mempool {
     // ── Placeholder Hash Computation ───────────────────────────────
 
     fn compute_protocol_tx_hash(&self, tx: &ProtocolTransaction) -> TxHash {
-        let data = serde_json::to_vec(tx).unwrap_or_default();
-        keccak256(&data)
+        // Use the canonical tx hash (same as compute_tx_hash) for consistency
+        // with block execution results.
+        tx.compute_tx_hash().into()
     }
 }
 
@@ -509,6 +514,8 @@ mod tests {
     }
 
     fn make_evm_tx(nonce: u64, gas_price: u128) -> EvmTransaction {
+        // Include nonce in data so each test tx has a unique hash
+        let data = call_evm::Bytes::from(nonce.to_be_bytes().to_vec());
         EvmTransaction {
             caller: test_addr(1),
             nonce,
@@ -516,7 +523,7 @@ mod tests {
             gas_price,
             to: Some(test_addr(2)),
             value: U256::from(100),
-            data: call_evm::Bytes::default(),
+            data,
             chain_id: 1,
         }
     }

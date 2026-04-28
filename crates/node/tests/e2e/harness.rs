@@ -7,7 +7,7 @@
 
 use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
-use call_primitives::{Address, BlockHash, Ed25519PublicKey};
+use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
 use call_protocol::{
     AccountState, AssetRegistry, ComplianceEngine,
     instructions::Instruction,
@@ -270,6 +270,20 @@ impl TestNode {
             consensus.commit_block(&block, &result).expect("commit block");
         }
         self.last_result = Some(result.clone());
+
+        // Remove confirmed transactions from mempool (only executed txs)
+        {
+            let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
+                .map(|r| r.tx_hash)
+                .collect();
+            let protocol_hashes: Vec<TxHash> = result.transaction_results.iter()
+                .map(|r| r.tx_hash)
+                .collect();
+            let mut all = evm_hashes;
+            all.extend(protocol_hashes);
+            let mut mp = self.mempool.write().unwrap();
+            mp.confirm_transactions(&all);
+        }
 
         let new_height = height + 1;
         self.state.set_current_block(new_height);

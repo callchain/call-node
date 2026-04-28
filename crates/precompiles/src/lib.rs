@@ -1,38 +1,138 @@
 //! Callchain precompiles for the EVM layer (per spec §25.4)
 //!
-//! - Oracle precompile at `0x101`: getPrice, getTWAP, isStale, getOracleStatus
-//! - Protocol balance precompile at `0x102`
-//! - Bridge precompile at `0x103`
+//! Precompiles expose protocol functionality to EVM contracts and EOAs:
+//! - `0x101` Oracle: getPrice, getTWAP, isStale, submitPrice
+//! - `0x103` Bridge: getTotalDeposits, getTotalWithdrawals, externalBridgeDeposit, externalBridgeWithdraw, challengeBridgeDeposit
+//! - `0x201` Asset: getBalance, getAssetInfo, transfer, approve, transferFrom, mint, burn, registerAsset
+//! - `0x202` Shielded: shieldedDeposit, shieldedWithdraw, shieldedTransfer
+//! - `0x203` Governance: submitProposal, vote, queue, execute, emergencyPause, emergencyResume
+//! - `0x204` Validator: stake, unstake, claimUnbonded
+//! - `0x205` Compliance: updateCompliance, checkCompliance
+//! - `0x207` Switch: switchToEvm, switchToProtocol
+//! - `0x209` Agent: registerAgent, grantAgentBalance, revokeAgentBalance
+//!
+//! > `0x102` (Balance) is deprecated — functionality merged into `0x201` Asset.
 
 mod oracle;
 mod balance;
 mod bridge;
+mod asset;
+mod switch;
+mod shielded;
+mod governance;
+mod validator;
+mod compliance;
+mod agent;
+pub mod state_hook;
 
 pub use oracle::*;
 pub use balance::*;
 pub use bridge::*;
+pub use asset::*;
+pub use switch::*;
+pub use shielded::*;
+pub use governance::*;
+pub use validator::*;
+pub use compliance::*;
+pub use agent::*;
 
-use alloy_primitives::{address, Address};
-use revm::context_interface::LocalContextTr;
-use revm_precompile::{Precompile, PrecompileId, PrecompileResult, PrecompileError};
+// Re-export types needed by external precompile implementations
+pub use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
+pub use alloy_primitives::Bytes;
+
+use alloy_primitives::{address, Address, U256};
+use revm::context_interface::local::LocalContextTr;
+use revm_precompile::{Precompile, PrecompileId};
+use std::sync::OnceLock;
+
+// ── External precompile registration ──────────────────────────────────
+///
+/// Crates that own protocol state (call-consensus, call-agent, call-bridge)
+/// can register their precompile implementations here to avoid cyclic
+/// dependencies. If no implementation is registered, the built-in stub
+/// is used.
+
+static VALIDATOR_PRECOMPILE_FN: OnceLock<fn(&[u8], u64) -> PrecompileResult> = OnceLock::new();
+static AGENT_PRECOMPILE_FN: OnceLock<fn(&[u8], u64) -> PrecompileResult> = OnceLock::new();
+static BRIDGE_EXT_PRECOMPILE_FN: OnceLock<fn(&[u8], u64) -> PrecompileResult> = OnceLock::new();
+
+/// Register the validator precompile implementation from call-consensus.
+pub fn set_validator_precompile_fn(f: fn(&[u8], u64) -> PrecompileResult) {
+    let _ = VALIDATOR_PRECOMPILE_FN.set(f);
+}
+
+/// Register the agent precompile implementation from call-agent.
+pub fn set_agent_precompile_fn(f: fn(&[u8], u64) -> PrecompileResult) {
+    let _ = AGENT_PRECOMPILE_FN.set(f);
+}
+
+/// Register the bridge extension precompile implementation from call-bridge.
+pub fn set_bridge_ext_precompile_fn(f: fn(&[u8], u64) -> PrecompileResult) {
+    let _ = BRIDGE_EXT_PRECOMPILE_FN.set(f);
+}
+
+// ── Thread-local call context for write precompiles ───────────────────
+
+thread_local! {
+    static CURRENT_CALLER: std::cell::Cell<Option<Address>> = std::cell::Cell::new(None);
+    static CURRENT_CALL_VALUE: std::cell::Cell<U256> = std::cell::Cell::new(U256::ZERO);
+}
+
+/// Get the caller address of the current precompile invocation (if any).
+/// Write precompiles use this to identify the transaction sender.
+pub fn current_caller() -> Option<Address> {
+    CURRENT_CALLER.with(|c| c.get())
+}
+
+/// Get the call value (ETH sent) of the current precompile invocation.
+pub fn current_call_value() -> U256 {
+    CURRENT_CALL_VALUE.with(|c| c.get())
+}
+
+/// Set the caller address for testing or manual invocation.
+pub fn set_current_caller(addr: Option<Address>) {
+    CURRENT_CALLER.with(|c| c.set(addr));
+}
+
+/// Set the call value for testing or manual invocation.
+pub fn set_current_call_value(value: U256) {
+    CURRENT_CALL_VALUE.with(|c| c.set(value));
+}
 
 /// Precompile addresses
 pub const ORACLE_ADDRESS: Address = address!("0000000000000000000000000000000000000101");
+/// Deprecated — use `ASSET_ADDRESS` (`0x201`) instead.
 pub const BALANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000102");
 pub const BRIDGE_ADDRESS: Address = address!("0000000000000000000000000000000000000103");
+pub const ASSET_ADDRESS: Address = address!("0000000000000000000000000000000000000201");
+pub const SHIELDED_ADDRESS: Address = address!("0000000000000000000000000000000000000202");
+pub const GOVERNANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000203");
+pub const VALIDATOR_ADDRESS: Address = address!("0000000000000000000000000000000000000204");
+pub const COMPLIANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000205");
+pub const SWITCH_ADDRESS: Address = address!("0000000000000000000000000000000000000207");
+pub const AGENT_ADDRESS: Address = address!("0000000000000000000000000000000000000209");
 
 /// Register all precompile addresses
 pub fn all_precompiles() -> &'static [Address] {
-    static PRECOMPILES: [Address; 3] = [ORACLE_ADDRESS, BALANCE_ADDRESS, BRIDGE_ADDRESS];
+    static PRECOMPILES: [Address; 10] = [
+        ORACLE_ADDRESS,
+        BALANCE_ADDRESS,
+        BRIDGE_ADDRESS,
+        ASSET_ADDRESS,
+        SHIELDED_ADDRESS,
+        GOVERNANCE_ADDRESS,
+        VALIDATOR_ADDRESS,
+        COMPLIANCE_ADDRESS,
+        SWITCH_ADDRESS,
+        AGENT_ADDRESS,
+    ];
     &PRECOMPILES
 }
 
 /// Callchain precompile provider implementing revm's `PrecompileProvider` trait.
 ///
-/// Wraps standard Ethereum precompiles with Callchain custom precompiles at
-/// `0x101` (Oracle), `0x102` (Balance), and `0x103` (Bridge).
-///
-/// This allows precompiles to be executed through revm's normal call-frame
+/// Wraps standard Ethereum precompiles with Callchain custom precompiles.
+/// All custom precompiles are executed through revm's normal call-frame
 /// mechanism with proper gas accounting, state isolation, and call depth tracking.
 pub struct CallPrecompiles {
     precompiles: revm_precompile::Precompiles,
@@ -71,7 +171,42 @@ fn build_precompiles_for_spec(
         Precompile::new(
             PrecompileId::Custom("call_bridge".into()),
             BRIDGE_ADDRESS,
-            bridge_precompile_fn,
+            BRIDGE_EXT_PRECOMPILE_FN.get().copied().unwrap_or(bridge_precompile_fn),
+        ),
+        Precompile::new(
+            PrecompileId::Custom("call_asset".into()),
+            ASSET_ADDRESS,
+            asset_precompile_fn,
+        ),
+        Precompile::new(
+            PrecompileId::Custom("call_shielded".into()),
+            SHIELDED_ADDRESS,
+            shielded_precompile_fn,
+        ),
+        Precompile::new(
+            PrecompileId::Custom("call_governance".into()),
+            GOVERNANCE_ADDRESS,
+            governance_precompile_fn,
+        ),
+        Precompile::new(
+            PrecompileId::Custom("call_validator".into()),
+            VALIDATOR_ADDRESS,
+            VALIDATOR_PRECOMPILE_FN.get().copied().unwrap_or(validator_precompile_fn),
+        ),
+        Precompile::new(
+            PrecompileId::Custom("call_compliance".into()),
+            COMPLIANCE_ADDRESS,
+            compliance_precompile_fn,
+        ),
+        Precompile::new(
+            PrecompileId::Custom("call_switch".into()),
+            SWITCH_ADDRESS,
+            switch_precompile_fn,
+        ),
+        Precompile::new(
+            PrecompileId::Custom("call_agent".into()),
+            AGENT_ADDRESS,
+            AGENT_PRECOMPILE_FN.get().copied().unwrap_or(agent_precompile_fn),
         ),
     ]);
 
@@ -108,6 +243,10 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX>
             output: revm::primitives::Bytes::new(),
         };
 
+        // Inject call context for write precompiles
+        CURRENT_CALLER.with(|c| c.set(Some(inputs.caller)));
+        CURRENT_CALL_VALUE.with(|c| c.set(inputs.call_value()));
+
         let exec_result = {
             let r;
             let input_bytes = match &inputs.input {
@@ -125,6 +264,10 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX>
             };
             precompile.execute(input_bytes, inputs.gas_limit)
         };
+
+        // Clear call context to prevent leakage
+        CURRENT_CALLER.with(|c| c.set(None));
+        CURRENT_CALL_VALUE.with(|c| c.set(U256::ZERO));
 
         match exec_result {
             Ok(output) => {
@@ -175,16 +318,23 @@ pub fn build_precompiles() -> revm_precompile::Precompiles {
 /// - isStale(assetId) -> returns bool
 /// - getOracleStatus(assetId) -> returns status (uint8)
 pub fn oracle_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 1000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-
     if input.len() < 4 {
         return Err(PrecompileError::Other("invalid input".into()));
     }
 
     let selector = &input[..4];
+
+    // Write operation: submitPrice needs write lock and higher gas
+    match selector {
+        &[0x7a, 0xe9, 0x19, 0xf7] => return oracle_submit_price(input, gas_limit),
+        _ => {}
+    }
+
+    // Read operations
+    const GAS_COST: u64 = 1000;
+    if gas_limit < GAS_COST {
+        return Err(PrecompileError::OutOfGas);
+    }
 
     let Some(oracle_guard) = get_live_oracle() else {
         return Err(PrecompileError::Other("oracle not initialized".into()));
@@ -257,7 +407,55 @@ pub fn oracle_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
 }
 
-/// Protocol balance precompile entry point
+/// submitPrice(uint64 assetId, uint256 price, uint64 timestamp, uint64 blockNumber)
+/// Selector: 0x7ae919f7
+fn oracle_submit_price(input: &[u8], gas_limit: u64) -> PrecompileResult {
+    const GAS_COST: u64 = 5000;
+    if gas_limit < GAS_COST {
+        return Err(PrecompileError::OutOfGas);
+    }
+    if input.len() < 132 {
+        return Err(PrecompileError::Other("invalid input".into()));
+    }
+
+    let asset_id = u64::from_be_bytes({
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&input[28..36]);
+        buf
+    });
+    let price = u128::from_be_bytes({
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&input[48..64]);
+        buf
+    });
+    let timestamp = u64::from_be_bytes({
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&input[92..100]);
+        buf
+    });
+    let block_number = u64::from_be_bytes({
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&input[124..132]);
+        buf
+    });
+
+    let Some(oracle_guard) = get_live_oracle() else {
+        return Err(PrecompileError::Other("oracle not initialized".into()));
+    };
+    let mut oracle: std::sync::RwLockWriteGuard<_> =
+        oracle_guard.write().map_err(|_| PrecompileError::Other("lock poisoned".into()))?;
+
+    oracle.record_direct_price_by_asset(asset_id, price, timestamp, block_number);
+
+    Ok(revm_precompile::PrecompileOutput {
+        bytes: alloy_primitives::Bytes::new(),
+        gas_used: GAS_COST,
+        gas_refunded: 0,
+        reverted: false,
+    })
+}
+
+/// Protocol balance precompile entry point (deprecated, use 0x201 Asset)
 ///
 /// Input: selector (4) + asset_id (32) + address (32)
 /// Output: balance (32 bytes, uint256)
@@ -347,10 +545,17 @@ mod tests {
     #[test]
     fn test_precompile_addresses() {
         let precompiles = all_precompiles();
-        assert_eq!(precompiles.len(), 3);
+        assert_eq!(precompiles.len(), 10);
         assert_eq!(precompiles[0], ORACLE_ADDRESS);
         assert_eq!(precompiles[1], BALANCE_ADDRESS);
         assert_eq!(precompiles[2], BRIDGE_ADDRESS);
+        assert_eq!(precompiles[3], ASSET_ADDRESS);
+        assert_eq!(precompiles[4], SHIELDED_ADDRESS);
+        assert_eq!(precompiles[5], GOVERNANCE_ADDRESS);
+        assert_eq!(precompiles[6], VALIDATOR_ADDRESS);
+        assert_eq!(precompiles[7], COMPLIANCE_ADDRESS);
+        assert_eq!(precompiles[8], SWITCH_ADDRESS);
+        assert_eq!(precompiles[9], AGENT_ADDRESS);
     }
 
     #[test]
@@ -360,7 +565,14 @@ mod tests {
         assert!(precompiles.contains(&ORACLE_ADDRESS));
         assert!(precompiles.contains(&BALANCE_ADDRESS));
         assert!(precompiles.contains(&BRIDGE_ADDRESS));
-        assert_eq!(precompiles.len(), 13);
+        assert!(precompiles.contains(&ASSET_ADDRESS));
+        assert!(precompiles.contains(&SHIELDED_ADDRESS));
+        assert!(precompiles.contains(&GOVERNANCE_ADDRESS));
+        assert!(precompiles.contains(&VALIDATOR_ADDRESS));
+        assert!(precompiles.contains(&COMPLIANCE_ADDRESS));
+        assert!(precompiles.contains(&SWITCH_ADDRESS));
+        assert!(precompiles.contains(&AGENT_ADDRESS));
+        assert_eq!(precompiles.len(), 20);
     }
 
     #[test]
@@ -372,15 +584,6 @@ mod tests {
     }
 
     #[test]
-    fn test_oracle_precompile_not_initialized() {
-        // Create a fresh process-equivalent test by not setting LIVE_ORACLE
-        // Since OnceLock is global, we test the error path by checking
-        // that without setup, the precompile returns an error.
-        // LIVE_ORACLE is already set from other tests, so we just verify
-        // the happy path works instead.
-    }
-
-    #[test]
     fn test_oracle_precompile_unknown_selector() {
         let manager = OracleManager::new(OracleConfig::default());
         set_live_oracle(Arc::new(RwLock::new(manager)));
@@ -389,27 +592,47 @@ mod tests {
     }
 
     #[test]
-    fn test_live_oracle_precompile_integration() {
-        // Use OracleState directly to avoid OnceLock ordering issues
-        use crate::oracle::OracleState;
-        let mut state = OracleState::new(3600);
-        state.submit_price(1, 1_000_000, 900, 90);
-        state.submit_price(1, 2_000_000, 1000, 100);
-        state.submit_price(2, 500_000, 1000, 100);
+    fn test_oracle_precompile_submit_price() {
+        let manager = OracleManager::new(OracleConfig::default());
+        set_live_oracle(Arc::new(RwLock::new(manager)));
 
-        // Test getPrice returns a non-zero price for asset 1
-        assert_eq!(state.get_price(1).map(|p| p.price), Some(2_000_000));
-        assert!(state.get_price(999).is_none());
+        // Encode: submitPrice(assetId=1, price=2_000_000, timestamp=1000, blockNumber=100)
+        let mut input = vec![0u8; 132];
+        input[0..4].copy_from_slice(&[0x7a, 0xe9, 0x19, 0xf7]);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..64].copy_from_slice(&2_000_000u128.to_be_bytes());
+        input[92..100].copy_from_slice(&1000u64.to_be_bytes());
+        input[124..132].copy_from_slice(&100u64.to_be_bytes());
 
-        // Test getTWAP returns a non-zero value
-        let twap = state.get_twapped(1, 1100).unwrap();
-        assert_eq!(twap, 1_500_000);
+        let result = oracle_precompile_fn(&input, 10000);
+        assert!(result.is_ok(), "submitPrice failed: {:?}", result);
 
-        // Test isStale returns true for a far-future timestamp
-        assert!(state.is_stale(1, 1_000_000));
+        // Verify price was recorded
+        let result = oracle_precompile_fn(&[0x76, 0x3e, 0x4d, 0x8c], 10000);
+        // getPrice needs asset_id argument
+        let mut get_price_input = vec![0u8; 36];
+        get_price_input[0..4].copy_from_slice(&[0x76, 0x3e, 0x4d, 0x8c]);
+        get_price_input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        let result = oracle_precompile_fn(&get_price_input, 10000);
+        assert!(result.is_ok(), "getPrice failed: {:?}", result);
+        let output = result.unwrap().bytes;
+        let price = u128::from_be_bytes({
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&output[16..32]);
+            buf
+        });
+        assert_eq!(price, 2_000_000);
+    }
 
-        // Test isStale returns false for a near timestamp
-        assert!(!state.is_stale(1, 1001));
+    #[test]
+    fn test_oracle_precompile_submit_price_out_of_gas() {
+        let manager = OracleManager::new(OracleConfig::default());
+        set_live_oracle(Arc::new(RwLock::new(manager)));
+
+        let mut input = vec![0u8; 132];
+        input[0..4].copy_from_slice(&[0x7a, 0xe9, 0x19, 0xf7]);
+        let result = oracle_precompile_fn(&input, 1000);
+        assert!(matches!(result, Err(PrecompileError::OutOfGas)));
     }
 
     #[test]
@@ -418,13 +641,6 @@ mod tests {
         input[0..4].copy_from_slice(&[0x00; 4]);
         let result = balance_precompile_fn(&input, 100);
         assert!(matches!(result, Err(PrecompileError::OutOfGas)));
-    }
-
-    #[test]
-    fn test_balance_precompile_not_initialized() {
-        // Without setup, the precompile returns a state-not-initialized error.
-        // set_live_balance may already be set by other tests, so we just
-        // verify the OOG path above.
     }
 
     #[test]

@@ -136,8 +136,6 @@ pub struct PriorityPool {
     /// Entries sorted by score (ascending in BTreeMap, so we iterate backwards for highest first)
     /// Key: (score, arrival_order), Value: MempoolEntry
     entries: BTreeMap<(u128, u64), MempoolEntry>,
-    /// Per-address nonce tracking
-    address_nonces: BTreeMap<Address, u64>,
     /// Counter for ordering ties
     next_order: u64,
 }
@@ -158,21 +156,21 @@ impl PriorityPool {
         self.entries.is_empty()
     }
 
-    /// Get the nonce for an address
+    /// Get the expected next nonce for an address by scanning current entries.
     pub fn get_address_nonce(&self, address: &Address) -> u64 {
-        self.address_nonces.get(address).copied().unwrap_or(0)
+        self.entries
+            .values()
+            .filter(|e| e.sender == *address)
+            .map(|e| e.nonce)
+            .max()
+            .map(|n| n.saturating_add(1))
+            .unwrap_or(0)
     }
 
     /// Insert an entry. Returns the order assigned.
     pub fn insert(&mut self, entry: MempoolEntry) -> u64 {
         let order = self.next_order;
         self.next_order += 1;
-
-        // Update address nonce
-        let current_nonce = self.address_nonces.entry(entry.sender).or_insert(0);
-        if entry.nonce >= *current_nonce {
-            *current_nonce = entry.nonce + 1;
-        }
 
         self.entries.insert((entry.score, order), entry);
         order
@@ -200,11 +198,10 @@ impl PriorityPool {
 
     /// Get all entries sorted by priority (highest score first, FIFO for ties)
     pub fn drain_sorted(&mut self) -> Vec<MempoolEntry> {
-        self.entries
-            .iter()
-            .rev()
-            .map(|(_, e)| e.clone())
-            .collect()
+        let mut entries: Vec<_> = self.entries.values().cloned().collect();
+        // Stable sort preserves FIFO order for equal scores.
+        entries.sort_by(|a, b| b.score.cmp(&a.score));
+        entries
     }
 
     /// Clear all entries

@@ -9,6 +9,7 @@ mod registry;
 mod permissions;
 mod balances;
 mod executor;
+pub mod precompile;
 
 pub use registry::*;
 pub use permissions::*;

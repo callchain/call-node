@@ -535,11 +535,17 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getTransactionCount
     module
         .register_async_method("eth_getTransactionCount", |params, state, _ctx| async move {
-            let (address, _block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let (address, block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let addr = address.parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
             let cp_address = Address::from_slice(addr.as_slice());
-            let nonce = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_nonce(&cp_address);
+            let committed_nonce = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_nonce(&cp_address);
+            let nonce = if block_tag.as_deref() == Some("pending") {
+                let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                committed_nonce.max(mempool.evm_pool.get_address_nonce(&cp_address))
+            } else {
+                committed_nonce
+            };
             Ok::<_, ErrorObjectOwned>(format!("0x{nonce:x}"))
         })
         .map_err(|e| internal_error(e.to_string()))?;

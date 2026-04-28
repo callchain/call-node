@@ -296,7 +296,8 @@ async fn test_high_volume_block_production() {
         consensus.refresh_proposer_subset();
     }
 
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
+    // Enough CALL for gas + transfers (200 txs * ~110k gas each + 200 * 10 transfer)
+    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 50_000_000).unwrap();
 
     // Register asset 1 for transfers
     {
@@ -304,8 +305,8 @@ async fn test_high_volume_block_production() {
         registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
     }
 
-    // Inject many transactions
-    let tx_count = 500;
+    // Inject many transactions (capped by per-address mempool limit of 256)
+    let tx_count = 200;
     for i in 0..tx_count {
         node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 50) as u8), 10));
     }

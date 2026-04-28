@@ -12,6 +12,8 @@ pub mod fork;
 pub mod proposer;
 pub mod simplex;
 pub mod validator;
+pub mod validator_precompile;
+pub mod bridge_precompile;
 
 #[cfg(test)]
 mod tests;

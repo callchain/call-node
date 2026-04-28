@@ -1657,6 +1657,7 @@ dependencies = [
  "call-bridge",
  "call-crypto",
  "call-evm",
+ "call-precompiles",
  "call-primitives",
  "call-protocol",
  "call-shielded",
@@ -1713,6 +1714,7 @@ dependencies = [
  "call-evm",
  "call-governance",
  "call-oracle",
+ "call-precompiles",
  "call-primitives",
  "call-protocol",
  "call-shielded",
@@ -1936,9 +1938,11 @@ name = "call-precompiles"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "call-governance",
  "call-oracle",
  "call-primitives",
  "call-protocol",
+ "call-shielded",
  "revm",
  "revm-precompile",
  "tracing",

@@ -15,6 +15,7 @@ call-crypto.workspace = true
 call-bridge.workspace = true
 call-evm.workspace = true
 call-shielded.workspace = true
+call-precompiles.workspace = true
 alloy-primitives.workspace = true
 thiserror.workspace = true
 serde.workspace = true
