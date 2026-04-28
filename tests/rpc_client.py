@@ -59,6 +59,15 @@ class CallchainNode:
     def get_block_by_number(self, number: str) -> Optional[Dict]:
         return self._call("eth_getBlockByNumber", [number, True])
 
+    def send_raw_transaction(self, raw_tx: str) -> str:
+        """Submit a raw RLP-encoded EVM transaction via eth_sendRawTransaction."""
+        return self._call("eth_sendRawTransaction", [raw_tx])
+
+    def get_evm_transaction_count(self, address: str) -> int:
+        """Query the pending EVM nonce for an address (includes mempool)."""
+        result = self._call("eth_getTransactionCount", [address, "pending"])
+        return int(result, 16) if isinstance(result, str) else 0
+
     def asset_list(self) -> List[Dict]:
         return self._call("call_assetList")
 

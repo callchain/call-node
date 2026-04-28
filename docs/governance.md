@@ -21,6 +21,10 @@ The CallChain governance system enables decentralized decision-making for protoc
 │  │ 4. call_governanceExecute (RPC)                   │        │
 │  │ 5. call_governanceEmergencyPause (RPC)            │        │
 │  └──────────────────────────────────────────────────┘        │
+│                                                             │
+│  OR: EVM transaction to Governance precompile (0x203)       │
+│     submitProposal / vote / queue / execute /               │
+│     emergencyPause / emergencyResume                        │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
@@ -46,6 +50,21 @@ The CallChain governance system enables decentralized decision-making for protoc
 ```
 
 ---
+
+## Precompile Alternative
+
+The **Governance precompile at `0x203`** exposes all governance operations via standard EVM transactions:
+
+| Operation | Function | Gas |
+|---|---|---|
+| Submit proposal | `submitProposal(uint8,string,string,bytes)` | 50,000 |
+| Vote | `vote(uint64,uint8)` | 10,000 |
+| Queue | `queue(uint64)` | 15,000 |
+| Execute | `execute(uint64)` | 30,000 |
+| Emergency pause | `emergencyPause(string)` | 20,000 |
+| Emergency resume | `emergencyResume()` | 20,000 |
+
+See [precompile.md](precompile.md) for the full ABI.
 
 ## GovernanceManager
 

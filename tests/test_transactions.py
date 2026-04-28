@@ -7,9 +7,9 @@ and compliance transaction types against a running 4-node devnet.
 Run after starting the devnet with:
     ./devnet/scripts/start.sh
 
-All write operations use the unified call_submit endpoint with raw tx_hash
-signatures. Submissions are accepted into the mempool; execution results
-should be verified by querying on-chain state after block inclusion.
+All write operations use EVM precompiles via eth_sendRawTransaction.
+Submissions are accepted into the mempool; execution results should be
+verified by querying on-chain state after block inclusion.
 """
 
 import json
@@ -18,17 +18,19 @@ import sys
 import time
 
 from rpc_client import CallchainNode, CallchainCluster
-from nonce_tracker import _next_nonce, set_default_node, sync_nonce
+from nonce_tracker import _next_nonce, _next_evm_nonce, set_default_node, sync_nonce, sync_evm_nonce
 
 from signer import (
-    sign_agent_register,
-    sign_asset_registration,
-    sign_governance_proposal,
-    sign_governance_vote,
-    sign_payment,
-    sign_validator_stake,
-    sign_validator_unstake,
-    sign_validator_claim_unbonded,
+    sign_evm_precompile_transfer,
+    sign_evm_precompile_register_asset,
+    sign_evm_precompile_register_agent,
+    sign_evm_precompile_submit_proposal,
+    sign_evm_precompile_vote,
+    sign_evm_precompile_stake,
+    sign_evm_precompile_unstake,
+    sign_evm_precompile_claim_unbonded,
+    build_evm_batch_transfer_data,
+    sign_evm_transaction,
 )
 
 # System escrow address for staked CALL (matches Rust STAKING_ESCROW)
@@ -108,47 +110,89 @@ def get_balance_int(node, asset_id, address):
 # ── Tests: Block Inclusion & State Verification ───────────────────────
 
 
+def test_precompile_batch_transfer(cluster, accounts):
+    """Submit a batchTransfer via EVM precompile 0x201 using eth_sendRawTransaction."""
+    sender = accounts[0]
+    receiver1 = accounts[1]
+    receiver2 = accounts[2]
+    asset_id = 1
+    amount1 = 10**15 + 1
+    amount2 = 10**15 + 2
+
+    # Query EVM nonce
+    evm_nonce = cluster.nodes[0].get_evm_transaction_count(sender["address"])
+
+    # Build batchTransfer call data
+    data = build_evm_batch_transfer_data(
+        asset_id,
+        [receiver1["address"], receiver2["address"]],
+        [amount1, amount2],
+    )
+
+    # Sign EVM transaction
+    raw_tx = sign_evm_transaction(
+        private_key=sender["private_key"],
+        nonce=evm_nonce,
+        to="0x0000000000000000000000000000000000000201",
+        data=data,
+        gas=200_000,
+        gas_price=1,
+        chain_id=1,
+    )
+
+    # Submit via eth_sendRawTransaction
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"invalid txHash: {tx_hash}")
+    print(f"  [OK] batchTransfer precompile tx submitted — txHash {tx_hash}")
+
+    # Wait for receipt
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    if receipt:
+        status = receipt.get("status", "N/A")
+        print(f"  [OK] receipt confirmed, status={status}")
+    else:
+        print(f"  [OK] tx submitted (receipt not yet available)")
+
+
 def test_transfer_balance_change_after_block(cluster, accounts):
-    """Submit a transfer and verify RPC acceptance into the mempool."""
+    """Submit a precompile transfer and verify RPC acceptance into the mempool."""
     sender = accounts[0]
     receiver = accounts[1]
-    amount = 10**18 + 1  # unique amount to avoid mempool replay with test_basic.py
-    nonce = _next_nonce(sender["address"])
+    amount = 10**18 + 3  # unique amount to avoid mempool replay with test_basic.py
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
 
-    payload = sign_payment(
+    raw_tx = sign_evm_precompile_transfer(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         asset_id=1,
         to=receiver["address"],
         amount=amount,
     )
 
-    result = cluster.nodes[0].send_payment(payload)
-    tx_hash = result.get("txHash")
-    assert_true(tx_hash, f"missing txHash in result: {result}")
-    print(f"  [OK] transfer submitted via RPC — txHash {tx_hash}")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
+    print(f"  [OK] precompile transfer submitted via RPC — txHash {tx_hash}")
 
 
 def test_agent_register_and_query_after_block(cluster, accounts):
-    """Register an agent, wait for block inclusion, verify it is queryable on all nodes."""
+    """Register an agent via precompile, wait for block inclusion, verify it is queryable on all nodes."""
     owner = accounts[2]
     pubkey_hex = "b" * 128
     name = "BlockTestAgent"
     url = "https://blocktest.example.com"
-    nonce = _next_nonce(owner["address"])
+    sync_evm_nonce(owner["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(owner["address"])
 
-    payload = sign_agent_register(
+    raw_tx = sign_evm_precompile_register_agent(
         private_key=owner["private_key"],
-        sender=owner["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         pubkey_hex=pubkey_hex,
         name=name,
         url=url,
     )
-    result = cluster.nodes[0].agent_register(payload)
-    tx_hash = result.get("txHash")
-    assert_true(tx_hash, f"missing txHash in result: {result}")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
     print(f"  submitted agent register tx: {tx_hash}")
 
     # Wait for a new block to ensure persistence
@@ -156,7 +200,6 @@ def test_agent_register_and_query_after_block(cluster, accounts):
     wait_for_height(cluster.nodes[0], current_height + 1)
 
     # Query agent info on the submission node to verify persistence
-    # call_submit does not return agentId immediately; query agent 1
     info = cluster.nodes[0].agent_info(1)
     if info is not None:
         print(f"  agent info verified after block")
@@ -170,38 +213,34 @@ def test_agent_register_and_query_after_block(cluster, accounts):
 
 
 def test_register_asset(cluster, accounts):
-    """Register a new asset via call_submit."""
+    """Register a new asset via Asset precompile (0x201)."""
     sender = accounts[0]
     symbol = "TEST"
     name = "Test Token"
     decimals = 18
-    nonce = _next_nonce(sender["address"])
+    evm_nonce = _next_evm_nonce(sender["address"])
 
-    payload = sign_asset_registration(
+    raw_tx = sign_evm_precompile_register_asset(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         symbol=symbol,
         name=name,
         decimals=decimals,
         max_supply=1_000_000,
     )
 
-    result = cluster.nodes[0].register_asset(payload)
-
-    print(f"  [OK] asset registered: {result}")
-    assert_true("txHash" in result, "missing txHash in response")
-    assert_true(result.get("status") == "pending", "unexpected status")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
+    print(f"  [OK] asset registered via precompile — txHash {tx_hash}")
 
 
 def test_register_asset_duplicate_rejected(cluster, accounts):
-    """Registering the same symbol twice — both accepted into mempool, second may fail execution."""
+    """Registering the same symbol twice via precompile — both accepted into mempool, second may fail execution."""
     sender = accounts[0]
-    nonce = _next_nonce(sender["address"])
-    payload = sign_asset_registration(
+    evm_nonce = _next_evm_nonce(sender["address"])
+    raw_tx1 = sign_evm_precompile_register_asset(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         symbol="DUP",
         name="Duplicate",
         decimals=18,
@@ -209,23 +248,22 @@ def test_register_asset_duplicate_rejected(cluster, accounts):
     )
 
     # First registration accepted into mempool
-    r1 = cluster.nodes[0].register_asset(payload)
-    assert_true(r1.get("txHash"), "first submission failed")
-    print(f"  first registration submitted: {r1.get('txHash')}")
+    tx_hash1 = cluster.nodes[0].send_raw_transaction(raw_tx1)
+    assert_true(tx_hash1 and tx_hash1.startswith("0x"), "first submission failed")
+    print(f"  first registration submitted: {tx_hash1}")
 
     # Second registration with same symbol — accepted into mempool but may fail during execution
-    nonce2 = _next_nonce(sender["address"])
-    payload2 = sign_asset_registration(
+    evm_nonce2 = _next_evm_nonce(sender["address"])
+    raw_tx2 = sign_evm_precompile_register_asset(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce2,
+        evm_nonce=evm_nonce2,
         symbol="DUP",
         name="Duplicate2",
         decimals=18,
         max_supply=0,
     )
-    r2 = cluster.nodes[0].register_asset(payload2)
-    print(f"  second registration submitted: {r2.get('txHash')}")
+    tx_hash2 = cluster.nodes[0].send_raw_transaction(raw_tx2)
+    print(f"  second registration submitted: {tx_hash2}")
     print("  [OK] duplicate registration accepted into mempool (execution failure expected)")
 
 
@@ -244,42 +282,41 @@ def test_asset_info_query(cluster, accounts):
 
 
 def test_governance_submit_proposal(cluster, accounts):
-    """Submit a governance proposal via call_governanceSubmitProposal."""
+    """Submit a governance proposal via Governance precompile (0x203)."""
     sender = accounts[0]
-    nonce = _next_nonce(sender["address"])
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
 
-    payload = sign_governance_proposal(
+    raw_tx = sign_evm_precompile_submit_proposal(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
-        proposal_type="ParameterChange",
+        evm_nonce=evm_nonce,
+        proposal_type=0,  # ParameterChange
         title="Test Proposal",
         description="A test governance proposal",
-        param_id="block_time",
-        new_value="5000",
+        execution_data=b"",
     )
 
-    result = cluster.nodes[0].governance_submit_proposal(payload)
-    print(f"  [OK] proposal submitted: {result}")
-    assert_true("txHash" in result, "missing txHash")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
+    print(f"  [OK] proposal submitted via precompile — txHash {tx_hash}")
 
 
 def test_governance_vote(cluster, accounts):
-    """Cast a vote on a governance proposal."""
+    """Cast a vote on a governance proposal via Governance precompile (0x203)."""
     sender = accounts[1]
-    nonce = _next_nonce(sender["address"])
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
 
-    payload = sign_governance_vote(
+    raw_tx = sign_evm_precompile_vote(
         private_key=sender["private_key"],
-        voter=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         proposal_id=1,
-        vote="yes",
+        vote=0,  # Yes
     )
 
-    result = cluster.nodes[0].governance_vote(payload)
-    print(f"  [OK] vote cast: {result}")
-    assert_true("txHash" in result, "missing txHash")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
+    print(f"  [OK] vote cast via precompile — txHash {tx_hash}")
 
 
 def test_governance_get_proposals(cluster, accounts):
@@ -309,25 +346,25 @@ def test_governance_pause_state(cluster, accounts):
 
 
 def test_agent_register(cluster, accounts):
-    """Register an agent via call_submit."""
+    """Register an agent via Agent precompile (0x209)."""
     owner = accounts[2]
     # Use a dummy 64-byte pubkey (128 hex chars)
     pubkey_hex = "a" * 128
     name = "TestAgent"
     url = "https://example.com"
-    nonce = _next_nonce(owner["address"])
+    sync_evm_nonce(owner["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(owner["address"])
 
-    payload = sign_agent_register(
+    raw_tx = sign_evm_precompile_register_agent(
         private_key=owner["private_key"],
-        sender=owner["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         pubkey_hex=pubkey_hex,
         name=name,
         url=url,
     )
-    result = cluster.nodes[0].agent_register(payload)
-    print(f"  [OK] agent registered: {result}")
-    assert_true("txHash" in result, "missing txHash")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
+    print(f"  [OK] agent registered via precompile — txHash {tx_hash}")
 
 
 def test_agent_query(cluster, accounts):
@@ -424,10 +461,10 @@ def test_bridge_withdraw_error_handling(cluster, accounts):
 
 
 def test_validator_join(cluster, accounts):
-    """Validator joins via ValidatorStake — verify registration and escrow."""
+    """Validator joins via Validator precompile (0x204) — verify registration and escrow."""
     sender = accounts[3]
-    sync_nonce(sender["address"], cluster.nodes[0])
-    nonce = _next_nonce(sender["address"])
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
     ed25519_pubkey_hex = "0x" + "aa" * 32
     self_stake = 1_000_000 * 10**18
 
@@ -436,17 +473,15 @@ def test_validator_join(cluster, accounts):
     escrow_bal_before = get_balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     print(f"  pre: validators={len(initial_validators)}, sender_bal={sender_bal_before}, escrow={escrow_bal_before}")
 
-    payload = sign_validator_stake(
+    raw_tx = sign_evm_precompile_stake(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         ed25519_pubkey_hex=ed25519_pubkey_hex,
         self_stake=self_stake,
     )
 
-    result = cluster.nodes[0].validator_stake(payload)
-    tx_hash = result.get("txHash")
-    assert_true(tx_hash, f"missing txHash in result: {result}")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
     print(f"  submitted stake tx: {tx_hash}")
 
     receipt = wait_for_tx(cluster, tx_hash, timeout=30)
@@ -484,10 +519,10 @@ def test_validator_join(cluster, accounts):
 
 
 def test_validator_leave(cluster, accounts):
-    """Validator leaves via ValidatorUnstake — verify unbonding and locked escrow."""
+    """Validator leaves via Validator precompile (0x204) — verify unbonding and locked escrow."""
     sender = accounts[0]
-    sync_nonce(sender["address"], cluster.nodes[0])
-    nonce = _next_nonce(sender["address"])
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
     validator_id = 0
 
     # Verify the validator exists before leaving
@@ -500,28 +535,25 @@ def test_validator_leave(cluster, accounts):
 
     # Reject non-owner unstake
     try:
-        sync_nonce(accounts[1]["address"], cluster.nodes[0])
-        bad = sign_validator_unstake(
+        sync_evm_nonce(accounts[1]["address"], cluster.nodes[0])
+        bad_raw_tx = sign_evm_precompile_unstake(
             private_key=accounts[1]["private_key"],
-            sender=accounts[1]["address"],
-            nonce=_next_nonce(accounts[1]["address"]),
+            evm_nonce=_next_evm_nonce(accounts[1]["address"]),
             validator_id=validator_id,
         )
-        cluster.nodes[0].validator_unstake(bad)
+        cluster.nodes[0].send_raw_transaction(bad_raw_tx)
         print("  [WARN] non-owner unstake accepted")
     except RuntimeError as e:
         print(f"  [OK] non-owner unstake rejected: {e}")
 
-    payload = sign_validator_unstake(
+    raw_tx = sign_evm_precompile_unstake(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         validator_id=validator_id,
     )
 
-    result = cluster.nodes[0].validator_unstake(payload)
-    tx_hash = result.get("txHash")
-    assert_true(tx_hash, f"missing txHash in result: {result}")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
     print(f"  submitted unstake tx: {tx_hash}")
 
     receipt = wait_for_tx(cluster, tx_hash, timeout=30)
@@ -555,18 +587,16 @@ def test_validator_leave(cluster, accounts):
     print(f"  escrow still locked: {escrow_bal_after}")
 
     # Attempt claim before unbonding period — should fail
-    sync_nonce(sender["address"], cluster.nodes[0])
-    claim_payload = sign_validator_claim_unbonded(
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    claim_raw_tx = sign_evm_precompile_claim_unbonded(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=_next_nonce(sender["address"]),
+        evm_nonce=_next_evm_nonce(sender["address"]),
         validator_id=validator_id,
     )
     try:
-        result = cluster.nodes[0].validator_claim_unbonded(claim_payload)
-        claim_tx = result.get("txHash")
-        if claim_tx:
-            claim_receipt = wait_for_tx(cluster, claim_tx, timeout=30)
+        claim_tx_hash = cluster.nodes[0].send_raw_transaction(claim_raw_tx)
+        if claim_tx_hash:
+            claim_receipt = wait_for_tx(cluster, claim_tx_hash, timeout=30)
             status = claim_receipt.get("status", "N/A") if claim_receipt else "no receipt"
             print(f"  claim-before-period status: {status}")
             assert_true(claim_receipt is None or status != "success",
@@ -580,6 +610,7 @@ def test_validator_leave(cluster, accounts):
 # ── Main ──────────────────────────────────────────────────────────────
 
 TEST_FUNCTIONS = [
+    test_precompile_batch_transfer,
     test_agent_register_and_query_after_block,
     test_register_asset,
     test_register_asset_duplicate_rejected,

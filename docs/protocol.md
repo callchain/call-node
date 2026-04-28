@@ -6,6 +6,8 @@ The Protocol Payment Layer (`crates/protocol`) is Callchain's native transaction
 
 Every block contains a mix of protocol transactions (`ProtocolTransaction`) and EVM transactions. Protocol transactions are validated, executed, and committed atomically within the block execution pipeline.
 
+> **EVM Precompile Alternative**: All protocol instructions can also be executed via EVM precompiles at fixed addresses (`0x101`–`0x209`). This enables MetaMask, Solidity contracts, and all standard Ethereum tooling to interact with protocol features. See [precompile.md](precompile.md) for the full precompile reference.
+
 ---
 
 ## Architecture

@@ -84,12 +84,17 @@ start_node() {
         exit 1
     fi
     echo "  starting node${n} (config=${config#"$ROOT_DIR"/}, log=${log#"$ROOT_DIR"/})"
+    # Node 1 runs as solo validator (no BFT consensus); nodes 2-6 are full nodes.
+    local solo_flag=""
+    if [[ "$n" == "1" ]]; then
+        solo_flag="--solo"
+    fi
     # Use setsid on Linux for proper process-group isolation; on macOS setsid
     # is unavailable, so fall back to plain nohup + background.
     if command -v setsid >/dev/null 2>&1; then
-        nohup setsid "$CALLD_BIN" --config "$config" >>"$log" 2>&1 &
+        nohup setsid "$CALLD_BIN" --config "$config" $solo_flag >>"$log" 2>&1 &
     else
-        nohup "$CALLD_BIN" --config "$config" >>"$log" 2>&1 &
+        nohup "$CALLD_BIN" --config "$config" $solo_flag >>"$log" 2>&1 &
     fi
     echo $! >"$pid_file"
 }

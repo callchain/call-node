@@ -43,6 +43,18 @@ The External Bridge (`crates/bridge`) manages cross-chain asset flow between Cal
 
 ---
 
+## Precompile Alternative
+
+The **Bridge precompile at `0x103`** exposes external bridge operations via standard EVM transactions:
+
+| Operation | Precompile Function | Gas |
+|---|---|---|
+| External Deposit | `externalBridgeDeposit(bytes32,uint8,uint64,bytes,address,uint64,uint128,bytes)` | 50,000 |
+| External Withdraw | `externalBridgeWithdraw(uint8,bytes,uint64,uint128)` | 30,000 |
+| Challenge | `challengeBridgeDeposit(bytes32,bytes)` | 20,000 |
+
+See [precompile.md](precompile.md) for the full ABI.
+
 ## Key Components
 
 ### 1. Bridge Operations (`lib.rs`)

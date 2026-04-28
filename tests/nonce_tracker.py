@@ -89,9 +89,50 @@ def _next_nonce(address=None, node=None):
         return nonce
 
 
+# ── EVM nonce tracking (separate from protocol nonces) ───────────────
+
+_EVM_NONCE_COUNTERS = {}
+
+
+def sync_evm_nonce(address, node=None):
+    """Resync the local EVM nonce counter for *address* with eth_getTransactionCount."""
+    global _EVM_NONCE_COUNTERS
+    key = address.lower() if address else "__global__"
+    target = node or _DEFAULT_NODE
+    if target is not None:
+        try:
+            actual = target.get_evm_transaction_count(key)
+            with _LOCK:
+                _EVM_NONCE_COUNTERS[key] = actual
+        except Exception:
+            pass
+
+
+def _next_evm_nonce(address=None, node=None):
+    """Return the next sequential EVM nonce for an address."""
+    global _EVM_NONCE_COUNTERS
+    key = address.lower() if address else "__global__"
+
+    with _LOCK:
+        if key not in _EVM_NONCE_COUNTERS:
+            target = node or _DEFAULT_NODE
+            if target is not None:
+                try:
+                    _EVM_NONCE_COUNTERS[key] = target.get_evm_transaction_count(key)
+                except Exception:
+                    _EVM_NONCE_COUNTERS[key] = 0
+            else:
+                _EVM_NONCE_COUNTERS[key] = 0
+
+        nonce = _EVM_NONCE_COUNTERS[key]
+        _EVM_NONCE_COUNTERS[key] = nonce + 1
+        return nonce
+
+
 def reset_state():
     """Remove the persisted nonce state file.  Call before a fresh devnet run."""
     if os.path.exists(_STATE_FILE):
         os.remove(_STATE_FILE)
     with _LOCK:
         _NONCE_COUNTERS.clear()
+        _EVM_NONCE_COUNTERS.clear()

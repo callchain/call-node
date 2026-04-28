@@ -11,6 +11,18 @@ The Agent Layer (`crates/agent`) enables delegated transaction execution on beha
 - Agent transaction verification with dual-signature support (agent + owner)
 - 0.5x gas discount for agent-mediated transactions
 
+## Precompile Alternative
+
+The **Agent precompile at `0x209`** exposes agent operations via standard EVM transactions:
+
+| Operation | Function | Gas |
+|---|---|---|
+| Register agent | `registerAgent(bytes,string,string)` | 10,000 |
+| Grant balance | `grantAgentBalance(uint64,uint64,uint128)` | 10,000 |
+| Revoke balance | `revokeAgentBalance(uint64,uint64)` | 10,000 |
+
+See [precompile.md](precompile.md) for the full ABI.
+
 ---
 
 ## Architecture

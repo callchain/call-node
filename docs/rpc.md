@@ -17,7 +17,9 @@ The RPC layer is the primary interface for users, dApps, validators, and operato
 
 Direct state mutations from RPC handlers are prohibited. State-changing operations are implemented as `Instruction` variants executed inline during block production. This ensures deterministic state transitions, replay protection through consensus ordering, and uniform gas accounting.
 
-The only write endpoint is `call_submit`, which accepts a `ProtocolTransaction` containing one or more `Instruction`s. All former individual write endpoints (`call_sendPayment`, `call_registerAsset`, `call_governanceVote`, etc.) have been removed and consolidated into this unified interface.
+The unified write endpoint is `call_submit`, which accepts a `ProtocolTransaction` containing one or more `Instruction`s. All former individual write endpoints (`call_sendPayment`, `call_registerAsset`, `call_governanceVote`, etc.) have been removed and consolidated into this unified interface.
+
+**EVM Precompile Path**: All protocol features are also accessible via standard EVM transactions sent to precompile addresses (`0x101`–`0x209`). Users can call `eth_sendRawTransaction` with an RLP-encoded EVM transaction targeting any precompile. This is the recommended path for MetaMask, Solidity contracts, and dApp integrations. See [precompile.md](precompile.md) for the ABI reference.
 
 ---
 

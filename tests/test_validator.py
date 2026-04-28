@@ -15,8 +15,15 @@ import sys
 import time
 
 from rpc_client import CallchainNode, CallchainCluster
-from signer import sign_validator_stake, sign_validator_unstake, sign_validator_claim_unbonded
-from nonce_tracker import _next_nonce, set_default_node, sync_nonce
+from signer import (
+    sign_validator_stake,
+    sign_validator_unstake,
+    sign_validator_claim_unbonded,
+    sign_evm_precompile_stake,
+    sign_evm_precompile_unstake,
+    sign_evm_precompile_claim_unbonded,
+)
+from nonce_tracker import _next_nonce, _next_evm_nonce, set_default_node, sync_nonce, sync_evm_nonce
 
 # System escrow address for staked CALL (matches Rust STAKING_ESCROW)
 STAKING_ESCROW = "0x" + "00" * 20
@@ -99,10 +106,10 @@ def _balance_int(node, asset_id, address):
 
 
 def test_validator_join(cluster, accounts):
-    """Full join flow: stake CALL, verify validator appears, verify escrow holds stake."""
+    """Full join flow via Validator precompile (0x204): stake CALL, verify validator appears."""
     sender = accounts[3]
-    sync_nonce(sender["address"], cluster.nodes[0])
-    nonce = _next_nonce(sender["address"])
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
     # Use a distinct pubkey to avoid collision with test_transactions.py
     ed25519_pubkey_hex = "0x" + "bb" * 32
     self_stake = 1_000_000 * 10**18
@@ -113,17 +120,15 @@ def test_validator_join(cluster, accounts):
     escrow_bal_before = _balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
     print(f"  pre: validators={len(validators_before)}, sender_bal={sender_bal_before}, escrow={escrow_bal_before}")
 
-    payload = sign_validator_stake(
+    raw_tx = sign_evm_precompile_stake(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         ed25519_pubkey_hex=ed25519_pubkey_hex,
         self_stake=self_stake,
     )
 
-    result = cluster.nodes[0].validator_stake(payload)
-    tx_hash = result.get("txHash")
-    assert_true(tx_hash, f"missing txHash in result: {result}")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
     print(f"  submitted stake tx: {tx_hash}")
 
     # Wait for the tx to be included and confirmed (not just height + 1)
@@ -172,10 +177,10 @@ def test_validator_join(cluster, accounts):
 
 
 def test_validator_leave(cluster, accounts):
-    """Full leave flow: unstake existing validator, verify unbonding, reject early claim."""
+    """Full leave flow via Validator precompile (0x204): unstake, verify unbonding, reject early claim."""
     sender = accounts[0]
-    sync_nonce(sender["address"], cluster.nodes[0])
-    nonce = _next_nonce(sender["address"])
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
     validator_id = 0
 
     # Verify the validator exists before leaving
@@ -187,29 +192,26 @@ def test_validator_leave(cluster, accounts):
     print(f"  pre: validator {validator_id} found, selfStake={stake_amount}, escrow={escrow_bal_before}")
 
     # Reject unstake from non-owner
-    sync_nonce(accounts[1]["address"], cluster.nodes[0])
-    bad_payload = sign_validator_unstake(
+    sync_evm_nonce(accounts[1]["address"], cluster.nodes[0])
+    bad_raw_tx = sign_evm_precompile_unstake(
         private_key=accounts[1]["private_key"],
-        sender=accounts[1]["address"],
-        nonce=_next_nonce(accounts[1]["address"]),
+        evm_nonce=_next_evm_nonce(accounts[1]["address"]),
         validator_id=validator_id,
     )
     try:
-        cluster.nodes[0].validator_unstake(bad_payload)
+        cluster.nodes[0].send_raw_transaction(bad_raw_tx)
         print("  [WARN] non-owner unstake accepted")
     except RuntimeError as e:
         print(f"  [OK] non-owner unstake rejected: {e}")
 
-    payload = sign_validator_unstake(
+    raw_tx = sign_evm_precompile_unstake(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=nonce,
+        evm_nonce=evm_nonce,
         validator_id=validator_id,
     )
 
-    result = cluster.nodes[0].validator_unstake(payload)
-    tx_hash = result.get("txHash")
-    assert_true(tx_hash, f"missing txHash in result: {result}")
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
     print(f"  submitted unstake tx: {tx_hash}")
 
     receipt = wait_for_tx(cluster, tx_hash, timeout=30)
@@ -238,16 +240,14 @@ def test_validator_leave(cluster, accounts):
         print(f"  node{i+1}: validator {validator_id} is unbonding, escrow={escrow_bal}")
 
     # Attempt to claim before unbonding period elapsed — should fail
-    sync_nonce(sender["address"], cluster.nodes[0])
-    claim_payload = sign_validator_claim_unbonded(
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    claim_raw_tx = sign_evm_precompile_claim_unbonded(
         private_key=sender["private_key"],
-        sender=sender["address"],
-        nonce=_next_nonce(sender["address"]),
+        evm_nonce=_next_evm_nonce(sender["address"]),
         validator_id=validator_id,
     )
     try:
-        result = cluster.nodes[0].validator_claim_unbonded(claim_payload)
-        claim_tx_hash = result.get("txHash")
+        claim_tx_hash = cluster.nodes[0].send_raw_transaction(claim_raw_tx)
         if claim_tx_hash:
             claim_receipt = wait_for_tx(cluster, claim_tx_hash, timeout=30)
             status = claim_receipt.get("status", "N/A") if claim_receipt else "no receipt"

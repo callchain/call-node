@@ -79,6 +79,19 @@ Prices use **6 decimal places** (e.g. `$2.00` = `2_000_000`).
               └────────────────┘
 ```
 
+## Precompile Functions
+
+The **Oracle precompile at `0x101`** exposes both read and write operations:
+
+| Operation | Function | Type | Gas |
+|---|---|---|---|
+| Read | `getPrice(uint64)` | view | 1,000 |
+| Read | `getTWAP(uint64,uint64)` | view | 1,500 |
+| Read | `isStale(uint64,uint64)` | view | 800 |
+| Write | `submitPrice(uint64,uint128,uint64,uint64,bytes,bytes[])` | — | 5,000 |
+
+`submitPrice` allows registered validators to submit prices directly via EVM transactions (e.g., from a Solidity contract or MetaMask). See [precompile.md](precompile.md) for the full ABI.
+
 ---
 
 ## OracleManager

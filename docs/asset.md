@@ -6,7 +6,11 @@ The Callchain asset system supports both protocol-native assets (registered on-c
 
 ## Asset Registration
 
-Assets are registered through a protocol transaction containing an `Instruction::RegisterAsset`. This ensures the operation is executed atomically during block execution, is ordered relative to other transactions, and is subject to the same consensus, fee, and nonce rules as all other protocol instructions.
+Assets are registered through either:
+1. A protocol transaction containing `Instruction::RegisterAsset` (legacy path), or
+2. An EVM transaction calling `registerAsset(string,string,uint8,uint128)` on the **Asset precompile at `0x201`** (recommended path for MetaMask / dApps).
+
+Both paths execute atomically during block execution, are ordered relative to other transactions, and are subject to the same consensus and fee rules.
 
 ### Instruction
 
@@ -329,6 +333,22 @@ Genesis assets should use `max_supply = 0` (uncapped) because protocol-level iss
 |------|--------|-------|
 | WrappedToken runtime bytecode | ⚠️ Partial | `.bin` is valid and deployed correctly; `.bin-runtime` is empty but unused at runtime. Regenerate if needed for external verification. |
 | `call_totalBalance` RPC | ⚠️ Legacy | Returns `Asset.total_supply` which no longer exists; should return `all_supply()` or be deprecated in favor of `call_assetInfo`. |
+
+## Precompile Equivalents
+
+All asset operations are also available via the **Asset precompile (`0x201`)**:
+
+| Instruction | Precompile Function | Address |
+|---|---|---|
+| `Transfer` | `transfer(uint64,address,uint128)` | `0x201` |
+| `BatchTransfer` | `batchTransfer(uint64,address[],uint128[])` | `0x201` |
+| `Approve` | `approve(uint64,address,uint128)` | `0x201` |
+| `TransferFrom` | `transferFrom(uint64,address,address,uint128)` | `0x201` |
+| `Mint` | `mint(uint64,address,uint128)` | `0x201` |
+| `Burn` | `burn(uint64,uint128)` | `0x201` |
+| `RegisterAsset` | `registerAsset(string,string,uint8,uint128)` | `0x201` |
+
+See [precompile.md](precompile.md) for the full ABI.
 
 ## Related Documents
 

@@ -1,4 +1,4 @@
-mode = "validator"
+mode = "full"
 
 [keys]
 validator_key = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"

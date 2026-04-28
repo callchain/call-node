@@ -66,6 +66,17 @@ Beyond the policy-level checks, each `(address, policy_id)` pair can have a gran
 
 `Instruction::UpdateCompliance { asset_id, target, status }` allows the asset issuer to set this status for any address under their asset's policy. When `status == Restricted`, `check_compliance_by_policy_id` returns `Err(ProtocolError::Compliance(...))` immediately.
 
+## Precompile Alternative
+
+The **Compliance precompile at `0x205`** provides the same functionality via standard EVM transactions:
+
+| Instruction | Precompile Function | Gas |
+|---|---|---|
+| `UpdateCompliance` | `updateCompliance(uint64,address,uint8)` | 10,000 |
+| — | `checkCompliance(uint64,address)` (read-only) | 1,000 |
+
+See [precompile.md](precompile.md) for the full ABI.
+
 ### Compliance Engine State
 
 `ComplianceEngine` (`crates/protocol/src/compliance.rs`):

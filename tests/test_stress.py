@@ -19,8 +19,8 @@ import statistics
 import threading
 
 from rpc_client import CallchainNode, CallchainCluster
-from signer import sign_payment
-from nonce_tracker import _next_nonce, set_default_node
+from signer import sign_payment, sign_evm_precompile_transfer
+from nonce_tracker import _next_nonce, _next_evm_nonce, set_default_node, sync_evm_nonce
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -54,32 +54,45 @@ class StressRunner:
 
     def _take_nonce(self, sender_idx: int) -> int:
         sender = self.accounts[sender_idx]
-        return _next_nonce(sender["address"])
+        return _next_evm_nonce(sender["address"])
 
     def submit_single(self, node_idx: int, sender_idx: int, amount: int):
-        """Submit one transaction and record latency."""
+        """Submit one precompile transfer transaction and record latency."""
         sender = self.accounts[sender_idx]
         receiver = self.accounts[(sender_idx + 1) % len(self.accounts)]
-        nonce = self._take_nonce(sender_idx)
 
-        payload = sign_payment(
-            private_key=sender["private_key"],
-            sender=sender["address"],
-            nonce=nonce,
-            asset_id=1,
-            to=receiver["address"],
-            amount=amount,
-        )
-
-        node = self.cluster.nodes[node_idx % len(self.cluster.nodes)]
+        # Always submit to node 0 so nonce tracking stays consistent
+        node = self.cluster.nodes[0]
         t0 = time.time()
-        try:
-            result = node.send_payment(payload)
-            latency = time.time() - t0
-            return {"success": True, "latency": latency, "txHash": result.get("txHash", "")}
-        except Exception as e:
-            latency = time.time() - t0
-            return {"success": False, "latency": latency, "error": str(e)}
+
+        for attempt in range(3):
+            evm_nonce = self._take_nonce(sender_idx)
+            raw_tx = sign_evm_precompile_transfer(
+                private_key=sender["private_key"],
+                evm_nonce=evm_nonce,
+                asset_id=1,
+                to=receiver["address"],
+                amount=amount,
+            )
+
+            try:
+                tx_hash = node.send_raw_transaction(raw_tx)
+                latency = time.time() - t0
+                return {"success": True, "latency": latency, "txHash": tx_hash}
+            except RuntimeError as e:
+                error_str = str(e)
+                # Retry on nonce mismatch — concurrent threads may submit out of order
+                if "nonce" in error_str.lower() and attempt < 2:
+                    sync_evm_nonce(sender["address"], node)
+                    continue
+                latency = time.time() - t0
+                return {"success": False, "latency": latency, "error": error_str}
+            except Exception as e:
+                latency = time.time() - t0
+                return {"success": False, "latency": latency, "error": str(e)}
+
+        latency = time.time() - t0
+        return {"success": False, "latency": latency, "error": "max retries exceeded"}
 
     def run_burst(self, count: int, concurrency: int, amount: int = 10**16) -> dict:
         """Fire `count` transactions with `concurrency` parallel workers."""

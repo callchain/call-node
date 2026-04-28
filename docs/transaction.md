@@ -10,10 +10,11 @@
 Provide a secure, deterministic, and economically sound transaction execution engine that:
 
 1. Supports both **native protocol operations** (`ProtocolTransaction`) and **EVM transactions** in the same block.
-2. Guarantees **atomic execution** — either all instructions in a transaction succeed, or none of them are committed.
-3. Enforces **replay protection** via nonces and cryptographic signatures.
-4. Meters **gas consumption** per instruction and charges fees fairly.
-5. Manages **mempool admission** to prevent spam and DoS.
+2. Exposes all protocol features via **EVM precompiles** (`0x101`–`0x209`) so MetaMask, Solidity contracts, and standard Ethereum tooling can interact with the chain without ProtocolTransaction.
+3. Guarantees **atomic execution** — either all instructions in a transaction succeed, or none of them are committed.
+4. Enforces **replay protection** via nonces and cryptographic signatures.
+5. Meters **gas consumption** per instruction and charges fees fairly.
+6. Manages **mempool admission** to prevent spam and DoS.
 
 ---
 

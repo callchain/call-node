@@ -68,6 +68,17 @@ Bridge operations update `Asset.evm_supply` in `AssetRegistry`:
 
 ---
 
+## Precompile Alternative
+
+The **Switch precompile at `0x207`** provides the same bridging functionality via standard EVM transactions:
+
+| Instruction | Precompile Function | Gas |
+|---|---|---|
+| `BridgeToEvm` | `switchToEvm(uint64,address,uint128)` | 30,000 |
+| `BridgeToProtocol` | `switchToProtocol(uint64,address,uint128)` | 30,000 |
+
+Solidity contracts and MetaMask can call these functions directly. See [precompile.md](precompile.md) for the full ABI.
+
 ## Entry Points
 
 ### 1. Block-Level BridgeOp (Agent / Block Producer)
