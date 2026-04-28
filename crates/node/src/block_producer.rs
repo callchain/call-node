@@ -8,8 +8,9 @@ use call_consensus::{Block, SimplexConsensus, SystemTx, SystemTxKind};
 use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
 use call_oracle::ORACLE_UPDATE_INTERVAL;
-use call_primitives::{Address, FeeCurrency};
+use call_primitives::{Address, FeeCurrency, TxHash};
 use call_protocol::{ProtocolReceipt, transaction::ProtocolTransaction};
+use call_crypto::keccak256;
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
 use call_transaction_pool::Mempool;
@@ -97,6 +98,35 @@ pub(crate) async fn block_production_loop(
             }
         };
         block.finalize(&result);
+
+        // Remove confirmed transactions from mempool so they are not re-selected
+        // in the next block.  Only confirm txs that were actually executed
+        // (skipped txs remain in the mempool for the next block).
+        {
+            let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
+                .map(|r| r.tx_hash)
+                .collect();
+            let protocol_hashes: Vec<TxHash> = result.transaction_results.iter()
+                .map(|r| r.tx_hash)
+                .collect();
+            let mut all = evm_hashes;
+            all.extend(protocol_hashes);
+            let mut mp = mempool.write().unwrap();
+            mp.confirm_transactions(&all);
+            // Also notify mempool defense so per-address tx_counts are decremented
+            drop(mp);
+            let mut defense = state.mempool_defense.write().unwrap();
+            for evm in &result.evm_tx_results {
+                defense.on_tx_confirmed(evm.caller);
+            }
+            for tr in &result.transaction_results {
+                if let Some(tx) = block.protocol_txs.iter().find(|t| {
+                    call_primitives::TxHash::from(t.compute_tx_hash()) == tr.tx_hash
+                }) {
+                    defense.on_tx_confirmed(tx.sender);
+                }
+            }
+        }
 
         // 3c. Finalize bridge deposits whose challenge period has expired
         {

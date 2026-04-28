@@ -548,7 +548,11 @@ impl RpcState {
         // Validate nonce and balance
         {
             let state = self.evm_state.read().map_err(|_| "lock poisoned".to_string())?;
-            let expected_nonce = state.get_nonce(&caller);
+            let committed_nonce = state.get_nonce(&caller);
+            let expected_nonce = {
+                let mempool = self.mempool.read().map_err(|_| "lock poisoned".to_string())?;
+                mempool.get_expected_evm_nonce(caller, committed_nonce)
+            };
             if nonce != expected_nonce {
                 return Err(format!("invalid nonce: expected {expected_nonce}, got {nonce}"));
             }
@@ -595,7 +599,12 @@ impl RpcState {
                 data: alloy_primitives::Bytes::from(raw_tx.to_vec()),
                 chain_id: self.chain_id,
             };
-            let _ = mempool.insert_evm_tx(evm_tx);
+            if let Err(e) = mempool.insert_evm_tx(evm_tx) {
+                // Rollback defense state so the tx can be re-submitted later
+                let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
+                defense.rollback_submission(caller, tx_hash);
+                return Err(format!("mempool insertion failed: {e}"));
+            }
         }
 
         // Transaction is now in the mempool and will be picked up by block production.
@@ -700,7 +709,9 @@ impl RpcState {
         }
 
         let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
-        let _ = mempool.insert_protocol_tx(tx.clone());
+        if let Err(e) = mempool.insert_protocol_tx(tx.clone()) {
+            return Err(format!("mempool insertion failed: {e}"));
+        }
         drop(mempool);
 
         // Gossip to peers so non-proposer validators also see the tx

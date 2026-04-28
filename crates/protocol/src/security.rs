@@ -191,6 +191,11 @@ impl ReplayProtector {
 
         first_seen
     }
+
+    /// Remove a hash from the seen set (used for rollback on insertion failure).
+    pub fn remove_hash(&mut self, hash: &TxHash) {
+        self.seen_hashes.remove(hash);
+    }
 }
 
 /// Mempool attack prevention state
@@ -251,6 +256,15 @@ impl MempoolDefense {
         if let Some(count) = self.tx_counts.get_mut(&sender) {
             *count = count.saturating_sub(1);
         }
+    }
+
+    /// Rollback defense state when mempool insertion fails after validation.
+    /// Reverses tx_counts and replay protector so the tx can be re-submitted.
+    pub fn rollback_submission(&mut self, sender: Address, hash: TxHash) {
+        if let Some(count) = self.tx_counts.get_mut(&sender) {
+            *count = count.saturating_sub(1);
+        }
+        self.replay_protector.remove_hash(&hash);
     }
 
     /// Cleanup expired rate limiter entries

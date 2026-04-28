@@ -16,8 +16,9 @@ use call_network::{
     EpochBoundarySignal,
 };
 use call_oracle::ORACLE_UPDATE_INTERVAL;
-use call_primitives::{Address, Hash, FeeCurrency};
+use call_primitives::{Address, Hash, FeeCurrency, TxHash};
 use call_protocol::{ProtocolReceipt, transaction::ProtocolTransaction};
+use call_crypto::keccak256;
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
 use call_transaction_pool::Mempool;
@@ -456,6 +457,34 @@ pub(crate) async fn bft_event_loop(
                     {
                         tracing::error!(height, "BFT finalize: state root mismatch — block rejected");
                         continue;
+                    }
+
+                    // Remove confirmed transactions from mempool so they are not
+                    // re-selected in the next block. Only confirm executed txs.
+                    {
+                        let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
+                            .map(|r| r.tx_hash)
+                            .collect();
+                        let protocol_hashes: Vec<TxHash> = result.transaction_results.iter()
+                            .map(|r| r.tx_hash)
+                            .collect();
+                        let mut all = evm_hashes;
+                        all.extend(protocol_hashes);
+                        let mut mp = mempool.write().unwrap();
+                        mp.confirm_transactions(&all);
+                        // Also notify mempool defense so per-address tx_counts are decremented
+                        drop(mp);
+                        let mut defense = state.mempool_defense.write().unwrap();
+                        for evm in &result.evm_tx_results {
+                            defense.on_tx_confirmed(evm.caller);
+                        }
+                        for tr in &result.transaction_results {
+                            if let Some(tx) = block.protocol_txs.iter().find(|t| {
+                                call_primitives::TxHash::from(t.compute_tx_hash()) == tr.tx_hash
+                            }) {
+                                defense.on_tx_confirmed(tx.sender);
+                            }
+                        }
                     }
 
                     // Handle oracle period transitions at boundary heights
