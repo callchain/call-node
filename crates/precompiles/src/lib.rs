@@ -51,6 +51,7 @@ use std::sync::OnceLock;
 static VALIDATOR_PRECOMPILE_FN: OnceLock<fn(&[u8], u64) -> PrecompileResult> = OnceLock::new();
 static AGENT_PRECOMPILE_FN: OnceLock<fn(&[u8], u64) -> PrecompileResult> = OnceLock::new();
 static BRIDGE_EXT_PRECOMPILE_FN: OnceLock<fn(&[u8], u64) -> PrecompileResult> = OnceLock::new();
+static ORACLE_VALIDATOR_CHECK: OnceLock<fn(&Address) -> bool> = OnceLock::new();
 
 /// Register the validator precompile implementation from call-consensus.
 pub fn set_validator_precompile_fn(f: fn(&[u8], u64) -> PrecompileResult) {
@@ -65,6 +66,18 @@ pub fn set_agent_precompile_fn(f: fn(&[u8], u64) -> PrecompileResult) {
 /// Register the bridge extension precompile implementation from call-bridge.
 pub fn set_bridge_ext_precompile_fn(f: fn(&[u8], u64) -> PrecompileResult) {
     let _ = BRIDGE_EXT_PRECOMPILE_FN.set(f);
+}
+
+/// Register the oracle validator check from call-consensus.
+/// This is called once during node startup.
+pub fn set_oracle_validator_check(f: fn(&Address) -> bool) {
+    let _ = ORACLE_VALIDATOR_CHECK.set(f);
+}
+
+/// Check if an address is a qualified (current-epoch) validator.
+/// Returns false if no check function has been registered.
+pub fn is_oracle_validator(addr: &Address) -> bool {
+    ORACLE_VALIDATOR_CHECK.get().map(|f| f(addr)).unwrap_or(false)
 }
 
 // ── Thread-local call context for write precompiles ───────────────────
@@ -427,6 +440,12 @@ fn oracle_submit_price(input: &[u8], gas_limit: u64) -> PrecompileResult {
         buf
     });
 
+    let caller = current_caller().ok_or_else(|| PrecompileError::Other("caller not available".into()))?;
+
+    if !is_oracle_validator(&caller) {
+        return Err(PrecompileError::Other("not a qualified validator".into()));
+    }
+
     let Some(oracle_guard) = get_live_oracle() else {
         return Err(PrecompileError::Other("oracle not initialized".into()));
     };
@@ -543,6 +562,10 @@ mod tests {
         let manager = OracleManager::new(OracleConfig::default());
         set_live_oracle(Arc::new(RwLock::new(manager)));
 
+        // Register a mock validator check that treats any address as qualified
+        let _ = ORACLE_VALIDATOR_CHECK.set(|_addr| true);
+        set_current_caller(Some(Address::repeat_byte(0xAB)));
+
         // Encode: submitPrice(assetId=1, price=2_000_000, timestamp=1000, blockNumber=100)
         let mut input = vec![0u8; 132];
         input[0..4].copy_from_slice(&[0x7a, 0xe9, 0x19, 0xf7]);
@@ -553,6 +576,8 @@ mod tests {
 
         let result = oracle_precompile_fn(&input, 10000);
         assert!(result.is_ok(), "submitPrice failed: {:?}", result);
+
+        set_current_caller(None);
 
         // Verify price was recorded
         let result = oracle_precompile_fn(&[0x76, 0x3e, 0x4d, 0x8c], 10000);

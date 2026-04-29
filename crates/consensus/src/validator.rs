@@ -693,6 +693,17 @@ impl ValidatorStateManager {
             .is_some_and(|v| v.unbonding_start.is_some())
     }
 
+    /// Check if an address belongs to a qualified (current-epoch) validator.
+    pub fn is_qualified_validator(&self, address: &Address) -> bool {
+        self.validators
+            .values()
+            .any(|v| {
+                v.address == *address
+                    && v.unbonding_start.is_none()
+                    && v.staked_call >= self.params.min_self_stake
+            })
+    }
+
     /// Check if unbonding requests are now eligible
     pub fn eligible_unbonding_requests(&self) -> Vec<ValidatorId> {
         self.unbonding_requests
@@ -989,5 +1000,30 @@ mod tests {
             state.remove_validator(id),
             Err(ConsensusError::ValidatorNotFound(_))
         ));
+    }
+
+    #[test]
+    fn test_is_qualified_validator() {
+        let mut state = ValidatorStateManager::new();
+        let addr = test_addr(1);
+
+        // No validators yet — random address is not qualified
+        assert!(!state.is_qualified_validator(&addr));
+
+        // Stake below minimum — still not qualified
+        let result = state.stake(addr, test_pubkey(1), state.params.min_self_stake - 1);
+        assert!(result.is_err());
+        assert!(!state.is_qualified_validator(&addr));
+
+        // Stake at minimum — now qualified
+        let id = state.stake(addr, test_pubkey(1), state.params.min_self_stake).unwrap();
+        assert!(state.is_qualified_validator(&addr));
+
+        // Another address that hasn't staked is not qualified
+        assert!(!state.is_qualified_validator(&test_addr(2)));
+
+        // Unstake — no longer qualified
+        state.unstake(id, addr).unwrap();
+        assert!(!state.is_qualified_validator(&addr));
     }
 }

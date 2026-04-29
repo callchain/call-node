@@ -185,7 +185,7 @@ interface IProtocolOracle {
 ### Behavior
 
 - Read functions query the `OracleManager` for latest price, time-weighted average, and staleness.
-- `submitPrice`: Verifies the caller is a registered validator, then submits the price to `OracleManager::submit_price()`.
+- `submitPrice`: Rejects the call unless the caller is a **qualified validator** (staked ≥ `min_self_stake`, not unbonding — i.e. in the current BFT epoch validator set). Candidates and unbonding validators cannot submit.
 
 ---
 

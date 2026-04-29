@@ -108,6 +108,21 @@ pub fn register_validator_precompile() {
     let _ = set_validator_precompile_fn(validator_precompile_fn);
 }
 
+/// Register the oracle validator checker with `call-precompiles`.
+///
+/// Call once during node startup. This lets the Oracle precompile reject
+/// `submitPrice` calls from non-qualified validators.
+pub fn register_oracle_validator_check() {
+    let _ = call_precompiles::set_oracle_validator_check(is_current_validator);
+}
+
+/// Check whether `addr` is a qualified (current-epoch) validator.
+/// Reads from the thread-local validator state injected by `ValidatorStateHookGuard`.
+fn is_current_validator(addr: &Address) -> bool {
+    with_validator_state(|vs, _current_block| vs.is_qualified_validator(addr))
+        .unwrap_or(false)
+}
+
 pub fn validator_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     if input.len() < 4 {
         return Err(PrecompileError::Other("invalid input".into()));

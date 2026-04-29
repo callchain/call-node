@@ -278,6 +278,9 @@ impl CallNode {
         // Register validator precompile implementation from call-consensus
         call_consensus::validator_precompile::register_validator_precompile();
 
+        // Register oracle validator checker so only qualified validators can submit prices
+        call_consensus::validator_precompile::register_oracle_validator_check();
+
         // Register bridge extension precompile implementation from call-consensus
         call_consensus::bridge_precompile::register_bridge_precompile();
 
