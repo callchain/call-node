@@ -67,8 +67,8 @@ All protocol operations are exposed through EVM precompiles (`crates/precompiles
 | `0x201` | `burn(uint64,address,uint128)` | 5,000 | Asset issuer only |
 | `0x207` | `switchToEvm(uint64,address,uint128)` | 8,000 | Sender balance |
 | `0x207` | `switchToProtocol(uint64,address,uint128)` | 8,000 | Sender EVM balance |
-| `0x202` | `shieldedDeposit` / `shieldedWithdraw` | 50,000 | ZK proof + nullifier |
-| `0x202` | `shieldedTransfer` | 100,000 | ZK proof |
+| `0x202` | `deposit` / `withdraw` | 50,000 | ZK proof + nullifier |
+| `0x202` | `transfer` | 100,000 | ZK proof |
 | `0x101` | `submitPrice` | 3,000 | Registered validator |
 | `0x103` | `externalBridgeDeposit` | 10,000 | Validator signatures |
 | `0x103` | `externalBridgeWithdraw` | 8,000 | Sender balance |

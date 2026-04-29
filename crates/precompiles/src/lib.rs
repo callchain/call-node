@@ -4,7 +4,7 @@
 //! - `0x101` Oracle: getPrice, getTWAP, isStale, submitPrice
 //! - `0x103` Bridge: getTotalDeposits, getTotalWithdrawals, externalBridgeDeposit, externalBridgeWithdraw, challengeBridgeDeposit
 //! - `0x201` Asset: getBalance, getAssetInfo, transfer, batchTransfer, approve, transferFrom, mint, burn, register
-//! - `0x202` Shielded: shieldedDeposit, shieldedWithdraw, shieldedTransfer
+//! - `0x202` Shielded: deposit, withdraw, transfer
 //! - `0x203` Governance: submitProposal, vote, queue, execute, emergencyPause, emergencyResume
 //! - `0x204` Validator: stake, unstake, claimUnbonded
 //! - `0x205` Compliance: updateCompliance, checkCompliance

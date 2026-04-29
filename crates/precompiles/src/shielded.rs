@@ -1,6 +1,6 @@
 //! Shielded precompile at 0x202
 //!
-//! Privacy operations: shieldedDeposit, shieldedWithdraw, shieldedTransfer.
+//! Privacy operations: deposit, withdraw, transfer.
 
 use alloy_primitives::address;
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
@@ -146,16 +146,16 @@ pub fn shielded_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult 
     }
 
     match &input[..4] {
-        &[0x43, 0x28, 0xf9, 0x2f] => shielded_deposit(input, gas_limit),
-        &[0x5f, 0x82, 0xf0, 0x03] => shielded_withdraw(input, gas_limit),
-        &[0xdc, 0x9a, 0x6c, 0xf6] => shielded_transfer(input, gas_limit),
+        &[0x26, 0x8a, 0x8d, 0xfe] => deposit(input, gas_limit),
+        &[0x6e, 0x1c, 0xfa, 0xc9] => withdraw(input, gas_limit),
+        &[0x79, 0x30, 0x54, 0x52] => transfer(input, gas_limit),
         _ => Err(PrecompileError::Other("unknown selector".into())),
     }
 }
 
-// ── shieldedDeposit(uint64 assetId, uint256 amount, bytes32 commitment, bytes encryptedNote) ──
+// ── deposit(uint64 assetId, uint256 amount, bytes32 commitment, bytes encryptedNote) ──
 
-fn shielded_deposit(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn deposit(input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 50000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
@@ -209,9 +209,9 @@ fn shielded_deposit(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
 }
 
-// ── shieldedWithdraw(uint64 assetId, address target, uint256 amount, bytes proof, bytes32 nullifier) ──
+// ── withdraw(uint64 assetId, address target, uint256 amount, bytes proof, bytes32 nullifier) ──
 
-fn shielded_withdraw(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn withdraw(input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 50000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
@@ -291,9 +291,9 @@ fn shielded_withdraw(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
 }
 
-// ── shieldedTransfer(uint64 assetId, bytes proof, bytes32[] nullifiers, bytes32[] commitments, bytes[] encryptedNotes) ──
+// ── transfer(uint64 assetId, bytes proof, bytes32[] nullifiers, bytes32[] commitments, bytes[] encryptedNotes) ──
 
-fn shielded_transfer(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn transfer(input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 100000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shielded_deposit() {
+    fn test_deposit() {
         let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::default();
@@ -486,11 +486,11 @@ mod tests {
         let encrypted_note = note.to_encrypted_bytes();
         let commitment = note.commitment().as_hash().0;
 
-        // Encode: shieldedDeposit(assetId, amount, commitment, encryptedNote)
+        // Encode: deposit(assetId, amount, commitment, encryptedNote)
         // Fixed slots: assetId(32), amount(32), commitment(32), offset(32)
         // Total fixed = 128 bytes; encryptedNote data follows
         let mut input = vec![0u8; 4 + 128];
-        input[0..4].copy_from_slice(&[0x43, 0x28, 0xf9, 0x2f]);
+        input[0..4].copy_from_slice(&[0x26, 0x8a, 0x8d, 0xfe]);
         input[4 + 24..4 + 32].copy_from_slice(&asset_id.to_be_bytes());
         input[36 + 16..36 + 32].copy_from_slice(&500u128.to_be_bytes());
         input[68..100].copy_from_slice(&commitment);
@@ -500,8 +500,8 @@ mod tests {
         let enc_data = abi_encode_bytes(&encrypted_note);
         input.extend_from_slice(&enc_data);
 
-        let result = shielded_deposit(&input, 100000);
-        assert!(result.is_ok(), "shieldedDeposit failed: {:?}", result);
+        let result = deposit(&input, 100000);
+        assert!(result.is_ok(), "deposit failed: {:?}", result);
 
         // Verify balance deducted
         assert_eq!(account.get_balance(asset_id, &Address::repeat_byte(0x22)), 500);
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shielded_withdraw() {
+    fn test_withdraw() {
         let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::default();
@@ -536,12 +536,12 @@ mod tests {
 
         crate::CURRENT_CALLER.with(|c| c.set(Some(Address::repeat_byte(0x22))));
 
-        // Encode: shieldedWithdraw(assetId, target, amount, proof, nullifier)
+        // Encode: withdraw(assetId, target, amount, proof, nullifier)
         // Fixed slots: assetId(32), target(32), amount(32), proof_offset(32), nullifier(32)
         // Total fixed = 160 bytes; proof data follows
         let proof_data = vec![1u8; 64]; // mock proof data
         let mut input = vec![0u8; 4 + 160];
-        input[0..4].copy_from_slice(&[0x5f, 0x82, 0xf0, 0x03]);
+        input[0..4].copy_from_slice(&[0x6e, 0x1c, 0xfa, 0xc9]);
         input[4 + 24..4 + 32].copy_from_slice(&asset_id.to_be_bytes());
         input[36 + 12..36 + 32].copy_from_slice(Address::repeat_byte(0x44).as_slice());
         input[68 + 16..68 + 32].copy_from_slice(&500u128.to_be_bytes());
@@ -552,8 +552,8 @@ mod tests {
         let proof_enc = abi_encode_bytes(&proof_data);
         input.extend_from_slice(&proof_enc);
 
-        let result = shielded_withdraw(&input, 100000);
-        assert!(result.is_ok(), "shieldedWithdraw failed: {:?}", result);
+        let result = withdraw(&input, 100000);
+        assert!(result.is_ok(), "withdraw failed: {:?}", result);
 
         // Verify nullifier spent
         assert!(shielded.nullifier_set.is_spent(&Nullifier::new(nullifier.into())));
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shielded_transfer() {
+    fn test_transfer() {
         let mut account = AccountState::new();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::default();
@@ -585,7 +585,7 @@ mod tests {
 
         let _guard = setup_state_hook(&mut account, &mut registry, &mut compliance, &mut shielded);
 
-        // Encode: shieldedTransfer(assetId, proof, nullifiers[], commitments[], encryptedNotes[])
+        // Encode: transfer(assetId, proof, nullifiers[], commitments[], encryptedNotes[])
         let proof_data = vec![1u8; 64];
         let nullifiers_arr = vec![nullifier];
         let output_vk = ViewingKey::generate(&[2u8; 32]);
@@ -604,7 +604,7 @@ mod tests {
         let encrypted_notes_enc = abi_encode_bytes_array(&encrypted_notes_arr);
 
         let mut input = vec![0u8; 4 + 160];
-        input[0..4].copy_from_slice(&[0xdc, 0x9a, 0x6c, 0xf6]);
+        input[0..4].copy_from_slice(&[0x79, 0x30, 0x54, 0x52]);
         input[4 + 24..4 + 32].copy_from_slice(&asset_id.to_be_bytes());
 
         // Offsets relative to byte 4
@@ -623,8 +623,8 @@ mod tests {
         input.extend_from_slice(&commitments_enc);
         input.extend_from_slice(&encrypted_notes_enc);
 
-        let result = shielded_transfer(&input, 200000);
-        assert!(result.is_ok(), "shieldedTransfer failed: {:?}", result);
+        let result = transfer(&input, 200000);
+        assert!(result.is_ok(), "transfer failed: {:?}", result);
 
         // Verify nullifier spent
         assert!(shielded.nullifier_set.is_spent(&Nullifier::new(nullifier.into())));

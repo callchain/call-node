@@ -21,7 +21,7 @@ All user transactions are standard EVM transactions (`EvmTransaction`). Protocol
 │  batchTransfer(uint64,address[],uint128[]) ┤              │
 │  approve / transferFrom ──────────────┤  → precompile_fn()     │
 │  mint / burn ─────────────────────────┤  → atomic rollback     │
-│  shieldedDeposit / Withdraw / Transfer ┤                    │
+│  deposit / withdraw / transfer ┤                    │
 │  externalBridgeDeposit / Withdraw ────┤                    │
 │  submitPrice ─────────────────────────┤                    │
 │  register / grant / revoke ───────────┤                    │
@@ -53,7 +53,7 @@ All protocol operations are exposed as EVM precompile functions at fixed address
 | `0x201` | `burn` | Destroy tokens | Asset issuer only |
 | `0x209` | `register` / `grant` / `revoke` | Agent management | Sender / owner |
 | `0x103` | `externalBridgeDeposit` / `externalBridgeWithdraw` | Cross-chain bridge | Bridge proof / validator sigs |
-| `0x202` | `shieldedDeposit` / `shieldedWithdraw` / `shieldedTransfer` | Shielded pool ops | ZK proof + nullifier |
+| `0x202` | `deposit` / `withdraw` / `transfer` | Shielded pool ops | ZK proof + nullifier |
 | `0x205` | `updateCompliance` | Set address compliance | Asset issuer only |
 | `0x101` | `submitPrice` | Price feed submission | Registered validator |
 | `0x203` | `submitProposal` / `vote` / `queue` / `execute` | Governance | CALL balance / validator |
@@ -83,8 +83,8 @@ All transactions are standard EVM transactions (`EvmTransaction`, RLP-encoded). 
 | `0x201` | `mint` | 6,000 |
 | `0x201` | `burn` | 5,000 |
 | `0x207` | `switchToEvm` / `switchToProtocol` | 8,000 |
-| `0x202` | `shieldedDeposit` / `shieldedWithdraw` | 50,000 |
-| `0x202` | `shieldedTransfer` | 100,000 |
+| `0x202` | `deposit` / `withdraw` | 50,000 |
+| `0x202` | `transfer` | 100,000 |
 | `0x101` | `submitPrice` | 3,000 |
 | `0x103` | `externalBridgeDeposit` | 10,000 |
 | `0x103` | `externalBridgeWithdraw` | 8,000 |

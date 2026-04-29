@@ -30,7 +30,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 | `0x101` | **Oracle** | `getPrice`, `getTWAP`, `isStale`, `submitPrice` |
 | `0x103` | **Bridge** | `getTotalDeposits`, `getTotalWithdrawals`, `externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit` |
 | `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `register`, `mint`, `burn` |
-| `0x202` | **Shielded** | `shieldedDeposit`, `shieldedWithdraw`, `shieldedTransfer` |
+| `0x202` | **Shielded** | `deposit`, `withdraw`, `transfer` |
 | `0x203` | **Governance** | `submitProposal`, `vote`, `queue`, `execute`, `emergencyPause`, `emergencyResume` |
 | `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded` |
 | `0x205` | **Compliance** | `updateCompliance`, `checkCompliance` |
@@ -233,14 +233,14 @@ Privacy-preserving deposits, withdrawals, and transfers via the Shielded Pool.
 
 ```solidity
 interface IProtocolShielded {
-    function shieldedDeposit(
+    function deposit(
         uint64 assetId,
         uint128 amount,
         bytes32 commitment,
         bytes calldata encryptedNote
     ) external returns (bool);
 
-    function shieldedWithdraw(
+    function withdraw(
         uint64 assetId,
         address target,
         uint128 amount,
@@ -248,7 +248,7 @@ interface IProtocolShielded {
         bytes32 nullifier
     ) external returns (bool);
 
-    function shieldedTransfer(
+    function transfer(
         uint64 assetId,
         bytes calldata proof,
         bytes32[] calldata nullifiers,
@@ -260,9 +260,9 @@ interface IProtocolShielded {
 
 ### Behavior
 
-- `shieldedDeposit`: Deducts transparent balance, appends commitment to the Merkle tree.
-- `shieldedWithdraw`: Verifies ZK proof and nullifier, credits transparent balance.
-- `shieldedTransfer`: Verifies ZK proof, spends nullifiers, appends new commitments. Groth16 proof verification is compute-intensive.
+- `deposit`: Deducts transparent balance, appends commitment to the Merkle tree.
+- `withdraw`: Verifies ZK proof and nullifier, credits transparent balance.
+- `transfer`: Verifies ZK proof, spends nullifiers, appends new commitments. Groth16 proof verification is compute-intensive.
 
 ---
 
@@ -440,9 +440,9 @@ interface IProtocolCompliance {
 | `register` | 6,000 | Agent registration |
 | `grant` | 6,000 | Balance grant |
 | `revoke` | 6,000 | Balance revoke |
-| `shieldedDeposit` | 50,000 | Not possible in Solidity |
-| `shieldedWithdraw` | 50,000 | Not possible in Solidity |
-| `shieldedTransfer` | 100,000 | Not possible in Solidity |
+| `deposit` | 50,000 | Not possible in Solidity |
+| `withdraw` | 50,000 | Not possible in Solidity |
+| `transfer` | 100,000 | Not possible in Solidity |
 | `stake` | 20,000 | Not possible in Solidity |
 | `unstake` | 20,000 | Not possible in Solidity |
 | `claimUnbonded` | 15,000 | Not possible in Solidity |
