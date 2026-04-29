@@ -29,7 +29,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 |---------|------|-----------|
 | `0x101` | **Oracle** | `getPrice`, `getTWAP`, `isStale`, `submitPrice` |
 | `0x103` | **Bridge** | `getTotalDeposits`, `getTotalWithdrawals`, `externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit` |
-| `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `registerAsset`, `mint`, `burn` |
+| `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `register`, `mint`, `burn` |
 | `0x202` | **Shielded** | `shieldedDeposit`, `shieldedWithdraw`, `shieldedTransfer` |
 | `0x203` | **Governance** | `submitProposal`, `vote`, `queue`, `execute`, `emergencyPause`, `emergencyResume` |
 | `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded` |
@@ -89,7 +89,7 @@ interface IProtocolAsset {
     ) external returns (bool);
 
     // ── Issuer ──
-    function registerAsset(
+    function register(
         string calldata symbol,
         string calldata name,
         uint8 decimals,
@@ -100,7 +100,7 @@ interface IProtocolAsset {
         external returns (bool); // issuer only
 
     function burn(uint64 assetId, address from, uint128 amount)
-        external returns (bool); // issuer only
+        external returns (bool); // any holder
 }
 ```
 
@@ -109,8 +109,9 @@ interface IProtocolAsset {
 - `transfer`: Deducts from sender's protocol balance, credits recipient. Checks compliance on both parties.
 - `batchTransfer`: Executes multiple transfers atomically. Gas = 5,000 per recipient.
 - `approve` / `transferFrom`: Protocol-level allowance system (separate from ERC-20 allowances).
-- `registerAsset`: Registers a new asset in `AssetRegistry` and auto-deploys a `WrappedToken` ERC-20 contract via `EvmExecutor::deploy_erc20_template`.
-- `mint` / `burn`: Only callable by the asset's registered issuer.
+- `register`: Registers a new asset in `AssetRegistry` and auto-deploys a `WrappedToken` ERC-20 contract via `EvmExecutor::deploy_erc20_template`.
+- `mint`: Only callable by the asset's registered issuer.
+- `burn`: Any holder can burn their own balance (or a balance they have allowance over via `transferFrom` semantics).
 
 ---
 
@@ -427,7 +428,7 @@ interface IProtocolCompliance {
 | `batchTransfer` (per recipient) | 5,000 | Loop ERC-20 ~25,000 each |
 | `approve` | 4,000 | ERC-20 `approve` ~20,000 |
 | `transferFrom` | 5,500 | ERC-20 `transferFrom` ~28,000 |
-| `registerAsset` | 50,000 | Contract deployment |
+| `register` | 50,000 | Contract deployment |
 | `mint` | 6,000 | ERC-20 `mint` ~35,000 |
 | `burn` | 5,000 | ERC-20 `burn` ~25,000 |
 | `switchToEvm` | 8,000 | Protocol->EVM switch |

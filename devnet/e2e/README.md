@@ -105,7 +105,7 @@ python3 devnet/e2e/e2e_test.py --config devnet/e2e/test_config.json
 | `test_insufficient_balance` | Attempt to over-spend, verify rejection | `call_sendPayment` |
 | `test_mempool_gossip` | Submit tx to node1, verify appears in node2 mempool | `txpool_status` |
 | `test_block_subscription` | Subscribe via WS on node1, wait for block | WebSocket `block` subscription |
-| `test_multi_asset` | Register new asset, transfer it, query balance | `call_registerAsset` + `call_sendPayment` |
+| `test_multi_asset` | Register new asset, transfer it, query balance | `call_register` + `call_sendPayment` |
 
 ### Key Validation Points
 
@@ -126,7 +126,7 @@ curl -X POST http://127.0.0.1:5005 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "call_registerAsset",
+    "method": "call_register",
     "params": [{
       "symbol": "TEST",
       "name": "Test Token",

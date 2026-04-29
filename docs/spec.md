@@ -2342,7 +2342,7 @@ Fully supports the Ethereum JSON-RPC 2.0 specification:
 
 // Asset registration
 {
-    "method": "call_registerAsset",
+    "method": "call_register",
     "params": [{ name, symbol, decimals, policy, signature }],
     "id": 1
 }

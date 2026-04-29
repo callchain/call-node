@@ -2474,7 +2474,7 @@ calld run \
 
 // 资产注册
 {
-    "method": "call_registerAsset",
+    "method": "call_register",
     "params": [{ name, symbol, decimals, policy, signature }],
     "id": 1
 }

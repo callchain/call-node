@@ -539,9 +539,9 @@ def build_evm_claim_unbonded_data(validator_id: int) -> str:
 
 
 def build_evm_register_asset_data(symbol: str, name: str, decimals: int, max_supply: int) -> str:
-    """Build ABI-encoded call data for registerAsset(string,string,uint8,uint256) on 0x201."""
+    """Build ABI-encoded call data for register(string,string,uint8,uint256) on 0x201."""
     from eth_abi import encode
-    selector = bytes.fromhex("b2bf15dd")
+    selector = bytes.fromhex("484a573d")
     encoded = encode(
         ["string", "string", "uint8", "uint256"],
         [symbol, name, decimals, max_supply],
@@ -696,7 +696,7 @@ def sign_evm_precompile_register_asset(
     gas_price: int = 1,
     chain_id: int = 1,
 ) -> str:
-    """Sign an EVM transaction calling registerAsset() on Asset precompile (0x201)."""
+    """Sign an EVM transaction calling register() on Asset precompile (0x201)."""
     data = build_evm_register_asset_data(symbol, name, decimals, max_supply)
     return sign_evm_transaction(
         private_key, evm_nonce,

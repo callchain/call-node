@@ -1,7 +1,7 @@
 //! Asset precompile at 0x201
 //!
 //! Unified asset operations: getBalance, getAssetInfo, transfer, approve,
-//! transferFrom, mint, burn, registerAsset.
+//! transferFrom, mint, burn, register.
 //!
 //! Replaces the deprecated 0x102 Balance precompile.
 
@@ -162,8 +162,8 @@ pub fn asset_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
         &[0x7e, 0x2e, 0xad, 0x93] => asset_approve(input, gas_limit),
         &[0xa1, 0x3e, 0x0f, 0xba] => asset_transfer_from(input, gas_limit),
         &[0xf2, 0xbe, 0x45, 0x99] => asset_mint(input, gas_limit),
-        &[0x1a, 0x6e, 0x5f, 0x3b] => asset_burn(input, gas_limit),
-        &[0xb2, 0xbf, 0x15, 0xdd] => asset_register_asset(input, gas_limit),
+        &[0x73, 0x71, 0x28, 0x63] => asset_burn(input, gas_limit),
+        &[0x48, 0x4a, 0x57, 0x3d] => asset_register(input, gas_limit),
         _ => Err(PrecompileError::Other("unknown selector".into())),
     }
 }
@@ -530,36 +530,42 @@ fn asset_burn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
     }
-    if input.len() < 68 {
+    if input.len() < 100 {
         return Err(PrecompileError::Other("invalid input".into()));
     }
 
     let asset_id = decode_u64(input, 4).ok_or_else(|| {
         PrecompileError::Other("invalid asset_id".into())
     })?;
-    let amount = decode_u128(input, 36).ok_or_else(|| {
+    let from = decode_address(input, 36).ok_or_else(|| {
+        PrecompileError::Other("invalid from address".into())
+    })?;
+    let amount = decode_u128(input, 68).ok_or_else(|| {
         PrecompileError::Other("invalid amount".into())
     })?;
 
     let caller = require_caller()?;
 
-    // Verify issuer
-    let is_issuer = state_hook::with_registry(|reg| {
-        reg.get_asset(asset_id)
-            .map(|a| a.issuer == caller)
-            .unwrap_or(false)
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("asset registry not available".into())
-    })?;
-
-    if !is_issuer {
-        return Err(PrecompileError::Other("not asset issuer".into()));
+    // If caller is not the owner, check allowance
+    if caller != from {
+        state_hook::with_account_state(|acc| {
+            let allowance = acc.allowances.get_allowance(asset_id, &from, &caller);
+            if allowance < amount {
+                return Err(PrecompileError::Other("insufficient allowance".into()));
+            }
+            acc.allowances
+                .spend_allowance(asset_id, from, caller, amount)
+                .map_err(|e| PrecompileError::Other(e.to_string().into()))
+        })
+        .ok_or_else(|| {
+            PrecompileError::Other("account state not available".into())
+        })
+        .and_then(|r| r)?;
     }
 
     // Update registry supply
     state_hook::with_registry(|reg| {
-        reg.burn_supply(asset_id, &caller, amount)
+        reg.burn_supply(asset_id, &from, amount)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))
     })
     .ok_or_else(|| {
@@ -567,9 +573,9 @@ fn asset_burn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
     .and_then(|r| r)?;
 
-    // Debit balance from caller
+    // Debit balance from target
     state_hook::with_account_state(|acc| {
-        acc.burn(asset_id, caller, amount)
+        acc.burn(asset_id, from, amount)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))
     })
     .ok_or_else(|| {
@@ -585,7 +591,7 @@ fn asset_burn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
 }
 
-fn asset_register_asset(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn asset_register(input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 50000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
@@ -595,7 +601,7 @@ fn asset_register_asset(input: &[u8], gas_limit: u64) -> PrecompileResult {
         return Err(PrecompileError::Other("invalid input".into()));
     }
 
-    // registerAsset(string symbol, string name, uint8 decimals, uint256 maxSupply)
+    // register(string symbol, string name, uint8 decimals, uint256 maxSupply)
     let symbol = decode_string(input, 4).ok_or_else(|| {
         PrecompileError::Other("invalid symbol".into())
     })?;
@@ -840,11 +846,12 @@ mod tests {
         assert_eq!(account.get_balance(id, &issuer), 400);
         assert_eq!(registry.get_asset(id).unwrap().protocol_supply, 900);
 
-        // Burn from issuer
-        let mut input = vec![0u8; 68];
-        input[0..4].copy_from_slice(&[0x1a, 0x6e, 0x5f, 0x3b]);
+        // Burn from issuer (caller == from, no allowance needed)
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&[0x73, 0x71, 0x28, 0x63]);
         input[28..36].copy_from_slice(&id.to_be_bytes());
-        input[52..68].copy_from_slice(&200u128.to_be_bytes());
+        input[48..68].copy_from_slice(issuer.as_slice());
+        input[84..100].copy_from_slice(&200u128.to_be_bytes());
 
         let result = asset_burn(&input, 10000);
         assert!(result.is_ok(), "burn failed: {:?}", result.err());
@@ -985,7 +992,7 @@ mod tests {
         let caller = Address::repeat_byte(0x33);
         crate::CURRENT_CALLER.with(|c| c.set(Some(caller)));
 
-        // ABI encode: registerAsset("TEST", "Test Token", 18, 1000000)
+        // ABI encode: register("TEST", "Test Token", 18, 1000000)
         // String offsets are relative to start of args (byte 4)
         // Args: offset_symbol(32), offset_name(32), decimals(32), maxSupply(32)
         // symbol data at offset 128 -> absolute 132
@@ -996,7 +1003,7 @@ mod tests {
         let name_offset = 128 + symbol_data_len;
 
         let mut input = vec![0u8; 4 + 4 * 32 + symbol_data_len + 32 + 32];
-        input[0..4].copy_from_slice(&[0xb2, 0xbf, 0x15, 0xdd]);
+        input[0..4].copy_from_slice(&[0x48, 0x4a, 0x57, 0x3d]);
         // offset_symbol = 128
         input[4 + 24..4 + 32].copy_from_slice(&128u64.to_be_bytes());
         // offset_name
@@ -1016,7 +1023,7 @@ mod tests {
         input[name_abs + 24..name_abs + 32].copy_from_slice(&(name.len() as u64).to_be_bytes());
         input[name_abs + 32..name_abs + 32 + name.len()].copy_from_slice(name);
 
-        let result = asset_register_asset(&input, 100000).unwrap();
+        let result = asset_register(&input, 100000).unwrap();
         assert_eq!(result.gas_used, 50000);
 
         let asset_id = u64::from_be_bytes([

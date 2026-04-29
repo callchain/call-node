@@ -17,7 +17,7 @@ The RPC layer is the primary interface for users, dApps, validators, and operato
 
 Direct state mutations from RPC handlers are prohibited. State-changing operations are invoked by calling EVM precompiles (`0x101`–`0x209`) during block execution. This ensures deterministic state transitions, replay protection through standard EVM nonces, and uniform gas accounting.
 
-The `call_submit` endpoint is a convenience wrapper that builds an EVM transaction targeting the appropriate precompile address from a JSON instruction description, signs it, and submits via the standard `eth_sendRawTransaction` path. All former individual write endpoints (`call_sendPayment`, `call_registerAsset`, `call_governanceVote`, etc.) have been removed and consolidated into this unified interface.
+The `call_submit` endpoint is a convenience wrapper that builds an EVM transaction targeting the appropriate precompile address from a JSON instruction description, signs it, and submits via the standard `eth_sendRawTransaction` path. All former individual write endpoints (`call_sendPayment`, `call_register`, `call_governanceVote`, etc.) have been removed and consolidated into this unified interface.
 
 **EVM Precompile Path**: All protocol features are also accessible via standard EVM transactions sent to precompile addresses (`0x101`–`0x209`). Users can call `eth_sendRawTransaction` with an RLP-encoded EVM transaction targeting any precompile. This is the recommended path for MetaMask, Solidity contracts, and dApp integrations. See [precompile.md](precompile.md) for the ABI reference.
 

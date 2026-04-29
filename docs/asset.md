@@ -6,13 +6,13 @@ The Callchain asset system supports both protocol-native assets (registered on-c
 
 ## Asset Registration
 
-Assets are registered by calling `registerAsset(string,string,uint8,uint128)` on the **Asset precompile at `0x201`**. This is a standard EVM transaction that can be sent from MetaMask, Solidity contracts, or any Ethereum-compatible wallet.
+Assets are registered by calling `register(string,string,uint8,uint128)` on the **Asset precompile at `0x201`**. This is a standard EVM transaction that can be sent from MetaMask, Solidity contracts, or any Ethereum-compatible wallet.
 
 Registration executes atomically during block execution, is ordered relative to other transactions, and is subject to the same consensus and fee rules as any EVM transaction.
 
 ### Execution Flow
 
-During block execution, the Asset precompile (`0x201`) processes `registerAsset` as follows:
+During block execution, the Asset precompile (`0x201`) processes `register` as follows:
 
 1. **Fee collection**: Deduct `asset_registration_fee` (in CALL, asset_id = 1) from the sender's balance. The fee amount is read from `GovernanceManager::config.asset_registration_fee`.
 2. **Asset allocation**: Register the asset in `AssetRegistry`:
@@ -68,7 +68,7 @@ POST /{
 
 The RPC handler:
 1. Parses parameters and validates the EIP-191 signature.
-2. Maps the instruction to an EVM transaction targeting `0x201` with the `registerAsset` selector.
+2. Maps the instruction to an EVM transaction targeting `0x201` with the `register` selector.
 3. Submits the EVM transaction via `eth_sendRawTransaction` → mempool.
 4. Returns the pending `txHash`.
 
@@ -336,8 +336,8 @@ All asset operations are also available via the **Asset precompile (`0x201`)**:
 | `Approve` | `approve(uint64,address,uint128)` | `0x201` |
 | `TransferFrom` | `transferFrom(uint64,address,address,uint128)` | `0x201` |
 | `Mint` | `mint(uint64,address,uint128)` | `0x201` |
-| `Burn` | `burn(uint64,uint128)` | `0x201` |
-| `RegisterAsset` | `registerAsset(string,string,uint8,uint128)` | `0x201` |
+| `Burn` | `burn(uint64,address,uint128)` | `0x201` |
+| `RegisterAsset` | `register(string,string,uint8,uint128)` | `0x201` |
 
 See [precompile.md](precompile.md) for the full ABI.
 
