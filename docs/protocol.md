@@ -24,7 +24,7 @@ All user transactions are standard EVM transactions (`EvmTransaction`). Protocol
 │  shieldedDeposit / Withdraw / Transfer ┤                    │
 │  externalBridgeDeposit / Withdraw ────┤                    │
 │  submitPrice ─────────────────────────┤                    │
-│  registerAgent / grant / revoke ──────┤                    │
+│  register / grant / revoke ───────────┤                    │
 │  updateCompliance ────────────────────┘                    │
 │                                                             │
 │  ┌──────────────┐  ┌──────────┐  ┌──────────────┐        │
@@ -51,7 +51,7 @@ All protocol operations are exposed as EVM precompile functions at fixed address
 | `0x201` | `transferFrom` | Spend allowance + transfer | Allowance holder |
 | `0x201` | `mint` | Create new tokens | Asset issuer only |
 | `0x201` | `burn` | Destroy tokens | Asset issuer only |
-| `0x209` | `registerAgent` / `grantAgentBalance` / `revokeAgentBalance` | Agent management | Sender / owner |
+| `0x209` | `register` / `grant` / `revoke` | Agent management | Sender / owner |
 | `0x103` | `externalBridgeDeposit` / `externalBridgeWithdraw` | Cross-chain bridge | Bridge proof / validator sigs |
 | `0x202` | `shieldedDeposit` / `shieldedWithdraw` / `shieldedTransfer` | Shielded pool ops | ZK proof + nullifier |
 | `0x205` | `updateCompliance` | Set address compliance | Asset issuer only |
@@ -89,9 +89,9 @@ All transactions are standard EVM transactions (`EvmTransaction`, RLP-encoded). 
 | `0x103` | `externalBridgeDeposit` | 10,000 |
 | `0x103` | `externalBridgeWithdraw` | 8,000 |
 | `0x103` | `challengeBridgeDeposit` | 6,000 |
-| `0x209` | `registerAgent` | 6,000 |
-| `0x209` | `grantAgentBalance` | 6,000 |
-| `0x209` | `revokeAgentBalance` | 6,000 |
+| `0x209` | `register` | 6,000 |
+| `0x209` | `grant` | 6,000 |
+| `0x209` | `revoke` | 6,000 |
 | `0x205` | `updateCompliance` | 6,000 |
 | `0x203` | `submitProposal` | 20,000 |
 | `0x203` | `vote` | 10,000 |

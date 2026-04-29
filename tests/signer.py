@@ -550,9 +550,9 @@ def build_evm_register_asset_data(symbol: str, name: str, decimals: int, max_sup
 
 
 def build_evm_register_agent_data(pubkey_hex: str, name: str, url: str) -> str:
-    """Build ABI-encoded call data for registerAgent(bytes,string,string) on 0x209."""
+    """Build ABI-encoded call data for register(bytes,string,string) on 0x209."""
     from eth_abi import encode
-    selector = bytes.fromhex("c0fc6063")
+    selector = bytes.fromhex("4d431f19")
     pubkey_bytes = bytes.fromhex(pubkey_hex.removeprefix("0x"))
     encoded = encode(
         ["bytes", "string", "string"],
@@ -715,7 +715,7 @@ def sign_evm_precompile_register_agent(
     gas_price: int = 1,
     chain_id: int = 1,
 ) -> str:
-    """Sign an EVM transaction calling registerAgent() on Agent precompile (0x209)."""
+    """Sign an EVM transaction calling register() on Agent precompile (0x209)."""
     data = build_evm_register_agent_data(pubkey_hex, name, url)
     return sign_evm_transaction(
         private_key, evm_nonce,

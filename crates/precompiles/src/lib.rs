@@ -9,7 +9,7 @@
 //! - `0x204` Validator: stake, unstake, claimUnbonded
 //! - `0x205` Compliance: updateCompliance, checkCompliance
 //! - `0x207` Switch: switchToEvm, switchToProtocol
-//! - `0x209` Agent: registerAgent, grantAgentBalance, revokeAgentBalance
+//! - `0x209` Agent: register, grant, revoke
 //!
 mod oracle;
 mod bridge;

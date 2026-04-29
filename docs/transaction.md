@@ -74,7 +74,7 @@ All protocol operations are exposed through EVM precompiles (`crates/precompiles
 | `0x103` | `externalBridgeWithdraw` | 8,000 | Sender balance |
 | `0x103` | `challengeBridgeDeposit` | 6,000 | Anyone |
 | `0x205` | `updateCompliance` | 6,000 | Asset issuer only |
-| `0x209` | `registerAgent` / `grantAgentBalance` / `revokeAgentBalance` | 6,000 | Sender / owner |
+| `0x209` | `register` / `grant` / `revoke` | 6,000 | Sender / owner |
 | `0x203` | `submitProposal` / `vote` / `queue` / `execute` | 10,000–20,000 | CALL balance / validator |
 | `0x203` | `emergencyPause` / `emergencyResume` | 20,000 | Validator quorum |
 | `0x204` | `stake` / `unstake` / `claimUnbonded` | 20,000 | Sender balance |

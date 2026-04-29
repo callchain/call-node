@@ -35,7 +35,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 | `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded` |
 | `0x205` | **Compliance** | `updateCompliance`, `checkCompliance` |
 | `0x207` | **Switch** | `switchToEvm`, `switchToProtocol` |
-| `0x209` | **Agent** | `registerAgent`, `grantAgentBalance`, `revokeAgentBalance` |
+| `0x209` | **Agent** | `register`, `grant`, `revoke` |
 
 > **Deprecated addresses**: `0x102` (Balance, merged into `0x201`), `0x208` (ExternalBridge, merged into `0x103`).
 
@@ -199,27 +199,27 @@ Agent registration and balance management.
 
 ```solidity
 interface IProtocolAgent {
-    function registerAgent(
+    function register(
         bytes calldata pubkey,
         string calldata name,
         string calldata url
     ) external returns (uint64 agentId);
 
     // owner only
-    function grantAgentBalance(uint64 agentId, uint64 assetId, uint128 amount)
+    function grant(uint64 agentId, uint64 assetId, uint128 amount)
         external returns (bool);
 
     // owner only
-    function revokeAgentBalance(uint64 agentId, uint64 assetId)
+    function revoke(uint64 agentId, uint64 assetId)
         external returns (bool);
 }
 ```
 
 ### Behavior
 
-- `registerAgent`: Registers a new agent with the caller as owner. Deducts base registration fee.
-- `grantAgentBalance`: Owner deducts from their own protocol balance and grants to agent's sub-account.
-- `revokeAgentBalance`: Owner revokes agent's balance for a specific asset.
+- `register`: Registers a new agent with the caller as owner. Deducts base registration fee.
+- `grant`: Owner deducts from their own protocol balance and grants to agent's sub-account.
+- `revoke`: Owner revokes agent's balance for a specific asset.
 
 ---
 
@@ -437,9 +437,9 @@ interface IProtocolCompliance {
 | `getTWAP` | 1,500 | Read query |
 | `isStale` | 800 | Read query |
 | `submitPrice` | 3,000 | Oracle submission |
-| `registerAgent` | 6,000 | Agent registration |
-| `grantAgentBalance` | 6,000 | Balance grant |
-| `revokeAgentBalance` | 6,000 | Balance revoke |
+| `register` | 6,000 | Agent registration |
+| `grant` | 6,000 | Balance grant |
+| `revoke` | 6,000 | Balance revoke |
 | `shieldedDeposit` | 50,000 | Not possible in Solidity |
 | `shieldedWithdraw` | 50,000 | Not possible in Solidity |
 | `shieldedTransfer` | 100,000 | Not possible in Solidity |

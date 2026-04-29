@@ -3,9 +3,8 @@
 //! The real implementation lives in `call-agent` at
 //! `crates/agent/src/precompile.rs` and is registered at node startup via
 //! `register_agent_precompile()`.  That registration replaces this stub in
-//! the OnceLock, so the full `registerAgent` / `grantAgentBalance` /
-//! `revokeAgentBalance` logic is used in production and tests that wire up
-//! the agent crate.
+//! the OnceLock, so the full `register` / `grant` / `revoke` logic is used
+//! in production and tests that wire up the agent crate.
 //!
 //! This file only exists to provide a compile-time fallback (returning
 //! "not yet implemented") when no external implementation is registered.

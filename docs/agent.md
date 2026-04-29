@@ -17,9 +17,9 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 
 | Operation | Function | Gas |
 |---|---|---|
-| Register agent | `registerAgent(bytes,string,string)` | 10,000 |
-| Grant balance | `grantAgentBalance(uint64,uint64,uint128)` | 10,000 |
-| Revoke balance | `revokeAgentBalance(uint64,uint64)` | 10,000 |
+| Register agent | `register(bytes,string,string)` | 10,000 |
+| Grant balance | `grant(uint64,uint64,uint128)` | 10,000 |
+| Revoke balance | `revoke(uint64,uint64)` | 10,000 |
 
 See [precompile.md](precompile.md) for the full ABI.
 

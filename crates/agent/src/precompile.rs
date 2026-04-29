@@ -1,9 +1,9 @@
 //! Agent precompile implementation for `call-agent`.
 //!
 //! Precompile at address `0x209` providing:
-//! - registerAgent(bytes32 pubkey, string name, string url)
-//! - grantAgentBalance(uint64 agentId, uint64 assetId, uint256 amount)
-//! - revokeAgentBalance(uint64 agentId, uint64 assetId)
+//! - register(bytes pubkey, string name, string url)
+//! - grant(uint64 agentId, uint64 assetId, uint256 amount)
+//! - revoke(uint64 agentId, uint64 assetId)
 
 use std::cell::RefCell;
 
@@ -149,16 +149,16 @@ pub fn agent_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     }
 
     match &input[..4] {
-        &[0xc0, 0xfc, 0x60, 0x63] => register_agent(input, gas_limit),
-        &[0xb0, 0xd7, 0x85, 0xed] => grant_agent_balance(input, gas_limit),
-        &[0x9d, 0xd1, 0xe1, 0xc5] => revoke_agent_balance(input, gas_limit),
+        &[0x4d, 0x43, 0x1f, 0x19] => register(input, gas_limit),
+        &[0x90, 0xd9, 0xbc, 0xca] => grant(input, gas_limit),
+        &[0x75, 0xde, 0xa5, 0x39] => revoke(input, gas_limit),
         _ => Err(PrecompileError::Other("unknown selector".into())),
     }
 }
 
-// ── registerAgent(bytes pubkey, string name, string url) ──────────────
+// ── register(bytes pubkey, string name, string url) ───────────────────
 
-fn register_agent(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn register(input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 20000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
@@ -209,7 +209,7 @@ fn register_agent(input: &[u8], gas_limit: u64) -> PrecompileResult {
                 current_block,
                 None,
             )
-            .map_err(|e| PrecompileError::Other(format!("registerAgent: {e}").into()))
+            .map_err(|e| PrecompileError::Other(format!("register: {e}").into()))
     })
     .ok_or_else(|| PrecompileError::Other("agent state not available".into()))
     .and_then(|r| r)?;
@@ -226,9 +226,9 @@ fn register_agent(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
 }
 
-// ── grantAgentBalance(uint64 agentId, uint64 assetId, uint256 amount) ─
+// ── grant(uint64 agentId, uint64 assetId, uint256 amount) ─────────────
 
-fn grant_agent_balance(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn grant(input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 10000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
@@ -264,7 +264,7 @@ fn grant_agent_balance(input: &[u8], gas_limit: u64) -> PrecompileResult {
         let acc_ref = unsafe { &mut *account };
         balances
             .grant_funds(caller, agent_id, asset_id, amount, acc_ref)
-            .map_err(|e| PrecompileError::Other(format!("grantAgentBalance: {e}").into()))
+            .map_err(|e| PrecompileError::Other(format!("grant: {e}").into()))
     })
     .ok_or_else(|| PrecompileError::Other("agent state not available".into()))
     .and_then(|r| r)?;
@@ -277,9 +277,9 @@ fn grant_agent_balance(input: &[u8], gas_limit: u64) -> PrecompileResult {
     })
 }
 
-// ── revokeAgentBalance(uint64 agentId, uint64 assetId) ────────────────
+// ── revoke(uint64 agentId, uint64 assetId) ────────────────────────────
 
-fn revoke_agent_balance(input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn revoke(input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 8000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
@@ -373,7 +373,7 @@ mod tests {
         let mut input = vec![0u8; total_size];
 
         // Selector
-        input[0..4].copy_from_slice(&[0xc0, 0xfc, 0x60, 0x63]);
+        input[0..4].copy_from_slice(&[0x4d, 0x43, 0x1f, 0x19]);
         // Pubkey offset (uint256, last 8 bytes of slot at byte 4)
         let pubkey_offset_u64 = pubkey_offset as u64;
         input[28..36].copy_from_slice(&pubkey_offset_u64.to_be_bytes());
@@ -419,7 +419,7 @@ mod tests {
 
         let input = encode_register_agent([0u8; 64], "TestAgent", "http://test.com");
         let result = agent_precompile_fn(&input, 50000);
-        assert!(result.is_ok(), "registerAgent failed: {:?}", result);
+        assert!(result.is_ok(), "register failed: {:?}", result);
 
         // Verify agent was registered
         let agent = registry.get_agent(0).unwrap();
@@ -460,25 +460,25 @@ mod tests {
 
         // Grant balance
         let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0xb0, 0xd7, 0x85, 0xed]);
+        input[0..4].copy_from_slice(&[0x90, 0xd9, 0xbc, 0xca]);
         input[28..36].copy_from_slice(&agent_id.to_be_bytes());
         input[60..68].copy_from_slice(&2u64.to_be_bytes());
         input[84..100].copy_from_slice(&1000u128.to_be_bytes());
 
         let result = agent_precompile_fn(&input, 50000);
-        assert!(result.is_ok(), "grantAgentBalance failed: {:?}", result);
+        assert!(result.is_ok(), "grant failed: {:?}", result);
 
         // Verify agent balance
         assert_eq!(balances.get_balance(caller, agent_id, 2), 1000);
 
         // Revoke balance
         let mut input = vec![0u8; 68];
-        input[0..4].copy_from_slice(&[0x9d, 0xd1, 0xe1, 0xc5]);
+        input[0..4].copy_from_slice(&[0x75, 0xde, 0xa5, 0x39]);
         input[28..36].copy_from_slice(&agent_id.to_be_bytes());
         input[60..68].copy_from_slice(&2u64.to_be_bytes());
 
         let result = agent_precompile_fn(&input, 50000);
-        assert!(result.is_ok(), "revokeAgentBalance failed: {:?}", result);
+        assert!(result.is_ok(), "revoke failed: {:?}", result);
 
         // Verify agent balance is zero
         assert_eq!(balances.get_balance(caller, agent_id, 2), 0);
@@ -508,7 +508,7 @@ mod tests {
         call_precompiles::set_current_caller(Some(test_addr(2)));
 
         let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0xb0, 0xd7, 0x85, 0xed]);
+        input[0..4].copy_from_slice(&[0x90, 0xd9, 0xbc, 0xca]);
         input[28..36].copy_from_slice(&0u64.to_be_bytes());
         input[60..68].copy_from_slice(&2u64.to_be_bytes());
         input[84..100].copy_from_slice(&100u128.to_be_bytes());
