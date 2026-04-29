@@ -43,7 +43,7 @@ use call_protocol::{
     security::P2PDefense,
 };
 use call_governance::GovernanceManager;
-use call_oracle::{OracleManager, OracleSubmission, ORACLE_UPDATE_INTERVAL};
+use call_oracle::OracleManager;
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager, wire_governance_executor};
 use call_storage::{CallDb, open_db, PruneState, StateRoots, produce_state_snapshot};
 use call_storage::reth_db::{
@@ -55,16 +55,15 @@ use crate::state_persist::{
     check_recovery_needed, clear_checkpoint,
     load_consensus_state_inner, save_consensus_state_inner, save_fork_state,
 };
-use reth_db::DatabaseEnv;
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
-use call_bridge::{BridgeStateManager, BridgeConfig};
+use call_bridge::BridgeStateManager;
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use jsonrpsee::server::ServerHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -76,7 +75,6 @@ use commonware_consensus::simplex::elector::RoundRobin;
 use commonware_consensus::simplex::scheme::ed25519::Scheme as Ed25519Scheme;
 use commonware_consensus::types::{Epoch, ViewDelta};
 use commonware_cryptography::ed25519;
-use commonware_cryptography::Digest;
 use commonware_cryptography::Signer;
 use commonware_parallel::Sequential;
 use commonware_p2p::AddressableManager;
@@ -242,7 +240,7 @@ impl CallNode {
             loaded.compliance,
             loaded.evm_state,
             loaded.bridge_state,
-            ValidatorStateManager::default(),
+            loaded.validators,
             loaded.agent_registry,
             loaded.agent_balances,
             loaded.agent_nonces,
@@ -271,21 +269,6 @@ impl CallNode {
 
         // Inject loaded fork state
         *state.fork_manager.write().unwrap() = fork_manager;
-
-        // Wire live oracle into precompiles so EVM contracts can read prices
-        call_precompiles::set_live_oracle(Arc::clone(&state.oracle));
-
-        // Register validator precompile implementation from call-consensus
-        call_consensus::validator_precompile::register_validator_precompile();
-
-        // Register oracle validator checker so only qualified validators can submit prices
-        call_consensus::validator_precompile::register_oracle_validator_check();
-
-        // Register bridge extension precompile implementation from call-consensus
-        call_consensus::bridge_precompile::register_bridge_precompile();
-
-        // Register agent precompile implementation from call-agent
-        call_agent::precompile::register_agent_precompile();
 
         // Replace default governance with persisted state
         *state.governance.write().unwrap() = loaded.governance;

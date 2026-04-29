@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 aws-kms = ["dep:aws-config", "dep:aws-sdk-kms", "dep:tokio"]
-hashi-vault = ["dep:reqwest"]
+hashi-vault = ["dep:reqwest", "dep:base64"]
 
 [dependencies]
 call-primitives.workspace = true
@@ -32,6 +32,7 @@ hex = { workspace = true }
 reqwest = { workspace = true, optional = true }
 aws-config = { version = "1.5", optional = true }
 aws-sdk-kms = { version = "1.37", optional = true }
+base64 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]

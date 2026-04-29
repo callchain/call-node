@@ -170,12 +170,8 @@ pub enum GenesisError {
 
 /// Initialized genesis state with all computed roots
 pub struct GenesisState {
-    /// Payment Merkle root
-    pub payment_root: Hash,
-    /// EVM state root
-    pub evm_state_root: Hash,
-    /// Bridge state root (always ZERO in genesis)
-    pub bridge_root: Hash,
+    /// Unified state root
+    pub state_root: Hash,
     /// Protocol account
     pub balances: AccountState,
     /// Asset registry
@@ -249,15 +245,15 @@ impl GenesisExecutor {
             oracle.set_tracked_assets(assets.clone());
         }
 
-        // Step 8: Compute initial state roots
+        // Step 8: Compute initial state root
         let payment_root = compute_payment_root(&account);
         let evm_state_root = compute_evm_state_root(&evm_state);
-        let bridge_root = Hash::ZERO; // No bridge operations in genesis
+        let state_root = call_crypto::keccak256(
+            &[payment_root.as_slice(), evm_state_root.as_slice(), &[0u8; 32]].concat()
+        );
 
         Ok(GenesisState {
-            payment_root,
-            evm_state_root,
-            bridge_root,
+            state_root,
             balances: account,
             registry,
             compliance,
@@ -573,12 +569,9 @@ mod tests {
         let executor = GenesisExecutor::new(genesis);
         let state = executor.execute().unwrap();
 
-        assert_ne!(state.payment_root, Hash::ZERO);
+        assert_ne!(state.state_root, Hash::ZERO);
         assert_eq!(state.fee_currencies.len(), 1);
         assert_eq!(state.fee_currencies[0], 1);
-        // EVM state root should be non-zero after ERC-20 deployment
-        assert_ne!(state.evm_state_root, Hash::ZERO);
-        assert_eq!(state.bridge_root, Hash::ZERO); // No bridge ops in genesis
     }
 
     #[test]
@@ -630,9 +623,7 @@ mod tests {
         let state = executor.execute().unwrap();
 
         let state2 = executor.execute().unwrap();
-        assert_eq!(state.payment_root, state2.payment_root);
-        assert_eq!(state.evm_state_root, state2.evm_state_root);
-        assert_eq!(state.bridge_root, state2.bridge_root);
+        assert_eq!(state.state_root, state2.state_root);
     }
 
     #[test]

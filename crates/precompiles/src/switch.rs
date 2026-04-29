@@ -83,16 +83,20 @@ fn check_compliance(
 
 // ── Switch precompile entry point ─────────────────────────────────────
 
-pub fn switch_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
+pub fn switch_precompile_fn(input: &[u8], _gas_limit: u64) -> PrecompileResult {
     if input.len() < 4 {
         return Err(PrecompileError::Other("invalid input".into()));
     }
 
-    match &input[..4] {
-        &[0x43, 0x11, 0xf6, 0x13] => switch_to_evm(input, gas_limit),
-        &[0xbd, 0x8d, 0x87, 0xd4] => switch_to_protocol(input, gas_limit),
-        _ => Err(PrecompileError::Other("unknown selector".into())),
-    }
+    // The switch precompile is disabled until atomic protocol/EVM dual-write
+    // is implemented. Without EVM-side mint/burn, switchToEvm would deduct
+    // protocol balance without creating the corresponding wrapped ERC-20,
+    // and switchToProtocol would credit protocol balance without burning
+    // the EVM tokens — creating supply imbalance and stuck funds.
+    Err(PrecompileError::Other(
+        "switch precompile is disabled: atomic protocol/EVM dual-write not yet implemented"
+            .into(),
+    ))
 }
 
 // ── switchToEvm(uint64 assetId, address to, uint256 amount) ───────────
@@ -228,31 +232,6 @@ fn switch_to_protocol(input: &[u8], gas_limit: u64) -> PrecompileResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_protocol::{AccountState, AssetRegistry};
-    use call_protocol::compliance::ComplianceEngine;
-
-    fn setup_state_hook(
-        account: &mut AccountState,
-        registry: &mut AssetRegistry,
-        compliance: &mut ComplianceEngine,
-    ) -> crate::state_hook::StateHookGuard {
-        use call_oracle::OracleManager;
-        use call_governance::GovernanceManager;
-        use call_shielded::ShieldedState;
-
-        let mut shielded = ShieldedState::new();
-        let mut oracle = OracleManager::default();
-        let mut gov = GovernanceManager::default();
-
-        crate::state_hook::StateHookGuard::new(
-            account,
-            registry,
-            compliance,
-            &mut shielded,
-            Some(&mut oracle),
-            Some(&mut gov),
-        )
-    }
 
     #[test]
     fn test_switch_address() {
@@ -263,130 +242,38 @@ mod tests {
     }
 
     #[test]
-    fn test_switch_to_evm() {
-        let mut account = AccountState::new();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::default();
-
-        // Register asset
-        let asset_id = registry
-            .register_asset("TEST".into(), "Test".into(), 18, alloy_primitives::Address::repeat_byte(0x11), 0, 100, 0)
-            .unwrap();
-
-        // Give caller some protocol balance
-        account.credit_balance(asset_id, alloy_primitives::Address::repeat_byte(0x22), 1000).unwrap();
-
-        let _guard = setup_state_hook(&mut account, &mut registry, &mut compliance);
-
-        // Set caller context
-        crate::CURRENT_CALLER.with(|c| c.set(Some(alloy_primitives::Address::repeat_byte(0x22))));
-
+    fn test_switch_to_evm_is_disabled() {
         // Encode: switchToEvm(assetId, to, amount)
         let mut input = vec![0u8; 100];
         input[0..4].copy_from_slice(&[0x43, 0x11, 0xf6, 0x13]);
-        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
         input[48..68].copy_from_slice(&alloy_primitives::Address::repeat_byte(0x33).as_slice());
         input[84..100].copy_from_slice(&500u128.to_be_bytes());
 
         let result = switch_precompile_fn(&input, 50000);
-        assert!(result.is_ok(), "switchToEvm failed: {:?}", result);
-
-        // Protocol balance deducted
-        assert_eq!(account.get_balance(asset_id, &alloy_primitives::Address::repeat_byte(0x22)), 500);
-
-        // EVM supply increased
-        assert_eq!(registry.get_asset(asset_id).unwrap().evm_supply, 500);
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
+        assert!(result.is_err(), "switchToEvm should be disabled");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("disabled"),
+            "error should mention disabled: {err}"
+        );
     }
 
     #[test]
-    fn test_switch_to_protocol() {
-        let mut account = AccountState::new();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::default();
-
-        // Register asset and add EVM supply
-        let asset_id = registry
-            .register_asset("TEST".into(), "Test".into(), 18, alloy_primitives::Address::repeat_byte(0x11), 0, 100, 0)
-            .unwrap();
-        registry.add_evm_supply(asset_id, 1000).unwrap();
-
-        let _guard = setup_state_hook(&mut account, &mut registry, &mut compliance);
-
-        // Set caller context
-        crate::CURRENT_CALLER.with(|c| c.set(Some(alloy_primitives::Address::repeat_byte(0x22))));
-
+    fn test_switch_to_protocol_is_disabled() {
         // Encode: switchToProtocol(assetId, to, amount)
         let mut input = vec![0u8; 100];
         input[0..4].copy_from_slice(&[0xbd, 0x8d, 0x87, 0xd4]);
-        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
         input[48..68].copy_from_slice(&alloy_primitives::Address::repeat_byte(0x44).as_slice());
         input[84..100].copy_from_slice(&300u128.to_be_bytes());
 
         let result = switch_precompile_fn(&input, 50000);
-        assert!(result.is_ok(), "switchToProtocol failed: {:?}", result);
-
-        // Protocol balance credited
-        assert_eq!(account.get_balance(asset_id, &alloy_primitives::Address::repeat_byte(0x44)), 300);
-
-        // EVM supply decreased
-        assert_eq!(registry.get_asset(asset_id).unwrap().evm_supply, 700);
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn test_switch_to_evm_insufficient_balance() {
-        let mut account = AccountState::new();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::default();
-
-        let asset_id = registry
-            .register_asset("TEST".into(), "Test".into(), 18, alloy_primitives::Address::repeat_byte(0x11), 0, 100, 0)
-            .unwrap();
-
-        // Caller has only 100
-        account.credit_balance(asset_id, alloy_primitives::Address::repeat_byte(0x22), 100).unwrap();
-
-        let _guard = setup_state_hook(&mut account, &mut registry, &mut compliance);
-        crate::CURRENT_CALLER.with(|c| c.set(Some(alloy_primitives::Address::repeat_byte(0x22))));
-
-        let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0x43, 0x11, 0xf6, 0x13]);
-        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
-        input[48..68].copy_from_slice(&alloy_primitives::Address::repeat_byte(0x33).as_slice());
-        input[84..100].copy_from_slice(&200u128.to_be_bytes());
-
-        let result = switch_precompile_fn(&input, 50000);
-        assert!(result.is_err());
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn test_switch_to_protocol_insufficient_evm_supply() {
-        let mut account = AccountState::new();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::default();
-
-        let asset_id = registry
-            .register_asset("TEST".into(), "Test".into(), 18, alloy_primitives::Address::repeat_byte(0x11), 0, 100, 0)
-            .unwrap();
-        registry.add_evm_supply(asset_id, 100).unwrap();
-
-        let _guard = setup_state_hook(&mut account, &mut registry, &mut compliance);
-        crate::CURRENT_CALLER.with(|c| c.set(Some(alloy_primitives::Address::repeat_byte(0x22))));
-
-        let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0xbd, 0x8d, 0x87, 0xd4]);
-        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
-        input[48..68].copy_from_slice(&alloy_primitives::Address::repeat_byte(0x44).as_slice());
-        input[84..100].copy_from_slice(&200u128.to_be_bytes());
-
-        let result = switch_precompile_fn(&input, 50000);
-        assert!(result.is_err());
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
+        assert!(result.is_err(), "switchToProtocol should be disabled");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("disabled"),
+            "error should mention disabled: {err}"
+        );
     }
 }

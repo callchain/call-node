@@ -11,6 +11,9 @@ use thiserror::Error;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+#[cfg(feature = "hashi-vault")]
+use base64::Engine as _;
+
 #[derive(Debug, Error)]
 pub enum SignerError {
     #[error("signing failed: {0}")]
@@ -129,7 +132,7 @@ impl AwsKmsSigner {
     /// `key_id` is the KMS key ARN or alias (e.g., "alias/validator-key").
     /// The public key is fetched from KMS at construction and cached.
     pub async fn new(key_id: String) -> Result<Self, SignerError> {
-        let config = aws_config::load_from_env().await;
+        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_kms::Client::new(&config);
 
         // Fetch and cache the public key
@@ -177,8 +180,8 @@ impl Signer for AwsKmsSigner {
             self.client
                 .sign()
                 .key_id(&self.key_id)
-                .signing_algorithm(SigningAlgorithmSpec::EcdsaSecp256k1)
-                .message(aws_sdk_kms::types::Blob::new(msg_hash.as_slice()))
+                .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
+                .message(aws_sdk_kms::primitives::Blob::new(msg_hash.as_slice()))
                 .message_type(aws_sdk_kms::types::MessageType::Digest)
                 .send()
                 .await
@@ -273,7 +276,8 @@ impl HashiVaultSigner {
             .and_then(|p| p.as_str())
             .ok_or_else(|| SignerError::KmsError("no public key in vault response".into()))?;
 
-        let pk_der = base64::decode(pubkey_b64)
+        let pk_der = base64::engine::general_purpose::STANDARD
+            .decode(pubkey_b64)
             .map_err(|e| SignerError::KmsError(format!("base64: {e}")))?;
 
         let pubkey = Self::parse_sec1_pubkey(&pk_der)?;
@@ -305,7 +309,7 @@ impl Signer for HashiVaultSigner {
         );
 
         let body = serde_json::json!({
-            "input": base64::encode(msg_hash)
+            "input": base64::engine::general_purpose::STANDARD.encode(msg_hash)
         });
 
         let resp = client
@@ -327,9 +331,9 @@ impl Signer for HashiVaultSigner {
 
         // Vault returns signatures as "vault:v1:BASE64"
         let sig_bytes = if let Some(idx) = sig_b64.rfind(':') {
-            base64::decode(&sig_b64[idx + 1..])
+            base64::engine::general_purpose::STANDARD.decode(&sig_b64[idx + 1..])
         } else {
-            base64::decode(sig_b64)
+            base64::engine::general_purpose::STANDARD.decode(sig_b64)
         }.map_err(|e| SignerError::KmsError(format!("base64: {e}")))?;
 
         Self::der_to_raw(&sig_bytes)

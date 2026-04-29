@@ -354,32 +354,19 @@ pub(crate) async fn bft_event_loop(
 
                     match result {
                         Ok(result) => {
-                            // State root verification: re-computed roots must match header roots
-                            let payment_ok = result.payment_root == block.header.payment_root;
-                            let evm_ok = result.evm_state_root == block.header.evm_state_root;
-                            let bridge_ok = result.bridge_root == block.header.bridge_root;
-                            let receipt_ok = result.receipt_root == block.header.receipt_root;
-                            let roots_match = payment_ok && evm_ok && bridge_ok && receipt_ok;
-                            if !roots_match {
+                            // State root verification: re-computed root must match header root
+                            let state_ok = result.state_root == block.header.state_root;
+                            if !state_ok {
                                 tracing::warn!(
                                     digest = %digest,
                                     height,
-                                    payment_ok,
-                                    evm_ok,
-                                    bridge_ok,
-                                    receipt_ok,
-                                    result_payment = %result.payment_root,
-                                    header_payment = %block.header.payment_root,
-                                    result_evm = %result.evm_state_root,
-                                    header_evm = %block.header.evm_state_root,
-                                    result_bridge = %result.bridge_root,
-                                    header_bridge = %block.header.bridge_root,
-                                    result_receipt = %result.receipt_root,
-                                    header_receipt = %block.header.receipt_root,
+                                    state_ok,
+                                    result_state = %result.state_root,
+                                    header_state = %block.header.state_root,
                                     "BFT verify: state root mismatch — block rejected"
                                 );
                             }
-                            roots_match
+                            state_ok
                         }
                         Err(e) => {
                             tracing::warn!(error = ?e, digest = %digest, "BFT verify: execution failed");
@@ -449,12 +436,8 @@ pub(crate) async fn bft_event_loop(
                         }
                     };
 
-                    // State root check: computed roots must match header roots
-                    if result.payment_root != block.header.payment_root
-                        || result.evm_state_root != block.header.evm_state_root
-                        || result.bridge_root != block.header.bridge_root
-                        || result.receipt_root != block.header.receipt_root
-                    {
+                    // State root check: computed root must match header root
+                    if result.state_root != block.header.state_root {
                         tracing::error!(height, "BFT finalize: state root mismatch — block rejected");
                         continue;
                     }
@@ -709,9 +692,9 @@ pub(crate) async fn bft_event_loop(
                         "totalDifficulty": "0x0",
                         "nonce": "0x0000000000000000",
                         "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
-                        "receiptsRoot": format!("0x{}", hex::encode(block.header.receipt_root.as_slice())),
-                        "transactionsRoot": format!("0x{}", hex::encode(block.header.payment_root.as_slice())),
-                        "stateRoot": format!("0x{}", hex::encode(block.header.evm_state_root.as_slice())),
+                        "receiptsRoot": format!("0x{}", hex::encode(block.header.state_root.as_slice())),
+                        "transactionsRoot": format!("0x{}", hex::encode(block.header.state_root.as_slice())),
+                        "stateRoot": format!("0x{}", hex::encode(block.header.state_root.as_slice())),
                         "size": format!("0x{:x}", serde_json::to_vec(&block).map(|v| v.len()).unwrap_or(0)),
                         "extraData": "0x",
                         "mixHash": format!("0x{}", hex::encode([0u8; 32])),

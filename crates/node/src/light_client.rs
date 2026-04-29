@@ -282,10 +282,10 @@ impl LightClient {
 
         // 3. State root consistency (only if checkpoint is set and height matches)
         if let Some(ref checkpoint) = self.checkpoint {
-            if header.height == checkpoint.block_height && header.payment_root != checkpoint.state_root {
+            if header.height == checkpoint.block_height && header.state_root != checkpoint.state_root {
                 return Err(LightClientError::StateRootMismatch {
                     expected: checkpoint.state_root,
-                    got: header.payment_root,
+                    got: header.state_root,
                 });
             }
         }
@@ -586,11 +586,7 @@ mod tests {
             parent_hash: parent,
             height,
             timestamp_millis: height * 250 + 1000,
-            payment_root: test_hash(height as u8),
-            evm_state_root: Hash::ZERO,
-            bridge_root: Hash::ZERO,
-            receipt_root: Hash::ZERO,
-            state_root: Hash::ZERO,
+            state_root: test_hash(height as u8),
             proposer: 1,
             signature: BlockSignature::default(),
             version: ProtocolVersion::new(1, 0, 0),
@@ -774,7 +770,7 @@ mod tests {
         client.set_checkpoint(Checkpoint {
             block_height: 0,
             block_hash: genesis.hash(),
-            state_root: genesis.payment_root,
+            state_root: genesis.state_root,
             validator_set_hash: test_hash(1),
         });
 

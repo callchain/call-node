@@ -11,8 +11,8 @@
 use std::cell::RefCell;
 
 use call_precompiles::state_hook::with_account_state;
-use call_precompiles::{current_caller, set_validator_precompile_fn, PrecompileError, PrecompileOutput, PrecompileResult};
-use call_primitives::{Address, Ed25519PublicKey};
+use call_precompiles::{current_caller, PrecompileError, PrecompileOutput, PrecompileResult};
+use call_primitives::Address;
 
 use crate::validator::ValidatorStateManager;
 use crate::STAKING_ESCROW;
@@ -101,27 +101,13 @@ fn decode_u32(input: &[u8], slot_offset: usize) -> Option<u32> {
 
 // ── Validator precompile entry point ──────────────────────────────────
 
-/// Register this precompile function with `call-precompiles`.
-///
-/// Call once during node startup (e.g. in `CallNode::new`).
-pub fn register_validator_precompile() {
-    let _ = set_validator_precompile_fn(validator_precompile_fn);
-}
+/// No-op: validator precompile is now stateful and self-contained.
+#[deprecated(note = "validator precompile is stateful; registration no longer needed")]
+pub fn register_validator_precompile() {}
 
-/// Register the oracle validator checker with `call-precompiles`.
-///
-/// Call once during node startup. This lets the Oracle precompile reject
-/// `submitPrice` calls from non-qualified validators.
-pub fn register_oracle_validator_check() {
-    let _ = call_precompiles::set_oracle_validator_check(is_current_validator);
-}
-
-/// Check whether `addr` is a qualified (current-epoch) validator.
-/// Reads from the thread-local validator state injected by `ValidatorStateHookGuard`.
-fn is_current_validator(addr: &Address) -> bool {
-    with_validator_state(|vs, _current_block| vs.is_qualified_validator(addr))
-        .unwrap_or(false)
-}
+/// No-op: oracle validator check is now read from EVM storage.
+#[deprecated(note = "validator status is read from EVM storage; registration no longer needed")]
+pub fn register_oracle_validator_check() {}
 
 pub fn validator_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     if input.len() < 4 {
@@ -283,7 +269,7 @@ fn claim_unbonded(input: &[u8], gas_limit: u64) -> PrecompileResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_primitives::Address;
+    use call_primitives::{Address, Ed25519PublicKey};
     use call_protocol::AccountState;
     use crate::validator::ValidatorStateManager;
 

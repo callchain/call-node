@@ -174,5 +174,5 @@ async fn test_block_state_roots() {
     let block = node.produce_block(1_000_000).expect("produce block");
 
     // After execution, payment root should be non-zero (balances exist)
-    assert_ne!(block.header.payment_root, call_primitives::Hash::ZERO);
+    assert_ne!(block.header.state_root, call_primitives::Hash::ZERO);
 }

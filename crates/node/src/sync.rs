@@ -32,7 +32,7 @@ pub(crate) fn handle_sync_request(data_dir: &Path, request: &call_network::SyncR
     }
     let state_root = blocks.last().and_then(|b| {
         let block: Block = serde_json::from_slice(b).ok()?;
-        Some(block.header.payment_root)
+        Some(block.header.state_root)
     }).unwrap_or(BlockHash::ZERO);
     Some(SyncResponse {
         start_height: request.start_height,
@@ -97,29 +97,17 @@ pub(crate) fn apply_synced_blocks(
         // State root verification on cloned state before applying to shared state
         let roots_valid = match state.read_all().execute_block_cloned(&block, block_height) {
             Ok(result) => {
-                let payment_ok = result.payment_root == block.header.payment_root;
-                let evm_ok = result.evm_state_root == block.header.evm_state_root;
-                let bridge_ok = result.bridge_root == block.header.bridge_root;
-                let receipt_ok = result.receipt_root == block.header.receipt_root;
-                if !(payment_ok && evm_ok && bridge_ok && receipt_ok) {
+                let state_ok = result.state_root == block.header.state_root;
+                if !state_ok {
                     tracing::error!(
                         height = block_height,
-                        payment_ok,
-                        evm_ok,
-                        bridge_ok,
-                        receipt_ok,
-                        result_payment = %result.payment_root,
-                        header_payment = %block.header.payment_root,
-                        result_evm = %result.evm_state_root,
-                        header_evm = %block.header.evm_state_root,
-                        result_bridge = %result.bridge_root,
-                        header_bridge = %block.header.bridge_root,
-                        result_receipt = %result.receipt_root,
-                        header_receipt = %block.header.receipt_root,
+                        state_ok,
+                        result_state = %result.state_root,
+                        header_state = %block.header.state_root,
                         "sync: state root mismatch — rejecting synced block"
                     );
                 }
-                payment_ok && evm_ok && bridge_ok && receipt_ok
+                state_ok
             }
             Err(_) => false,
         };
@@ -253,9 +241,9 @@ pub(crate) fn apply_synced_blocks(
                     "totalDifficulty": "0x0",
                     "nonce": "0x0000000000000000",
                     "sha3Uncles": format!("0x{}", hex::encode([0u8; 32])),
-                    "receiptsRoot": format!("0x{}", hex::encode(block.header.receipt_root.as_slice())),
-                    "transactionsRoot": format!("0x{}", hex::encode(block.header.payment_root.as_slice())),
-                    "stateRoot": format!("0x{}", hex::encode(block.header.evm_state_root.as_slice())),
+                    "receiptsRoot": format!("0x{}", hex::encode(block.header.state_root.as_slice())),
+                    "transactionsRoot": format!("0x{}", hex::encode(block.header.state_root.as_slice())),
+                    "stateRoot": format!("0x{}", hex::encode(block.header.state_root.as_slice())),
                     "size": format!("0x{:x}", serde_json::to_vec(&block).map(|v| v.len()).unwrap_or(0)),
                     "extraData": "0x",
                     "mixHash": format!("0x{}", hex::encode([0u8; 32])),

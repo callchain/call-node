@@ -17,6 +17,7 @@ call-governance.workspace = true
 alloy-primitives.workspace = true
 revm-precompile.workspace = true
 revm.workspace = true
+scoped-tls = "1"
 tracing.workspace = true
 
 [dev-dependencies]

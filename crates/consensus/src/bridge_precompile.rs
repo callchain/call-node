@@ -11,7 +11,7 @@ use std::cell::RefCell;
 
 use call_precompiles::state_hook::with_account_state;
 use call_precompiles::{
-    current_caller, set_bridge_ext_precompile_fn, PrecompileError, PrecompileOutput,
+    current_caller, PrecompileError, PrecompileOutput,
     PrecompileResult,
 };
 use call_primitives::{Address, B256};
@@ -163,10 +163,9 @@ fn decode_address(input: &[u8], slot_offset: usize) -> Option<Address> {
 
 // ── Bridge precompile entry point ─────────────────────────────────────
 
-/// Register this precompile function with `call-precompiles`.
-pub fn register_bridge_precompile() {
-    let _ = set_bridge_ext_precompile_fn(bridge_ext_precompile_fn);
-}
+/// No-op: bridge precompile is now stateful and self-contained.
+#[deprecated(note = "bridge precompile is stateful; registration no longer needed")]
+pub fn register_bridge_precompile() {}
 
 pub fn bridge_ext_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     if input.len() < 4 {

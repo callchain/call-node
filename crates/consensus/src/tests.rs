@@ -115,10 +115,6 @@ fn test_block_header_hash() {
         parent_hash: BlockHash::ZERO,
         height: 1,
         timestamp_millis: 1000,
-        payment_root: Hash::ZERO,
-        evm_state_root: Hash::ZERO,
-        bridge_root: Hash::ZERO,
-        receipt_root: Hash::ZERO,
         state_root: Hash::ZERO,
         proposer: 1,
         signature: BlockSignature::default(),
@@ -141,10 +137,6 @@ fn test_block_header_validate() {
         parent_hash: BlockHash::repeat_byte(1),
         height: 2,
         timestamp_millis: 1000,
-        payment_root: Hash::ZERO,
-        evm_state_root: Hash::ZERO,
-        bridge_root: Hash::ZERO,
-        receipt_root: Hash::ZERO,
         state_root: Hash::ZERO,
         proposer: 1,
         signature: BlockSignature::default(),
@@ -287,8 +279,7 @@ fn test_block_execution_order() {
 
     // Finalize
     block.finalize(&result);
-    assert_ne!(block.header.payment_root, Hash::ZERO);
-    assert_ne!(block.header.bridge_root, Hash::ZERO);
+    assert_ne!(block.header.state_root, Hash::ZERO);
 }
 
 #[test]

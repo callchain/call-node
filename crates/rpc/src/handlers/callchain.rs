@@ -821,12 +821,16 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                     .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())).collect())
                     .ok_or_else(|| invalid_params("missing 'receiptProof' field".into()))?;
+                let receipt_index = call_obj.get("receiptIndex")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| invalid_params("missing 'receiptIndex' field".into()))?;
                 use call_light_client::{EthHeader, TxInclusionProof, ReceiptProof, MptProofNode};
                 let header = EthHeader::from_rlp(header_bytes);
                 let tx_proof = TxInclusionProof::new(
                     tx_proof_nodes.into_iter().map(MptProofNode::new).collect(),
                 );
                 let receipt_proof = ReceiptProof::new(
+                    receipt_index,
                     receipt_proof_nodes.into_iter().map(MptProofNode::new).collect(),
                 );
                 let op = call_bridge::ExternalBridgeOp::LightClientDeposit {

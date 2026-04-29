@@ -19,10 +19,11 @@ thiserror.workspace = true
 
 reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = []
-http-fetcher = ["dep:reqwest", "dep:tokio"]
+http-fetcher = ["dep:reqwest", "dep:tokio", "dep:serde_json"]
 test-utils = []
 
 [dev-dependencies]

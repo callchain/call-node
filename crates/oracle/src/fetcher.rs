@@ -1,7 +1,7 @@
 //! Price fetcher trait and implementations
 
 #[cfg(feature = "http-fetcher")]
-use crate::AssetId;
+use call_primitives::AssetId;
 use crate::PricePair;
 
 /// Trait for fetching prices from external data sources.

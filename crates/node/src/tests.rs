@@ -222,7 +222,7 @@
 
         let height_after = node.consensus.read().unwrap().current_height();
         assert_eq!(height_after, height_before + 1);
-        assert_ne!(block.header.payment_root, call_primitives::Hash::ZERO);
+        assert_ne!(block.header.state_root, call_primitives::Hash::ZERO);
 
         // Persist
         persist_block(&tmp, height, &block).expect("persist block");
@@ -834,11 +834,8 @@
                 .execute_block_no_subsystems(&block, height)
                 .expect("finalize execution on shared state");
 
-            // Verify state roots match header
-            assert_eq!(result.payment_root, block.header.payment_root, "payment_root mismatch");
-            assert_eq!(result.evm_state_root, block.header.evm_state_root, "evm_state_root mismatch");
-            assert_eq!(result.bridge_root, block.header.bridge_root, "bridge_root mismatch");
-            assert_eq!(result.receipt_root, block.header.receipt_root, "receipt_root mismatch");
+            // Verify state root matches header
+            assert_eq!(result.state_root, block.header.state_root, "state_root mismatch");
 
             block.finalize(&result);
 
@@ -930,8 +927,8 @@
         block.finalize(&result);
 
         // Tamper with a state root in the header
-        let original_payment_root = block.header.payment_root;
-        block.header.payment_root = call_primitives::Hash::repeat_byte(0xDE);
+        let original_state_root = block.header.state_root;
+        block.header.state_root = call_primitives::Hash::repeat_byte(0xDE);
 
         // Verify: re-execution on clone detects root mismatch
         {
@@ -941,8 +938,8 @@
                 .expect("re-execution");
 
             assert_ne!(
-                result2.payment_root, block.header.payment_root,
-                "tampered payment_root should mismatch re-computed root"
+                result2.state_root, block.header.state_root,
+                "tampered state_root should mismatch re-computed root"
             );
         }
 
@@ -954,9 +951,9 @@
                 .expect("execution on shared state");
 
             // The re-computed result3 should have the ORIGINAL correct root
-            assert_eq!(result3.payment_root, original_payment_root, "re-computed root should match original");
+            assert_eq!(result3.state_root, original_state_root, "re-computed root should match original");
             // But the block header has the tampered root
-            assert_ne!(result3.payment_root, block.header.payment_root, "tampered block should fail root check");
+            assert_ne!(result3.state_root, block.header.state_root, "tampered block should fail root check");
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1161,7 +1158,7 @@
         let response = SyncResponse {
             start_height: 1,
             blocks: vec![block_json],
-            state_root: block.header.payment_root,
+            state_root: block.header.state_root,
         };
 
         // Apply synced blocks
@@ -1237,7 +1234,7 @@
         let response = SyncResponse {
             start_height: 5,
             blocks: vec![block_json],
-            state_root: block.header.payment_root,
+            state_root: block.header.state_root,
         };
 
         // Apply synced blocks

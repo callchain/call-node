@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 
 use call_precompiles::state_hook::with_account_state;
-use call_precompiles::{current_caller, set_agent_precompile_fn, PrecompileError, PrecompileOutput, PrecompileResult};
+use call_precompiles::{current_caller, PrecompileError, PrecompileOutput, PrecompileResult};
 use call_primitives::Address;
 
 use crate::{AgentBalances, AgentRegistry};
@@ -138,10 +138,9 @@ fn decode_string(input: &[u8], slot_offset: usize) -> Option<String> {
 
 // ── Agent precompile entry point ──────────────────────────────────────
 
-/// Register this precompile function with `call-precompiles`.
-pub fn register_agent_precompile() {
-    let _ = set_agent_precompile_fn(agent_precompile_fn);
-}
+/// No-op: agent precompile is now stateful and self-contained.
+#[deprecated(note = "agent precompile is stateful; registration no longer needed")]
+pub fn register_agent_precompile() {}
 
 pub fn agent_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
     if input.len() < 4 {

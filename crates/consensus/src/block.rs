@@ -3,7 +3,7 @@
 //! Block and BlockHeader types with hash, validation, and execution.
 
 use call_bridge::{BridgeOp, BridgeConfig};
-use call_crypto::{build_merkle_root, keccak256};
+use call_crypto::keccak256;
 use call_governance::GovernanceManager;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_primitives::ExecutionStatus;
@@ -69,10 +69,6 @@ pub struct BlockHeader {
     pub parent_hash: BlockHash,
     pub height: u64,
     pub timestamp_millis: u64,
-    pub payment_root: Hash,
-    pub evm_state_root: Hash,
-    pub bridge_root: Hash,
-    pub receipt_root: Hash,
     pub state_root: Hash,
     pub proposer: call_primitives::ValidatorId,
     pub signature: BlockSignature,
@@ -91,10 +87,6 @@ impl BlockHeader {
         data.extend_from_slice(self.parent_hash.as_slice());
         data.extend_from_slice(&self.height.to_le_bytes());
         data.extend_from_slice(&self.timestamp_millis.to_le_bytes());
-        data.extend_from_slice(self.payment_root.as_slice());
-        data.extend_from_slice(self.evm_state_root.as_slice());
-        data.extend_from_slice(self.bridge_root.as_slice());
-        data.extend_from_slice(self.receipt_root.as_slice());
         data.extend_from_slice(self.state_root.as_slice());
         data.extend_from_slice(&self.proposer.to_le_bytes());
         data.extend_from_slice(&self.signature.0);
@@ -268,10 +260,6 @@ impl Block {
             parent_hash,
             height,
             timestamp_millis,
-            payment_root: Hash::ZERO,
-            evm_state_root: Hash::ZERO,
-            bridge_root: Hash::ZERO,
-            receipt_root: Hash::ZERO,
             state_root: Hash::ZERO,
             proposer,
             signature: BlockSignature::default(),
@@ -904,27 +892,16 @@ impl Block {
             // after processing outliers for slashing, otherwise outlier data is lost.
         }
 
-        // Compute state roots
-        result.payment_root = compute_payment_root(state.account);
-        result.evm_state_root = compute_evm_state_root(state.evm_state);
-        result.bridge_root = compute_bridge_root(state.bridge_state);
-        result.receipt_root = compute_receipt_root(&result);
+        // Compute state root (EVM-only mode)
+        result.state_root = compute_evm_state_root(state.evm_state);
 
         Ok(result)
     }
 
-    /// Update header roots after execution
+    /// Update header state_root after execution.
+    /// In EVM-only mode state_root is exactly the EVM state root.
     pub fn finalize(&mut self, result: &BlockExecutionResult) {
-        self.header.payment_root = result.payment_root;
-        self.header.evm_state_root = result.evm_state_root;
-        self.header.bridge_root = result.bridge_root;
-        self.header.receipt_root = result.receipt_root;
-        self.header.state_root = keccak256(&[
-            self.header.payment_root.as_slice(),
-            self.header.evm_state_root.as_slice(),
-            self.header.bridge_root.as_slice(),
-            self.header.receipt_root.as_slice(),
-        ].concat());
+        self.header.state_root = result.state_root;
     }
 }
 
@@ -958,10 +935,6 @@ pub struct EvmTxResult {
 #[derive(Debug, Default, Clone)]
 pub struct BlockExecutionResult {
     pub transaction_results: Vec<TransactionResult>,
-    pub payment_root: Hash,
-    pub evm_state_root: Hash,
-    pub bridge_root: Hash,
-    pub receipt_root: Hash,
     pub state_root: Hash,
     pub evm_tx_count: usize,
     pub protocol_tx_count: usize,
@@ -1012,52 +985,6 @@ impl BlockExecutionResult {
 /// Update base fee after block execution (delegates to protocol layer)
 pub(crate) fn update_base_fee_after_block(params: &mut FeeParams, gas_used: u64) {
     call_protocol::transaction::update_base_fee(params, gas_used);
-}
-
-/// Compute payment root from current balance state
-fn compute_payment_root(account: &AccountState) -> Hash {
-    let mut leaves: Vec<Hash> = account
-        .balances
-        .iter()
-        .map(|(&(asset_id, addr), &balance)| {
-            let mut data = Vec::with_capacity(60);
-            data.extend_from_slice(&asset_id.to_le_bytes());
-            data.extend_from_slice(addr.as_slice());
-            data.extend_from_slice(&balance.to_le_bytes());
-            keccak256(&data)
-        })
-        .collect();
-
-    if leaves.is_empty() {
-        return Hash::ZERO;
-    }
-
-    leaves.sort();
-    build_merkle_root(&leaves).unwrap_or(Hash::ZERO)
-}
-
-/// Compute bridge state root
-fn compute_bridge_root(
-    bridge_state: &call_bridge::BridgeStateManager,
-) -> Hash {
-    let mut data = Vec::new();
-    data.extend_from_slice(&(bridge_state.pending_ops.len() as u64).to_le_bytes());
-
-    // Sort by asset_id to ensure deterministic ordering across nodes
-    let mut deposits: Vec<_> = bridge_state.total_deposits.iter().collect();
-    deposits.sort_by_key(|(asset_id, _)| *asset_id);
-    for (asset_id, total) in deposits {
-        data.extend_from_slice(&asset_id.to_le_bytes());
-        data.extend_from_slice(&total.to_le_bytes());
-    }
-
-    let mut withdrawals: Vec<_> = bridge_state.total_withdrawals.iter().collect();
-    withdrawals.sort_by_key(|(asset_id, _)| *asset_id);
-    for (asset_id, total) in withdrawals {
-        data.extend_from_slice(&asset_id.to_le_bytes());
-        data.extend_from_slice(&total.to_le_bytes());
-    }
-    keccak256(&data)
 }
 
 /// Compute EVM state root from the EVM state trie

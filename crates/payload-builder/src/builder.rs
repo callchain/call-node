@@ -102,7 +102,7 @@ impl PayloadBuilder {
         bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
-        evm_state_root: Hash,
+        state_root: Hash,
         bridge_config: Option<&call_bridge::BridgeConfig>,
     ) -> Result<BuiltPayload, BuilderError> {
         let mut selected_protocol = Vec::new();
@@ -240,12 +240,12 @@ impl PayloadBuilder {
             &mut Subsystems::none(),
         )?;
 
-        // Verify EVM state root matches expected (if non-zero)
-        if evm_state_root != Hash::ZERO && result.evm_state_root != Hash::ZERO
-            && result.evm_state_root != evm_state_root {
+        // Verify state root matches expected (if non-zero)
+        if state_root != Hash::ZERO && result.state_root != Hash::ZERO
+            && result.state_root != state_root {
                 return Err(BuilderError::StateRootMismatch {
-                    expected: evm_state_root,
-                    actual: result.evm_state_root,
+                    expected: state_root,
+                    actual: result.state_root,
                 });
             }
 
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(payload.block.header.height, 1);
         assert_eq!(payload.block.protocol_txs.len(), 2);
         assert_eq!(payload.block.evm_txs.len(), 1);
-        assert!(payload.block.header.payment_root != Hash::ZERO);
+        assert!(payload.block.header.state_root != Hash::ZERO);
     }
 
     #[test]
