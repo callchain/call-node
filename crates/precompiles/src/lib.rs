@@ -20,7 +20,6 @@ mod governance;
 mod validator;
 mod compliance;
 mod agent;
-pub mod state_hook;
 pub mod storage;
 
 pub use oracle::*;
@@ -75,33 +74,6 @@ impl StatefulPrecompile for StatelessPrecompileWrapper {
         (self.0)(calldata, u64::MAX)
     }
 }
-
-// ── External precompile registration (deprecated, kept for compat) ────
-///
-/// Crates that own protocol state (call-consensus, call-agent, call-bridge)
-/// can register their precompile implementations here to avoid cyclic
-/// dependencies. If no implementation is registered, the built-in stub
-/// is used.
-
-// Deprecated: external precompile registration via OnceLock has been removed.
-// All precompiles now implement StatefulPrecompile directly and access state
-// through StorageCtx backed by the EVM journal.
-
-/// No-op: validator precompile is now stateful and self-contained.
-#[deprecated(note = "validator precompile is stateful; registration no longer needed")]
-pub fn set_validator_precompile_fn(_f: fn(&[u8], u64) -> PrecompileResult) {}
-
-/// No-op: agent precompile is now stateful and self-contained.
-#[deprecated(note = "agent precompile is stateful; registration no longer needed")]
-pub fn set_agent_precompile_fn(_f: fn(&[u8], u64) -> PrecompileResult) {}
-
-/// No-op: bridge precompile is now stateful and self-contained.
-#[deprecated(note = "bridge precompile is stateful; registration no longer needed")]
-pub fn set_bridge_ext_precompile_fn(_f: fn(&[u8], u64) -> PrecompileResult) {}
-
-/// No-op: oracle validator check is now read from EVM storage.
-#[deprecated(note = "validator status is read from EVM storage; registration no longer needed")]
-pub fn set_oracle_validator_check(_f: fn(&Address) -> bool) {}
 
 // ── Thread-local call context for write precompiles ───────────────────
 

@@ -89,6 +89,13 @@ async fn test_node_process_transactions() {
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }
+    // Seed EVM storage with CALL balance for fees
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+        );
+    }
 
     // Insert tx
     node.insert_tx(make_tx(&secret, sender, 0, receiver, 3_000));

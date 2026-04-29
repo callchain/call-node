@@ -150,6 +150,10 @@ impl NodeBuilder {
                 .balances
                 .set_balance(*asset_id, *addr, *amount)
                 .expect("set balance");
+            let mut evm = state.evm_state.write().unwrap();
+            call_consensus::exec::evm_instructions::seed_balance(
+                &mut *evm, *asset_id, *addr, *amount,
+            );
         }
 
         TestNode {
@@ -336,7 +340,9 @@ impl TestNode {
 
     /// Get a balance for an address.
     pub fn balance(&self, asset_id: u64, addr: &Address) -> u128 {
-        self.state.balance_state.read().unwrap().get_balance(asset_id, addr)
+        use call_consensus::exec::evm_instructions;
+        let evm = self.state.evm_state.read().unwrap();
+        evm_instructions::read_balance(&*evm, asset_id, *addr)
     }
 
     /// Get mempool size (protocol txs).

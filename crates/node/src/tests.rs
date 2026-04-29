@@ -1,6 +1,7 @@
     use super::*;
     use call_consensus::BlockExecutionResult;
     use call_consensus::block::{ExecutionState, BlockContext, Subsystems};
+    use call_consensus::exec::evm_instructions;
     use call_network::{InMemoryNetwork, EpochBoundarySignal};
     use call_primitives::{Address, Ed25519PublicKey};
     use call_protocol::instructions::Instruction;
@@ -519,18 +520,11 @@
                 consensus.refresh_proposer_subset();
             }
 
-            // Fund sender balance
+            // Fund sender balance in EVM storage
             {
-                let mut balances = node.state.balance_state.write().unwrap();
-                balances.balances.set_balance(1, *test_sender(), initial_balance).unwrap();
-            }
-
-            // Register CALL asset so transfer instruction can validate it
-            {
-                let mut registry = node.state.asset_registry.write().unwrap();
-                registry
-                    .register_asset("CALL".into(), "Callchain".into(), 18, *test_sender(), 0, 0, 0)
-                    .unwrap();
+                let mut evm = node.state.evm_state.write().unwrap();
+                evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), initial_balance);
+                evm_instructions::seed_asset(&mut *evm, 1, "CALL", "Callchain", 18, *test_sender(), 0, initial_balance, 0);
             }
 
             // Insert a transfer tx
@@ -617,10 +611,10 @@
         {
             let node2 = CallNode::new(tmp.clone()).expect("node creation (restart)");
 
-            // Verify balance was recovered
+            // Verify EVM balance was recovered
             let sender_balance = {
-                let balances = node2.state.balance_state.read().unwrap();
-                balances.balances.get_balance(1, test_sender())
+                let evm = node2.state.evm_state.read().unwrap();
+                evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
             };
 
             // Balance should be less than initial (transfer + fees deducted)
@@ -646,10 +640,16 @@
 
         let proposer = call_primitives::Address::repeat_byte(0xAA);
 
-        // Fund proposer in AccountState (asset_id 1 = CALL) — governance reads from balance_source
+        // Fund proposer in AccountState and EVM storage (asset_id 1 = CALL)
         {
             let mut balances = node.state.balance_state.write().unwrap();
             balances.balances.set_balance(1, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5).expect("fund proposer");
+        }
+        {
+            let mut evm = node.state.evm_state.write().unwrap();
+            call_consensus::exec::evm_instructions::seed_balance(
+                &mut *evm, call_protocol::CALL_ASSET_ID, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5,
+            );
         }
 
         // Register some validators so quorum can be met
@@ -759,6 +759,11 @@
             let mut balances = node.state.balance_state.write().unwrap();
             balances.balances.set_balance(1, *test_sender(), 10_000_000).unwrap();
         }
+        // Seed EVM storage with CALL balance for fees
+        {
+            let mut evm = node.state.evm_state.write().unwrap();
+            evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
+        }
 
         // Register CALL asset so Transfer instructions succeed
         {
@@ -803,8 +808,8 @@
 
         // Capture shared state BEFORE propose-phase execution
         let balance_before = {
-            let balances = node.state.balance_state.read().unwrap();
-            balances.balances.get_balance(1, test_sender())
+            let evm = node.state.evm_state.read().unwrap();
+            evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
         };
 
         // Simulate PROPOSE phase: execute on CLONED state
@@ -819,8 +824,8 @@
 
         // Verify shared state is UNCHANGED after propose
         let balance_after_propose = {
-            let balances = node.state.balance_state.read().unwrap();
-            balances.balances.get_balance(1, test_sender())
+            let evm = node.state.evm_state.read().unwrap();
+            evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
         };
         assert_eq!(
             balance_after_propose, balance_before,
@@ -845,8 +850,8 @@
 
         // Verify shared state IS modified after finalize
         let balance_after_finalize = {
-            let balances = node.state.balance_state.read().unwrap();
-            balances.balances.get_balance(1, test_sender())
+            let evm = node.state.evm_state.read().unwrap();
+            evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
         };
         assert!(
             balance_after_finalize < balance_before,

@@ -5,6 +5,7 @@ use call_protocol::security::MempoolDefense;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
 use call_consensus::{ValidatorStateManager, ForkManager, RollbackPlan, ConsensusParams};
+use call_consensus::exec::evm_instructions;
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash};
@@ -240,11 +241,11 @@ impl RpcState {
     }
 
     pub fn get_balance(&self, asset_id: AssetId, address: &Address) -> Balance {
-        self.balance_state.read().map(|s| s.get_balance(asset_id, address)).unwrap_or(0)
+        self.evm_state.read().map(|s| evm_instructions::read_balance(&s, asset_id, *address)).unwrap_or(0)
     }
 
     pub fn get_nonce(&self, address: &Address) -> u64 {
-        self.balance_state.read().map(|s| s.get_nonce(address)).unwrap_or(0)
+        self.evm_state.read().map(|s| s.get_nonce(address)).unwrap_or(0)
     }
 
     pub fn get_total_balance(&self, asset_id: AssetId) -> Balance {

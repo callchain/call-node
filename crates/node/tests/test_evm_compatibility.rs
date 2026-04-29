@@ -23,7 +23,7 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-/// EVM state is independent from protocol balances.
+/// Asset balances are read from EVM storage, not legacy protocol state.
 #[test]
 fn test_evm_state_isolation_from_protocol() {
     let node = TestNode::new();
@@ -35,17 +35,25 @@ fn test_evm_state_isolation_from_protocol() {
         consensus.refresh_proposer_subset();
     }
 
-    // Set protocol balance
+    // Legacy protocol balance is ignored
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 5_000).unwrap();
 
-    // Set EVM balance separately
+    // Asset balance lives in EVM storage
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 7_000,
+        );
+    }
+
+    // node.balance() reads from EVM asset storage
+    assert_eq!(node.balance(1, &sender), 7_000);
+
+    // Native EVM balance is independent of asset balance
     {
         let mut evm_state = node.state.evm_state.write().unwrap();
         evm_state.set_balance(sender, U256::from(10_000u128));
     }
-
-    // Protocol and EVM balances are independent
-    assert_eq!(node.balance(1, &sender), 5_000);
     {
         let evm_state = node.state.evm_state.read().unwrap();
         assert_eq!(evm_state.get_balance(&sender), U256::from(10_000u128));
@@ -210,7 +218,7 @@ fn test_evm_state_default() {
     assert_eq!(state.get_nonce(&test_addr(1)), 0);
 }
 
-/// Protocol balance and EVM balance can be set for the same address independently.
+/// Asset balance (EVM storage slot) and native EVM balance are independent.
 #[test]
 fn test_protocol_and_evm_same_address() {
     let node = TestNode::new();
@@ -222,7 +230,15 @@ fn test_protocol_and_evm_same_address() {
         consensus.refresh_proposer_subset();
     }
 
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 5_000).unwrap();
+    // Asset balance lives in EVM storage slots
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 5_000,
+        );
+    }
+
+    // Native EVM balance is stored separately in the account
     node.state.evm_state.write().unwrap().set_balance(sender, U256::from(99_999u128));
 
     assert_eq!(node.balance(1, &sender), 5_000);

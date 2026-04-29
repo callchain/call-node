@@ -8,7 +8,7 @@
 use alloy_primitives::{address, Address};
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
-use crate::{current_caller, state_hook, state_hook::with_account_state};
+use crate::current_caller;
 
 #[allow(dead_code)]
 pub(crate) const ASSET_ADDRESS: alloy_primitives::Address =
@@ -145,517 +145,18 @@ fn encode_string32(s: &str) -> [u8; 32] {
     out
 }
 
-// ── Asset precompile entry point ──────────────────────────────────────
-
-pub fn asset_precompile_fn(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    if input.len() < 4 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let selector = &input[..4];
-
-    match selector {
-        &[0xd2, 0x14, 0x25, 0xdf] => asset_get_balance(input, gas_limit),
-        &[0x4e, 0xc3, 0xce, 0x7f] => asset_get_asset_info(input, gas_limit),
-        &[0xd1, 0x5d, 0xcd, 0x62] => asset_transfer(input, gas_limit),
-        &[0x5f, 0x91, 0x61, 0xbb] => asset_batch_transfer(input, gas_limit),
-        &[0x7e, 0x2e, 0xad, 0x93] => asset_approve(input, gas_limit),
-        &[0xa1, 0x3e, 0x0f, 0xba] => asset_transfer_from(input, gas_limit),
-        &[0xf2, 0xbe, 0x45, 0x99] => asset_mint(input, gas_limit),
-        &[0x73, 0x71, 0x28, 0x63] => asset_burn(input, gas_limit),
-        &[0x48, 0x4a, 0x57, 0x3d] => asset_register(input, gas_limit),
-        _ => Err(PrecompileError::Other("unknown selector".into())),
-    }
-}
-
-// ── Read operations ───────────────────────────────────────────────────
-
-fn asset_get_balance(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 800;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 68 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let addr = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid address".into())
-    })?;
-
-    let balance = with_account_state(|acc| acc.get_balance(asset_id, &addr))
-        .ok_or_else(|| {
-            PrecompileError::Other("account state not available".into())
-        })?;
-
-    let output = encode_u256(balance);
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::from(output.to_vec()),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-fn asset_get_asset_info(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 1000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 36 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-
-    let asset = state_hook::with_registry(|reg| reg.get_asset(asset_id).cloned())
-        .ok_or_else(|| {
-            PrecompileError::Other("asset registry not available".into())
-        })?
-        .ok_or_else(|| {
-            PrecompileError::Other("asset not found".into())
-        })?;
-
-    // Encode as 6 x 32-byte slots = 192 bytes
-    // Slot 0: symbol (bytes32)
-    // Slot 1: name (bytes32)
-    // Slot 2: decimals (uint8 in last byte)
-    // Slot 3: issuer (address in last 20 bytes)
-    // Slot 4: maxSupply (uint256)
-    // Slot 5: status (uint8 in last byte)
-    let mut output = [0u8; 192];
-    output[0..32].copy_from_slice(&encode_string32(&asset.symbol));
-    output[32..64].copy_from_slice(&encode_string32(&asset.name));
-    output[95] = asset.decimals;
-    output[108..128].copy_from_slice(asset.issuer.as_slice());
-    output[128..160].copy_from_slice(&encode_u256(asset.max_supply));
-    output[191] = asset.status as u8;
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::from(output.to_vec()),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-// ── Write operations ──────────────────────────────────────────────────
-
-fn require_caller() -> Result<Address, PrecompileError> {
-    current_caller()
-        .ok_or_else(|| PrecompileError::Other("caller not available".into()))
-}
-
-fn check_compliance(
-    asset_id: u64,
-    addr: &Address,
-) -> Result<(), PrecompileError> {
-    let policy_id = state_hook::with_registry(|reg| {
-        reg.get_asset(asset_id).map(|a| a.compliance_policy)
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("asset registry not available".into())
-    })?
-    .ok_or_else(|| {
-        PrecompileError::Other("asset not found".into())
-    })?;
-
-    state_hook::with_compliance(|engine| {
-        engine
-            .check_compliance_by_policy_id(addr, policy_id)
-            .map_err(|e| {
-                PrecompileError::Other(format!("compliance check failed: {e}").into())
-            })
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("compliance engine not available".into())
-    })?
-}
-
-fn asset_transfer(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 5000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 100 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let to = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid to address".into())
-    })?;
-    let amount = decode_u128(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid amount".into())
-    })?;
-
-    let from = require_caller()?;
-
-    check_compliance(asset_id, &from)?;
-    check_compliance(asset_id, &to)?;
-
-    state_hook::with_account_state(|acc| {
-        acc.transfer(asset_id, from, to, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("account state not available".into())
-    })
-    .and_then(|r| r)?;
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-fn asset_batch_transfer(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    if input.len() < 100 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let recipients = decode_address_array(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid recipients array".into())
-    })?;
-    let amounts = decode_u128_array(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid amounts array".into())
-    })?;
-
-    if recipients.len() != amounts.len() {
-        return Err(PrecompileError::Other(
-            "recipients and amounts length mismatch".into(),
-        ));
-    }
-    if recipients.is_empty() {
-        return Err(PrecompileError::Other("empty batch".into()));
-    }
-
-    const GAS_COST_PER: u64 = 5000;
-    let total_gas = GAS_COST_PER * recipients.len() as u64;
-    if gas_limit < total_gas {
-        return Err(PrecompileError::OutOfGas);
-    }
-
-    let from = require_caller()?;
-
-    check_compliance(asset_id, &from)?;
-    for to in &recipients {
-        check_compliance(asset_id, to)?;
-    }
-
-    state_hook::with_account_state(|acc| {
-        for (to, amount) in recipients.iter().zip(amounts.iter()) {
-            acc.transfer(asset_id, from, *to, *amount)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-        }
-        Ok::<_, PrecompileError>(())
-    })
-    .ok_or_else(|| PrecompileError::Other("account state not available".into()))
-    .and_then(|r| r)?;
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: total_gas,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-fn asset_approve(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 3000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 100 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let spender = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid spender address".into())
-    })?;
-    let amount = decode_u128(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid amount".into())
-    })?;
-
-    let owner = require_caller()?;
-
-    state_hook::with_account_state(|acc| {
-        acc.allowances.set_allowance(asset_id, owner, spender, amount);
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("account state not available".into())
-    })?;
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-fn asset_transfer_from(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 6000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 132 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let from = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid from address".into())
-    })?;
-    let to = decode_address(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid to address".into())
-    })?;
-    let amount = decode_u128(input, 100).ok_or_else(|| {
-        PrecompileError::Other("invalid amount".into())
-    })?;
-
-    let spender = require_caller()?;
-
-    check_compliance(asset_id, &from)?;
-    check_compliance(asset_id, &to)?;
-
-    state_hook::with_account_state(|acc| {
-        // Check allowance
-        let allowance = acc.allowances.get_allowance(asset_id, &from, &spender);
-        if allowance < amount {
-            return Err(PrecompileError::Other("insufficient allowance".into()));
-        }
-        acc.allowances
-            .spend_allowance(asset_id, from, spender, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-        acc.transfer(asset_id, from, to, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("account state not available".into())
-    })
-    .and_then(|r| r)?;
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-fn asset_mint(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 10000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 100 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let to = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid to address".into())
-    })?;
-    let amount = decode_u128(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid amount".into())
-    })?;
-
-    let caller = require_caller()?;
-
-    // Verify issuer
-    let is_issuer = state_hook::with_registry(|reg| {
-        reg.get_asset(asset_id)
-            .map(|a| a.issuer == caller)
-            .unwrap_or(false)
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("asset registry not available".into())
-    })?;
-
-    if !is_issuer {
-        return Err(PrecompileError::Other("not asset issuer".into()));
-    }
-
-    // Update registry supply
-    state_hook::with_registry(|reg| {
-        reg.mint_supply(asset_id, &caller, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("asset registry not available".into())
-    })
-    .and_then(|r| r)?;
-
-    // Credit balance
-    state_hook::with_account_state(|acc| {
-        acc.credit_balance(asset_id, to, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("account state not available".into())
-    })
-    .and_then(|r| r)?;
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-fn asset_burn(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 8000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 100 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let from = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid from address".into())
-    })?;
-    let amount = decode_u128(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid amount".into())
-    })?;
-
-    let caller = require_caller()?;
-
-    // If caller is not the owner, check allowance
-    if caller != from {
-        state_hook::with_account_state(|acc| {
-            let allowance = acc.allowances.get_allowance(asset_id, &from, &caller);
-            if allowance < amount {
-                return Err(PrecompileError::Other("insufficient allowance".into()));
-            }
-            acc.allowances
-                .spend_allowance(asset_id, from, caller, amount)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))
-        })
-        .ok_or_else(|| {
-            PrecompileError::Other("account state not available".into())
-        })
-        .and_then(|r| r)?;
-    }
-
-    // Update registry supply
-    state_hook::with_registry(|reg| {
-        reg.burn_supply(asset_id, &from, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("asset registry not available".into())
-    })
-    .and_then(|r| r)?;
-
-    // Debit balance from target
-    state_hook::with_account_state(|acc| {
-        acc.burn(asset_id, from, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("account state not available".into())
-    })
-    .and_then(|r| r)?;
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-fn asset_register(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 50000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    // Minimum input: selector + 4 args * 32 bytes = 132 bytes
-    if input.len() < 132 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    // register(string symbol, string name, uint8 decimals, uint256 maxSupply)
-    let symbol = decode_string(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid symbol".into())
-    })?;
-    let name = decode_string(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid name".into())
-    })?;
-    let decimals = decode_u64(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid decimals".into())
-    })? as u8;
-    let max_supply = decode_u128(input, 100).ok_or_else(|| {
-        PrecompileError::Other("invalid maxSupply".into())
-    })?;
-
-    let caller = require_caller()?;
-
-    let asset_id = state_hook::with_registry(|reg| {
-        reg.register_asset(
-            symbol,
-            name,
-            decimals,
-            caller,
-            0, // compliance_policy: default None
-            0, // registered_at: will be set by caller with block timestamp
-            max_supply,
-        )
-        .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("asset registry not available".into())
-    })
-    .and_then(|r| r)?;
-
-    let output = encode_u64_slot(asset_id);
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::from(output.to_vec()),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
 // ── AssetPrecompile (stateful, uses StorageCtx) ───────────────────────
 
 use crate::StatefulPrecompile;
 use crate::storage::storage_slot;
 
 /// Compute the EVM storage slot for an asset balance.
-fn slot_balance(asset_id: u64, addr: Address) -> alloy_primitives::U256 {
+pub fn slot_balance(asset_id: u64, addr: Address) -> alloy_primitives::U256 {
     storage_slot(&[&asset_id.to_be_bytes()[..], addr.as_slice()])
 }
 
 /// Compute the EVM storage slot for an allowance.
-fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> alloy_primitives::U256 {
+pub fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> alloy_primitives::U256 {
     storage_slot(&[
         &asset_id.to_be_bytes()[..],
         owner.as_slice(),
@@ -664,32 +165,32 @@ fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> alloy_prim
 }
 
 /// Compute the EVM storage slot for asset metadata.
-fn slot_asset_meta(asset_id: u64, suffix: &[u8]) -> alloy_primitives::U256 {
+pub fn slot_asset_meta(asset_id: u64, suffix: &[u8]) -> alloy_primitives::U256 {
     storage_slot(&[&asset_id.to_be_bytes()[..], suffix])
 }
 
 /// Read a u128 value from a U256 storage word (low 128 bits).
-fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
+pub fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
     let bytes = v.to_be_bytes::<32>();
     u128::from_be_bytes(bytes[16..32].try_into().unwrap())
 }
 
 /// Write a u128 value into a U256 storage word (low 128 bits).
-fn u128_to_u256(v: u128) -> alloy_primitives::U256 {
+pub fn u128_to_u256(v: u128) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     bytes[16..32].copy_from_slice(&v.to_be_bytes());
     alloy_primitives::U256::from_be_bytes::<32>(bytes)
 }
 
 /// Read a bytes32 string from a U256 storage word.
-fn read_string32(v: alloy_primitives::U256) -> String {
+pub fn read_string32(v: alloy_primitives::U256) -> String {
     let bytes = v.to_be_bytes::<32>();
     let len = bytes.iter().take_while(|b| **b != 0).count();
     String::from_utf8_lossy(&bytes[..len]).into_owned()
 }
 
 /// Write a short string into a bytes32 U256 storage word.
-fn write_string32(s: &str) -> alloy_primitives::U256 {
+pub fn write_string32(s: &str) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     let src = s.as_bytes();
     let len = src.len().min(32);
@@ -698,26 +199,26 @@ fn write_string32(s: &str) -> alloy_primitives::U256 {
 }
 
 /// Read an Address from the low 20 bytes of a U256.
-fn u256_to_address(v: alloy_primitives::U256) -> Address {
+pub fn u256_to_address(v: alloy_primitives::U256) -> Address {
     let bytes = v.to_be_bytes::<32>();
     Address::from_slice(&bytes[12..32])
 }
 
 /// Write an Address into the low 20 bytes of a U256.
-fn address_to_u256(addr: Address) -> alloy_primitives::U256 {
+pub fn address_to_u256(addr: Address) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     bytes[12..32].copy_from_slice(addr.as_slice());
     alloy_primitives::U256::from_be_bytes::<32>(bytes)
 }
 
 /// Read a u64 from the low 8 bytes of a U256.
-fn u256_to_u64(v: alloy_primitives::U256) -> u64 {
+pub fn u256_to_u64(v: alloy_primitives::U256) -> u64 {
     let bytes = v.to_be_bytes::<32>();
     u64::from_be_bytes(bytes[24..32].try_into().unwrap())
 }
 
 /// Write a u64 into the low 8 bytes of a U256.
-fn u64_to_u256(v: u64) -> alloy_primitives::U256 {
+pub fn u64_to_u256(v: u64) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&v.to_be_bytes());
     alloy_primitives::U256::from_be_bytes::<32>(bytes)
@@ -1149,7 +650,6 @@ impl StatefulPrecompile for AssetPrecompile {
 mod tests {
     use super::*;
     use call_primitives::Address;
-    use call_protocol::{AccountState, AssetRegistry};
 
     #[test]
     fn test_asset_address() {
@@ -1180,371 +680,6 @@ mod tests {
         assert_eq!(&encoded[0..4], b"TEST");
         assert_eq!(&encoded[4..32], &[0u8; 28]);
     }
-
-    #[test]
-    fn test_get_balance_no_hook() {
-        // Without state hook, getBalance should fail
-        let sel = [0xd2, 0x14, 0x25, 0xdf];
-        let input = [&sel[..], &[0u8; 64]].concat();
-        let result = asset_get_balance(&input, 10000);
-        assert!(matches!(result, Err(PrecompileError::Other(_))));
-    }
-
-    #[test]
-    fn test_get_balance_with_hook() {
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, Address::repeat_byte(0xAB), 5000).unwrap();
-        let mut registry = AssetRegistry::new();
-
-        let _guard = crate::state_hook::StateHookGuard::new(
-            &mut account,
-            &mut registry,
-            &mut call_protocol::compliance::ComplianceEngine::default(),
-            &mut call_shielded::ShieldedState::new(),
-            None,
-            None,
-        );
-
-        let mut input = vec![0u8; 68];
-        input[0..4].copy_from_slice(&[0xd2, 0x14, 0x25, 0xdf]);
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        input[48..68].copy_from_slice(Address::repeat_byte(0xAB).as_slice());
-
-        let result = asset_get_balance(&input, 10000).unwrap();
-        assert_eq!(result.gas_used, 800);
-        // Balance 5000 encoded as uint256
-        let mut expected = [0u8; 32];
-        expected[16..].copy_from_slice(&5000u128.to_be_bytes());
-        assert_eq!(result.bytes.as_ref(), &expected);
-    }
-
-    #[test]
-    fn test_transfer_with_hook() {
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, Address::repeat_byte(0xAB), 1000).unwrap();
-        let mut registry = AssetRegistry::new();
-        registry.register_asset("TEST".into(), "Test".into(), 18, Address::repeat_byte(0xAB), 0, 0, 0).unwrap();
-
-        let _guard = crate::state_hook::StateHookGuard::new(
-            &mut account,
-            &mut registry,
-            &mut call_protocol::compliance::ComplianceEngine::default(),
-            &mut call_shielded::ShieldedState::new(),
-            None,
-            None,
-        );
-
-        // Set caller context
-        crate::CURRENT_CALLER.with(|c| c.set(Some(Address::repeat_byte(0xAB))));
-
-        let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0xd1, 0x5d, 0xcd, 0x62]);
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        input[48..68].copy_from_slice(Address::repeat_byte(0xCD).as_slice());
-        input[84..100].copy_from_slice(&500u128.to_be_bytes());
-
-        let result = asset_transfer(&input, 10000);
-        assert!(result.is_ok(), "transfer failed: {:?}", result.err());
-        assert_eq!(result.unwrap().gas_used, 5000);
-
-        // Verify state
-        assert_eq!(account.get_balance(1, &Address::repeat_byte(0xAB)), 500);
-        assert_eq!(account.get_balance(1, &Address::repeat_byte(0xCD)), 500);
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn test_approve_and_transfer_from() {
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, Address::repeat_byte(0xAB), 1000).unwrap();
-        let mut registry = AssetRegistry::new();
-        registry.register_asset("TEST".into(), "Test".into(), 18, Address::repeat_byte(0xAB), 0, 0, 0).unwrap();
-
-        let _guard = crate::state_hook::StateHookGuard::new(
-            &mut account,
-            &mut registry,
-            &mut call_protocol::compliance::ComplianceEngine::default(),
-            &mut call_shielded::ShieldedState::new(),
-            None,
-            None,
-        );
-
-        // Owner approves spender
-        crate::CURRENT_CALLER.with(|c| c.set(Some(Address::repeat_byte(0xAB))));
-
-        let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0x7e, 0x2e, 0xad, 0x93]);
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        input[48..68].copy_from_slice(Address::repeat_byte(0xEF).as_slice());
-        input[84..100].copy_from_slice(&300u128.to_be_bytes());
-
-        let result = asset_approve(&input, 10000);
-        assert!(result.is_ok());
-
-        // Spender does transferFrom
-        crate::CURRENT_CALLER.with(|c| c.set(Some(Address::repeat_byte(0xEF))));
-
-        let mut input = vec![0u8; 132];
-        input[0..4].copy_from_slice(&[0xa1, 0x3e, 0x0f, 0xba]);
-        input[28..36].copy_from_slice(&1u64.to_be_bytes());
-        input[48..68].copy_from_slice(Address::repeat_byte(0xAB).as_slice());
-        input[80..100].copy_from_slice(Address::repeat_byte(0xCD).as_slice());
-        input[116..132].copy_from_slice(&200u128.to_be_bytes());
-
-        let result = asset_transfer_from(&input, 10000);
-        assert!(result.is_ok(), "transfer_from failed: {:?}", result.err());
-
-        assert_eq!(account.get_balance(1, &Address::repeat_byte(0xAB)), 800);
-        assert_eq!(account.get_balance(1, &Address::repeat_byte(0xCD)), 200);
-        assert_eq!(
-            account.allowances.get_allowance(1, &Address::repeat_byte(0xAB), &Address::repeat_byte(0xEF)),
-            100
-        );
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn test_mint_and_burn() {
-        let mut account = AccountState::new();
-        let mut registry = AssetRegistry::new();
-        let issuer = Address::repeat_byte(0x11);
-        let id = registry.register_asset("GOLD".into(), "Gold Token".into(), 18, issuer, 0, 0, 10000).unwrap();
-
-        let _guard = crate::state_hook::StateHookGuard::new(
-            &mut account,
-            &mut registry,
-            &mut call_protocol::compliance::ComplianceEngine::default(),
-            &mut call_shielded::ShieldedState::new(),
-            None,
-            None,
-        );
-
-        crate::CURRENT_CALLER.with(|c| c.set(Some(issuer)));
-
-        // Mint
-        let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0xf2, 0xbe, 0x45, 0x99]);
-        input[28..36].copy_from_slice(&id.to_be_bytes());
-        input[48..68].copy_from_slice(Address::repeat_byte(0x22).as_slice());
-        input[84..100].copy_from_slice(&500u128.to_be_bytes());
-
-        let result = asset_mint(&input, 10000);
-        assert!(result.is_ok(), "mint failed: {:?}", result.err());
-        assert_eq!(account.get_balance(id, &Address::repeat_byte(0x22)), 500);
-        assert_eq!(registry.get_asset(id).unwrap().protocol_supply, 500);
-
-        // Mint some to issuer so we can burn from them
-        let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0xf2, 0xbe, 0x45, 0x99]);
-        input[28..36].copy_from_slice(&id.to_be_bytes());
-        input[48..68].copy_from_slice(issuer.as_slice());
-        input[84..100].copy_from_slice(&400u128.to_be_bytes());
-
-        let result = asset_mint(&input, 10000);
-        assert!(result.is_ok(), "mint to issuer failed: {:?}", result.err());
-        assert_eq!(account.get_balance(id, &issuer), 400);
-        assert_eq!(registry.get_asset(id).unwrap().protocol_supply, 900);
-
-        // Burn from issuer (caller == from, no allowance needed)
-        let mut input = vec![0u8; 100];
-        input[0..4].copy_from_slice(&[0x73, 0x71, 0x28, 0x63]);
-        input[28..36].copy_from_slice(&id.to_be_bytes());
-        input[48..68].copy_from_slice(issuer.as_slice());
-        input[84..100].copy_from_slice(&200u128.to_be_bytes());
-
-        let result = asset_burn(&input, 10000);
-        assert!(result.is_ok(), "burn failed: {:?}", result.err());
-        assert_eq!(account.get_balance(id, &Address::repeat_byte(0x22)), 500); // recipient unchanged
-        assert_eq!(account.get_balance(id, &issuer), 200); // issuer burned 200
-        assert_eq!(registry.get_asset(id).unwrap().protocol_supply, 700);
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn test_batch_transfer_with_hook() {
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, Address::repeat_byte(0xAB), 1000).unwrap();
-        let mut registry = AssetRegistry::new();
-        registry.register_asset("TEST".into(), "Test".into(), 18, Address::repeat_byte(0xAB), 0, 0, 0).unwrap();
-
-        let _guard = crate::state_hook::StateHookGuard::new(
-            &mut account,
-            &mut registry,
-            &mut call_protocol::compliance::ComplianceEngine::default(),
-            &mut call_shielded::ShieldedState::new(),
-            None,
-            None,
-        );
-
-        crate::CURRENT_CALLER.with(|c| c.set(Some(Address::repeat_byte(0xAB))));
-
-        // ABI encode: batchTransfer(uint64,address[],uint128[])
-        // Static: asset_id(32), offset_to(32), offset_amounts(32)
-        // Dynamic to: len(32), addr1(32), addr2(32)
-        // Dynamic amounts: len(32), amount1(32), amount2(32)
-        let addr1 = Address::repeat_byte(0xCD);
-        let addr2 = Address::repeat_byte(0xEF);
-        let amount1 = 200u128;
-        let amount2 = 300u128;
-
-        let static_size = 3 * 32;
-        let to_array_size = 32 + 2 * 32;
-        let amounts_array_size = 32 + 2 * 32;
-        let offset_to = static_size;
-        let offset_amounts = static_size + to_array_size;
-
-        let mut input = vec![0u8; 4 + static_size + to_array_size + amounts_array_size];
-        input[0..4].copy_from_slice(&[0x5f, 0x91, 0x61, 0xbb]);
-        // asset_id
-        input[4 + 24..4 + 32].copy_from_slice(&1u64.to_be_bytes());
-        // offset_to
-        input[36 + 24..36 + 32].copy_from_slice(&(offset_to as u64).to_be_bytes());
-        // offset_amounts
-        input[68 + 24..68 + 32].copy_from_slice(&(offset_amounts as u64).to_be_bytes());
-
-        // to array at absolute 4 + offset_to
-        let to_abs = 4 + offset_to;
-        input[to_abs + 24..to_abs + 32].copy_from_slice(&2u64.to_be_bytes());
-        input[to_abs + 32 + 12..to_abs + 32 + 32].copy_from_slice(addr1.as_slice());
-        input[to_abs + 64 + 12..to_abs + 64 + 32].copy_from_slice(addr2.as_slice());
-
-        // amounts array at absolute 4 + offset_amounts
-        let amt_abs = 4 + offset_amounts;
-        input[amt_abs + 24..amt_abs + 32].copy_from_slice(&2u64.to_be_bytes());
-        input[amt_abs + 32 + 16..amt_abs + 32 + 32].copy_from_slice(&amount1.to_be_bytes());
-        input[amt_abs + 64 + 16..amt_abs + 64 + 32].copy_from_slice(&amount2.to_be_bytes());
-
-        let result = asset_batch_transfer(&input, 20000);
-        assert!(result.is_ok(), "batch_transfer failed: {:?}", result.err());
-        assert_eq!(result.unwrap().gas_used, 10000); // 5000 * 2
-
-        // Verify state
-        assert_eq!(account.get_balance(1, &Address::repeat_byte(0xAB)), 500); // 1000 - 200 - 300
-        assert_eq!(account.get_balance(1, &addr1), 200);
-        assert_eq!(account.get_balance(1, &addr2), 300);
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn test_batch_transfer_length_mismatch() {
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, Address::repeat_byte(0xAB), 1000).unwrap();
-        let mut registry = AssetRegistry::new();
-        registry.register_asset("TEST".into(), "Test".into(), 18, Address::repeat_byte(0xAB), 0, 0, 0).unwrap();
-
-        let _guard = crate::state_hook::StateHookGuard::new(
-            &mut account,
-            &mut registry,
-            &mut call_protocol::compliance::ComplianceEngine::default(),
-            &mut call_shielded::ShieldedState::new(),
-            None,
-            None,
-        );
-
-        crate::CURRENT_CALLER.with(|c| c.set(Some(Address::repeat_byte(0xAB))));
-
-        // 2 recipients but 1 amount
-        let static_size = 3 * 32;
-        let to_array_size = 32 + 2 * 32;
-        let amounts_array_size = 32 + 1 * 32;
-        let offset_to = static_size;
-        let offset_amounts = static_size + to_array_size;
-
-        let mut input = vec![0u8; 4 + static_size + to_array_size + amounts_array_size];
-        input[0..4].copy_from_slice(&[0x5f, 0x91, 0x61, 0xbb]);
-        input[4 + 24..4 + 32].copy_from_slice(&1u64.to_be_bytes());
-        input[36 + 24..36 + 32].copy_from_slice(&(offset_to as u64).to_be_bytes());
-        input[68 + 24..68 + 32].copy_from_slice(&(offset_amounts as u64).to_be_bytes());
-
-        let to_abs = 4 + offset_to;
-        input[to_abs + 24..to_abs + 32].copy_from_slice(&2u64.to_be_bytes());
-        input[to_abs + 32 + 12..to_abs + 32 + 32].copy_from_slice(Address::repeat_byte(0xCD).as_slice());
-        input[to_abs + 64 + 12..to_abs + 64 + 32].copy_from_slice(Address::repeat_byte(0xEF).as_slice());
-
-        let amt_abs = 4 + offset_amounts;
-        input[amt_abs + 24..amt_abs + 32].copy_from_slice(&1u64.to_be_bytes());
-        input[amt_abs + 32 + 16..amt_abs + 32 + 32].copy_from_slice(&100u128.to_be_bytes());
-
-        let result = asset_batch_transfer(&input, 20000);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("mismatch"));
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn test_register_asset() {
-        let mut account = AccountState::new();
-        let mut registry = AssetRegistry::new();
-
-        let _guard = crate::state_hook::StateHookGuard::new(
-            &mut account,
-            &mut registry,
-            &mut call_protocol::compliance::ComplianceEngine::default(),
-            &mut call_shielded::ShieldedState::new(),
-            None,
-            None,
-        );
-
-        let caller = Address::repeat_byte(0x33);
-        crate::CURRENT_CALLER.with(|c| c.set(Some(caller)));
-
-        // ABI encode: register("TEST", "Test Token", 18, 1000000)
-        // String offsets are relative to start of args (byte 4)
-        // Args: offset_symbol(32), offset_name(32), decimals(32), maxSupply(32)
-        // symbol data at offset 128 -> absolute 132
-        // name data follows symbol data
-        let symbol = b"TEST";
-        let name = b"Test Token";
-        let symbol_data_len = 32 + 32; // len slot + data slot
-        let name_offset = 128 + symbol_data_len;
-
-        let mut input = vec![0u8; 4 + 4 * 32 + symbol_data_len + 32 + 32];
-        input[0..4].copy_from_slice(&[0x48, 0x4a, 0x57, 0x3d]);
-        // offset_symbol = 128
-        input[4 + 24..4 + 32].copy_from_slice(&128u64.to_be_bytes());
-        // offset_name
-        input[36 + 24..36 + 32].copy_from_slice(&(name_offset as u64).to_be_bytes());
-        // decimals = 18
-        input[68 + 31] = 18;
-        // maxSupply = 1000000
-        input[100 + 16..100 + 32].copy_from_slice(&1_000_000u128.to_be_bytes());
-
-        // symbol data at absolute 132
-        let sym_abs = 4 + 128;
-        input[sym_abs + 24..sym_abs + 32].copy_from_slice(&(symbol.len() as u64).to_be_bytes());
-        input[sym_abs + 32..sym_abs + 32 + symbol.len()].copy_from_slice(symbol);
-
-        // name data at absolute 4 + name_offset
-        let name_abs = 4 + name_offset;
-        input[name_abs + 24..name_abs + 32].copy_from_slice(&(name.len() as u64).to_be_bytes());
-        input[name_abs + 32..name_abs + 32 + name.len()].copy_from_slice(name);
-
-        let result = asset_register(&input, 100000).unwrap();
-        assert_eq!(result.gas_used, 50000);
-
-        let asset_id = u64::from_be_bytes([
-            result.bytes[24], result.bytes[25], result.bytes[26], result.bytes[27],
-            result.bytes[28], result.bytes[29], result.bytes[30], result.bytes[31],
-        ]);
-        assert_eq!(asset_id, 1);
-
-        let asset = registry.get_asset(asset_id).unwrap();
-        assert_eq!(asset.symbol, "TEST");
-        assert_eq!(asset.name, "Test Token");
-        assert_eq!(asset.decimals, 18);
-        assert_eq!(asset.issuer, caller);
-        assert_eq!(asset.max_supply, 1_000_000);
-
-        crate::CURRENT_CALLER.with(|c| c.set(None));
-    }
-
-    // ── AssetPrecompile tests (stateful, using HashMapStorageProvider) ──
-
     #[test]
     fn test_asset_precompile_get_balance() {
         let mut provider = crate::storage::HashMapStorageProvider::new(1_000_000);

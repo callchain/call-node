@@ -16,6 +16,7 @@ use call_protocol::transaction::FeeParams;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use call_consensus::exec::evm_instructions;
 
 // ── Genesis Types ─────────────────────────────────────────────────────
 
@@ -330,10 +331,8 @@ impl GenesisExecutor {
                     .checked_add(*amount)
                     .ok_or_else(|| GenesisError::ExecutionFailed("supply overflow".into()))?;
 
-                // If asset is CALL (asset_id 1), also set EVM balance
-                if asset.asset_id == 1 {
-                    evm_state.set_balance(addr, U256::from(*amount));
-                }
+                // Seed EVM asset storage so get_balance reads from EVM state root
+                evm_instructions::seed_balance(evm_state, asset.asset_id, addr, *amount);
             }
 
             // Set protocol_supply to total distributed amount

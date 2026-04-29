@@ -293,7 +293,7 @@ mod tests {
         let limits = PoolLimits::default();
         assert_eq!(limits.max_protocol_txs, 50_000);
         assert_eq!(limits.max_evm_txs, 100_000);
-        assert_eq!(limits.max_per_address, 256);
+        assert_eq!(limits.max_per_address, 2000);
         assert_eq!(limits.lifetime_blocks, 72);
     }
 

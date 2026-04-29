@@ -116,6 +116,13 @@ async fn test_invalid_tx_causes_block_failure() {
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }
+    // Seed EVM storage with CALL balance for fees
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+        );
+    }
 
     // Valid tx should work
     node.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
@@ -138,6 +145,13 @@ async fn test_double_nonce_rejected() {
     }
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 20_000).unwrap();
+    }
+    // Seed EVM storage with CALL balance for fees
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 20_000,
+        );
     }
 
     // Two txs with same nonce but different content

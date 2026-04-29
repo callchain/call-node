@@ -14,7 +14,7 @@
 use alloy_primitives::address;
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
-use crate::{current_caller, state_hook, state_hook::with_account_state};
+// (no crate imports needed — switch is disabled)
 
 #[allow(dead_code)]
 pub(crate) const SWITCH_ADDRESS: alloy_primitives::Address =
@@ -50,37 +50,6 @@ fn decode_u128(input: &[u8], slot_offset: usize) -> Option<u128> {
     Some(u128::from_be_bytes(buf))
 }
 
-fn require_caller() -> Result<alloy_primitives::Address, PrecompileError> {
-    current_caller()
-        .ok_or_else(|| PrecompileError::Other("caller not available".into()))
-}
-
-fn check_compliance(
-    asset_id: u64,
-    addr: &alloy_primitives::Address,
-) -> Result<(), PrecompileError> {
-    let policy_id = state_hook::with_registry(|reg| {
-        reg.get_asset(asset_id).map(|a| a.compliance_policy)
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("asset registry not available".into())
-    })?
-    .ok_or_else(|| {
-        PrecompileError::Other("asset not found".into())
-    })?;
-
-    state_hook::with_compliance(|engine| {
-        engine
-            .check_compliance_by_policy_id(addr, policy_id)
-            .map_err(|e| {
-                PrecompileError::Other(format!("compliance check failed: {e}").into())
-            })
-    })
-    .ok_or_else(|| {
-        PrecompileError::Other("compliance engine not available".into())
-    })?
-}
-
 // ── Switch precompile entry point ─────────────────────────────────────
 
 pub fn switch_precompile_fn(input: &[u8], _gas_limit: u64) -> PrecompileResult {
@@ -97,136 +66,6 @@ pub fn switch_precompile_fn(input: &[u8], _gas_limit: u64) -> PrecompileResult {
         "switch precompile is disabled: atomic protocol/EVM dual-write not yet implemented"
             .into(),
     ))
-}
-
-// ── switchToEvm(uint64 assetId, address to, uint256 amount) ───────────
-
-fn switch_to_evm(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 30000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 100 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let _to = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid to address".into())
-    })?;
-    let amount = decode_u128(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid amount".into())
-    })?;
-
-    let caller = require_caller()?;
-
-    // Asset must exist and be active
-    let asset = state_hook::with_registry(|reg| reg.get_asset(asset_id).cloned())
-        .ok_or_else(|| PrecompileError::Other("asset registry not available".into()))?
-        .ok_or_else(|| PrecompileError::Other("asset not found".into()))?;
-
-    if asset.status != call_protocol::registry::AssetStatus::Active {
-        return Err(PrecompileError::Other("asset is not active".into()));
-    }
-
-    // Compliance check
-    check_compliance(asset_id, &caller)?;
-    check_compliance(asset_id, &_to)?;
-
-    // Deduct protocol balance from caller
-    with_account_state(|acc| {
-        acc.deduct_balance(asset_id, caller, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| PrecompileError::Other("account state not available".into()))
-    .and_then(|r| r)?;
-
-    // Track EVM supply increase
-    state_hook::with_registry(|reg| {
-        reg.add_evm_supply(asset_id, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| PrecompileError::Other("asset registry not available".into()))
-    .and_then(|r| r)?;
-
-    // TODO: Mint wrapped ERC-20 tokens on EVM side.
-    // This requires EVM state access which is not available through the
-    // standard precompile function signature. Future work: special-case
-    // this precompile in CallPrecompiles::run to manipulate the revm
-    // journal directly, or wire an EvmExecutor callback through StateHookGuard.
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
-}
-
-// ── switchToProtocol(uint64 assetId, address to, uint256 amount) ──────
-
-fn switch_to_protocol(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS_COST: u64 = 30000;
-    if gas_limit < GAS_COST {
-        return Err(PrecompileError::OutOfGas);
-    }
-    if input.len() < 100 {
-        return Err(PrecompileError::Other("invalid input".into()));
-    }
-
-    let asset_id = decode_u64(input, 4).ok_or_else(|| {
-        PrecompileError::Other("invalid asset_id".into())
-    })?;
-    let to = decode_address(input, 36).ok_or_else(|| {
-        PrecompileError::Other("invalid to address".into())
-    })?;
-    let amount = decode_u128(input, 68).ok_or_else(|| {
-        PrecompileError::Other("invalid amount".into())
-    })?;
-
-    let _caller = require_caller()?;
-
-    // Asset must exist and be active
-    let asset = state_hook::with_registry(|reg| reg.get_asset(asset_id).cloned())
-        .ok_or_else(|| PrecompileError::Other("asset registry not available".into()))?
-        .ok_or_else(|| PrecompileError::Other("asset not found".into()))?;
-
-    if asset.status != call_protocol::registry::AssetStatus::Active {
-        return Err(PrecompileError::Other("asset is not active".into()));
-    }
-
-    // Compliance check for recipient
-    check_compliance(asset_id, &to)?;
-
-    // Track EVM supply decrease
-    state_hook::with_registry(|reg| {
-        reg.sub_evm_supply(asset_id, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| PrecompileError::Other("asset registry not available".into()))
-    .and_then(|r| r)?;
-
-    // Credit protocol balance to recipient
-    with_account_state(|acc| {
-        acc.credit_balance(asset_id, to, amount)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))
-    })
-    .ok_or_else(|| PrecompileError::Other("account state not available".into()))
-    .and_then(|r| r)?;
-
-    // TODO: Burn wrapped ERC-20 tokens on EVM side.
-    // The caller is expected to have burned their EVM tokens (e.g. via
-    // WrappedToken.bridgeBurn) before or alongside calling this precompile.
-    // Atomic dual-write requires EVM state access from the precompile context.
-
-    Ok(PrecompileOutput {
-        bytes: alloy_primitives::Bytes::new(),
-        gas_used: GAS_COST,
-        gas_refunded: 0,
-        reverted: false,
-    })
 }
 
 #[cfg(test)]

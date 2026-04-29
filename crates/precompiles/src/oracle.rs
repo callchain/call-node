@@ -1,144 +1,13 @@
 //! Oracle precompile at 0x101 (per spec §25.4)
 //!
-//! Functions: getPrice(), getTWAP(), isStale(), getOracleStatus()
+//! Functions: getPrice(), getTWAP(), isStale(), submitPrice()
 
-use call_primitives::{AssetId, PricePair};
-use call_oracle::OracleManager;
 use alloy_primitives::address;
-use std::sync::{Arc, RwLock};
 
 /// Precompile address
 #[allow(dead_code)]
 pub(crate) const ORACLE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000101");
-
-/// Deprecated: live oracle was accessed via OnceLock; now OraclePrecompile
-/// reads directly from EVM storage through StorageCtx.
-#[deprecated(note = "oracle reads from EVM storage; OnceLock no longer used")]
-pub fn set_live_oracle(_oracle: Arc<RwLock<OracleManager>>) {}
-
-/// Deprecated: always returns None. Oracle state is in EVM storage.
-#[deprecated(note = "oracle reads from EVM storage; OnceLock no longer used")]
-pub fn get_live_oracle() -> Option<Arc<RwLock<OracleManager>>> {
-    None
-}
-
-/// Price entry for an asset (legacy, used by precompile)
-#[derive(Debug, Clone)]
-pub struct OraclePrice {
-    pub price: u128,
-    pub timestamp: u64,
-    pub block_number: u64,
-}
-
-/// Oracle status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OracleStatus {
-    Active,
-    Stale,
-    Disabled,
-}
-
-/// Oracle state (wraps OracleManager for precompile access)
-#[derive(Debug)]
-pub struct OracleState {
-    manager: OracleManager,
-    _stale_threshold_secs: u64,
-}
-
-impl Default for OracleState {
-    fn default() -> Self {
-        Self::new(3600)
-    }
-}
-
-impl OracleState {
-    pub fn new(stale_threshold_secs: u64) -> Self {
-        let config = call_oracle::OracleConfig {
-            staleness_secs: stale_threshold_secs,
-            ..Default::default()
-        };
-        Self {
-            manager: OracleManager::new(config),
-            _stale_threshold_secs: stale_threshold_secs,
-        }
-    }
-
-    /// Get current aggregated price for an asset (implicitly quoted in USD).
-    pub fn get_price(&self, asset_id: AssetId) -> Option<OraclePrice> {
-        self.manager.get_price_by_asset(asset_id).map(|agg| OraclePrice {
-            price: agg.median_price,
-            timestamp: agg.timestamp,
-            block_number: agg.block_number,
-        })
-    }
-
-    /// Get current aggregated price for a specific pair.
-    pub fn get_price_for_pair(&self, pair: PricePair) -> Option<OraclePrice> {
-        self.manager.get_price(pair).map(|agg| OraclePrice {
-            price: agg.median_price,
-            timestamp: agg.timestamp,
-            block_number: agg.block_number,
-        })
-    }
-
-    /// Get TWAP for an asset (implicitly quoted in USD).
-    pub fn get_twapped(&self, asset_id: AssetId, current_timestamp: u64) -> Option<u128> {
-        self.manager.get_twap_by_asset(asset_id, current_timestamp)
-    }
-
-    /// Get TWAP for a specific pair.
-    pub fn get_twapped_for_pair(&self, pair: PricePair, current_timestamp: u64) -> Option<u128> {
-        self.manager.get_twap(pair, current_timestamp)
-    }
-
-    /// Check if price is stale for an asset (implicitly quoted in USD).
-    pub fn is_stale(&self, asset_id: AssetId, current_timestamp: u64) -> bool {
-        self.manager.is_stale_by_asset(asset_id, current_timestamp)
-    }
-
-    /// Check if price is stale for a specific pair.
-    pub fn is_stale_for_pair(&self, pair: PricePair, current_timestamp: u64) -> bool {
-        self.manager.is_stale(pair, current_timestamp)
-    }
-
-    /// Get oracle status for an asset (implicitly quoted in USD).
-    pub fn get_oracle_status(&self, asset_id: AssetId, current_timestamp: u64) -> OracleStatus {
-        match self.manager.get_price_by_asset(asset_id) {
-            None => OracleStatus::Disabled,
-            Some(_) => {
-                if self.is_stale(asset_id, current_timestamp) {
-                    OracleStatus::Stale
-                } else {
-                    OracleStatus::Active
-                }
-            }
-        }
-    }
-
-    /// Submit a price directly, bypassing the full validation pipeline.
-    /// Used for testing and legacy integrations.
-    pub fn submit_price(
-        &mut self,
-        asset_id: AssetId,
-        price: u128,
-        timestamp: u64,
-        block_number: u64,
-    ) {
-        self.manager
-            .record_direct_price_by_asset(asset_id, price, timestamp, block_number);
-    }
-
-    /// Access the underlying manager for advanced operations
-    pub fn manager(&self) -> &OracleManager {
-        &self.manager
-    }
-
-    /// Access the underlying manager mutably
-    pub fn manager_mut(&mut self) -> &mut OracleManager {
-        &mut self.manager
-    }
-}
 
 // ── OraclePrecompile (stateful, uses StorageCtx) ──────────────────────
 
@@ -335,35 +204,6 @@ impl StatefulPrecompile for OraclePrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_oracle_precompile_get_price() {
-        let mut state = OracleState::new(3600);
-        state.submit_price(1, 2_000_000, 1000, 100);
-        assert_eq!(state.get_price(1).map(|p| p.price), Some(2_000_000));
-        assert!(state.get_price(999).is_none());
-    }
-
-    #[test]
-    fn test_oracle_precompile_get_twapped() {
-        let mut state = OracleState::new(3600);
-        state.submit_price(1, 1_000_000, 900, 90);
-        state.submit_price(1, 2_000_000, 1000, 100);
-        // TWAP with current_ts=1100:
-        // Entry 0: price=1_000_000, duration = 1000 - 900 = 100
-        // Entry 1: price=2_000_000, duration = 1100 - 1000 = 100
-        // TWAP = (1_000_000*100 + 2_000_000*100) / 200 = 1_500_000
-        let twap = state.get_twapped(1, 1100).unwrap();
-        assert_eq!(twap, 1_500_000);
-    }
-
-    #[test]
-    fn test_oracle_precompile_is_stale() {
-        let mut state = OracleState::new(3600);
-        state.submit_price(1, 2_000_000, 1000, 100);
-        assert!(!state.is_stale(1, 2000));
-        assert!(state.is_stale(1, 5000));
-    }
 
     // ── OraclePrecompile tests (stateful, using HashMapStorageProvider) ──
 

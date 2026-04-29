@@ -346,6 +346,7 @@ mod tests {
     use super::*;
     use call_primitives::{Address, ProtocolVersion};
     use call_protocol::transaction::{AuthScheme, GasConfig};
+    use call_consensus::exec::evm_instructions;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -601,18 +602,23 @@ mod tests {
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
         evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_instructions::seed_balance(
+            &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000_000,
+        );
 
-        // Deploy wrapped token contract for asset 1
+        // Deploy wrapped token contract for asset 1 (use separate deployer to avoid nonce conflict)
+        let deployer = test_addr(99);
+        evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000_000u128));
         let deploy_executor = call_evm::EvmExecutor::new(1);
         let (contract_addr, deploy_result) = deploy_executor
             .deploy_erc20_template(
-                test_sender(),
+                deployer,
                 &mut evm_state,
                 "CALL",
                 "CALL",
                 18,
                 call_protocol::BRIDGE_EVM_ADDRESS,
-                test_sender(),
+                deployer,
                 call_primitives::U256::ZERO,
                 call_primitives::U256::from(1u64),
             )

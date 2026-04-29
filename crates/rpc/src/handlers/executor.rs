@@ -281,7 +281,9 @@ pub fn wire_governance_executor(state: &Arc<RpcState>) {
     let balance_source = {
         let state = Arc::clone(state);
         Arc::new(move |addr: Address| {
-            state.balance_state.read().ok().map(|s| s.balances.get_balance(1, &addr)).unwrap_or(0)
+            state.evm_state.read().ok().map(|s| {
+                call_consensus::exec::evm_instructions::read_balance(&s, call_protocol::CALL_ASSET_ID, addr)
+            }).unwrap_or(0)
         })
     };
     if let Ok(mut gov) = state.governance.write() {

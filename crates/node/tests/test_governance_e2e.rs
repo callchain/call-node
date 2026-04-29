@@ -63,6 +63,13 @@ fn test_governance_proposal_full_lifecycle() {
             .set_balance(1, proposer, one_million_call() * 3)
             .unwrap();
     }
+    // Seed EVM storage for proposer fees
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, proposer, one_million_call() * 3,
+        );
+    }
 
     // Fund validator with enough CALL for voting gas
     {
@@ -73,6 +80,13 @@ fn test_governance_proposal_full_lifecycle() {
             .balances
             .set_balance(1, validator_addr, one_million_call())
             .unwrap();
+    }
+    // Seed EVM storage for validator fees
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, validator_addr, one_million_call(),
+        );
     }
 
     // Register validator in governance manager and use short periods for testing

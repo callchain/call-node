@@ -1706,6 +1706,7 @@ name = "call-consensus"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-primitives",
  "alloy-rlp",
  "bytes",
  "call-agent",
@@ -1727,6 +1728,8 @@ dependencies = [
  "ed25519-dalek",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "revm",
+ "revm-precompile",
  "serde",
  "serde_bytes",
  "serde_json",

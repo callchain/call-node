@@ -8,6 +8,7 @@ mod tests {
     use call_evm::EvmState;
     use call_bridge::BridgeStateManager;
     use call_consensus::ValidatorStateManager;
+    use call_consensus::exec::evm_instructions;
     use call_agent::{AgentRegistry, AgentBalances};
     use call_shielded::ShieldedState;
     use call_transaction_pool::Mempool;
@@ -114,8 +115,11 @@ mod tests {
         let addr = test_addr(1);
         let asset_id: AssetId = 1;
 
-        // Set balance
-        state.balance_state.write().unwrap().balances.set_balance(asset_id, addr, 5000).unwrap();
+        // Set balance in EVM storage
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_balance(&mut *evm, asset_id, addr, 5000);
+        }
 
         let balance = state.get_balance(asset_id, &addr);
         assert_eq!(balance, 5000);
@@ -405,8 +409,11 @@ mod tests {
         let to = test_addr(2);
         let asset_id: AssetId = 1;
 
-        // Set up protocol balance (not required for mempool insertion, but harmless)
-        state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 10_000).unwrap();
+        // Set up balance in EVM storage
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_balance(&mut *evm, asset_id, sender, 10_000);
+        }
 
         // Build tx to compute canonical hash for signing
         let tx = call_protocol::transaction::ProtocolTransaction {
@@ -466,7 +473,10 @@ mod tests {
         let asset_id: AssetId = 1;
 
         // Low balance — but mempool insertion does not validate balance
-        state.balance_state.write().unwrap().balances.set_balance(asset_id, sender, 100).unwrap();
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_balance(&mut *evm, asset_id, sender, 100);
+        }
 
         // Build tx and sign it
         let tx = call_protocol::transaction::ProtocolTransaction {

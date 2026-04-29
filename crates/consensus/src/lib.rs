@@ -7,13 +7,13 @@ pub mod bft;
 pub mod block;
 pub mod block_cache;
 pub mod digest;
+pub mod evm_storage_provider;
 pub mod exec;
 pub mod fork;
 pub mod proposer;
 pub mod simplex;
 pub mod validator;
-pub mod validator_precompile;
-pub mod bridge_precompile;
+
 
 #[cfg(test)]
 mod tests;

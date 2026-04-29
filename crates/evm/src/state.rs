@@ -92,7 +92,7 @@ impl EvmAccount {
 /// EVM state database
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EvmState {
-    pub(crate) accounts: HashMap<Address, EvmAccount>,
+    pub accounts: HashMap<Address, EvmAccount>,
 }
 
 impl EvmState {
@@ -125,9 +125,7 @@ impl EvmState {
     }
 
     pub fn increment_nonce(&mut self, address: Address) {
-        if let Some(acc) = self.accounts.get_mut(&address) {
-            acc.nonce += 1;
-        }
+        self.accounts.entry(address).or_default().nonce += 1;
     }
 
     pub fn get_storage(&self, address: &Address, key: U256) -> U256 {

@@ -59,6 +59,12 @@ async fn test_high_throughput_many_transactions() {
 
     // Fund sender with enough for 1000 transfers
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+        );
+    }
 
     // Inject 1000 transactions
     let tx_count = 1000;
@@ -97,6 +103,12 @@ fn test_mempool_capacity_under_pressure() {
     for _ in 0..num_senders {
         let kp = test_keypair();
         node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 10_000_000).unwrap();
+        {
+            let mut evm = node.state.evm_state.write().unwrap();
+            call_consensus::exec::evm_instructions::seed_balance(
+                &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 10_000_000,
+            );
+        }
         sender_keys.push(kp);
     }
 
@@ -142,6 +154,12 @@ async fn test_base_fee_under_sustained_load() {
     }
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000_000).unwrap();
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000_000,
+        );
+    }
 
     let initial_fee = node.base_fee();
 
@@ -170,6 +188,12 @@ async fn test_no_double_spend_concurrent_nonce() {
     }
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+        );
+    }
 
     // Register asset 1 for transfers
     {
@@ -185,9 +209,8 @@ async fn test_no_double_spend_concurrent_nonce() {
     node.produce_block(1_000_000);
 
     // Only one transfer should have executed (nonce dedup)
-    let state = node.state.balance_state.read().unwrap();
-    let received_10 = state.get_balance(1, &test_addr(10));
-    let received_20 = state.get_balance(1, &test_addr(20));
+    let received_10 = node.balance(1, &test_addr(10));
+    let received_20 = node.balance(1, &test_addr(20));
 
     // Exactly one of them received funds
     assert!((received_10 == 500 && received_20 == 0) || (received_10 == 0 && received_20 == 500));
@@ -207,6 +230,12 @@ async fn test_final_state_consistency_after_load() {
 
     let initial_balance = 200_000_000u128;
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, initial_balance).unwrap();
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, initial_balance,
+        );
+    }
 
     // Register asset 1 for transfers
     {
@@ -226,17 +255,16 @@ async fn test_final_state_consistency_after_load() {
     node.produce_block(1_000_000);
 
     // Verify all recipients received funds
-    let state = node.state.balance_state.read().unwrap();
     let mut total_received = 0u128;
     for i in 0..20 {
-        total_received += state.get_balance(1, &test_addr(50 + i as u8));
+        total_received += node.balance(1, &test_addr(50 + i as u8));
     }
 
     // Total received should be num_txs * transfer_amount
     assert_eq!(total_received, num_txs as u128 * transfer_amount, "all transfers should have executed");
 
     // Sender balance should be reduced by total transferred
-    let sender_balance = state.get_balance(1, &sender);
+    let sender_balance = node.balance(1, &sender);
     assert!(sender_balance <= initial_balance - total_received, "sender should have sent funds");
 }
 
@@ -257,6 +285,12 @@ async fn test_multi_sender_stress() {
     for _ in 0..20 {
         let kp = test_keypair();
         node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 20_000_000).unwrap();
+        {
+            let mut evm = node.state.evm_state.write().unwrap();
+            call_consensus::exec::evm_instructions::seed_balance(
+                &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 20_000_000,
+            );
+        }
         sender_keys.push(kp);
     }
 
@@ -279,8 +313,7 @@ async fn test_multi_sender_stress() {
     }
 
     // Verify some recipients received funds
-    let state = node.state.balance_state.read().unwrap();
-    let any_received = state.get_balance(1, &test_addr(200)) > 0;
+    let any_received = node.balance(1, &test_addr(200)) > 0;
     assert!(any_received, "at least some recipients should have received funds");
 }
 
@@ -298,6 +331,12 @@ async fn test_high_volume_block_production() {
 
     // Enough CALL for gas + transfers (200 txs * ~110k gas each + 200 * 10 transfer)
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 50_000_000).unwrap();
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 50_000_000,
+        );
+    }
 
     // Register asset 1 for transfers
     {
@@ -319,10 +358,9 @@ async fn test_high_volume_block_production() {
     assert_eq!(node.consensus_height(), 1);
 
     // Verify some recipients received funds
-    let state = node.state.balance_state.read().unwrap();
     let mut any_received = false;
     for i in 0..50 {
-        if state.get_balance(1, &test_addr(50 + i as u8)) > 0 {
+        if node.balance(1, &test_addr(50 + i as u8)) > 0 {
             any_received = true;
             break;
         }
@@ -343,6 +381,12 @@ async fn test_rapid_block_production() {
     }
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 600_000_000).unwrap();
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 600_000_000,
+        );
+    }
 
     // Produce 500 blocks rapidly (no real delay)
     for i in 0..500 {

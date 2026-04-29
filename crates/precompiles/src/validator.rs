@@ -1,14 +1,8 @@
-//! Validator precompile at 0x204 — fallback stub
+//! Validator precompile at 0x204 — stub
 //!
-//! The real implementation lives in `call-consensus` at
-//! `crates/consensus/src/validator_precompile.rs` and is registered at node
-//! startup via `register_validator_precompile()`.  That registration replaces
-//! this stub in the OnceLock, so the full `stake` / `unstake` /
-//! `claimUnbonded` logic is used in production and tests that wire up the
-//! consensus crate.
-//!
-//! This file only exists to provide a compile-time fallback (returning
-//! "not yet implemented") when no external implementation is registered.
+//! The full validator precompile implementation is pending migration to
+//! the stateful pattern. This stub returns "not yet implemented" for
+//! all calls.
 
 use alloy_primitives::address;
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -17,18 +11,17 @@ use revm_precompile::{PrecompileError, PrecompileResult};
 pub(crate) const VALIDATOR_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000204");
 
-/// Fallback validator precompile entry point.
+/// Stub validator precompile entry point.
 ///
-/// Never invoked at runtime because `call-consensus` registers its own
-/// implementation during node startup. Returns an error so callers get
-/// immediate feedback if the registration was accidentally skipped.
+/// Returns an error so callers get immediate feedback that the
+/// validator precompile is not yet implemented.
 pub fn validator_precompile_fn(_input: &[u8], gas_limit: u64) -> PrecompileResult {
     const GAS_COST: u64 = 20000;
     if gas_limit < GAS_COST {
         return Err(PrecompileError::OutOfGas);
     }
     Err(PrecompileError::Other(
-        "validator precompile not registered — call register_validator_precompile()".into(),
+        "validator precompile not yet implemented".into(),
     ))
 }
 

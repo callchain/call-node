@@ -196,14 +196,13 @@ async fn test_light_get_balance_proof() {
     let asset_id = 7u64;
     let balance = 12_345u128;
 
-    // Set balance directly
-    node.state
-        .balance_state
-        .write()
-        .unwrap()
-        .balances
-        .set_balance(asset_id, addr, balance)
-        .unwrap();
+    // Set balance in EVM storage
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, asset_id, addr, balance,
+        );
+    }
 
     let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state))
         .expect("build rpc module");

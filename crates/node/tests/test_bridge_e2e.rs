@@ -9,6 +9,7 @@ use e2e::harness::*;
 use call_primitives::{Address, ExecutionStatus};
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
+use call_consensus::exec::evm_instructions;
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -189,6 +190,13 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
         .balances
         .set_balance(1, sender, 1_000_000_000)
         .unwrap();
+
+    // Seed EVM storage with CALL balance for fees
+    {
+        let mut evm = node.state.evm_state.write().unwrap();
+        evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
+    }
 
     // Stake sender as validator and register in validator state
     {

@@ -19,7 +19,7 @@ use std::collections::HashSet;
 
 use crate::validator::{ConsensusError, ValidatorStateManager};
 use crate::{ForkManager, RollbackPlan};
-use crate::exec::{agent, asset, bridge, validator, rollback};
+use crate::exec::{agent, asset, bridge, evm_instructions, rollback, validator};
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
 
@@ -316,59 +316,6 @@ impl Block {
         ctx: &mut BlockContext,
         subsystems: &mut Subsystems,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        // Inject protocol state into precompile hooks so EVM precompiles
-        // can access account state, registry, compliance, etc.
-        let _state_hook = unsafe {
-            call_precompiles::state_hook::StateHookGuard::from_raw(
-                state.account,
-                state.registry,
-                state.compliance,
-                state.shielded_state,
-                subsystems
-                    .oracle
-                    .as_mut()
-                    .map_or(std::ptr::null_mut(), |o| *o as *mut _),
-                subsystems
-                    .governance
-                    .as_mut()
-                    .map_or(std::ptr::null_mut(), |g| *g as *mut _),
-            )
-        };
-
-        // Inject validator state into precompile hooks for 0x204
-        let _validator_hook = subsystems.validator_state.as_mut().map(|vs| {
-            crate::validator_precompile::ValidatorStateHookGuard::new(
-                vs,
-                ctx.current_block_height,
-            )
-        });
-
-        // Inject agent state into precompile hooks for 0x209
-        let _agent_hook = if let (Some(ar), Some(ab)) = (
-            subsystems.agent_registry.as_mut(),
-            subsystems.agent_balances.as_mut(),
-        ) {
-            Some(call_agent::precompile::AgentStateHookGuard::new(
-                ar,
-                ab,
-                ctx.fee_params.base_fee,
-                ctx.current_block_height,
-            ))
-        } else {
-            None
-        };
-
-        // Inject bridge state into precompile hooks for 0x103
-        let _bridge_hook = unsafe {
-            crate::bridge_precompile::BridgeStateHookGuard::from_raw(
-                state.bridge_state as *mut _,
-                ctx.bridge_config.map_or(std::ptr::null(), |c| c as *const _),
-                ctx.validators.map_or(std::ptr::null(), |v| v.as_ptr()),
-                ctx.validators.map_or(0, |v| v.len()),
-                ctx.current_block_height,
-            )
-        };
-
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
         let max_evm_gas = 30_000_000u64; // default block gas limit (~30M for Ethereum-compatible)
@@ -487,8 +434,8 @@ impl Block {
 
         // Step 2: Protocol transactions
         for tx in &self.protocol_txs {
-            // Validate nonce against state (nonce consumed on inclusion)
-            if let Err(_e) = state.account.validate_nonce(&tx.sender, tx.nonce) {
+            // Validate nonce against EVM state (nonce consumed on inclusion)
+            if state.evm_state.get_nonce(&tx.sender) != tx.nonce {
                 // Nonce mismatch or already used — skip this tx
                 continue;
             }
@@ -519,59 +466,24 @@ impl Block {
             )
             .min(tx.max_fee);
 
-            // Unified gas balance: auto-bridge EVM→Protocol if needed
-            let mut bridged_from_evm = 0u128;
-            let protocol_balance = state.account.get_balance(call_protocol::CALL_ASSET_ID, &tx.sender);
-            if protocol_balance < fee {
-                let needed = fee - protocol_balance;
-                let evm_balance_u128: u128 =
-                    state.evm_state.get_balance(&tx.sender).try_into().unwrap_or(0);
-                if evm_balance_u128 < needed {
-                    continue; // insufficient unified gas
-                }
-                let current_evm = state.evm_state.get_balance(&tx.sender);
-                state.evm_state.set_balance(
-                    tx.sender,
-                    current_evm - call_evm::U256::from(needed),
-                );
-                if state.account
-                    .credit_balance(call_protocol::CALL_ASSET_ID, tx.sender, needed)
-                    .is_err()
-                {
-                    state.evm_state.set_balance(tx.sender, current_evm);
-                    continue;
-                }
-                bridged_from_evm = needed;
+            // Check fee balance in EVM storage
+            let fee_asset_id = match tx.fee_currency {
+                call_primitives::FeeCurrency::Call => call_protocol::CALL_ASSET_ID,
+                call_primitives::FeeCurrency::Stablecoin(asset_id) => asset_id,
+            };
+            let fee_balance = evm_instructions::read_balance(state.evm_state, fee_asset_id, tx.sender);
+            if fee_balance < fee {
+                continue; // insufficient fee balance
             }
 
-            // Deduct gas fee from protocol balance
-            let gas_ok = match tx.fee_currency {
-                call_primitives::FeeCurrency::Call => state.account
-                    .deduct_balance(call_protocol::CALL_ASSET_ID, tx.sender, fee)
-                    .is_ok(),
-                call_primitives::FeeCurrency::Stablecoin(asset_id) => state.account
-                    .deduct_balance(asset_id, tx.sender, fee)
-                    .is_ok(),
-            };
-            if !gas_ok {
-                // Rollback EVM bridge if we bridged
-                if bridged_from_evm > 0 {
-                    let current_evm = state.evm_state.get_balance(&tx.sender);
-                    state.evm_state.set_balance(
-                        tx.sender,
-                        current_evm + call_evm::U256::from(bridged_from_evm),
-                    );
-                    let _ = state.account.deduct_balance(
-                        call_protocol::CALL_ASSET_ID,
-                        tx.sender,
-                        bridged_from_evm,
-                    );
-                }
-                continue;
-            }
+            // Deduct gas fee from EVM storage
+            let new_fee_balance = fee_balance
+                .checked_sub(fee)
+                .expect("fee balance checked above");
+            evm_instructions::seed_balance(state.evm_state, fee_asset_id, tx.sender, new_fee_balance);
 
             // Increment nonce (consumed on inclusion, regardless of execution result)
-            state.account.increment_nonce(tx.sender);
+            state.evm_state.increment_nonce(tx.sender);
 
             // Separate instructions by type: bridge, agent, validator, asset, regular
             let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
@@ -591,10 +503,14 @@ impl Block {
                 .iter()
                 .cloned()
                 .partition(|i| asset::is_asset_instruction(i));
-            let (rollback_instrs, other_instrs): (Vec<_>, Vec<_>) = non_asset
+            let (rollback_instrs, non_rollback): (Vec<_>, Vec<_>) = non_asset
                 .iter()
                 .cloned()
                 .partition(|i| rollback::is_rollback_instruction(i));
+            let (evm_instrs, other_instrs): (Vec<_>, Vec<_>) = non_rollback
+                .iter()
+                .cloned()
+                .partition(|i| evm_instructions::is_evm_instruction(i));
 
             // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
             let balance_snapshot = state.account.clone();
@@ -605,6 +521,19 @@ impl Block {
             let mut tx_agent_events = Vec::new();
 
             let exec_result = (|| -> Result<(), ConsensusError> {
+                // Execute EVM instructions (Transfer, BatchTransfer, Approve, TransferFrom, Mint, Burn)
+                if !evm_instrs.is_empty() {
+                    for instr in &evm_instrs {
+                        let r = evm_instructions::execute_instruction_on_evm(
+                            instr,
+                            tx.sender,
+                            state.evm_state,
+                            Some(state.compliance),
+                        )?;
+                        tx_results.push(r);
+                    }
+                }
+
                 // Execute regular instructions via protocol engine (includes subsystems.governance)
                 if !other_instrs.is_empty() {
                     let results = execute_protocol_instructions(

@@ -1,5 +1,6 @@
 use crate::*;
 use crate::ForkManager;
+use crate::exec::evm_instructions;
 use call_primitives::{Address, BlockHash, Hash, ProtocolVersion, ExecutionStatus};
 use call_protocol::instructions::{Instruction, InstructionResult};
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
@@ -228,14 +229,18 @@ fn test_block_execution_order() {
         .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
         .unwrap();
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000_000u128));
     evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
     // Deploy wrapped token contract for asset 1
+    let deployer = test_addr(99);
+    evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000_000u128));
+    evm_state.create_account(deployer);
     let deploy_executor = call_evm::EvmExecutor::new(1);
     let (contract_addr, deploy_result) = deploy_executor
         .deploy_erc20_template(
-            sender,
+            deployer,
             &mut evm_state,
             "CALL",
             "CALL",
@@ -457,6 +462,7 @@ fn test_agent_instruction_emits_event() {
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     let bridge_config = call_bridge::BridgeConfig::default();
 
     let result = block
@@ -617,6 +623,7 @@ fn test_frozen_asset_rejects_bridge_to_evm() {
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     let bridge_config = call_bridge::BridgeConfig::default();
 
     let validators: Vec<Address> = vec![sender];
@@ -696,6 +703,7 @@ fn test_delisted_asset_rejects_bridge_to_protocol() {
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     let bridge_config = call_bridge::BridgeConfig::default();
 
@@ -785,6 +793,7 @@ fn test_evm_issuer_mint_success() {
     // Deploy ERC-20 contract first
     let executor = EvmExecutor::new(1);
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
     evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
     evm_state.create_account(deployer);
@@ -889,6 +898,7 @@ fn test_evm_issuer_mint_cap_enforcement() {
     // Deploy ERC-20 with small cap
     let executor = EvmExecutor::new(1);
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
     evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
     evm_state.create_account(deployer);
@@ -989,6 +999,7 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
 
     let executor = EvmExecutor::new(1);
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
     evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
     evm_state.create_account(deployer);
@@ -1087,6 +1098,7 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
 
     let executor = EvmExecutor::new(1);
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     let deployer = call_protocol::BRIDGE_EVM_ADDRESS;
     evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000u128));
     evm_state.create_account(deployer);
@@ -1233,6 +1245,7 @@ fn test_evm_issuer_mint_call_asset_rejected() {
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
+    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
 
     let result = block.execute(
         &mut ExecutionState::new(
