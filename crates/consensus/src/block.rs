@@ -6,9 +6,7 @@ use call_bridge::{BridgeOp, BridgeConfig};
 use call_crypto::keccak256;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_primitives::ExecutionStatus;
-use call_protocol::account::AccountState;
 use call_protocol::instructions::{Instruction, InstructionResult};
-use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::ProtocolTransaction;
 use call_protocol::FeeParams;
 use call_shielded::ShieldedState;
@@ -163,9 +161,6 @@ pub type EvmTx = Vec<u8>;
 
 /// Core mutable protocol state passed to every block execution.
 pub struct ExecutionState<'a> {
-    pub account: &'a mut AccountState,
-    pub registry: &'a mut AssetRegistry,
-    pub compliance: &'a mut call_protocol::compliance::ComplianceEngine,
     pub shielded_state: &'a mut ShieldedState,
     pub evm_state: &'a mut EvmState,
 }
@@ -181,20 +176,15 @@ pub struct BlockContext<'a> {
 /// Optional subsystem extensions. Each field is `None` when the subsystem
 /// is not active for the current execution context.
 pub struct Subsystems<'a> {
-    pub oracle: Option<&'a mut call_oracle::OracleManager>,
-    pub smart_accounts: Option<&'a call_protocol::smart_accounts::SmartAccountRegistry>,
     pub fork_manager: Option<&'a mut ForkManager>,
 }
 
 impl<'a> ExecutionState<'a> {
     pub fn new(
-        account: &'a mut AccountState,
-        registry: &'a mut AssetRegistry,
-        compliance: &'a mut call_protocol::compliance::ComplianceEngine,
         shielded_state: &'a mut ShieldedState,
         evm_state: &'a mut EvmState,
     ) -> Self {
-        Self { account, registry, compliance, shielded_state, evm_state }
+        Self { shielded_state, evm_state }
     }
 }
 
@@ -210,8 +200,6 @@ impl<'a> BlockContext<'a> {
 impl<'a> Subsystems<'a> {
     pub fn none() -> Self {
         Self {
-            oracle: None,
-            smart_accounts: None,
             fork_manager: None,
         }
     }
@@ -429,7 +417,7 @@ impl Block {
             }
 
             // Verify transaction signature before execution
-            if let Err(e) = tx.verify_signature_with_registry(subsystems.smart_accounts) {
+            if let Err(e) = tx.verify_signature() {
                 return Err(ConsensusError::InvalidBlock(format!(
                     "signature verification failed for tx from {:?}: {e}",
                     tx.sender
@@ -482,7 +470,6 @@ impl Block {
                 .partition(|i| rollback::is_rollback_instruction(i));
 
             // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
-            let account_snapshot = state.account.clone();
             let evm_snapshot = state.evm_state.clone();
             let shielded_snapshot = state.shielded_state.clone();
             let mut tx_results = Vec::new();
@@ -493,7 +480,6 @@ impl Block {
                         instr,
                         tx.sender,
                         state.evm_state,
-                        Some(state.compliance),
                         state.shielded_state,
                         ctx.current_block_height,
                         ctx.bridge_config,
@@ -527,9 +513,8 @@ impl Block {
             })();
 
             if let Err(e) = exec_result {
-                // Rollback account/EVM/shielded but nonce stays consumed.
+                // Rollback EVM/shielded but nonce stays consumed.
                 // Include the failed tx in the block with a Reverted result.
-                *state.account = account_snapshot;
                 *state.evm_state = evm_snapshot;
                 *state.shielded_state = shielded_snapshot;
                 result.protocol_tx_count += 1;
@@ -615,15 +600,10 @@ impl Block {
         }
 
         // Step 5: Oracle reward pool allocation from block fees
-        if let Some(oracle) = subsystems.oracle.as_mut() {
-            // Approximate total gas used: EVM gas + protocol txs * base gas per tx
-            let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
-            let total_fees = total_gas as u128 * ctx.fee_params.base_fee;
-            let oracle_share = total_fees * ctx.fee_params.oracle_fee_share_bps as u128 / 10_000;
-            oracle.add_reward(oracle_share);
-            // Note: clear_tracking is NOT called here — the caller must call it
-            // after processing outliers for slashing, otherwise outlier data is lost.
-        }
+        let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+        let total_fees = total_gas as u128 * ctx.fee_params.base_fee;
+        let oracle_share = total_fees * ctx.fee_params.oracle_fee_share_bps as u128 / 10_000;
+        evm_instructions::add_oracle_reward(state.evm_state, oracle_share);
 
         // Compute state root (EVM-only mode)
         result.state_root = compute_evm_state_root(state.evm_state);

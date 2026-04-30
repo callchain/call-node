@@ -18,7 +18,6 @@ use call_precompiles::{
 use call_shielded::ShieldedState;
 use call_precompiles::storage::storage_slot;
 use call_primitives::{Address, U256};
-use call_protocol::compliance::ComplianceEngine;
 use call_protocol::instructions::{Instruction, InstructionResult};
 
 use crate::{ConsensusError, STAKING_ESCROW};
@@ -83,7 +82,6 @@ pub fn execute_instruction_on_evm(
     instruction: &Instruction,
     sender: Address,
     evm_state: &mut EvmState,
-    compliance: Option<&ComplianceEngine>,
     shielded_state: &mut ShieldedState,
     current_block_height: u64,
     bridge_config: Option<&call_bridge::BridgeConfig>,
@@ -101,12 +99,12 @@ pub fn execute_instruction_on_evm(
                 m.validate()
                     .map_err(|e| ConsensusError::InvalidBlock(format!("memo: {e}")))?;
             }
-            exec_transfer(evm_state, *asset_id, sender, *to, *amount, compliance)
+            exec_transfer(evm_state, *asset_id, sender, *to, *amount)
         }
         Instruction::BatchTransfer {
             asset_id,
             payments,
-        } => exec_batch_transfer(evm_state, *asset_id, sender, payments, compliance),
+        } => exec_batch_transfer(evm_state, *asset_id, sender, payments),
         Instruction::Approve {
             asset_id,
             spender,
@@ -117,7 +115,7 @@ pub fn execute_instruction_on_evm(
             from,
             to,
             amount,
-        } => exec_transfer_from(evm_state, *asset_id, *from, *to, sender, *amount, compliance),
+        } => exec_transfer_from(evm_state, *asset_id, *from, *to, sender, *amount),
         Instruction::Mint {
             asset_id,
             to,
@@ -429,15 +427,19 @@ fn get_compliance_policy(evm_state: &EvmState, asset_id: u64) -> u8 {
 }
 
 fn check_address_compliance(
-    compliance: Option<&ComplianceEngine>,
+    evm_state: &EvmState,
     address: &Address,
     policy_id: u8,
 ) -> Result<(), ConsensusError> {
-    if let Some(ce) = compliance {
-        ce.check_compliance_by_policy_id(address, policy_id)
-            .map_err(|e| ConsensusError::InvalidBlock(format!("compliance: {e}")))?;
+    if policy_id == 0 {
+        return Ok(());
     }
-    Ok(())
+    let status = read_compliance_status(evm_state, *address, policy_id);
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(ConsensusError::InvalidBlock("compliance check failed".into()))
+    }
 }
 
 // ── Storage slot helpers (shared with precompiles) ────────────────────
@@ -1737,8 +1739,8 @@ fn exec_validator_unstake(
 
     // Pack (validator_id u64 | amount u128) into a single U256
     let mut packed = [0u8; 32];
-    packed[16..24].copy_from_slice(&stored_id.to_be_bytes());
-    packed[24..].copy_from_slice(&stake.to_be_bytes());
+    packed[8..16].copy_from_slice(&stored_id.to_be_bytes());
+    packed[16..32].copy_from_slice(&stake.to_be_bytes());
     evm_state.set_storage(
         VALIDATOR_ADDRESS,
         slot_unbonding(unbonding_idx),
@@ -1789,9 +1791,9 @@ fn exec_validator_claim_unbonded(
     let mut amount = 0u128;
     for i in 0..unbonding_count {
         let packed = evm_state.get_storage(&VALIDATOR_ADDRESS, slot_unbonding(i)).to_be_bytes::<32>();
-        let entry_id = u64::from_be_bytes(packed[16..24].try_into().unwrap());
+        let entry_id = u64::from_be_bytes(packed[8..16].try_into().unwrap());
         if entry_id == stored_id {
-            amount = u128::from_be_bytes(packed[24..].try_into().unwrap());
+            amount = u128::from_be_bytes(packed[16..32].try_into().unwrap());
             found = true;
             break;
         }
@@ -2126,7 +2128,6 @@ fn exec_transfer(
     from: Address,
     to: Address,
     amount: u128,
-    compliance: Option<&ComplianceEngine>,
 ) -> Result<InstructionResult, ConsensusError> {
     if amount == 0 {
         return Ok(InstructionResult::Success);
@@ -2134,8 +2135,8 @@ fn exec_transfer(
     check_asset_active(evm_state, asset_id)?;
 
     let policy_id = get_compliance_policy(evm_state, asset_id);
-    check_address_compliance(compliance, &from, policy_id)?;
-    check_address_compliance(compliance, &to, policy_id)?;
+    check_address_compliance(evm_state, &from, policy_id)?;
+    check_address_compliance(evm_state, &to, policy_id)?;
 
     let from_slot = slot_balance(asset_id, from);
     let from_bal = u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, from_slot));
@@ -2162,12 +2163,11 @@ fn exec_batch_transfer(
     asset_id: u64,
     from: Address,
     payments: &[call_protocol::instructions::PaymentEntry],
-    compliance: Option<&ComplianceEngine>,
 ) -> Result<InstructionResult, ConsensusError> {
     check_asset_active(evm_state, asset_id)?;
 
     let policy_id = get_compliance_policy(evm_state, asset_id);
-    check_address_compliance(compliance, &from, policy_id)?;
+    check_address_compliance(evm_state, &from, policy_id)?;
 
     let from_slot = slot_balance(asset_id, from);
     let mut from_bal = u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, from_slot));
@@ -2181,7 +2181,7 @@ fn exec_batch_transfer(
             m.validate()
                 .map_err(|e| ConsensusError::InvalidBlock(format!("memo: {e}")))?;
         }
-        check_address_compliance(compliance, &p.to, policy_id)?;
+        check_address_compliance(evm_state, &p.to, policy_id)?;
         from_bal = from_bal
             .checked_sub(amount)
             .ok_or_else(|| ConsensusError::InvalidBlock("insufficient balance".into()))?;
@@ -2223,7 +2223,6 @@ fn exec_transfer_from(
     to: Address,
     spender: Address,
     amount: u128,
-    compliance: Option<&ComplianceEngine>,
 ) -> Result<InstructionResult, ConsensusError> {
     if amount == 0 {
         return Ok(InstructionResult::Success);
@@ -2231,9 +2230,9 @@ fn exec_transfer_from(
     check_asset_active(evm_state, asset_id)?;
 
     let policy_id = get_compliance_policy(evm_state, asset_id);
-    check_address_compliance(compliance, &spender, policy_id)?;
-    check_address_compliance(compliance, &from, policy_id)?;
-    check_address_compliance(compliance, &to, policy_id)?;
+    check_address_compliance(evm_state, &spender, policy_id)?;
+    check_address_compliance(evm_state, &from, policy_id)?;
+    check_address_compliance(evm_state, &to, policy_id)?;
 
     // Check and spend allowance
     let allowance_slot = slot_allowance(asset_id, from, spender);
@@ -2684,6 +2683,27 @@ pub fn read_gov_paused(evm_state: &EvmState) -> bool {
 /// Read compliance status for an address under a policy from EVM storage.
 pub fn read_compliance_status(evm_state: &EvmState, addr: Address, policy_id: u8) -> u8 {
     evm_state.get_storage(&COMPLIANCE_ADDRESS, slot_compliance(addr, policy_id)).to_be_bytes::<32>()[31]
+}
+
+// ── Oracle reward pool (stored in EVM storage) ────────────────────────
+
+fn slot_oracle_reward_pool() -> U256 {
+    storage_slot(&[b"oracle_reward_pool"])
+}
+
+/// Read the oracle reward pool from EVM storage.
+pub fn read_oracle_reward_pool(evm_state: &EvmState) -> u128 {
+    evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle_reward_pool())
+        .to_be_bytes::<32>()[16..32]
+        .try_into()
+        .map(u128::from_be_bytes)
+        .unwrap_or(0)
+}
+
+/// Add to the oracle reward pool in EVM storage.
+pub fn add_oracle_reward(evm_state: &mut EvmState, amount: u128) {
+    let current = read_oracle_reward_pool(evm_state);
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_reward_pool(), u128_to_u256(current + amount));
 }
 
 /// Seed validator state directly into EVM storage (for tests / genesis).

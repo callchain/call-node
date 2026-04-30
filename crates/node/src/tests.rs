@@ -577,10 +577,7 @@
             let result = {
                 let mut s = node.state.write_all();
                 block.execute(
-                    &mut ExecutionState::new(
-                        &mut s.balances, &mut s.registry, &mut s.compliance,
-                        &mut s.shielded, &mut s.evm,
-                    ),
+                    &mut ExecutionState::new(&mut s.shielded, &mut s.evm),
                     &mut BlockContext::new(height, &mut s.fee_params),
                     &mut Subsystems::none(),
                 )

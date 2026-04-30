@@ -283,7 +283,6 @@ fn test_block_execution_order() {
     let result = block
         .execute(
             &mut ExecutionState::new(
-                &mut account, &mut registry, &mut compliance,
                 &mut shielded_state, &mut evm_state,
             ),
             &mut BlockContext {
@@ -354,7 +353,6 @@ fn test_system_tx_reward_distribution() {
     let result = block
         .execute(
             &mut ExecutionState::new(
-                &mut account, &mut registry, &mut compliance,
                 &mut shielded_state, &mut evm_state,
             ),
             &mut BlockContext {
@@ -489,7 +487,6 @@ fn test_agent_pay_via_evm_storage() {
     let result = block
         .execute(
             &mut ExecutionState::new(
-                &mut account, &mut registry, &mut compliance,
                 &mut shielded_state, &mut evm_state,
             ),
             &mut BlockContext {
@@ -562,7 +559,7 @@ fn test_expired_transaction_rejected() {
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 51,
@@ -638,7 +635,7 @@ fn test_frozen_asset_rejects_bridge_to_evm() {
     let validators: Vec<Address> = vec![sender];
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 1,
@@ -720,7 +717,7 @@ fn test_delisted_asset_rejects_bridge_to_protocol() {
     let validators: Vec<Address> = vec![sender];
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 1,
@@ -790,7 +787,7 @@ fn test_frozen_asset_rejects_bridge_op_deposit() {
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 1,
@@ -894,7 +891,7 @@ fn test_evm_issuer_mint_success() {
     let mut registry = AssetRegistry::new();
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -989,7 +986,7 @@ fn test_evm_issuer_mint_cap_enforcement() {
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -1082,7 +1079,7 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -1174,7 +1171,7 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -1244,7 +1241,7 @@ fn test_evm_issuer_mint_call_asset_rejected() {
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
+                        &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),

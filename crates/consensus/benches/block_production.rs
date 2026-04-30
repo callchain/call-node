@@ -7,12 +7,10 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Benchmark
 use call_consensus::{Block, BlockContext, ConsensusParams, ExecutionState, SimplexConsensus, Subsystems, SystemTx, SystemTxKind};
 use call_primitives::{Address, BlockHash, ValidatorId};
 use call_protocol::{
-    AccountState, AssetRegistry, ComplianceEngine,
     instructions::Instruction,
     transaction::{AuthScheme, GasConfig, ProtocolTransaction},
 };
 use call_evm::EvmState;
-use call_oracle::OracleManager;
 
 fn setup_consensus() -> SimplexConsensus {
     let mut consensus = SimplexConsensus::new(
@@ -60,17 +58,13 @@ fn bench_block_execution(c: &mut Criterion) {
 
                 b.iter_batched(
                     || {
-                        let mut account = AccountState::new();
-                        let mut registry = AssetRegistry::new();
-                        registry.register_asset("CALL".into(), "Call Token".into(), 18, Address::ZERO, 0, 0, 0).unwrap();
-                        account.balances.set_balance(1, Address::repeat_byte(1), 1_000_000_000_000u128).unwrap();
                         let mut evm_state = EvmState::new();
                         let mut fee_params = call_protocol::transaction::FeeParams::default();
                         let bridge_config = call_bridge::BridgeConfig::default();
 
-                        (account, registry, evm_state, fee_params, bridge_config)
+                        (evm_state, fee_params, bridge_config)
                     },
-                    |(mut account, mut registry, mut evm_state, mut fee_params, bridge_config)| {
+                    |(mut evm_state, mut fee_params, bridge_config)| {
                         let mut block = Block::new(
                             1,
                             BlockHash::ZERO,
@@ -84,9 +78,6 @@ fn bench_block_execution(c: &mut Criterion) {
                         );
                         let result = block.execute(
                             &mut ExecutionState::new(
-                                &mut account,
-                                &mut registry,
-                                &mut ComplianceEngine::new(),
                                 &mut call_shielded::ShieldedState::new(),
                                 &mut evm_state,
                             ),
@@ -96,10 +87,7 @@ fn bench_block_execution(c: &mut Criterion) {
                                 bridge_config: Some(&bridge_config),
                                 validators: None,
                             },
-                            &mut Subsystems {
-                                oracle: Some(&mut OracleManager::default()),
-                                ..Subsystems::none()
-                            },
+                            &mut Subsystems::none(),
                         );
                         black_box(result);
                     },

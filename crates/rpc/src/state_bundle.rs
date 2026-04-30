@@ -122,9 +122,6 @@ impl<'a> StateWriteBundle<'a> {
         let validators = call_consensus::exec::evm_instructions::read_validator_addresses(&self.evm);
         block.execute(
             &mut ExecutionState::new(
-                &mut self.balances,
-                &mut self.registry,
-                &mut self.compliance,
                 &mut self.shielded,
                 &mut self.evm,
             ),
@@ -135,9 +132,7 @@ impl<'a> StateWriteBundle<'a> {
                 validators: if validators.is_empty() { None } else { Some(&validators) },
             },
             &mut Subsystems {
-                oracle: Some(&mut self.oracle),
                 fork_manager: Some(&mut self.fork_manager),
-                ..Subsystems::none()
             },
         )
     }
@@ -152,9 +147,6 @@ impl<'a> StateWriteBundle<'a> {
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(
             &mut ExecutionState::new(
-                &mut self.balances,
-                &mut self.registry,
-                &mut self.compliance,
                 &mut self.shielded,
                 &mut self.evm,
             ),
@@ -174,22 +166,15 @@ impl<'a> StateReadBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let mut balances = self.balances.clone();
-        let mut registry = self.registry.clone();
-        let mut compliance = self.compliance.clone();
         let mut shielded = self.shielded.clone();
         let mut fee_params = self.fee_params.clone();
         let mut evm = self.evm.clone();
-        let mut oracle = self.oracle.clone();
         let mut fork_manager = self.fork_manager.clone();
         let bridge_config = BridgeConfig::default();
         let validators = call_consensus::exec::evm_instructions::read_validator_addresses(&self.evm);
 
         block.execute(
             &mut ExecutionState::new(
-                &mut balances,
-                &mut registry,
-                &mut compliance,
                 &mut shielded,
                 &mut evm,
             ),
@@ -200,9 +185,7 @@ impl<'a> StateReadBundle<'a> {
                 validators: if validators.is_empty() { None } else { Some(&validators) },
             },
             &mut Subsystems {
-                oracle: Some(&mut oracle),
                 fork_manager: Some(&mut fork_manager),
-                ..Subsystems::none()
             },
         )
     }
@@ -213,18 +196,12 @@ impl<'a> StateReadBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let mut balances = self.balances.clone();
-        let mut registry = self.registry.clone();
-        let mut compliance = self.compliance.clone();
         let mut shielded = self.shielded.clone();
         let mut fee_params = self.fee_params.clone();
         let mut evm = self.evm.clone();
 
         block.execute(
             &mut ExecutionState::new(
-                &mut balances,
-                &mut registry,
-                &mut compliance,
                 &mut shielded,
                 &mut evm,
             ),

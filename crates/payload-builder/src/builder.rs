@@ -230,7 +230,7 @@ impl PayloadBuilder {
         // Execute the block
         let mut fee_params = self.fee_params.clone();
         let result = block.execute(
-            &mut ExecutionState::new(account, registry, compliance, shielded_state, evm_state),
+            &mut ExecutionState::new(shielded_state, evm_state),
             &mut BlockContext {
                 current_block_height: attrs.height,
                 fee_params: &mut fee_params,
