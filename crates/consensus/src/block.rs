@@ -489,40 +489,18 @@ impl Block {
 
             let exec_result = (|| -> Result<(), ConsensusError> {
                 for instr in &non_rollback {
-                    match instr {
-                        Instruction::ShieldedTransfer { .. }
-                        | Instruction::ShieldedWithdraw { .. }
-                        | Instruction::ShieldedDeposit { .. } => {
-                            let r = call_protocol::instructions::execute_instruction(
-                                instr,
-                                state.account,
-                                state.registry,
-                                state.compliance,
-                                state.shielded_state,
-                                tx.sender,
-                                None,
-                                &mut None,
-                                None,
-                            )
-                            .map_err(|e| {
-                                ConsensusError::InvalidBlock(format!("protocol tx: {e}"))
-                            })?;
-                            tx_results.push(r);
-                        }
-                        _ => {
-                            let r = evm_instructions::execute_instruction_on_evm(
-                                instr,
-                                tx.sender,
-                                state.evm_state,
-                                Some(state.compliance),
-                                ctx.current_block_height,
-                                ctx.bridge_config,
-                                ctx.validators,
-                                Some(&executor),
-                            )?;
-                            tx_results.push(r);
-                        }
-                    }
+                    let r = evm_instructions::execute_instruction_on_evm(
+                        instr,
+                        tx.sender,
+                        state.evm_state,
+                        Some(state.compliance),
+                        state.shielded_state,
+                        ctx.current_block_height,
+                        ctx.bridge_config,
+                        ctx.validators,
+                        Some(&executor),
+                    )?;
+                    tx_results.push(r);
                 }
 
                 // Execute rollback instructions inline

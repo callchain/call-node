@@ -128,9 +128,10 @@ fn test_e2e_shielded_withdraw_flow() {
 
     let _block = node.produce_block(1_000).expect("block produced");
 
-    // Transparent balance should be credited
-    let balances = node.state.balance_state.read().unwrap();
-    assert_eq!(balances.get_balance(0, &receiver), 500);
+    // Transparent balance should be credited (EVM storage)
+    let evm = node.state.evm_state.read().unwrap();
+    let receiver_bal = call_consensus::exec::evm_instructions::read_balance(&*evm, 0, receiver);
+    assert_eq!(receiver_bal, 500);
 
     // Nullifier should be consumed
     let shielded = node.state.shielded_state.read().unwrap();
@@ -289,10 +290,10 @@ fn test_e2e_shielded_lifecycle() {
     node.insert_tx(tx);
     let _block = node.produce_block(1_000).expect("deposit block");
 
-    // Verify deposit: sender balance reduced by 1_000 + gas fee
+    // Verify deposit: sender balance reduced by 1_000 + gas fee (EVM storage)
     {
-        let balances = node.state.balance_state.read().unwrap();
-        let sender_bal = balances.get_balance(1, &sender);
+        let evm = node.state.evm_state.read().unwrap();
+        let sender_bal = call_consensus::exec::evm_instructions::read_balance(&*evm, 1, sender);
         assert!(sender_bal <= 1_000_000_000 - 1_000, "deposit should deduct 1_000 from sender");
     }
 
@@ -310,9 +311,10 @@ fn test_e2e_shielded_lifecycle() {
     node.insert_tx(tx2);
     let _block2 = node.produce_block(2_000).expect("withdraw block");
 
-    // Verify withdraw
+    // Verify withdraw (EVM storage)
     {
-        let balances = node.state.balance_state.read().unwrap();
-        assert_eq!(balances.get_balance(0, &receiver), 500);
+        let evm = node.state.evm_state.read().unwrap();
+        let receiver_bal = call_consensus::exec::evm_instructions::read_balance(&*evm, 0, receiver);
+        assert_eq!(receiver_bal, 500);
     }
 }

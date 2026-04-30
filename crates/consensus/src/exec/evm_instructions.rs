@@ -13,8 +13,9 @@ use call_precompiles::{
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
     write_string32,
     AGENT_ADDRESS, ASSET_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
-    ORACLE_ADDRESS, VALIDATOR_ADDRESS,
+    ORACLE_ADDRESS, SHIELDED_ADDRESS, VALIDATOR_ADDRESS,
 };
+use call_shielded::ShieldedState;
 use call_precompiles::storage::storage_slot;
 use call_primitives::{Address, U256};
 use call_protocol::compliance::ComplianceEngine;
@@ -71,6 +72,9 @@ pub fn is_evm_instruction(instr: &Instruction) -> bool {
             | Instruction::RevokeAgentBalance { .. }
             | Instruction::RegisterAsset { .. }
             | Instruction::EvmIssuerMint { .. }
+            | Instruction::ShieldedDeposit { .. }
+            | Instruction::ShieldedWithdraw { .. }
+            | Instruction::ShieldedTransfer { .. }
     )
 }
 
@@ -80,6 +84,7 @@ pub fn execute_instruction_on_evm(
     sender: Address,
     evm_state: &mut EvmState,
     compliance: Option<&ComplianceEngine>,
+    shielded_state: &mut ShieldedState,
     current_block_height: u64,
     bridge_config: Option<&call_bridge::BridgeConfig>,
     validators: Option<&[Address]>,
@@ -353,6 +358,50 @@ pub fn execute_instruction_on_evm(
             to,
             amount,
         } => exec_evm_issuer_mint(evm_state, sender, *asset_id, *to, *amount, evm_executor),
+        Instruction::ShieldedDeposit {
+            asset_id,
+            amount,
+            commitment,
+            encrypted_note,
+        } => exec_shielded_deposit(
+            evm_state,
+            shielded_state,
+            sender,
+            *asset_id,
+            *amount,
+            *commitment,
+            encrypted_note,
+        ),
+        Instruction::ShieldedWithdraw {
+            asset_id,
+            target,
+            amount,
+            proof,
+            nullifier,
+        } => exec_shielded_withdraw(
+            evm_state,
+            shielded_state,
+            *asset_id,
+            *target,
+            *amount,
+            proof,
+            *nullifier,
+        ),
+        Instruction::ShieldedTransfer {
+            asset_id,
+            proof,
+            nullifiers,
+            commitments,
+            encrypted_notes,
+        } => exec_shielded_transfer(
+            evm_state,
+            shielded_state,
+            *asset_id,
+            proof,
+            nullifiers,
+            commitments,
+            encrypted_notes,
+        ),
         _ => Err(ConsensusError::InvalidBlock(
             "instruction not handled by EVM executor".into(),
         )),
@@ -2675,4 +2724,301 @@ pub fn seed_agent(
     evm_state.set_storage(AGENT_ADDRESS, slot_agent_url(agent_id), write_string32(url));
     evm_state.set_storage(AGENT_ADDRESS, slot_agent_registered_at(agent_id), u64_to_u256(registered_at));
     evm_state.set_storage(AGENT_ADDRESS, slot_agent_perms(agent_id), pack_agent_perms(1_000, 0, 1));
+}
+
+// ── Shielded storage slot helpers ─────────────────────────────────────
+
+fn slot_shielded_merkle_root() -> U256 {
+    storage_slot(&[b"merkle_root"])
+}
+
+fn slot_shielded_nullifier(nullifier: &call_shielded::Nullifier) -> U256 {
+    storage_slot(&[b"nullifier", nullifier.as_ref()])
+}
+
+fn slot_shielded_commitment_count() -> U256 {
+    storage_slot(&[b"cm_count"])
+}
+
+fn slot_shielded_commitment(index: u64) -> U256 {
+    storage_slot(&[b"commitment", &index.to_be_bytes()[..]])
+}
+
+/// Sync a single commitment and the updated merkle root to EVM storage.
+fn sync_shielded_deposit_to_evm(
+    evm_state: &mut EvmState,
+    shielded_state: &call_shielded::ShieldedState,
+    commitment: &call_shielded::NoteCommitment,
+) {
+    let count = u256_to_u64(evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment_count()));
+    evm_state.set_storage(
+        SHIELDED_ADDRESS,
+        slot_shielded_commitment(count),
+        U256::from_be_slice(commitment.as_ref()),
+    );
+    evm_state.set_storage(
+        SHIELDED_ADDRESS,
+        slot_shielded_commitment_count(),
+        u64_to_u256(count + 1),
+    );
+    let root = shielded_state.merkle_root();
+    evm_state.set_storage(
+        SHIELDED_ADDRESS,
+        slot_shielded_merkle_root(),
+        U256::from_be_slice(root.as_slice()),
+    );
+}
+
+/// Mark a nullifier as spent in EVM storage.
+fn sync_shielded_nullifier_to_evm(
+    evm_state: &mut EvmState,
+    nullifier: &call_shielded::Nullifier,
+) {
+    evm_state.set_storage(
+        SHIELDED_ADDRESS,
+        slot_shielded_nullifier(nullifier),
+        U256::from(1),
+    );
+}
+
+// ── ShieldedDeposit ───────────────────────────────────────────────────
+
+fn exec_shielded_deposit(
+    evm_state: &mut EvmState,
+    shielded_state: &mut ShieldedState,
+    sender: Address,
+    asset_id: u64,
+    amount: u128,
+    commitment: call_primitives::Hash,
+    encrypted_note: &[u8],
+) -> Result<InstructionResult, ConsensusError> {
+    // Deduct transparent balance
+    let sender_slot = slot_balance(asset_id, sender);
+    let sender_bal = u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, sender_slot));
+    let sender_bal = sender_bal
+        .checked_sub(amount)
+        .ok_or_else(|| ConsensusError::InvalidBlock("shielded deposit: insufficient balance".into()))?;
+    evm_state.set_storage(ASSET_ADDRESS, sender_slot, u128_to_u256(sender_bal));
+
+    // Reconstruct note
+    let note = call_shielded::Note::from_encrypted_bytes(encrypted_note)
+        .map_err(|e| ConsensusError::InvalidBlock(format!("shielded deposit: invalid encrypted note: {e}")))?;
+    let note_cm = call_shielded::NoteCommitment::new(commitment);
+
+    // Process in shielded state
+    shielded_state
+        .process_deposit(note_cm.clone(), note)
+        .map_err(|e| ConsensusError::InvalidBlock(format!("shielded deposit: {e}")))?;
+
+    // Sync to EVM storage
+    sync_shielded_deposit_to_evm(evm_state, shielded_state, &note_cm);
+
+    Ok(InstructionResult::Success)
+}
+
+// ── ShieldedWithdraw ──────────────────────────────────────────────────
+
+fn exec_shielded_withdraw(
+    evm_state: &mut EvmState,
+    shielded_state: &mut ShieldedState,
+    asset_id: u64,
+    target: Address,
+    amount: u128,
+    proof: &[u8],
+    nullifier: call_primitives::Hash,
+) -> Result<InstructionResult, ConsensusError> {
+    let zk_proof = call_shielded::ZkProof {
+        proof_data: proof.to_vec(),
+        nullifiers: vec![call_shielded::Nullifier::new(nullifier)],
+        commitments: vec![],
+        asset_id,
+    };
+
+    // Structural validation
+    if !call_shielded::verify_zk_proof(&zk_proof) {
+        return Err(ConsensusError::InvalidBlock(
+            "shielded withdraw: invalid ZK proof".into(),
+        ));
+    }
+
+    // Real Groth16 verification when real-prover feature is enabled
+    #[cfg(feature = "real-prover")]
+    {
+        let merkle_root = shielded_state.merkle_root();
+        let merkle_root_bytes: [u8; 32] = merkle_root.into();
+        let valid = call_shielded::verify_shielded_proof(
+            &zk_proof,
+            "withdraw",
+            Some(&merkle_root_bytes),
+            Some(amount),
+        )
+        .map_err(|e| {
+            ConsensusError::InvalidBlock(format!("shielded withdraw: proof verification error: {e}"))
+        })?;
+        if !valid {
+            return Err(ConsensusError::InvalidBlock(
+                "shielded withdraw: ZK proof verification failed".into(),
+            ));
+        }
+    }
+
+    shielded_state
+        .process_withdraw(call_shielded::Nullifier::new(nullifier))
+        .map_err(|e| ConsensusError::InvalidBlock(format!("shielded withdraw: {e}")))?;
+
+    // Mark nullifier spent in EVM storage
+    sync_shielded_nullifier_to_evm(evm_state, &call_shielded::Nullifier::new(nullifier));
+
+    // Credit transparent balance
+    let target_slot = slot_balance(asset_id, target);
+    let target_bal = u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, target_slot));
+    let target_bal = target_bal
+        .checked_add(amount)
+        .ok_or_else(|| ConsensusError::InvalidBlock("shielded withdraw: balance overflow".into()))?;
+    evm_state.set_storage(ASSET_ADDRESS, target_slot, u128_to_u256(target_bal));
+
+    Ok(InstructionResult::Success)
+}
+
+// ── ShieldedTransfer ──────────────────────────────────────────────────
+
+fn exec_shielded_transfer(
+    evm_state: &mut EvmState,
+    shielded_state: &mut ShieldedState,
+    asset_id: u64,
+    proof: &[u8],
+    nullifiers: &[call_primitives::Hash],
+    commitments: &[call_primitives::Hash],
+    encrypted_notes: &[Vec<u8>],
+) -> Result<InstructionResult, ConsensusError> {
+    let zk_proof = call_shielded::ZkProof {
+        proof_data: proof.to_vec(),
+        nullifiers: nullifiers.iter().map(|h| call_shielded::Nullifier::new(*h)).collect(),
+        commitments: commitments.iter().map(|h| call_shielded::NoteCommitment::new(*h)).collect(),
+        asset_id,
+    };
+
+    // Structural validation
+    if !call_shielded::verify_zk_proof(&zk_proof) {
+        return Err(ConsensusError::InvalidBlock(
+            "shielded transfer: invalid ZK proof structure".into(),
+        ));
+    }
+
+    // Real Groth16 verification when real-prover feature is enabled
+    #[cfg(feature = "real-prover")]
+    {
+        let merkle_root = shielded_state.merkle_root();
+        let merkle_root_bytes: [u8; 32] = merkle_root.into();
+        let valid = call_shielded::verify_shielded_proof(
+            &zk_proof,
+            "transfer",
+            Some(&merkle_root_bytes),
+            None,
+        )
+        .map_err(|e| {
+            ConsensusError::InvalidBlock(format!("shielded transfer: proof verification error: {e}"))
+        })?;
+        if !valid {
+            return Err(ConsensusError::InvalidBlock(
+                "shielded transfer: ZK proof verification failed".into(),
+            ));
+        }
+    }
+
+    // Decrypt output notes from encrypted_notes field
+    let output_notes: Vec<call_shielded::Note> = encrypted_notes
+        .iter()
+        .filter_map(|data| call_shielded::Note::from_encrypted_bytes(data).ok())
+        .collect();
+
+    let transfer = call_shielded::ShieldedTransfer {
+        input_notes: vec![], // input notes are not transmitted; proven via ZK
+        output_notes,
+        proof: zk_proof,
+    };
+
+    shielded_state
+        .process_transfer(&transfer)
+        .map_err(|e| ConsensusError::InvalidBlock(format!("shielded transfer: {e}")))?;
+
+    // Sync nullifiers to EVM
+    for nf in nullifiers {
+        sync_shielded_nullifier_to_evm(evm_state, &call_shielded::Nullifier::new(*nf));
+    }
+
+    // Sync commitments to EVM
+    for cm in commitments {
+        let count = u256_to_u64(evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment_count()));
+        evm_state.set_storage(
+            SHIELDED_ADDRESS,
+            slot_shielded_commitment(count),
+            U256::from_be_slice(cm.as_slice()),
+        );
+        evm_state.set_storage(
+            SHIELDED_ADDRESS,
+            slot_shielded_commitment_count(),
+            u64_to_u256(count + 1),
+        );
+    }
+
+    // Sync merkle root
+    let root = shielded_state.merkle_root();
+    evm_state.set_storage(
+        SHIELDED_ADDRESS,
+        slot_shielded_merkle_root(),
+        U256::from_be_slice(root.as_slice()),
+    );
+
+    Ok(InstructionResult::Success)
+}
+
+// ── Shielded read helpers ─────────────────────────────────────────────
+
+/// Read shielded merkle root from EVM storage.
+pub fn read_shielded_merkle_root(evm_state: &EvmState) -> call_primitives::Hash {
+    let root_u256 = evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_merkle_root());
+    call_primitives::Hash::from_slice(&root_u256.to_be_bytes::<32>())
+}
+
+/// Read shielded commitment count from EVM storage.
+pub fn read_shielded_commitment_count(evm_state: &EvmState) -> u64 {
+    u256_to_u64(evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment_count()))
+}
+
+/// Read a shielded commitment by index from EVM storage.
+pub fn read_shielded_commitment(evm_state: &EvmState, index: u64) -> call_primitives::Hash {
+    let cm_u256 = evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment(index));
+    call_primitives::Hash::from_slice(&cm_u256.to_be_bytes::<32>())
+}
+
+/// Check if a nullifier is spent in EVM storage.
+pub fn read_shielded_nullifier_spent(evm_state: &EvmState, nullifier: &call_shielded::Nullifier) -> bool {
+    evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_nullifier(nullifier)).to_be_bytes::<32>()[31] == 1
+}
+
+/// Seed a shielded commitment directly into EVM storage (for tests / genesis).
+pub fn seed_shielded_commitment(
+    evm_state: &mut EvmState,
+    index: u64,
+    commitment: call_primitives::Hash,
+) {
+    let count = u256_to_u64(evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment_count()));
+    if index >= count {
+        evm_state.set_storage(SHIELDED_ADDRESS, slot_shielded_commitment_count(), u64_to_u256(index + 1));
+    }
+    evm_state.set_storage(
+        SHIELDED_ADDRESS,
+        slot_shielded_commitment(index),
+        U256::from_be_slice(commitment.as_slice()),
+    );
+}
+
+/// Seed a shielded nullifier as spent directly into EVM storage (for tests / genesis).
+pub fn seed_shielded_nullifier(evm_state: &mut EvmState, nullifier: &call_shielded::Nullifier) {
+    evm_state.set_storage(
+        SHIELDED_ADDRESS,
+        slot_shielded_nullifier(nullifier),
+        U256::from(1),
+    );
 }
