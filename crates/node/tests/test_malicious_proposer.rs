@@ -214,7 +214,6 @@ async fn test_invalid_proposer_rejected() {
         vec![],
         vec![],
         vec![],
-        vec![],
     );
 
     let fm = node.state.fork_manager.read().unwrap();

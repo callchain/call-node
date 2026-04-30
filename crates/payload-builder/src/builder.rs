@@ -4,9 +4,9 @@
 //! execution ordering, and state root computation.
 
 use call_bridge::{BridgeOp, BridgeStateManager};
-use call_consensus::block::{Block, BlockExecutionResult, BlockContext, ExecutionState, Subsystems, SystemTx, SystemTxKind};
+use call_consensus::block::{Block, BlockExecutionResult, BlockContext, ExecutionState, Subsystems};
 use call_consensus::validator::ConsensusError;
-use call_primitives::{Balance, BlockHash, Hash};
+use call_primitives::{BlockHash, Hash};
 use call_protocol::AccountState;
 use call_protocol::compliance::ComplianceEngine;
 use call_protocol::instructions::{Instruction, InstructionResult};
@@ -200,21 +200,6 @@ impl PayloadBuilder {
             return Err(BuilderError::EmptyBlock);
         }
 
-        // Build the block with system transactions
-        let system_txs = vec![
-            SystemTx {
-                kind: SystemTxKind::ValidatorReward {
-                    proposer: attrs.proposer,
-                    reward: Balance::default(),
-                },
-                data: vec![],
-            },
-            SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            },
-        ];
-
         let mut block = Block::new(
             attrs.height,
             attrs.parent_hash,
@@ -223,7 +208,6 @@ impl PayloadBuilder {
             attrs.version,
             selected_protocol,
             selected_evm,
-            system_txs,
             selected_bridges,
         );
 
@@ -657,11 +641,10 @@ mod tests {
             Some(&bridge_config),
         ).unwrap();
 
-        // Execution order: EVM(1) → Protocol(1) → Bridge(1) → System(2)
+        // Execution order: EVM(1) → Protocol(1) → Bridge(1)
         assert_eq!(payload.execution_result.evm_tx_count, 1);
         assert_eq!(payload.execution_result.protocol_tx_count, 1);
         assert_eq!(payload.execution_result.bridge_op_count, 1);
-        assert_eq!(payload.execution_result.system_tx_count, 2);
     }
 
     #[test]

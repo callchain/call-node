@@ -201,10 +201,6 @@
             version,
             protocol_txs,
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             selection.bridge_ops,
         );
 
@@ -270,10 +266,6 @@
             version,
             vec![],
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             vec![],
         );
 
@@ -365,10 +357,6 @@
             version,
             protocol_txs,
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             selection.bridge_ops,
         );
 
@@ -466,10 +454,6 @@
             version,
             protocol_txs,
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             selection.bridge_ops,
         );
 
@@ -570,7 +554,6 @@
             let version = node.state.fork_manager.read().unwrap().current_version();
             let mut block = Block::new(
                 height, node.parent_hash, 5_000, proposer, version, protocol_txs, vec![],
-                vec![SystemTx { kind: SystemTxKind::UpdateBaseFee, data: vec![] }],
                 selection.bridge_ops,
             );
 
@@ -793,10 +776,6 @@
             version,
             protocol_txs,
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             selection.bridge_ops,
         );
 
@@ -910,10 +889,6 @@
             version,
             protocol_txs,
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             selection.bridge_ops,
         );
 
@@ -986,10 +961,6 @@
             version,
             vec![],
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             vec![],
         );
 
@@ -1130,10 +1101,6 @@
             version,
             vec![],
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             vec![],
         );
 
@@ -1212,10 +1179,6 @@
             version,
             vec![],
             vec![],
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             vec![],
         );
 

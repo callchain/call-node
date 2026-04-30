@@ -5,7 +5,7 @@
 
 #![allow(dead_code, unreachable_pub)]
 
-use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind};
+use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
 use call_protocol::{
@@ -252,10 +252,6 @@ impl TestNode {
             version,
             protocol_txs,
             evm_txs,
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             selection.bridge_ops,
         );
 

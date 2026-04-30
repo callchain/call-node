@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use call_bridge::BridgeConfig;
-use call_consensus::{Block, SimplexConsensus, SystemTx, SystemTxKind};
+use call_consensus::{Block, SimplexConsensus};
 use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
 use call_oracle::ORACLE_UPDATE_INTERVAL;
@@ -78,10 +78,6 @@ pub(crate) async fn block_production_loop(
             version,
             protocol_txs,
             evm_txs,
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }],
             selection.bridge_ops,
         );
 

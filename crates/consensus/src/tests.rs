@@ -97,10 +97,6 @@ fn test_block_structure_serialization() {
         TEST_VERSION,
         vec![make_test_tx()],
         vec![vec![0u8; 100]],
-        vec![SystemTx {
-            kind: SystemTxKind::UpdateBaseFee,
-            data: vec![],
-        }],
         vec![],
     );
 
@@ -108,7 +104,6 @@ fn test_block_structure_serialization() {
     assert_eq!(block.header.proposer, 1);
     assert_eq!(block.protocol_txs.len(), 1);
     assert_eq!(block.evm_txs.len(), 1);
-    assert_eq!(block.system_txs.len(), 1);
     assert_eq!(block.bridge_operations.len(), 0);
 }
 
@@ -164,7 +159,6 @@ fn test_block_validate() {
         vec![make_test_tx()],
         vec![],
         vec![],
-        vec![],
     );
     let fm = test_fork_manager();
 
@@ -182,7 +176,6 @@ fn test_block_validate_duplicate_nonce() {
         1,
         TEST_VERSION,
         vec![tx.clone(), tx],
-        vec![],
         vec![],
         vec![],
     );
@@ -205,13 +198,6 @@ fn test_block_execution_order() {
         TEST_VERSION,
         vec![protocol_tx],
         vec![evm_bytes],
-        vec![SystemTx {
-            kind: SystemTxKind::ValidatorReward {
-                proposer: 1,
-                reward: 1000,
-            },
-            data: vec![],
-        }],
         vec![BridgeOp::DepositToEvm {
             asset_id: call_protocol::CALL_ASSET_ID,
             from: sender,
@@ -295,11 +281,10 @@ fn test_block_execution_order() {
         )
         .unwrap();
 
-    // Execution order: EVM(1) → Protocol(1) → Bridge(1) → System(1)
+    // Execution order: EVM(1) → Protocol(1) → Bridge(1)
     assert_eq!(result.evm_tx_count, 1);
     assert_eq!(result.protocol_tx_count, 1);
     assert_eq!(result.bridge_op_count, 1);
-    assert_eq!(result.system_tx_count, 1);
 
     // Finalize
     block.finalize(&result);
@@ -331,13 +316,6 @@ fn test_system_tx_reward_distribution() {
         TEST_VERSION,
         vec![],
         vec![],
-        vec![SystemTx {
-            kind: SystemTxKind::ValidatorReward {
-                proposer: 1,
-                reward: 500_000,
-            },
-            data: vec![],
-        }],
         vec![],
     );
 
@@ -365,7 +343,9 @@ fn test_system_tx_reward_distribution() {
         )
         .unwrap();
 
-    assert_eq!(result.total_validator_reward, 500_000);
+    // Validator reward is no longer injected via system_tx; currently no
+    // automatic reward is minted during block execution.
+    assert_eq!(result.total_validator_reward, 0);
 }
 
 #[test]
@@ -376,7 +356,6 @@ fn test_block_new_builder() {
         999_000,
         7,
         TEST_VERSION,
-        vec![],
         vec![],
         vec![],
         vec![],
@@ -395,11 +374,10 @@ fn test_block_execution_result() {
         evm_tx_count: 10,
         protocol_tx_count: 5,
         bridge_op_count: 2,
-        system_tx_count: 1,
         ..Default::default()
     };
 
-    assert_eq!(result.total_tx_count(), 18);
+    assert_eq!(result.total_tx_count(), 17);
 }
 
 #[test]
@@ -479,7 +457,6 @@ fn test_agent_pay_via_evm_storage() {
         vec![tx],
         vec![],
         vec![],
-        vec![],
     );
 
     let bridge_config = call_bridge::BridgeConfig::default();
@@ -542,7 +519,6 @@ fn test_expired_transaction_rejected() {
         1,
         TEST_VERSION,
         vec![tx],
-        vec![],
         vec![],
         vec![],
     );
@@ -609,7 +585,6 @@ fn test_frozen_asset_rejects_bridge_to_evm() {
         1,
         TEST_VERSION,
         vec![tx],
-        vec![],
         vec![],
         vec![],
     );
@@ -692,7 +667,6 @@ fn test_delisted_asset_rejects_bridge_to_protocol() {
         vec![tx],
         vec![],
         vec![],
-        vec![],
     );
 
     let mut account = AccountState::new();
@@ -747,7 +721,6 @@ fn test_frozen_asset_rejects_bridge_op_deposit() {
         1000,
         1,
         TEST_VERSION,
-        vec![],
         vec![],
         vec![],
         vec![BridgeOp::DepositToEvm {
@@ -874,7 +847,6 @@ fn test_evm_issuer_mint_success() {
         vec![tx],
         vec![],
         vec![],
-        vec![],
     );
 
     let mut account = AccountState::new();
@@ -974,7 +946,6 @@ fn test_evm_issuer_mint_cap_enforcement() {
         vec![tx],
         vec![],
         vec![],
-        vec![],
     );
 
     let mut account = AccountState::new();
@@ -1065,7 +1036,6 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
         1,
         TEST_VERSION,
         vec![tx],
-        vec![],
         vec![],
         vec![],
     );
@@ -1159,7 +1129,6 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
         vec![tx],
         vec![],
         vec![],
-        vec![],
     );
 
     let mut account = AccountState::new();
@@ -1221,7 +1190,6 @@ fn test_evm_issuer_mint_call_asset_rejected() {
         1,
         TEST_VERSION,
         vec![tx],
-        vec![],
         vec![],
         vec![],
     );

@@ -7,7 +7,6 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::{Address, BlockHash, ProtocolVersion};
-use call_consensus::{SystemTx, SystemTxKind};
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 
@@ -78,25 +77,18 @@ async fn test_height_activated_upgrade() {
             .filter_map(|e| serde_json::from_slice(&e.data).ok())
             .collect();
 
-        // At upgrade height, inject ProtocolUpgrade system tx
-        let system_txs = if height == upgrade_height && !upgraded {
+        if height == upgrade_height && !upgraded {
             upgraded = true;
-            vec![
-                SystemTx {
-                    kind: SystemTxKind::UpdateBaseFee,
-                    data: vec![],
+            node.state.fork_manager.write().unwrap().schedule_upgrade(
+                call_consensus::fork::UpgradeEntry {
+                    version: ProtocolVersion::new(2, 0, 0),
+                    activation_height: upgrade_height,
+                    applied: false,
+                    proposal_id: Some(1),
+                    approved_at_height: Some(height),
                 },
-                SystemTx {
-                    kind: SystemTxKind::ProtocolUpgrade(ProtocolVersion::new(2, 0, 0)),
-                    data: vec![],
-                },
-            ]
-        } else {
-            vec![SystemTx {
-                kind: SystemTxKind::UpdateBaseFee,
-                data: vec![],
-            }]
-        };
+            );
+        }
 
         let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = call_consensus::Block::new(
@@ -107,7 +99,6 @@ async fn test_height_activated_upgrade() {
             version,
             protocol_txs,
             vec![],
-            system_txs,
             selection.bridge_ops,
         );
 

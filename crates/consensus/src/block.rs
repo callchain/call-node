@@ -129,28 +129,6 @@ impl BlockHeader {
     }
 }
 
-// ── System Transaction ────────────────────────────────────────────────
-
-/// System transaction for validator reward distribution and fee settlement
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemTx {
-    pub kind: SystemTxKind,
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SystemTxKind {
-    /// Distribute fees to validator
-    ValidatorReward {
-        proposer: call_primitives::ValidatorId,
-        reward: Balance,
-    },
-    /// Update base fee for next block
-    UpdateBaseFee,
-    /// Protocol version upgrade
-    ProtocolUpgrade(ProtocolVersion),
-}
-
 // ── EVM Transaction ───────────────────────────────────────────────────
 
 /// EVM transaction in raw serialized form (RLP-encoded).
@@ -213,7 +191,6 @@ pub struct Block {
     pub header: BlockHeader,
     pub protocol_txs: Vec<ProtocolTransaction>,
     pub evm_txs: Vec<EvmTx>,
-    pub system_txs: Vec<SystemTx>,
     pub bridge_operations: Vec<BridgeOp>,
 }
 
@@ -228,7 +205,6 @@ impl Block {
         version: ProtocolVersion,
         protocol_txs: Vec<ProtocolTransaction>,
         evm_txs: Vec<EvmTx>,
-        system_txs: Vec<SystemTx>,
         bridge_operations: Vec<BridgeOp>,
     ) -> Self {
         let header = BlockHeader {
@@ -247,7 +223,6 @@ impl Block {
             header,
             protocol_txs,
             evm_txs,
-            system_txs,
             bridge_operations,
         }
     }
@@ -260,7 +235,7 @@ impl Block {
     ) -> Result<(), ConsensusError> {
         self.header.validate(expected_parent, fork_manager)?;
 
-        // Per spec §2.5: execution order must be EVM → Protocol → Bridge → System
+        // Per spec §2.5: execution order must be EVM → Protocol → Bridge
         // We validate that each section is internally consistent
 
         // Check no duplicate nonces in protocol txs
@@ -282,7 +257,7 @@ impl Block {
     /// 1. EVM transactions (evm_txs)
     /// 2. Protocol transactions (protocol_txs)
     /// 3. Bridge operations (bridge_operations)
-    /// 4. System transactions (system_txs)
+    /// 4. System settlement (base-fee update, validator reward, oracle share)
     ///
     /// Returns all instruction results.
     pub fn execute(
@@ -582,25 +557,10 @@ impl Block {
             }
         }
 
-        // Step 4: System transactions
-        for sys_tx in &self.system_txs {
-            match &sys_tx.kind {
-                SystemTxKind::ValidatorReward { proposer: _, reward } => {
-                    result.total_validator_reward += *reward;
-                }
-                SystemTxKind::UpdateBaseFee => {
-                    let gas_used = result.protocol_tx_count as u64 * 10_000; // rough estimate
-                    update_base_fee_after_block(ctx.fee_params, gas_used);
-                }
-                SystemTxKind::ProtocolUpgrade(_) => {
-                    // Version upgrade handled by node layer
-                }
-            }
-            result.system_tx_count += 1;
-        }
-
-        // Step 5: Oracle reward pool allocation from block fees
+        // Step 4: System settlement (base-fee update, oracle reward pool)
         let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+        update_base_fee_after_block(ctx.fee_params, total_gas);
+
         let total_fees = total_gas as u128 * ctx.fee_params.base_fee;
         let oracle_share = total_fees * ctx.fee_params.oracle_fee_share_bps as u128 / 10_000;
         evm_instructions::add_oracle_reward(state.evm_state, oracle_share);
@@ -652,7 +612,6 @@ pub struct BlockExecutionResult {
     pub evm_tx_count: usize,
     pub protocol_tx_count: usize,
     pub bridge_op_count: usize,
-    pub system_tx_count: usize,
     pub total_validator_reward: Balance,
     /// Total gas used by EVM transactions
     pub evm_gas_used: u64,
@@ -669,7 +628,7 @@ pub struct BlockExecutionResult {
 impl BlockExecutionResult {
     /// Total transactions processed
     pub fn total_tx_count(&self) -> usize {
-        self.evm_tx_count + self.protocol_tx_count + self.bridge_op_count + self.system_tx_count
+        self.evm_tx_count + self.protocol_tx_count + self.bridge_op_count
     }
 
     /// Compute priority fee percentiles for fee history.

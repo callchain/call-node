@@ -4,7 +4,7 @@
 //! transaction counts.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use call_consensus::{Block, BlockContext, ConsensusParams, ExecutionState, SimplexConsensus, Subsystems, SystemTx, SystemTxKind};
+use call_consensus::{Block, BlockContext, ConsensusParams, ExecutionState, SimplexConsensus, Subsystems};
 use call_primitives::{Address, BlockHash, ValidatorId};
 use call_protocol::{
     instructions::Instruction,
@@ -73,7 +73,6 @@ fn bench_block_execution(c: &mut Criterion) {
                             version,
                             protocol_txs.clone(),
                             vec![],
-                            vec![SystemTx { kind: SystemTxKind::UpdateBaseFee, data: vec![] }],
                             vec![],
                         );
                         let result = block.execute(

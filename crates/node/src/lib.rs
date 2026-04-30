@@ -28,7 +28,7 @@ pub(crate) use bft_loop::bft_event_loop;
 
 use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
-    Block, ConsensusParams, SimplexConsensus, SystemTx, SystemTxKind, ValidatorStateManager,
+    Block, ConsensusParams, SimplexConsensus, ValidatorStateManager,
     ForkManager,
     bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
     block_cache::BlockCache,

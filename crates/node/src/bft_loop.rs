@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use call_consensus::{
     Block, BlockCache, BlockExecutionResult, ConsensusDigest, EvmTxResult, FinalizationInfo, ProposeRequest,
-    SimplexConsensus, SystemTx, SystemTxKind, VerifyRequest,
+    SimplexConsensus, VerifyRequest,
 };
 use call_primitives::BlockHash;
 use crate::EpochRotationReason;
@@ -285,10 +285,6 @@ pub(crate) async fn bft_event_loop(
                     version,
                     protocol_txs,
                     evm_txs,
-                    vec![SystemTx {
-                        kind: SystemTxKind::UpdateBaseFee,
-                        data: vec![],
-                    }],
                     selection.bridge_ops,
                 );
 
