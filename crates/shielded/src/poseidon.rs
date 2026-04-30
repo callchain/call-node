@@ -318,6 +318,23 @@ mod tests {
         assert_eq!(h5, h5_direct);
     }
 
+    #[test]
+    fn test_bytes_to_fr_large_values() {
+        let aa = [0xAAu8; 32];
+        let bb = [0xBBu8; 32];
+        let one_le = { let mut b = [0u8; 32]; b[0] = 1; b };
+        let two_le = { let mut b = [0u8; 32]; b[0] = 2; b };
+        let zero = [0u8; 32];
+        let fr_aa = bytes_to_fr(&aa);
+        let fr_bb = bytes_to_fr(&bb);
+        let fr_one = bytes_to_fr(&one_le);
+        let fr_two = bytes_to_fr(&two_le);
+        let fr_zero = bytes_to_fr(&zero);
+        assert_ne!(fr_aa, fr_bb, "[0xAA;32] and [0xBB;32] should map to different Fr elements");
+        assert_ne!(fr_one, fr_zero, "[0x01,0x00...] should not map to zero");
+        assert_ne!(fr_two, fr_zero, "[0x02,0x00...] should not map to zero");
+    }
+
     #[cfg(feature = "real-prover")]
     #[test]
     fn test_poseidon_gadget_circuit_satisfied() {

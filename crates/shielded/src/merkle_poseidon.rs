@@ -156,7 +156,7 @@ impl PoseidonMerkleTree {
     ///
     /// Level 0: hash(0, 0)
     /// Level N: hash(empty_hash(N-1), empty_hash(N-1))
-    fn empty_hash(level: usize) -> [u8; 32] {
+    pub fn empty_hash(level: usize) -> [u8; 32] {
         EMPTY_HASH.with(|h| {
             let mut map = h.borrow_mut();
             let max = map.len() - 1;
