@@ -82,8 +82,6 @@ mod tests {
             0,
             ProtocolVersion::new(1, 0, 0),
             vec![],
-            vec![],
-            vec![],
         )
     }
 

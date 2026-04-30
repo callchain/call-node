@@ -26,7 +26,7 @@ pub(crate) async fn block_production_loop(
     mut prune_state: PruneState,
     subscriptions: SubscriptionManager,
     telemetry: Arc<crate::telemetry::TelemetryRegistry>,
-    audit_log: Arc<RwLock<crate::logging::AuditLog>>,
+    _audit_log: Arc<RwLock<crate::logging::AuditLog>>,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -67,9 +67,7 @@ pub(crate) async fn block_production_loop(
             crate::current_timestamp_millis(),
             proposer,
             version,
-            vec![], // protocol_txs — EVM-only mempool, no protocol txs
             evm_txs,
-            vec![], // bridge_operations — handled via EVM precompiles
         );
 
         // 3. Execute block
@@ -225,34 +223,6 @@ pub(crate) async fn block_production_loop(
         let block_duration = block_start.elapsed().as_millis() as u64;
         telemetry.record_block_latency(block_duration);
 
-        // Append audit entries for each protocol transaction
-        {
-            let mut audit = audit_log.write().unwrap();
-            for (tx_idx, tx) in block.protocol_txs.iter().enumerate() {
-                let tx_hash = {
-                    let data = serde_json::to_vec(tx).unwrap_or_default();
-                    call_crypto::keccak256(&data)
-                };
-                for instr in &tx.instructions {
-                    let entry = crate::logging::AuditEntry {
-                        block_height: block.header.height,
-                        tx_index: tx_idx as u32,
-                        tx_type: format!("{:?}", std::mem::discriminant(instr)),
-                        action: format!("{:?}", instr),
-                        agent_id: None,
-                        fee_payer: Some(tx.sender),
-                        before_state: serde_json::Value::Null,
-                        after_state: serde_json::Value::Null,
-                        tx_hash,
-                        shielded_details: None,
-                    };
-                    if let Err(e) = audit.append(entry) {
-                        tracing::warn!(error = %e, "audit log append failed");
-                    }
-                }
-            }
-        }
-
         // 7a. Check and apply any scheduled protocol upgrades at this height
         {
             let mut fm = state.fork_manager.write().unwrap();
@@ -273,11 +243,21 @@ pub(crate) async fn block_production_loop(
             let base_fee = fee_params.base_fee;
             let max_gas = fee_params.max_gas_per_block.max(1);
             drop(fee_params);
-            let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+            let total_gas = result.evm_gas_used;
             let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
-            let priority_fee_rewards = result.priority_fee_percentiles(
-                &[0.0, 10.0, 50.0, 90.0, 100.0]
-            );
+            let mut evm_priority_fees: Vec<u128> = result.evm_tx_results.iter()
+                .map(|e| e.gas_price.saturating_sub(base_fee))
+                .collect();
+            evm_priority_fees.sort_unstable();
+            let n = evm_priority_fees.len().max(1);
+            let priority_fee_rewards: Vec<u128> = [0.0, 10.0, 50.0, 90.0, 100.0]
+                .iter()
+                .map(|p| {
+                    let p = (*p as f64).min(100.0).max(0.0);
+                    let idx = ((n - 1) as f64 * p / 100.0).round() as usize;
+                    evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS)
+                })
+                .collect();
             let entry = call_rpc::handlers::BlockFeeEntry {
                 base_fee,
                 gas_used_ratio,
@@ -325,7 +305,7 @@ pub(crate) async fn block_production_loop(
             }
         }
 
-        // 11. Generate and store receipts for EVM + protocol transactions
+        // 11. Generate and store receipts for EVM transactions
         let block_hash = block.header.hash();
         let mut cumulative_gas: u64 = 0;
         let mut tx_index: u64 = 0;
@@ -364,45 +344,8 @@ pub(crate) async fn block_production_loop(
             tx_index += 1;
         }
 
-        for tr in &result.transaction_results {
-            let tx_hash = tr.tx_hash;
-            let Some(tx) = block.protocol_txs.iter().find(|t| {
-                call_primitives::TxHash::from(t.compute_tx_hash()) == tx_hash
-            }) else { continue; };
-
-            let effective_gas_price = if tr.gas_used > 0 {
-                tr.fee_amount / tr.gas_used as u128
-            } else {
-                0
-            };
-            cumulative_gas += tr.gas_used;
-            let receipt = ProtocolReceipt {
-                tx_hash,
-                status: tr.status.clone(),
-                gas_used: tr.gas_used,
-                gas_payer: tx.sender,
-                fee_currency: tx.fee_currency,
-                fee_amount: tr.fee_amount,
-                block_number: height,
-                block_hash,
-                transaction_index: tx_index,
-                to: None,
-                contract_address: None,
-                cumulative_gas_used: cumulative_gas,
-                effective_gas_price,
-                logs_bloom: vec![],
-                instruction_results: vec![],
-                logs: vec![],
-                memos: vec![],
-                state_changes: vec![],
-            };
-            state.store_receipt(tx_hash, receipt);
-            tx_index += 1;
-        }
-
         // 11b. Broadcast ETH WebSocket events (newHeads + logs)
-        let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>()
-            + result.transaction_results.iter().map(|t| t.gas_used).sum::<u64>();
+        let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>();
         let base_fee = state.fee_params.read().map(|p| p.base_fee).unwrap_or(0);
         subscriptions.broadcast_eth_new_head(serde_json::json!({
             "hash": format!("0x{}", hex::encode(block_hash.as_slice())),

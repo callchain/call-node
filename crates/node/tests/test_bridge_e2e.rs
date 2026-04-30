@@ -202,7 +202,4 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     let block = node.produce_block(1_000_000);
     assert!(block.is_some(), "block should be produced");
 
-    // No protocol txs in EVM-only mode
-    let result = node.last_result.clone().expect("execution result should exist");
-    assert_eq!(result.protocol_tx_count, 0, "no protocol txs in EVM-only mode");
 }

@@ -197,8 +197,6 @@ async fn test_invalid_proposer_rejected() {
         invalid_proposer,
         ProtocolVersion::new(1, 0, 0),
         vec![],
-        vec![],
-        vec![],
     );
 
     let fm = node.state.fork_manager.read().unwrap();

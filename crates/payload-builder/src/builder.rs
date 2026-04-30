@@ -3,15 +3,15 @@
 //! Block assembly from mempool with limits enforcement,
 //! execution ordering, and state root computation.
 
-use call_bridge::{BridgeOp, BridgeStateManager};
+use call_bridge::BridgeStateManager;
 use call_consensus::block::{Block, BlockExecutionResult, BlockContext, ExecutionState, Subsystems};
 use call_consensus::validator::ConsensusError;
 use call_primitives::{BlockHash, Hash};
 use call_protocol::AccountState;
 use call_protocol::compliance::ComplianceEngine;
-use call_protocol::instructions::{Instruction, InstructionResult};
+use call_protocol::instructions::InstructionResult;
 use call_protocol::registry::AssetRegistry;
-use call_protocol::transaction::{ProtocolTransaction, FeeParams};
+use call_protocol::transaction::FeeParams;
 use call_payload_types::{BlockLimits, PayloadAttributes};
 use call_transaction_pool::MempoolSelection;
 use tracing::info;
@@ -87,79 +87,25 @@ impl PayloadBuilder {
 
     /// Build a payload from mempool selection.
     ///
-    /// Selects transactions from the mempool, enforces block limits,
-    /// executes them in spec order (EVM → Protocol → Bridge → System),
-    /// and computes state roots.
+    /// Selects EVM transactions from the mempool, enforces block limits,
+    /// executes them, and computes state roots.
     pub fn build(
         &self,
         attrs: &PayloadAttributes,
-        protocol_txs: Vec<ProtocolTransaction>,
         evm_txs: Vec<Vec<u8>>,
-        bridge_ops: Vec<BridgeOp>,
-        account: &mut AccountState,
-        registry: &mut AssetRegistry,
-        compliance: &mut ComplianceEngine,
+        _account: &mut AccountState,
+        _registry: &mut AssetRegistry,
+        _compliance: &mut ComplianceEngine,
         _bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         state_root: Hash,
         bridge_config: Option<&call_bridge::BridgeConfig>,
     ) -> Result<BuiltPayload, BuilderError> {
-        let mut selected_protocol = Vec::new();
         let mut selected_evm = Vec::new();
-        let mut selected_bridges = Vec::new();
         let mut total_count = 0;
         let mut total_size = 0;
-        let mut shielded_count = 0;
         let mut evm_gas_used = 0u64;
-
-        // Select protocol transactions
-        for tx in protocol_txs {
-            // Check transaction count limit
-            if total_count >= self.limits.max_transactions {
-                break;
-            }
-
-            // Check instruction limit
-            if tx.instructions.len() > self.limits.max_instructions_per_tx {
-                info!(
-                    "skipping protocol tx: {} instructions > limit {}",
-                    tx.instructions.len(),
-                    self.limits.max_instructions_per_tx
-                );
-                continue;
-            }
-
-            // Check shielded transaction limit
-            let is_shielded = tx.instructions.iter().any(|instr| {
-                matches!(
-                    instr,
-                    Instruction::ShieldedDeposit { .. }
-                        | Instruction::ShieldedWithdraw { .. }
-                        | Instruction::ShieldedTransfer { .. }
-                )
-            });
-            if is_shielded {
-                if shielded_count >= self.limits.max_shielded_per_block {
-                    info!("skipping shielded tx: limit reached");
-                    continue;
-                }
-                shielded_count += 1;
-            }
-
-            // Estimate tx size (placeholder: ~200 bytes per protocol tx)
-            let tx_size = estimate_protocol_tx_size(&tx);
-            if tx_size > self.limits.max_tx_size {
-                continue;
-            }
-            if total_size + tx_size > self.limits.max_block_size {
-                break;
-            }
-
-            total_size += tx_size;
-            total_count += 1;
-            selected_protocol.push(tx);
-        }
 
         // Select EVM transactions
         for evm_tx in evm_txs {
@@ -187,15 +133,6 @@ impl PayloadBuilder {
             selected_evm.push(evm_tx);
         }
 
-        // Select bridge operations (FIFO)
-        for bridge_op in bridge_ops {
-            if total_count >= self.limits.max_transactions {
-                break;
-            }
-            total_count += 1;
-            selected_bridges.push(bridge_op);
-        }
-
         if total_count == 0 {
             return Err(BuilderError::EmptyBlock);
         }
@@ -206,9 +143,7 @@ impl PayloadBuilder {
             attrs.timestamp_millis,
             attrs.proposer,
             attrs.version,
-            selected_protocol,
             selected_evm,
-            selected_bridges,
         );
 
         // Execute the block
@@ -237,11 +172,9 @@ impl PayloadBuilder {
         block.finalize(&result);
 
         info!(
-            "built payload: height={} protocol={} evm={} bridge={} total_size={}",
+            "built payload: height={} evm={} total_size={}",
             attrs.height,
-            result.protocol_tx_count,
             result.evm_tx_count,
-            result.bridge_op_count,
             total_size
         );
 
@@ -255,15 +188,14 @@ impl PayloadBuilder {
     /// Build a payload from mempool selection directly.
     ///
     /// Same as [`build`](Self::build) but takes a `MempoolSelection`
-    /// instead of separate vectors. The mempool is EVM-only, so
-    /// protocol_txs and bridge_ops are always empty.
+    /// instead of separate vectors. The mempool is EVM-only.
     pub fn build_from_mempool(
         &self,
         attrs: &PayloadAttributes,
         selection: MempoolSelection,
-        account: &mut AccountState,
-        registry: &mut AssetRegistry,
-        compliance: &mut ComplianceEngine,
+        _account: &mut AccountState,
+        _registry: &mut AssetRegistry,
+        _compliance: &mut ComplianceEngine,
         _bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
@@ -274,12 +206,10 @@ impl PayloadBuilder {
 
         self.build(
             attrs,
-            vec![], // protocol_txs — EVM-only mempool
             evm_txs,
-            vec![], // bridge_ops — handled via EVM precompiles
-            account,
-            registry,
-            compliance,
+            _account,
+            _registry,
+            _compliance,
             _bridge_state,
             shielded_state,
             evm_state,
@@ -290,11 +220,6 @@ impl PayloadBuilder {
 }
 
 // ── Helper Functions ──────────────────────────────────────────────────
-
-/// Estimate the serialized size of a protocol transaction
-fn estimate_protocol_tx_size(tx: &ProtocolTransaction) -> usize {
-    serde_json::to_vec(tx).map(|v| v.len()).unwrap_or(0)
-}
 
 /// Compute receipt root from instruction results
 pub fn compute_receipt_root(results: &[InstructionResult]) -> Hash {
@@ -323,58 +248,14 @@ pub fn compute_receipt_root(results: &[InstructionResult]) -> Hash {
 mod tests {
     use super::*;
     use call_primitives::{Address, ProtocolVersion};
-    use call_protocol::transaction::{AuthScheme, GasConfig};
     use call_consensus::exec::evm_instructions;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
     }
 
-    fn test_keypair() -> &'static ([u8; 32], Address) {
-        use std::sync::OnceLock;
-        static PAIR: OnceLock<([u8; 32], Address)> = OnceLock::new();
-        PAIR.get_or_init(|| {
-            let (secret, _) = call_crypto::generate_keypair();
-            let msg_hash = [0u8; 32];
-            let sig = call_crypto::secp256k1_sign(&secret, &msg_hash);
-            let addr = call_crypto::recover_secp256k1_signer(&msg_hash, &sig).unwrap();
-            (secret, addr)
-        })
-    }
-
-    fn sign_tx(mut tx: ProtocolTransaction) -> ProtocolTransaction {
-        let (secret, _) = test_keypair();
-        let tx_hash = tx.compute_tx_hash();
-        let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
-        tx.auth = AuthScheme::SingleSig { signature };
-        tx
-    }
-
     fn test_sender() -> Address {
-        test_keypair().1
-    }
-
-    fn make_test_tx(nonce: u64) -> ProtocolTransaction {
-        let tx = ProtocolTransaction {
-            sender: test_sender(),
-            nonce,
-            instructions: vec![Instruction::Transfer {
-                asset_id: 1,
-                to: test_addr(2),
-                amount: 100,
-                memo: None,
-            }],
-            gas_config: GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        };
-        sign_tx(tx)
+        Address::repeat_byte(1)
     }
 
     /// Create a serialized EVM transaction for testing.
@@ -398,9 +279,7 @@ mod tests {
         let builder = PayloadBuilder::new(fee_params);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        let protocol_txs = vec![make_test_tx(0), make_test_tx(1)];
         let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
-        let bridge_ops: Vec<BridgeOp> = vec![];
 
         let mut account = AccountState::new();
         account.balances.set_balance(1, test_sender(), 10_000).unwrap();
@@ -412,9 +291,7 @@ mod tests {
 
         let payload = builder.build(
             &attrs,
-            protocol_txs,
             evm_txs,
-            bridge_ops,
             &mut account,
             &mut registry,
             &mut compliance,
@@ -426,7 +303,6 @@ mod tests {
         ).unwrap();
 
         assert_eq!(payload.block.header.height, 1);
-        assert_eq!(payload.block.protocol_txs.len(), 2);
         assert_eq!(payload.block.evm_txs.len(), 1);
         assert!(payload.block.header.state_root != Hash::ZERO);
     }
@@ -441,10 +317,8 @@ mod tests {
         let builder = PayloadBuilder::with_limits(fee_params, limits);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        // Send more txs than limit
-        let protocol_txs: Vec<_> = (0..10).map(|n| make_test_tx(n)).collect();
-        let evm_txs: Vec<Vec<u8>> = vec![];
-        let bridge_ops: Vec<BridgeOp> = vec![];
+        // Send more evm txs than limit
+        let evm_txs: Vec<Vec<u8>> = (0..10).map(|_| make_evm_tx_bytes(21_000)).collect();
 
         let mut account = AccountState::new();
         account.balances.set_balance(1, test_sender(), 100_000).unwrap();
@@ -456,9 +330,7 @@ mod tests {
 
         let payload = builder.build(
             &attrs,
-            protocol_txs,
             evm_txs,
-            bridge_ops,
             &mut account,
             &mut registry,
             &mut compliance,
@@ -473,24 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn test_payload_shielded_per_block_limit() {
-        // Test that shielded tx selection and execution handles ZK validation properly.
-        // Mix regular transfers (execute fine) with shielded transfers (fail ZK validation
-        // during execution, which rolls back that tx but continues processing).
+    fn test_payload_evm_gas_limit() {
+        // Test that EVM transactions exceeding gas limits are skipped.
         let fee_params = FeeParams::default();
         let limits = BlockLimits {
-            max_shielded_per_block: 1,
+            max_evm_gas_per_block: 50_000,
             max_transactions: 10,
             ..Default::default()
         };
         let builder = PayloadBuilder::with_limits(fee_params, limits);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        // Regular transfers that will execute successfully
-        let protocol_txs = vec![
-            make_test_tx_with_sender(test_sender(), 1, 0),
-            make_test_tx_with_sender(test_sender(), 1, 1),
-            make_test_tx_with_sender(test_sender(), 1, 2),
+        // Two EVM txs: one within gas limit, one exceeding
+        let evm_txs: Vec<Vec<u8>> = vec![
+            make_evm_tx_bytes(21_000),
+            make_evm_tx_bytes(100_000),
         ];
 
         let mut account = AccountState::new();
@@ -503,9 +372,7 @@ mod tests {
 
         let payload = builder.build(
             &attrs,
-            protocol_txs,
-            vec![],
-            vec![],
+            evm_txs,
             &mut account,
             &mut registry,
             &mut compliance,
@@ -516,31 +383,8 @@ mod tests {
             None,
         ).unwrap();
 
-        // All 3 regular txs should be included (no shielded txs to limit)
-        assert_eq!(payload.block.protocol_txs.len(), 3);
-    }
-
-    fn make_test_tx_with_sender(_sender: Address, asset_id: u64, nonce: u64) -> ProtocolTransaction {
-        let tx = ProtocolTransaction {
-            sender: test_sender(),
-            nonce,
-            instructions: vec![Instruction::Transfer {
-                asset_id,
-                to: Address::ZERO,
-                amount: 1,
-                memo: None,
-            }],
-            gas_config: GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        };
-        sign_tx(tx)
+        // Only the tx within gas limit should be included
+        assert_eq!(payload.tx_count, 1);
     }
 
     #[test]
@@ -549,7 +393,6 @@ mod tests {
         let builder = PayloadBuilder::new(fee_params);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        let protocol_txs = vec![make_test_tx(0)];
         let evm_txs: Vec<Vec<u8>> = vec![{
             let tx = call_evm::EvmTransaction {
                 caller: test_addr(1),
@@ -562,12 +405,6 @@ mod tests {
                 chain_id: 1,
             };
             serde_json::to_vec(&tx).unwrap()
-        }];
-        let bridge_ops = vec![BridgeOp::DepositToEvm {
-            asset_id: 1,
-            from: test_sender(),
-            to: test_addr(2),
-            amount: 500,
         }];
 
         let mut account = AccountState::new();
@@ -622,9 +459,7 @@ mod tests {
 
         let payload = builder.build(
             &attrs,
-            protocol_txs,
             evm_txs,
-            bridge_ops,
             &mut account,
             &mut registry,
             &mut compliance,
@@ -635,10 +470,7 @@ mod tests {
             Some(&bridge_config),
         ).unwrap();
 
-        // Execution order: EVM(1) → Protocol(1) → Bridge(1)
         assert_eq!(payload.execution_result.evm_tx_count, 1);
-        assert_eq!(payload.execution_result.protocol_tx_count, 1);
-        assert_eq!(payload.execution_result.bridge_op_count, 1);
     }
 
     #[test]
@@ -647,9 +479,7 @@ mod tests {
         let builder = PayloadBuilder::new(fee_params);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        let protocol_txs = vec![make_test_tx(0)];
-        let evm_txs: Vec<Vec<u8>> = vec![];
-        let bridge_ops: Vec<BridgeOp> = vec![];
+        let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
 
         let mut account = AccountState::new();
         account.balances.set_balance(1, test_sender(), 10_000).unwrap();
@@ -658,20 +488,19 @@ mod tests {
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
 
-        // Provide a non-zero evm_state_root that won't match the computed root
+        // Hash::ZERO expected bypasses the state-root check; payload should succeed
         let result = builder.build(
             &attrs,
-            protocol_txs,
             evm_txs,
-            bridge_ops,
             &mut account,
             &mut registry,
             &mut compliance,
             &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
-            Hash::ZERO, // ZERO expected - should pass
+            Hash::ZERO,
             None,
         );
 
@@ -721,42 +550,42 @@ mod tests {
         ).unwrap();
 
         assert_eq!(payload.block.header.height, 1);
-        assert_eq!(payload.block.protocol_txs.len(), 0);
         assert_eq!(payload.block.evm_txs.len(), 1);
     }
 
     #[test]
-    fn test_payload_skips_tx_exceeding_instruction_limit() {
+    fn test_payload_skips_evm_tx_exceeding_size_limit() {
         let fee_params = FeeParams::default();
         let limits = BlockLimits {
-            max_instructions_per_tx: 5,
+            max_tx_size: 200,
             max_transactions: 10,
             ..Default::default()
         };
         let builder = PayloadBuilder::with_limits(fee_params, limits);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        // First tx exceeds instruction limit (6 > 5)
-        let tx_over = sign_tx(ProtocolTransaction {
-            sender: test_sender(),
+        // One small EVM tx, one large EVM tx
+        let small_tx = serde_json::to_vec(&call_evm::EvmTransaction {
+            caller: test_sender(),
             nonce: 0,
-            instructions: (0..6).map(|_| Instruction::Transfer {
-                asset_id: 1,
-                to: test_addr(2),
-                amount: 100,
-                memo: None,
-            }).collect(),
-            gas_config: GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        });
-        let tx_ok = make_test_tx(1);
+            gas_limit: 21_000,
+            gas_price: 1,
+            to: Some(test_addr(2)),
+            value: call_primitives::U256::from(100),
+            data: call_evm::Bytes::default(),
+            chain_id: 1,
+        }).unwrap();
+        let large_tx = serde_json::to_vec(&call_evm::EvmTransaction {
+            caller: test_sender(),
+            nonce: 1,
+            gas_limit: 21_000,
+            gas_price: 1,
+            to: None,
+            value: call_primitives::U256::ZERO,
+            data: call_evm::Bytes::from(vec![0u8; 100]),
+            chain_id: 1,
+        }).unwrap();
+        let evm_txs: Vec<Vec<u8>> = vec![small_tx, large_tx];
 
         let mut account = AccountState::new();
         account.balances.set_balance(1, test_sender(), 10_000).unwrap();
@@ -765,12 +594,11 @@ mod tests {
         let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
 
         let payload = builder.build(
             &attrs,
-            vec![tx_over, tx_ok],
-            vec![],
-            vec![],
+            evm_txs,
             &mut account,
             &mut registry,
             &mut compliance,
@@ -781,7 +609,7 @@ mod tests {
             None,
         ).unwrap();
 
-        // Only the valid tx should be included
-        assert_eq!(payload.block.protocol_txs.len(), 1);
+        // Only the small tx should be included
+        assert_eq!(payload.tx_count, 1);
     }
 }

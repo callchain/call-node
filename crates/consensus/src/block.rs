@@ -2,12 +2,9 @@
 //!
 //! Block and BlockHeader types with hash, validation, and execution.
 
-use call_bridge::{BridgeOp, BridgeConfig};
+use call_bridge::BridgeConfig;
 use call_crypto::keccak256;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
-use call_primitives::ExecutionStatus;
-use call_protocol::instructions::{Instruction, InstructionResult};
-use call_protocol::transaction::ProtocolTransaction;
 use call_protocol::FeeParams;
 use call_shielded::ShieldedState;
 use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
@@ -15,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::validator::ConsensusError;
-use crate::{ForkManager, RollbackPlan};
-use crate::exec::{evm_instructions, rollback};
+use crate::ForkManager;
+use crate::exec::evm_instructions;
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
 
@@ -189,23 +186,18 @@ impl<'a> Subsystems<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
-    pub protocol_txs: Vec<ProtocolTransaction>,
     pub evm_txs: Vec<EvmTx>,
-    pub bridge_operations: Vec<BridgeOp>,
 }
 
 impl Block {
     /// Build a new block
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         height: u64,
         parent_hash: BlockHash,
         timestamp_millis: u64,
         proposer: call_primitives::ValidatorId,
         version: ProtocolVersion,
-        protocol_txs: Vec<ProtocolTransaction>,
         evm_txs: Vec<EvmTx>,
-        bridge_operations: Vec<BridgeOp>,
     ) -> Self {
         let header = BlockHeader {
             parent_hash,
@@ -221,9 +213,7 @@ impl Block {
 
         Self {
             header,
-            protocol_txs,
             evm_txs,
-            bridge_operations,
         }
     }
 
@@ -234,37 +224,19 @@ impl Block {
         fork_manager: &ForkManager,
     ) -> Result<(), ConsensusError> {
         self.header.validate(expected_parent, fork_manager)?;
-
-        // Per spec §2.5: execution order must be EVM → Protocol → Bridge
-        // We validate that each section is internally consistent
-
-        // Check no duplicate nonces in protocol txs
-        let mut seen_nonces = HashSet::new();
-        for tx in &self.protocol_txs {
-            let key = (tx.sender, tx.nonce);
-            if !seen_nonces.insert(key) {
-                return Err(ConsensusError::InvalidBlock(format!(
-                    "duplicate nonce: {:?}",
-                    key
-                )));
-            }
-        }
-
         Ok(())
     }
 
     /// Execute all transactions in spec order (per spec §2.5):
     /// 1. EVM transactions (evm_txs)
-    /// 2. Protocol transactions (protocol_txs)
-    /// 3. Bridge operations (bridge_operations)
-    /// 4. System settlement (base-fee update, validator reward, oracle share)
+    /// 2. System settlement (base-fee update, oracle reward)
     ///
-    /// Returns all instruction results.
+    /// Returns EVM execution results.
     pub fn execute(
         &self,
         state: &mut ExecutionState,
         ctx: &mut BlockContext,
-        subsystems: &mut Subsystems,
+        _subsystems: &mut Subsystems,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut result = BlockExecutionResult::default();
         let executor = EvmExecutor::new(1); // chain_id = 1
@@ -383,182 +355,8 @@ impl Block {
             // Nonce consumed regardless of execution result (same as Ethereum)
         }
 
-        // Step 2: Protocol transactions
-        for tx in &self.protocol_txs {
-            // Validate nonce against EVM state (nonce consumed on inclusion)
-            if state.evm_state.get_nonce(&tx.sender) != tx.nonce {
-                // Nonce mismatch or already used — skip this tx
-                continue;
-            }
-
-            // Verify transaction signature before execution
-            if let Err(e) = tx.verify_signature() {
-                return Err(ConsensusError::InvalidBlock(format!(
-                    "signature verification failed for tx from {:?}: {e}",
-                    tx.sender
-                )));
-            }
-
-            // Check transaction expiry
-            if tx.expires_at != 0 && ctx.current_block_height > tx.expires_at {
-                return Err(ConsensusError::InvalidBlock(format!(
-                    "transaction from {:?} expired at block {} (current: {})",
-                    tx.sender, tx.expires_at, ctx.current_block_height
-                )));
-            }
-
-            // Compute gas fee
-            let gas_units = call_protocol::transaction::calculate_gas_units(&tx.instructions);
-            let priority_fee = tx.max_priority_fee.max(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS);
-            let fee = call_protocol::transaction::compute_fee(
-                gas_units,
-                priority_fee,
-                ctx.fee_params.base_fee,
-            )
-            .min(tx.max_fee);
-
-            // Check fee balance in EVM storage
-            let fee_asset_id = match tx.fee_currency {
-                call_primitives::FeeCurrency::Call => call_protocol::CALL_ASSET_ID,
-                call_primitives::FeeCurrency::Stablecoin(asset_id) => asset_id,
-            };
-            let fee_balance = evm_instructions::read_balance(state.evm_state, fee_asset_id, tx.sender);
-            if fee_balance < fee {
-                continue; // insufficient fee balance
-            }
-
-            // Deduct gas fee from EVM storage
-            let new_fee_balance = fee_balance
-                .checked_sub(fee)
-                .expect("fee balance checked above");
-            evm_instructions::seed_balance(state.evm_state, fee_asset_id, tx.sender, new_fee_balance);
-
-            // Increment nonce (consumed on inclusion, regardless of execution result)
-            state.evm_state.increment_nonce(tx.sender);
-
-            // Separate instructions by type: rollback, evm
-            // Separate rollback instructions (stateless, need ForkManager)
-            let (rollback_instrs, non_rollback): (Vec<_>, Vec<_>) = tx
-                .instructions
-                .iter()
-                .cloned()
-                .partition(|i| rollback::is_rollback_instruction(i));
-
-            // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
-            let evm_snapshot = state.evm_state.clone();
-            let shielded_snapshot = state.shielded_state.clone();
-            let mut tx_results = Vec::new();
-
-            let exec_result = (|| -> Result<(), ConsensusError> {
-                for instr in &non_rollback {
-                    let r = evm_instructions::execute_instruction_on_evm(
-                        instr,
-                        tx.sender,
-                        state.evm_state,
-                        state.shielded_state,
-                        ctx.current_block_height,
-                        ctx.bridge_config,
-                        ctx.validators,
-                        Some(&executor),
-                    )?;
-                    tx_results.push(r);
-                }
-
-                // Execute rollback instructions inline
-                if !rollback_instrs.is_empty() {
-                    let fm = subsystems.fork_manager.as_mut().ok_or_else(|| {
-                        ConsensusError::InvalidBlock(
-                            "rollback instructions require fork manager".into(),
-                        )
-                    })?;
-                    for instr in &rollback_instrs {
-                        let maybe_plan = rollback::execute_rollback_instruction(
-                            instr,
-                            fm,
-                            ctx.current_block_height,
-                        )?;
-                        if let Some(plan) = maybe_plan {
-                            result.pending_rollback = Some(plan);
-                        }
-                        tx_results.push(InstructionResult::Success);
-                    }
-                }
-
-                Ok(())
-            })();
-
-            if let Err(e) = exec_result {
-                // Rollback EVM/shielded but nonce stays consumed.
-                // Include the failed tx in the block with a Reverted result.
-                *state.evm_state = evm_snapshot;
-                *state.shielded_state = shielded_snapshot;
-                result.protocol_tx_count += 1;
-                result.protocol_priority_fees.push(priority_fee);
-                result.transaction_results.push(TransactionResult {
-                    tx_hash: tx.compute_tx_hash().into(),
-                    status: ExecutionStatus::Reverted { reason: e.to_string() },
-                    gas_used: gas_units,
-                    fee_amount: fee,
-                    instruction_count: 0,
-                    agent_events: vec![],
-                });
-                tracing::warn!(error = %e, sender = ?tx.sender, nonce = tx.nonce, "block: tx execution failed, included as reverted");
-            } else {
-                result.protocol_tx_count += 1;
-                result.protocol_priority_fees.push(priority_fee);
-                result.transaction_results.push(TransactionResult {
-                    tx_hash: tx.compute_tx_hash().into(),
-                    status: ExecutionStatus::Success,
-                    gas_used: gas_units,
-                    fee_amount: fee,
-                    instruction_count: tx_results.len(),
-                    agent_events: vec![],
-                });
-            }
-        }
-
-        // Step 3: Bridge operations
-        // Execute internal bridge deposits/withdrawals atomically via EVM storage.
-        if let Some(config) = ctx.bridge_config {
-            for op in &self.bridge_operations {
-                let asset_id = op.asset_id();
-                // Reject bridge ops on frozen or delisted assets (hard block failure)
-                let status = evm_instructions::read_asset_status(state.evm_state, asset_id);
-                if status != 0 {
-                    return Err(ConsensusError::InvalidBlock(format!(
-                        "bridge op: asset {asset_id} is not active (status: {status})"
-                    )));
-                }
-
-                let exec_result = match op {
-                    call_bridge::BridgeOp::DepositToEvm { .. } => {
-                        evm_instructions::exec_bridge_op_deposit(
-                            state.evm_state,
-                            op,
-                            ctx.current_block_height,
-                            config,
-                            Some(&executor),
-                        )
-                    }
-                    call_bridge::BridgeOp::WithdrawToProtocol { .. } => {
-                        evm_instructions::exec_bridge_op_withdraw(
-                            state.evm_state,
-                            op,
-                            ctx.current_block_height,
-                            config,
-                            Some(&executor),
-                        )
-                    }
-                };
-
-                if exec_result.is_ok() {
-                    result.bridge_op_count += 1;
-                }
-            }
-        }
-
-        // Step 4: System settlement (base-fee update, oracle reward pool)
-        let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+        // Step 2: System settlement (base-fee update, oracle reward pool)
+        let total_gas = result.evm_gas_used;
         update_base_fee_after_block(ctx.fee_params, total_gas);
 
         let total_fees = total_gas as u128 * ctx.fee_params.base_fee;
@@ -580,17 +378,6 @@ impl Block {
 
 // ── Block Execution Result ────────────────────────────────────────────
 
-/// Result of executing a single protocol transaction
-#[derive(Debug, Clone)]
-pub struct TransactionResult {
-    pub tx_hash: TxHash,
-    pub status: ExecutionStatus,
-    pub gas_used: u64,
-    pub fee_amount: u128,
-    pub instruction_count: usize,
-    pub agent_events: Vec<call_agent::AgentEvent>,
-}
-
 /// Result of executing a single EVM transaction
 #[derive(Debug, Clone)]
 pub struct EvmTxResult {
@@ -607,20 +394,11 @@ pub struct EvmTxResult {
 /// Result of executing all transactions in a block
 #[derive(Debug, Default, Clone)]
 pub struct BlockExecutionResult {
-    pub transaction_results: Vec<TransactionResult>,
     pub state_root: Hash,
     pub evm_tx_count: usize,
-    pub protocol_tx_count: usize,
-    pub bridge_op_count: usize,
     pub total_validator_reward: Balance,
     /// Total gas used by EVM transactions
     pub evm_gas_used: u64,
-    /// Agent activity events emitted during block execution
-    pub agent_events: Vec<call_agent::AgentEvent>,
-    /// Emergency rollback plan produced during block execution (quorum reached)
-    pub pending_rollback: Option<RollbackPlan>,
-    /// Priority fees paid by each protocol tx (for fee history percentile computation)
-    pub protocol_priority_fees: Vec<u128>,
     /// Per-EVM-tx results (for receipt generation)
     pub evm_tx_results: Vec<EvmTxResult>,
 }
@@ -628,27 +406,7 @@ pub struct BlockExecutionResult {
 impl BlockExecutionResult {
     /// Total transactions processed
     pub fn total_tx_count(&self) -> usize {
-        self.evm_tx_count + self.protocol_tx_count + self.bridge_op_count
-    }
-
-    /// Compute priority fee percentiles for fee history.
-    ///
-    /// Returns a Vec of priority fees at the requested percentiles.
-    /// If no protocol transactions exist, returns a Vec filled with the minimum.
-    pub fn priority_fee_percentiles(&self, percentiles: &[f64]) -> Vec<u128> {
-        if self.protocol_priority_fees.is_empty() {
-            return vec![call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS; percentiles.len()];
-        }
-        let mut sorted = self.protocol_priority_fees.clone();
-        sorted.sort_unstable();
-        let n = sorted.len();
-        percentiles
-            .iter()
-            .map(|p| {
-                let idx = ((n - 1) as f64 * p.min(100.0).max(0.0) / 100.0).round() as usize;
-                sorted[idx.min(n - 1)]
-            })
-            .collect()
+        self.evm_tx_count
     }
 }
 
@@ -669,21 +427,13 @@ pub(crate) fn compute_receipt_root(result: &BlockExecutionResult) -> Hash {
     let mut data = Vec::new();
     data.extend_from_slice(&result.evm_gas_used.to_le_bytes());
     data.extend_from_slice(&(result.evm_tx_count as u64).to_le_bytes());
-    data.extend_from_slice(&(result.protocol_tx_count as u64).to_le_bytes());
-    data.extend_from_slice(&(result.bridge_op_count as u64).to_le_bytes());
-    for tr in &result.transaction_results {
+    for evm in &result.evm_tx_results {
         let mut leaf = Vec::new();
-        leaf.extend_from_slice(tr.tx_hash.as_slice());
-        leaf.push(if tr.status.is_success() { 1 } else { 0 });
-        leaf.extend_from_slice(&tr.gas_used.to_be_bytes());
-        leaf.extend_from_slice(&tr.fee_amount.to_be_bytes());
+        leaf.extend_from_slice(evm.tx_hash.as_slice());
+        leaf.push(if evm.status { 1 } else { 0 });
+        leaf.extend_from_slice(&evm.gas_used.to_be_bytes());
+        leaf.extend_from_slice(&evm.gas_price.to_be_bytes());
         data.extend_from_slice(keccak256(&leaf).as_slice());
-    }
-    for event in &result.agent_events {
-        data.extend_from_slice(&event.agent_id.to_be_bytes());
-        data.extend_from_slice(&event.asset_id.to_be_bytes());
-        data.extend_from_slice(&event.amount.to_be_bytes());
-        data.extend_from_slice(&event.block_height.to_be_bytes());
     }
     keccak256(&data)
 }

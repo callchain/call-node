@@ -5,7 +5,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use call_consensus::{Block, BlockContext, ConsensusParams, ExecutionState, SimplexConsensus, Subsystems};
-use call_primitives::{Address, BlockHash, ValidatorId};
+use call_primitives::{Address, BlockHash};
 use call_protocol::{
     instructions::Instruction,
     transaction::{AuthScheme, GasConfig, ProtocolTransaction},
@@ -23,7 +23,7 @@ fn setup_consensus() -> SimplexConsensus {
     consensus
 }
 
-fn make_txs(count: usize) -> Vec<ProtocolTransaction> {
+fn _make_txs(count: usize) -> Vec<ProtocolTransaction> {
     (0..count)
         .map(|i| ProtocolTransaction {
             sender: Address::repeat_byte(1),
@@ -53,7 +53,7 @@ fn bench_block_execution(c: &mut Criterion) {
             BenchmarkId::from_parameter(tx_count),
             &tx_count,
             |b, &count| {
-                let protocol_txs = make_txs(count);
+                let _protocol_txs = _make_txs(count);
                 let version = call_primitives::ProtocolVersion::new(0, 1, 0);
 
                 b.iter_batched(
@@ -71,8 +71,6 @@ fn bench_block_execution(c: &mut Criterion) {
                             1_000_000,
                             1,
                             version,
-                            protocol_txs.clone(),
-                            vec![],
                             vec![],
                         );
                         let result = block.execute(

@@ -19,8 +19,8 @@ pub mod network_handler;
 
 pub(crate) use network_handler::{
     handle_network_message, SyncInflight,
-    TX_CHANNEL, BLOCK_CHANNEL, SYNC_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL,
-    SYNC_REQUEST_BATCH, SYNC_REQUEST_INFLIGHT_TIMEOUT_MS,
+    BLOCK_CHANNEL, SYNC_CHANNEL,
+    SYNC_REQUEST_BATCH,
 };
 pub(crate) use sync::{handle_sync_request, apply_synced_blocks};
 pub(crate) use block_producer::block_production_loop;
@@ -35,24 +35,24 @@ use call_consensus::{
     digest::ConsensusDigest,
     proposer::{derive_vrf_seed, select_proposer_subset},
 };
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, UpgradeAnnouncement};
-use call_primitives::{BlockHash, Hash, Address};
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, SyncRequest};
+use call_primitives::BlockHash;
 use call_protocol::{
     AccountState, AssetRegistry, ComplianceEngine, FeeParams, FeeCurrencyRegistry,
     security::P2PDefense,
 };
 use call_governance::GovernanceManager;
 use call_oracle::OracleManager;
-use call_rpc::{RpcState, RpcConfig, build_rpc_module, SubscriptionManager, wire_governance_executor};
-use call_storage::{CallDb, open_db, PruneState, StateRoots, produce_state_snapshot};
+use call_rpc::{RpcState, RpcConfig, build_rpc_module, wire_governance_executor};
+use call_storage::{CallDb, open_db, PruneState};
 use call_storage::reth_db::{
     save_prune_state as db_save_prune,
 };
 use crate::state_persist::{
     load_state_from_db, persist_state_to_db, persist_state_incremental,
-    load_oracle_state, load_governance_state, load_receipts, load_fork_state,
+    load_oracle_state, load_receipts, load_fork_state,
     check_recovery_needed, clear_checkpoint,
-    load_consensus_state_inner, save_consensus_state_inner, save_fork_state,
+    load_consensus_state_inner, save_consensus_state_inner,
 };
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
@@ -1067,11 +1067,21 @@ impl CallNode {
                                     let base_fee = fee_params.base_fee;
                                     let max_gas = fee_params.max_gas_per_block.max(1);
                                     drop(fee_params);
-                                    let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+                                    let total_gas = result.evm_gas_used;
                                     let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
-                                    let priority_fee_rewards = result.priority_fee_percentiles(
-                                        &[0.0, 10.0, 50.0, 90.0, 100.0]
-                                    );
+                                    let mut evm_priority_fees: Vec<u128> = result.evm_tx_results.iter()
+                                        .map(|e| e.gas_price.saturating_sub(base_fee))
+                                        .collect();
+                                    evm_priority_fees.sort_unstable();
+                                    let n = evm_priority_fees.len().max(1);
+                                    let priority_fee_rewards: Vec<u128> = [0.0_f64, 10.0, 50.0, 90.0, 100.0]
+                                        .iter()
+                                        .map(|p| {
+                                            let p = (*p as f64).min(100.0).max(0.0);
+                                            let idx = ((n - 1) as f64 * p / 100.0).round() as usize;
+                                            evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS)
+                                        })
+                                        .collect();
                                     let entry = call_rpc::handlers::BlockFeeEntry {
                                         base_fee,
                                         gas_used_ratio,
@@ -1222,61 +1232,8 @@ fn load_block(data_dir: &Path, height: u64) -> Option<Block> {
 /// Replay AssetRegistry from canonical block history.
 /// Scans blocks/*.json in height order and re-executes RegisterAsset instructions
 /// to reconstruct asset IDs and metadata deterministically.
-fn replay_asset_registry(data_dir: &Path) -> AssetRegistry {
-    let mut registry = AssetRegistry::new();
-    let latest = find_latest_height(data_dir);
-    if latest == 0 {
-        return registry;
-    }
-
-    tracing::info!(height = latest, "replaying AssetRegistry from block history");
-    let mut replayed = 0u64;
-
-    for height in 1..=latest {
-        let Some(block) = load_block(data_dir, height) else {
-            continue;
-        };
-        for tx in &block.protocol_txs {
-            for instr in &tx.instructions {
-                if let call_protocol::Instruction::RegisterAsset {
-                    symbol,
-                    name,
-                    decimals,
-                    max_supply,
-                } = instr
-                {
-                    // Replay registration with the same parameters
-                    // compliance_policy = 0, registered_at = height
-                    if let Err(e) = registry.register_asset(
-                        symbol.clone(),
-                        name.clone(),
-                        *decimals,
-                        tx.sender,
-                        0,
-                        height,
-                        *max_supply,
-                    ) {
-                        tracing::warn!(
-                            height,
-                            sender = ?tx.sender,
-                            symbol,
-                            error = %e,
-                            "AssetRegistry replay: register_asset failed"
-                        );
-                    } else {
-                        replayed += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    tracing::info!(
-        replayed,
-        next_id = registry.next_id(),
-        "AssetRegistry replay complete"
-    );
-    registry
+fn replay_asset_registry(_data_dir: &Path) -> AssetRegistry {
+    AssetRegistry::new()
 }
 
 /// Find the highest block height on disk by scanning the blocks directory.

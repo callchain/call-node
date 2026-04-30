@@ -132,11 +132,21 @@ pub(crate) fn apply_synced_blocks(
                     let base_fee = fee_params.base_fee;
                     let max_gas = fee_params.max_gas_per_block.max(1);
                     drop(fee_params);
-                    let total_gas = result.evm_gas_used + result.protocol_tx_count as u64 * 21_000;
+                    let total_gas = result.evm_gas_used;
                     let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
-                    let priority_fee_rewards = result.priority_fee_percentiles(
-                        &[0.0, 10.0, 50.0, 90.0, 100.0]
-                    );
+                    let mut evm_priority_fees: Vec<u128> = result.evm_tx_results.iter()
+                        .map(|e| e.gas_price.saturating_sub(base_fee))
+                        .collect();
+                    evm_priority_fees.sort_unstable();
+                    let n = evm_priority_fees.len().max(1);
+                    let priority_fee_rewards: Vec<u128> = [0.0, 10.0, 50.0, 90.0, 100.0]
+                        .iter()
+                        .map(|p| {
+                            let p = (*p as f64).min(100.0).max(0.0);
+                            let idx = ((n - 1) as f64 * p / 100.0).round() as usize;
+                            evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS)
+                        })
+                        .collect();
                     let entry = call_rpc::handlers::BlockFeeEntry {
                         base_fee,
                         gas_used_ratio,
@@ -150,7 +160,7 @@ pub(crate) fn apply_synced_blocks(
                     }
                 }
 
-                // Generate and store receipts for EVM + protocol transactions
+                // Generate and store receipts for EVM transactions
                 let block_hash = block.header.hash();
                 let mut cumulative_gas: u64 = 0;
                 let mut tx_index: u64 = 0;
@@ -189,45 +199,8 @@ pub(crate) fn apply_synced_blocks(
                     tx_index += 1;
                 }
 
-                for tr in &result.transaction_results {
-                    let tx_hash = tr.tx_hash;
-                    let Some(tx) = block.protocol_txs.iter().find(|t| {
-                        call_primitives::TxHash::from(t.compute_tx_hash()) == tx_hash
-                    }) else { continue; };
-
-                    let effective_gas_price = if tr.gas_used > 0 {
-                        tr.fee_amount / tr.gas_used as u128
-                    } else {
-                        0
-                    };
-                    cumulative_gas += tr.gas_used;
-                    let receipt = ProtocolReceipt {
-                        tx_hash,
-                        status: tr.status.clone(),
-                        gas_used: tr.gas_used,
-                        gas_payer: tx.sender,
-                        fee_currency: tx.fee_currency,
-                        fee_amount: tr.fee_amount,
-                        block_number: block_height,
-                        block_hash,
-                        transaction_index: tx_index,
-                        to: None,
-                        contract_address: None,
-                        cumulative_gas_used: cumulative_gas,
-                        effective_gas_price,
-                        logs_bloom: vec![],
-                        instruction_results: vec![],
-                        logs: vec![],
-                        memos: vec![],
-                        state_changes: vec![],
-                    };
-                    state.store_receipt(tx_hash, receipt);
-                    tx_index += 1;
-                }
-
                 // Broadcast ETH WebSocket events
-                let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>()
-                    + result.transaction_results.iter().map(|t| t.gas_used).sum::<u64>();
+                let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>();
                 let base_fee = state.fee_params.read().map(|p| p.base_fee).unwrap_or(0);
                 state.subscriptions.broadcast_eth_new_head(serde_json::json!({
                     "hash": format!("0x{}", hex::encode(block_hash.as_slice())),

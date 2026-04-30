@@ -2,7 +2,7 @@
     use call_consensus::BlockExecutionResult;
     use call_consensus::block::{ExecutionState, BlockContext, Subsystems};
     use call_consensus::exec::evm_instructions;
-    use call_network::{InMemoryNetwork, EpochBoundarySignal};
+    use call_network::{InMemoryNetwork, EpochBoundarySignal, BlockAnnouncement, SyncResponse};
     use call_primitives::{Address, Ed25519PublicKey};
     use crate::state_persist::{save_asset_registry_inner, load_asset_registry_inner};
     use std::sync::OnceLock;
@@ -176,9 +176,7 @@
             1_000, // timestamp
             proposer,
             version,
-            vec![], // protocol_txs — EVM-only mempool
             evm_txs,
-            vec![], // bridge_ops — handled via EVM precompiles
         );
 
         // Execute
@@ -239,8 +237,6 @@
             2_000,
             proposer,
             version,
-            vec![],
-            vec![],
             vec![],
         );
 
@@ -325,9 +321,7 @@
             3_000,
             proposer,
             version,
-            vec![], // protocol_txs — EVM-only mempool
             evm_txs,
-            vec![], // bridge_ops — handled via EVM precompiles
         );
 
         let result = node1.state
@@ -418,9 +412,7 @@
             4_000,
             proposer,
             version,
-            vec![], // protocol_txs — EVM-only mempool
             evm_txs,
-            vec![], // bridge_ops — handled via EVM precompiles
         );
 
         let result = node.state
@@ -495,8 +487,7 @@
 
             let version = node.state.fork_manager.read().unwrap().current_version();
             let mut block = Block::new(
-                height, node.parent_hash, 5_000, proposer, version, vec![], evm_txs, vec![],
-            );
+                height, node.parent_hash, 5_000, proposer, version, evm_txs);
 
             let result = {
                 let mut s = node.state.write_all();
@@ -709,9 +700,7 @@
             5_000,
             proposer,
             version,
-            vec![], // protocol_txs — EVM-only
             evm_txs,
-            vec![], // bridge_ops — EVM-only
         );
 
         // Capture shared state BEFORE propose-phase execution
@@ -822,9 +811,7 @@
             6_000,
             proposer,
             version,
-            vec![], // protocol_txs — EVM-only
             evm_txs,
-            vec![], // bridge_ops — EVM-only
         );
 
         // Execute on cloned state to get valid roots
@@ -894,8 +881,6 @@
             7_000,
             proposer,
             version,
-            vec![],
-            vec![],
             vec![],
         );
 
@@ -1035,8 +1020,6 @@
             proposer,
             version,
             vec![],
-            vec![],
-            vec![],
         );
 
         // Execute to compute valid state roots
@@ -1112,8 +1095,6 @@
             10_000,
             proposer,
             version,
-            vec![],
-            vec![],
             vec![],
         );
 

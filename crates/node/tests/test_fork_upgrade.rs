@@ -88,9 +88,7 @@ async fn test_height_activated_upgrade() {
             ts,
             proposer,
             version,
-            vec![], // protocol_txs — EVM-only
             evm_txs,
-            vec![], // bridge_operations — handled via EVM precompiles
         );
 
         let result = node.state
