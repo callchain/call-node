@@ -1,6 +1,7 @@
 //! Validator precompile at 0x204
 //!
-//! Functions: stake, unstake, claimUnbonded, getValidatorStake, getValidatorStatus
+//! Functions: stake, unstake, claimUnbonded, getValidatorStake, getValidatorStatus,
+//!            getValidatorPubkey, getUnbondHeight, getValidatorByIndex
 
 use alloy_primitives::{address, Address, U256};
 use revm_precompile::{PrecompileError, PrecompileOutput};
@@ -393,6 +394,65 @@ impl ValidatorPrecompile {
         let out = PrecompileOutput::new(0, encode_u8(status).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
+
+    // getValidatorPubkey(address) -> 0x9511f44f
+    fn get_validator_pubkey(&self, input: &[u8]) -> crate::PrecompileResult {
+        const GAS_COST: u64 = 1000;
+        StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
+        if input.len() < 36 {
+            return Err(PrecompileError::Other("invalid input".into()));
+        }
+
+        let addr = decode_address(input, 4)
+            .ok_or_else(|| PrecompileError::Other("invalid address".into()))?;
+
+        let pubkey = StorageCtx::sload(VALIDATOR_ADDRESS, slot_validator_pubkey(addr))
+            .map(|v| v.to_be_bytes::<32>())
+            .unwrap_or([0u8; 32]);
+
+        let out = PrecompileOutput::new(0, pubkey.to_vec().into());
+        Ok(crate::storage::fill_precompile_output(out))
+    }
+
+    // getUnbondHeight(address) -> 0x528e09b6
+    fn get_unbond_height(&self, input: &[u8]) -> crate::PrecompileResult {
+        const GAS_COST: u64 = 1000;
+        StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
+        if input.len() < 36 {
+            return Err(PrecompileError::Other("invalid input".into()));
+        }
+
+        let addr = decode_address(input, 4)
+            .ok_or_else(|| PrecompileError::Other("invalid address".into()))?;
+
+        let height = StorageCtx::sload(VALIDATOR_ADDRESS, slot_validator_unbond_height(addr))
+            .map(u256_to_u64)
+            .unwrap_or(0);
+
+        let out = PrecompileOutput::new(0, encode_u64(height).to_vec().into());
+        Ok(crate::storage::fill_precompile_output(out))
+    }
+
+    // getValidatorByIndex(uint256) -> 0x3fce1b0d
+    fn get_validator_by_index(&self, input: &[u8]) -> crate::PrecompileResult {
+        const GAS_COST: u64 = 1000;
+        StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
+        if input.len() < 36 {
+            return Err(PrecompileError::Other("invalid input".into()));
+        }
+
+        let index = decode_u64(input, 4)
+            .ok_or_else(|| PrecompileError::Other("invalid index".into()))?;
+
+        let addr = StorageCtx::sload(VALIDATOR_ADDRESS, slot_validator_addr(index))
+            .map(u256_to_address)
+            .unwrap_or(Address::ZERO);
+
+        let mut out = [0u8; 32];
+        out[12..32].copy_from_slice(addr.as_slice());
+        let out = PrecompileOutput::new(0, out.to_vec().into());
+        Ok(crate::storage::fill_precompile_output(out))
+    }
 }
 
 impl StatefulPrecompile for ValidatorPrecompile {
@@ -406,6 +466,9 @@ impl StatefulPrecompile for ValidatorPrecompile {
             &[0x6a, 0xb7, 0x60, 0x49] => self.claim_unbonded(calldata, msg_sender),
             &[0x34, 0x66, 0x48, 0x46] => self.get_validator_stake(calldata),
             &[0xa3, 0x10, 0x62, 0x4f] => self.get_validator_status(calldata),
+            &[0x95, 0x11, 0xf4, 0x4f] => self.get_validator_pubkey(calldata),
+            &[0x52, 0x8e, 0x09, 0xb6] => self.get_unbond_height(calldata),
+            &[0x3f, 0xce, 0x1b, 0x0d] => self.get_validator_by_index(calldata),
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }
@@ -515,6 +578,64 @@ mod tests {
             input[28..36].copy_from_slice(&1u64.to_be_bytes());
             let result = precompile.call(&input, sender);
             assert!(result.is_err(), "claim should fail before period elapsed");
+        });
+    }
+
+    #[test]
+    fn test_validator_precompile_read_methods() {
+        let mut provider = crate::storage::HashMapStorageProvider::new(1_000_000);
+        let sender = Address::repeat_byte(0x11);
+
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            // Seed sender balance
+            let sender_slot = slot_balance(CALL_ASSET_ID, sender);
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                sender_slot,
+                u128_to_u256(10_000_000),
+            );
+
+            let mut precompile = ValidatorPrecompile;
+
+            // stake first
+            let mut input = vec![0u8; 68];
+            input[0..4].copy_from_slice(&[0x48, 0x72, 0x06, 0x40]);
+            input[4..36].copy_from_slice(&[0xAAu8; 32]);
+            input[52..68].copy_from_slice(&5_000_000u128.to_be_bytes());
+            precompile.call(&input, sender).unwrap();
+
+            // getValidatorPubkey(sender)
+            let mut input = vec![0u8; 36];
+            input[0..4].copy_from_slice(&[0x95, 0x11, 0xf4, 0x4f]);
+            input[16..36].copy_from_slice(sender.as_slice());
+            let result = precompile.call(&input, Address::ZERO).unwrap();
+            assert_eq!(&result.bytes[..], &[0xAAu8; 32]);
+
+            // getValidatorByIndex(1)
+            let mut input = vec![0u8; 36];
+            input[0..4].copy_from_slice(&[0x3f, 0xce, 0x1b, 0x0d]);
+            input[28..36].copy_from_slice(&1u64.to_be_bytes());
+            let result = precompile.call(&input, Address::ZERO).unwrap();
+            let returned_addr = Address::from_slice(&result.bytes[12..32]);
+            assert_eq!(returned_addr, sender);
+
+            // unstake to set unbond height
+            let mut input = vec![0u8; 36];
+            input[0..4].copy_from_slice(&[0xd2, 0x9a, 0xb8, 0x7a]);
+            input[28..36].copy_from_slice(&1u64.to_be_bytes());
+            precompile.call(&input, sender).unwrap();
+
+            // getUnbondHeight(sender)
+            let mut input = vec![0u8; 36];
+            input[0..4].copy_from_slice(&[0x52, 0x8e, 0x09, 0xb6]);
+            input[16..36].copy_from_slice(sender.as_slice());
+            let result = precompile.call(&input, Address::ZERO).unwrap();
+            let height = u64::from_be_bytes({
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&result.bytes[24..32]);
+                buf
+            });
+            assert_eq!(height, 0); // block_number defaults to 0 in test provider
         });
     }
 }

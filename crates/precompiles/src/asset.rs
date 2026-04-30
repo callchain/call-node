@@ -650,6 +650,7 @@ impl StatefulPrecompile for AssetPrecompile {
             &[0x7e, 0x2e, 0xad, 0x93] => self.approve(calldata, msg_sender),
             &[0xa1, 0x3e, 0x0f, 0xba] => self.transfer_from(calldata, msg_sender),
             &[0xf2, 0xbe, 0x45, 0x99] => self.mint(calldata, msg_sender),
+            &[0x2b, 0x7d, 0x14, 0x80] => self.mint(calldata, msg_sender), // issuerMint alias
             &[0x73, 0x71, 0x28, 0x63] => self.burn(calldata, msg_sender),
             &[0x48, 0x4a, 0x57, 0x3d] => self.register(calldata, msg_sender),
             _ => Err(PrecompileError::Other("unknown selector".into())),
