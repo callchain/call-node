@@ -42,23 +42,16 @@ async fn test_light_verify_block_header_valid() {
         id
     };
 
-    // Also register in validator state manager (used by RPC for validator set lookup)
+    // Seed validator into EVM storage (RPC reads from EVM, not legacy validator_state)
     {
-        let mut validator_mgr = node.state.validator_state.write().unwrap();
-        validator_mgr.register_validator_from_stake(
-            val_id,
-            call_consensus::ValidatorStake {
-                validator_id: val_id,
-                address: validator_addr,
-                ed25519_pubkey,
-                staked_call: one_million_call(),
-                self_stake: one_million_call(),
-                delegated_call: 0,
-                rewards: 0,
-                slash_history: vec![],
-                unbonding_start: None,
-                bls_pubkey: [0u8; 48],
-            },
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_validator(
+            &mut *evm,
+            val_id as u64,
+            validator_addr,
+            ed25519_pubkey,
+            one_million_call(),
+            1, // active
         );
     }
 
@@ -128,21 +121,14 @@ async fn test_light_verify_block_header_bad_parent() {
     };
 
     {
-        let mut validator_mgr = node.state.validator_state.write().unwrap();
-        validator_mgr.register_validator_from_stake(
-            val_id,
-            call_consensus::ValidatorStake {
-                validator_id: val_id,
-                address: validator_addr,
-                ed25519_pubkey,
-                staked_call: one_million_call(),
-                self_stake: one_million_call(),
-                delegated_call: 0,
-                rewards: 0,
-                slash_history: vec![],
-                unbonding_start: None,
-                bls_pubkey: [0u8; 48],
-            },
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_validator(
+            &mut *evm,
+            val_id as u64,
+            validator_addr,
+            ed25519_pubkey,
+            one_million_call(),
+            1,
         );
     }
 
@@ -280,21 +266,14 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
     };
 
     {
-        let mut validator_mgr = node.state.validator_state.write().unwrap();
-        validator_mgr.register_validator_from_stake(
-            val_id,
-            call_consensus::ValidatorStake {
-                validator_id: val_id,
-                address: validator_addr,
-                ed25519_pubkey,
-                staked_call: one_million_call(),
-                self_stake: one_million_call(),
-                delegated_call: 0,
-                rewards: 0,
-                slash_history: vec![],
-                unbonding_start: None,
-                bls_pubkey: [0u8; 48],
-            },
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_validator(
+            &mut *evm,
+            val_id as u64,
+            validator_addr,
+            ed25519_pubkey,
+            one_million_call(),
+            1,
         );
     }
 

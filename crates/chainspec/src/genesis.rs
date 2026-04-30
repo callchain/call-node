@@ -17,6 +17,8 @@ use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use call_consensus::exec::evm_instructions;
+use call_precompiles::VALIDATOR_ADDRESS;
+use call_precompiles::storage::storage_slot;
 
 // ── Genesis Types ─────────────────────────────────────────────────────
 
@@ -223,11 +225,11 @@ impl GenesisExecutor {
         let mut evm_state = EvmState::new();
         let mut validators = ValidatorStateManager::default();
 
-        // Step 3: Register assets and distribute initial account
+        // Step 3: Register assets and distribute initial account (EVM + legacy)
         self.register_assets(&mut account, &mut registry, &mut evm_state)?;
 
-        // Step 4: Register validators
-        self.register_validators(&mut validators)?;
+        // Step 4: Register validators (EVM + legacy)
+        self.register_validators(&mut validators, &mut evm_state)?;
 
         // Step 5: Register fee currencies
         let fee_currencies = self.register_fee_currencies(&mut registry)?;
@@ -246,12 +248,8 @@ impl GenesisExecutor {
             oracle.set_tracked_assets(assets.clone());
         }
 
-        // Step 8: Compute initial state root
-        let payment_root = compute_payment_root(&account);
-        let evm_state_root = compute_evm_state_root(&evm_state);
-        let state_root = call_crypto::keccak256(
-            &[payment_root.as_slice(), evm_state_root.as_slice(), &[0u8; 32]].concat()
-        );
+        // Step 8: Compute initial state root (EVM-only)
+        let state_root = compute_evm_state_root(&evm_state);
 
         Ok(GenesisState {
             state_root,
@@ -298,7 +296,7 @@ impl GenesisExecutor {
         Ok(())
     }
 
-    /// Register assets and distribute initial account
+    /// Register assets and distribute initial account (EVM + legacy)
     fn register_assets(
         &self,
         account: &mut AccountState,
@@ -319,7 +317,7 @@ impl GenesisExecutor {
                 )
                 .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
 
-            // Distribute initial account
+            // Distribute initial balances (legacy + EVM)
             let mut total_allocated: Balance = 0;
             for (address_str, amount) in &asset.distribution {
                 let addr = parse_address(address_str)?;
@@ -335,28 +333,83 @@ impl GenesisExecutor {
                 evm_instructions::seed_balance(evm_state, asset.asset_id, addr, *amount);
             }
 
-            // Set protocol_supply to total distributed amount
+            // Set protocol_supply to total distributed amount (legacy)
             if total_allocated > 0 {
                 registry
                     .mint_supply(asset.asset_id, &Address::ZERO, total_allocated)
                     .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
             }
+
+            // Seed EVM asset metadata
+            evm_instructions::seed_asset(
+                evm_state,
+                asset.asset_id,
+                &asset.symbol,
+                &asset.name,
+                asset.decimals,
+                Address::ZERO,
+                0,
+                total_allocated,
+                0, // active
+            );
         }
         Ok(())
     }
 
-    /// Register genesis validators
+    /// Register genesis validators (EVM + legacy)
     fn register_validators(
         &self,
         validators: &mut ValidatorStateManager,
+        evm_state: &mut EvmState,
     ) -> Result<(), GenesisError> {
-        for gv in &self.genesis.validators {
+        use call_precompiles::{address_to_u256, u128_to_u256, u64_to_u256, VALIDATOR_ADDRESS};
+        use call_precompiles::storage::storage_slot;
+
+        for (i, gv) in self.genesis.validators.iter().enumerate() {
             let addr = parse_address(&gv.address)?;
             let pubkey = parse_pubkey(&gv.ed25519_pubkey)?;
 
+            // Legacy validator state
             validators
                 .stake(addr, pubkey, gv.self_stake)
                 .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
+
+            // EVM validator slots
+            let validator_id = (i + 1) as u64;
+            evm_state.set_storage(VALIDATOR_ADDRESS, U256::ZERO, u64_to_u256(validator_id));
+            evm_state.set_storage(
+                VALIDATOR_ADDRESS,
+                storage_slot(&[addr.as_slice(), b"validator_id"]),
+                u64_to_u256(validator_id),
+            );
+            evm_state.set_storage(
+                VALIDATOR_ADDRESS,
+                storage_slot(&[b"validators"]) + U256::from(validator_id),
+                address_to_u256(addr),
+            );
+            evm_state.set_storage(
+                VALIDATOR_ADDRESS,
+                storage_slot(&[addr.as_slice(), b"stake"]),
+                u128_to_u256(gv.self_stake),
+            );
+            evm_state.set_storage(
+                VALIDATOR_ADDRESS,
+                storage_slot(&[addr.as_slice(), b"pubkey"]),
+                U256::from_be_slice(&pubkey),
+            );
+            evm_state.set_storage(
+                VALIDATOR_ADDRESS,
+                storage_slot(&[addr.as_slice(), b"status"]),
+                U256::from(1u8), // active
+            );
+
+            // Seed staking escrow balance
+            evm_instructions::seed_balance(
+                evm_state,
+                call_protocol::CALL_ASSET_ID,
+                call_consensus::STAKING_ESCROW,
+                gv.self_stake,
+            );
         }
         Ok(())
     }

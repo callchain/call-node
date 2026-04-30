@@ -6,6 +6,7 @@
 
 use crate::handlers::state::RpcState;
 use crate::handlers::helpers::{invalid_params, internal_error};
+use call_consensus::exec::evm_instructions;
 use call_primitives::Address;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -445,27 +446,32 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let sigs_array = sigs_json.get("signatures")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| invalid_params("missing signatures array".into()))?;
-            let validator_state = state.validator_state.read()
+            let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let validators = validator_state.get_all_validators();
+            let validators = evm_instructions::read_validator_addresses(&*evm);
             let total = validators.len() as u32;
             let quorum = (2 * total as usize).div_ceil(3).max(1);
             let block_hash_bytes = block_hash.as_slice();
             let mut valid_count = 0;
             for entry in sigs_array {
                 if let Some(validator_id) = entry.get(0).and_then(|v| v.as_u64()) {
-                    if let Some(validator_stake) = validators.get(&(validator_id as u32)) {
-                        if let Some(sig_hex) = entry.get(2).and_then(|v| v.as_str()) {
-                            if let Ok(sig_bytes) = hex::decode(sig_hex.trim_start_matches("0x")) {
-                                if sig_bytes.len() == 64 {
-                                    let mut sig = [0u8; 64];
-                                    sig.copy_from_slice(&sig_bytes);
-                                    if call_crypto::ed25519_verify(
-                                        &validator_stake.ed25519_pubkey,
-                                        &sig,
-                                        block_hash_bytes,
-                                    ).is_ok() {
-                                        valid_count += 1;
+                    let addr = evm_instructions::read_validator_addr(&*evm, validator_id);
+                    if addr != Address::ZERO {
+                        let status = evm_instructions::read_validator_status(&*evm, addr);
+                        if status != 0 {
+                            if let Some(sig_hex) = entry.get(2).and_then(|v| v.as_str()) {
+                                if let Ok(sig_bytes) = hex::decode(sig_hex.trim_start_matches("0x")) {
+                                    if sig_bytes.len() == 64 {
+                                        let mut sig = [0u8; 64];
+                                        sig.copy_from_slice(&sig_bytes);
+                                        let pk = evm_instructions::read_validator_pubkey(&*evm, addr);
+                                        if call_crypto::ed25519_verify(
+                                            &pk,
+                                            &sig,
+                                            block_hash_bytes,
+                                        ).is_ok() {
+                                            valid_count += 1;
+                                        }
                                     }
                                 }
                             }
@@ -869,19 +875,29 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_validatorList
     module
         .register_async_method("call_validatorList", |_params, state, _ctx| async move {
-            let vs = state.validator_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let validators: Vec<serde_json::Value> = vs.get_all_validators().values()
-                .map(|v| serde_json::json!({
-                    "validatorId": v.validator_id,
-                    "address": format!("0x{}", hex::encode(v.address.as_slice())),
-                    "ed25519Pubkey": format!("0x{}", hex::encode(v.ed25519_pubkey)),
-                    "selfStake": v.self_stake.to_string(),
-                    "stakedCall": v.staked_call.to_string(),
-                    "delegatedCall": v.delegated_call.to_string(),
-                    "rewards": v.rewards.to_string(),
-                    "isUnbonding": v.unbonding_start.is_some(),
-                }))
-                .collect();
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let count = evm_instructions::read_validator_count(&*evm);
+            let mut validators = Vec::new();
+            for i in 1..=count {
+                let addr = evm_instructions::read_validator_addr(&*evm, i);
+                if addr == Address::ZERO {
+                    continue;
+                }
+                let status = evm_instructions::read_validator_status(&*evm, addr);
+                if status == 0 {
+                    continue;
+                }
+                validators.push(serde_json::json!({
+                    "validatorId": i,
+                    "address": format!("0x{}", hex::encode(addr.as_slice())),
+                    "ed25519Pubkey": format!("0x{}", hex::encode(evm_instructions::read_validator_pubkey(&*evm, addr))),
+                    "selfStake": evm_instructions::read_validator_stake(&*evm, addr).to_string(),
+                    "stakedCall": evm_instructions::read_validator_stake(&*evm, addr).to_string(),
+                    "delegatedCall": "0",
+                    "rewards": "0",
+                    "isUnbonding": status == 2,
+                }));
+            }
             Ok::<_, ErrorObjectOwned>(serde_json::json!({ "validators": validators }))
         })
         .map_err(|e| internal_error(e.to_string()))?;

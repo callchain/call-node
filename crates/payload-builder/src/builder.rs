@@ -99,7 +99,7 @@ impl PayloadBuilder {
         account: &mut AccountState,
         registry: &mut AssetRegistry,
         compliance: &mut ComplianceEngine,
-        bridge_state: &mut BridgeStateManager,
+        _bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         state_root: Hash,
@@ -230,7 +230,7 @@ impl PayloadBuilder {
         // Execute the block
         let mut fee_params = self.fee_params.clone();
         let result = block.execute(
-            &mut ExecutionState::new(account, registry, compliance, bridge_state, shielded_state, evm_state),
+            &mut ExecutionState::new(account, registry, compliance, shielded_state, evm_state),
             &mut BlockContext {
                 current_block_height: attrs.height,
                 fee_params: &mut fee_params,
@@ -280,7 +280,7 @@ impl PayloadBuilder {
         account: &mut AccountState,
         registry: &mut AssetRegistry,
         compliance: &mut ComplianceEngine,
-        bridge_state: &mut BridgeStateManager,
+        _bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         evm_state_root: Hash,
@@ -302,7 +302,7 @@ impl PayloadBuilder {
             account,
             registry,
             compliance,
-            bridge_state,
+            _bridge_state,
             shielded_state,
             evm_state,
             evm_state_root,
@@ -625,6 +625,20 @@ mod tests {
             .unwrap();
         assert!(deploy_result.success);
         registry.set_evm_contract_address(1, contract_addr);
+
+        // Seed EVM storage for bridge ops
+        evm_instructions::seed_asset(
+            &mut evm_state,
+            1,
+            "CALL",
+            "Callchain",
+            18,
+            test_sender(),
+            0,
+            0,
+            0, // active
+        );
+        evm_instructions::seed_bridge_contract(&mut evm_state, 1, contract_addr);
 
         let bridge_config = call_bridge::BridgeConfig::default();
 

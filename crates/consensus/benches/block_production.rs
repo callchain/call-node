@@ -66,13 +66,11 @@ fn bench_block_execution(c: &mut Criterion) {
                         account.balances.set_balance(1, Address::repeat_byte(1), 1_000_000_000_000u128).unwrap();
                         let mut evm_state = EvmState::new();
                         let mut fee_params = call_protocol::transaction::FeeParams::default();
-                        let mut governance = call_governance::GovernanceManager::default();
-                        governance.set_current_block(0);
                         let bridge_config = call_bridge::BridgeConfig::default();
 
-                        (account, registry, evm_state, fee_params, governance, bridge_config)
+                        (account, registry, evm_state, fee_params, bridge_config)
                     },
-                    |(mut account, mut registry, mut evm_state, mut fee_params, mut governance, bridge_config)| {
+                    |(mut account, mut registry, mut evm_state, mut fee_params, bridge_config)| {
                         let mut block = Block::new(
                             1,
                             BlockHash::ZERO,
@@ -89,7 +87,6 @@ fn bench_block_execution(c: &mut Criterion) {
                                 &mut account,
                                 &mut registry,
                                 &mut ComplianceEngine::new(),
-                                &mut call_bridge::BridgeStateManager::default(),
                                 &mut call_shielded::ShieldedState::new(),
                                 &mut evm_state,
                             ),
@@ -101,7 +98,6 @@ fn bench_block_execution(c: &mut Criterion) {
                             },
                             &mut Subsystems {
                                 oracle: Some(&mut OracleManager::default()),
-                                governance: Some(&mut governance),
                                 ..Subsystems::none()
                             },
                         );

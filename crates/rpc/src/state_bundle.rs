@@ -17,7 +17,6 @@ use call_consensus::{
 use call_evm::EvmState;
 use call_governance::GovernanceManager;
 use call_oracle::OracleManager;
-use call_primitives::Address;
 use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, FeeParams};
 use call_shielded::ShieldedState;
 
@@ -120,17 +119,12 @@ impl<'a> StateWriteBundle<'a> {
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let bridge_config = BridgeConfig::default();
-        let validators: Vec<Address> = self.validator_state
-            .get_all_validators()
-            .values()
-            .map(|v| v.address)
-            .collect();
+        let validators = call_consensus::exec::evm_instructions::read_validator_addresses(&self.evm);
         block.execute(
             &mut ExecutionState::new(
                 &mut self.balances,
                 &mut self.registry,
                 &mut self.compliance,
-                &mut self.bridge,
                 &mut self.shielded,
                 &mut self.evm,
             ),
@@ -142,10 +136,6 @@ impl<'a> StateWriteBundle<'a> {
             },
             &mut Subsystems {
                 oracle: Some(&mut self.oracle),
-                agent_balances: Some(&mut self.agent_balances),
-                agent_registry: Some(&mut self.agent_registry),
-                validator_state: Some(&mut self.validator_state),
-                governance: Some(&mut self.governance),
                 fork_manager: Some(&mut self.fork_manager),
                 ..Subsystems::none()
             },
@@ -165,7 +155,6 @@ impl<'a> StateWriteBundle<'a> {
                 &mut self.balances,
                 &mut self.registry,
                 &mut self.compliance,
-                &mut self.bridge,
                 &mut self.shielded,
                 &mut self.evm,
             ),
@@ -188,29 +177,19 @@ impl<'a> StateReadBundle<'a> {
         let mut balances = self.balances.clone();
         let mut registry = self.registry.clone();
         let mut compliance = self.compliance.clone();
-        let mut bridge = self.bridge.clone();
         let mut shielded = self.shielded.clone();
         let mut fee_params = self.fee_params.clone();
         let mut evm = self.evm.clone();
         let mut oracle = self.oracle.clone();
-        let mut agent_balances = self.agent_balances.clone();
-        let mut agent_registry = self.agent_registry.clone();
-        let mut validator_state = self.validator_state.clone();
-        let mut governance = self.governance.clone();
         let mut fork_manager = self.fork_manager.clone();
         let bridge_config = BridgeConfig::default();
-        let validators: Vec<Address> = self.validator_state
-            .get_all_validators()
-            .values()
-            .map(|v| v.address)
-            .collect();
+        let validators = call_consensus::exec::evm_instructions::read_validator_addresses(&self.evm);
 
         block.execute(
             &mut ExecutionState::new(
                 &mut balances,
                 &mut registry,
                 &mut compliance,
-                &mut bridge,
                 &mut shielded,
                 &mut evm,
             ),
@@ -222,10 +201,6 @@ impl<'a> StateReadBundle<'a> {
             },
             &mut Subsystems {
                 oracle: Some(&mut oracle),
-                agent_balances: Some(&mut agent_balances),
-                agent_registry: Some(&mut agent_registry),
-                validator_state: Some(&mut validator_state),
-                governance: Some(&mut governance),
                 fork_manager: Some(&mut fork_manager),
                 ..Subsystems::none()
             },
@@ -241,7 +216,6 @@ impl<'a> StateReadBundle<'a> {
         let mut balances = self.balances.clone();
         let mut registry = self.registry.clone();
         let mut compliance = self.compliance.clone();
-        let mut bridge = self.bridge.clone();
         let mut shielded = self.shielded.clone();
         let mut fee_params = self.fee_params.clone();
         let mut evm = self.evm.clone();
@@ -251,7 +225,6 @@ impl<'a> StateReadBundle<'a> {
                 &mut balances,
                 &mut registry,
                 &mut compliance,
-                &mut bridge,
                 &mut shielded,
                 &mut evm,
             ),

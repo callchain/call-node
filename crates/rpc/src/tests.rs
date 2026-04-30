@@ -71,21 +71,20 @@ mod tests {
     #[test]
     fn test_rpc_call_asset_info() {
         let state = make_test_state();
-        // Register an asset
         let issuer = test_addr(1);
-        let mut registry = state.asset_registry.write().unwrap();
-        let id = registry.register_asset("TEST".into(), "Test Token".into(), 18, issuer, 0, 0, 0).unwrap();
-        registry.mint_supply(id, &issuer, 5_000).unwrap();
-        registry.add_evm_supply(id, 3_000).unwrap();
-        drop(registry);
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_asset(&mut *evm, 1, "TEST", "Test Token", 18, issuer, 0, 8_000, 0,
+            );
+        }
 
-        let info = state.get_asset_info(id).expect("asset info");
+        let info = state.get_asset_info(1).expect("asset info");
         assert_eq!(info.symbol, "TEST");
         assert_eq!(info.name, "Test Token");
         assert_eq!(info.decimals, 18);
         assert_eq!(info.issuer, issuer);
-        assert_eq!(info.protocol_supply, 5_000);
-        assert_eq!(info.evm_supply, 3_000);
+        assert_eq!(info.protocol_supply, 8_000);
+        assert_eq!(info.evm_supply, 8_000);
         assert_eq!(info.all_supply, 8_000);
         assert_eq!(info.max_supply, 0);
         assert_eq!(info.status, "Active");
@@ -98,12 +97,14 @@ mod tests {
     fn test_rpc_call_asset_info_capped() {
         let state = make_test_state();
         let issuer = test_addr(1);
-        let mut registry = state.asset_registry.write().unwrap();
-        let id = registry.register_asset("CAPPED".into(), "Capped Token".into(), 18, issuer, 0, 0, 10_000).unwrap();
-        registry.freeze_asset(id, &issuer).unwrap();
-        drop(registry);
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_asset(
+                &mut *evm, 1, "CAPPED", "Capped Token", 18, issuer, 10_000, 0, 1,
+            );
+        }
 
-        let info = state.get_asset_info(id).expect("asset info");
+        let info = state.get_asset_info(1).expect("asset info");
         assert_eq!(info.max_supply, 10_000);
         assert_eq!(info.status, "Frozen");
         assert_eq!(info.all_supply, 0);
@@ -133,9 +134,12 @@ mod tests {
         let state = make_test_state();
         let asset_id: AssetId = 1;
 
-        state.balance_state.write().unwrap().balances.set_balance(asset_id, test_addr(1), 1000).unwrap();
-        state.balance_state.write().unwrap().balances.set_balance(asset_id, test_addr(2), 2000).unwrap();
-        state.balance_state.write().unwrap().balances.set_balance(asset_id, test_addr(3), 3000).unwrap();
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_asset(
+                &mut *evm, asset_id, "CALL", "Call Token", 18, Address::ZERO, 0, 6_000, 0,
+            );
+        }
 
         let total = state.get_total_balance(asset_id);
         assert_eq!(total, 6000);
@@ -145,12 +149,15 @@ mod tests {
     fn test_rpc_call_agent_register_and_info() {
         let state = make_test_state();
         let owner = test_addr(1);
-        let pubkey = [1u8; 64];
 
-        let agent_id = state.register_agent(owner, pubkey, "test-agent".into(), "https://agent.example.com".into(), [0u8; 32]).unwrap();
-        assert_eq!(agent_id, 0);
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_agent(
+                &mut *evm, 0, owner, "test-agent", "https://agent.example.com", 0,
+            );
+        }
 
-        let info = state.get_agent_info(agent_id).expect("agent info");
+        let info = state.get_agent_info(0).expect("agent info");
         assert_eq!(info.agent_id, 0);
         assert_eq!(info.owner, owner);
         assert_eq!(info.name, "test-agent");
@@ -165,21 +172,28 @@ mod tests {
     fn test_rpc_call_agent_balance() {
         let state = make_test_state();
         let owner = test_addr(1);
-        let pubkey = [1u8; 64];
 
-        // Give owner sufficient balance for grants
-        state.balance_state.write().unwrap().balances.set_balance(1, owner, 50000).unwrap();
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::seed_balance(&mut *evm, 1, owner, 50_000,
+            );
+            evm_instructions::seed_agent(
+                &mut *evm, 0, owner, "balance-agent", "https://a.com", 0,
+            );
+            evm_instructions::agent_set_balance(&mut *evm, 0, 1, 10_000,
+            );
+        }
 
-        let agent_id = state.register_agent(owner, pubkey, "balance-agent".into(), "https://a.com".into(), [0u8; 32]).unwrap();
-
-        // Grant balance
-        state.grant_agent_balance(agent_id, 1, 10000).unwrap();
-        let balance = state.get_agent_total_balance(agent_id);
+        let balance = state.get_agent_total_balance(0);
         assert_eq!(balance, 10000);
 
         // Revoke
-        state.revoke_agent_balance(agent_id, 1).unwrap();
-        let balance = state.get_agent_total_balance(agent_id);
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            evm_instructions::agent_set_balance(&mut *evm, 0, 1, 0,
+            );
+        }
+        let balance = state.get_agent_total_balance(0);
         assert_eq!(balance, 0);
     }
 

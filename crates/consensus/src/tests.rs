@@ -9,6 +9,8 @@ use call_evm::{EvmExecutor, EvmTransaction};
 use call_protocol::account::AccountState;
 use call_protocol::registry::AssetRegistry;
 use call_protocol::FeeParams;
+use call_precompiles::{address_to_u256, BRIDGE_ADDRESS};
+use crate::exec::evm_instructions::slot_bridge_contract;
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -254,6 +256,24 @@ fn test_block_execution_order() {
     assert!(deploy_result.success, "ERC-20 deploy failed");
     registry.set_evm_contract_address(1, contract_addr);
 
+    // Seed EVM storage for bridge op (asset metadata + contract address)
+    evm_instructions::seed_asset(
+        &mut evm_state,
+        1,
+        "CALL",
+        "Callchain",
+        18,
+        sender,
+        0,
+        0,
+        0, // active
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        evm_instructions::slot_bridge_contract(1),
+        address_to_u256(contract_addr),
+    );
+
     let mut compliance = call_protocol::compliance::ComplianceEngine::new();
     let mut bridge_state = call_bridge::BridgeStateManager::default();
     let mut shielded_state = call_shielded::ShieldedState::new();
@@ -264,7 +284,7 @@ fn test_block_execution_order() {
         .execute(
             &mut ExecutionState::new(
                 &mut account, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut evm_state,
+                &mut shielded_state, &mut evm_state,
             ),
             &mut BlockContext {
                 current_block_height: 1,
@@ -335,7 +355,7 @@ fn test_system_tx_reward_distribution() {
         .execute(
             &mut ExecutionState::new(
                 &mut account, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut evm_state,
+                &mut shielded_state, &mut evm_state,
             ),
             &mut BlockContext {
                 current_block_height: 1,
@@ -385,35 +405,46 @@ fn test_block_execution_result() {
 }
 
 #[test]
-fn test_agent_instruction_emits_event() {
-    use call_agent::{AgentBalances, AgentEventType, AgentRegistry};
+fn test_agent_pay_via_evm_storage() {
     use call_protocol::instructions::AgentPayment;
+    use call_precompiles::{address_to_u256, u128_to_u256, u64_to_u256, AGENT_ADDRESS};
+    use crate::exec::evm_instructions::{
+        agent_get_balance, agent_set_balance, pack_agent_perms, read_balance,
+        seed_balance, slot_agent_count, slot_agent_name, slot_agent_owner,
+        slot_agent_perms, slot_agent_pubkey, slot_agent_registered_at, slot_agent_url,
+    };
 
     let (secret, pubkey) = call_crypto::generate_keypair();
     let sender = call_crypto::pubkey_to_address(&pubkey);
+    let agent_id: u64 = 0;
+    let recipient = test_addr(2);
 
-    // Register agent
-    let mut agent_registry = AgentRegistry::new_with_format_verifier();
-    let agent_id = agent_registry
-        .register_agent(
-            sender,
-            pubkey,
-            "test-agent".into(),
-            "https://test.com".into(),
-            [0u8; 32],
-            None,
-            1,
-            None,
-        )
-        .unwrap();
-
-    // Fund owner and grant to agent
     let mut account = AccountState::new();
-    account.balances.set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000).unwrap();
-    let mut agent_balances = AgentBalances::new();
-    agent_balances
-        .grant_funds(sender, agent_id, 1, 5_000, &mut account)
+    let mut registry = AssetRegistry::new();
+    registry
+        .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
         .unwrap();
+    let mut compliance = call_protocol::compliance::ComplianceEngine::new();
+    let mut bridge_state = call_bridge::BridgeStateManager::default();
+    let mut shielded_state = call_shielded::ShieldedState::new();
+    let mut fee_params = FeeParams::default();
+    let mut evm_state = call_evm::EvmState::new();
+
+    // Seed sender balance for fee + nothing else needed (agent pays from agent balance)
+    seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000);
+
+    // Seed agent registration directly in EVM storage
+    evm_state.set_storage(AGENT_ADDRESS, slot_agent_count(), u64_to_u256(1));
+    evm_state.set_storage(AGENT_ADDRESS, slot_agent_owner(agent_id), address_to_u256(sender));
+    let pk_hash = call_crypto::keccak256(&pubkey);
+    evm_state.set_storage(AGENT_ADDRESS, slot_agent_pubkey(agent_id), alloy_primitives::U256::from_be_slice(pk_hash.as_slice()));
+    evm_state.set_storage(AGENT_ADDRESS, slot_agent_name(agent_id), call_precompiles::write_string32("test-agent"));
+    evm_state.set_storage(AGENT_ADDRESS, slot_agent_url(agent_id), call_precompiles::write_string32("https://test.com"));
+    evm_state.set_storage(AGENT_ADDRESS, slot_agent_perms(agent_id), pack_agent_perms(10_000, 0, 1));
+    evm_state.set_storage(AGENT_ADDRESS, slot_agent_registered_at(agent_id), u64_to_u256(1));
+
+    // Seed agent balance
+    agent_set_balance(&mut evm_state, agent_id, call_protocol::CALL_ASSET_ID, 5_000);
 
     // Build signed AgentPay transaction
     let mut tx = ProtocolTransaction {
@@ -423,7 +454,7 @@ fn test_agent_instruction_emits_event() {
             payment: AgentPayment {
                 agent_id,
                 asset_id: call_protocol::CALL_ASSET_ID,
-                to: test_addr(2),
+                to: recipient,
                 amount: 1_000,
             },
         }],
@@ -453,52 +484,30 @@ fn test_agent_instruction_emits_event() {
         vec![],
     );
 
-    let mut registry = AssetRegistry::new();
-    registry
-        .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
-        .unwrap();
-    let mut compliance = call_protocol::compliance::ComplianceEngine::new();
-    let mut bridge_state = call_bridge::BridgeStateManager::default();
-    let mut shielded_state = call_shielded::ShieldedState::new();
-    let mut fee_params = FeeParams::default();
-    let mut evm_state = call_evm::EvmState::new();
-    evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     let bridge_config = call_bridge::BridgeConfig::default();
 
     let result = block
         .execute(
             &mut ExecutionState::new(
                 &mut account, &mut registry, &mut compliance,
-                &mut bridge_state, &mut shielded_state, &mut evm_state,
+                &mut shielded_state, &mut evm_state,
             ),
             &mut BlockContext {
-                current_block_height: 50, // current_block_height < expires_at
+                current_block_height: 50,
                 fee_params: &mut fee_params,
                 bridge_config: Some(&bridge_config),
                 validators: None,
             },
-            &mut Subsystems {
-                agent_balances: Some(&mut agent_balances),
-                agent_registry: Some(&mut agent_registry),
-                ..Subsystems::none()
-            },
+            &mut Subsystems::none(),
         )
         .unwrap();
 
-    eprintln!("protocol_tx_count={} agent_events={}", result.protocol_tx_count, result.agent_events.len());
-    // Verify agent event was emitted
-    assert_eq!(result.agent_events.len(), 1);
-    let event = &result.agent_events[0];
-    assert!(matches!(event.event_type, AgentEventType::AgentPay));
-    assert_eq!(event.agent_id, agent_id);
-    assert_eq!(event.asset_id, 1);
-    assert_eq!(event.amount, 1_000);
-    assert_eq!(event.recipient, Some(test_addr(2)));
-    assert_eq!(event.block_height, 50);
+    assert_eq!(result.protocol_tx_count, 1);
+    assert_eq!(result.transaction_results[0].status, ExecutionStatus::Success);
 
-    // Verify receipt root includes agent events
-    let receipt_root = compute_receipt_root(&result);
-    assert_ne!(receipt_root, Hash::ZERO);
+    // Verify agent balance decreased and recipient received funds
+    assert_eq!(agent_get_balance(&evm_state, agent_id, call_protocol::CALL_ASSET_ID), 4_000);
+    assert_eq!(read_balance(&evm_state, call_protocol::CALL_ASSET_ID, recipient), 1_000);
 }
 
 #[test]
@@ -553,8 +562,7 @@ fn test_expired_transaction_rejected() {
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state,
-                        &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 51,
@@ -624,12 +632,13 @@ fn test_frozen_asset_rejects_bridge_to_evm() {
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
     evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
+    evm_instructions::seed_asset(&mut evm_state, call_protocol::CALL_ASSET_ID, "CALL", "Callchain", 18, sender, 0, 0, 1);
     let bridge_config = call_bridge::BridgeConfig::default();
 
     let validators: Vec<Address> = vec![sender];
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 1,
@@ -704,13 +713,14 @@ fn test_delisted_asset_rejects_bridge_to_protocol() {
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
     evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
+    evm_instructions::seed_asset(&mut evm_state, call_protocol::CALL_ASSET_ID, "CALL", "Callchain", 18, sender, 0, 0, 2);
     evm_state.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     let bridge_config = call_bridge::BridgeConfig::default();
 
     let validators: Vec<Address> = vec![sender];
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 1,
@@ -764,11 +774,23 @@ fn test_frozen_asset_rejects_bridge_op_deposit() {
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
+    // Seed EVM storage with frozen asset status
+    evm_instructions::seed_asset(
+        &mut evm_state,
+        call_protocol::CALL_ASSET_ID,
+        "CALL",
+        "Callchain",
+        18,
+        sender,
+        0,
+        0,
+        1, // frozen
+    );
     let bridge_config = call_bridge::BridgeConfig::default();
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext {
                         current_block_height: 1,
@@ -815,15 +837,13 @@ fn test_evm_issuer_mint_success() {
         .unwrap();
     assert!(deploy_result.success, "ERC-20 deploy failed");
 
-    // Register asset with max_supply cap
-    let mut registry = AssetRegistry::new();
-    registry
-        .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
-        .unwrap();
-    registry
-        .register_asset("TST".into(), "Test Token".into(), 18, sender, 0, 0, 10_000)
-        .unwrap();
-    registry.set_evm_contract_address(2, contract_addr);
+    // Seed asset metadata and contract address in EVM storage
+    evm_instructions::seed_asset(
+        &mut evm_state, 2, "TST", "Test Token", 18, sender, 10_000, 0, 0,
+    );
+    use call_precompiles::{address_to_u256, BRIDGE_ADDRESS};
+    use crate::exec::evm_instructions::slot_bridge_contract;
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_contract(2), address_to_u256(contract_addr));
 
     // Build EvmIssuerMint instruction
     let mut tx = ProtocolTransaction {
@@ -871,9 +891,10 @@ fn test_evm_issuer_mint_success() {
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
 
+    let mut registry = AssetRegistry::new();
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -881,13 +902,13 @@ fn test_evm_issuer_mint_success() {
 
     assert!(result.is_ok(), "EvmIssuerMint should succeed: {:?}", result);
 
-    // evm_supply should be updated
-    let asset = registry.get_asset(2).unwrap();
-    assert_eq!(asset.evm_supply, 5_000);
-    assert_eq!(asset.protocol_supply, 0);
-    assert_eq!(asset.all_supply(), 5_000);
-
-    // EVM state reflects the mint (contract storage updated, verified by success + supply tracking)
+    // Verify supply updated in EVM storage
+    let supply = call_precompiles::u256_to_u128(
+        evm_state.get_storage(
+            &call_precompiles::ASSET_ADDRESS,
+            call_precompiles::slot_asset_meta(2, b"supply"),
+        ));
+    assert_eq!(supply, 5_000);
 }
 
 #[test]
@@ -918,14 +939,11 @@ fn test_evm_issuer_mint_cap_enforcement() {
         .unwrap();
     assert!(deploy_result.success);
 
-    let mut registry = AssetRegistry::new();
-    registry
-        .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
-        .unwrap();
-    registry
-        .register_asset("CAP".into(), "Capped".into(), 18, sender, 0, 0, 1_000)
-        .unwrap();
-    registry.set_evm_contract_address(2, contract_addr);
+    // Seed asset metadata and contract address in EVM storage
+    evm_instructions::seed_asset(
+        &mut evm_state, 2, "CAP", "Capped", 18, sender, 1_000, 0, 0,
+    );
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_contract(2), address_to_u256(contract_addr));
 
     // Try to mint more than cap
     let mut tx = ProtocolTransaction {
@@ -963,19 +981,15 @@ fn test_evm_issuer_mint_cap_enforcement() {
     );
 
     let mut account = AccountState::new();
-    account
-        .balances
-        .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
-        .unwrap();
-
     let mut compliance = call_protocol::compliance::ComplianceEngine::new();
     let mut bridge_state = call_bridge::BridgeStateManager::default();
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
+    let mut registry = AssetRegistry::new();
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -1019,14 +1033,11 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
         .unwrap();
     assert!(deploy_result.success);
 
-    let mut registry = AssetRegistry::new();
-    registry
-        .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
-        .unwrap();
-    registry
-        .register_asset("TST".into(), "Test".into(), 18, issuer, 0, 0, 0)
-        .unwrap();
-    registry.set_evm_contract_address(2, contract_addr);
+    // Seed asset metadata with different issuer
+    evm_instructions::seed_asset(
+        &mut evm_state, 2, "TST", "Test", 18, issuer, 0, 0, 0,
+    );
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_contract(2), address_to_u256(contract_addr));
 
     let mut tx = ProtocolTransaction {
         sender,
@@ -1063,19 +1074,15 @@ fn test_evm_issuer_mint_non_issuer_rejected() {
     );
 
     let mut account = AccountState::new();
-    account
-        .balances
-        .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
-        .unwrap();
-
     let mut compliance = call_protocol::compliance::ComplianceEngine::new();
     let mut bridge_state = call_bridge::BridgeStateManager::default();
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
+    let mut registry = AssetRegistry::new();
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -1118,15 +1125,11 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
         .unwrap();
     assert!(deploy_result.success);
 
-    let mut registry = AssetRegistry::new();
-    registry
-        .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
-        .unwrap();
-    registry
-        .register_asset("TST".into(), "Test".into(), 18, sender, 0, 0, 0)
-        .unwrap();
-    registry.set_evm_contract_address(2, contract_addr);
-    registry.freeze_asset(2, &sender).unwrap();
+    // Seed asset with frozen status (1 = Frozen)
+    evm_instructions::seed_asset(
+        &mut evm_state, 2, "TST", "Test", 18, sender, 0, 0, 1,
+    );
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_contract(2), address_to_u256(contract_addr));
 
     let mut tx = ProtocolTransaction {
         sender,
@@ -1163,19 +1166,15 @@ fn test_evm_issuer_mint_frozen_asset_rejected() {
     );
 
     let mut account = AccountState::new();
-    account
-        .balances
-        .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
-        .unwrap();
-
     let mut compliance = call_protocol::compliance::ComplianceEngine::new();
     let mut bridge_state = call_bridge::BridgeStateManager::default();
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
+    let mut registry = AssetRegistry::new();
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),
@@ -1231,25 +1230,21 @@ fn test_evm_issuer_mint_call_asset_rejected() {
     );
 
     let mut account = AccountState::new();
-    account
-        .balances
-        .set_balance(call_protocol::CALL_ASSET_ID, sender, 1_000_000_000)
-        .unwrap();
-    let mut registry = AssetRegistry::new();
-    registry
-        .register_asset("CALL".into(), "Callchain".into(), 18, sender, 0, 0, 0)
-        .unwrap();
-
     let mut compliance = call_protocol::compliance::ComplianceEngine::new();
     let mut bridge_state = call_bridge::BridgeStateManager::default();
     let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
+    let mut registry = AssetRegistry::new();
     evm_instructions::seed_balance(&mut evm_state, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
+    // Seed CALL asset in EVM storage so issuer check succeeds
+    evm_instructions::seed_asset(
+        &mut evm_state, call_protocol::CALL_ASSET_ID, "CALL", "Callchain", 18, sender, 0, 0, 0,
+    );
 
     let result = block.execute(
         &mut ExecutionState::new(
-                        &mut account, &mut registry, &mut compliance, &mut bridge_state, &mut shielded_state, &mut evm_state,
+                        &mut account, &mut registry, &mut compliance, &mut shielded_state, &mut evm_state,
                     ),
         &mut BlockContext::new(1, &mut fee_params),
         &mut Subsystems::none(),

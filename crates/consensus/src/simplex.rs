@@ -206,18 +206,15 @@ impl SimplexConsensus {
         balances: &mut call_protocol::AccountState,
         registry: &mut call_protocol::registry::AssetRegistry,
         compliance: &mut call_protocol::compliance::ComplianceEngine,
-        bridge_state: &mut call_bridge::BridgeStateManager,
+        _bridge_state: &mut call_bridge::BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         fee_params: &mut call_protocol::FeeParams,
         evm_state: &mut call_evm::EvmState,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(
-            &mut ExecutionState::new(balances, registry, compliance, bridge_state, shielded_state, evm_state),
+            &mut ExecutionState::new(balances, registry, compliance, shielded_state, evm_state),
             &mut BlockContext::new(self.current_height, fee_params),
-            &mut Subsystems {
-                validator_state: Some(&mut self.validators),
-                ..Subsystems::none()
-            },
+            &mut Subsystems::none(),
         )
     }
 

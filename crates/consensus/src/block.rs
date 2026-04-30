@@ -4,12 +4,11 @@
 
 use call_bridge::{BridgeOp, BridgeConfig};
 use call_crypto::keccak256;
-use call_governance::GovernanceManager;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_primitives::ExecutionStatus;
 use call_protocol::account::AccountState;
-use call_protocol::instructions::{execute_protocol_instructions, InstructionResult};
-use call_protocol::registry::{AssetRegistry, AssetStatus};
+use call_protocol::instructions::{Instruction, InstructionResult};
+use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::ProtocolTransaction;
 use call_protocol::FeeParams;
 use call_shielded::ShieldedState;
@@ -17,9 +16,9 @@ use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::validator::{ConsensusError, ValidatorStateManager};
+use crate::validator::ConsensusError;
 use crate::{ForkManager, RollbackPlan};
-use crate::exec::{agent, asset, bridge, evm_instructions, rollback, validator};
+use crate::exec::{evm_instructions, rollback};
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
 
@@ -167,7 +166,6 @@ pub struct ExecutionState<'a> {
     pub account: &'a mut AccountState,
     pub registry: &'a mut AssetRegistry,
     pub compliance: &'a mut call_protocol::compliance::ComplianceEngine,
-    pub bridge_state: &'a mut call_bridge::BridgeStateManager,
     pub shielded_state: &'a mut ShieldedState,
     pub evm_state: &'a mut EvmState,
 }
@@ -184,12 +182,7 @@ pub struct BlockContext<'a> {
 /// is not active for the current execution context.
 pub struct Subsystems<'a> {
     pub oracle: Option<&'a mut call_oracle::OracleManager>,
-    pub agent_executor: Option<call_protocol::instructions::AgentExecutor<'a>>,
-    pub agent_balances: Option<&'a mut call_agent::AgentBalances>,
-    pub agent_registry: Option<&'a mut call_agent::AgentRegistry>,
-    pub governance: Option<&'a mut GovernanceManager>,
     pub smart_accounts: Option<&'a call_protocol::smart_accounts::SmartAccountRegistry>,
-    pub validator_state: Option<&'a mut ValidatorStateManager>,
     pub fork_manager: Option<&'a mut ForkManager>,
 }
 
@@ -198,11 +191,10 @@ impl<'a> ExecutionState<'a> {
         account: &'a mut AccountState,
         registry: &'a mut AssetRegistry,
         compliance: &'a mut call_protocol::compliance::ComplianceEngine,
-        bridge_state: &'a mut call_bridge::BridgeStateManager,
         shielded_state: &'a mut ShieldedState,
         evm_state: &'a mut EvmState,
     ) -> Self {
-        Self { account, registry, compliance, bridge_state, shielded_state, evm_state }
+        Self { account, registry, compliance, shielded_state, evm_state }
     }
 }
 
@@ -219,12 +211,7 @@ impl<'a> Subsystems<'a> {
     pub fn none() -> Self {
         Self {
             oracle: None,
-            agent_executor: None,
-            agent_balances: None,
-            agent_registry: None,
-            governance: None,
             smart_accounts: None,
-            validator_state: None,
             fork_manager: None,
         }
     }
@@ -359,22 +346,23 @@ impl Block {
             if evm_balance_u128 < gas_cost_u128 {
                 let needed = gas_cost_u128 - evm_balance_u128;
                 let protocol_balance =
-                    state.account.get_balance(call_protocol::CALL_ASSET_ID, &caller);
+                    evm_instructions::read_balance(state.evm_state, call_protocol::CALL_ASSET_ID, caller);
                 if protocol_balance < needed {
                     tracing::warn!(?caller, needed, protocol_balance, evm_balance = evm_balance_u128, "block: insufficient unified gas, skipping");
                     continue;
                 }
-                if state.account
-                    .deduct_balance(call_protocol::CALL_ASSET_ID, caller, needed)
-                    .is_ok()
-                {
-                    let new_evm = state.evm_state.get_balance(&caller)
-                        + call_evm::U256::from(needed);
-                    state.evm_state.set_balance(caller, new_evm);
-                } else {
-                    tracing::warn!(?caller, needed, "block: auto-bridge deduct_balance failed, skipping");
-                    continue;
-                }
+                let new_protocol_bal = protocol_balance
+                    .checked_sub(needed)
+                    .expect("checked above");
+                evm_instructions::seed_balance(
+                    state.evm_state,
+                    call_protocol::CALL_ASSET_ID,
+                    caller,
+                    new_protocol_bal,
+                );
+                let new_evm = state.evm_state.get_balance(&caller)
+                    + call_evm::U256::from(needed);
+                state.evm_state.set_balance(caller, new_evm);
             }
 
             let tx_to = tx.to;
@@ -485,169 +473,55 @@ impl Block {
             // Increment nonce (consumed on inclusion, regardless of execution result)
             state.evm_state.increment_nonce(tx.sender);
 
-            // Separate instructions by type: bridge, agent, validator, asset, regular
-            let (bridge_instrs, non_bridge): (Vec<_>, Vec<_>) = tx
+            // Separate instructions by type: rollback, evm
+            // Separate rollback instructions (stateless, need ForkManager)
+            let (rollback_instrs, non_rollback): (Vec<_>, Vec<_>) = tx
                 .instructions
                 .iter()
                 .cloned()
-                .partition(|i| bridge::is_bridge_instruction(i));
-            let (agent_instrs, non_agent): (Vec<_>, Vec<_>) = non_bridge
-                .iter()
-                .cloned()
-                .partition(|i| agent::is_agent_instruction(i));
-            let (validator_instrs, non_validator): (Vec<_>, Vec<_>) = non_agent
-                .iter()
-                .cloned()
-                .partition(|i| validator::is_validator_instruction(i));
-            let (asset_instrs, non_asset): (Vec<_>, Vec<_>) = non_validator
-                .iter()
-                .cloned()
-                .partition(|i| asset::is_asset_instruction(i));
-            let (rollback_instrs, non_rollback): (Vec<_>, Vec<_>) = non_asset
-                .iter()
-                .cloned()
                 .partition(|i| rollback::is_rollback_instruction(i));
-            let (evm_instrs, other_instrs): (Vec<_>, Vec<_>) = non_rollback
-                .iter()
-                .cloned()
-                .partition(|i| evm_instructions::is_evm_instruction(i));
 
             // Take snapshots for atomic rollback (nonce already consumed, not rolled back)
-            let balance_snapshot = state.account.clone();
+            let account_snapshot = state.account.clone();
             let evm_snapshot = state.evm_state.clone();
-            let bridge_snapshot = state.bridge_state.clone();
-            let validator_snapshot = subsystems.validator_state.as_ref().map(|vs| (*vs).clone());
+            let shielded_snapshot = state.shielded_state.clone();
             let mut tx_results = Vec::new();
-            let mut tx_agent_events = Vec::new();
 
             let exec_result = (|| -> Result<(), ConsensusError> {
-                // Execute EVM instructions (Transfer, BatchTransfer, Approve, TransferFrom, Mint, Burn)
-                if !evm_instrs.is_empty() {
-                    for instr in &evm_instrs {
-                        let r = evm_instructions::execute_instruction_on_evm(
-                            instr,
-                            tx.sender,
-                            state.evm_state,
-                            Some(state.compliance),
-                        )?;
-                        tx_results.push(r);
-                    }
-                }
-
-                // Execute regular instructions via protocol engine (includes subsystems.governance)
-                if !other_instrs.is_empty() {
-                    let results = execute_protocol_instructions(
-                        &other_instrs,
-                        state.account,
-                        state.registry,
-                        state.compliance,
-                        state.shielded_state,
-                        tx.sender,
-                        subsystems.oracle.as_deref_mut(),
-                        &mut subsystems.agent_executor,
-                        subsystems.governance.as_deref_mut(),
-                    )
-                    .map_err(|e| {
-                        ConsensusError::InvalidBlock(format!("protocol tx: {e}"))
-                    })?;
-                    tx_results.extend(results);
-                }
-
-                // Execute asset registration instructions inline
-                if !asset_instrs.is_empty() {
-                    for instr in &asset_instrs {
-                        let r = asset::execute_asset_instruction(
-                            instr,
-                            tx.sender,
-                            state.account,
-                            state.registry,
-                            subsystems.governance.as_deref_mut(),
-                            state.evm_state,
-                            &executor,
-                            ctx.current_block_height,
-                        )?;
-                        tx_results.push(r);
-                    }
-                }
-
-                // Execute bridge deposit instructions inline
-                if !bridge_instrs.is_empty() {
-                    let config = ctx.bridge_config.ok_or_else(|| {
-                        ConsensusError::InvalidBlock(
-                            "bridge instructions require bridge config".into(),
-                        )
-                    })?;
-                    let vals = ctx.validators.ok_or_else(|| {
-                        ConsensusError::InvalidBlock(
-                            "bridge instructions require validator set".into(),
-                        )
-                    })?;
-                    for instr in &bridge_instrs {
-                        let r = bridge::execute_bridge_instruction(
-                            instr,
-                            tx.sender,
-                            state.account,
-                            state.bridge_state,
-                            config,
-                            vals,
-                            ctx.current_block_height,
-                            state.evm_state,
-                            &executor,
-                            state.registry,
-                        )?;
-                        tx_results.push(r);
-                    }
-                }
-
-                // Execute agent instructions inline
-                if !agent_instrs.is_empty() {
-                    let ab = subsystems.agent_balances
-                        .as_mut()
-                        .ok_or_else(|| {
-                            ConsensusError::InvalidBlock(
-                                "agent instructions require agent state".into(),
+                for instr in &non_rollback {
+                    match instr {
+                        Instruction::ShieldedTransfer { .. }
+                        | Instruction::ShieldedWithdraw { .. }
+                        | Instruction::ShieldedDeposit { .. } => {
+                            let r = call_protocol::instructions::execute_instruction(
+                                instr,
+                                state.account,
+                                state.registry,
+                                state.compliance,
+                                state.shielded_state,
+                                tx.sender,
+                                None,
+                                &mut None,
+                                None,
                             )
-                        })?;
-                    let ar = subsystems.agent_registry.as_mut().ok_or_else(|| {
-                        ConsensusError::InvalidBlock(
-                            "agent instructions require agent registry".into(),
-                        )
-                    })?;
-                    for instr in &agent_instrs {
-                        let r = agent::execute_agent_instruction(
-                            instr,
-                            tx.sender,
-                            ab,
-                            ar,
-                            state.account,
-                            state.evm_state,
-                            state.bridge_state,
-                            state.registry,
-                            &executor,
-                            ctx.current_block_height,
-                            ctx.fee_params,
-                            &mut tx_agent_events,
-                        )?;
-                        tx_results.push(r);
-                    }
-                }
-
-                // Execute validator instructions inline
-                if !validator_instrs.is_empty() {
-                    let vs = subsystems.validator_state.as_mut().ok_or_else(|| {
-                        ConsensusError::InvalidBlock(
-                            "validator instructions require validator state".into(),
-                        )
-                    })?;
-                    for instr in &validator_instrs {
-                        let r = validator::execute_validator_instruction(
-                            instr,
-                            tx.sender,
-                            state.account,
-                            vs,
-                            ctx.current_block_height,
-                        )?;
-                        tx_results.push(r);
+                            .map_err(|e| {
+                                ConsensusError::InvalidBlock(format!("protocol tx: {e}"))
+                            })?;
+                            tx_results.push(r);
+                        }
+                        _ => {
+                            let r = evm_instructions::execute_instruction_on_evm(
+                                instr,
+                                tx.sender,
+                                state.evm_state,
+                                Some(state.compliance),
+                                ctx.current_block_height,
+                                ctx.bridge_config,
+                                ctx.validators,
+                                Some(&executor),
+                            )?;
+                            tx_results.push(r);
+                        }
                     }
                 }
 
@@ -675,16 +549,11 @@ impl Block {
             })();
 
             if let Err(e) = exec_result {
-                // Rollback balance/EVM/bridge but nonce stays consumed.
+                // Rollback account/EVM/shielded but nonce stays consumed.
                 // Include the failed tx in the block with a Reverted result.
-                *state.account = balance_snapshot;
+                *state.account = account_snapshot;
                 *state.evm_state = evm_snapshot;
-                *state.bridge_state = bridge_snapshot;
-                if let Some(ref snapshot) = validator_snapshot {
-                    if let Some(ref mut vs) = subsystems.validator_state {
-                        **vs = snapshot.clone();
-                    }
-                }
+                *state.shielded_state = shielded_snapshot;
                 result.protocol_tx_count += 1;
                 result.protocol_priority_fees.push(priority_fee);
                 result.transaction_results.push(TransactionResult {
@@ -705,81 +574,47 @@ impl Block {
                     gas_used: gas_units,
                     fee_amount: fee,
                     instruction_count: tx_results.len(),
-                    agent_events: tx_agent_events.clone(),
+                    agent_events: vec![],
                 });
-                result.agent_events.extend(tx_agent_events);
             }
         }
 
         // Step 3: Bridge operations
-        // Execute internal bridge deposits/withdrawals atomically.
-        // Each operation deducts/credits protocol account and mints/burns
-        // wrapped ERC-20 tokens in the EVM layer.
+        // Execute internal bridge deposits/withdrawals atomically via EVM storage.
         if let Some(config) = ctx.bridge_config {
             for op in &self.bridge_operations {
                 let asset_id = op.asset_id();
-                // Reject bridge ops on frozen or delisted assets
-                if let Some(asset) = state.registry.get_asset(asset_id) {
-                    if asset.status != AssetStatus::Active {
-                        return Err(ConsensusError::InvalidBlock(format!(
-                            "bridge op: asset {} is not active (status: {:?})",
-                            asset_id, asset.status
-                        )));
-                    }
+                // Reject bridge ops on frozen or delisted assets (hard block failure)
+                let status = evm_instructions::read_asset_status(state.evm_state, asset_id);
+                if status != 0 {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "bridge op: asset {asset_id} is not active (status: {status})"
+                    )));
                 }
-                let Some(contract_addr) = state.registry.get_evm_contract_address(asset_id) else {
-                    // Asset has no deployed wrapped token — skip
-                    continue;
-                };
 
                 let exec_result = match op {
-                    BridgeOp::DepositToEvm { from, .. } => {
-                        call_bridge::execute_deposit(
-                            op,
-                            state.account,
+                    call_bridge::BridgeOp::DepositToEvm { .. } => {
+                        evm_instructions::exec_bridge_op_deposit(
                             state.evm_state,
-                            &executor,
-                            state.bridge_state,
-                            config,
-                            state.registry,
-                            contract_addr,
-                            *from,
+                            op,
                             ctx.current_block_height,
+                            config,
+                            Some(&executor),
                         )
                     }
-                    BridgeOp::WithdrawToProtocol { from, .. } => {
-                        call_bridge::execute_withdraw(
-                            op,
-                            state.account,
+                    call_bridge::BridgeOp::WithdrawToProtocol { .. } => {
+                        evm_instructions::exec_bridge_op_withdraw(
                             state.evm_state,
-                            &executor,
-                            state.bridge_state,
-                            config,
-                            state.registry,
-                            contract_addr,
-                            *from,
+                            op,
                             ctx.current_block_height,
+                            config,
+                            Some(&executor),
                         )
                     }
                 };
 
-                match exec_result {
-                    Ok(_) => {
-                        // Update EVM supply tracking in asset registry
-                        match op {
-                            BridgeOp::DepositToEvm { asset_id, amount, .. } => {
-                                let _ = state.registry.add_evm_supply(*asset_id, *amount);
-                            }
-                            BridgeOp::WithdrawToProtocol { asset_id, amount, .. } => {
-                                let _ = state.registry.sub_evm_supply(*asset_id, *amount);
-                            }
-                        }
-                        state.bridge_state.add_pending_op(op.clone(), ctx.current_block_height);
-                        result.bridge_op_count += 1;
-                    }
-                    Err(_) => {
-                        // Skip failed bridge ops (same pattern as EVM txs)
-                    }
+                if exec_result.is_ok() {
+                    result.bridge_op_count += 1;
                 }
             }
         }
@@ -799,15 +634,6 @@ impl Block {
                 }
             }
             result.system_tx_count += 1;
-        }
-
-        // Step 4.5: Auto-finalize pending external deposits and bridge maintenance
-        if let Some(config) = ctx.bridge_config {
-            state.bridge_state.on_block_finalized(
-                ctx.current_block_height,
-                config.challenge_period_blocks,
-                config.processed_tx_retention_blocks,
-            );
         }
 
         // Step 5: Oracle reward pool allocation from block fees

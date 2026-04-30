@@ -249,27 +249,37 @@ impl RpcState {
     }
 
     pub fn get_total_balance(&self, asset_id: AssetId) -> Balance {
-        self.balance_state
+        self.evm_state
             .read()
-            .map(|s| s.balances.iter().filter(|((aid, _), _)| *aid == asset_id).map(|(_, b)| *b).sum())
+            .map(|s| evm_instructions::read_asset_supply(&s, asset_id))
             .unwrap_or(0)
     }
 
     pub fn get_asset_info(&self, asset_id: AssetId) -> Option<AssetInfoResponse> {
-        self.asset_registry.read().ok().and_then(|r| {
-            r.get_asset(asset_id).map(|a| AssetInfoResponse {
-                id: a.id,
-                symbol: a.symbol.clone(),
-                name: a.name.clone(),
-                decimals: a.decimals,
-                issuer: a.issuer,
-                protocol_supply: a.protocol_supply,
-                evm_supply: a.evm_supply,
-                all_supply: a.all_supply(),
-                max_supply: a.max_supply,
-                status: format!("{:?}", a.status),
-                compliance_policy: a.compliance_policy,
-                registered_at: a.registered_at,
+        self.evm_state.read().ok().and_then(|evm| {
+            let symbol = evm_instructions::read_asset_symbol(&evm, asset_id);
+            if symbol.is_empty() {
+                return None;
+            }
+            let supply = evm_instructions::read_asset_supply(&evm, asset_id);
+            Some(AssetInfoResponse {
+                id: asset_id,
+                symbol,
+                name: evm_instructions::read_asset_name(&evm, asset_id),
+                decimals: evm_instructions::read_asset_decimals(&evm, asset_id),
+                issuer: evm_instructions::read_asset_issuer(&evm, asset_id),
+                protocol_supply: supply,
+                evm_supply: supply,
+                all_supply: supply,
+                max_supply: evm_instructions::read_asset_max_supply(&evm, asset_id),
+                status: match evm_instructions::read_asset_status(&evm, asset_id) {
+                    0 => "Active".to_string(),
+                    1 => "Frozen".to_string(),
+                    2 => "Delisted".to_string(),
+                    _ => "Unknown".to_string(),
+                },
+                compliance_policy: evm_instructions::read_asset_compliance(&evm, asset_id),
+                registered_at: evm_instructions::read_asset_registered_at(&evm, asset_id),
             })
         })
     }
@@ -414,28 +424,26 @@ impl RpcState {
     }
 
     pub fn get_agent_info(&self, agent_id: u64) -> Option<AgentInfoResponse> {
-        self.agent_registry.read().ok().and_then(|r| {
-            r.get_agent(agent_id).map(|a| AgentInfoResponse {
-                agent_id: a.agent_id,
-                owner: a.owner,
-                name: a.name.clone(),
-                url: a.url.clone(),
-                domain_verified: a.domain_verified,
-                registered_at: a.registered_at,
+        self.evm_state.read().ok().and_then(|evm| {
+            if !evm_instructions::agent_exists(&evm, agent_id) {
+                return None;
+            }
+            Some(AgentInfoResponse {
+                agent_id,
+                owner: evm_instructions::agent_get_owner(&evm, agent_id),
+                name: evm_instructions::agent_get_name(&evm, agent_id),
+                url: evm_instructions::agent_get_url(&evm, agent_id),
+                domain_verified: false,
+                registered_at: evm_instructions::agent_get_registered_at(&evm, agent_id),
             })
         })
     }
 
     pub fn get_agent_total_balance(&self, agent_id: u64) -> Balance {
-        let registry = match self.agent_registry.read() {
-            Ok(r) => r,
-            Err(_) => return 0,
-        };
-        let agent = match registry.get_agent(agent_id) {
-            Some(a) => a,
-            None => return 0,
-        };
-        self.agent_balances.read().map(|b| b.get_total_balance(agent.owner, agent_id)).unwrap_or(0)
+        self.evm_state
+            .read()
+            .map(|s| evm_instructions::agent_get_balance(&s, agent_id, call_protocol::CALL_ASSET_ID))
+            .unwrap_or(0)
     }
 
     pub fn grant_agent_balance(&self, agent_id: u64, asset_id: AssetId, amount: Balance) -> Result<(), String> {
@@ -459,9 +467,10 @@ impl RpcState {
     }
 
     pub fn get_compliance_policy(&self, asset_id: AssetId) -> u8 {
-        self.asset_registry.read().ok().and_then(|r| {
-            r.get_asset(asset_id).map(|a| a.compliance_policy)
-        }).unwrap_or(0)
+        self.evm_state
+            .read()
+            .map(|s| evm_instructions::read_asset_compliance(&s, asset_id))
+            .unwrap_or(0)
     }
 
     pub fn get_shielded_tree_state(&self) -> ShieldedTreeStateResponse {
@@ -687,22 +696,20 @@ impl RpcState {
         // from entering the mempool and poisoning block proposals.
         for instr in &tx.instructions {
             match instr {
-                call_protocol::Instruction::ValidatorUnstake { validator_id } => {
-                    let vs = self.validator_state.read()
-                        .map_err(|_| "validator lock poisoned".to_string())?;
-                    if let Some(stake) = vs.get_validator_stake(*validator_id) {
-                        if stake.address != tx.sender {
-                            return Err("unstake: sender must be the validator owner".into());
-                        }
+                call_protocol::Instruction::ValidatorUnstake { .. } => {
+                    let evm = self.evm_state.read()
+                        .map_err(|_| "evm lock poisoned".to_string())?;
+                    let validator_id = evm_instructions::read_validator_id_by_addr(&evm, tx.sender);
+                    if validator_id == 0 {
+                        return Err("unstake: sender is not a registered validator".into());
                     }
                 }
-                call_protocol::Instruction::ValidatorClaimUnbonded { validator_id } => {
-                    let vs = self.validator_state.read()
-                        .map_err(|_| "validator lock poisoned".to_string())?;
-                    if let Some(stake) = vs.get_validator_stake(*validator_id) {
-                        if stake.address != tx.sender {
-                            return Err("claim: sender must be the validator owner".into());
-                        }
+                call_protocol::Instruction::ValidatorClaimUnbonded { .. } => {
+                    let evm = self.evm_state.read()
+                        .map_err(|_| "evm lock poisoned".to_string())?;
+                    let validator_id = evm_instructions::read_validator_id_by_addr(&evm, tx.sender);
+                    if validator_id == 0 {
+                        return Err("claim: sender is not a registered validator".into());
                     }
                 }
                 _ => {}

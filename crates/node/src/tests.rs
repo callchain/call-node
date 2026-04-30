@@ -579,13 +579,10 @@
                 block.execute(
                     &mut ExecutionState::new(
                         &mut s.balances, &mut s.registry, &mut s.compliance,
-                        &mut s.bridge, &mut s.shielded, &mut s.evm,
+                        &mut s.shielded, &mut s.evm,
                     ),
                     &mut BlockContext::new(height, &mut s.fee_params),
-                    &mut Subsystems {
-                        validator_state: Some(&mut *s.validator_state),
-                        ..Subsystems::none()
-                    },
+                    &mut Subsystems::none(),
                 )
                     .expect("execution")
             };

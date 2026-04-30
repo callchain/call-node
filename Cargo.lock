@@ -1693,6 +1693,7 @@ dependencies = [
  "call-crypto",
  "call-evm",
  "call-oracle",
+ "call-precompiles",
  "call-primitives",
  "call-protocol",
  "hex",

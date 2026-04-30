@@ -2,12 +2,17 @@
 //!
 //! Validates that governance instructions (submit, vote, queue, execute)
 //! are correctly processed during block production.
+//!
+//! Governance now writes to EVM storage (GOVERNANCE_ADDRESS 0x203), so this
+//! test verifies state by reading EVM slots directly.
 
 #[path = "e2e/mod.rs"]
 mod e2e;
 use e2e::harness::*;
 
-use call_primitives::ValidatorId;
+use alloy_primitives::U256;
+use call_crypto::keccak256;
+use call_precompiles::GOVERNANCE_ADDRESS;
 use call_protocol::instructions::Instruction;
 use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 
@@ -15,95 +20,56 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
+/// Compute a governance proposal storage slot: keccak256(b"proposal" || id_be || suffix)
+fn gov_slot(proposal_id: u64, suffix: &[u8]) -> U256 {
+    let mut data = Vec::new();
+    data.extend_from_slice(b"proposal");
+    data.extend_from_slice(&proposal_id.to_be_bytes());
+    data.extend_from_slice(suffix);
+    let hash = keccak256(&data);
+    U256::from_be_slice(&hash.0)
+}
+
+/// Read a proposal status byte from EVM storage.
+/// Status values: 0=None, 1=Active, 2=Queued, 3=Executed.
+fn read_proposal_status(evm: &call_evm::EvmState, proposal_id: u64) -> u8 {
+    let slot = gov_slot(proposal_id, b"status");
+    evm.get_storage(&GOVERNANCE_ADDRESS, slot).to_be_bytes::<32>()[31]
+}
+
 /// Governance proposal full lifecycle: submit → vote → queue → execute.
+/// EVM governance uses hardcoded constants:
+///   - PROPOSAL_DEPOSIT = 10_000 CALL
+///   - GOV_TIMELOCK_BLOCKS = 100 blocks
+///   - GOV_QUORUM_BPS = 3_333 (33.33%)
 #[test]
 fn test_governance_proposal_full_lifecycle() {
     let mut node = TestNode::new();
 
     let (proposer_secret, proposer) = test_keypair();
-    let (validator_secret, validator_addr) = test_keypair();
+    let (voter_secret, voter_addr) = test_keypair();
 
-    // Register validator in consensus
-    let val_id: ValidatorId = {
+    // Stake a validator so there is a proposer
+    {
         let mut consensus = node.consensus.write().unwrap();
-        let id = consensus
-            .stake_validator(validator_addr, [1u8; 32], one_million_call())
+        let _ = consensus
+            .stake_validator(voter_addr, [1u8; 32], one_million_call())
             .unwrap();
         consensus.refresh_proposer_subset();
-        id
-    };
-
-    // Also register in validator state manager (used for block execution validators list)
-    {
-        let mut validator_mgr = node.state.validator_state.write().unwrap();
-        validator_mgr.register_validator_from_stake(
-            val_id,
-            call_consensus::ValidatorStake {
-                validator_id: val_id,
-                address: validator_addr,
-                ed25519_pubkey: [1u8; 32],
-                staked_call: one_million_call(),
-                self_stake: one_million_call(),
-                delegated_call: 0,
-                rewards: 0,
-                slash_history: vec![],
-                unbonding_start: None,
-                bls_pubkey: [0u8; 48],
-            },
-        );
     }
 
-    // Fund proposer with enough CALL for deposit + gas
-    {
-        node.state
-            .balance_state
-            .write()
-            .unwrap()
-            .balances
-            .set_balance(1, proposer, one_million_call() * 3)
-            .unwrap();
-    }
-    // Seed EVM storage for proposer fees
+    // Seed EVM storage for proposer fees + deposit (10_000 CALL)
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, proposer, one_million_call() * 3,
         );
-    }
-
-    // Fund validator with enough CALL for voting gas
-    {
-        node.state
-            .balance_state
-            .write()
-            .unwrap()
-            .balances
-            .set_balance(1, validator_addr, one_million_call())
-            .unwrap();
-    }
-    // Seed EVM storage for validator fees
-    {
-        let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, validator_addr, one_million_call(),
+            &mut *evm, call_protocol::CALL_ASSET_ID, voter_addr, one_million_call(),
         );
     }
 
-    // Register validator in governance manager and use short periods for testing
-    {
-        let mut gov = node.state.governance.write().unwrap();
-        gov.register_validator(1, validator_addr);
-        gov.config.review_period_blocks = 5;
-        gov.config.voting_period_blocks = 10;
-        gov.config.timelock_period_blocks = 5;
-        gov.config.execution_timeout_blocks = 100;
-        // Fund proposer's governance voting balance for proposal deposit
-        gov.set_call_balance(proposer, one_million_call() * 3);
-        // Fund validator's governance voting balance
-        gov.set_call_balance(validator_addr, one_million_call());
-    }
-
-    // Step 1: Submit proposal
+    // Step 1: Submit proposal (proposal_id = 1)
     let proposal_tx = sign_tx(
         &proposer_secret,
         ProtocolTransaction {
@@ -130,21 +96,26 @@ fn test_governance_proposal_full_lifecycle() {
         },
     );
     node.insert_tx(proposal_tx);
-    node.produce_block(1_000_000);
+    let result = node.produce_block(1_000_000);
+    assert!(result.is_some());
 
-    // Proposal should exist with Pending state
-    let proposal_id = {
-        let gov = node.state.governance.read().unwrap();
-        let proposals: Vec<u64> = gov.get_all_proposals().iter().map(|p| *p.0).collect();
-        assert!(!proposals.is_empty(), "proposal should have been created");
-        proposals[0]
-    };
+    let proposal_id = 1u64;
 
-    // Step 2: Vote yes from validator
+    // Verify proposal is Active (status = 1)
+    {
+        let evm = node.state.evm_state.read().unwrap();
+        assert_eq!(
+            read_proposal_status(&*evm, proposal_id),
+            1,
+            "proposal should be Active after submission"
+        );
+    }
+
+    // Step 2: Vote yes
     let vote_tx = sign_tx(
-        &validator_secret,
+        &voter_secret,
         ProtocolTransaction {
-            sender: validator_addr,
+            sender: voter_addr,
             nonce: 0,
             instructions: vec![Instruction::GovernanceVote {
                 proposal_id,
@@ -161,21 +132,10 @@ fn test_governance_proposal_full_lifecycle() {
             },
         },
     );
-    // Advance past review period (review_period = 5)
-    for i in 0..6 {
-        node.produce_block(1_000_000 + (1 + i) * 250);
-    }
-
-    // Step 2: Vote yes from validator
     node.insert_tx(vote_tx);
-    node.produce_block(1_000_000 + 7 * 250);
+    node.produce_block(1_000_001);
 
-    // Advance past voting period (voting_period = 10)
-    for i in 0..10 {
-        node.produce_block(1_000_000 + (8 + i) * 250);
-    }
-
-    // Step 3: Queue proposal
+    // Step 3: Queue proposal (one yes vote = 100% quorum)
     let queue_tx = sign_tx(
         &proposer_secret,
         ProtocolTransaction {
@@ -194,11 +154,21 @@ fn test_governance_proposal_full_lifecycle() {
         },
     );
     node.insert_tx(queue_tx);
-    node.produce_block(1_000_000 + 18 * 250);
+    node.produce_block(1_000_002);
 
-    // Advance past timelock (timelock_period = 5)
-    for i in 0..6 {
-        node.produce_block(1_000_000 + (19 + i) * 250);
+    // Verify proposal is Queued (status = 2)
+    {
+        let evm = node.state.evm_state.read().unwrap();
+        assert_eq!(
+            read_proposal_status(&*evm, proposal_id),
+            2,
+            "proposal should be Queued"
+        );
+    }
+
+    // Advance past timelock (GOV_TIMELOCK_BLOCKS = 100)
+    for _ in 0..101 {
+        node.produce_block(1_000_003);
     }
 
     // Step 4: Execute proposal
@@ -220,14 +190,15 @@ fn test_governance_proposal_full_lifecycle() {
         },
     );
     node.insert_tx(exec_tx);
-    node.produce_block(1_000_000 + 25 * 250);
+    node.produce_block(1_000_004);
 
-    // Verify proposal is executed
-    let gov = node.state.governance.read().unwrap();
-    let proposal = gov.get_proposal(proposal_id).expect("proposal should exist");
-    assert_eq!(
-        proposal.state,
-        call_governance::ProposalState::Executed,
-        "proposal should be executed after full lifecycle"
-    );
+    // Verify proposal is Executed (status = 3)
+    {
+        let evm = node.state.evm_state.read().unwrap();
+        assert_eq!(
+            read_proposal_status(&*evm, proposal_id),
+            3,
+            "proposal should be Executed after full lifecycle"
+        );
+    }
 }

@@ -45,6 +45,20 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
         )
         .unwrap();
     assert!(result.success, "ERC-20 deploy failed");
+
+    // Seed EVM storage for bridge ops
+    evm_instructions::seed_asset(
+        &mut evm_state,
+        1,
+        "TEST",
+        "TestToken",
+        18,
+        sender,
+        0,
+        0,
+        0, // active
+    );
+    evm_instructions::seed_bridge_contract(&mut evm_state, 1, contract_addr);
     drop(evm_state);
 
     let mut registry = node.state.asset_registry.write().unwrap();
@@ -68,23 +82,13 @@ fn test_bridge_deposit_evm_credits() {
         consensus.refresh_proposer_subset();
     }
 
-    // Fund sender with protocol balance for the deposit
+    // Fund sender with EVM storage balance for the deposit
     {
-        node.state
-            .balance_state
-            .write()
-            .unwrap()
-            .balances
-            .set_balance(1, sender, 10_000)
-            .unwrap();
-    }
-
-    // Set up EVM state for sender
-    {
-        let mut evm_state = node.state.evm_state.write().unwrap();
-        evm_state.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
-        evm_state.create_account(sender);
-        evm_state.create_account(recipient);
+        let mut evm = node.state.evm_state.write().unwrap();
+        evm_instructions::seed_balance(&mut evm, 1, sender, 10_000);
+        evm.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
+        evm.create_account(sender);
+        evm.create_account(recipient);
     }
 
     setup_bridge_env(&mut node, sender);
@@ -100,10 +104,10 @@ fn test_bridge_deposit_evm_credits() {
     let block = node.produce_block(1_000_000);
     assert!(block.is_some(), "block should be produced");
 
-    // Verify the deposit was recorded in bridge state
-    let bridge = node.state.bridge_state.read().unwrap();
+    // Verify the deposit was recorded in EVM storage
+    let evm = node.state.evm_state.read().unwrap();
     assert_eq!(
-        bridge.total_deposits.get(&1).copied().unwrap_or(0),
+        evm_instructions::read_bridge_total_deposits(&*evm, 1),
         500,
         "bridge should record 500 deposited"
     );
@@ -125,27 +129,17 @@ fn test_bridge_withdraw_records_outflow() {
         consensus.refresh_proposer_subset();
     }
 
-    // Fund sender with protocol balance
+    // Fund sender with EVM storage balance
     {
-        node.state
-            .balance_state
-            .write()
-            .unwrap()
-            .balances
-            .set_balance(1, sender, 10_000)
-            .unwrap();
-    }
-
-    // Set up EVM state
-    {
-        let mut evm_state = node.state.evm_state.write().unwrap();
-        evm_state.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
-        evm_state.create_account(sender);
+        let mut evm = node.state.evm_state.write().unwrap();
+        evm_instructions::seed_balance(&mut evm, 1, sender, 10_000);
+        evm.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
+        evm.create_account(sender);
     }
 
     setup_bridge_env(&mut node, sender);
 
-    // First deposit to mint wrapped tokens
+    // First deposit to add native EVM balance
     node.insert_bridge_op(call_bridge::BridgeOp::DepositToEvm {
         asset_id: 1,
         from: sender,
@@ -165,10 +159,10 @@ fn test_bridge_withdraw_records_outflow() {
     let block = node.produce_block(1_000_250);
     assert!(block.is_some(), "withdraw block should be produced");
 
-    // Verify withdrawal recorded
-    let bridge = node.state.bridge_state.read().unwrap();
+    // Verify withdrawal recorded in EVM storage
+    let evm = node.state.evm_state.read().unwrap();
     assert_eq!(
-        bridge.total_withdrawals.get(&1).copied().unwrap_or(0),
+        evm_instructions::read_bridge_total_withdrawals(&*evm, 1),
         300,
         "bridge should record 300 withdrawn"
     );
@@ -262,7 +256,7 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     match &tx_result.status {
         ExecutionStatus::Reverted { reason } => {
             assert!(
-                reason.contains("bridge deposit:"),
+                reason.contains("ExternalBridgeDeposit:"),
                 "expected bridge deposit failure, got: {}",
                 reason
             );
