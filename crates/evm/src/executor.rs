@@ -76,6 +76,7 @@ impl EvmExecutor {
         &self,
         tx: EvmTransaction,
         state: &mut EvmState,
+        block_number: u64,
     ) -> Result<EvmExecutionResult, EvmError> {
         // Build revm InMemoryDB and sync our state into it
         let mut db = InMemoryDB::default();
@@ -100,7 +101,9 @@ impl EvmExecutor {
         // Build EVM with Callchain custom precompiles (0x101/0x102/0x103)
         let mut evm = ctx.build_mainnet().with_precompiles(CallPrecompiles::new(self.spec_id));
 
-        evm.set_block(revm::context::BlockEnv::default());
+        let mut block_env = revm::context::BlockEnv::default();
+        block_env.number = U256::from(block_number);
+        evm.set_block(block_env);
 
         let result = evm
             .transact(tx_env)
@@ -175,7 +178,7 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        let result = self.execute_tx(tx, state)?;
+        let result = self.execute_tx(tx, state, 0)?;
 
         // Revm already sets the deployed code via apply_from_revm_state,
         // but we keep this as a safety net for CREATE output.
@@ -219,7 +222,7 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        self.execute_tx(tx, state)
+        self.execute_tx(tx, state, 0)
     }
 
     /// Helper: EVM call for bridge burn operations
@@ -250,7 +253,7 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        self.execute_tx(tx, state)
+        self.execute_tx(tx, state, 0)
     }
 
     /// Helper: EVM call for issuer mint operations on WrappedToken
@@ -286,7 +289,7 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        self.execute_tx(tx, state)
+        self.execute_tx(tx, state, 0)
     }
 }
 
@@ -471,7 +474,7 @@ mod tests {
             chain_id: 1,
         };
 
-        let result = executor.execute_tx(tx, &mut state);
+        let result = executor.execute_tx(tx, &mut state, 0);
         assert!(result.is_ok());
     }
 

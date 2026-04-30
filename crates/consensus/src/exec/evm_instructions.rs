@@ -1502,7 +1502,7 @@ fn exec_agent_call(
         chain_id: executor.chain_id,
     };
 
-    match executor.execute_tx(tx, evm_state) {
+    match executor.execute_tx(tx, evm_state, current_block_height) {
         Ok(_) => Ok(InstructionResult::Success),
         Err(e) => Err(ConsensusError::InvalidBlock(format!("agent call: {e:?}"))),
     }

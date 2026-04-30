@@ -7,8 +7,6 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::{Address, TxHash};
-use call_protocol::instructions::Instruction;
-use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 use call_network::{Network, NetworkMessage, TransactionMessage};
 
 const BLOCK_CHANNEL: u64 = 2;
@@ -22,25 +20,17 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    let tx = ProtocolTransaction {
-        sender,
+fn make_tx(_secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> call_evm::EvmTransaction {
+    call_evm::EvmTransaction {
+        caller: sender,
         nonce,
-        instructions: vec![Instruction::Transfer {
-            asset_id: 1,
-            to,
-            amount,
-            memo: None,
-        }],
-        gas_config: GasConfig::SelfPay,
-        fee_currency: call_primitives::FeeCurrency::Call,
-        gas_limit: 100_000,
-        max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-        auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    };
-    sign_tx(secret, tx)
+        gas_limit: 21_000,
+        gas_price: 1_000_000_000,
+        to: Some(to),
+        value: call_primitives::U256::from(amount),
+        data: call_evm::Bytes::default(),
+        chain_id: 1,
+    }
 }
 
 /// Two nodes connected via shared network — node1 produces blocks and broadcasts.
@@ -63,7 +53,7 @@ async fn test_two_nodes_block_propagation() {
     {
         let mut n = node0.write().unwrap();
         for i in 0..5 {
-            n.insert_tx(make_tx(&secret, val_addr, i, test_addr(20 + i as u8), 100));
+            n.insert_evm_tx(make_tx(&secret, val_addr, i, test_addr(20 + i as u8), 100));
             n.produce_block(1_000_000 + i * 250);
         }
     }
@@ -106,12 +96,13 @@ async fn test_transaction_propagation() {
     {
         let n = node0.read().unwrap();
         assert_eq!(n.mempool_size(), 0);
-        n.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
+        n.insert_evm_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
         assert_eq!(n.mempool_size(), 1);
     }
 
     // Manually broadcast tx to network (simulating gossip)
-    let tx_data = serde_json::to_vec(&make_tx(&secret, sender, 0, test_addr(2), 1_000)).unwrap();
+    let evm_tx = make_tx(&secret, sender, 0, test_addr(2), 1_000);
+    let tx_data = serde_json::to_vec(&evm_tx).unwrap();
     let tx_msg = TransactionMessage::new(tx_data, TxHash::repeat_byte(0));
     let msg_data = bincode::serialize(&NetworkMessage::Transaction(tx_msg)).unwrap();
     net_ref.broadcast(TX_CHANNEL, msg_data).await;
@@ -146,7 +137,7 @@ async fn test_multiple_nodes_produce_blocks() {
     {
         let mut n = node0.write().unwrap();
         for i in 0..10 {
-            n.insert_tx(make_tx(&secret1, addr1, i, test_addr(50 + i as u8), 100));
+            n.insert_evm_tx(make_tx(&secret1, addr1, i, test_addr(50 + i as u8), 100));
             n.produce_block(1_000_000 + i * 250);
         }
     }

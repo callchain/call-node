@@ -9,8 +9,7 @@ use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
 use call_oracle::ORACLE_UPDATE_INTERVAL;
 use call_primitives::{Address, FeeCurrency, TxHash};
-use call_protocol::{ProtocolReceipt, transaction::ProtocolTransaction};
-use call_crypto::keccak256;
+use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
 use call_transaction_pool::Mempool;
@@ -39,10 +38,9 @@ pub(crate) async fn block_production_loop(
     loop {
         interval.tick().await;
 
-        // 1. Select transactions from mempool
+        // 1. Select transactions from mempool (EVM-only)
         let selection = { mempool.write().unwrap().select_transactions() };
-        telemetry.set_mempool_size(selection.protocol_txs.len() + selection.evm_txs.len());
-        telemetry.set_bridge_pending(selection.bridge_ops.len());
+        telemetry.set_mempool_size(selection.evm_txs.len());
 
         // 2. Build block
         let (proposer, height) = {
@@ -54,13 +52,6 @@ pub(crate) async fn block_production_loop(
         };
 
         let block_start = Instant::now();
-
-        // Deserialize protocol txs from mempool data
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
-            .collect();
 
         let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
@@ -76,9 +67,9 @@ pub(crate) async fn block_production_loop(
             crate::current_timestamp_millis(),
             proposer,
             version,
-            protocol_txs,
+            vec![], // protocol_txs — EVM-only mempool, no protocol txs
             evm_txs,
-            selection.bridge_ops,
+            vec![], // bridge_operations — handled via EVM precompiles
         );
 
         // 3. Execute block
@@ -102,25 +93,13 @@ pub(crate) async fn block_production_loop(
             let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
                 .map(|r| r.tx_hash)
                 .collect();
-            let protocol_hashes: Vec<TxHash> = result.transaction_results.iter()
-                .map(|r| r.tx_hash)
-                .collect();
-            let mut all = evm_hashes;
-            all.extend(protocol_hashes);
             let mut mp = mempool.write().unwrap();
-            mp.confirm_transactions(&all);
+            mp.confirm_transactions(&evm_hashes);
             // Also notify mempool defense so per-address tx_counts are decremented
             drop(mp);
             let mut defense = state.mempool_defense.write().unwrap();
             for evm in &result.evm_tx_results {
                 defense.on_tx_confirmed(evm.caller);
-            }
-            for tr in &result.transaction_results {
-                if let Some(tx) = block.protocol_txs.iter().find(|t| {
-                    call_primitives::TxHash::from(t.compute_tx_hash()) == tr.tx_hash
-                }) {
-                    defense.on_tx_confirmed(tx.sender);
-                }
             }
         }
 

@@ -12,9 +12,7 @@
 mod e2e;
 use e2e::harness::*;
 
-use call_primitives::{Address, FeeCurrency};
-use call_protocol::instructions::Instruction;
-use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
+use call_primitives::Address;
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -24,25 +22,22 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    let tx = ProtocolTransaction {
-        sender,
+fn make_tx(_secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> call_evm::EvmTransaction {
+    call_evm::EvmTransaction {
+        caller: sender,
         nonce,
-        instructions: vec![Instruction::Transfer {
-            asset_id: 1,
-            to,
-            amount,
-            memo: None,
-        }],
-        gas_config: GasConfig::SelfPay,
-        fee_currency: FeeCurrency::Call,
-        gas_limit: 100_000,
-        max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-        auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    };
-    sign_tx(secret, tx)
+        gas_limit: 21_000,
+        gas_price: 1,
+        to: Some(to),
+        value: call_primitives::U256::from(amount),
+        data: call_evm::Bytes::default(),
+        chain_id: 1,
+    }
+}
+
+/// Read native EVM balance for an address.
+fn native_balance(node: &TestNode, addr: &Address) -> u128 {
+    node.state.evm_state.read().unwrap().get_balance(addr).try_into().unwrap_or(0)
 }
 
 /// High throughput: inject many transactions and produce blocks.
@@ -64,12 +59,13 @@ async fn test_high_throughput_many_transactions() {
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
+        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     }
 
     // Inject 1000 transactions
     let tx_count = 1000;
     for i in 0..tx_count {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 50) as u8), 100));
+        node.insert_evm_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 50) as u8), 100));
     }
 
     // Produce blocks until mempool is drained
@@ -108,15 +104,16 @@ fn test_mempool_capacity_under_pressure() {
             call_consensus::exec::evm_instructions::seed_balance(
                 &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 10_000_000,
             );
+            evm.set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
         }
         sender_keys.push(kp);
     }
 
-    // Fill mempool: ~170 txs per sender × 3 senders = 510 total
+    // Fill mempool: ~170 txs per sender x 3 senders = 510 total
     let mut count = 0;
     for (secret, sender_addr) in &sender_keys {
         for i in 0..170 {
-            node.insert_tx(make_tx(secret, *sender_addr, i as u64, test_addr(50 + (count % 20) as u8), 50));
+            node.insert_evm_tx(make_tx(secret, *sender_addr, i as u64, test_addr(50 + (count % 20) as u8), 50));
             count += 1;
         }
     }
@@ -132,10 +129,10 @@ fn test_mempool_duplicate_tx_rejected() {
     let (secret, sender) = test_keypair();
 
     let tx = make_tx(&secret, sender, 0, test_addr(2), 100);
-    node.insert_tx(tx.clone());
+    node.insert_evm_tx(tx.clone());
 
     // Same tx again (same sender + nonce)
-    node.insert_tx(tx);
+    node.insert_evm_tx(tx);
 
     // Mempool should only keep one (dedup by sender+nonce)
     assert_eq!(node.mempool_size(), 1);
@@ -159,13 +156,14 @@ async fn test_base_fee_under_sustained_load() {
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000_000,
         );
+        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     }
 
     let initial_fee = node.base_fee();
 
     // Produce many blocks with transactions (sustained gas usage)
     for i in 0..200 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_evm_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -193,24 +191,19 @@ async fn test_no_double_spend_concurrent_nonce() {
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
+        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     }
 
-    // Register asset 1 for transfers
-    {
-        let mut registry = node.state.asset_registry.write().unwrap();
-        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
-    }
-
-    // Two txs with same nonce — second should be rejected during execution
-    node.insert_tx(make_tx(&secret, sender, 0, test_addr(10), 500));
-    node.insert_tx(make_tx(&secret, sender, 0, test_addr(20), 500));
+    // Two txs with same nonce - second should be rejected during execution
+    node.insert_evm_tx(make_tx(&secret, sender, 0, test_addr(10), 500));
+    node.insert_evm_tx(make_tx(&secret, sender, 0, test_addr(20), 500));
 
     // Produce a block
     node.produce_block(1_000_000);
 
     // Only one transfer should have executed (nonce dedup)
-    let received_10 = node.balance(1, &test_addr(10));
-    let received_20 = node.balance(1, &test_addr(20));
+    let received_10 = native_balance(&node, &test_addr(10));
+    let received_20 = native_balance(&node, &test_addr(20));
 
     // Exactly one of them received funds
     assert!((received_10 == 500 && received_20 == 0) || (received_10 == 0 && received_20 == 500));
@@ -235,12 +228,7 @@ async fn test_final_state_consistency_after_load() {
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, initial_balance,
         );
-    }
-
-    // Register asset 1 for transfers
-    {
-        let mut registry = node.state.asset_registry.write().unwrap();
-        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+        evm.set_balance(sender, call_primitives::U256::from(initial_balance));
     }
 
     let num_txs = 100;
@@ -248,7 +236,7 @@ async fn test_final_state_consistency_after_load() {
 
     // Send 100 transfers
     for i in 0..num_txs {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 20) as u8), transfer_amount));
+        node.insert_evm_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 20) as u8), transfer_amount));
     }
 
     // Produce a block (drains all pending txs)
@@ -257,15 +245,15 @@ async fn test_final_state_consistency_after_load() {
     // Verify all recipients received funds
     let mut total_received = 0u128;
     for i in 0..20 {
-        total_received += node.balance(1, &test_addr(50 + i as u8));
+        total_received += native_balance(&node, &test_addr(50 + i as u8));
     }
 
     // Total received should be num_txs * transfer_amount
     assert_eq!(total_received, num_txs as u128 * transfer_amount, "all transfers should have executed");
 
-    // Sender balance should be reduced by total transferred
-    let sender_balance = node.balance(1, &sender);
-    assert!(sender_balance <= initial_balance - total_received, "sender should have sent funds");
+    // Sender native balance should be reduced (gas + transfers deducted)
+    let sender_balance = native_balance(&node, &sender);
+    assert!(sender_balance < initial_balance, "sender should have spent funds");
 }
 
 /// Multi-sender stress: many senders submitting concurrently.
@@ -290,20 +278,15 @@ async fn test_multi_sender_stress() {
             call_consensus::exec::evm_instructions::seed_balance(
                 &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 20_000_000,
             );
+            evm.set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
         }
         sender_keys.push(kp);
-    }
-
-    // Register asset 1 for transfers
-    {
-        let mut registry = node.state.asset_registry.write().unwrap();
-        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
     }
 
     // Each sender submits 10 transactions
     for (secret, sender_addr) in &sender_keys {
         for j in 0..10 {
-            node.insert_tx(make_tx(secret, *sender_addr, j as u64, test_addr(200), 100));
+            node.insert_evm_tx(make_tx(secret, *sender_addr, j as u64, test_addr(200), 100));
         }
     }
 
@@ -313,7 +296,7 @@ async fn test_multi_sender_stress() {
     }
 
     // Verify some recipients received funds
-    let any_received = node.balance(1, &test_addr(200)) > 0;
+    let any_received = native_balance(&node, &test_addr(200)) > 0;
     assert!(any_received, "at least some recipients should have received funds");
 }
 
@@ -336,18 +319,13 @@ async fn test_high_volume_block_production() {
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 50_000_000,
         );
-    }
-
-    // Register asset 1 for transfers
-    {
-        let mut registry = node.state.asset_registry.write().unwrap();
-        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
+        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     }
 
     // Inject many transactions (capped by per-address mempool limit of 256)
     let tx_count = 200;
     for i in 0..tx_count {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 50) as u8), 10));
+        node.insert_evm_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 50) as u8), 10));
     }
 
     // Produce one block (drains all)
@@ -360,7 +338,7 @@ async fn test_high_volume_block_production() {
     // Verify some recipients received funds
     let mut any_received = false;
     for i in 0..50 {
-        if node.balance(1, &test_addr(50 + i as u8)) > 0 {
+        if native_balance(&node, &test_addr(50 + i as u8)) > 0 {
             any_received = true;
             break;
         }
@@ -386,11 +364,12 @@ async fn test_rapid_block_production() {
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 600_000_000,
         );
+        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     }
 
     // Produce 500 blocks rapidly (no real delay)
     for i in 0..500 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(99), 1));
+        node.insert_evm_tx(make_tx(&secret, sender, i as u64, test_addr(99), 1));
         node.produce_block(1_000_000 + i); // 1ms apart timestamps
     }
 

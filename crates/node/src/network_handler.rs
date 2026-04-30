@@ -52,12 +52,9 @@ pub(crate) fn handle_network_message(
             if let Ok(tx_msg) = serde_json::from_slice::<TransactionMessage>(data) {
                 if tx_msg.verify_checksum() {
                     if let Ok(mut pool) = mempool.write() {
-                        // Try EVM transaction first
+                        // EVM-only mempool
                         if let Ok(evm_tx) = serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data) {
                             let _ = pool.insert_evm_tx(evm_tx);
-                        } else if let Ok(proto_tx) = serde_json::from_slice::<call_protocol::transaction::ProtocolTransaction>(&tx_msg.data) {
-                            // Protocol transaction (ValidatorStake, etc.)
-                            let _ = pool.insert_protocol_tx(proto_tx);
                         }
                     }
                 }

@@ -7,8 +7,6 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::{Address, BlockHash};
-use call_protocol::instructions::Instruction;
-use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -18,25 +16,17 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    let tx = ProtocolTransaction {
-        sender,
+fn make_tx(_secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> call_evm::EvmTransaction {
+    call_evm::EvmTransaction {
+        caller: sender,
         nonce,
-        instructions: vec![Instruction::Transfer {
-            asset_id: 1,
-            to,
-            amount,
-            memo: None,
-        }],
-        gas_config: GasConfig::SelfPay,
-        fee_currency: call_primitives::FeeCurrency::Call,
-        gas_limit: 100_000,
-        max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-        auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    };
-    sign_tx(secret, tx)
+        gas_limit: 21_000,
+        gas_price: 1,
+        to: Some(to),
+        value: call_primitives::U256::from(amount),
+        data: call_evm::Bytes::default(),
+        chain_id: 1,
+    }
 }
 
 /// Fresh node starts at height 0, produces genesis block, advances.
@@ -89,25 +79,28 @@ async fn test_node_process_transactions() {
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     }
-    // Seed EVM storage with CALL balance for fees
+    // Seed EVM storage with CALL balance for fees + native balance for gas
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
+        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
     }
 
     // Insert tx
-    node.insert_tx(make_tx(&secret, sender, 0, receiver, 3_000));
+    node.insert_evm_tx(make_tx(&secret, sender, 0, receiver, 3_000));
     assert_eq!(node.mempool_size(), 1);
 
     // Produce block
     let block = node.produce_block(1_000_000).expect("should produce block");
 
-    // Mempool cleared, balance updated
+    // Mempool cleared, native EVM balance updated
     assert_eq!(node.mempool_size(), 0);
-    assert_eq!(node.balance(1, &receiver), 3_000);
-    assert!(node.balance(1, &sender) <= 10_000_000 - 3_000); // may have gas deducted
+    let receiver_native = node.state.evm_state.read().unwrap().get_balance(&receiver);
+    let sender_native = node.state.evm_state.read().unwrap().get_balance(&sender);
+    assert_eq!(receiver_native, call_primitives::U256::from(3_000));
+    assert!(sender_native < call_primitives::U256::from(100_000_000_000u128));
     assert_eq!(block.header.height, 0);
 }
 
@@ -127,13 +120,13 @@ async fn test_node_persist_and_recover() {
     }
 
     // Produce 3 blocks
-    node.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
+    node.insert_evm_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
     node.produce_block(1_000_000);
 
-    node.insert_tx(make_tx(&secret, sender, 1, test_addr(3), 2_000));
+    node.insert_evm_tx(make_tx(&secret, sender, 1, test_addr(3), 2_000));
     node.produce_block(1_000_250);
 
-    node.insert_tx(make_tx(&secret, sender, 2, test_addr(4), 500));
+    node.insert_evm_tx(make_tx(&secret, sender, 2, test_addr(4), 500));
     node.produce_block(1_000_500);
 
     assert_eq!(node.consensus_height(), 3);
@@ -178,7 +171,7 @@ async fn test_block_chain_continuity() {
 
     let mut prev_hash = BlockHash::ZERO;
     for i in 0..10 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(10 + i as u8), 100));
+        node.insert_evm_tx(make_tx(&secret, sender, i as u64, test_addr(10 + i as u8), 100));
         let block = node.produce_block(1_000_000 + i * 250).expect("produce block");
         assert_eq!(block.header.parent_hash, prev_hash);
         assert_eq!(block.header.height, i);

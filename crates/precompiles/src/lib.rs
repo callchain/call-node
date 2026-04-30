@@ -253,7 +253,7 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
 
             let mut provider = EvmStorageProvider::new(
                 journal,
-                u64::MAX, // gas tracked by precompile during transition
+                inputs.gas_limit, // enforce precompile gas limit so revm never underflows
                 inputs.is_static,
                 chain_id,
                 timestamp,

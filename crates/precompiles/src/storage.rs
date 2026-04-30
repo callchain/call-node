@@ -121,6 +121,12 @@ where
     <J::Database as Database>::Error: core::fmt::Debug,
 {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
+        // Ensure account is loaded into journal before accessing storage.
+        // Precompiles may read/write arbitrary addresses (e.g. ASSET_ADDRESS)
+        // that are not the call target and thus not warmed by revm's frame setup.
+        let _ = self.journal.load_account(address)
+            .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+
         let result = self
             .journal
             .sload(address, key)
@@ -140,6 +146,10 @@ where
         if self.is_static {
             return Err(PrecompileError::Other("static call cannot mutate state".into()));
         }
+        // Ensure account is loaded into journal before accessing storage.
+        let _ = self.journal.load_account(address)
+            .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+
         let result = self
             .journal
             .sstore(address, key, value)

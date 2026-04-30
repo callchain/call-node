@@ -7,8 +7,7 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::{Address, BlockHash, ProtocolVersion};
-use call_protocol::instructions::Instruction;
-use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
+use call_evm::EvmTransaction;
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -18,25 +17,17 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    let tx = ProtocolTransaction {
-        sender,
+fn make_evm_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> EvmTransaction {
+    EvmTransaction {
+        caller: sender,
         nonce,
-        instructions: vec![Instruction::Transfer {
-            asset_id: 1,
-            to,
-            amount,
-            memo: None,
-        }],
-        gas_config: GasConfig::SelfPay,
-        fee_currency: call_primitives::FeeCurrency::Call,
-        gas_limit: 100_000,
-        max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-        auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    };
-    sign_tx(secret, tx)
+        gas_limit: 21_000,
+        gas_price: 1_000_000_000,
+        to: Some(to),
+        value: call_primitives::U256::from(amount),
+        data: call_evm::Bytes::default(),
+        chain_id: 1,
+    }
 }
 
 /// Simulate a protocol upgrade at a specific block height.
@@ -44,7 +35,7 @@ fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: 
 async fn test_height_activated_upgrade() {
     let mut node = TestNode::new();
 
-    let (secret, sender) = test_keypair();
+    let (_secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -59,7 +50,7 @@ async fn test_height_activated_upgrade() {
 
     // Produce blocks up to and past the upgrade height
     for i in 0..60 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_evm_tx(make_evm_tx(sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
 
         let ts = 1_000_000 + i * 250;
         let selection = { node.mempool.write().unwrap().select_transactions() };
@@ -71,10 +62,10 @@ async fn test_height_activated_upgrade() {
 
         let Some(proposer) = proposer else { continue; };
 
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
+        let evm_txs: Vec<Vec<u8>> = selection
+            .evm_txs
             .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
+            .map(|e| e.data)
             .collect();
 
         if height == upgrade_height && !upgraded {
@@ -97,9 +88,9 @@ async fn test_height_activated_upgrade() {
             ts,
             proposer,
             version,
-            protocol_txs,
-            vec![],
-            selection.bridge_ops,
+            vec![], // protocol_txs — EVM-only
+            evm_txs,
+            vec![], // bridge_operations — handled via EVM precompiles
         );
 
         let result = node.state
@@ -129,7 +120,7 @@ async fn test_height_activated_upgrade() {
 async fn test_chain_fork_and_reconcile() {
     let mut sim = NetworkSimulator::new();
 
-    let (secret, sender) = test_keypair();
+    let (_secret, sender) = test_keypair();
 
     // Node A and Node B start with same initial state
     let node_a = NodeBuilder::new()
@@ -148,7 +139,7 @@ async fn test_chain_fork_and_reconcile() {
     {
         let mut na = node_a_ref.write().unwrap();
         for i in 0..5 {
-            na.insert_tx(make_tx(&secret, sender, i, test_addr(20 + i as u8), 100));
+            na.insert_evm_tx(make_evm_tx(sender, i, test_addr(20 + i as u8), 100));
             na.produce_block(1_000_000 + i * 250);
         }
     }
@@ -173,7 +164,7 @@ async fn test_governance_triggered_upgrade() {
 
     let mut node = TestNode::new();
 
-    let (secret, sender) = test_keypair();
+    let (_secret, sender) = test_keypair();
     let val_addr = sender;
     {
         let mut consensus = node.consensus.write().unwrap();
@@ -209,7 +200,7 @@ async fn test_governance_triggered_upgrade() {
 
     // Produce blocks up to the activation height
     for i in 0..10 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(30 + i as u8), 100));
+        node.insert_evm_tx(make_evm_tx(sender, i as u64, test_addr(30 + i as u8), 100));
         node.produce_block(1_000_000 + i * 250);
     }
 

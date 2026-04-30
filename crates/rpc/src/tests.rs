@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rpc_submit_payment_success() {
+    fn test_rpc_submit_payment_rejected_evm_only_mempool() {
         let state = make_test_state();
         let sender = *test_sender();
         let to = test_addr(2);
@@ -429,7 +429,7 @@ mod tests {
             evm_instructions::seed_balance(&mut *evm, asset_id, sender, 10_000);
         }
 
-        // Build tx to compute canonical hash for signing
+        // Build tx and sign it
         let tx = call_protocol::transaction::ProtocolTransaction {
             sender,
             nonce: 1,
@@ -453,78 +453,25 @@ mod tests {
                 signature: [0u8; 65],
             },
         };
-        let tx_hash = tx.compute_tx_hash();
-        let signature = sign_tx_hash(&tx_hash);
+        let signature = sign_tx_hash(&tx.compute_tx_hash());
 
-        let returned_hash = state.submit_payment(
+        // Protocol transactions are rejected in EVM-only mempool mode
+        let result = state.submit_payment(
             sender, 1, asset_id, to, 5_000,
             Some("test payment".into()),
             100_000, 1_000_000,
             Some(signature),
-        ).unwrap();
-
-        assert_eq!(returned_hash.as_slice().len(), 32);
-
-        // Balances are NOT changed immediately — execution is deferred to block production
-        let balance = state.get_balance(asset_id, &sender);
-        assert_eq!(balance, 10_000);
-        let to_balance = state.get_balance(asset_id, &to);
-        assert_eq!(to_balance, 0);
-
-        // No receipt stored yet — receipt is produced during block execution
-        assert!(state.get_receipt(&returned_hash).is_none());
-
-        // Transaction should be in the mempool
-        let mempool_size = state.mempool.read().unwrap().protocol_pool.len();
-        assert_eq!(mempool_size, 1);
-    }
-
-    #[test]
-    fn test_rpc_submit_payment_insufficient_balance() {
-        let state = make_test_state();
-        let sender = *test_sender();
-        let to = test_addr(2);
-        let asset_id: AssetId = 1;
-
-        // Low balance — but mempool insertion does not validate balance
-        {
-            let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_balance(&mut *evm, asset_id, sender, 100);
-        }
-
-        // Build tx and sign it
-        let tx = call_protocol::transaction::ProtocolTransaction {
-            sender,
-            nonce: 1,
-            instructions: vec![call_protocol::Instruction::Transfer {
-                asset_id,
-                to,
-                amount: 5_000,
-                memo: None,
-            }],
-            gas_config: call_protocol::transaction::GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: call_protocol::transaction::AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        };
-        let signature = sign_tx_hash(&tx.compute_tx_hash());
-
-        // Mempool insertion succeeds — balance check is deferred to block execution
-        let result = state.submit_payment(
-            sender, 1, asset_id, to, 5_000,
-            None, 100_000, 1_000_000,
-            Some(signature),
         );
-        assert!(result.is_ok(), "mempool should accept tx even with insufficient balance");
+        assert!(result.is_err(), "protocol tx should be rejected in EVM-only mempool");
+        assert!(result.unwrap_err().contains("eth_sendRawTransaction"));
 
-        // Balances unchanged — execution not yet performed
-        assert_eq!(state.get_balance(asset_id, &sender), 100);
+        // Balances unchanged
+        assert_eq!(state.get_balance(asset_id, &sender), 10_000);
         assert_eq!(state.get_balance(asset_id, &to), 0);
+
+        // Mempool should be empty (EVM-only)
+        let mempool_size = state.mempool.read().unwrap().evm_pool.len();
+        assert_eq!(mempool_size, 0);
     }
 
     #[test]

@@ -7,8 +7,7 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::{Address, BlockHash};
-use call_protocol::instructions::Instruction;
-use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
+use call_evm::EvmTransaction;
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -18,25 +17,17 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> ProtocolTransaction {
-    let tx = ProtocolTransaction {
-        sender,
+fn make_evm_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> EvmTransaction {
+    EvmTransaction {
+        caller: sender,
         nonce,
-        instructions: vec![Instruction::Transfer {
-            asset_id: 1,
-            to,
-            amount,
-            memo: None,
-        }],
-        gas_config: GasConfig::SelfPay,
-        fee_currency: call_primitives::FeeCurrency::Call,
-        gas_limit: 100_000,
-        max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-        auth: AuthScheme::SingleSig { signature: [0u8; 65] },
-    };
-    sign_tx(secret, tx)
+        gas_limit: 21_000,
+        gas_price: 1_000_000_000,
+        to: Some(to),
+        value: call_primitives::U256::from(amount),
+        data: call_evm::Bytes::default(),
+        chain_id: 1,
+    }
 }
 
 /// Single validator produces blocks continuously.
@@ -44,7 +35,7 @@ fn make_tx(secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: 
 async fn test_single_validator_block_production() {
     let mut node = TestNode::new();
 
-    let (secret, sender) = test_keypair();
+    let (_secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -54,9 +45,9 @@ async fn test_single_validator_block_production() {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 1_000_000).unwrap();
     }
 
-    // Produce 100 blocks with transactions
+    // Produce 100 blocks with EVM transactions
     for i in 0..100 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_evm_tx(make_evm_tx(sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -76,7 +67,7 @@ async fn test_single_validator_block_production() {
 async fn test_base_fee_dynamics() {
     let mut node = TestNode::new();
 
-    let (secret, sender) = test_keypair();
+    let (_secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -88,9 +79,9 @@ async fn test_base_fee_dynamics() {
 
     let initial_fee = node.base_fee();
 
-    // Produce blocks with transactions (gas usage) — fee should change
+    // Produce blocks with EVM transactions (gas usage) — fee should change
     for i in 0..50 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_evm_tx(make_evm_tx(sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -120,9 +111,9 @@ async fn test_empty_block_production() {
 
     assert_eq!(node.consensus_height(), 20);
 
-    // All blocks should have zero protocol txs
+    // All blocks should have zero EVM txs (empty blocks)
     for block in &node.blocks_produced {
-        assert_eq!(block.protocol_txs.len(), 0);
+        assert_eq!(block.evm_txs.len(), 0);
     }
 }
 
@@ -131,7 +122,7 @@ async fn test_empty_block_production() {
 async fn test_validator_reward_accumulation() {
     let mut node = TestNode::new();
 
-    let (secret, sender) = test_keypair();
+    let (_secret, sender) = test_keypair();
     let val_addr = sender;
     {
         let mut consensus = node.consensus.write().unwrap();
@@ -142,9 +133,9 @@ async fn test_validator_reward_accumulation() {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 1_000_000).unwrap();
     }
 
-    // Produce blocks with transactions to generate fees
+    // Produce blocks with EVM transactions to generate fees
     for i in 0..30 {
-        node.insert_tx(make_tx(&secret, sender, i as u64, test_addr(60 + (i % 5) as u8), 50));
+        node.insert_evm_tx(make_evm_tx(sender, i as u64, test_addr(60 + (i % 5) as u8), 50));
         node.produce_block(1_000_000 + i * 250);
     }
 
@@ -160,7 +151,7 @@ async fn test_validator_reward_accumulation() {
 async fn test_block_state_roots() {
     let mut node = TestNode::new();
 
-    let (secret, sender) = test_keypair();
+    let (_secret, sender) = test_keypair();
     {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
@@ -170,7 +161,7 @@ async fn test_block_state_roots() {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
     }
 
-    node.insert_tx(make_tx(&secret, sender, 0, test_addr(2), 1_000));
+    node.insert_evm_tx(make_evm_tx(sender, 0, test_addr(2), 1_000));
     let block = node.produce_block(1_000_000).expect("produce block");
 
     // After execution, payment root should be non-zero (balances exist)

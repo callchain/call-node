@@ -205,23 +205,17 @@ impl TestNode {
         self.network = Some(Arc::clone(&network));
     }
 
-    /// Insert a protocol transaction into the mempool.
-    pub fn insert_tx(&self, tx: ProtocolTransaction) {
+    /// Insert an EVM transaction into the mempool.
+    pub fn insert_evm_tx(&self, tx: call_evm::EvmTransaction) {
         let mut mempool = self.mempool.write().unwrap();
-        let _ = mempool.insert_protocol_tx(tx);
-    }
-
-    /// Insert a bridge operation into the mempool.
-    pub fn insert_bridge_op(&self, op: call_bridge::BridgeOp) {
-        let mut mempool = self.mempool.write().unwrap();
-        let _ = mempool.insert_bridge_op(op);
+        let _ = mempool.insert_evm_tx(tx);
     }
 
     /// Produce a single block deterministically.
     ///
     /// Returns the produced block, or `None` if no proposer is available.
     pub fn produce_block(&mut self, timestamp: u64) -> Option<Block> {
-        // Select transactions
+        // Select transactions (EVM-only)
         let selection = { self.mempool.write().unwrap().select_transactions() };
 
         let (proposer, height) = {
@@ -232,15 +226,6 @@ impl TestNode {
             return None;
         };
 
-        // Deserialize protocol txs
-        let mut protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
-            .collect();
-        // Sort by (sender, nonce) so sequential nonce validation works correctly
-        protocol_txs.sort_by_key(|tx| (tx.sender, tx.nonce));
-
         let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
         let version = self.state.fork_manager.read().unwrap().current_version();
@@ -250,9 +235,9 @@ impl TestNode {
             timestamp,
             proposer,
             version,
-            protocol_txs,
+            vec![], // protocol_txs — EVM-only
             evm_txs,
-            selection.bridge_ops,
+            vec![], // bridge_operations — handled via EVM precompiles
         );
 
         // Execute
@@ -276,13 +261,8 @@ impl TestNode {
             let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
                 .map(|r| r.tx_hash)
                 .collect();
-            let protocol_hashes: Vec<TxHash> = result.transaction_results.iter()
-                .map(|r| r.tx_hash)
-                .collect();
-            let mut all = evm_hashes;
-            all.extend(protocol_hashes);
             let mut mp = self.mempool.write().unwrap();
-            mp.confirm_transactions(&all);
+            mp.confirm_transactions(&evm_hashes);
         }
 
         let new_height = height + 1;
@@ -341,9 +321,9 @@ impl TestNode {
         evm_instructions::read_balance(&*evm, asset_id, *addr)
     }
 
-    /// Get mempool size (protocol txs).
+    /// Get mempool size (EVM txs).
     pub fn mempool_size(&self) -> usize {
-        self.mempool.read().unwrap().protocol_pool.len()
+        self.mempool.read().unwrap().evm_pool.len()
     }
 
     /// Persist the latest block to disk.
@@ -499,9 +479,9 @@ impl DeterministicRuntime {
 
 // ── SharedTxCorpus ────────────────────────────────────────────────────
 
-/// A shared pool of transactions that can be injected into multiple nodes.
+/// A shared pool of EVM transactions that can be injected into multiple nodes.
 pub struct SharedTxCorpus {
-    pub transactions: Vec<ProtocolTransaction>,
+    pub transactions: Vec<call_evm::EvmTransaction>,
     next_nonce: u64,
 }
 
@@ -513,32 +493,23 @@ impl SharedTxCorpus {
         }
     }
 
-    /// Create a simple transfer transaction.
+    /// Create a simple EVM transfer transaction.
     pub fn make_transfer(
         &mut self,
         sender: Address,
         receiver: Address,
-        asset_id: u64,
+        _asset_id: u64,
         amount: u128,
-    ) -> ProtocolTransaction {
-        let tx = ProtocolTransaction {
-            sender,
+    ) -> call_evm::EvmTransaction {
+        let tx = call_evm::EvmTransaction {
+            caller: sender,
             nonce: self.next_nonce,
-            instructions: vec![Instruction::Transfer {
-                asset_id,
-                to: receiver,
-                amount,
-                memo: None,
-            }],
-            gas_config: GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
+            gas_limit: 21_000,
+            gas_price: 1_000_000_000,
+            to: Some(receiver),
+            value: call_primitives::U256::from(amount),
+            data: call_evm::Bytes::default(),
+            chain_id: 1,
         };
         self.next_nonce += 1;
         self.transactions.push(tx.clone());
@@ -550,11 +521,11 @@ impl SharedTxCorpus {
         &mut self,
         sender: Address,
         transfers: Vec<(Address, u64, u128)>, // (receiver, asset_id, amount)
-    ) -> Vec<ProtocolTransaction> {
+    ) -> Vec<call_evm::EvmTransaction> {
         transfers
             .into_iter()
-            .map(|(receiver, asset_id, amount)| {
-                self.make_transfer(sender, receiver, asset_id, amount)
+            .map(|(receiver, _asset_id, amount)| {
+                self.make_transfer(sender, receiver, 0, amount)
             })
             .collect()
     }
@@ -562,7 +533,7 @@ impl SharedTxCorpus {
     /// Inject all transactions into a node's mempool.
     pub fn inject_into(&self, node: &TestNode) {
         for tx in &self.transactions {
-            node.insert_tx(tx.clone());
+            node.insert_evm_tx(tx.clone());
         }
     }
 }

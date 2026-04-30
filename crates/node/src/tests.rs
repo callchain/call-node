@@ -4,9 +4,7 @@
     use call_consensus::exec::evm_instructions;
     use call_network::{InMemoryNetwork, EpochBoundarySignal};
     use call_primitives::{Address, Ed25519PublicKey};
-    use call_protocol::instructions::Instruction;
     use crate::state_persist::{save_asset_registry_inner, load_asset_registry_inner};
-    use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
     use std::sync::OnceLock;
 
     fn test_addr(n: u8) -> Address {
@@ -33,32 +31,17 @@
             .0
     }
 
-    fn make_test_tx(nonce: u64) -> ProtocolTransaction {
-        let sender = *test_sender();
-        let mut tx = ProtocolTransaction {
-            sender,
+    fn make_evm_tx(nonce: u64) -> call_evm::EvmTransaction {
+        call_evm::EvmTransaction {
+            caller: *test_sender(),
             nonce,
-            instructions: vec![Instruction::Transfer {
-                asset_id: 1,
-                to: test_addr(2),
-                amount: 100,
-                memo: None,
-            }],
-            gas_config: GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        };
-        let tx_hash = tx.compute_tx_hash();
-        let secret = &TEST_SENDER.get().expect("TEST_SENDER initialized").1;
-        let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
-        tx.auth = AuthScheme::SingleSig { signature };
-        tx
+            gas_limit: 21_000,
+            gas_price: 1,
+            to: Some(test_addr(2)),
+            value: call_primitives::U256::from(100),
+            data: call_evm::Bytes::default(),
+            chain_id: 1,
+        }
     }
 
     fn one_million_call() -> u128 {
@@ -128,22 +111,20 @@
         ));
         let node = CallNode::new(tmp.clone()).expect("node creation");
 
-        let (proto, evm, bridge) = node.mempool_stats();
-        assert_eq!(proto, 0);
+        let (evm, known) = node.mempool_stats();
         assert_eq!(evm, 0);
-        assert_eq!(bridge, 0);
+        assert_eq!(known, 0);
 
-        // Insert a tx
-        let tx = make_test_tx(0);
+        // Insert an EVM tx
+        let tx = make_evm_tx(0);
         {
             let mut mempool = node.mempool.write().unwrap();
-            let _ = mempool.insert_protocol_tx(tx);
+            let _ = mempool.insert_evm_tx(tx);
         }
 
-        let (proto, evm, bridge) = node.mempool_stats();
-        assert_eq!(proto, 1);
-        assert_eq!(evm, 0);
-        assert_eq!(bridge, 0);
+        let (evm, known) = node.mempool_stats();
+        assert_eq!(evm, 1);
+        assert_eq!(known, 1);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -165,17 +146,17 @@
             consensus.refresh_proposer_subset();
         }
 
-        // Fund sender balance
+        // Fund sender balance in EVM storage
         {
-            let mut balances = node.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, *test_sender(), 10_000).unwrap();
+            let mut evm = node.state.evm_state.write().unwrap();
+            evm.set_balance(*test_sender(), call_primitives::U256::from(10_000_000_000_000u128));
         }
 
-        // Insert a protocol tx into mempool
-        let tx = make_test_tx(0);
+        // Insert an EVM tx into mempool
+        let tx = make_evm_tx(0);
         {
             let mut mempool = node.mempool.write().unwrap();
-            let _ = mempool.insert_protocol_tx(tx);
+            let _ = mempool.insert_evm_tx(tx);
         }
 
         // Manually run one iteration of block production
@@ -186,11 +167,7 @@
         let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
         let height = node.consensus.read().unwrap().current_height();
 
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
-            .collect();
+        let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
         let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
@@ -199,9 +176,9 @@
             1_000, // timestamp
             proposer,
             version,
-            protocol_txs,
-            vec![],
-            selection.bridge_ops,
+            vec![], // protocol_txs — EVM-only mempool
+            evm_txs,
+            vec![], // bridge_ops — handled via EVM precompiles
         );
 
         // Execute
@@ -253,9 +230,7 @@
         let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
         let height = node.consensus.read().unwrap().current_height();
 
-        assert!(selection.protocol_txs.is_empty());
         assert!(selection.evm_txs.is_empty());
-        assert!(selection.bridge_ops.is_empty());
 
         let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
@@ -324,14 +299,14 @@
         }
 
         // Verify initial state
-        assert_eq!(node1.mempool_stats().0, 0); // no protocol txs
+        assert_eq!(node1.mempool_stats().0, 0); // no evm txs
         assert_eq!(node2.mempool_stats().0, 0);
 
-        // Step 1: Submit a tx to node1's mempool
-        let tx = make_test_tx(0);
+        // Step 1: Submit an EVM tx to node1's mempool
+        let tx = make_evm_tx(0);
         {
             let mut mempool = node1.mempool.write().unwrap();
-            let _ = mempool.insert_protocol_tx(tx);
+            let _ = mempool.insert_evm_tx(tx);
         }
         assert_eq!(node1.mempool_stats().0, 1, "node1 should have 1 tx in mempool");
 
@@ -340,13 +315,8 @@
         let proposer = node1.consensus.read().unwrap().current_proposer().expect("proposer");
         let height = node1.consensus.read().unwrap().current_height();
 
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
-            .collect();
-
-        assert_eq!(protocol_txs.len(), 1, "should have 1 protocol tx");
+        let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
+        assert_eq!(evm_txs.len(), 1, "should have 1 evm tx");
 
         let version = node1.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
@@ -355,9 +325,9 @@
             3_000,
             proposer,
             version,
-            protocol_txs,
-            vec![],
-            selection.bridge_ops,
+            vec![], // protocol_txs — EVM-only mempool
+            evm_txs,
+            vec![], // bridge_ops — handled via EVM precompiles
         );
 
         let result = node1.state
@@ -421,17 +391,17 @@
             consensus.refresh_proposer_subset();
         }
 
-        // Fund balance
+        // Fund sender in EVM storage
         {
-            let mut balances = node.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, *test_sender(), 10_000).unwrap();
+            let mut evm = node.state.evm_state.write().unwrap();
+            evm.set_balance(*test_sender(), call_primitives::U256::from(10_000_000_000_000u128));
         }
 
-        // Insert tx
-        let tx = make_test_tx(0);
+        // Insert EVM tx
+        let tx = make_evm_tx(0);
         {
             let mut mempool = node.mempool.write().unwrap();
-            let _ = mempool.insert_protocol_tx(tx);
+            let _ = mempool.insert_evm_tx(tx);
         }
 
         // Produce block
@@ -439,11 +409,7 @@
         let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
         let height = node.consensus.read().unwrap().current_height();
 
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
-            .collect();
+        let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
         let version = node.state.fork_manager.read().unwrap().current_version();
         let mut block = Block::new(
@@ -452,9 +418,9 @@
             4_000,
             proposer,
             version,
-            protocol_txs,
-            vec![],
-            selection.bridge_ops,
+            vec![], // protocol_txs — EVM-only mempool
+            evm_txs,
+            vec![], // bridge_ops — handled via EVM precompiles
         );
 
         let result = node.state
@@ -509,35 +475,15 @@
                 let mut evm = node.state.evm_state.write().unwrap();
                 evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), initial_balance);
                 evm_instructions::seed_asset(&mut *evm, 1, "CALL", "Callchain", 18, *test_sender(), 0, initial_balance, 0);
+                // Set native EVM balance for gas payment
+                evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
             }
 
-            // Insert a transfer tx
-            let mut tx = ProtocolTransaction {
-                sender: *test_sender(),
-                nonce: 0,
-                instructions: vec![Instruction::Transfer {
-                    asset_id: 1,
-                    to: test_addr(2),
-                    amount: transfer_amount,
-                    memo: None,
-                }],
-                gas_config: GasConfig::SelfPay,
-                fee_currency: call_primitives::FeeCurrency::Call,
-                gas_limit: 100_000,
-                max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-                auth: AuthScheme::SingleSig {
-                    signature: [0u8; 65],
-                },
-            };
-            let tx_hash = tx.compute_tx_hash();
-            let secret = &TEST_SENDER.get().expect("TEST_SENDER initialized").1;
-            let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
-            tx.auth = AuthScheme::SingleSig { signature };
+            // Insert an EVM tx
+            let tx = make_evm_tx(0);
             {
                 let mut mempool = node.mempool.write().unwrap();
-                let _ = mempool.insert_protocol_tx(tx);
+                let _ = mempool.insert_evm_tx(tx);
             }
 
             // Produce and commit block
@@ -545,16 +491,11 @@
             let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
             let height = node.consensus.read().unwrap().current_height();
 
-            let protocol_txs: Vec<ProtocolTransaction> = selection
-                .protocol_txs
-                .into_iter()
-                .filter_map(|e| serde_json::from_slice(&e.data).ok())
-                .collect();
+            let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
             let version = node.state.fork_manager.read().unwrap().current_version();
             let mut block = Block::new(
-                height, node.parent_hash, 5_000, proposer, version, protocol_txs, vec![],
-                selection.bridge_ops,
+                height, node.parent_hash, 5_000, proposer, version, vec![], evm_txs, vec![],
             );
 
             let result = {
@@ -588,15 +529,15 @@
         {
             let node2 = CallNode::new(tmp.clone()).expect("node creation (restart)");
 
-            // Verify EVM balance was recovered
+            // Verify native EVM balance was recovered
             let sender_balance = {
                 let evm = node2.state.evm_state.read().unwrap();
-                evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
+                evm.get_balance(test_sender())
             };
 
-            // Balance should be less than initial (transfer + fees deducted)
+            // Native balance should be less than what was seeded (gas deducted)
             assert!(
-                sender_balance < initial_balance,
+                sender_balance < call_primitives::U256::from(100_000_000_000u128),
                 "sender balance should be reduced after restart, got {sender_balance}"
             );
 
@@ -740,31 +681,25 @@
         {
             let mut evm = node.state.evm_state.write().unwrap();
             evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
-        }
-
-        // Register CALL asset so Transfer instructions succeed
-        {
-            let mut registry = node.state.asset_registry.write().unwrap();
-            registry
-                .register_asset("CALL".into(), "Callchain".into(), 18, *test_sender(), 0, 0, 0)
-                .unwrap();
+            // Set native EVM balance for gas payment
+            evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
         }
 
         // Insert tx into mempool
-        let tx = make_test_tx(0);
+        let tx = make_evm_tx(0);
         {
             let mut mempool = node.mempool.write().unwrap();
-            let _ = mempool.insert_protocol_tx(tx);
+            let _ = mempool.insert_evm_tx(tx);
         }
 
         let selection = { node.mempool.write().unwrap().select_transactions() };
         let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
         let height = node.consensus.read().unwrap().current_height();
 
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
+        let evm_txs: Vec<Vec<u8>> = selection
+            .evm_txs
             .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
+            .map(|e| e.data)
             .collect();
 
         let version = node.state.fork_manager.read().unwrap().current_version();
@@ -774,15 +709,15 @@
             5_000,
             proposer,
             version,
-            protocol_txs,
-            vec![],
-            selection.bridge_ops,
+            vec![], // protocol_txs — EVM-only
+            evm_txs,
+            vec![], // bridge_ops — EVM-only
         );
 
         // Capture shared state BEFORE propose-phase execution
         let balance_before = {
             let evm = node.state.evm_state.read().unwrap();
-            evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
+            evm.get_balance(test_sender())
         };
 
         // Simulate PROPOSE phase: execute on CLONED state
@@ -798,7 +733,7 @@
         // Verify shared state is UNCHANGED after propose
         let balance_after_propose = {
             let evm = node.state.evm_state.read().unwrap();
-            evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
+            evm.get_balance(test_sender())
         };
         assert_eq!(
             balance_after_propose, balance_before,
@@ -824,11 +759,11 @@
         // Verify shared state IS modified after finalize
         let balance_after_finalize = {
             let evm = node.state.evm_state.read().unwrap();
-            evm_instructions::read_balance(&*evm, call_protocol::CALL_ASSET_ID, *test_sender())
+            evm.get_balance(test_sender())
         };
         assert!(
             balance_after_finalize < balance_before,
-            "shared state must be modified by finalize-phase execution, before={balance_before}, after={balance_after_finalize}"
+            "shared state must be modified by finalize-phase execution"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -864,20 +799,20 @@
                 .unwrap();
         }
 
-        let tx = make_test_tx(0);
+        let tx = make_evm_tx(0);
         {
             let mut mempool = node.mempool.write().unwrap();
-            let _ = mempool.insert_protocol_tx(tx);
+            let _ = mempool.insert_evm_tx(tx);
         }
 
         let selection = { node.mempool.write().unwrap().select_transactions() };
         let proposer = node.consensus.read().unwrap().current_proposer().expect("proposer");
         let height = node.consensus.read().unwrap().current_height();
 
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
+        let evm_txs: Vec<Vec<u8>> = selection
+            .evm_txs
             .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
+            .map(|e| e.data)
             .collect();
 
         let version = node.state.fork_manager.read().unwrap().current_version();
@@ -887,9 +822,9 @@
             6_000,
             proposer,
             version,
-            protocol_txs,
-            vec![],
-            selection.bridge_ops,
+            vec![], // protocol_txs — EVM-only
+            evm_txs,
+            vec![], // bridge_ops — EVM-only
         );
 
         // Execute on cloned state to get valid roots

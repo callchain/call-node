@@ -512,7 +512,7 @@ impl RpcState {
             chain_id: self.chain_id,
         };
 
-        executor.execute_tx(tx, &mut state).map_err(|e| format!("{e}"))
+        executor.execute_tx(tx, &mut state, 0).map_err(|e| format!("{e}"))
     }
 
     // ── EVM submission (inserts into mempool + executes) ──────────────
@@ -627,130 +627,34 @@ impl RpcState {
         Ok(tx_hash)
     }
 
-    // ── Protocol transaction submission (inserts into mempool + executes) ────────
+    // ── Protocol transaction submission (EVM-only mempool) ───────────
 
-    /// Submit a protocol payment transaction: validates and inserts into mempool only.
-    /// Execution is deferred to block production via Block::execute.
+    /// Submit a protocol payment transaction.
+    /// DEPRECATED: The mempool is now EVM-only. Protocol transactions must be
+    /// submitted as EVM transactions via `submit_evm_tx`.
     #[allow(dead_code)]
     pub fn submit_payment(
         &self,
-        sender: Address,
-        nonce: u64,
-        asset_id: AssetId,
-        to: Address,
-        amount: Balance,
-        memo: Option<String>,
-        gas_limit: u64,
-        max_fee: u128,
-        signature: Option<[u8; 65]>,
+        _sender: Address,
+        _nonce: u64,
+        _asset_id: AssetId,
+        _to: Address,
+        _amount: Balance,
+        _memo: Option<String>,
+        _gas_limit: u64,
+        _max_fee: u128,
+        _signature: Option<[u8; 65]>,
     ) -> Result<TxHash, String> {
-        use call_protocol::{
-            Instruction, PaymentMemo,
-        };
-
-        // Build instructions
-        let instructions = vec![Instruction::Transfer {
-            asset_id,
-            to,
-            amount,
-            memo: memo.map(|m| PaymentMemo {
-                message: m,
-                reference: None,
-                metadata: None,
-            }),
-        }];
-
-        // Build protocol transaction
-        let sig = signature.ok_or_else(|| "signature required for payment".to_string())?;
-        let tx = call_protocol::transaction::ProtocolTransaction {
-            sender,
-            nonce,
-            instructions,
-            gas_config: call_protocol::transaction::GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit,
-            max_fee,
-            max_priority_fee: call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS,
-            expires_at: 0,
-            auth: call_protocol::transaction::AuthScheme::SingleSig {
-                signature: sig,
-            },
-        };
-
-        // Verify signature and insert into mempool (execution deferred to consensus)
-        self.insert_protocol_tx(tx)
+        Err("protocol transactions are no longer accepted directly; submit via eth_sendRawTransaction".into())
     }
 
-    /// Insert a pre-built protocol transaction into the mempool without executing.
-    /// Used for governance, bridge, and other consensus-ordered operations.
+    /// Insert a pre-built protocol transaction into the mempool.
+    /// DEPRECATED: The mempool is now EVM-only. Returns an error.
     pub fn insert_protocol_tx(
         &self,
-        tx: call_protocol::transaction::ProtocolTransaction,
+        _tx: call_protocol::transaction::ProtocolTransaction,
     ) -> Result<call_primitives::TxHash, String> {
-        let tx_hash = call_primitives::TxHash::from_slice(&tx.compute_tx_hash());
-
-        tx.verify_signature()
-            .map_err(|e| format!("signature verification failed: {e}"))?;
-
-        // Pre-validate validator instructions to prevent obviously-invalid txs
-        // from entering the mempool and poisoning block proposals.
-        for instr in &tx.instructions {
-            match instr {
-                call_protocol::Instruction::ValidatorUnstake { .. } => {
-                    let evm = self.evm_state.read()
-                        .map_err(|_| "evm lock poisoned".to_string())?;
-                    let validator_id = evm_instructions::read_validator_id_by_addr(&evm, tx.sender);
-                    if validator_id == 0 {
-                        return Err("unstake: sender is not a registered validator".into());
-                    }
-                }
-                call_protocol::Instruction::ValidatorClaimUnbonded { .. } => {
-                    let evm = self.evm_state.read()
-                        .map_err(|_| "evm lock poisoned".to_string())?;
-                    let validator_id = evm_instructions::read_validator_id_by_addr(&evm, tx.sender);
-                    if validator_id == 0 {
-                        return Err("claim: sender is not a registered validator".into());
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
-        if let Err(e) = mempool.insert_protocol_tx(tx.clone()) {
-            return Err(format!("mempool insertion failed: {e}"));
-        }
-        drop(mempool);
-
-        // Gossip to peers so non-proposer validators also see the tx
-        if let Ok(net_guard) = self.network.read() {
-            if let Some(ref net) = *net_guard {
-                let data = match serde_json::to_vec(&tx) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to serialize protocol tx for gossip");
-                        return Ok(tx_hash);
-                    }
-                };
-                let msg = call_network::TransactionMessage::new(data, tx_hash);
-                let net_clone = Arc::clone(net);
-                tokio::spawn(async move {
-                    let payload = match serde_json::to_vec(&msg) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to serialize TransactionMessage");
-                            return;
-                        }
-                    };
-                    net_clone.broadcast(1, payload).await;
-                });
-            }
-        }
-
-        // Broadcast pending tx for eth_subscribe("newPendingTransactions")
-        self.subscriptions.broadcast_eth_pending_tx(format!("0x{}", hex::encode(tx_hash.as_slice())));
-
-        Ok(tx_hash)
+        Err("protocol transactions are no longer accepted directly; submit via eth_sendRawTransaction".into())
     }
 
     /// Prune expired transactions from the mempool and confirm included ones.

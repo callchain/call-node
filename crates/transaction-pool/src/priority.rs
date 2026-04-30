@@ -1,42 +1,29 @@
 //! T8.1 — Transaction Priority (per spec §17.2)
 //!
-//! Multi-currency priority scoring and cross-pool ordering.
+//! EVM transaction priority scoring.
 
 use call_primitives::{Address, TxHash};
-use call_protocol::transaction::{ProtocolTransaction, calculate_gas_units};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-// ── Pool Priority Levels (per spec §17.2) ─────────────────────────────
+// ── Pool Priority Levels ──────────────────────────────────────────────
 
-/// Cross-pool priority ordering: Protocol > Agent > EVM > Bridge
+/// Pool kind for EVM transactions only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum PoolKind {
-    /// Protocol transactions: highest priority
-    Protocol = 0,
-    /// Agent transactions: medium-high priority
-    Agent = 1,
-    /// EVM transactions: standard priority
-    Evm = 2,
-    /// Bridge operations: lowest priority
-    Bridge = 3,
+    /// EVM transactions
+    Evm = 0,
 }
 
-// ── Capacity Limits (per spec §17.3) ──────────────────────────────────
+// ── Capacity Limits ───────────────────────────────────────────────────
 
-/// Mempool capacity limits per pool
+/// Mempool capacity limits.
 #[derive(Debug, Clone, Copy)]
 pub struct PoolLimits {
-    /// Maximum protocol transactions (50,000)
-    pub max_protocol_txs: usize,
     /// Maximum EVM transactions (100,000)
     pub max_evm_txs: usize,
-    /// Maximum agent transactions (25,000)
-    pub max_agent_txs: usize,
-    /// Maximum pending bridges (1,000)
-    pub max_bridges: usize,
-    /// Maximum pending txs per address (256)
+    /// Maximum pending txs per address (2000)
     pub max_per_address: usize,
     /// Transaction lifetime in blocks (72)
     pub lifetime_blocks: u64,
@@ -45,10 +32,7 @@ pub struct PoolLimits {
 impl Default for PoolLimits {
     fn default() -> Self {
         Self {
-            max_protocol_txs: 50_000,
             max_evm_txs: 100_000,
-            max_agent_txs: 25_000,
-            max_bridges: 1_000,
             max_per_address: 2000,
             lifetime_blocks: 72,
         }
@@ -62,7 +46,7 @@ impl Default for PoolLimits {
 pub struct MempoolEntry {
     /// Transaction hash
     pub hash: TxHash,
-    /// Priority score (CALL equivalent)
+    /// Priority score (gas price)
     pub score: u128,
     /// Sender address
     pub sender: Address,
@@ -105,25 +89,6 @@ impl MempoolEntry {
     pub fn is_expired(&self, current_block: u64, lifetime: u64) -> bool {
         current_block.saturating_sub(self.entered_at_block) >= lifetime
     }
-}
-
-// ── Priority Score Calculation (per spec §17.2) ───────────────────────
-
-/// Calculate priority score for a protocol transaction.
-/// Per spec §17.2: priority_score = max_fee in CALL equivalent.
-///
-/// For stablecoin fees, converts to CALL equivalent using oracle price.
-pub fn protocol_priority_score(
-    tx: &ProtocolTransaction,
-    base_fee: u128,
-) -> u128 {
-    // Total gas units for all instructions
-    let gas_units = calculate_gas_units(&tx.instructions);
-    let gas_cost = gas_units as u128 * base_fee;
-
-    // Priority score = max_fee - gas_cost
-    // Higher fee txs get higher priority
-    tx.max_fee.saturating_sub(gas_cost)
 }
 
 // ── Priority Queue (ordered by score desc, then FIFO) ────────────────
@@ -258,50 +223,22 @@ impl PriorityPool {
 mod tests {
     use super::*;
     use call_primitives::Address;
-    use call_primitives::FeeCurrency;
-    use call_protocol::instructions::Instruction;
-    use call_protocol::transaction::{AuthScheme, GasConfig};
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
     }
 
-    fn make_test_tx(score: u128) -> ProtocolTransaction {
-        ProtocolTransaction {
-            sender: test_addr(1),
-            nonce: 1,
-            instructions: vec![Instruction::Transfer {
-                asset_id: 1,
-                to: test_addr(2),
-                amount: 100,
-                memo: None,
-            }],
-            gas_config: GasConfig::SelfPay,
-            fee_currency: FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: score,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        }
-    }
-
     #[test]
     fn test_pool_limits_defaults() {
         let limits = PoolLimits::default();
-        assert_eq!(limits.max_protocol_txs, 50_000);
         assert_eq!(limits.max_evm_txs, 100_000);
         assert_eq!(limits.max_per_address, 2000);
         assert_eq!(limits.lifetime_blocks, 72);
     }
 
     #[test]
-    fn test_pool_kind_ordering() {
-        assert!(PoolKind::Protocol < PoolKind::Agent);
-        assert!(PoolKind::Agent < PoolKind::Evm);
-        assert!(PoolKind::Evm < PoolKind::Bridge);
+    fn test_pool_kind_evm() {
+        assert_eq!(PoolKind::Evm as u8, 0);
     }
 
     #[test]
@@ -312,7 +249,7 @@ mod tests {
             1000,
             test_addr(1),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![1, 2, 3],
             0,
         );
@@ -329,7 +266,7 @@ mod tests {
             1000,
             test_addr(1),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![1, 2, 3],
             0,
         );
@@ -351,7 +288,7 @@ mod tests {
             100,
             test_addr(1),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![1],
             0,
         ));
@@ -360,7 +297,7 @@ mod tests {
             300,
             test_addr(2),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![2],
             0,
         ));
@@ -369,7 +306,7 @@ mod tests {
             200,
             test_addr(3),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![3],
             0,
         ));
@@ -391,7 +328,7 @@ mod tests {
             50,
             test_addr(1),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![1],
             0,
         ));
@@ -400,7 +337,7 @@ mod tests {
             200,
             test_addr(2),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![2],
             0,
         ));
@@ -420,7 +357,7 @@ mod tests {
             100,
             test_addr(1),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![1],
             0,
         ));
@@ -430,7 +367,7 @@ mod tests {
             100,
             test_addr(2),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![2],
             50,
         ));
@@ -453,7 +390,7 @@ mod tests {
                 100,
                 addr,
                 nonce,
-                PoolKind::Protocol,
+                PoolKind::Evm,
                 vec![nonce as u8],
                 0,
             ));
@@ -464,27 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_priority_score_call() {
-        let tx = make_test_tx(1_000_000);
-        let score = protocol_priority_score(&tx, 10);
-        // score = max_fee - gas_cost * base_fee
-        assert!(score > 0);
-    }
-
-    #[test]
     fn test_mempool_entry_is_expired() {
         let entry = MempoolEntry::new(
             TxHash::repeat_byte(1),
             100,
             test_addr(1),
             0,
-            PoolKind::Protocol,
+            PoolKind::Evm,
             vec![1],
             10,
         );
 
         assert!(!entry.is_expired(80, 72)); // 70 blocks < 72
-        assert!(entry.is_expired(82, 72)); // 72 blocks == 72
+        assert!(entry.is_expired(82, 72)); // 72 blocks >= 72
         assert!(entry.is_expired(100, 72)); // 90 blocks > 72
     }
 }

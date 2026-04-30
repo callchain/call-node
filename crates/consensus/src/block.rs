@@ -330,7 +330,7 @@ impl Block {
 
             let tx_to = tx.to;
             let tx_gas_price = tx.gas_price;
-            match executor.execute_tx(tx, state.evm_state) {
+            match executor.execute_tx(tx, state.evm_state, ctx.current_block_height) {
                 Ok(exec_result) => {
                     let new_evm_nonce = state.evm_state.get_nonce(&caller);
                     tracing::info!(?caller, tx_nonce = nonce, new_evm_nonce, gas_used = exec_result.gas_used, success = exec_result.success, "block: evm tx executed");

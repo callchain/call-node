@@ -286,15 +286,10 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                     serde_json::Value::Array(results)
                 }
                 crate::handlers::state::Filter::PendingTransaction { mut seen } => {
-                    // Collect pending tx hashes from mempool
+                    // Collect pending tx hashes from EVM mempool only
                     let mut pending = Vec::new();
                     {
                         let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                        for entry in mempool.protocol_pool.iter() {
-                            if seen.insert(entry.hash) {
-                                pending.push(format!("0x{}", hex::encode(entry.hash.as_slice())));
-                            }
-                        }
                         for entry in mempool.evm_pool.iter() {
                             let hash = call_crypto::keccak256(&entry.data);
                             let tx_hash = call_primitives::TxHash::from(hash.0);
@@ -682,14 +677,8 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                             }
                         }
                     }
-                    // Search protocol txs
-                    let evm_offset = block.evm_txs.len() as u64;
-                    for (idx, tx) in block.protocol_txs.iter().enumerate() {
-                        let proto_hash = call_primitives::TxHash::from(tx.compute_tx_hash());
-                        if proto_hash == cp_hash {
-                            return Ok::<_, ErrorObjectOwned>(protocol_tx_to_json(tx, receipt.block_hash, block_number, evm_offset + idx as u64));
-                        }
-                    }
+                    // Protocol txs are no longer accepted via mempool; blocks may still
+                    // contain them from consensus, but RPC lookup is EVM-only.
                 }
                 // Fallback if block not available: return receipt-based minimal info
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -734,7 +723,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let cp_hash = call_primitives::Hash::from(hash.0);
 
             if let Some(block) = state.load_block_by_hash(&cp_hash) {
-                let count = block.evm_txs.len() + block.protocol_txs.len();
+                let count = block.evm_txs.len();
                 return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(format!("0x{:x}", count)));
             }
             Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
@@ -749,7 +738,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let block_number = parse_block_tag(&block_tag, current);
 
             if let Some(block) = state.load_block(block_number) {
-                let count = block.evm_txs.len() + block.protocol_txs.len();
+                let count = block.evm_txs.len();
                 return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(format!("0x{:x}", count)));
             }
             Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
@@ -773,12 +762,9 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                     if let Some(json) = evm_raw_tx_to_json(raw, cp_hash, block.header.height, idx) {
                         return Ok::<_, ErrorObjectOwned>(json);
                     }
-                } else {
-                    let p_idx = (idx - evm_len) as usize;
-                    if let Some(tx) = block.protocol_txs.get(p_idx) {
-                        return Ok::<_, ErrorObjectOwned>(protocol_tx_to_json(tx, cp_hash, block.header.height, idx));
-                    }
                 }
+                // Protocol txs are no longer accepted via mempool; blocks may still
+                // contain them from consensus, but RPC lookup is EVM-only.
             }
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
         })
@@ -801,12 +787,9 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                     if let Some(json) = evm_raw_tx_to_json(raw, block_hash, block_number, idx) {
                         return Ok::<_, ErrorObjectOwned>(json);
                     }
-                } else {
-                    let p_idx = (idx - evm_len) as usize;
-                    if let Some(tx) = block.protocol_txs.get(p_idx) {
-                        return Ok::<_, ErrorObjectOwned>(protocol_tx_to_json(tx, block_hash, block_number, idx));
-                    }
                 }
+                // Protocol txs are no longer accepted via mempool; blocks may still
+                // contain them from consensus, but RPC lookup is EVM-only.
             }
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
         })
@@ -1008,7 +991,7 @@ fn block_to_json(
     let block_hash = block.header.hash();
     let receipts = state.get_receipts_by_block(height);
     let gas_used: u64 = receipts.iter().map(|r| r.gas_used).sum();
-    let tx_count = block.evm_txs.len() + block.protocol_txs.len();
+    let tx_count = block.evm_txs.len();
 
     let mut transactions: Vec<serde_json::Value> = Vec::with_capacity(tx_count);
 
@@ -1034,19 +1017,9 @@ fn block_to_json(
         }
     }
 
-    // Protocol transactions
-    let evm_offset = block.evm_txs.len() as u64;
-    for (idx, tx) in block.protocol_txs.iter().enumerate() {
-        let tx_hash = call_primitives::TxHash::from(tx.compute_tx_hash());
-        if full_txs {
-            transactions.push(protocol_tx_to_json(tx, block_hash, height, evm_offset + idx as u64));
-        } else {
-            transactions.push(serde_json::Value::String(format!(
-                "0x{}",
-                hex::encode(tx_hash.as_slice())
-            )));
-        }
-    }
+    // Protocol transactions are no longer accepted via mempool;
+    // blocks may still contain them from consensus, but block JSON
+    // only surfaces EVM transactions for RPC compatibility.
 
     // Approximate size: serialized JSON of the block struct
     let size = serde_json::to_vec(block).map(|v| v.len()).unwrap_or(0);

@@ -39,7 +39,6 @@ use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage,
 use call_primitives::{BlockHash, Hash, Address};
 use call_protocol::{
     AccountState, AssetRegistry, ComplianceEngine, FeeParams, FeeCurrencyRegistry,
-    transaction::ProtocolTransaction,
     security::P2PDefense,
 };
 use call_governance::GovernanceManager;
@@ -1179,13 +1178,12 @@ impl CallNode {
         Ok(())
     }
 
-    /// Get mempool stats
-    pub fn mempool_stats(&self) -> (usize, usize, usize) {
+    /// Get mempool stats (EVM count, known tx count)
+    pub fn mempool_stats(&self) -> (usize, usize) {
         let mempool = self.mempool.read().unwrap();
         (
-            mempool.protocol_pool.len(),
             mempool.evm_pool.len(),
-            mempool.pending_bridges.len(),
+            mempool.known_txs.len(),
         )
     }
 

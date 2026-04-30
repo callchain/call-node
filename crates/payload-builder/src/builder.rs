@@ -255,8 +255,8 @@ impl PayloadBuilder {
     /// Build a payload from mempool selection directly.
     ///
     /// Same as [`build`](Self::build) but takes a `MempoolSelection`
-    /// instead of separate vectors. Deserializes protocol transactions
-    /// from their mempool entry data.
+    /// instead of separate vectors. The mempool is EVM-only, so
+    /// protocol_txs and bridge_ops are always empty.
     pub fn build_from_mempool(
         &self,
         attrs: &PayloadAttributes,
@@ -270,19 +270,13 @@ impl PayloadBuilder {
         evm_state_root: Hash,
         bridge_config: Option<&call_bridge::BridgeConfig>,
     ) -> Result<BuiltPayload, BuilderError> {
-        let protocol_txs: Vec<ProtocolTransaction> = selection
-            .protocol_txs
-            .into_iter()
-            .filter_map(|e| serde_json::from_slice(&e.data).ok())
-            .collect();
-
         let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
         self.build(
             attrs,
-            protocol_txs,
+            vec![], // protocol_txs — EVM-only mempool
             evm_txs,
-            selection.bridge_ops,
+            vec![], // bridge_ops — handled via EVM precompiles
             account,
             registry,
             compliance,
@@ -690,26 +684,8 @@ mod tests {
         let builder = PayloadBuilder::new(fee_params);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        // Create mempool entries with serialized protocol txs
-        let tx1 = make_test_tx(0);
-        let tx2 = make_test_tx(1);
-        let protocol_data: Vec<call_transaction_pool::MempoolEntry> = vec![tx1.clone(), tx2.clone()]
-            .into_iter()
-            .map(|tx| call_transaction_pool::MempoolEntry {
-                data: serde_json::to_vec(&tx).unwrap(),
-                hash: call_primitives::TxHash::ZERO,
-                sender: tx.sender,
-                nonce: tx.nonce,
-                score: 1_000_000,
-                kind: call_transaction_pool::PoolKind::Protocol,
-                entered_at: std::time::Instant::now(),
-                entered_at_block: 0,
-            })
-            .collect();
-
         let evm_tx_raw = make_evm_tx_bytes(21_000);
         let selection = MempoolSelection {
-            protocol_txs: protocol_data,
             evm_txs: vec![call_transaction_pool::MempoolEntry {
                 data: evm_tx_raw.clone(),
                 hash: call_primitives::TxHash::ZERO,
@@ -720,7 +696,6 @@ mod tests {
                 entered_at: std::time::Instant::now(),
                 entered_at_block: 0,
             }],
-            bridge_ops: vec![],
         };
 
         let mut account = AccountState::new();
@@ -746,7 +721,7 @@ mod tests {
         ).unwrap();
 
         assert_eq!(payload.block.header.height, 1);
-        assert_eq!(payload.block.protocol_txs.len(), 2);
+        assert_eq!(payload.block.protocol_txs.len(), 0);
         assert_eq!(payload.block.evm_txs.len(), 1);
     }
 

@@ -228,7 +228,7 @@ pub fn execute_agent_call(
         chain_id: evm_executor.chain_id,
     };
 
-    evm_executor.execute_tx(tx, evm_state)
+    evm_executor.execute_tx(tx, evm_state, 0)
         .map_err(|e| AgentError::ExecutionFailed(format!("{:?}", e)))
 }
 
