@@ -1,8 +1,6 @@
 use crate::*;
 use crate::ForkManager;
 use call_primitives::{Address, BlockHash, Hash, ProtocolVersion};
-use call_protocol::instructions::Instruction;
-use call_protocol::transaction::{AuthScheme, GasConfig, ProtocolTransaction};
 use call_evm::EvmTransaction;
 use call_protocol::FeeParams;
 
@@ -27,58 +25,6 @@ fn make_test_evm_tx() -> EvmTransaction {
         data: call_evm::Bytes::default(),
         chain_id: 1,
     }
-}
-
-fn make_test_tx() -> ProtocolTransaction {
-    ProtocolTransaction {
-        sender: test_addr(1),
-        nonce: 0,
-        instructions: vec![Instruction::Transfer {
-            asset_id: call_protocol::CALL_ASSET_ID,
-            to: test_addr(2),
-            amount: 100,
-            memo: None,
-        }],
-        gas_config: GasConfig::SelfPay,
-        fee_currency: call_primitives::FeeCurrency::Call,
-        gas_limit: 100_000,
-        max_fee: 1_000_000,
-        max_priority_fee: 1,
-        expires_at: 0,
-        auth: AuthScheme::SingleSig {
-            signature: [0u8; 65],
-        },
-    }
-}
-
-/// Create a protocol transaction with a valid secp256k1 signature.
-/// Returns the transaction and the sender address (derived from the signing key).
-fn make_signed_test_tx() -> (ProtocolTransaction, Address) {
-    let (secret, pubkey) = call_crypto::generate_keypair();
-    let sender = call_crypto::pubkey_to_address(&pubkey);
-    let mut tx = ProtocolTransaction {
-        sender,
-        nonce: 0,
-        instructions: vec![Instruction::Transfer {
-            asset_id: call_protocol::CALL_ASSET_ID,
-            to: test_addr(2),
-            amount: 100,
-            memo: None,
-        }],
-        gas_config: GasConfig::SelfPay,
-        fee_currency: call_primitives::FeeCurrency::Call,
-        gas_limit: 100_000,
-        max_fee: 1_000_000,
-        max_priority_fee: 1,
-        expires_at: 0,
-        auth: AuthScheme::SingleSig {
-            signature: [0u8; 65],
-        },
-    };
-    let tx_hash = tx.compute_tx_hash();
-    let signature = call_crypto::secp256k1_sign(&secret, &tx_hash);
-    tx.auth = AuthScheme::SingleSig { signature };
-    (tx, sender)
 }
 
 #[test]

@@ -652,7 +652,7 @@ impl RpcState {
     /// DEPRECATED: The mempool is now EVM-only. Returns an error.
     pub fn insert_protocol_tx(
         &self,
-        _tx: call_protocol::transaction::ProtocolTransaction,
+        _tx: Vec<u8>,
     ) -> Result<call_primitives::TxHash, String> {
         Err("protocol transactions are no longer accepted directly; submit via eth_sendRawTransaction".into())
     }

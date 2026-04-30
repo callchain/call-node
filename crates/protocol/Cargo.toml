@@ -38,11 +38,3 @@ criterion = { workspace = true }
 call-bridge.workspace = true
 call-agent.workspace = true
 call-consensus.workspace = true
-
-[[test]]
-name = "test_shielded_integration"
-path = "tests/test_shielded_integration.rs"
-
-[[bench]]
-name = "instruction_execute"
-harness = false

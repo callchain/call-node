@@ -44,7 +44,3 @@ revm-precompile.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }
-
-[[bench]]
-name = "block_production"
-harness = false

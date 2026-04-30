@@ -1,8 +1,3 @@
-//! Transaction submodules: model, gas, fee, mempool, tests.
+//! Transaction submodules: fee parameters.
 
-pub mod model;
 pub mod gas;
-pub mod fee;
-pub mod mempool;
-#[cfg(test)]
-pub mod tests;

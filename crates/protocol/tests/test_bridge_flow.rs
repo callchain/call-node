@@ -1,8 +1,6 @@
 //! Bridge flow integration tests
-mod integration;
 
 mod test_bridge_flow_impl {
-    use super::integration::*;
     use call_primitives::{Address, AssetId};
     use call_protocol::AccountState;
     use call_protocol::registry::AssetRegistry;
@@ -10,10 +8,35 @@ mod test_bridge_flow_impl {
         BridgeConfig, BridgeOp, BridgeStateManager, ExternalBridgeOp, ExternalChain,
         BridgeSignature, process_external_deposit, process_external_withdraw,
         verify_bridge_signatures, sign_bridge_event, bridge_event_hash,
-        check_deposit_balance, check_withdraw_balance,
+        check_deposit_balance,
     };
     use alloy_primitives::B256;
     use call_crypto::{generate_keypair, secp256k1_sign, recover_secp256k1_signer};
+
+    fn addr(n: u8) -> Address {
+        Address::repeat_byte(n)
+    }
+
+    fn setup_asset(
+        account: &mut AccountState,
+        registry: &mut AssetRegistry,
+        symbol: &str,
+        issuer: Address,
+        holder: Address,
+        amount: u128,
+    ) -> AssetId {
+        let asset_id = registry.register_asset(
+            symbol.into(),
+            symbol.into(),
+            18,
+            issuer,
+            0,
+            0,
+            1_000_000_000 * 10u128.pow(18),
+        ).unwrap();
+        account.balances.set_balance(asset_id, holder, amount).unwrap();
+        asset_id
+    }
 
     fn generate_bridge_validators(count: usize) -> (Vec<[u8; 32]>, Vec<Address>) {
         let mut secrets = Vec::with_capacity(count);

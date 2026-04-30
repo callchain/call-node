@@ -16,86 +16,15 @@ use std::sync::Arc;
 pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(), ErrorObjectOwned> {
     // ── Unified Write Endpoint ─────────────────────────────────────
 
-    // call_submit — unified entry point for all state-mutating operations.
-    // Accepts a ProtocolTransaction containing one or more Instructions.
+    // call_submit — DEPRECATED: The mempool is EVM-only.
+    // Submit transactions via eth_sendRawTransaction instead.
     module
-        .register_async_method("call_submit", |params, state, _ctx| async move {
-            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
-
-            let sender_str = call_obj.get("sender")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("missing 'sender' field".into()))?;
-            let sender = sender_str.parse::<Address>()
-                .map_err(|e| invalid_params(e.to_string()))?;
-            let nonce = call_obj.get("nonce")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| invalid_params("missing 'nonce' field".into()))?;
-            let gas_limit = call_obj.get("gasLimit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(100_000);
-            let max_fee = call_obj.get("maxFee")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u128)
-                .unwrap_or(gas_limit as u128 * 10);
-            let expires_at = call_obj.get("expiresAt")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-
-            let sig_hex = call_obj.get("signature")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("missing 'signature' field".into()))?;
-            let sig_bytes = hex::decode(sig_hex.trim_start_matches("0x"))
-                .map_err(|e| invalid_params(format!("invalid signature: {e}")))?;
-            if sig_bytes.len() != 65 {
-                return Err(invalid_params("signature must be 65 bytes".into()));
-            }
-            let mut signature = [0u8; 65];
-            signature.copy_from_slice(&sig_bytes);
-
-            // Parse instructions array
-            let instructions_json = call_obj.get("instructions")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| invalid_params("missing 'instructions' field".into()))?;
-
-            let mut instructions = Vec::with_capacity(instructions_json.len());
-            for instr_value in instructions_json {
-                let type_str = instr_value.get("type")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| invalid_params("instruction missing 'type' field".into()))?;
-
-                // Convert internally tagged JSON ("type": "Variant") to externally tagged
-                // ({"Variant": {fields}}) so serde can deserialise into the Instruction enum.
-                let mut instr_obj = instr_value.clone();
-                if let Some(map) = instr_obj.as_object_mut() {
-                    map.remove("type");
-                }
-                let tagged = serde_json::json!({ type_str: instr_obj });
-
-                let instr: call_protocol::Instruction = serde_json::from_value(tagged)
-                    .map_err(|e| invalid_params(format!("invalid instruction '{}': {}", type_str, e)))?;
-                instructions.push(instr);
-            }
-
-            let tx = call_protocol::transaction::ProtocolTransaction {
-                sender,
-                nonce,
-                instructions,
-                gas_config: call_protocol::transaction::GasConfig::SelfPay,
-                fee_currency: call_primitives::FeeCurrency::Call,
-                gas_limit,
-                max_fee,
-                max_priority_fee: call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS,
-                expires_at,
-                auth: call_protocol::transaction::AuthScheme::SingleSig { signature },
-            };
-
-            let tx_hash = state.insert_protocol_tx(tx)
-                .map_err(|e| invalid_params(e))?;
-
-            Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "txHash": format!("0x{}", hex::encode(tx_hash)),
-                "status": "pending",
-            }))
+        .register_async_method("call_submit", |_params, _state, _ctx| async move {
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "call_submit is deprecated: submit via eth_sendRawTransaction",
+                None::<()>,
+            ))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 

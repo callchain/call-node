@@ -1,8 +1,6 @@
 //! Governance flow integration tests
-mod integration;
 
 mod test_governance_flow_impl {
-    use super::integration::*;
     use call_primitives::{Address, ValidatorId};
     use call_governance::{
         GovernanceManager, ProposalType, ProposalState, Vote,

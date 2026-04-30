@@ -113,29 +113,6 @@ impl ExecutionStatus {
     }
 }
 
-// ─── Instruction discriminant ───────────────────────────────────
-
-/// Instruction type discriminant (per spec §3.5)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum InstructionType {
-    Transfer = 0,
-    BatchTransfer = 1,
-    Approve = 2,
-    TransferFrom = 3,
-    Mint = 4,
-    Burn = 5,
-    AgentPay = 6,
-    AgentBatchPay = 7,
-    AgentCall = 8,
-    AgentBridgeDeposit = 9,
-    BridgeDeposit = 10,
-    UpdateCompliance = 11,
-    ShieldedTransfer = 12,
-    ShieldedWithdraw = 13,
-    ShieldedDeposit = 14,
-}
-
 // ─── Constants ──────────────────────────────────────────────────
 
 /// Minimum unit: 1 wei = 10^-18 CALL (per spec §12.1)
@@ -229,13 +206,6 @@ mod tests {
         let v = ProtocolVersion::new(1, 2, 3);
         assert_eq!(v.to_string(), "1.2.3");
         assert_eq!(v, ProtocolVersion::new(1, 2, 3));
-    }
-
-    #[test]
-    fn test_instruction_type_discriminants() {
-        assert_eq!(InstructionType::Transfer as u8, 0);
-        assert_eq!(InstructionType::BatchTransfer as u8, 1);
-        assert_eq!(InstructionType::ShieldedDeposit as u8, 14);
     }
 
     #[test]

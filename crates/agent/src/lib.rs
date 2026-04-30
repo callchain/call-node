@@ -8,14 +8,11 @@
 mod registry;
 mod permissions;
 mod balances;
-mod executor;
 pub use registry::*;
 pub use permissions::*;
 pub use balances::*;
-pub use executor::*;
 
-use call_primitives::{Address, AssetId, Signature};
-use call_protocol::ProtocolTransaction;
+use call_primitives::{Address, AssetId};
 use thiserror::Error;
 
 /// Domain proof for agent registration (per spec §6.2)
@@ -80,13 +77,6 @@ pub enum AgentFundingAction {
         agent_id: u64,
         new_config: AgentFeeConfig,
     },
-}
-
-/// Signed agent transaction (per spec §6.6)
-#[derive(Debug, Clone)]
-pub struct SignedAgentTx {
-    pub protocol_tx: ProtocolTransaction,
-    pub owner_signature: Option<Signature>,
 }
 
 /// Agent error

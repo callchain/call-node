@@ -3,7 +3,6 @@
 //! Multi-sig, social recovery, session keys, auth verification.
 
 use call_primitives::{Address, AssetId};
-use call_primitives::InstructionType;
 use crate::{ProtocolError, ProtocolResult};
 use std::collections::{HashMap, HashSet};
 
@@ -86,7 +85,6 @@ impl SocialRecoveryConfig {
 
 #[derive(Debug, Clone)]
 pub struct SessionPermissions {
-    pub allowed_instructions: Vec<InstructionType>,
     pub max_per_tx: u128,
     pub max_daily: u128,
     pub allowed_targets: Vec<Address>,
@@ -487,7 +485,6 @@ mod tests {
                 test_addr(1),
                 test_addr(10),
                 SessionPermissions {
-                    allowed_instructions: vec![InstructionType::Transfer],
                     max_per_tx: 1000,
                     max_daily: 10000,
                     allowed_targets: vec![],
@@ -503,7 +500,6 @@ mod tests {
                 test_addr(1),
                 test_addr(11),
                 SessionPermissions {
-                    allowed_instructions: vec![InstructionType::Transfer],
                     max_per_tx: 500,
                     max_daily: 5000,
                     allowed_targets: vec![],
@@ -531,7 +527,6 @@ mod tests {
                 test_addr(1),
                 test_addr(10),
                 SessionPermissions {
-                    allowed_instructions: vec![],
                     max_per_tx: 1000,
                     max_daily: 10000,
                     allowed_targets: vec![],
@@ -561,11 +556,10 @@ mod tests {
     }
 
     #[test]
-    fn test_session_key_instruction_not_allowed() {
+    fn test_session_key_permissions_defaults() {
         let config = SessionKeyConfig {
             session_key: test_addr(10),
             permissions: SessionPermissions {
-                allowed_instructions: vec![InstructionType::Transfer],
                 max_per_tx: 1000,
                 max_daily: 10000,
                 allowed_targets: vec![],
@@ -573,14 +567,7 @@ mod tests {
             },
             expires_at: 1000,
         };
-        // Transfer is allowed; BatchTransfer is not
-        assert!(config
-            .permissions
-            .allowed_instructions
-            .contains(&InstructionType::Transfer));
-        assert!(!config
-            .permissions
-            .allowed_instructions
-            .contains(&InstructionType::BatchTransfer));
+        assert_eq!(config.permissions.max_per_tx, 1000);
+        assert_eq!(config.permissions.max_daily, 10000);
     }
 }

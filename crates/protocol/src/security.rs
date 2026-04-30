@@ -4,8 +4,6 @@
 //! P2P rate limiting, consensus attack defense, and MEV protection.
 
 use call_primitives::{Address, TxHash, ValidatorId};
-use crate::instructions::{Instruction, PaymentMemo};
-use crate::transaction::ProtocolTransaction;
 use std::collections::{HashMap, HashSet};
 
 // ─── Block Limits (per spec §13.5) ─────────────────────────────────
@@ -41,40 +39,6 @@ impl Default for BlockLimits {
 }
 
 impl BlockLimits {
-    /// Validate a transaction against block limits
-    pub fn validate_tx(&self, tx: &ProtocolTransaction) -> Result<(), SecurityError> {
-        // Size limit
-        let tx_size = estimate_tx_size(tx);
-        if tx_size > self.max_tx_size {
-            return Err(SecurityError::TxTooLarge {
-                size: tx_size,
-                max: self.max_tx_size,
-            });
-        }
-
-        // Instruction count limit
-        if tx.instructions.len() > self.max_instructions {
-            return Err(SecurityError::TooManyInstructions {
-                count: tx.instructions.len(),
-                max: self.max_instructions,
-            });
-        }
-
-        // Batch transfer recipient limit
-        for instruction in &tx.instructions {
-            if let Instruction::BatchTransfer { payments, .. } = instruction {
-                if payments.len() > self.max_batch_recipients {
-                    return Err(SecurityError::BatchTooLarge {
-                        count: payments.len(),
-                        max: self.max_batch_recipients,
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Validate a block's total size
     pub fn validate_block_size(&self, tx_count: usize, total_size: usize) -> Result<(), SecurityError> {
         if tx_count > self.max_txs_per_block {
@@ -91,27 +55,6 @@ impl BlockLimits {
         }
         Ok(())
     }
-}
-
-/// Estimate serialized transaction size
-fn estimate_tx_size(tx: &ProtocolTransaction) -> usize {
-    // Rough estimate: sender(20) + nonce(8) + gas_limit(8) + max_fee(16) +
-    // auth(65) + instructions(variable)
-    let base = 20 + 8 + 8 + 16 + 65;
-    let instructions_size: usize = tx
-        .instructions
-        .iter()
-        .map(|i| match i {
-            Instruction::Transfer { amount: _, memo, .. } => {
-                8 + 20 + 16 + memo.as_ref().map(|m: &PaymentMemo| m.message.len()).unwrap_or(0)
-            }
-            Instruction::BatchTransfer { payments, .. } => {
-                8 + 20 + payments.len() * (20 + 16)
-            }
-            _ => 32,
-        })
-        .sum();
-    base + instructions_size
 }
 
 // ─── Mempool Attack Prevention ─────────────────────────────────────
@@ -631,85 +574,6 @@ pub enum SecurityError {
 mod tests {
     use super::*;
     use call_primitives::TxHash;
-    use crate::instructions::{Instruction, PaymentMemo};
-    use crate::transaction::{AuthScheme, GasConfig};
-
-    fn make_tx(instructions: Vec<Instruction>, max_fee: u128) -> ProtocolTransaction {
-        ProtocolTransaction {
-            sender: Address::repeat_byte(1),
-            nonce: 0,
-            instructions,
-            gas_config: GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        }
-    }
-
-    #[test]
-    fn test_block_limits_max_tx_size() {
-        let limits = BlockLimits::default();
-
-        // Small tx should pass
-        let small_tx = make_tx(
-            vec![Instruction::Transfer {
-                asset_id: 1,
-                to: Address::repeat_byte(2),
-                amount: 100,
-                memo: None,
-            }],
-            1_000_000,
-        );
-        assert!(limits.validate_tx(&small_tx).is_ok());
-
-        // Large tx (many instructions) should fail
-        let mut large_instructions = Vec::new();
-        for _ in 0..5000 {
-            large_instructions.push(Instruction::Transfer {
-                asset_id: 1,
-                to: Address::repeat_byte(2),
-                amount: 100,
-                memo: None,
-            });
-        }
-        let large_tx = make_tx(large_instructions, 1_000_000);
-        let err = limits.validate_tx(&large_tx).unwrap_err();
-        assert!(matches!(err, SecurityError::TxTooLarge { .. }));
-    }
-
-    #[test]
-    fn test_block_limits_max_instructions() {
-        let limits = BlockLimits::default();
-
-        // Exactly at limit should pass
-        let mut instructions = Vec::new();
-        for _ in 0..256 {
-            instructions.push(Instruction::Transfer {
-                asset_id: 1,
-                to: Address::repeat_byte(2),
-                amount: 100,
-                memo: None,
-            });
-        }
-        let ok_tx = make_tx(instructions.clone(), 1_000_000);
-        assert!(limits.validate_tx(&ok_tx).is_ok());
-
-        // One over limit should fail
-        instructions.push(Instruction::Transfer {
-            asset_id: 1,
-            to: Address::repeat_byte(3),
-            amount: 100,
-            memo: None,
-        });
-        let over_tx = make_tx(instructions, 1_000_000);
-        let err = limits.validate_tx(&over_tx).unwrap_err();
-        assert!(matches!(err, SecurityError::TooManyInstructions { .. }));
-    }
 
     #[test]
     fn test_mempool_tx_flood_protection() {

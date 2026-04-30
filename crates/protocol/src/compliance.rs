@@ -39,7 +39,14 @@ pub enum CompliancePolicy {
 }
 
 /// Compliance status for a specific address and asset
-pub use crate::instructions::ComplianceStatus;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ComplianceStatus {
+    #[default]
+    Clear,
+    UnderReview,
+    Flagged,
+    Restricted,
+}
 
 /// Per-address compliance state keyed by (address, policy_id)
 #[derive(Debug, Default, Clone, Copy)]

@@ -5,7 +5,7 @@
 use alloy_primitives::address;
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
-use call_protocol::instructions::ComplianceStatus;
+use call_protocol::compliance::ComplianceStatus;
 
 #[allow(dead_code)]
 pub(crate) const COMPLIANCE_ADDRESS: alloy_primitives::Address =

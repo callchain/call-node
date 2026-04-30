@@ -429,38 +429,12 @@ mod tests {
             evm_instructions::seed_balance(&mut *evm, asset_id, sender, 10_000);
         }
 
-        // Build tx and sign it
-        let tx = call_protocol::transaction::ProtocolTransaction {
-            sender,
-            nonce: 1,
-            instructions: vec![call_protocol::Instruction::Transfer {
-                asset_id,
-                to,
-                amount: 5_000,
-                memo: Some(call_protocol::PaymentMemo {
-                    message: "test payment".into(),
-                    reference: None,
-                    metadata: None,
-                }),
-            }],
-            gas_config: call_protocol::transaction::GasConfig::SelfPay,
-            fee_currency: call_primitives::FeeCurrency::Call,
-            gas_limit: 100_000,
-            max_fee: 1_000_000,
-            max_priority_fee: 1,
-            expires_at: 0,
-            auth: call_protocol::transaction::AuthScheme::SingleSig {
-                signature: [0u8; 65],
-            },
-        };
-        let signature = sign_tx_hash(&tx.compute_tx_hash());
-
         // Protocol transactions are rejected in EVM-only mempool mode
         let result = state.submit_payment(
             sender, 1, asset_id, to, 5_000,
             Some("test payment".into()),
             100_000, 1_000_000,
-            Some(signature),
+            Some([0u8; 65]),
         );
         assert!(result.is_err(), "protocol tx should be rejected in EVM-only mempool");
         assert!(result.unwrap_err().contains("eth_sendRawTransaction"));

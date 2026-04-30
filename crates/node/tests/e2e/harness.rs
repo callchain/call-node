@@ -10,8 +10,6 @@ use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
 use call_protocol::{
     AccountState, AssetRegistry, ComplianceEngine,
-    instructions::Instruction,
-    transaction::{AuthScheme, GasConfig, ProtocolTransaction},
 };
 use call_oracle::OracleManager;
 use call_transaction_pool::Mempool;
@@ -28,14 +26,6 @@ pub fn test_keypair() -> ([u8; 32], Address) {
     let sig = call_crypto::secp256k1_sign(&secret, &msg_hash);
     let addr = call_crypto::recover_secp256k1_signer(&msg_hash, &sig).unwrap();
     (secret, addr)
-}
-
-/// Sign a protocol transaction with the given secp256k1 secret key.
-pub fn sign_tx(secret: &[u8; 32], mut tx: ProtocolTransaction) -> ProtocolTransaction {
-    let tx_hash = tx.compute_tx_hash();
-    let signature = call_crypto::secp256k1_sign(secret, &tx_hash);
-    tx.auth = AuthScheme::SingleSig { signature };
-    tx
 }
 
 // ── Constants ─────────────────────────────────────────────────────────

@@ -9,7 +9,6 @@ use call_consensus::validator::ConsensusError;
 use call_primitives::{BlockHash, Hash};
 use call_protocol::AccountState;
 use call_protocol::compliance::ComplianceEngine;
-use call_protocol::instructions::InstructionResult;
 use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::FeeParams;
 use call_payload_types::{BlockLimits, PayloadAttributes};
@@ -217,31 +216,6 @@ impl PayloadBuilder {
             bridge_config,
         )
     }
-}
-
-// ── Helper Functions ──────────────────────────────────────────────────
-
-/// Compute receipt root from instruction results
-pub fn compute_receipt_root(results: &[InstructionResult]) -> Hash {
-    use call_crypto::keccak256;
-
-    if results.is_empty() {
-        return Hash::ZERO;
-    }
-
-    let mut data = Vec::with_capacity(results.len() * 32);
-    for result in results {
-        match result {
-            InstructionResult::Success => {
-                data.push(1u8);
-            }
-            InstructionResult::Reverted { reason } => {
-                data.push(0u8);
-                data.extend_from_slice(reason.as_bytes());
-            }
-        }
-    }
-    keccak256(&data)
 }
 
 #[cfg(test)]

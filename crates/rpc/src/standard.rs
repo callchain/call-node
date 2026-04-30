@@ -1111,33 +1111,6 @@ fn evm_raw_tx_to_json(
     }))
 }
 
-/// Build an Ethereum JSON-RPC transaction object for a protocol transaction.
-fn protocol_tx_to_json(
-    tx: &call_protocol::transaction::ProtocolTransaction,
-    block_hash: call_primitives::Hash,
-    block_number: u64,
-    tx_index: u64,
-) -> serde_json::Value {
-    let tx_hash = call_primitives::TxHash::from(tx.compute_tx_hash());
-    serde_json::json!({
-        "hash": format!("0x{}", hex::encode(tx_hash.as_slice())),
-        "nonce": format!("0x{:x}", tx.nonce),
-        "blockHash": format!("0x{}", hex::encode(block_hash.as_slice())),
-        "blockNumber": format!("0x{:x}", block_number),
-        "transactionIndex": format!("0x{:x}", tx_index),
-        "from": format!("{:?}", tx.sender),
-        "to": serde_json::Value::Null,
-        "gas": format!("0x{:x}", tx.gas_limit),
-        "gasPrice": format!("0x{:x}", tx.max_fee),
-        "value": "0x0",
-        "input": "0x",
-        "chainId": serde_json::Value::Null,
-        "v": "0x0",
-        "r": "0x0",
-        "s": "0x0",
-    })
-}
-
 /// Convert a Protocol LogEntry to ETH JSON-RPC log format.
 fn log_to_json(
     log: &call_protocol::LogEntry,
