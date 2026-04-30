@@ -129,7 +129,7 @@ impl OraclePrecompile {
         Ok(crate::storage::fill_precompile_output(out))
     }
 
-    fn submit_price(&self, input: &[u8], _msg_sender: alloy_primitives::Address) -> crate::PrecompileResult {
+    fn submit_price(&self, input: &[u8], msg_sender: alloy_primitives::Address) -> crate::PrecompileResult {
         const GAS_COST: u64 = 5000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
         if input.len() < 132 {
@@ -157,8 +157,15 @@ impl OraclePrecompile {
             buf
         });
 
-        // TODO: read validator set from VALIDATOR_ADDRESS storage
-        // For transition, accept all callers
+        // Verify caller is a registered validator
+        let validator_id = StorageCtx::sload(crate::VALIDATOR_ADDRESS, crate::slot_validator_by_addr(msg_sender))
+            .map(u256_to_u64)
+            .unwrap_or(0);
+        if validator_id == 0 {
+            return Err(revm_precompile::PrecompileError::Other(
+                "oracle submit: caller is not a validator".into(),
+            ));
+        }
 
         // Update price
         StorageCtx::sstore(ORACLE_ADDRESS, slot_oracle(asset_id, b"price"), u128_to_u256(price));
@@ -213,6 +220,14 @@ mod tests {
 
         crate::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
+            let caller = alloy_primitives::Address::repeat_byte(0xAB);
+
+            // Seed caller as a validator
+            crate::storage::StorageCtx::sstore(
+                crate::VALIDATOR_ADDRESS,
+                crate::slot_validator_by_addr(caller),
+                crate::u64_to_u256(1),
+            );
 
             // submitPrice(assetId=1, price=2_000_000, timestamp=1000, block=100)
             let mut input = vec![0u8; 132];
@@ -222,7 +237,7 @@ mod tests {
             input[92..100].copy_from_slice(&1000u64.to_be_bytes());
             input[124..132].copy_from_slice(&100u64.to_be_bytes());
 
-            let result = precompile.call(&input, alloy_primitives::Address::repeat_byte(0xAB));
+            let result = precompile.call(&input, caller);
             assert!(result.is_ok(), "submitPrice failed: {:?}", result.err());
 
             // getPrice(assetId=1)
@@ -247,6 +262,14 @@ mod tests {
 
         crate::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
+            let caller = alloy_primitives::Address::repeat_byte(0xAB);
+
+            // Seed caller as a validator
+            crate::storage::StorageCtx::sstore(
+                crate::VALIDATOR_ADDRESS,
+                crate::slot_validator_by_addr(caller),
+                crate::u64_to_u256(1),
+            );
 
             // Submit two prices
             for (price, ts) in [(1_000_000u128, 900u64), (2_000_000, 1000)] {
@@ -256,7 +279,7 @@ mod tests {
                 input[48..64].copy_from_slice(&price.to_be_bytes());
                 input[92..100].copy_from_slice(&ts.to_be_bytes());
                 input[124..132].copy_from_slice(&100u64.to_be_bytes());
-                precompile.call(&input, alloy_primitives::Address::repeat_byte(0xAB)).unwrap();
+                precompile.call(&input, caller).unwrap();
             }
 
             // getTWAP

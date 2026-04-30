@@ -164,15 +164,15 @@ impl CallPrecompiles {
         );
         custom.insert(
             SHIELDED_ADDRESS,
-            Box::new(StatelessPrecompileWrapper(shielded_precompile_fn)),
+            Box::new(ShieldedPrecompile),
         );
         custom.insert(
             GOVERNANCE_ADDRESS,
-            Box::new(StatelessPrecompileWrapper(governance_precompile_fn)),
+            Box::new(GovernancePrecompile),
         );
         custom.insert(
             VALIDATOR_ADDRESS,
-            Box::new(StatelessPrecompileWrapper(validator_precompile_fn)),
+            Box::new(ValidatorPrecompile),
         );
         custom.insert(
             COMPLIANCE_ADDRESS,
@@ -180,11 +180,11 @@ impl CallPrecompiles {
         );
         custom.insert(
             SWITCH_ADDRESS,
-            Box::new(StatelessPrecompileWrapper(switch_precompile_fn)),
+            Box::new(SwitchPrecompile),
         );
         custom.insert(
             AGENT_ADDRESS,
-            Box::new(StatelessPrecompileWrapper(agent_precompile_fn)),
+            Box::new(AgentPrecompile),
         );
 
         Self {

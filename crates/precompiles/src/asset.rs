@@ -236,7 +236,7 @@ impl AssetPrecompile {
         Ok(msg_sender)
     }
 
-    fn check_compliance(asset_id: u64, _addr: &Address) -> Result<(), PrecompileError> {
+    fn check_compliance(asset_id: u64, addr: &Address) -> Result<(), PrecompileError> {
         // Read compliance policy from asset storage
         let policy_id = crate::storage::StorageCtx::sload(
             ASSET_ADDRESS,
@@ -249,9 +249,20 @@ impl AssetPrecompile {
             return Ok(());
         }
 
-        // TODO: read compliance status from COMPLIANCE_ADDRESS storage
-        // For transition, simplified: always allow if policy exists
-        Ok(())
+        // Read compliance status from COMPLIANCE_ADDRESS storage
+        let status = crate::storage::StorageCtx::sload(
+            crate::COMPLIANCE_ADDRESS,
+            crate::slot_compliance(*addr, policy_id as u8),
+        )
+        .map(|v| v.to_be_bytes::<32>()[31])
+        .unwrap_or(0);
+
+        // status == 0 means Clear (allowed), anything else is restricted
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(PrecompileError::Other("compliance check failed".into()))
+        }
     }
 
     fn get_balance(&self, input: &[u8]) -> PrecompileResult {

@@ -54,7 +54,7 @@ use crate::StatefulPrecompile;
 use crate::storage::{storage_slot, StorageCtx};
 
 /// Compute compliance storage slot for an address under a policy.
-fn slot_compliance(addr: alloy_primitives::Address, policy_id: u8) -> alloy_primitives::U256 {
+pub fn slot_compliance(addr: alloy_primitives::Address, policy_id: u8) -> alloy_primitives::U256 {
     storage_slot(&[addr.as_slice(), &[policy_id]])
 }
 
