@@ -4,10 +4,15 @@
 //!            getProposalStatus, getProposalVotes, isPaused, getProposalCount
 
 use alloy_primitives::{address, Address, U256};
-use revm_precompile::{PrecompileError, PrecompileOutput};
+use revm_precompile::PrecompileError;
 
 use crate::StatefulPrecompile;
 use crate::storage::{storage_slot, StorageCtx};
+use crate::{
+    address_to_u256, decode_bytes32, decode_u128, decode_u64, decode_u8, encode_u128, encode_u64,
+    encode_u8, ok_empty, slot_balance, slot_validator_by_addr, u128_to_u256, u256_to_u128,
+    u256_to_u64, u64_to_u256,
+};
 
 pub const GOVERNANCE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000203");
@@ -16,72 +21,6 @@ const CALL_ASSET_ID: u64 = 1;
 const PROPOSAL_DEPOSIT: u128 = 10_000;
 const GOV_TIMELOCK_BLOCKS: u64 = 100;
 const GOV_QUORUM_BPS: u128 = 3_333;
-
-// ── ABI decoding helpers ──────────────────────────────────────────────
-
-fn decode_u64(input: &[u8], slot_offset: usize) -> Option<u64> {
-    let start = slot_offset + 24;
-    if input.len() < start + 8 {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&input[start..start + 8]);
-    Some(u64::from_be_bytes(buf))
-}
-
-fn decode_u128(input: &[u8], slot_offset: usize) -> Option<u128> {
-    let start = slot_offset + 16;
-    if input.len() < start + 16 {
-        return None;
-    }
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&input[start..start + 16]);
-    Some(u128::from_be_bytes(buf))
-}
-
-fn decode_u8(input: &[u8], slot_offset: usize) -> Option<u8> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    Some(input[slot_offset + 31])
-}
-
-fn decode_bytes32(input: &[u8], slot_offset: usize) -> Option<[u8; 32]> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(&input[slot_offset..slot_offset + 32]);
-    Some(buf)
-}
-
-// ── Encoding helpers ──────────────────────────────────────────────────
-
-fn u256_to_u64(v: U256) -> u64 {
-    u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().unwrap())
-}
-
-fn u256_to_u128(v: U256) -> u128 {
-    u128::from_be_bytes(v.to_be_bytes::<32>()[16..32].try_into().unwrap())
-}
-
-fn u128_to_u256(v: u128) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn u64_to_u256(v: u64) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn address_to_u256(addr: Address) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(addr.as_slice());
-    U256::from_be_bytes::<32>(bytes)
-}
 
 // ── Storage slot helpers ──────────────────────────────────────────────
 
@@ -105,18 +44,45 @@ fn slot_gov_pause_reason() -> U256 {
     storage_slot(&[b"pause_reason"])
 }
 
-fn slot_balance(asset_id: u64, addr: Address) -> U256 {
-    storage_slot(&[&asset_id.to_be_bytes()[..], addr.as_slice()])
-}
-
-fn slot_validator_by_addr(addr: Address) -> U256 {
-    storage_slot(&[addr.as_slice(), b"validator_id"])
-}
+// ── Governance helpers ────────────────────────────────────────────────
 
 fn is_validator(sender: Address) -> bool {
     StorageCtx::sload(crate::VALIDATOR_ADDRESS, slot_validator_by_addr(sender))
         .map(|v| u256_to_u64(v) != 0)
         .unwrap_or(false)
+}
+
+fn require_validator(sender: Address) -> Result<(), PrecompileError> {
+    if !is_validator(sender) {
+        return Err(PrecompileError::Other(
+            "governance: sender not a registered validator".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn proposal_status(proposal_id: u64) -> u8 {
+    StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"))
+        .map(|v| v.to_be_bytes::<32>()[31])
+        .unwrap_or(0)
+}
+
+fn require_proposal_status(proposal_id: u64, expected: u8, err: &str) -> Result<(), PrecompileError> {
+    if proposal_status(proposal_id) != expected {
+        return Err(PrecompileError::Other(err.to_string().into()));
+    }
+    Ok(())
+}
+
+fn vote_tally(proposal_id: u64, suffix: &[u8]) -> u128 {
+    StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+fn increment_tally(proposal_id: u64, suffix: &[u8]) {
+    let tally = vote_tally(proposal_id, suffix);
+    StorageCtx::sstore(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix), u128_to_u256(tally + 1));
 }
 
 // ── GovernancePrecompile ──────────────────────────────────────────────
@@ -218,8 +184,7 @@ impl GovernancePrecompile {
             u128_to_u256(PROPOSAL_DEPOSIT),
         );
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // vote(uint64 proposalId, uint8 vote) -> 0x023d033b
@@ -243,15 +208,7 @@ impl GovernancePrecompile {
             return Err(PrecompileError::Other("governance: invalid vote value".into()));
         }
 
-        // Check proposal is active
-        let status = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"))
-            .map(|v| v.to_be_bytes::<32>()[31])
-            .unwrap_or(0);
-        if status != 1 {
-            return Err(PrecompileError::Other(
-                "governance: proposal not active".into(),
-            ));
-        }
+        require_proposal_status(proposal_id, 1, "governance: proposal not active")?;
 
         // Check voter hasn't already voted
         let voter_slot = slot_gov_voter(proposal_id, msg_sender);
@@ -271,17 +228,9 @@ impl GovernancePrecompile {
             3 => b"votes_abstain",
             _ => unreachable!(),
         };
-        let tally = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, tally_suffix))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        StorageCtx::sstore(
-            GOVERNANCE_ADDRESS,
-            slot_gov_proposal(proposal_id, tally_suffix),
-            u128_to_u256(tally + 1),
-        );
+        increment_tally(proposal_id, tally_suffix);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // queue(uint64 proposalId) -> 0xfe72d010
@@ -299,26 +248,12 @@ impl GovernancePrecompile {
         let proposal_id = decode_u64(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid proposalId".into()))?;
 
-        // Check proposal is active
-        let status = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"))
-            .map(|v| v.to_be_bytes::<32>()[31])
-            .unwrap_or(0);
-        if status != 1 {
-            return Err(PrecompileError::Other(
-                "governance: proposal not active".into(),
-            ));
-        }
+        require_proposal_status(proposal_id, 1, "governance: proposal not active")?;
 
         // Check quorum
-        let votes_for = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_for"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let votes_against = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_against"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let votes_abstain = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_abstain"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
+        let votes_for = vote_tally(proposal_id, b"votes_for");
+        let votes_against = vote_tally(proposal_id, b"votes_against");
+        let votes_abstain = vote_tally(proposal_id, b"votes_abstain");
         let total_votes = votes_for + votes_against + votes_abstain;
 
         if total_votes == 0 || votes_for * 10_000 < total_votes * GOV_QUORUM_BPS {
@@ -338,8 +273,7 @@ impl GovernancePrecompile {
             u64_to_u256(current_block),
         );
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // execute(uint64 proposalId) -> 0x50f701f4
@@ -357,15 +291,7 @@ impl GovernancePrecompile {
         let proposal_id = decode_u64(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid proposalId".into()))?;
 
-        // Check proposal is queued
-        let status = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"))
-            .map(|v| v.to_be_bytes::<32>()[31])
-            .unwrap_or(0);
-        if status != 2 {
-            return Err(PrecompileError::Other(
-                "governance: proposal not queued".into(),
-            ));
-        }
+        require_proposal_status(proposal_id, 2, "governance: proposal not queued")?;
 
         // Check timelock elapsed
         let queued_at = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"queued_at"))
@@ -385,8 +311,7 @@ impl GovernancePrecompile {
             U256::from(3u8),
         );
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // emergencyPause(bytes32 reason) -> 0x7b391c64
@@ -404,11 +329,7 @@ impl GovernancePrecompile {
         let reason = decode_bytes32(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid reason".into()))?;
 
-        if !is_validator(msg_sender) {
-            return Err(PrecompileError::Other(
-                "governance: sender not a registered validator".into(),
-            ));
-        }
+        require_validator(msg_sender)?;
 
         StorageCtx::sstore(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::from(1u8));
         StorageCtx::sstore(
@@ -417,8 +338,7 @@ impl GovernancePrecompile {
             U256::from_be_slice(&reason),
         );
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // emergencyResume() -> 0x597c1a8d
@@ -434,17 +354,12 @@ impl GovernancePrecompile {
             return Err(PrecompileError::Other("invalid input".into()));
         }
 
-        if !is_validator(msg_sender) {
-            return Err(PrecompileError::Other(
-                "governance: sender not a registered validator".into(),
-            ));
-        }
+        require_validator(msg_sender)?;
 
         StorageCtx::sstore(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::ZERO);
         StorageCtx::sstore(GOVERNANCE_ADDRESS, slot_gov_pause_reason(), U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // getProposalStatus(uint64 proposalId) -> uint8 -> 0x7d62d795
@@ -458,13 +373,9 @@ impl GovernancePrecompile {
         let proposal_id = decode_u64(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid proposalId".into()))?;
 
-        let status = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"))
-            .map(|v| v.to_be_bytes::<32>()[31])
-            .unwrap_or(0);
+        let status = proposal_status(proposal_id);
 
-        let mut out = vec![0u8; 32];
-        out[31] = status;
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(status).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -479,21 +390,15 @@ impl GovernancePrecompile {
         let proposal_id = decode_u64(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid proposalId".into()))?;
 
-        let votes_for = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_for"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let votes_against = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_against"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let votes_abstain = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_abstain"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
+        let votes_for = vote_tally(proposal_id, b"votes_for");
+        let votes_against = vote_tally(proposal_id, b"votes_against");
+        let votes_abstain = vote_tally(proposal_id, b"votes_abstain");
 
         let mut out = vec![0u8; 96];
         out[16..32].copy_from_slice(&votes_for.to_be_bytes());
         out[48..64].copy_from_slice(&votes_against.to_be_bytes());
         out[80..96].copy_from_slice(&votes_abstain.to_be_bytes());
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -509,9 +414,7 @@ impl GovernancePrecompile {
             .map(|v| v.to_be_bytes::<32>()[31] == 1)
             .unwrap_or(false);
 
-        let mut out = vec![0u8; 32];
-        out[31] = if paused { 1 } else { 0 };
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(if paused { 1 } else { 0 }).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -527,9 +430,7 @@ impl GovernancePrecompile {
             .map(u256_to_u64)
             .unwrap_or(0);
 
-        let mut out = vec![0u8; 32];
-        out[24..32].copy_from_slice(&count.to_be_bytes());
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u64(count).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 }
