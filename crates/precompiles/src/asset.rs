@@ -500,8 +500,6 @@ impl AssetPrecompile {
         if input.len() < 100 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let asset_id = decode_u64(input, 4)
-            .ok_or_else(|| PrecompileError::Other("invalid asset_id".into()))?;
         let (asset_id, to, amount) = decode_asset_addr_amount(input)
             .ok_or_else(|| PrecompileError::Other("invalid input".into()))?;
 

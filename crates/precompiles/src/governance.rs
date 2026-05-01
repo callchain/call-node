@@ -9,7 +9,7 @@ use revm_precompile::PrecompileError;
 use crate::StatefulPrecompile;
 use crate::storage::{storage_slot, StorageCtx};
 use crate::{
-    address_to_u256, decode_bytes32, decode_u128, decode_u64, decode_u8, encode_u128, encode_u64,
+    address_to_u256, decode_bytes32, decode_u64, decode_u8, encode_u64,
     encode_u8, ok_empty, slot_balance, slot_validator_by_addr, u128_to_u256, u256_to_u128,
     u256_to_u64, u64_to_u256,
 };

@@ -21,9 +21,9 @@ mod validator;
 mod compliance;
 mod agent;
 pub mod storage;
-pub mod utils;
+pub mod helpers;
 
-pub use utils::*;
+pub use helpers::utils::*;
 pub use oracle::*;
 pub use bridge::*;
 pub use asset::*;
@@ -38,7 +38,7 @@ pub use agent::*;
 pub use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 pub use alloy_primitives::Bytes;
 
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{Address, U256};
 use revm::context::Block;
 use revm::context_interface::cfg::Cfg;
 use revm::context_interface::local::LocalContextTr;

@@ -286,7 +286,7 @@ impl StatefulPrecompile for SwitchPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{address_to_u256, slot_asset_meta, u128_to_u256, ASSET_ADDRESS};
+    use crate::{slot_asset_meta, u128_to_u256, ASSET_ADDRESS};
 
     fn addr(n: u8) -> Address {
         Address::repeat_byte(n)
