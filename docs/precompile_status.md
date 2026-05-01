@@ -11,8 +11,8 @@
 
 | # | 严重度 | 问题 | 涉及文件 | 状态 |
 |---|--------|------|----------|------|
-| C-1 | 中 | `load_bal`/`save_bal` 重复定义在 5 个文件中，应统一移到 `utils.rs` | `bridge.rs`, `shielded.rs`, `validator.rs`, `agent.rs`, `asset.rs` | **未实现** |
-| C-2 | 低 | `require_caller` 重复定义 | `switch.rs`, `asset.rs` | **未实现** |
+| C-1 | 中 | `load_bal`/`save_bal` 重复定义在 5 个文件中，应统一移到 `utils.rs` | `bridge.rs`, `shielded.rs`, `validator.rs`, `agent.rs`, `asset.rs` | **已修复** |
+| C-2 | 低 | `require_caller` 重复定义 | `switch.rs`, `asset.rs` | **已修复** |
 
 ---
 
@@ -20,12 +20,12 @@
 
 | # | 严重度 | 问题 | 行 | 状态 |
 |---|--------|------|-----|------|
-| O-1 | **高** | `submit_price` 中 `decode_u128(input, 32)` 偏移量错误，应改为 `decode_u128(input, 36)`。当前会截断价格的最高 4 字节（价格 >= 2^96 时出错） | 85 | **未实现** |
-| O-2 | **高** | `submit_price` 固定收 5000 gas，实际执行 5 次 sstore（约 110,000 gas），严重低估 | 78 | **未实现** |
-| O-3 | 中 | `decode_*` 失败时静默返回 0 而不是 revert | 37, 51, 65-66, 84-87 | **未实现** |
-| O-4 | 中 | `is_stale` 使用调用方传入的 `current_ts` 而不是 `StorageCtx::timestamp()` | 66 | **未实现** |
-| O-5 | 低 | `slot_oracle` 与 `utils.rs` 的 `slot_asset_meta` 重复 | 21-23 | **未实现** |
-| O-6 | 低 | 没有事件发射 | 99-119 | **未实现** |
+| O-1 | **高** | `submit_price` 中 `decode_u128(input, 32)` 偏移量错误，已改为 `decode_u128(input, 36)` | 85 | **已修复** |
+| O-2 | **高** | `submit_price` gas 从 5000 上调至 30,000（5 次 sstore + 2 次 sload + validator check） | 78 | **已修复** |
+| O-3 | 中 | `decode_*` 失败时从 `.unwrap_or(0)` 改为返回 `PrecompileError::Other` revert | 37, 51, 65-66, 84-87 | **已修复** |
+| O-4 | 中 | `is_stale` 改为使用 `StorageCtx::timestamp()` 作为当前时间戳 | 66 | **已修复** |
+| O-5 | 低 | 移除 `slot_oracle`，统一使用 `helpers/utils.rs` 的 `slot_asset_meta` | 21-23 | **已修复** |
+| O-6 | 低 | `submit_price` 成功后发射 `PriceSubmitted` 事件 | 99-119 | **已修复** |
 
 ---
 
@@ -85,7 +85,7 @@
 |---|--------|------|-----|------|
 | S-1 | 中 | 缺少 `amount > 0` 和 `to != ZERO` 检查 | 168-264 | **未实现** |
 | S-2 | 中 | ERC-20 路径固定 20,000 gas 低估（约需 40,000） | 173, 223 | **未实现** |
-| S-3 | 低 | `require_caller` 与 `asset.rs` 重复 | 135 | **未实现** |
+| S-3 | 低 | `require_caller` 与 `asset.rs` 重复 | 135 | **已修复** |
 
 ---
 
@@ -113,14 +113,14 @@
 
 | # | 严重度 | 问题 | 行 | 状态 |
 |---|--------|------|-----|------|
-| T-1 | 低 | `require_caller` 与 `switch.rs` 重复 | ~113 | **未实现** |
+| T-1 | 低 | `require_caller` 与 `switch.rs` 重复 | ~113 | **已修复** |
 
 ---
 
 ## 修复优先级建议
 
 ### P0（破坏性行为 / 数据错误）
-- [ ] O-1: 修复 `decode_u128` 偏移量 bug（oracle.rs）
+- [x] O-1: 修复 `decode_u128` 偏移量 bug（oracle.rs）
 - [ ] A-3: 修复 `bridge_deposit` 双重扣款（agent.rs）
 
 ### P1（安全 / 完整性）
@@ -129,11 +129,11 @@
 - [ ] G-4: 修复 `queue()` 逻辑（yes > no）
 - [ ] V-2: 为 validator 写函数添加 `is_static` 检查
 - [ ] M-3: 为 compliance 写函数添加 `is_static` 检查
-- [ ] O-3: 修复 `decode_*` 失败时静默返回 0
+- [x] O-3: 修复 `decode_*` 失败时静默返回 0
 - [ ] S-1: 添加 `amount > 0` 和 `to != ZERO` 检查（switch.rs）
 
 ### P2（Gas 计费 / 文档一致性）
-- [ ] O-2: 修复 oracle 写函数 gas 低估
+- [x] O-2: 修复 oracle 写函数 gas 低估
 - [ ] G-2: 修复 governance 写函数 gas 低估
 - [ ] V-1: 修复 validator gas 费用与文档一致
 - [ ] A-1: 修复 agent gas 费用与文档一致
@@ -141,18 +141,18 @@
 - [ ] S-2: 修复 switch ERC-20 路径 gas 低估
 
 ### P3（代码优化 / 清理）
-- [ ] C-1: 统一 `load_bal`/`save_bal` 到 `utils.rs`
-- [ ] C-2: 统一 `require_caller` 到 `utils.rs`
+- [x] C-1: 统一 `load_bal`/`save_bal` 到 `utils.rs`
+- [x] C-2: 统一 `require_caller` 到 `utils.rs`
 - [ ] G-6: 将 `is_validator`/`require_validator` 移到 `utils.rs`
 - [ ] M-4: 将 `u8_from_u256`/`u256_from_u8` 移到 `utils.rs`
-- [ ] O-5: 移除 `slot_oracle`，改用 `slot_asset_meta`
+- [x] O-5: 移除 `slot_oracle`，改用 `slot_asset_meta`
 - [ ] V-3: 完整清理 validator 退出状态
 - [ ] V-4: 清理 unbonding queue
 - [ ] V-5: 为 validator 读函数添加 gas 费用
 - [ ] A-5: 提取 agent 权限检查为共享 helper
 - [ ] A-4: 修复 `batch_pay` 丢弃 offset 变量
-- [ ] O-4: `is_stale` 使用 `StorageCtx::timestamp()`
-- [ ] O-6 / G-7: 添加事件发射
+- [x] O-4: `is_stale` 使用 `StorageCtx::timestamp()`
+- [x] O-6 / G-7: 添加事件发射
 - [ ] D-4: 修复 shielded `transfer` 中未使用的 `asset_id`
 - [ ] V-6: `STAKING_ESCROW` 改为专用地址
 - [ ] G-5: 治理提案存款退还机制

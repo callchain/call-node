@@ -534,6 +534,10 @@ impl HashMapStorageProvider {
         self.block_number = block_number;
     }
 
+    pub fn set_timestamp(&mut self, timestamp: U256) {
+        self.timestamp = timestamp;
+    }
+
     pub fn get(&self, address: Address, key: U256) -> Option<U256> {
         self.persistent.get(&(address, key)).copied()
     }
