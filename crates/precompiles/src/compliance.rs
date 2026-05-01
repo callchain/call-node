@@ -3,40 +3,15 @@
 //! Compliance engine access: updateCompliance, checkCompliance.
 
 use alloy_primitives::address;
-use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
 use call_protocol::compliance::ComplianceStatus;
-use crate::slot_compliance;
+use crate::{
+    decode_address, decode_u64, decode_u8, encode_u8, ok_empty, slot_compliance,
+    u256_to_address,
+};
 
 pub const COMPLIANCE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000205");
-
-// ── ABI decoding helpers ──────────────────────────────────────────────
-
-fn decode_u64(input: &[u8], slot_offset: usize) -> Option<u64> {
-    let start = slot_offset + 24;
-    if input.len() < start + 8 {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&input[start..start + 8]);
-    Some(u64::from_be_bytes(buf))
-}
-
-fn decode_address(input: &[u8], slot_offset: usize) -> Option<alloy_primitives::Address> {
-    let start = slot_offset + 12;
-    if input.len() < start + 20 {
-        return None;
-    }
-    Some(alloy_primitives::Address::from_slice(&input[start..start + 20]))
-}
-
-fn decode_u8(input: &[u8], slot_offset: usize) -> Option<u8> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    Some(input[slot_offset + 31])
-}
 
 fn decode_compliance_status(status_u8: u8) -> Option<ComplianceStatus> {
     match status_u8 {
@@ -54,42 +29,15 @@ use crate::StatefulPrecompile;
 use crate::storage::StorageCtx;
 
 /// Read u8 from last byte of a U256.
-fn u256_to_u8(v: alloy_primitives::U256) -> u8 {
+fn u8_from_u256(v: alloy_primitives::U256) -> u8 {
     v.to_be_bytes::<32>()[31]
 }
 
 /// Write u8 into last byte of a U256.
-fn u8_to_u256(v: u8) -> alloy_primitives::U256 {
+fn u256_from_u8(v: u8) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     bytes[31] = v;
     alloy_primitives::U256::from_be_bytes::<32>(bytes)
-}
-
-/// Read an Address from low 20 bytes of a U256.
-fn u256_to_address(v: alloy_primitives::U256) -> alloy_primitives::Address {
-    alloy_primitives::Address::from_slice(&v.to_be_bytes::<32>()[12..32])
-}
-
-/// Write an Address into low 20 bytes of a U256.
-fn address_to_u256(addr: alloy_primitives::Address) -> alloy_primitives::U256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(addr.as_slice());
-    alloy_primitives::U256::from_be_bytes::<32>(bytes)
-}
-
-/// Read a u64 from low 8 bytes of a U256.
-fn u256_to_u64(v: alloy_primitives::U256) -> u64 {
-    u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().unwrap())
-}
-
-/// Encode a ComplianceStatus to u8.
-fn encode_compliance_status(status: ComplianceStatus) -> u8 {
-    match status {
-        ComplianceStatus::Clear => 0,
-        ComplianceStatus::UnderReview => 1,
-        ComplianceStatus::Flagged => 2,
-        ComplianceStatus::Restricted => 3,
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -134,15 +82,14 @@ impl CompliancePrecompile {
             &[&asset_id.to_be_bytes()[..], b"compliance"]
         );
         let policy_id = StorageCtx::sload(crate::ASSET_ADDRESS, policy_slot)
-            .map(u256_to_u8)
+            .map(u8_from_u256)
             .unwrap_or(0);
 
         // Store compliance status
         let slot = slot_compliance(target, policy_id);
-        StorageCtx::sstore(COMPLIANCE_ADDRESS, slot, u8_to_u256(status_u8));
+        StorageCtx::sstore(COMPLIANCE_ADDRESS, slot, u256_from_u8(status_u8));
 
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     fn check_compliance(&self, input: &[u8]) -> crate::PrecompileResult {
@@ -163,18 +110,13 @@ impl CompliancePrecompile {
         } else {
             let slot = slot_compliance(target, policy_id);
             let status = StorageCtx::sload(COMPLIANCE_ADDRESS, slot)
-                .map(u256_to_u8)
+                .map(u8_from_u256)
                 .unwrap_or(0);
             // Clear (0) = pass, anything else = fail
             status == 0
         };
 
-        let mut output = [0u8; 32];
-        if result {
-            output[31] = 1;
-        }
-
-        let out = revm_precompile::PrecompileOutput::new(0, output.to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(if result { 1 } else { 0 }).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 }
@@ -211,12 +153,12 @@ mod tests {
             crate::storage::StorageCtx::sstore(
                 crate::ASSET_ADDRESS,
                 crate::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"issuer"]),
-                address_to_u256(issuer),
+                u256_from_u8_addr(issuer),
             );
             crate::storage::StorageCtx::sstore(
                 crate::ASSET_ADDRESS,
                 crate::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"compliance"]),
-                u8_to_u256(1),
+                u256_from_u8(1),
             );
 
             let mut precompile = CompliancePrecompile;
@@ -261,12 +203,12 @@ mod tests {
             crate::storage::StorageCtx::sstore(
                 crate::ASSET_ADDRESS,
                 crate::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"issuer"]),
-                address_to_u256(issuer),
+                u256_from_u8_addr(issuer),
             );
             crate::storage::StorageCtx::sstore(
                 crate::ASSET_ADDRESS,
                 crate::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"compliance"]),
-                u8_to_u256(1),
+                u256_from_u8(1),
             );
 
             let mut precompile = CompliancePrecompile;
@@ -280,5 +222,11 @@ mod tests {
             let result = precompile.call(&input, Address::repeat_byte(0x99));
             assert!(result.is_err());
         });
+    }
+
+    fn u256_from_u8_addr(addr: Address) -> alloy_primitives::U256 {
+        let mut bytes = [0u8; 32];
+        bytes[12..32].copy_from_slice(addr.as_slice());
+        alloy_primitives::U256::from_be_bytes::<32>(bytes)
     }
 }
