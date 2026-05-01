@@ -5,134 +5,20 @@
 //!            getAgentOwner, getAgentBalance, getAgentName, getAgentUrl, getAgentPerms
 
 use alloy_primitives::{address, Address, U256};
-use revm_precompile::{PrecompileError, PrecompileOutput};
+use revm_precompile::PrecompileError;
 
-use crate::StatefulPrecompile;
+use crate::{
+    address_to_u256, decode_address, decode_bytes32, decode_u128, decode_u64,
+    decode_u256_usize, decode_address_array, decode_u128_array, encode_u128,
+    ok_empty, slot_balance, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
+    u64_to_u256, StatefulPrecompile,
+};
 use crate::storage::{storage_slot, StorageCtx};
 
 pub const AGENT_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000209");
 
 const CALL_ASSET_ID: u64 = 1;
-
-// ── ABI decoding helpers ──────────────────────────────────────────────
-
-fn decode_u64(input: &[u8], slot_offset: usize) -> Option<u64> {
-    let start = slot_offset + 24;
-    if input.len() < start + 8 {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&input[start..start + 8]);
-    Some(u64::from_be_bytes(buf))
-}
-
-fn decode_u128(input: &[u8], slot_offset: usize) -> Option<u128> {
-    let start = slot_offset + 16;
-    if input.len() < start + 16 {
-        return None;
-    }
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&input[start..start + 16]);
-    Some(u128::from_be_bytes(buf))
-}
-
-fn decode_address(input: &[u8], slot_offset: usize) -> Option<Address> {
-    let start = slot_offset + 12;
-    if input.len() < start + 20 {
-        return None;
-    }
-    Some(Address::from_slice(&input[start..start + 20]))
-}
-
-fn decode_bytes32(input: &[u8], slot_offset: usize) -> Option<[u8; 32]> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(&input[slot_offset..slot_offset + 32]);
-    Some(buf)
-}
-
-fn decode_u256_usize(input: &[u8], slot_offset: usize) -> Option<usize> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let bytes = &input[slot_offset..slot_offset + 32];
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&bytes[24..32]);
-    Some(u64::from_be_bytes(buf) as usize)
-}
-
-fn decode_address_array(input: &[u8], slot_offset: usize) -> Option<Vec<Address>> {
-    let data_offset = decode_u256_usize(input, slot_offset)?;
-    let abs_offset = 4 + data_offset;
-    if input.len() < abs_offset + 32 {
-        return None;
-    }
-    let len = decode_u256_usize(input, abs_offset)?;
-    let elem_start = abs_offset + 32;
-    if input.len() < elem_start + len * 32 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let addr = decode_address(input, elem_start + i * 32)?;
-        out.push(addr);
-    }
-    Some(out)
-}
-
-fn decode_u128_array(input: &[u8], slot_offset: usize) -> Option<Vec<u128>> {
-    let data_offset = decode_u256_usize(input, slot_offset)?;
-    let abs_offset = 4 + data_offset;
-    if input.len() < abs_offset + 32 {
-        return None;
-    }
-    let len = decode_u256_usize(input, abs_offset)?;
-    let elem_start = abs_offset + 32;
-    if input.len() < elem_start + len * 32 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let val = decode_u128(input, elem_start + i * 32)?;
-        out.push(val);
-    }
-    Some(out)
-}
-
-// ── Encoding helpers ──────────────────────────────────────────────────
-
-fn u256_to_u64(v: U256) -> u64 {
-    u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().unwrap())
-}
-
-fn u256_to_u128(v: U256) -> u128 {
-    u128::from_be_bytes(v.to_be_bytes::<32>()[16..32].try_into().unwrap())
-}
-
-fn u128_to_u256(v: u128) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn u64_to_u256(v: u64) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn address_to_u256(addr: Address) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(addr.as_slice());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn u256_to_address(v: U256) -> Address {
-    Address::from_slice(&v.to_be_bytes::<32>()[12..32])
-}
 
 // ── Storage slot helpers ──────────────────────────────────────────────
 
@@ -168,10 +54,6 @@ fn slot_agent_balance(agent_id: u64, asset_id: u64) -> U256 {
     storage_slot(&[b"abalance", &agent_id.to_be_bytes()[..], &asset_id.to_be_bytes()[..]])
 }
 
-fn slot_balance(asset_id: u64, addr: Address) -> U256 {
-    storage_slot(&[&asset_id.to_be_bytes()[..], addr.as_slice()])
-}
-
 // Pack agent permissions into a single U256:
 // bytes 0..16  = per_tx_limit (u128)
 // bytes 16..24 = expires_at (u64)
@@ -198,6 +80,28 @@ fn agent_check_owner(agent_id: u64, sender: Address) -> Result<(), PrecompileErr
         return Err(PrecompileError::Other("agent: sender is not owner".into()));
     }
     Ok(())
+}
+
+// ── Balance helpers ───────────────────────────────────────────────────
+
+fn load_bal(asset_id: u64, addr: Address) -> u128 {
+    StorageCtx::sload(crate::ASSET_ADDRESS, slot_balance(asset_id, addr))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+fn save_bal(asset_id: u64, addr: Address, amount: u128) {
+    StorageCtx::sstore(crate::ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
+}
+
+fn load_agent_bal(agent_id: u64, asset_id: u64) -> u128 {
+    StorageCtx::sload(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+fn save_agent_bal(agent_id: u64, asset_id: u64, amount: u128) {
+    StorageCtx::sstore(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id), u128_to_u256(amount));
 }
 
 // ── AgentPrecompile ───────────────────────────────────────────────────
@@ -264,8 +168,7 @@ impl AgentPrecompile {
             u64_to_u256(block_number),
         );
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // grantBalance(uint64 agentId, uint64 assetId, uint128 amount) -> 0x80ecf9d4
@@ -292,27 +195,19 @@ impl AgentPrecompile {
         }
         agent_check_owner(agent_id, msg_sender)?;
 
-        // Duct sender balance
-        let sender_slot = slot_balance(asset_id, msg_sender);
-        let sender_bal = StorageCtx::sload(crate::ASSET_ADDRESS, sender_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let sender_bal = sender_bal
+        // Deduct sender balance
+        let sender_bal = load_bal(asset_id, msg_sender)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("agent grant: insufficient balance".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, sender_slot, u128_to_u256(sender_bal));
+        save_bal(asset_id, msg_sender, sender_bal);
 
         // Credit agent balance
-        let agent_bal = StorageCtx::sload(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let agent_bal = agent_bal
+        let agent_bal = load_agent_bal(agent_id, asset_id)
             .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("agent grant: balance overflow".into()))?;
-        StorageCtx::sstore(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id), u128_to_u256(agent_bal));
+        save_agent_bal(agent_id, asset_id, agent_bal);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // revokeBalance(uint64 agentId, uint64 assetId) -> 0x1946b415
@@ -340,8 +235,7 @@ impl AgentPrecompile {
         // Zero agent balance for this asset
         StorageCtx::sstore(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id), U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // pay(uint64 agentId, uint64 assetId, address to, uint128 amount) -> 0xe699cef8
@@ -388,26 +282,18 @@ impl AgentPrecompile {
         }
 
         // Deduct agent balance
-        let agent_bal = StorageCtx::sload(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let agent_bal = agent_bal
+        let agent_bal = load_agent_bal(agent_id, asset_id)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("agent pay: insufficient balance".into()))?;
-        StorageCtx::sstore(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id), u128_to_u256(agent_bal));
+        save_agent_bal(agent_id, asset_id, agent_bal);
 
         // Credit recipient
-        let to_slot = slot_balance(asset_id, to);
-        let to_bal = StorageCtx::sload(crate::ASSET_ADDRESS, to_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let to_bal = to_bal
+        let to_bal = load_bal(asset_id, to)
             .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("agent pay: balance overflow".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, to_slot, u128_to_u256(to_bal));
+        save_bal(asset_id, to, to_bal);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // getAgentOwner(uint64 agentId) -> address -> 0x6b2b421b
@@ -427,7 +313,7 @@ impl AgentPrecompile {
 
         let mut out = vec![0u8; 32];
         out[12..32].copy_from_slice(owner.as_slice());
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -448,9 +334,7 @@ impl AgentPrecompile {
             .map(u256_to_u128)
             .unwrap_or(0);
 
-        let mut out = vec![0u8; 32];
-        out[16..32].copy_from_slice(&balance.to_be_bytes());
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u128(balance).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -468,7 +352,7 @@ impl AgentPrecompile {
         let name = StorageCtx::sload(AGENT_ADDRESS, slot_agent_name(agent_id))
             .unwrap_or(U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(name.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(name.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -486,7 +370,7 @@ impl AgentPrecompile {
         let url = StorageCtx::sload(AGENT_ADDRESS, slot_agent_url(agent_id))
             .unwrap_or(U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(url.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(url.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -504,7 +388,7 @@ impl AgentPrecompile {
         let perms = StorageCtx::sload(AGENT_ADDRESS, slot_agent_perms(agent_id))
             .unwrap_or(U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(perms.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(perms.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -559,14 +443,11 @@ impl AgentPrecompile {
         }
 
         // Deduct agent balance
-        let agent_bal = StorageCtx::sload(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id))
-            .map(u256_to_u128)
-            .unwrap_or(0);
         let total_amount: u128 = amounts.iter().copied().sum();
-        let agent_bal = agent_bal
+        let agent_bal = load_agent_bal(agent_id, asset_id)
             .checked_sub(total_amount)
             .ok_or_else(|| PrecompileError::Other("agent batch pay: insufficient balance".into()))?;
-        StorageCtx::sstore(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id), u128_to_u256(agent_bal));
+        save_agent_bal(agent_id, asset_id, agent_bal);
 
         // Credit recipients
         for (recipient, amount) in to.iter().zip(amounts.iter()) {
@@ -575,18 +456,13 @@ impl AgentPrecompile {
                     format!("agent: amount {amount} exceeds per-tx limit {per_tx_limit}").into(),
                 ));
             }
-            let to_slot = slot_balance(asset_id, *recipient);
-            let to_bal = StorageCtx::sload(crate::ASSET_ADDRESS, to_slot)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let to_bal = to_bal
+            let to_bal = load_bal(asset_id, *recipient)
                 .checked_add(*amount)
                 .ok_or_else(|| PrecompileError::Other("agent batch pay: balance overflow".into()))?;
-            StorageCtx::sstore(crate::ASSET_ADDRESS, to_slot, u128_to_u256(to_bal));
+            save_bal(asset_id, *recipient, to_bal);
         }
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // bridgeDeposit(uint64 agentId, uint64 assetId, uint128 amount, uint64 targetChain, bytes targetAddress)
@@ -640,30 +516,22 @@ impl AgentPrecompile {
         }
 
         // Deduct agent balance
-        let agent_bal = StorageCtx::sload(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let agent_bal = agent_bal
+        let agent_bal = load_agent_bal(agent_id, asset_id)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("agent bridge deposit: insufficient agent balance".into()))?;
-        StorageCtx::sstore(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id), u128_to_u256(agent_bal));
+        save_agent_bal(agent_id, asset_id, agent_bal);
 
         // Deduct sender protocol balance
-        let sender_slot = slot_balance(asset_id, msg_sender);
-        let sender_bal = StorageCtx::sload(crate::ASSET_ADDRESS, sender_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let sender_bal = sender_bal
+        let sender_bal = load_bal(asset_id, msg_sender)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("agent bridge deposit: insufficient sender balance".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, sender_slot, u128_to_u256(sender_bal));
+        save_bal(asset_id, msg_sender, sender_bal);
 
         // Note: Full bridge to EVM requires EVM executor (not available in precompile context).
         // The protocol-level bridge deposit instruction handles ERC-20 contract calls.
         // This precompile deducts balances and records intent; validators relay the withdrawal.
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // revokeAgent(uint64 agentId) -> 0x88311f9c
@@ -692,8 +560,7 @@ impl AgentPrecompile {
         // Note: agent balances are not returned; they are zeroed implicitly by clearing state.
         // In a full implementation, iterate over all asset IDs and zero balance slots.
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 }
 
