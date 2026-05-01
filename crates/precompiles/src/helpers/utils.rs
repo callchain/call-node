@@ -212,6 +212,18 @@ pub fn u64_to_u256(v: u64) -> U256 {
     U256::from_be_bytes::<32>(bytes)
 }
 
+/// Read a u8 from the last byte of a U256.
+pub fn u256_to_u8(v: U256) -> u8 {
+    v.to_be_bytes::<32>()[31]
+}
+
+/// Write a u8 into the last byte of a U256.
+pub fn u8_to_u256(v: u8) -> U256 {
+    let mut bytes = [0u8; 32];
+    bytes[31] = v;
+    U256::from_be_bytes::<32>(bytes)
+}
+
 /// Read an Address from the low 20 bytes of a U256.
 pub fn u256_to_address(v: U256) -> Address {
     Address::from_slice(&v.to_be_bytes::<32>()[12..32])

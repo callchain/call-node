@@ -33,10 +33,10 @@
 
 | # | 严重度 | 问题 | 行 | 状态 |
 |---|--------|------|-----|------|
-| M-1 | **高** | `update_compliance` gas 收费 10,000，但文档规定 6,000 | 48 | **未实现** |
-| M-2 | **高** | `check_compliance` ABI 与文档不匹配：实现读取 `policy_id`，文档要求 `assetId` 并内部推导 policy | 95-105 | **未实现** |
-| M-3 | 中 | `update_compliance` 缺少 `is_static` 检查 | 47 | **未实现** |
-| M-4 | 低 | `u8_from_u256`/`u256_from_u8` 应移到 `utils.rs` | 32, 37 | **未实现** |
+| M-1 | **高** | `update_compliance` gas 收费 10,000，但文档规定 6,000 | 48 | **已修复** |
+| M-2 | **高** | `check_compliance` ABI 与文档不匹配：实现读取 `policy_id`，文档要求 `assetId` 并内部推导 policy | 95-105 | **已修复** |
+| M-3 | 中 | `update_compliance` 缺少 `is_static` 检查 | 47 | **已修复** |
+| M-4 | 低 | `u8_from_u256`/`u256_from_u8` 应移到 `utils.rs` | 32, 37 | **已修复** |
 
 ---
 
@@ -124,11 +124,11 @@
 - [ ] A-3: 修复 `bridge_deposit` 双重扣款（agent.rs）
 
 ### P1（安全 / 完整性）
-- [ ] M-2: 修复 `check_compliance` ABI 不匹配
+- [x] M-2: 修复 `check_compliance` ABI 不匹配
 - [ ] G-3: 为所有写函数添加 `is_static` 检查
 - [ ] G-4: 修复 `queue()` 逻辑（yes > no）
 - [ ] V-2: 为 validator 写函数添加 `is_static` 检查
-- [ ] M-3: 为 compliance 写函数添加 `is_static` 检查
+- [x] M-3: 为 compliance 写函数添加 `is_static` 检查
 - [x] O-3: 修复 `decode_*` 失败时静默返回 0
 - [ ] S-1: 添加 `amount > 0` 和 `to != ZERO` 检查（switch.rs）
 
@@ -137,14 +137,14 @@
 - [ ] G-2: 修复 governance 写函数 gas 低估
 - [ ] V-1: 修复 validator gas 费用与文档一致
 - [ ] A-1: 修复 agent gas 费用与文档一致
-- [ ] M-1: 修复 compliance gas 费用与文档一致
+- [x] M-1: 修复 compliance gas 费用与文档一致
 - [ ] S-2: 修复 switch ERC-20 路径 gas 低估
 
 ### P3（代码优化 / 清理）
 - [x] C-1: 统一 `load_bal`/`save_bal` 到 `utils.rs`
 - [x] C-2: 统一 `require_caller` 到 `utils.rs`
 - [ ] G-6: 将 `is_validator`/`require_validator` 移到 `utils.rs`
-- [ ] M-4: 将 `u8_from_u256`/`u256_from_u8` 移到 `utils.rs`
+- [x] M-4: 将 `u8_from_u256`/`u256_from_u8` 移到 `utils.rs`
 - [x] O-5: 移除 `slot_oracle`，改用 `slot_asset_meta`
 - [ ] V-3: 完整清理 validator 退出状态
 - [ ] V-4: 清理 unbonding queue
