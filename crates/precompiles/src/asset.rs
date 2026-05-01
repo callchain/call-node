@@ -8,8 +8,6 @@
 use alloy_primitives::{address, Address};
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
-use crate::current_caller;
-
 pub const ASSET_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000201");
 
@@ -228,6 +226,53 @@ pub fn u64_to_u256(v: u64) -> alloy_primitives::U256 {
     alloy_primitives::U256::from_be_bytes::<32>(bytes)
 }
 
+// ── Asset metadata helpers ────────────────────────────────────────────
+
+/// Read a single asset metadata slot from storage.
+fn load_meta(asset_id: u64, key: &[u8]) -> Option<alloy_primitives::U256> {
+    crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, key))
+}
+
+fn load_meta_u128(asset_id: u64, key: &[u8]) -> u128 {
+    load_meta(asset_id, key).map(u256_to_u128).unwrap_or(0)
+}
+
+fn load_meta_u8(asset_id: u64, key: &[u8]) -> u8 {
+    load_meta(asset_id, key).map(|v| v.to_be_bytes::<32>()[31]).unwrap_or(0)
+}
+
+fn load_meta_address(asset_id: u64, key: &[u8]) -> Address {
+    load_meta(asset_id, key).map(u256_to_address).unwrap_or(Address::ZERO)
+}
+
+fn load_meta_string(asset_id: u64, key: &[u8]) -> String {
+    load_meta(asset_id, key).map(read_string32).unwrap_or_default()
+}
+
+/// Asset metadata loaded from storage in one shot.
+pub struct AssetMeta {
+    pub symbol: String,
+    pub name: String,
+    pub decimals: u8,
+    pub issuer: Address,
+    pub max_supply: u128,
+    pub status: u8,
+}
+
+impl AssetMeta {
+    /// Load all metadata fields for the given asset_id from storage.
+    pub fn load(asset_id: u64) -> Self {
+        Self {
+            symbol: load_meta_string(asset_id, b"symbol"),
+            name: load_meta_string(asset_id, b"name"),
+            decimals: load_meta_u8(asset_id, b"decimals"),
+            issuer: load_meta_address(asset_id, b"issuer"),
+            max_supply: load_meta_u128(asset_id, b"max_supply"),
+            status: load_meta_u8(asset_id, b"status"),
+        }
+    }
+}
+
 /// Stateful asset precompile backed by EVM storage.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AssetPrecompile;
@@ -242,12 +287,7 @@ impl AssetPrecompile {
 
     fn check_compliance(asset_id: u64, addr: &Address) -> Result<(), PrecompileError> {
         // Read compliance policy from asset storage
-        let policy_id = crate::storage::StorageCtx::sload(
-            ASSET_ADDRESS,
-            slot_asset_meta(asset_id, b"compliance"),
-        )
-        .map(u256_to_u64)
-        .unwrap_or(0);
+        let policy_id = load_meta(asset_id, b"compliance").map(u256_to_u64).unwrap_or(0);
 
         if policy_id == 0 {
             return Ok(());
@@ -300,32 +340,15 @@ impl AssetPrecompile {
         let asset_id = decode_u64(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid asset_id".into()))?;
 
-        let symbol = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"symbol"))
-            .map(read_string32)
-            .unwrap_or_default();
-        let name = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"name"))
-            .map(read_string32)
-            .unwrap_or_default();
-        let decimals = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"decimals"))
-            .map(|v| v.to_be_bytes::<32>()[31])
-            .unwrap_or(0);
-        let issuer = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"issuer"))
-            .map(u256_to_address)
-            .unwrap_or(Address::ZERO);
-        let max_supply = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"max_supply"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let status = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"status"))
-            .map(|v| v.to_be_bytes::<32>()[31])
-            .unwrap_or(0);
+        let meta = AssetMeta::load(asset_id);
 
         let mut out = [0u8; 192];
-        out[0..32].copy_from_slice(&write_string32(&symbol).to_be_bytes::<32>());
-        out[32..64].copy_from_slice(&write_string32(&name).to_be_bytes::<32>());
-        out[95] = decimals;
-        out[108..128].copy_from_slice(issuer.as_slice());
-        out[128..160].copy_from_slice(&encode_u256(max_supply));
-        out[191] = status;
+        out[0..32].copy_from_slice(&write_string32(&meta.symbol).to_be_bytes::<32>());
+        out[32..64].copy_from_slice(&write_string32(&meta.name).to_be_bytes::<32>());
+        out[95] = meta.decimals;
+        out[108..128].copy_from_slice(meta.issuer.as_slice());
+        out[128..160].copy_from_slice(&encode_u256(meta.max_supply));
+        out[191] = meta.status;
 
         let output = PrecompileOutput::new(0, out.to_vec().into());
         Ok(crate::storage::fill_precompile_output(output))
@@ -517,26 +540,18 @@ impl AssetPrecompile {
 
         let caller = Self::require_caller(msg_sender)?;
 
-        let issuer = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"issuer"))
-            .map(u256_to_address)
-            .unwrap_or(Address::ZERO);
-        if issuer != caller {
+        let meta = AssetMeta::load(asset_id);
+        if meta.issuer != caller {
             return Err(PrecompileError::Other("not asset issuer".into()));
         }
 
-        let supply_slot = slot_asset_meta(asset_id, b"supply");
-        let supply = crate::storage::StorageCtx::sload(ASSET_ADDRESS, supply_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let max_supply = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"max_supply"))
-            .map(u256_to_u128)
-            .unwrap_or(0);
+        let supply = load_meta_u128(asset_id, b"supply");
         let new_supply = supply.checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("supply overflow".into()))?;
-        if max_supply > 0 && new_supply > max_supply {
+        if meta.max_supply > 0 && new_supply > meta.max_supply {
             return Err(PrecompileError::Other("max supply exceeded".into()));
         }
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, supply_slot, u128_to_u256(new_supply));
+        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(new_supply));
 
         let to_slot = slot_balance(asset_id, to);
         let to_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, to_slot)
@@ -577,13 +592,10 @@ impl AssetPrecompile {
             crate::storage::StorageCtx::sstore(ASSET_ADDRESS, allowance_slot, u128_to_u256(allowance - amount));
         }
 
-        let supply_slot = slot_asset_meta(asset_id, b"supply");
-        let supply = crate::storage::StorageCtx::sload(ASSET_ADDRESS, supply_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
+        let supply = load_meta_u128(asset_id, b"supply");
         let new_supply = supply.checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("supply underflow".into()))?;
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, supply_slot, u128_to_u256(new_supply));
+        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(new_supply));
 
         let from_slot = slot_balance(asset_id, from);
         let from_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, from_slot)
