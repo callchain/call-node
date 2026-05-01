@@ -305,7 +305,7 @@ crates/oracle/
 | Crate | Usage |
 |---|---|
 | `call-precompiles` | `OracleManager` for EVM precompile (legacy `asset_id` compat) |
-| `call-protocol` | `OracleManager`, `OracleSubmission` for instruction execution |
+| `call-protocol` | `OracleManager`, `OracleSubmission` for precompile execution |
 | `call-consensus` | `OracleManager` for block execution, slashing, rewards |
 | `call-rpc` | `OracleSubmission` for RPC endpoint |
 | `call-node` | Full oracle lifecycle: P2P, block production, persistence |

@@ -244,7 +244,7 @@ Before mainnet deployment, the codebase must undergo a comprehensive security au
 
 **Audit scope** (priority order):
 
-1. **Protocol layer** — `execute_instruction` balance calculations, fee logic, allowance enforcement, batch transfer correctness
+1. **Protocol layer** — precompile execution balance calculations, fee logic, allowance enforcement, batch transfer correctness
 2. **Bridge security** — Signature threshold enforcement (`min_validator_signatures`), challenge period logic, deposit finalization, `revoke_pending_external_deposit`
 3. **ZK circuits** — Groth16 circuit constraints, trusted setup assumptions, nullifier uniqueness, note commitment soundness
 4. **Governance** — Proposal lifecycle, voting power calculation, timelock enforcement, emergency pause/resume safety
@@ -279,7 +279,7 @@ Establish measurable performance baselines before testnet launch. Targets must b
 
 ```bash
 # Hot path benchmarks
-cargo bench -p call-protocol --bench instruction_execute
+cargo bench -p call-precompiles --bench precompile_execute
 cargo bench -p call-consensus --bench block_production
 cargo bench -p call-crypto --bench signature_verify
 cargo bench -p call-storage --bench mdbx_read_write
@@ -292,7 +292,7 @@ cargo bench -p call-light-client --bench mpt_verify
 | Metric | Target | Measurement |
 |---|---|---|
 | Block production time | < 250ms | `criterion` median over 1000 blocks |
-| Instruction execution throughput | > 5,000 tx/s | Single-block max capacity |
+| Precompile execution throughput | > 5,000 tx/s | Single-block max capacity |
 | Signature verification (Ed25519) | > 50,000 sigs/s | Batch verify 1,000 signatures |
 | MPT proof verification | < 5ms | Single receipt proof |
 | ZK proof generation (deposit) | < 30s | `real-prover` feature enabled |
@@ -456,7 +456,7 @@ Launch a public bug bounty program before testnet goes live to incentivize white
 | Low | $500 - $2,000 | Information disclosure, configuration issues, documentation errors |
 
 **Scope**:
-- `crates/protocol/` — Instruction execution, balance logic, fee calculation
+- `crates/protocol/` — Precompile execution, balance logic, fee calculation
 - `crates/bridge/` — Deposit validation, signature threshold, challenge period
 - `crates/consensus/` — Block production, BFT rounds, fork choice
 - `crates/shielded/` — ZK circuits, nullifier tracking, note commitments
@@ -524,7 +524,7 @@ Height-activated upgrades have only been tested in simulation with identical nod
 
 2. **Schedule upgrade at known height** (e.g., height 10,000)
    - Only upgraded nodes should apply new rules after height 10,000
-   - Non-upgraded nodes should reject blocks with new instructions
+   - Non-upgraded nodes should reject blocks with new precompiles
 
 3. **Verify backward compatibility**
    - Old nodes can still sync pre-upgrade blocks

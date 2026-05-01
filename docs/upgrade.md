@@ -35,7 +35,7 @@ The Upgrade/Fork Management system (`crates/consensus/src/fork.rs`) handles prot
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │ Protocol Feature Flags                                  ││
-│  │ - ShieldedPool, AgentInstructions, BridgeOperations     ││
+│  │ - ShieldedPool, AgentPrecompiles, BridgeOperations      ││
 │  │ - SmartAccounts, ComplianceEngine, OracleIntegration    ││
 │  └─────────────────────────────────────────────────────────┘│
 │                                                              │
@@ -81,7 +81,7 @@ The node gossips scheduled upgrades via `UPGRADE_CHANNEL`. When a node produces 
 
 ### 6. Feature Flagging
 
-`ProtocolFeature` enum defines version-gated capabilities (e.g., `ShieldedPool`, `AgentInstructions`, `SmartAccounts`). Each feature has a `min_version()`. `ForkManager::is_feature_enabled()` checks if the current version satisfies the minimum. This allows protocol changes to be activated conditionally by version rather than hardcoded.
+`ProtocolFeature` enum defines version-gated capabilities (e.g., `ShieldedPool`, `AgentPrecompiles`, `SmartAccounts`). Each feature has a `min_version()`. `ForkManager::is_feature_enabled()` checks if the current version satisfies the minimum. This allows protocol changes to be activated conditionally by version rather than hardcoded.
 
 ### 7. Upgrade Readiness
 

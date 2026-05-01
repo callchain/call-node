@@ -46,8 +46,6 @@ pub enum ProtocolError {
     NonceError(String),
     #[error("compliance check failed: {0}")]
     Compliance(String),
-    #[error("invalid instruction: {0}")]
-    InvalidInstruction(String),
     #[error("gas error: {0}")]
     GasError(String),
     #[error("balance error: {0}")]

@@ -26,8 +26,8 @@ pub const MIN_TIMELOCK_BLOCKS: u64 = 100;
 pub enum ProtocolFeature {
     /// Shielded pool operations (deposit, transfer, withdraw)
     ShieldedPool,
-    /// Agent instructions (AgentPay, AgentCall, AgentBridgeDeposit)
-    AgentInstructions,
+    /// Agent precompile operations (AgentPay, AgentCall, AgentBridgeDeposit)
+    AgentPrecompiles,
     /// Bridge operations (external deposits/withdrawals)
     BridgeOperations,
     /// Smart accounts (multi-sig, social recovery, session keys)
@@ -42,8 +42,6 @@ pub enum ProtocolFeature {
     OnChainGovernance,
     /// Per-transaction gas sponsorship
     GasSponsorship,
-    /// Instruction batching with multi-instruction transactions
-    InstructionBatching,
 }
 
 impl ProtocolFeature {
@@ -53,10 +51,9 @@ impl ProtocolFeature {
         match self {
             // Core features available from genesis (1.0.0)
             ProtocolFeature::BridgeOperations => ProtocolVersion::new(1, 0, 0),
-            ProtocolFeature::InstructionBatching => ProtocolVersion::new(1, 0, 0),
             // Features introduced in 1.1.0
             ProtocolFeature::ShieldedPool => ProtocolVersion::new(1, 1, 0),
-            ProtocolFeature::AgentInstructions => ProtocolVersion::new(1, 1, 0),
+            ProtocolFeature::AgentPrecompiles => ProtocolVersion::new(1, 1, 0),
             ProtocolFeature::ComplianceEngine => ProtocolVersion::new(1, 1, 0),
             ProtocolFeature::GasSponsorship => ProtocolVersion::new(1, 1, 0),
             // Features introduced in 1.2.0
@@ -713,11 +710,10 @@ mod tests {
 
         // Core features (1.0.0) are always enabled
         assert!(fm.is_feature_enabled(ProtocolFeature::BridgeOperations));
-        assert!(fm.is_feature_enabled(ProtocolFeature::InstructionBatching));
 
         // Features from 1.1.0 are disabled at 1.0.0
         assert!(!fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
-        assert!(!fm.is_feature_enabled(ProtocolFeature::AgentInstructions));
+        assert!(!fm.is_feature_enabled(ProtocolFeature::AgentPrecompiles));
         assert!(!fm.is_feature_enabled(ProtocolFeature::ComplianceEngine));
         assert!(!fm.is_feature_enabled(ProtocolFeature::GasSponsorship));
 
@@ -747,7 +743,7 @@ mod tests {
 
         // After upgrade: shielded pool enabled
         assert!(fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
-        assert!(fm.is_feature_enabled(ProtocolFeature::AgentInstructions));
+        assert!(fm.is_feature_enabled(ProtocolFeature::AgentPrecompiles));
         assert!(fm.is_feature_enabled(ProtocolFeature::ComplianceEngine));
 
         // But 1.2.0 features still disabled
@@ -780,7 +776,7 @@ mod tests {
         // But patch bumps within same minor should keep features enabled
         let fm = ForkManager::new(ProtocolVersion::new(1, 1, 3), 1);
         assert!(fm.is_feature_enabled(ProtocolFeature::ShieldedPool));
-        assert!(fm.is_feature_enabled(ProtocolFeature::AgentInstructions));
+        assert!(fm.is_feature_enabled(ProtocolFeature::AgentPrecompiles));
     }
 
     #[test]

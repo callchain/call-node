@@ -282,7 +282,7 @@ meaning the validator stops participating in consensus the moment unstake is acc
 
 ### 4.5 Delegation Exit Linkage
 
-> **Note**: Delegation is not yet exposed as a protocol instruction, but the `delegate()` method exists in `ValidatorStateManager`.
+> **Note**: Delegation is not yet exposed as a precompile, but the `delegate()` method exists in `ValidatorStateManager`.
 > This section defines the intended behavior once delegation is enabled.
 
 | Scenario | Behavior |
@@ -379,8 +379,8 @@ Ok(SimplexConsensus::restore_from_persisted(state, validators.clone()))
 
 ### 5.5 `crates/consensus/src/exec/validator.rs`
 
-- `Instruction::ValidatorUnstake`: tx result may now include `queue_position` when queued.
-- `Instruction::ValidatorClaimUnbonded`: no changes needed.
+- `ValidatorUnstake` precompile: tx result may now include `queue_position` when queued.
+- `ValidatorClaimUnbonded` precompile: no changes needed.
 
 ---
 

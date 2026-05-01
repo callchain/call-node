@@ -10,7 +10,7 @@
 Provide a layered, asset-specific compliance framework that:
 
 1. Enforces **per-asset compliance policies** — each registered asset declares its own policy (none, blacklist, KYC, whitelist, or custom).
-2. Checks **both sender and recipient** on every value-moving instruction.
+2. Checks **both sender and recipient** on every value-moving precompile call.
 3. Supports **issuer-managed address compliance** — asset issuers can flag individual addresses as Restricted, UnderReview, etc.
 4. Allows **runtime custom policy handlers** for integrations (e.g. on-chain KYC oracle, geographic restriction).
 5. Survives node restarts via **database persistence** of all compliance state.
@@ -23,7 +23,7 @@ Provide a layered, asset-specific compliance framework that:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     Compliance Check Flow                            │
 │                                                                     │
-│  AssetRegistry        ComplianceEngine         InstructionExec      │
+│  AssetRegistry        ComplianceEngine         PrecompileExec      │
 │  ┌────────────┐       ┌──────────────┐        ┌────────────────┐   │
 │  │ asset_id   │──────▶│ policy_id    │        │ Transfer       │   │
 │  │ compliance │       │ (0–4)        │        │ BatchTransfer  │   │
@@ -70,7 +70,7 @@ The Compliance precompile (`0x205`) `updateCompliance(uint64,address,uint8)` all
 
 The **Compliance precompile at `0x205`** provides the same functionality via standard EVM transactions:
 
-| Instruction | Precompile Function | Gas |
+| Operation | Precompile Function | Gas |
 |---|---|---|
 | `UpdateCompliance` | `updateCompliance(uint64,address,uint8)` | 10,000 |
 | — | `checkCompliance(uint64,address)` (read-only) | 1,000 |
@@ -93,23 +93,23 @@ pub struct ComplianceEngine {
 
 **Persistence**: `ComplianceEngineSnapshot` (derived `Serialize`/`Deserialize`) captures all sets and address states. Custom handlers are runtime-only `Box<dyn>` trait objects and are intentionally excluded — they must be re-registered at node boot. The snapshot is stored as a JSON blob under key `[0]` in the `CallComplianceState` MDBX table.
 
-**Atomic rollback**: `ComplianceEngine` implements `Clone`. During instruction execution, the engine is cloned before execution; if any instruction fails, the clone replaces the live instance, rolling back all compliance-side mutations.
+**Atomic rollback**: `ComplianceEngine` implements `Clone`. During precompile execution, the engine is cloned before execution; if any precompile call fails, the clone replaces the live instance, rolling back all compliance-side mutations.
 
-### Instruction-Level Enforcement
+### Precompile-Level Enforcement
 
-`execute_protocol_instructions` checks compliance on every value-moving instruction:
+The precompile dispatcher checks compliance on every value-moving precompile call:
 
-| Instruction | Compliance Check |
+| Precompile Call | Compliance Check |
 |---|---|
-| `Transfer` | sender + recipient |
-| `BatchTransfer` | sender + every recipient |
-| `TransferFrom` | sender (spender) + from + to |
-| `Mint` | recipient |
-| `Burn` | from |
-| `BridgeDeposit` | recipient |
-| `ShieldedDeposit` / `ShieldedWithdraw` | target address |
+| `transfer` | sender + recipient |
+| `batchTransfer` | sender + every recipient |
+| `transferFrom` | sender (spender) + from + to |
+| `mint` | recipient |
+| `burn` | from |
+| `switchToEvm` | recipient |
+| `shieldedDeposit` / `shieldedWithdraw` | target address |
 
-Non-value instructions (`Approve`, `OracleSubmit`, `Governance*`, `Agent*`, `UpdateCompliance` itself) do not trigger compliance checks.
+Non-value precompile calls (`approve`, `submitPrice`, `governance*`, `agent*`, `updateCompliance` itself) do not trigger compliance checks.
 
 ### RPC Surface
 
@@ -183,7 +183,7 @@ There is no direct RPC mutation endpoint for compliance state. All changes flow 
 | Address status tracking | Ready | None |
 | Custom handlers | Ready | Requires re-registration after restart |
 | Persistence | Ready | None |
-| Instruction integration | Ready | None |
+| Precompile integration | Ready | None |
 
 ---
 

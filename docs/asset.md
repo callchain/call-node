@@ -42,7 +42,7 @@ Using an EVM transaction to the Asset precompile (`0x201`) solves all of these b
 
 ### RPC Interface
 
-`call_submit` with `type: "RegisterAsset"` is the user-facing convenience RPC:
+`call_submit` with `type: "RegisterAsset"` is the user-facing convenience RPC (historical reference — the `call_submit` endpoint has been removed; use `eth_sendRawTransaction` with the Asset precompile directly):
 
 ```json
 POST /{
@@ -68,7 +68,7 @@ POST /{
 
 The RPC handler:
 1. Parses parameters and validates the EIP-191 signature.
-2. Maps the instruction to an EVM transaction targeting `0x201` with the `register` selector.
+2. Maps the precompile call to an EVM transaction targeting `0x201` with the `register` selector.
 3. Submits the EVM transaction via `eth_sendRawTransaction` → mempool.
 4. Returns the pending `txHash`.
 
@@ -123,10 +123,10 @@ sum(protocol balance deductions via BridgeToEvm)
   == evm_wrapped_token.totalSupply()
 ```
 
-This invariant is maintained by the bridge execution logic in `execute_bridge_instruction`:
+This invariant is maintained by the bridge precompile (`0x207`):
 
-- `BridgeToEvm`: Deduct protocol balance, then call `bridgeMint` on the EVM contract (via the bridge address).
-- `BridgeToProtocol`: Call `bridgeBurn` on the EVM contract (burning the sender's EVM balance), then credit protocol balance.
+- `switchToEvm`: Deduct protocol balance, then call `bridgeMint` on the EVM contract (via the bridge address).
+- `switchToProtocol`: Call `bridgeBurn` on the EVM contract (burning the sender's EVM balance), then credit protocol balance.
 
 ## EVM Wrapped Token Reference Template
 
@@ -265,15 +265,19 @@ Governance can also pause the entire chain via `GovernanceEmergencyPause`.
 
 ### Replay Layer (Correctness Fallback)
 
-If the DB snapshot is empty or missing (e.g., after unclean shutdown, or on a new node), `replay_asset_registry` scans `data_dir/blocks/*.json` in height order and re-executes every `Instruction::RegisterAsset` to rebuild the registry deterministically:
+If the DB snapshot is empty or missing (e.g., after unclean shutdown, or on a new node), `replay_asset_registry` scans `data_dir/blocks/*.json` in height order and re-executes every `register` precompile call to rebuild the registry deterministically:
 
 ```rust
 for height in 1..=latest {
     let block = load_block(data_dir, height)?;
-    for tx in &block.protocol_txs {
-        for instr in &tx.instructions {
-            if let Instruction::RegisterAsset { symbol, name, decimals, max_supply } = instr {
-                registry.register_asset(symbol, name, decimals, tx.sender, 0, height, max_supply)?;
+    for tx in &block.transactions {
+        if let Some(to) = tx.to {
+            if to == ASSET_PRECOMPILE {
+                if let Ok((selector, args)) = decode_asset_call(&tx.data) {
+                    if selector == REGISTER_SELECTOR {
+                        registry.register_asset(args.symbol, args.name, args.decimals, tx.from, 0, height, args.max_supply)?;
+                    }
+                }
             }
         }
     }
@@ -290,15 +294,13 @@ This guarantees that every node reconstructs the exact same registry from canoni
 
 Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`. This is an intentional security design:
 
-- **No one can issuer-mint**: `Address::ZERO` has no corresponding private key, so `Instruction::Mint`, `Instruction::Burn`, and `Instruction::EvmIssuerMint` are all impossible for genesis assets.
-- **Supply changes only via system path**: Block rewards, validator incentives, and other protocol-level issuance go through `SystemTx` in `Block::execute`, not through user-signed instructions.
+- **No one can issuer-mint**: `Address::ZERO` has no corresponding private key, so `mint`, `burn`, and `issuerMint` precompile calls are all impossible for genesis assets.
+- **Supply changes only via system path**: Block rewards, validator incentives, and other protocol-level issuance go through `SystemTx` in `Block::execute`, not through user-signed precompile calls.
 - **Protocol-controlled monetary policy**: The chain itself controls how much CALL enters circulation.
 
 After genesis block execution, `protocol_supply` for CALL must be initialized to the total distributed amount. Subsequent block rewards update it via `account.mint` + `registry.mint_supply` system paths.
 
 Genesis assets should use `max_supply = 0` (uncapped) because protocol-level issuance has its own economic rules.
-
-> **Historical Note**: The chain previously supported a native `ProtocolTransaction` format with `Instruction` variants (e.g., `Instruction::RegisterAsset`, `Instruction::EvmIssuerMint`). These have been replaced by precompile calls. See [precompile.md](precompile.md) for the current ABI.
 
 ## Asset System Roadmap
 
@@ -308,14 +310,14 @@ Genesis assets should use `max_supply = 0` (uncapped) because protocol-level iss
 |------|--------|
 | Supply redesign (`protocol_supply`, `evm_supply`, `max_supply`, `all_supply()`) | ✅ Done |
 | Supply cap enforcement in `Block::execute` | ✅ Done |
-| EVM issuer mint (`Instruction::EvmIssuerMint` + `WrappedToken.issuerMint`) | ✅ Done |
+| EVM issuer mint (`issuerMint` precompile + `WrappedToken.issuerMint`) | ✅ Done |
 | Frozen/Delisted asset enforcement in transaction execution | ✅ Done |
 | AssetRegistry serde + DB persistence | ✅ Done |
 | AssetRegistry block replay reconstruction on startup | ✅ Done |
-| `RegisterEvmBridge` instruction removal | ✅ Done |
+| `RegisterEvmBridge` precompile removal | ✅ Done |
 | `WithdrawFromEvm` → `BridgeToProtocol` rename | ✅ Done |
 | `call_assetInfo` extended with supply fields | ✅ Done |
-| Unified write endpoint (`call_submit`) for all state mutations | ✅ Done |
+| Unified write via `eth_sendRawTransaction` to precompiles | ✅ Done |
 | Fixed bridge address for `bridgeMint` | ✅ Done |
 
 ### Remaining
@@ -329,7 +331,7 @@ Genesis assets should use `max_supply = 0` (uncapped) because protocol-level iss
 
 All asset operations are also available via the **Asset precompile (`0x201`)**:
 
-| Instruction | Precompile Function | Address |
+| Operation | Precompile Function | Address |
 |---|---|---|
 | `Transfer` | `transfer(uint64,address,uint128)` | `0x201` |
 | `BatchTransfer` | `batchTransfer(uint64,address[],uint128[])` | `0x201` |
@@ -344,6 +346,6 @@ See [precompile.md](precompile.md) for the full ABI.
 ## Related Documents
 
 - [internal_bridge.md](internal_bridge.md) — BridgeToEvm and BridgeToProtocol execution details
-- [protocol.md](protocol.md) — Instruction execution and atomicity guarantees
+- [protocol.md](protocol.md) — Precompile execution and atomicity guarantees
 - [transaction.md](transaction.md) — Transaction format, fees, and nonce rules
 - [rpc.md](rpc.md) — RPC method reference

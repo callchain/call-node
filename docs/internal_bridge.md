@@ -29,7 +29,7 @@ Internal bridge operations are **atomic** and execute within a single block. If 
 │         │                           │                       │
 │  ┌──────┴───────────────────────────┴──────┐               │
 │  │ Block::execute (Step 3)                  │               │
-│  │  execute_bridge_instruction()            │               │
+│  │  execute_bridge_precompile()             │               │
 │  │  - snapshot/rollback atomicity           │               │
 │  └──────────────────────────────────────────┘               │
 │                                                             │
@@ -72,7 +72,7 @@ Bridge operations update `Asset.evm_supply` in `AssetRegistry`:
 
 The **Switch precompile at `0x207`** provides the same bridging functionality via standard EVM transactions:
 
-| Instruction | Precompile Function | Gas |
+| Operation | Precompile Function | Gas |
 |---|---|---|
 | `BridgeToEvm` | `switchToEvm(uint64,address,uint128)` | 30,000 |
 | `BridgeToProtocol` | `switchToProtocol(uint64,address,uint128)` | 30,000 |
@@ -119,7 +119,7 @@ These calls are executed by revm during `Block::execute`. The Switch precompile 
 
 ## Inline Execution in Block::execute
 
-### Bridge Instruction Detection
+### Bridge Precompile Detection
 
 During block execution, bridge-related EVM calls to precompiles (`0x103`, `0x207`) are handled by the respective precompile functions. The Switch precompile (`0x207`) handles `switchToEvm` / `switchToProtocol`, while the Bridge precompile (`0x103`) handles `externalBridgeDeposit` / `externalBridgeWithdraw` / `challengeBridgeDeposit`.
 
@@ -173,7 +173,7 @@ let evm_snapshot = evm_state.clone();
 let bridge_snapshot = bridge_state.clone();
 ```
 
-If any bridge instruction fails, all three states are restored:
+If any bridge precompile call fails, all three states are restored:
 
 ```rust
 *account = balance_snapshot;
@@ -267,7 +267,7 @@ def sign_bridge_to_protocol(
 ```
 
 Both helpers:
-1. Build the bridge instruction
+1. Build an EVM transaction calling the Switch precompile (`0x207`)
 2. Compute `tx_hash` via `compute_tx_hash()` (matching Rust canonical hash)
 3. Sign with `sign_raw()` (raw secp256k1, **not** EIP-191)
 4. Return a dict ready for the RPC client
@@ -306,11 +306,11 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 |------|------|
 | `crates/bridge/src/deposit.rs` | `execute_deposit` — Protocol → EVM (BridgeOp::DepositToEvm) |
 | `crates/bridge/src/withdraw.rs` | `execute_withdraw` — EVM → Protocol (BridgeOp::WithdrawToProtocol) |
-| `crates/consensus/src/block.rs` | `execute_bridge_instruction` — inline execution for user BridgeToEvm / BridgeToProtocol instructions |
-| `crates/protocol/src/instructions.rs` | `Instruction::BridgeToEvm` and `Instruction::BridgeToProtocol` enum variants |
-| `crates/protocol/src/transaction.rs` | Gas cost assignment (25,000) for bridge instructions |
+| `crates/consensus/src/block.rs` | `execute_bridge_precompile` — inline execution for user bridge precompile calls |
+| `crates/precompiles/src/bridge.rs` | Bridge precompile functions (`externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit`) |
+| `crates/precompiles/src/switch.rs` | Switch precompile functions (`switchToEvm`, `switchToProtocol`) |
 | `crates/rpc/src/callchain.rs` | `call_bridgeToEvm` and `call_bridgeToProtocol` RPC handlers |
-| `tests/signer.py` | Python signing helpers for bridge instructions |
+| `tests/signer.py` | Python signing helpers for EVM bridge transactions |
 | `tests/rpc_client.py` | Python RPC client methods for bridge endpoints |
 
 ---
@@ -326,5 +326,5 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 | Rate limiting | Ready | Per-tx and daily limits enforced; auto-reset per `blocks_per_day` |
 | Bridge pause | Ready | Per-asset pause via `BridgeStateManager` |
 | User-facing RPC | Ready | `call_bridgeToEvm` and `call_bridgeToProtocol` with signature verification and mempool submission |
-| EVM issuer mint | Ready | `Instruction::EvmIssuerMint` + `WrappedToken.issuerMint`; cap enforced at protocol layer |
+| EVM issuer mint | Ready | `evmIssuerMint` precompile + `WrappedToken.issuerMint`; cap enforced at protocol layer |
 | E2E test helpers | Ready | Python signing and RPC wrappers in `tests/signer.py` and `tests/rpc_client.py` |

@@ -31,7 +31,7 @@ Provide a secure, deterministic, and economically sound transaction execution en
 │         │                │                │              │          │
 │         ▼                ▼                ▼              ▼          │
 │    verify_signature()  fee/gas/nonce   priority      atomic        │
-│                        dedup check     ordering    instruction     │
+│                        dedup check     ordering    EVM tx          │
 │                                              execution+rollback    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -202,7 +202,7 @@ pub struct ProtocolReceipt {
     pub fee_currency: FeeCurrency,
     pub fee_amount: u128,
     pub block_number: u64,
-    pub instruction_results: Vec<InstructionExecResult>, // per-instruction detail (future)
+    pub precompile_events: Vec<PrecompileEvent>, // per-precompile detail (future)
     pub logs: Vec<LogEntry>,             // EVM logs + agent events (future)
     pub memos: Vec<MemoEntry>,
     pub state_changes: Vec<StateChange>,
@@ -241,7 +241,7 @@ Policy enforcement via `ComplianceEngine` with five policy types:
 |---|---|
 | MultiSig | M-of-N with 2–10 signers, configurable threshold, versioned updates |
 | Social Recovery | 24–72h delay, 2+ guardians, guardian approval flow |
-| Session Keys | Per-key permissions (instructions, targets, assets, per-tx/daily limits), expiry |
+| Session Keys | Per-key permissions (precompiles, targets, assets, per-tx/daily limits), expiry |
 
 ---
 
@@ -257,7 +257,7 @@ All components are production-ready with no open gaps.
 | **Base fee dynamics** | Ready | EIP-1559-style adjustment with min/max bounds |
 | **Fee allocation** | Ready | CALL burn + validator reward; stablecoin treasury + validator reward |
 | **Gas sponsors** | Ready | All three modes wired; `PoolSponsor`/`PerTxSponsor` rejected at mempool |
-| **Instruction execution** | Ready | All variants have execution arms; governance/bridge/oracle/shielded/validator wired |
+| **Precompile execution** | Ready | All variants have execution arms; governance/bridge/oracle/shielded/validator wired |
 | **Atomic rollback** | Ready | BalanceState, ComplianceEngine, ShieldedState, EvmState, BridgeState, ValidatorState all snapshotted and restored |
 | **Compliance** | Ready | Dual-party checks, custom handlers, per-address status, serializable snapshots |
 | **Smart accounts** | Ready | MultiSig, social recovery, session keys with permissions and expiry |
@@ -271,15 +271,14 @@ All components are production-ready with no open gaps.
 | File | Role |
 |------|------|
 | `crates/protocol/src/transaction.rs` | `EvmTransaction` handling, gas calculation, fee model, mempool admission |
-| `crates/protocol/src/instructions/types.rs` | `Instruction` enum, all instruction variants |
-| `crates/protocol/src/instructions/exec.rs` | `execute_protocol_instructions()`, per-instruction execution logic |
-| `crates/protocol/src/tx/gas.rs` | Per-instruction gas cost table |
-| `crates/protocol/src/receipts.rs` | `ProtocolReceipt`, `InstructionExecResult`, `LogEntry`, `MemoEntry`, `StateChange` |
+| `crates/precompiles/src/lib.rs` | Precompile registry and dispatch |
+| `crates/precompiles/src/gas.rs` | Per-precompile gas cost table |
+| `crates/protocol/src/receipts.rs` | `ProtocolReceipt`, `PrecompileEvent`, `LogEntry`, `MemoEntry`, `StateChange` |
 | `crates/protocol/src/sponsor.rs` | `SponsorRegistry`, `GasSponsorAuth`, `GasSponsorPool`, daily usage tracking |
 | `crates/protocol/src/compliance.rs` | `ComplianceEngine`, `CompliancePolicy`, `CustomComplianceHandler`, snapshots |
 | `crates/protocol/src/smart_accounts.rs` | `SmartAccountRegistry`, MultiSig, social recovery, session keys |
 | `crates/consensus/src/block.rs` | `Block`, `BlockHeader`, `BlockExecutionResult`, `TransactionResult`, `compute_receipt_root`, `Block::execute()` |
-| `crates/consensus/src/exec/validator.rs` | `execute_validator_instruction()` — inline validator stake/unstake/claim execution |
+| `crates/consensus/src/exec/validator.rs` | `execute_validator_precompile()` — inline validator stake/unstake/claim execution |
 | `crates/transaction-pool/src/lib.rs` | `Mempool`, multi-pool management, admission, selection |
 | `crates/transaction-pool/src/pool.rs` | `MempoolEntry`, `PriorityPool`, capacity limits |
 | `crates/transaction-pool/src/priority.rs` | `PoolKind`, `PoolLimits`, `protocol_priority_score()` |
@@ -291,7 +290,7 @@ All components are production-ready with no open gaps.
 
 ## Test Status
 
-- `cargo test -p call-protocol` — unit tests cover instruction execution, rollback, memo limits, mint/burn authorization, gas calculation, base fee dynamics, fee deduction (all sponsor modes), mempool admission, signature verification (zero/ones/wrong-key/malleation/replay/insufficient-multisig/session-key mismatch), serde round-trips
+- `cargo test -p call-protocol` — unit tests cover precompile execution, rollback, memo limits, mint/burn authorization, gas calculation, base fee dynamics, fee deduction (all sponsor modes), mempool admission, signature verification (zero/ones/wrong-key/malleation/replay/insufficient-multisig/session-key mismatch), serde round-trips
 - `cargo test -p call-transaction-pool` — unit tests cover mempool insert/duplicate/fee/gas/address-limit/capacity/eviction/expiry/confirm/stats, priority scoring, priority pool operations
-- `cargo test -p call-consensus` — unit tests cover block execution, `TransactionResult` generation, receipt root computation, validator instruction execution, snapshot rollback
+- `cargo test -p call-consensus` — unit tests cover block execution, `TransactionResult` generation, receipt root computation, validator precompile execution, snapshot rollback
 - Missing: ZK shielded transfer execution tests (require `real-prover` feature), bridge challenge execution tests, smart account social recovery end-to-end tests

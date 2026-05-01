@@ -1,7 +1,6 @@
 //! Callchain extension RPC endpoints (per spec §11.2)
 //!
-//! Architecture: all state-mutating operations go through a single `call_submit`
-//! endpoint which accepts a ProtocolTransaction (one or more Instructions).
+//! Architecture: all state-mutating operations go through EVM precompiles.
 //! Read-only endpoints remain as individual `call_*` methods.
 
 use crate::handlers::state::RpcState;

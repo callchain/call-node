@@ -534,8 +534,6 @@ fn keccak256_hash(data: &[u8]) -> [u8; 32] {
 pub enum SecurityError {
     #[error("transaction too large: {size} > {max}")]
     TxTooLarge { size: usize, max: usize },
-    #[error("too many instructions: {count} > {max}")]
-    TooManyInstructions { count: usize, max: usize },
     #[error("batch transfer too large: {count} > {max}")]
     BatchTooLarge { count: usize, max: usize },
     #[error("too many txs in block: {count} > {max}")]

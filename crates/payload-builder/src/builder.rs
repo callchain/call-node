@@ -24,8 +24,6 @@ pub enum BuilderError {
     BlockLimitExceeded(String),
     #[error("transaction too large: {size} > {max}")]
     TransactionTooLarge { size: usize, max: usize },
-    #[error("too many instructions: {count} > {max}")]
-    TooManyInstructions { count: usize, max: usize },
     #[error("too many shielded transactions: {count} > {max}")]
     TooManyShielded { count: usize, max: usize },
     #[error("state root mismatch: expected {expected}, got {actual}")]

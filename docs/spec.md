@@ -481,7 +481,7 @@ fn protocol_transfer_handler(input: &[u8], gas_limit: u64) -> PrecompileResult {
 
 ### 3.7 EVM Gas Accounting for Precompile Calls
 
-Protocol operations consume EVM gas according to standard Ethereum accounting. Each precompile call is an independent EVM call frame with its own gas limit and cost. There is no multi-instruction discount; gas is charged per call based on the precompile's fixed gas schedule.
+Protocol operations consume EVM gas according to standard Ethereum accounting. Each precompile call is an independent EVM call frame with its own gas limit and cost. There is no multi-precompile discount; gas is charged per call based on the precompile's fixed gas schedule.
 
 **Precompile Gas Schedule:**
 
@@ -959,8 +959,8 @@ struct SessionKeyConfig {
 
 /// Session Key permissions
 struct SessionPermissions {
-    /// Allowed instruction types (empty = all types)
-    allowed_instructions: Vec<InstructionType>,
+    /// Allowed precompile addresses (empty = all addresses)
+    allowed_precompiles: Vec<Address>,
     /// Maximum amount per transaction (0 = unlimited)
     max_per_tx: u128,
     /// Daily cumulative amount limit (0 = unlimited)
@@ -1421,7 +1421,7 @@ Callchain validator operations:
 
 ```
 User operates on Callchain:
-  1. Initiates ExternalBridgeWithdraw instruction
+  1. Initiates ExternalBridgeWithdraw precompile call
   2. Callchain burns corresponding asset
   3. Withdrawal request added to pending queue
 
@@ -2483,11 +2483,11 @@ CALL is Callchain's native token, serving the triple role of Gas, staking, and g
 
 ### 12.2 Gas Payment (EIP-1559 Dynamic Fee)
 
-All protocol-layer transactions pay Gas in CALL. Uses an **EIP-1559-like dynamic fee**: each instruction has a fixed gas unit, and the network base rate adjusts automatically each block, rising during congestion and falling during idle periods.
+All protocol-layer transactions pay Gas in CALL. Uses an **EIP-1559-like dynamic fee**: each precompile call has a fixed gas cost, and the network base rate adjusts automatically each block, rising during congestion and falling during idle periods.
 
-#### 12.2.1 Instruction Gas Unit Table
+#### 12.2.1 Precompile Gas Cost Table
 
-| Instruction Type | Gas Unit | Description |
+| Precompile Operation | Gas Cost | Description |
 |----------|---------|------|
 | Transfer | 10,000 gas | Standard transfer |
 | Transfer (with Memo) | 10,000 + memo_bytes × 1 gas | Transfer with memo |
@@ -2497,7 +2497,7 @@ All protocol-layer transactions pay Gas in CALL. Uses an **EIP-1559-like dynamic
 | BridgeDeposit | 10,000 gas | Internal bridge deposit |
 | ShieldedDeposit / Withdraw | 20,000 gas | Includes ZK proof verification |
 | ShieldedTransfer | 50,000 gas | Includes ZK proof verification |
-| Agent instructions | Above × 0.5 | Agent exclusive discount |
+| Agent precompiles | Above × 0.5 | Agent exclusive discount |
 | ExternalBridgeDeposit | 30,000 gas | External bridge (includes signature verification) |
 
 #### 12.2.2 Fee Calculation Formula
@@ -2507,15 +2507,8 @@ Total fee = base_fee × total gas units + priority_fee
 
 Where:
   base_fee: dynamically adjusted base rate per block (wei/gas unit)
-  total_gas = first instruction gas + (N-1) × subsequent instruction gas × marginal discount coefficient
+  total_gas: sum of gas consumed by all precompile calls in the transaction
   priority_fee: user-selected priority tip (all goes to validators)
-```
-
-**Marginal Discount Coefficient:**
-```
-1st instruction: 1.0 × gas (full price)
-2nd-10th instructions: 0.5 × gas (50% discount)
-11th+ instructions: 0.25 × gas (75% discount)
 ```
 
 #### 12.2.3 Base Fee Dynamic Adjustment
@@ -2993,7 +2986,7 @@ struct Proposal {
 enum ProposalType {
     /// Technical parameter changes (gas price, block size, validator count, etc.)
     ParameterChange { param_id: u64, new_value: Vec<u8> },
-    /// Protocol upgrade (new features, instruction types, ZK circuits, etc.)
+    /// Protocol upgrade (new features, precompile operations, ZK circuits, etc.)
     ProtocolUpgrade { activation_block: u64, changelog: String },
     /// Ecosystem fund allocation (community project funding, airdrops, etc.)
     TreasurySpend { recipient: Address, amount: u128, asset_id: AssetId },
@@ -3161,8 +3154,8 @@ struct BlockLimits {
     /// Shielded transaction cap (ZK proof verification is costly)
     max_shielded_per_block: u32,     // default 50
 
-    /// Maximum instructions per transaction
-    max_instructions_per_tx: u32,    // default 1,000
+    /// Maximum precompile calls per transaction
+    max_precompile_calls_per_tx: u32,    // default 1,000
 
     /// Maximum transaction size in bytes
     max_tx_size: u32,                // default 256 KB
@@ -3540,7 +3533,7 @@ apply_block(state, block) -> Result<State> {
 - Or protocol-layer bridge request has been recorded (DepositToEvm)
 - Asset exists and bridge pool balance is sufficient
 
-**Shielded instruction validation:**
+**Shielded precompile validation:**
 - ZK proof verification passes (Groth16/Halo2)
 - All nullifiers unspent (anti-double-spend)
 - Merkle Tree root matches (input Notes actually exist)

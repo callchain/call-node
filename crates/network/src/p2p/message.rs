@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 /// Note: enum uses serde for serialization; RLP derives apply to inner struct types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
-    /// Transaction propagation (ProtocolTransaction or EvmTx)
+    /// Transaction propagation (EvmTx)
     Transaction(TransactionMessage),
     /// Block announcement
     BlockAnnouncement(BlockAnnouncement),

@@ -53,7 +53,7 @@ This document tracks the gap between the current codebase and production mainnet
 | 27 | **No CORS configuration tests** | `crates/rpc` | Default jsonrpsee CORS policy untested. |
 | 28 | **No mempool eviction under memory pressure tests** | `crates/transaction-pool` | `ReplayProtector` evicts 25% when over limit but no test verifies correctness during eviction. |
 | 29 | **No P2P ban enforcement tests** | `crates/network` | `NetworkLimits` defines ban duration but no test verifies peer banning works in practice. |
-| 30 | **No property-based or fuzz testing** | Entire codebase | No `proptest`, `quickcheck`, or `cargo-fuzz` for transaction RLP decoding, MPT proof parsing, instruction deserialization. |
+| 30 | **No property-based or fuzz testing** | Entire codebase | No `proptest`, `quickcheck`, or `cargo-fuzz` for transaction RLP decoding, MPT proof parsing, precompile call deserialization. |
 | 31 | **No benchmark suite** | Entire codebase | No `criterion.rs` benchmarks for hot paths (MPT verification, proof generation, block production). |
 | 32 | **No testnet environment** | Infrastructure | E2E tests run in-memory. No long-running testnet for soak testing or heterogeneous fork upgrade testing. |
 

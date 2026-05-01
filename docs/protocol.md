@@ -6,8 +6,6 @@ The Protocol Payment Layer (`crates/protocol`) is Callchain's native state manag
 
 All user transactions are standard EVM transactions (`EvmTransaction`). Protocol operations are invoked by calling precompile addresses (`0x101`–`0x209`) within the EVM execution environment. This gives MetaMask, Solidity contracts, and all standard Ethereum tooling native access to protocol features without a separate transaction format.
 
-> **Historical Note**: The chain previously supported a native `ProtocolTransaction` format with an `Instruction` enum. This has been removed in favor of a pure precompile architecture. See [precompile.md](precompile.md) for the full precompile reference.
-
 ---
 
 ## Architecture
@@ -72,7 +70,7 @@ All transactions are standard EVM transactions (`EvmTransaction`, RLP-encoded). 
 
 ### 3. Gas & Fee Model
 
-**Gas unit table (per instruction):**
+**Gas cost table (per precompile):**
 
 | Precompile | Function | Base Gas |
 |------------|----------|----------|
@@ -152,15 +150,15 @@ All protocol components are production-ready. No remaining gaps.
 
 | Component | Status |
 |-----------|--------|
-| Instruction execution | 🟢 Ready | Atomic rollback covers BalanceState + ComplianceEngine + ShieldedState |
+| Precompile execution | 🟢 Ready | Atomic rollback covers BalanceState + ComplianceEngine + ShieldedState |
 | Balance management | 🟢 Ready | Checked arithmetic, no known gaps |
 | Asset registry | 🟢 Ready | `registered_at` set by caller, total supply tracked on mint |
 | Gas/fee model | 🟢 Ready | PoolSponsor implemented, all sponsor variants wired, priority fee enforced |
 | Compliance engine | 🟢 Ready | Recipient checks, custom handlers, persistence all wired |
-| Transaction validation | 🟢 Ready | Signature verification, sequential nonces, instruction limits |
+| Transaction validation | 🟢 Ready | Signature verification, sequential nonces, precompile limits |
 
 ---
 
 ## Test Status
 
-- `cargo test -p call-protocol` — ~105 unit tests covering gas calculation, fee dynamics (including priority fee), instruction execution, balance operations, asset registry, compliance policies, memo validation, atomic rollback, signature verification (positive + negative), proptest roundtrip encode/decode
+- `cargo test -p call-protocol` — ~105 unit tests covering gas calculation, fee dynamics (including priority fee), precompile execution, balance operations, asset registry, compliance policies, memo validation, atomic rollback, signature verification (positive + negative), proptest roundtrip encode/decode

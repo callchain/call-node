@@ -1181,14 +1181,7 @@ User (shielded)                     Shielded Pool              User (transparent
 **Public**: Amount withdrawn, target transparent address
 **Hidden**: Who withdrew (the note consumer is anonymous)
 
-### 11.4 Instruction Types (from spec)
-
-From `call-primitives` `InstructionType` enum:
-- `ShieldedTransfer` = 12
-- `ShieldedWithdraw` = 13
-- `ShieldedDeposit` = 14
-
-### 11.5 Privacy Analysis of Flow Transitions
+### 11.4 Privacy Analysis of Flow Transitions
 
 | Transition | What's Visible | What's Hidden |
 |------------|---------------|---------------|

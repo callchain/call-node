@@ -18,7 +18,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | Crate | Test Count | Coverage Areas |
 |-------|-----------|----------------|
 | `call-consensus` | ~168 | Block production, BFT rounds, fork choice, validator set, proposer selection, upgrade scheduling, emergency rollback, block cache, digest |
-| `call-protocol` | ~280 | Balances, transfers, batch transfers, fees, allowances, receipts, memos, asset registry, issuer, instructions, transactions, compliance, sponsor, smart accounts, security limits, mempool defense |
+| `call-protocol` | ~280 | Balances, transfers, batch transfers, fees, allowances, receipts, memos, asset registry, issuer, precompiles, transactions, compliance, sponsor, smart accounts, security limits, mempool defense |
 | `call-crypto` | ~40 | keccak256, Ed25519 sign/verify, secp256k1 recovery, BLS, hash functions, keystore |
 | `call-evm` | ~29 | EVM state, executor, DB adapter, contract creation, call |
 | `call-network` | ~78 | P2P message handling, gossip, peer limits, identity, limits validation |
@@ -27,7 +27,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | `call-bridge` | ~35 | Deposit flow, external tracking, challenge period, withdrawal, permissionless challenge revocation |
 | `call-shielded` | ~160 | Circuit deposit/transfer/withdraw, Merkle tree, Poseidon hash, notes, nullifiers, proof serialization, keygen, compliance |
 | `call-light-client` | ~26 | MPT proof verification (leaf, extension, branch, tampered hash), header chain submission, compact encoding |
-| `call-agent` | ~105 | Registration, permissions, balances, nonces, instruction extraction, transaction verification, execution |
+| `call-agent` | ~105 | Registration, permissions, balances, nonces, precompile call extraction, transaction verification, execution |
 | `call-governance` | ~51 | Proposal lifecycle, voting, execution, delegation, timelock |
 | `call-oracle` | ~22 | Price submission, aggregation, validator info |
 | `call-transaction-pool` | ~46 | Pool ordering, priority, eviction, duplicate handling |
@@ -144,7 +144,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 
 ### Phase 3 — Medium (Ongoing)
 
-1. **Fuzz tests**: Transaction RLP decoding, MPT proof parsing, instruction deserialization.
+1. **Fuzz tests**: Transaction RLP decoding, MPT proof parsing, precompile call deserialization.
 2. **Chaos tests**: Random node restarts, network delays, message drops.
 3. **Load tests**: Sustained 1000 TPS for 1 hour, memory profiling. Validate on real hardware with cross-region latency (50-200ms) and packet loss simulation.
 4. **Real-network light client tests**: Connect to live Ethereum RPC for 7+ days. Verify header chain submission, receipt proofs, reorg handling.

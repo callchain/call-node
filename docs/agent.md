@@ -120,14 +120,14 @@ See [precompile.md](precompile.md) for the full ABI.
 `verify_agent_tx()` performs 5-step validation:
 1. Agent signature verification (secp256k1)
 2. Nonce check (sequential, no gaps)
-3. Per-instruction permission checks (all payments in a batch)
+3. Per-precompile permission checks (all payments in a batch)
 4. Expiry check (uses `protocol_tx.expires_at` as block deadline)
 5. Owner signature threshold for large amounts
 
 `execute_agent_tx()`:
 1. Calculates gas with 0.5x discount
 2. Deducts fee from agent balance using the transaction's `fee_currency`
-3. Executes instructions via `execute_protocol_instructions()`
+3. Executes precompile calls
 
 
 ### 5. Agent Activity Audit Trail (`lib.rs`, `block.rs`)
@@ -139,7 +139,7 @@ See [precompile.md](precompile.md) for the full ABI.
 `AgentEvent` struct:
 - `event_type`, `agent_id`, `tx_hash`, `asset_id`, `amount`, `recipient`, `block_height`
 
-Emitted during `Block::execute` by `execute_agent_instruction()` for every successful agent instruction. Included in `BlockExecutionResult::agent_events` and hashed into `compute_receipt_root()`.
+Emitted during `Block::execute` by `execute_agent_precompile()` for every successful agent precompile call. Included in `BlockExecutionResult::agent_events` and hashed into `compute_receipt_root()`.
 
 
 ---
@@ -152,7 +152,7 @@ Emitted during `Block::execute` by `execute_agent_instruction()` for every succe
 | `registry.rs` | `AgentRegistration`, `AgentRegistry`, domain proof handling |
 | `permissions.rs` | `AgentPermissions`, `AgentDailyUsage`, permission verification |
 | `balances.rs` | `AgentBalances`, `AgentNonces` |
-| `executor.rs` | `verify_agent_tx()`, `execute_agent_tx()`, instruction helpers |
+| `executor.rs` | `verify_agent_tx()`, `execute_agent_tx()`, precompile helpers |
 
 ---
 
@@ -161,7 +161,7 @@ Emitted during `Block::execute` by `execute_agent_instruction()` for every succe
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Agent registration | 🟢 Ready | Name uniqueness, metadata storage, real DNS/HTTP domain verification, agent revocation, configurable registration fee |
-| Permissions | 🟢 Ready | Restrictive defaults, full per-instruction checking including all batch payments |
+| Permissions | 🟢 Ready | Restrictive defaults, full per-precompile checking including all batch payments |
 | Balance management | 🟢 Ready | Grant deducts from owner, overflow-protected credit, underflow-protected deduct |
 | Transaction verification | 🟢 Ready | 5-step validation with independent `expires_at` field, no longer conflates fee with time |
 | Transaction execution | 🟢 Ready | Proper EVM call execution, wired into block production with inline permission checks, fee_currency-aware gas deduction |
@@ -171,7 +171,7 @@ Emitted during `Block::execute` by `execute_agent_instruction()` for every succe
 
 ## Test Status
 
-- `cargo test -p call-agent` — 46 unit tests covering registration (including fee deduction, insufficient balance rejection), domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, instruction extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
-- `cargo test -p call-consensus` — block execution order test verifies `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` execute correctly during `Block::execute`; `test_agent_instruction_emits_event` verifies `AgentEvent` emission and receipt root inclusion; `test_expired_transaction_rejected` verifies `expires_at` enforcement
+- `cargo test -p call-agent` — 46 unit tests covering registration (including fee deduction, insufficient balance rejection), domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, precompile call extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
+- `cargo test -p call-consensus` — block execution order test verifies `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` execute correctly during `Block::execute`; `test_agent_precompile_emits_event` verifies `AgentEvent` emission and receipt root inclusion; `test_expired_transaction_rejected` verifies `expires_at` enforcement
 - `cargo test -p call-node --lib` — node startup and state persistence tests verify agent registry, balances, and nonces are saved/loaded to MDBX correctly
 - `cargo test -p call-protocol --test test_agent_flow` — integration tests covering registration, domain proof, balance operations, nonce sequential/stale rejection

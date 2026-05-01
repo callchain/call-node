@@ -21,7 +21,7 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 │  ┌────────────────────┐  ┌──────────────────────────────┐  │
 │  │ Block Limits       │  │ Mempool Defense              │  │
 │  │ - max_tx_size      │  │ - rate_limiter               │  │
-│  │ - max_instructions │  │ - replay_protector           │  │
+│  │ - max_precompiles  │  │ - replay_protector           │  │
 │  │ - max_batch_size   │  │ - address_saturation         │  │
 │  └────────────────────┘  └──────────────────────────────┘  │
 │                                                             │
@@ -47,7 +47,7 @@ The Security layer (`crates/protocol/src/security.rs`, `crates/network/src/limit
 
 `BlockLimits` enforces:
 - Max tx size: 64 KB
-- Max instructions per tx: 256
+- Max precompile calls per tx: 256
 - Max batch recipients: 100
 - Max shielded proofs per block: 50
 - Max txs per block: 10,000
