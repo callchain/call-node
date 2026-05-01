@@ -10,7 +10,10 @@ use std::collections::HashMap;
 // ── Constants ─────────────────────────────────────────────────────────
 
 /// System escrow address for staked CALL tokens (Cosmos-style module account)
-pub const STAKING_ESCROW: Address = Address::repeat_byte(0);
+pub const STAKING_ESCROW: Address = Address::new([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A, 0xCE,
+]);
 
 // ── Types ─────────────────────────────────────────────────────────────
 

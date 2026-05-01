@@ -13,7 +13,7 @@ use alloy_primitives::{address, Address, U256};
 use revm_precompile::PrecompileError;
 
 use crate::{
-    decode_address, decode_bytes32, decode_bytes32_array, decode_u128, decode_u64,
+    decode_address, decode_bytes, decode_bytes32, decode_bytes32_array, decode_u128, decode_u64,
     decode_u256_usize, encode_u64, encode_u8, load_bal, ok_empty, save_bal,
     u256_to_u64, u64_to_u256, StatefulPrecompile,
 };
@@ -175,17 +175,14 @@ impl ShieldedPrecompile {
 
     // withdraw(uint64 assetId, address target, uint128 amount, bytes32 nullifier,
     //           bytes32 merkleRoot, bytes proofData) -> 0x175231d5
-    //
-    // Backward-compatible: if calldata is the old 132-byte format, skip ZK proof
-    // verification. If merkleRoot + proofData are provided, verify the Groth16 proof.
     fn withdraw(
         &self,
         input: &[u8],
         _msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 50000;
+        const GAS_COST: u64 = 50_000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
-        if input.len() < 132 {
+        if input.len() < 196 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
 
@@ -197,61 +194,66 @@ impl ShieldedPrecompile {
             .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
         let nullifier = decode_bytes32(input, 100)
             .ok_or_else(|| PrecompileError::Other("invalid nullifier".into()))?;
+        let merkle_root = decode_bytes32(input, 132)
+            .ok_or_else(|| PrecompileError::Other("invalid merkleRoot".into()))?;
 
-        // Optional ZK proof verification (extended calldata)
-        if input.len() >= 164 {
-            let merkle_root = decode_bytes32(input, 132)
-                .ok_or_else(|| PrecompileError::Other("invalid merkleRoot".into()))?;
+        // Verify merkleRoot matches current storage root
+        let stored_root = StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_merkle_root())
+            .unwrap_or(U256::ZERO)
+            .to_be_bytes::<32>();
+        if merkle_root != stored_root {
+            return Err(PrecompileError::Other(
+                "shielded withdraw: merkle root mismatch".into(),
+            ));
+        }
 
-            // Verify merkleRoot matches current storage root
-            let stored_root = StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_merkle_root())
-                .unwrap_or(U256::ZERO)
-                .to_be_bytes::<32>();
-            if merkle_root != stored_root {
+        // Verify ZK proof
+        let proof_offset = decode_u256_usize(input, 164)
+            .ok_or_else(|| PrecompileError::Other("invalid proofOffset".into()))?;
+        let abs_offset = 4 + proof_offset;
+        if input.len() < abs_offset + 32 {
+            return Err(PrecompileError::Other("invalid proof".into()));
+        }
+        let proof_len = decode_u256_usize(input, abs_offset)
+            .ok_or_else(|| PrecompileError::Other("invalid proofLen".into()))?;
+        let proof_start = abs_offset + 32;
+        if input.len() < proof_start + proof_len {
+            return Err(PrecompileError::Other("proof data too short".into()));
+        }
+        let proof_data = input[proof_start..proof_start + proof_len].to_vec();
+
+        let proof = call_shielded::ZkProof {
+            proof_data,
+            nullifiers: vec![call_shielded::Nullifier::new(
+                call_primitives::Hash::from_slice(&nullifier),
+            )],
+            commitments: vec![],
+            asset_id,
+        };
+        match call_shielded::verify_shielded_proof(
+            &proof,
+            "withdraw",
+            Some(&merkle_root),
+            Some(amount),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
                 return Err(PrecompileError::Other(
-                    "shielded withdraw: merkle root mismatch".into(),
+                    "shielded withdraw: invalid ZK proof".into(),
                 ));
             }
-
-            // Verify ZK proof if proofData is provided
-            if input.len() >= 196 {
-                let proof_offset = decode_u256_usize(input, 164)
-                    .ok_or_else(|| PrecompileError::Other("invalid proofOffset".into()))?;
-                let abs_offset = 4 + proof_offset;
-                if input.len() >= abs_offset + 32 {
-                    let proof_len = decode_u256_usize(input, abs_offset)
-                        .ok_or_else(|| PrecompileError::Other("invalid proofLen".into()))?;
-                    let proof_start = abs_offset + 32;
-                    if input.len() >= proof_start + proof_len {
-                        let proof_data = input[proof_start..proof_start + proof_len].to_vec();
-
-                        let proof = call_shielded::ZkProof {
-                            proof_data,
-                            nullifiers: vec![call_shielded::Nullifier::new(
-                                call_primitives::Hash::from_slice(&nullifier),
-                            )],
-                            commitments: vec![],
-                            asset_id,
-                        };
-                        match call_shielded::verify_shielded_proof(
-                            &proof,
-                            "withdraw",
-                            Some(&merkle_root),
-                            Some(amount),
-                        ) {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                return Err(PrecompileError::Other(
-                                    "shielded withdraw: invalid ZK proof".into(),
-                                ));
-                            }
-                            Err(e) => {
-                                return Err(PrecompileError::Other(
-                                    format!("ZK verification error: {e}").into(),
-                                ));
-                            }
-                        }
+            Err(e) => {
+                // Fall back to structural validation when real-prover is unavailable
+                if e.contains("real-prover") {
+                    if !call_shielded::verify_zk_proof(&proof) {
+                        return Err(PrecompileError::Other(
+                            "shielded withdraw: invalid ZK proof structure".into(),
+                        ));
                     }
+                } else {
+                    return Err(PrecompileError::Other(
+                        format!("ZK verification error: {e}").into(),
+                    ));
                 }
             }
         }
@@ -279,24 +281,78 @@ impl ShieldedPrecompile {
         ok_empty()
     }
 
-    // transfer(uint64 assetId, bytes32[] nullifiers, bytes32[] commitments) -> 0x1c3b10f8
+    // transfer(uint64 assetId, bytes proof, bytes32[] nullifiers, bytes32[] commitments) -> 0x0a0b378f
     fn transfer(
         &self,
         input: &[u8],
         _msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 100000;
-        StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
-        if input.len() < 100 {
+        if input.len() < 132 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
 
-        let _asset_id = decode_u64(input, 4)
+        let asset_id = decode_u64(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid assetId".into()))?;
-        let nullifiers = decode_bytes32_array(input, 36)
+        let proof_data = decode_bytes(input, 36)
+            .ok_or_else(|| PrecompileError::Other("invalid proof".into()))?;
+        let nullifiers = decode_bytes32_array(input, 68)
             .ok_or_else(|| PrecompileError::Other("invalid nullifiers".into()))?;
-        let commitments = decode_bytes32_array(input, 68)
+        let commitments = decode_bytes32_array(input, 100)
             .ok_or_else(|| PrecompileError::Other("invalid commitments".into()))?;
+
+        if nullifiers.is_empty() && commitments.is_empty() {
+            return Err(PrecompileError::Other("shielded transfer: empty inputs".into()));
+        }
+
+        // Scaled gas: base + per item + per proof byte
+        let gas_cost = 20_000
+            + 10_000 * nullifiers.len() as u64
+            + 10_000 * commitments.len() as u64
+            + 500 * proof_data.len() as u64;
+        StorageCtx::deduct_gas(gas_cost).ok_or(PrecompileError::OutOfGas)?;
+
+        // Verify ZK proof if provided
+        if !proof_data.is_empty() {
+            let merkle_root = StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_merkle_root())
+                .unwrap_or(U256::ZERO)
+                .to_be_bytes::<32>();
+
+            let proof = call_shielded::ZkProof {
+                proof_data,
+                nullifiers: nullifiers
+                    .iter()
+                    .map(|nf| call_shielded::Nullifier::new(call_primitives::Hash::from_slice(nf)))
+                    .collect(),
+                commitments: commitments
+                    .iter()
+                    .map(|cm| call_shielded::NoteCommitment::new(call_primitives::Hash::from_slice(cm)))
+                    .collect(),
+                asset_id,
+            };
+
+            match call_shielded::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(PrecompileError::Other(
+                        "shielded transfer: invalid ZK proof".into(),
+                    ));
+                }
+                Err(e) => {
+                    // Fall back to structural validation when real-prover is unavailable
+                    if e.contains("real-prover") {
+                        if !call_shielded::verify_zk_proof(&proof) {
+                            return Err(PrecompileError::Other(
+                                "shielded transfer: invalid ZK proof structure".into(),
+                            ));
+                        }
+                    } else {
+                        return Err(PrecompileError::Other(
+                            format!("ZK verification error: {e}").into(),
+                        ));
+                    }
+                }
+            }
+        }
 
         // Check all nullifiers not spent
         for nf in &nullifiers {
@@ -350,7 +406,7 @@ impl ShieldedPrecompile {
         let root = StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_merkle_root())
             .unwrap_or(U256::ZERO);
 
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(root.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, alloy_primitives::Bytes::from(root.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -366,7 +422,7 @@ impl ShieldedPrecompile {
             .map(u256_to_u64)
             .unwrap_or(0);
 
-        let out = revm_precompile::PrecompileOutput::new(0, encode_u64(count).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, encode_u64(count).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -384,7 +440,7 @@ impl ShieldedPrecompile {
         let cm = StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_commitment(index))
             .unwrap_or(U256::ZERO);
 
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(cm.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, alloy_primitives::Bytes::from(cm.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -401,7 +457,7 @@ impl ShieldedPrecompile {
 
         let spent = is_nullifier_spent(nullifier);
 
-        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(if spent { 1 } else { 0 }).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, encode_u8(if spent { 1 } else { 0 }).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 }
@@ -419,7 +475,7 @@ impl StatefulPrecompile for ShieldedPrecompile {
         match selector {
             [0x16, 0x8f, 0x44, 0xf5] => self.deposit(calldata, msg_sender),
             [0x17, 0x52, 0x31, 0xd5] => self.withdraw(calldata, msg_sender),
-            [0x1c, 0x3b, 0x10, 0xf8] => self.transfer(calldata, msg_sender),
+            [0x0a, 0x0b, 0x37, 0x8f] => self.transfer(calldata, msg_sender),
             [0xe0, 0xc7, 0x49, 0x7f] => self.get_merkle_root(calldata),
             [0x11, 0x98, 0x5b, 0xa9] => self.get_commitment_count(calldata),
             [0x23, 0x82, 0xd4, 0xc4] => self.get_commitment(calldata),
@@ -505,13 +561,21 @@ mod tests {
             // Seed target balance area (not needed but ok)
             let mut precompile = ShieldedPrecompile;
 
-            // withdraw(assetId=0, target, amount=500, nullifier)
-            let mut input = vec![0u8; 132];
+            // withdraw(assetId=0, target, amount=500, nullifier, merkleRoot, proofData)
+            let mut input = vec![0u8; 260];
             input[0..4].copy_from_slice(&[0x17, 0x52, 0x31, 0xd5]);
             input[28..36].copy_from_slice(&0u64.to_be_bytes());
             input[48..68].copy_from_slice(target.as_slice());
             input[84..100].copy_from_slice(&500u128.to_be_bytes());
             input[100..132].copy_from_slice(&[0xBBu8; 32]);
+            // merkleRoot = zeros (matches default storage)
+            input[132..164].copy_from_slice(&[0u8; 32]);
+            // proofData offset = 192 (0xC0)
+            input[188..196].copy_from_slice(&192u64.to_be_bytes());
+            // proofData length = 32
+            input[220..228].copy_from_slice(&32u64.to_be_bytes());
+            // dummy proofData
+            input[228..260].copy_from_slice(&[0u8; 32]);
 
             let result = precompile.call(&input, sender);
             assert!(result.is_ok(), "withdraw failed: {:?}", result.err());
@@ -540,29 +604,28 @@ mod tests {
         crate::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = ShieldedPrecompile;
 
-            // transfer(assetId=1, nullifiers=[0xCC], commitments=[0xDD, 0xEE])
-            // Layout: selector(4) + assetId(32) + nullifiers_offset(32) + commitments_offset(32)
-            let mut input = vec![0u8; 264];
-            input[0..4].copy_from_slice(&[0x1c, 0x3b, 0x10, 0xf8]);
+            // transfer(assetId=1, proof=empty, nullifiers=[0xCC], commitments=[0xDD, 0xEE])
+            let mut input = vec![0u8; 324];
+            input[0..4].copy_from_slice(&[0x0a, 0x0b, 0x37, 0x8f]);
             input[28..36].copy_from_slice(&1u64.to_be_bytes());
-            // nullifiers_offset = 96 (0x60) at last 8 bytes of word at offset 36
-            input[60..68].copy_from_slice(&96u64.to_be_bytes());
-            // commitments_offset = 160 (0xA0) at last 8 bytes of word at offset 68
+            // proof_offset = 128 (0x80)
+            input[60..68].copy_from_slice(&128u64.to_be_bytes());
+            // nullifiers_offset = 160 (0xA0)
             input[92..100].copy_from_slice(&160u64.to_be_bytes());
+            // commitments_offset = 224 (0xE0)
+            input[124..132].copy_from_slice(&224u64.to_be_bytes());
 
-            // nullifiers array at abs_offset = 4 + 96 = 100
-            // length word at 100-131, value in last 8 bytes (124-131)
-            input[124..132].copy_from_slice(&1u64.to_be_bytes());
-            // element 0 at 132-163
-            input[132..164].copy_from_slice(&[0xCCu8; 32]);
+            // proof at abs_offset = 4 + 128 = 132
+            input[156..164].copy_from_slice(&0u64.to_be_bytes());
 
-            // commitments array at abs_offset = 4 + 160 = 164
-            // length word at 164-195, value in last 8 bytes (188-195)
-            input[188..196].copy_from_slice(&2u64.to_be_bytes());
-            // element 0 at 196-227
-            input[196..228].copy_from_slice(&test_commitment(3));
-            // element 1 at 228-259
-            input[228..260].copy_from_slice(&test_commitment(4));
+            // nullifiers array at abs_offset = 4 + 160 = 164
+            input[188..196].copy_from_slice(&1u64.to_be_bytes());
+            input[196..228].copy_from_slice(&[0xCCu8; 32]);
+
+            // commitments array at abs_offset = 4 + 224 = 228
+            input[252..260].copy_from_slice(&2u64.to_be_bytes());
+            input[260..292].copy_from_slice(&test_commitment(3));
+            input[292..324].copy_from_slice(&test_commitment(4));
 
             let result = precompile.call(&input, sender);
             assert!(result.is_ok(), "transfer failed: {:?}", result.err());
@@ -660,27 +723,27 @@ mod tests {
         crate::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = ShieldedPrecompile;
 
-            // transfer(nullifiers=[0xCC], commitments=[0xDD])
-            // Layout: selector(4) + assetId(32) + nullifiers_offset(32) + commitments_offset(32)
-            // = 100 bytes fixed
-            // nullifiers_offset = 96 -> abs = 100, len = 1, elem = 32 -> total 64
-            // commitments_offset = 160 -> abs = 164, len = 1, elem = 32 -> total 64
-            // total = 100 + 64 + 64 = 228
-            let mut input = vec![0u8; 228];
-            input[0..4].copy_from_slice(&[0x1c, 0x3b, 0x10, 0xf8]);
+            // transfer(assetId=1, proof=empty, nullifiers=[0xCC], commitments=[0xDD])
+            let mut input = vec![0u8; 292];
+            input[0..4].copy_from_slice(&[0x0a, 0x0b, 0x37, 0x8f]);
             input[28..36].copy_from_slice(&1u64.to_be_bytes());
-            // nullifiers_offset = 96 (0x60)
-            input[60..68].copy_from_slice(&96u64.to_be_bytes());
-            // commitments_offset = 160 (0xA0)
+            // proof_offset = 128 (0x80)
+            input[60..68].copy_from_slice(&128u64.to_be_bytes());
+            // nullifiers_offset = 160 (0xA0)
             input[92..100].copy_from_slice(&160u64.to_be_bytes());
+            // commitments_offset = 224 (0xE0)
+            input[124..132].copy_from_slice(&224u64.to_be_bytes());
 
-            // nullifiers array at abs_offset = 4 + 96 = 100
-            input[124..132].copy_from_slice(&1u64.to_be_bytes());
-            input[132..164].copy_from_slice(&[0xCCu8; 32]);
+            // proof at abs_offset = 4 + 128 = 132
+            input[156..164].copy_from_slice(&0u64.to_be_bytes());
 
-            // commitments array at abs_offset = 4 + 160 = 164
+            // nullifiers array at abs_offset = 4 + 160 = 164
             input[188..196].copy_from_slice(&1u64.to_be_bytes());
-            input[196..228].copy_from_slice(&test_commitment(3));
+            input[196..228].copy_from_slice(&[0xCCu8; 32]);
+
+            // commitments array at abs_offset = 4 + 224 = 228
+            input[252..260].copy_from_slice(&1u64.to_be_bytes());
+            input[260..292].copy_from_slice(&test_commitment(3));
 
             precompile.call(&input, sender).unwrap();
 

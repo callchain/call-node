@@ -8,10 +8,10 @@ use alloy_primitives::{address, Address, U256};
 use revm_precompile::PrecompileError;
 
 use crate::{
-    address_to_u256, decode_address, decode_bytes32, decode_u128, decode_u64,
+    address_to_u256, decode_address, decode_bytes32, decode_string, decode_u128, decode_u64,
     decode_u256_usize, decode_address_array, decode_u128_array, encode_u128,
     load_bal, ok_empty, save_bal, u128_to_u256, u256_to_address, u256_to_u128,
-    u256_to_u64, u64_to_u256, StatefulPrecompile,
+    u256_to_u64, u64_to_u256, write_string32, StatefulPrecompile,
 };
 use crate::storage::{storage_slot, StorageCtx};
 
@@ -82,6 +82,20 @@ fn agent_check_owner(agent_id: u64, sender: Address) -> Result<(), PrecompileErr
     Ok(())
 }
 
+fn require_agent_perms(agent_id: u64, asset_id: u64) -> Result<(u128, u64, u8), PrecompileError> {
+    let perms = StorageCtx::sload(AGENT_ADDRESS, slot_agent_perms(agent_id))
+        .unwrap_or(U256::ZERO);
+    let (per_tx_limit, expires_at, flags) = unpack_agent_perms(perms);
+    let current_block = StorageCtx::block_number();
+    if expires_at != 0 && current_block > expires_at {
+        return Err(PrecompileError::Other("agent: permissions expired".into()));
+    }
+    if asset_id != CALL_ASSET_ID && (flags & 1) == 0 {
+        return Err(PrecompileError::Other("agent: asset not allowed".into()));
+    }
+    Ok((per_tx_limit, expires_at, flags))
+}
+
 // ── Balance helpers ───────────────────────────────────────────────────
 
 fn load_agent_bal(agent_id: u64, asset_id: u64) -> u128 {
@@ -100,21 +114,21 @@ fn save_agent_bal(agent_id: u64, asset_id: u64, amount: u128) {
 pub struct AgentPrecompile;
 
 impl AgentPrecompile {
-    // registerAgent(bytes32 name, bytes32 url, bytes32 pubkeyHash) -> 0x9f32a135
+    // registerAgent(string name, string url, bytes32 pubkeyHash) -> 0x2b3ce0bf
     fn register_agent(
         &self,
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 50000;
+        const GAS_COST: u64 = 6_000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 100 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
 
-        let name = decode_bytes32(input, 4)
+        let name = decode_string(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid name".into()))?;
-        let url = decode_bytes32(input, 36)
+        let url = decode_string(input, 36)
             .ok_or_else(|| PrecompileError::Other("invalid url".into()))?;
         let pubkey_hash = decode_bytes32(input, 68)
             .ok_or_else(|| PrecompileError::Other("invalid pubkeyHash".into()))?;
@@ -138,12 +152,12 @@ impl AgentPrecompile {
         StorageCtx::sstore(
             AGENT_ADDRESS,
             slot_agent_name(agent_id),
-            U256::from_be_slice(&name),
+            write_string32(&name),
         );
         StorageCtx::sstore(
             AGENT_ADDRESS,
             slot_agent_url(agent_id),
-            U256::from_be_slice(&url),
+            write_string32(&url),
         );
         // Default perms: per_tx_limit=1_000, expires_at=0, flags=1 (allow asset 1)
         StorageCtx::sstore(
@@ -167,7 +181,7 @@ impl AgentPrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 30000;
+        const GAS_COST: u64 = 6_000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 68 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -206,7 +220,7 @@ impl AgentPrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 20000;
+        const GAS_COST: u64 = 6_000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 36 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -254,21 +268,11 @@ impl AgentPrecompile {
         }
         agent_check_owner(agent_id, msg_sender)?;
 
-        // Check permissions
-        let perms = StorageCtx::sload(AGENT_ADDRESS, slot_agent_perms(agent_id))
-            .unwrap_or(U256::ZERO);
-        let (per_tx_limit, expires_at, flags) = unpack_agent_perms(perms);
-        let current_block = StorageCtx::block_number();
-        if expires_at != 0 && current_block > expires_at {
-            return Err(PrecompileError::Other("agent: permissions expired".into()));
-        }
+        let (per_tx_limit, _expires_at, _flags) = require_agent_perms(agent_id, asset_id)?;
         if amount > per_tx_limit {
             return Err(PrecompileError::Other(
                 format!("agent: amount {amount} exceeds per-tx limit {per_tx_limit}").into(),
             ));
-        }
-        if asset_id != CALL_ASSET_ID && (flags & 1) == 0 {
-            return Err(PrecompileError::Other("agent: asset not allowed".into()));
         }
 
         // Deduct agent balance
@@ -303,7 +307,7 @@ impl AgentPrecompile {
 
         let mut out = vec![0u8; 32];
         out[12..32].copy_from_slice(owner.as_slice());
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, alloy_primitives::Bytes::from(out));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -324,7 +328,7 @@ impl AgentPrecompile {
             .map(u256_to_u128)
             .unwrap_or(0);
 
-        let out = revm_precompile::PrecompileOutput::new(0, encode_u128(balance).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, encode_u128(balance).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -342,7 +346,7 @@ impl AgentPrecompile {
         let name = StorageCtx::sload(AGENT_ADDRESS, slot_agent_name(agent_id))
             .unwrap_or(U256::ZERO);
 
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(name.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, alloy_primitives::Bytes::from(name.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -360,7 +364,7 @@ impl AgentPrecompile {
         let url = StorageCtx::sload(AGENT_ADDRESS, slot_agent_url(agent_id))
             .unwrap_or(U256::ZERO);
 
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(url.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, alloy_primitives::Bytes::from(url.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -378,7 +382,7 @@ impl AgentPrecompile {
         let perms = StorageCtx::sload(AGENT_ADDRESS, slot_agent_perms(agent_id))
             .unwrap_or(U256::ZERO);
 
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(perms.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, alloy_primitives::Bytes::from(perms.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -399,11 +403,6 @@ impl AgentPrecompile {
         agent_check_owner(agent_id, msg_sender)?;
 
         // Decode dynamic arrays
-        let _to_offset = decode_u256_usize(input, 68)
-            .ok_or_else(|| PrecompileError::Other("invalid to offset".into()))?;
-        let _amounts_offset = decode_u256_usize(input, 100)
-            .ok_or_else(|| PrecompileError::Other("invalid amounts offset".into()))?;
-
         let to = decode_address_array(input, 68)
             .ok_or_else(|| PrecompileError::Other("invalid to array".into()))?;
         let amounts = decode_u128_array(input, 100)
@@ -416,21 +415,11 @@ impl AgentPrecompile {
             return Err(PrecompileError::Other("empty batch".into()));
         }
 
-        const GAS_COST_PER: u64 = 30000;
+        const GAS_COST_PER: u64 = 30_000;
         let total_gas = GAS_COST_PER * to.len() as u64;
         StorageCtx::deduct_gas(total_gas).ok_or(PrecompileError::OutOfGas)?;
 
-        // Check permissions
-        let perms = StorageCtx::sload(AGENT_ADDRESS, slot_agent_perms(agent_id))
-            .unwrap_or(U256::ZERO);
-        let (per_tx_limit, expires_at, flags) = unpack_agent_perms(perms);
-        let current_block = StorageCtx::block_number();
-        if expires_at != 0 && current_block > expires_at {
-            return Err(PrecompileError::Other("agent: permissions expired".into()));
-        }
-        if asset_id != CALL_ASSET_ID && (flags & 1) == 0 {
-            return Err(PrecompileError::Other("agent: asset not allowed".into()));
-        }
+        let (per_tx_limit, _expires_at, _flags) = require_agent_perms(agent_id, asset_id)?;
 
         // Deduct agent balance
         let total_amount: u128 = amounts.iter().copied().sum();
@@ -493,29 +482,13 @@ impl AgentPrecompile {
         }
         agent_check_owner(agent_id, msg_sender)?;
 
-        // Check permissions
-        let perms = StorageCtx::sload(AGENT_ADDRESS, slot_agent_perms(agent_id))
-            .unwrap_or(U256::ZERO);
-        let (_, expires_at, flags) = unpack_agent_perms(perms);
-        let current_block = StorageCtx::block_number();
-        if expires_at != 0 && current_block > expires_at {
-            return Err(PrecompileError::Other("agent: permissions expired".into()));
-        }
-        if asset_id != CALL_ASSET_ID && (flags & 1) == 0 {
-            return Err(PrecompileError::Other("agent: asset not allowed".into()));
-        }
+        require_agent_perms(agent_id, asset_id)?;
 
         // Deduct agent balance
         let agent_bal = load_agent_bal(agent_id, asset_id)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("agent bridge deposit: insufficient agent balance".into()))?;
         save_agent_bal(agent_id, asset_id, agent_bal);
-
-        // Deduct sender protocol balance
-        let sender_bal = load_bal(asset_id, msg_sender)
-            .checked_sub(amount)
-            .ok_or_else(|| PrecompileError::Other("agent bridge deposit: insufficient sender balance".into()))?;
-        save_bal(asset_id, msg_sender, sender_bal);
 
         // Note: Full bridge to EVM requires EVM executor (not available in precompile context).
         // The protocol-level bridge deposit instruction handles ERC-20 contract calls.
@@ -569,7 +542,7 @@ impl StatefulPrecompile for AgentPrecompile {
         }
         let selector = [calldata[0], calldata[1], calldata[2], calldata[3]];
         match selector {
-            [0x9f, 0x32, 0xa1, 0x35] => self.register_agent(calldata, msg_sender),
+            [0x2b, 0x3c, 0xe0, 0xbf] => self.register_agent(calldata, msg_sender),
             [0x80, 0xec, 0xf9, 0xd4] => self.grant_balance(calldata, msg_sender),
             [0x19, 0x46, 0xb4, 0x15] => self.revoke_balance(calldata, msg_sender),
             [0xe6, 0x99, 0xce, 0xf8] => self.pay(calldata, msg_sender),
@@ -608,13 +581,19 @@ mod tests {
             let mut precompile = AgentPrecompile;
 
             // registerAgent(name, url, pubkeyHash)
-            let mut input = vec![0u8; 100];
-            input[0..4].copy_from_slice(&[0x9f, 0x32, 0xa1, 0x35]);
-            input[4..36].copy_from_slice(b"TestAgent_______________________");
-            let mut url = [b'_'; 32];
-            url[..15].copy_from_slice(b"http://test.com");
-            input[36..68].copy_from_slice(&url);
+            let mut input = vec![0u8; 228];
+            input[0..4].copy_from_slice(&[0x2b, 0x3c, 0xe0, 0xbf]);
+            // name offset = 96 (0x60)
+            input[28..36].copy_from_slice(&96u64.to_be_bytes());
+            // url offset = 160 (0xA0)
+            input[60..68].copy_from_slice(&160u64.to_be_bytes());
             input[68..100].copy_from_slice(&[0xBBu8; 32]);
+            // name length = 9
+            input[124..132].copy_from_slice(&9u64.to_be_bytes());
+            input[132..141].copy_from_slice(b"TestAgent");
+            // url length = 15
+            input[188..196].copy_from_slice(&15u64.to_be_bytes());
+            input[196..211].copy_from_slice(b"http://test.com");
 
             let result = precompile.call(&input, sender);
             assert!(result.is_ok(), "register failed: {:?}", result.err());
@@ -632,7 +611,7 @@ mod tests {
             input[0..4].copy_from_slice(&[0x53, 0x04, 0xa7, 0xbf]);
             input[28..36].copy_from_slice(&0u64.to_be_bytes());
             let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(&result.bytes[0..12], b"TestAgent___");
+            assert_eq!(&result.bytes[0..9], b"TestAgent");
 
             // getAgentUrl(0)
             let mut input = vec![0u8; 36];
@@ -661,11 +640,15 @@ mod tests {
             let mut precompile = AgentPrecompile;
 
             // registerAgent
-            let mut input = vec![0u8; 100];
-            input[0..4].copy_from_slice(&[0x9f, 0x32, 0xa1, 0x35]);
-            input[4..36].copy_from_slice(b"Agent___________________________");
-            input[36..68].copy_from_slice(b"url_____________________________");
+            let mut input = vec![0u8; 228];
+            input[0..4].copy_from_slice(&[0x2b, 0x3c, 0xe0, 0xbf]);
+            input[28..36].copy_from_slice(&96u64.to_be_bytes());
+            input[60..68].copy_from_slice(&160u64.to_be_bytes());
             input[68..100].copy_from_slice(&[0xCCu8; 32]);
+            input[124..132].copy_from_slice(&5u64.to_be_bytes());
+            input[132..137].copy_from_slice(b"Agent");
+            input[188..196].copy_from_slice(&3u64.to_be_bytes());
+            input[196..199].copy_from_slice(b"url");
             precompile.call(&input, sender).unwrap();
 
             // grantBalance(agentId=0, assetId=1, amount=5_000)

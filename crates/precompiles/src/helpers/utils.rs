@@ -7,7 +7,7 @@ use alloy_primitives::{Address, U256};
 use revm_precompile::{PrecompileError, PrecompileOutput};
 
 use crate::storage::{storage_slot, StorageCtx};
-use crate::ASSET_ADDRESS;
+use crate::{ASSET_ADDRESS, VALIDATOR_ADDRESS};
 
 // ── ABI decoding helpers ──────────────────────────────────────────────
 
@@ -72,9 +72,9 @@ pub fn decode_u256_usize(input: &[u8], slot_offset: usize) -> Option<usize> {
     Some(val as usize)
 }
 
-/// Read a dynamic string from ABI-encoded input.
+/// Read dynamic bytes from ABI-encoded input.
 /// `slot_offset` points to the 32-byte offset slot.
-pub fn decode_string(input: &[u8], slot_offset: usize) -> Option<String> {
+pub fn decode_bytes(input: &[u8], slot_offset: usize) -> Option<Vec<u8>> {
     if input.len() < slot_offset + 32 {
         return None;
     }
@@ -88,9 +88,13 @@ pub fn decode_string(input: &[u8], slot_offset: usize) -> Option<String> {
     if input.len() < data_start + len {
         return None;
     }
-    Some(
-        String::from_utf8_lossy(&input[data_start..data_start + len]).into_owned(),
-    )
+    Some(input[data_start..data_start + len].to_vec())
+}
+
+/// Read a dynamic string from ABI-encoded input.
+/// `slot_offset` points to the 32-byte offset slot.
+pub fn decode_string(input: &[u8], slot_offset: usize) -> Option<String> {
+    decode_bytes(input, slot_offset).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 /// Decode a dynamic `address[]` from an ABI-encoded offset slot.
@@ -329,4 +333,23 @@ pub fn require_caller(msg_sender: Address) -> Result<Address, PrecompileError> {
         return Err(PrecompileError::Other("caller not available".into()));
     }
     Ok(msg_sender)
+}
+
+// ── Validator validation ──────────────────────────────────────────────
+
+/// Check whether an address is a registered validator.
+pub fn is_validator(sender: Address) -> bool {
+    StorageCtx::sload(VALIDATOR_ADDRESS, slot_validator_by_addr(sender))
+        .map(|v| u256_to_u64(v) != 0)
+        .unwrap_or(false)
+}
+
+/// Require the sender to be a registered validator.
+pub fn require_validator(sender: Address) -> Result<(), PrecompileError> {
+    if !is_validator(sender) {
+        return Err(PrecompileError::Other(
+            "sender not a registered validator".into(),
+        ));
+    }
+    Ok(())
 }

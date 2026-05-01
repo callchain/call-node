@@ -10,8 +10,9 @@ use crate::StatefulPrecompile;
 use crate::storage::{storage_slot, StorageCtx};
 use crate::{
     address_to_u256, decode_bytes32, decode_u64, decode_u8, encode_u64,
-    encode_u8, ok_empty, slot_balance, slot_validator_by_addr, u128_to_u256, u256_to_u128,
-    u256_to_u64, u64_to_u256,
+    encode_u8, load_bal, ok_empty, require_validator, save_bal, slot_balance,
+    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
+    u8_to_u256,
 };
 
 pub const GOVERNANCE_ADDRESS: alloy_primitives::Address =
@@ -45,21 +46,6 @@ fn slot_gov_pause_reason() -> U256 {
 }
 
 // ── Governance helpers ────────────────────────────────────────────────
-
-fn is_validator(sender: Address) -> bool {
-    StorageCtx::sload(crate::VALIDATOR_ADDRESS, slot_validator_by_addr(sender))
-        .map(|v| u256_to_u64(v) != 0)
-        .unwrap_or(false)
-}
-
-fn require_validator(sender: Address) -> Result<(), PrecompileError> {
-    if !is_validator(sender) {
-        return Err(PrecompileError::Other(
-            "governance: sender not a registered validator".into(),
-        ));
-    }
-    Ok(())
-}
 
 fn proposal_status(proposal_id: u64) -> u8 {
     StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"))
@@ -97,7 +83,10 @@ impl GovernancePrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 50000;
+        const GAS_COST: u64 = 200_000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 100 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -184,6 +173,15 @@ impl GovernancePrecompile {
             u128_to_u256(PROPOSAL_DEPOSIT),
         );
 
+        // Emit ProposalSubmitted(proposalId, proposer)
+        let topic0 = alloy_primitives::keccak256(b"ProposalSubmitted(uint64,address)");
+        let mut event_data = Vec::with_capacity(64);
+        event_data.extend_from_slice(&u64_to_u256(proposal_id).to_be_bytes::<32>());
+        event_data.extend_from_slice(&address_to_u256(msg_sender).to_be_bytes::<32>());
+        if let Some(log) = alloy_primitives::LogData::new(vec![topic0], alloy_primitives::Bytes::from(event_data)) {
+            let _ = StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+        }
+
         ok_empty()
     }
 
@@ -193,7 +191,10 @@ impl GovernancePrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 20000;
+        const GAS_COST: u64 = 10_000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 36 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -230,6 +231,16 @@ impl GovernancePrecompile {
         };
         increment_tally(proposal_id, tally_suffix);
 
+        // Emit VoteCast(proposalId, voter, vote)
+        let topic0 = alloy_primitives::keccak256(b"VoteCast(uint64,address,uint8)");
+        let mut event_data = Vec::with_capacity(96);
+        event_data.extend_from_slice(&u64_to_u256(proposal_id).to_be_bytes::<32>());
+        event_data.extend_from_slice(&address_to_u256(msg_sender).to_be_bytes::<32>());
+        event_data.extend_from_slice(&u8_to_u256(vote_val).to_be_bytes::<32>());
+        if let Some(log) = alloy_primitives::LogData::new(vec![topic0], alloy_primitives::Bytes::from(event_data)) {
+            let _ = StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+        }
+
         ok_empty()
     }
 
@@ -239,7 +250,10 @@ impl GovernancePrecompile {
         input: &[u8],
         _msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 20000;
+        const GAS_COST: u64 = 20_000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 12 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -250,7 +264,7 @@ impl GovernancePrecompile {
 
         require_proposal_status(proposal_id, 1, "governance: proposal not active")?;
 
-        // Check quorum
+        // Check quorum and majority
         let votes_for = vote_tally(proposal_id, b"votes_for");
         let votes_against = vote_tally(proposal_id, b"votes_against");
         let votes_abstain = vote_tally(proposal_id, b"votes_abstain");
@@ -258,6 +272,9 @@ impl GovernancePrecompile {
 
         if total_votes == 0 || votes_for * 10_000 < total_votes * GOV_QUORUM_BPS {
             return Err(PrecompileError::Other("governance: quorum not reached".into()));
+        }
+        if votes_for <= votes_against {
+            return Err(PrecompileError::Other("governance: not enough for votes".into()));
         }
 
         // Update status to queued (2)
@@ -273,6 +290,15 @@ impl GovernancePrecompile {
             u64_to_u256(current_block),
         );
 
+        // Emit ProposalQueued(proposalId, queuedAt)
+        let topic0 = alloy_primitives::keccak256(b"ProposalQueued(uint64,uint64)");
+        let mut event_data = Vec::with_capacity(64);
+        event_data.extend_from_slice(&u64_to_u256(proposal_id).to_be_bytes::<32>());
+        event_data.extend_from_slice(&u64_to_u256(current_block).to_be_bytes::<32>());
+        if let Some(log) = alloy_primitives::LogData::new(vec![topic0], alloy_primitives::Bytes::from(event_data)) {
+            let _ = StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+        }
+
         ok_empty()
     }
 
@@ -282,7 +308,10 @@ impl GovernancePrecompile {
         input: &[u8],
         _msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 20000;
+        const GAS_COST: u64 = 20_000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 12 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -304,12 +333,37 @@ impl GovernancePrecompile {
             ));
         }
 
+        // Refund deposit to proposer
+        let proposer = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer"))
+            .map(u256_to_address)
+            .unwrap_or(Address::ZERO);
+        let deposit = StorageCtx::sload(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"deposit"))
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        if deposit > 0 && proposer != Address::ZERO {
+            let bal = load_bal(CALL_ASSET_ID, proposer);
+            save_bal(CALL_ASSET_ID, proposer, bal + deposit);
+            StorageCtx::sstore(
+                GOVERNANCE_ADDRESS,
+                slot_gov_proposal(proposal_id, b"deposit"),
+                U256::ZERO,
+            );
+        }
+
         // Update status to executed (3)
         StorageCtx::sstore(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"status"),
             U256::from(3u8),
         );
+
+        // Emit ProposalExecuted(proposalId)
+        let topic0 = alloy_primitives::keccak256(b"ProposalExecuted(uint64)");
+        let mut event_data = Vec::with_capacity(32);
+        event_data.extend_from_slice(&u64_to_u256(proposal_id).to_be_bytes::<32>());
+        if let Some(log) = alloy_primitives::LogData::new(vec![topic0], alloy_primitives::Bytes::from(event_data)) {
+            let _ = StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+        }
 
         ok_empty()
     }
@@ -320,7 +374,10 @@ impl GovernancePrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 30000;
+        const GAS_COST: u64 = 30_000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 36 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -338,6 +395,15 @@ impl GovernancePrecompile {
             U256::from_be_slice(&reason),
         );
 
+        // Emit EmergencyPaused(pauser, reason)
+        let topic0 = alloy_primitives::keccak256(b"EmergencyPaused(address,bytes32)");
+        let mut event_data = Vec::with_capacity(64);
+        event_data.extend_from_slice(&address_to_u256(msg_sender).to_be_bytes::<32>());
+        event_data.extend_from_slice(&reason);
+        if let Some(log) = alloy_primitives::LogData::new(vec![topic0], alloy_primitives::Bytes::from(event_data)) {
+            let _ = StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+        }
+
         ok_empty()
     }
 
@@ -347,7 +413,10 @@ impl GovernancePrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 20000;
+        const GAS_COST: u64 = 20_000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         // No args beyond selector
         if input.len() < 4 {
@@ -358,6 +427,14 @@ impl GovernancePrecompile {
 
         StorageCtx::sstore(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::ZERO);
         StorageCtx::sstore(GOVERNANCE_ADDRESS, slot_gov_pause_reason(), U256::ZERO);
+
+        // Emit EmergencyResumed(resumer)
+        let topic0 = alloy_primitives::keccak256(b"EmergencyResumed(address)");
+        let mut event_data = Vec::with_capacity(32);
+        event_data.extend_from_slice(&address_to_u256(msg_sender).to_be_bytes::<32>());
+        if let Some(log) = alloy_primitives::LogData::new(vec![topic0], alloy_primitives::Bytes::from(event_data)) {
+            let _ = StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+        }
 
         ok_empty()
     }
@@ -375,7 +452,7 @@ impl GovernancePrecompile {
 
         let status = proposal_status(proposal_id);
 
-        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(status).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, encode_u8(status).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -398,7 +475,7 @@ impl GovernancePrecompile {
         out[16..32].copy_from_slice(&votes_for.to_be_bytes());
         out[48..64].copy_from_slice(&votes_against.to_be_bytes());
         out[80..96].copy_from_slice(&votes_abstain.to_be_bytes());
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, alloy_primitives::Bytes::from(out));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -414,7 +491,7 @@ impl GovernancePrecompile {
             .map(|v| v.to_be_bytes::<32>()[31] == 1)
             .unwrap_or(false);
 
-        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(if paused { 1 } else { 0 }).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, encode_u8(if paused { 1 } else { 0 }).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -430,7 +507,7 @@ impl GovernancePrecompile {
             .map(u256_to_u64)
             .unwrap_or(0);
 
-        let out = revm_precompile::PrecompileOutput::new(0, encode_u64(count).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(GAS_COST, encode_u64(count).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 }
@@ -594,7 +671,7 @@ mod tests {
             // Seed validator so pause/resume work
             crate::storage::StorageCtx::sstore(
                 crate::VALIDATOR_ADDRESS,
-                slot_validator_by_addr(sender),
+                crate::slot_validator_by_addr(sender),
                 u64_to_u256(1),
             );
 

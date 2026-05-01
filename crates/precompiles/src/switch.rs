@@ -163,9 +163,6 @@ impl SwitchPrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 20_000;
-        StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
-
         if input.len() < 100 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
@@ -176,8 +173,19 @@ impl SwitchPrecompile {
         let amount = decode_u128(input, 68)
             .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
 
+        if amount == 0 {
+            return Err(PrecompileError::Other("amount must be > 0".into()));
+        }
+        if to == Address::ZERO {
+            return Err(PrecompileError::Other("to cannot be zero address".into()));
+        }
+
         let sender = require_caller(msg_sender)?;
         Self::check_asset_active(asset_id)?;
+
+        // ERC-20 path needs more gas (totalSupply + balanceOf sstore)
+        let gas_cost = if asset_id == 1 { 20_000 } else { 40_000 };
+        StorageCtx::deduct_gas(gas_cost).ok_or(PrecompileError::OutOfGas)?;
 
         let _guard = StorageCtx::checkpoint();
 
@@ -213,9 +221,6 @@ impl SwitchPrecompile {
         input: &[u8],
         msg_sender: Address,
     ) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 20_000;
-        StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
-
         if input.len() < 100 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
@@ -226,8 +231,19 @@ impl SwitchPrecompile {
         let amount = decode_u128(input, 68)
             .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
 
+        if amount == 0 {
+            return Err(PrecompileError::Other("amount must be > 0".into()));
+        }
+        if to == Address::ZERO {
+            return Err(PrecompileError::Other("to cannot be zero address".into()));
+        }
+
         let sender = require_caller(msg_sender)?;
         Self::check_asset_active(asset_id)?;
+
+        // ERC-20 path needs more gas (totalSupply + balanceOf sstore)
+        let gas_cost = if asset_id == 1 { 20_000 } else { 40_000 };
+        StorageCtx::deduct_gas(gas_cost).ok_or(PrecompileError::OutOfGas)?;
 
         let _guard = StorageCtx::checkpoint();
 

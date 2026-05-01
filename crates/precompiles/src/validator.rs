@@ -19,7 +19,7 @@ pub const VALIDATOR_ADDRESS: alloy_primitives::Address =
 const CALL_ASSET_ID: u64 = 1;
 const MIN_SELF_STAKE: u128 = 1_000_000;
 const UNBONDING_PERIOD_BLOCKS: u64 = 120_960;
-const STAKING_ESCROW: Address = Address::repeat_byte(0);
+const STAKING_ESCROW: Address = address!("0000000000000000000000000000000000000ACE");
 
 // ── Storage slot helpers (match evm_instructions.rs layout) ───────────
 
@@ -63,7 +63,10 @@ pub struct ValidatorPrecompile;
 impl ValidatorPrecompile {
     // stake(bytes32,uint128) -> 0x48720640
     fn stake(&self, input: &[u8], msg_sender: Address) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 50000;
+        const GAS_COST: u64 = 20000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 68 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -116,7 +119,10 @@ impl ValidatorPrecompile {
 
     // unstake(uint64) -> 0xd29ab87a
     fn unstake(&self, input: &[u8], msg_sender: Address) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 30000;
+        const GAS_COST: u64 = 20000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 12 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -168,7 +174,10 @@ impl ValidatorPrecompile {
 
     // claimUnbonded(uint64) -> 0x6ab76049
     fn claim_unbonded(&self, input: &[u8], msg_sender: Address) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 30000;
+        const GAS_COST: u64 = 15000;
+        if StorageCtx::is_static() {
+            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+        }
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 12 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -202,12 +211,12 @@ impl ValidatorPrecompile {
             return Err(PrecompileError::Other("validator claim: unbonding period not elapsed".into()));
         }
 
-        // Find unbonding request
+        // Find and remove unbonding request from queue
         let unbonding_count = StorageCtx::sload(VALIDATOR_ADDRESS, slot_unbonding_count())
             .map(u256_to_u64)
             .unwrap_or(0);
         let mut amount = 0u128;
-        let mut found = false;
+        let mut found_idx = None;
         for i in 0..unbonding_count {
             let packed = StorageCtx::sload(VALIDATOR_ADDRESS, slot_unbonding(i))
                 .map(|v| v.to_be_bytes::<32>())
@@ -215,13 +224,22 @@ impl ValidatorPrecompile {
             let entry_id = u64::from_be_bytes(packed[8..16].try_into().unwrap());
             if entry_id == stored_id {
                 amount = u128::from_be_bytes(packed[16..32].try_into().unwrap());
-                found = true;
+                found_idx = Some(i);
                 break;
             }
         }
-        if !found {
-            return Err(PrecompileError::Other("validator claim: no unbonding request found".into()));
+        let found_idx = found_idx.ok_or_else(|| {
+            PrecompileError::Other("validator claim: no unbonding request found".into())
+        })?;
+
+        // Swap-and-pop to remove the entry and keep O(1) amortized
+        if unbonding_count > 1 && found_idx != unbonding_count - 1 {
+            let last = StorageCtx::sload(VALIDATOR_ADDRESS, slot_unbonding(unbonding_count - 1))
+                .unwrap_or(U256::ZERO);
+            StorageCtx::sstore(VALIDATOR_ADDRESS, slot_unbonding(found_idx), last);
         }
+        StorageCtx::sstore(VALIDATOR_ADDRESS, slot_unbonding(unbonding_count - 1), U256::ZERO);
+        StorageCtx::sstore(VALIDATOR_ADDRESS, slot_unbonding_count(), u64_to_u256(unbonding_count - 1));
 
         // Return stake from escrow to sender
         let escrow_bal = load_bal(CALL_ASSET_ID, STAKING_ESCROW)
@@ -238,6 +256,8 @@ impl ValidatorPrecompile {
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_by_addr(msg_sender), U256::ZERO);
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_stake(msg_sender), U256::ZERO);
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_status(msg_sender), U256::ZERO);
+        StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_pubkey(msg_sender), U256::ZERO);
+        StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_unbond_height(msg_sender), U256::ZERO);
 
         ok_empty()
     }

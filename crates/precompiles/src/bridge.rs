@@ -5,7 +5,7 @@
 //!            deposit, challengeDeposit
 
 use call_primitives::{Address, AssetId, Balance, Hash};
-use alloy_primitives::address;
+use alloy_primitives::{address, Bytes, LogData};
 use std::sync::{Arc, RwLock};
 
 use revm_precompile::PrecompileError;
@@ -145,6 +145,7 @@ fn slot_bridge_deposit_block_height(tx_hash: [u8; 32]) -> alloy_primitives::U256
 const DEFAULT_CHALLENGE_PERIOD: u64 = 100;
 const DEFAULT_CHALLENGE_BOND: u128 = 1000;
 const CALL_ASSET_ID: u64 = 1;
+const STAKING_ESCROW: Address = alloy_primitives::address!("0000000000000000000000000000000000000ACE");
 
 fn slot_challenge_period() -> alloy_primitives::U256 {
     storage_slot(&[b"challenge_period"])
@@ -652,22 +653,61 @@ impl BridgePrecompile {
 
 /// Verify fraud proof for a challenged deposit.
 /// TODO: Implement actual cryptographic verification based on bridge type.
-fn verify_fraud_proof(_source_tx_hash: [u8; 32]) -> bool {
+/// Full verification requires Merkle proof + signature checking against the source chain.
+/// Currently performs only structural validation (proof hash was stored during initiate_challenge).
+fn verify_fraud_proof(source_tx_hash: [u8; 32]) -> bool {
+    // Structural check: ensure a proof hash was recorded when the challenge was initiated.
+    let proof_hash = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_proof_hash(source_tx_hash));
+    if proof_hash.is_none() || proof_hash.unwrap() == alloy_primitives::U256::ZERO {
+        return false;
+    }
+    // Real verification would check the proof against source chain state here.
+    // Safe default: return false (challenge fails) until crypto logic is implemented.
     false
 }
 
-/// Slash validator stake. Minimal implementation: reduce stake and clear status.
+/// Slash validator stake. Deducts staked amount from escrow and clears all validator state.
 fn slash_validator_stake(validator: Address) -> Result<(), PrecompileError> {
-    let stake = StorageCtx::sload(crate::VALIDATOR_ADDRESS, crate::slot_validator_by_addr(validator))
+    let validator_id = StorageCtx::sload(crate::VALIDATOR_ADDRESS, crate::slot_validator_by_addr(validator))
         .map(u256_to_u64)
         .unwrap_or(0);
-    if stake == 0 {
+    if validator_id == 0 {
         return Ok(());
     }
 
-    // For now, just clear validator status to inactive
-    // Full slashing logic (transferring to treasury, reducing stake) can be added later
+    // Read actual stake amount from validator storage
+    let stake_slot = storage_slot(&[validator.as_slice(), b"stake"]);
+    let stake = StorageCtx::sload(crate::VALIDATOR_ADDRESS, stake_slot)
+        .map(u256_to_u128)
+        .unwrap_or(0);
+
+    if stake > 0 {
+        // Deduct slashed amount from staking escrow (burn / transfer to treasury)
+        let escrow_bal = StorageCtx::sload(crate::ASSET_ADDRESS, crate::slot_balance(CALL_ASSET_ID, STAKING_ESCROW))
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        let new_escrow = escrow_bal.saturating_sub(stake);
+        StorageCtx::sstore(crate::ASSET_ADDRESS, crate::slot_balance(CALL_ASSET_ID, STAKING_ESCROW), u128_to_u256(new_escrow));
+
+        // Emit ValidatorSlashed(validator, stake)
+        let topic0 = alloy_primitives::keccak256(b"ValidatorSlashed(address,uint128)");
+        let mut event_data = Vec::with_capacity(64);
+        event_data.extend_from_slice(&crate::address_to_u256(validator).to_be_bytes::<32>());
+        event_data.extend_from_slice(&crate::encode_u128(stake));
+        if let Some(log) = LogData::new(vec![topic0], Bytes::from(event_data)) {
+            let _ = StorageCtx::emit_event(BRIDGE_ADDRESS, log);
+        }
+    }
+
+    // Clear all validator state
     StorageCtx::sstore(crate::VALIDATOR_ADDRESS, crate::slot_validator_by_addr(validator), alloy_primitives::U256::ZERO);
+    StorageCtx::sstore(crate::VALIDATOR_ADDRESS, stake_slot, alloy_primitives::U256::ZERO);
+    let status_slot = storage_slot(&[validator.as_slice(), b"status"]);
+    StorageCtx::sstore(crate::VALIDATOR_ADDRESS, status_slot, alloy_primitives::U256::ZERO);
+    let pubkey_slot = storage_slot(&[validator.as_slice(), b"pubkey"]);
+    StorageCtx::sstore(crate::VALIDATOR_ADDRESS, pubkey_slot, alloy_primitives::U256::ZERO);
+    let unbond_slot = storage_slot(&[validator.as_slice(), b"unbond_at"]);
+    StorageCtx::sstore(crate::VALIDATOR_ADDRESS, unbond_slot, alloy_primitives::U256::ZERO);
 
     Ok(())
 }
