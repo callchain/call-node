@@ -7,8 +7,7 @@ use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
 use call_protocol::compliance::ComplianceStatus;
 
-#[allow(dead_code)]
-pub(crate) const COMPLIANCE_ADDRESS: alloy_primitives::Address =
+pub const COMPLIANCE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000205");
 
 // ── ABI decoding helpers ──────────────────────────────────────────────

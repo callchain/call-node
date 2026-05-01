@@ -19,8 +19,7 @@ use crate::asset::{
 use crate::storage::StorageCtx;
 use crate::ASSET_ADDRESS;
 
-#[allow(dead_code)]
-pub(crate) const SWITCH_ADDRESS: alloy_primitives::Address =
+pub const SWITCH_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000207");
 
 // ── ABI decoding helpers (mirroring asset.rs) ─────────────────────────

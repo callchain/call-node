@@ -5,8 +5,7 @@
 use alloy_primitives::address;
 
 /// Precompile address
-#[allow(dead_code)]
-pub(crate) const ORACLE_ADDRESS: alloy_primitives::Address =
+pub const ORACLE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000101");
 
 // ── OraclePrecompile (stateful, uses StorageCtx) ──────────────────────

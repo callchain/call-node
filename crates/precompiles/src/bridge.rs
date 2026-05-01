@@ -8,8 +8,7 @@ use call_primitives::{Address, AssetId, Balance, Hash};
 use alloy_primitives::address;
 use std::sync::{Arc, RwLock};
 
-#[allow(dead_code)]
-pub(crate) const BRIDGE_ADDRESS: alloy_primitives::Address =
+pub const BRIDGE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000103");
 
 #[derive(Debug, Clone)]

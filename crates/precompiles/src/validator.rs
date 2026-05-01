@@ -9,8 +9,7 @@ use revm_precompile::{PrecompileError, PrecompileOutput};
 use crate::StatefulPrecompile;
 use crate::storage::{storage_slot, StorageCtx};
 
-#[allow(dead_code)]
-pub(crate) const VALIDATOR_ADDRESS: alloy_primitives::Address =
+pub const VALIDATOR_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000204");
 
 const CALL_ASSET_ID: u64 = 1;

@@ -104,16 +104,8 @@ pub fn set_current_call_value(value: U256) {
 }
 
 // ── Precompile addresses ──────────────────────────────────────────────
-
-pub const ORACLE_ADDRESS: Address = address!("0000000000000000000000000000000000000101");
-pub const BRIDGE_ADDRESS: Address = address!("0000000000000000000000000000000000000103");
-pub const ASSET_ADDRESS: Address = address!("0000000000000000000000000000000000000201");
-pub const SHIELDED_ADDRESS: Address = address!("0000000000000000000000000000000000000202");
-pub const GOVERNANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000203");
-pub const VALIDATOR_ADDRESS: Address = address!("0000000000000000000000000000000000000204");
-pub const COMPLIANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000205");
-pub const SWITCH_ADDRESS: Address = address!("0000000000000000000000000000000000000207");
-pub const AGENT_ADDRESS: Address = address!("0000000000000000000000000000000000000209");
+//
+// Defined in their respective submodules and re-exported via `pub use` above.
 
 /// Register all precompile addresses
 pub fn all_precompiles() -> &'static [Address] {

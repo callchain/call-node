@@ -10,8 +10,7 @@ use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
 use crate::current_caller;
 
-#[allow(dead_code)]
-pub(crate) const ASSET_ADDRESS: alloy_primitives::Address =
+pub const ASSET_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000201");
 
 // ── ABI decoding helpers ──────────────────────────────────────────────

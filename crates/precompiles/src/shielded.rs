@@ -15,8 +15,7 @@ use revm_precompile::{PrecompileError, PrecompileOutput};
 use crate::StatefulPrecompile;
 use crate::storage::{storage_slot, StorageCtx};
 
-#[allow(dead_code)]
-pub(crate) const SHIELDED_ADDRESS: alloy_primitives::Address =
+pub const SHIELDED_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000202");
 
 // ── ABI decoding helpers ──────────────────────────────────────────────
