@@ -12,36 +12,14 @@ pub const ORACLE_ADDRESS: alloy_primitives::Address =
 
 use crate::StatefulPrecompile;
 use crate::storage::{storage_slot, StorageCtx};
+use crate::{
+    decode_u128, decode_u64, encode_u128, encode_u8, ok_empty, u128_to_u256, u256_to_u128,
+    u256_to_u64, u64_to_u256,
+};
 
 /// Compute oracle storage slot for an asset field.
 fn slot_oracle(asset_id: u64, suffix: &[u8]) -> alloy_primitives::U256 {
     storage_slot(&[&asset_id.to_be_bytes()[..], suffix])
-}
-
-/// Read u128 from low 16 bytes of a U256.
-fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
-    let bytes = v.to_be_bytes::<32>();
-    u128::from_be_bytes(bytes[16..32].try_into().unwrap())
-}
-
-/// Write u128 into low 16 bytes of a U256.
-fn u128_to_u256(v: u128) -> alloy_primitives::U256 {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&v.to_be_bytes());
-    alloy_primitives::U256::from_be_bytes::<32>(bytes)
-}
-
-/// Read u64 from low 8 bytes of a U256.
-fn u256_to_u64(v: alloy_primitives::U256) -> u64 {
-    let bytes = v.to_be_bytes::<32>();
-    u64::from_be_bytes(bytes[24..32].try_into().unwrap())
-}
-
-/// Write u64 into low 8 bytes of a U256.
-fn u64_to_u256(v: u64) -> alloy_primitives::U256 {
-    let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&v.to_be_bytes());
-    alloy_primitives::U256::from_be_bytes::<32>(bytes)
 }
 
 /// Stateful oracle precompile backed by EVM storage.
@@ -56,22 +34,13 @@ impl OraclePrecompile {
         const GAS_COST: u64 = 1000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
 
-        let asset_id = u64::from_be_bytes({
-            let mut buf = [0u8; 8];
-            if input.len() >= 36 {
-                buf.copy_from_slice(&input[28..36]);
-            }
-            buf
-        });
+        let asset_id = decode_u64(input, 4).unwrap_or(0);
 
         let price = StorageCtx::sload(ORACLE_ADDRESS, slot_oracle(asset_id, b"price"))
             .map(u256_to_u128)
             .unwrap_or(0);
 
-        let mut output = [0u8; 32];
-        output[16..].copy_from_slice(&price.to_be_bytes());
-
-        let out = revm_precompile::PrecompileOutput::new(0, output.to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u128(price).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -79,22 +48,13 @@ impl OraclePrecompile {
         const GAS_COST: u64 = 1000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
 
-        let asset_id = u64::from_be_bytes({
-            let mut buf = [0u8; 8];
-            if input.len() >= 36 {
-                buf.copy_from_slice(&input[28..36]);
-            }
-            buf
-        });
+        let asset_id = decode_u64(input, 4).unwrap_or(0);
 
         let twap = StorageCtx::sload(ORACLE_ADDRESS, slot_oracle(asset_id, b"twap"))
             .map(u256_to_u128)
             .unwrap_or(0);
 
-        let mut output = [0u8; 32];
-        output[16..].copy_from_slice(&twap.to_be_bytes());
-
-        let out = revm_precompile::PrecompileOutput::new(0, output.to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u128(twap).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -102,29 +62,15 @@ impl OraclePrecompile {
         const GAS_COST: u64 = 1000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
 
-        let asset_id = u64::from_be_bytes({
-            let mut buf = [0u8; 8];
-            if input.len() >= 36 {
-                buf.copy_from_slice(&input[28..36]);
-            }
-            buf
-        });
-        let current_ts = u64::from_be_bytes({
-            let mut buf = [0u8; 8];
-            if input.len() >= 68 {
-                buf.copy_from_slice(&input[60..68]);
-            }
-            buf
-        });
+        let asset_id = decode_u64(input, 4).unwrap_or(0);
+        let current_ts = decode_u64(input, 36).unwrap_or(0);
 
         let stored_ts = StorageCtx::sload(ORACLE_ADDRESS, slot_oracle(asset_id, b"ts"))
             .map(u256_to_u64)
             .unwrap_or(0);
 
-        let mut output = [0u8; 32];
-        output[31] = if stored_ts + Self::STALE_THRESHOLD_SECS < current_ts { 1 } else { 0 };
-
-        let out = revm_precompile::PrecompileOutput::new(0, output.to_vec().into());
+        let stale = stored_ts + Self::STALE_THRESHOLD_SECS < current_ts;
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(if stale { 1 } else { 0 }).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -135,26 +81,10 @@ impl OraclePrecompile {
             return Err(revm_precompile::PrecompileError::Other("invalid input".into()));
         }
 
-        let asset_id = u64::from_be_bytes({
-            let mut buf = [0u8; 8];
-            buf.copy_from_slice(&input[28..36]);
-            buf
-        });
-        let price = u128::from_be_bytes({
-            let mut buf = [0u8; 16];
-            buf.copy_from_slice(&input[48..64]);
-            buf
-        });
-        let timestamp = u64::from_be_bytes({
-            let mut buf = [0u8; 8];
-            buf.copy_from_slice(&input[92..100]);
-            buf
-        });
-        let block_number = u64::from_be_bytes({
-            let mut buf = [0u8; 8];
-            buf.copy_from_slice(&input[124..132]);
-            buf
-        });
+        let asset_id = decode_u64(input, 4).unwrap_or(0);
+        let price = decode_u128(input, 32).unwrap_or(0);
+        let timestamp = decode_u64(input, 68).unwrap_or(0);
+        let block_number = decode_u64(input, 100).unwrap_or(0);
 
         // Verify caller is a registered validator
         let validator_id = StorageCtx::sload(crate::VALIDATOR_ADDRESS, crate::slot_validator_by_addr(msg_sender))
@@ -186,8 +116,7 @@ impl OraclePrecompile {
         StorageCtx::sstore(ORACLE_ADDRESS, slot_oracle(asset_id, b"twap"), u128_to_u256(new_twap));
         StorageCtx::sstore(ORACLE_ADDRESS, slot_oracle(asset_id, b"count"), u64_to_u256(count + 1));
 
-        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 }
 
