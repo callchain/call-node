@@ -106,26 +106,22 @@ All challenge data is stored in `BRIDGE_ADDRESS` (`0x103`) EVM storage.
 
 ```rust
 // Challenge state per sourceTxHash
-fn slot_challenge_status(tx_hash: [u8; 32]) -> U256;
-fn slot_challenge_challenger(tx_hash: [u8; 32]) -> U256;      // address
-fn slot_challenge_deadline(tx_hash: [u8; 32]) -> U256;       // uint64 block height
-fn slot_challenge_bond(tx_hash: [u8; 32]) -> U256;           // uint128
-fn slot_challenge_proof_hash(tx_hash: [u8; 32]) -> U256;     // keccak256(proof)
-fn slot_challenge_original_validator(tx_hash: [u8; 32]) -> U256; // address
+fn slot_bridge_challenge_status(tx_hash: [u8; 32]) -> U256;
+fn slot_bridge_challenge_challenger(tx_hash: [u8; 32]) -> U256;      // address
+fn slot_bridge_challenge_deadline(tx_hash: [u8; 32]) -> U256;       // uint64 block height
+fn slot_bridge_challenge_bond(tx_hash: [u8; 32]) -> U256;           // uint128
+fn slot_bridge_challenge_proof_hash(tx_hash: [u8; 32]) -> U256;     // keccak256(proof)
+fn slot_bridge_challenge_original_validator(tx_hash: [u8; 32]) -> U256; // address
 
 // Deposit metadata (set at externalDeposit time)
-fn slot_deposit_asset_id(tx_hash: [u8; 32]) -> U256;         // uint64
-fn slot_deposit_recipient(tx_hash: [u8; 32]) -> U256;        // address
-fn slot_deposit_amount(tx_hash: [u8; 32]) -> U256;           // uint128
-fn slot_deposit_block_height(tx_hash: [u8; 32]) -> U256;     // uint64
+fn slot_bridge_deposit_asset_id(tx_hash: [u8; 32]) -> U256;         // uint64
+fn slot_bridge_deposit_recipient(tx_hash: [u8; 32]) -> U256;        // address
+fn slot_bridge_deposit_amount(tx_hash: [u8; 32]) -> U256;           // uint128
+fn slot_bridge_deposit_block_height(tx_hash: [u8; 32]) -> U256;     // uint64
 
 // Challenge period configuration
 fn slot_challenge_period() -> U256;                          // uint64
-fn slot_challenge_bond() -> U256;                            // uint128
-
-// Deadline index (linked list for batch settlement)
-fn slot_challenges_at_height_head(height: u64) -> U256;      // tx_hash
-fn slot_challenge_next(tx_hash: [u8; 32]) -> U256;           // next tx_hash in list
+fn slot_challenge_bond_amount() -> U256;                     // uint128
 ```
 
 ### 4.3 Challenge Status Values
@@ -154,9 +150,9 @@ fn slot_challenge_next(tx_hash: [u8; 32]) -> U256;           // next tx_hash in 
 | `0x393da669` | `externalWithdraw(uint64,bytes,uint64,uint128)` | targetChain, targetAddress, assetId, amount | - | 30,000 |
 | `0x2689cfc0` | `deposit(uint64,address,uint128,uint64,bytes)` | sourceChain, targetAddress, amount, assetId, proof | - | 30,000 |
 | `0x07dee8d0` | `initiateChallenge(bytes32,bytes)` | sourceTxHash, proof | - | 50,000 |
-| `0x??` | `resolveChallenge(bytes32)` | sourceTxHash | - | 100,000 |
-| `0x??` | `getChallengeStatus(bytes32)` | sourceTxHash | `(uint8,uint64,uint128,address)` | 1,500 |
-| `0x??` | `withdrawChallengeBond(bytes32)` | sourceTxHash | - | 5,000 |
+| `0x8a1e5018` | `resolveChallenge(bytes32)` | sourceTxHash | - | 100,000 |
+| `0x2a5d97e9` | `getChallengeStatus(bytes32)` | sourceTxHash | `(uint8,uint64,uint128,address)` | 1,500 |
+| `0x9c4e5e8b` | `withdrawChallengeBond(bytes32)` | sourceTxHash | - | 5,000 |
 
 ### 5.2 Function Details
 
@@ -166,7 +162,7 @@ Called by validators to relay a confirmed deposit from an external chain.
 
 - Validates asset is registered and active.
 - Checks `sourceTxHash` has not been processed before.
-- Records deposit metadata (assetId, recipient, amount, current block height).
+- Records deposit metadata (assetId, recipient, amount, current block height, original validator).
 - Credits recipient balance.
 - Increments `total_deposits`.
 - Marks `processed[sourceTxHash] = true`.
@@ -180,7 +176,6 @@ Called by anyone who suspects a fraudulent deposit.
 - Validates current block is within challenge period (`current < deposit_block + period`).
 - Deducts `challenge_bond` from challenger.
 - Stores challenge metadata (challenger, deadline, bond, proof_hash, status=Pending).
-- Appends to deadline-linked-list for batch settlement.
 
 #### `resolveChallenge(bytes32 sourceTxHash)`
 
@@ -188,12 +183,12 @@ Called by anyone after the challenge deadline has passed. Gas-intensive because 
 
 - Validates challenge status is Pending.
 - Validates current block >= deadline.
-- Calls `verify_fraud_proof(sourceTxHash, proof)`.
+- Calls `verify_fraud_proof(sourceTxHash)`.
 - **If proof valid (successful):**
-  - Roll back deposit: debit recipient balance, decrement `total_deposits`.
+  - Attempt to debit recipient balance (ignored if already spent), decrement `total_deposits`.
   - Clear `processed[sourceTxHash]` (allows re-processing the correct deposit).
-  - Return bond to challenger + slash reward from original validator.
-  - Slash original validator via validator precompile.
+  - Credit bond + 10% reward to challenger.
+  - Slash original validator (minimal: clears validator status to inactive).
   - Set status = Successful.
 - **If proof invalid (failed):**
   - Transfer bond to original validator as reward.
@@ -201,10 +196,11 @@ Called by anyone after the challenge deadline has passed. Gas-intensive because 
 
 #### `withdrawChallengeBond(bytes32 sourceTxHash)`
 
-Called by challenger after a successful challenge to reclaim bond + reward.
+Called by challenger after a successful challenge to reclaim bond + 10% reward.
 
 - Validates status = Successful.
-- Transfers bond + reward to challenger.
+- Validates caller is the original challenger.
+- Credits bond + 10% reward to challenger.
 - Sets status = Withdrawn.
 
 ---
@@ -273,14 +269,11 @@ Called by challenger after a successful challenge to reclaim bond + reward.
 
 ### 7.3 Rollback Safety
 
-When a challenge succeeds, the ideal behavior is to reverse the deposit's credit. However, if the recipient has already spent the balance, a simple `debit_bal` will fail.
+When a challenge succeeds, the implementation attempts to debit the recipient's balance. If the recipient has already spent the funds, the debit is silently ignored (`let _ = debit_bal(...)`), and the deposit total is still decremented.
 
-**Resolution:** Instead of forcing debit, the system records a **debt** against the validator who submitted the fraudulent deposit. The validator's stake is slashed to cover the loss. The recipient's spent funds are not clawed back.
+The validator who submitted the fraudulent deposit is also slashed (current minimal implementation clears their validator status to inactive). This places the economic loss on the dishonest validator while protecting innocent recipients who acted in good faith.
 
-This approach:
-- Protects innocent recipients who acted in good faith.
-- Places economic loss on the dishonest validator.
-- Simplifies implementation by avoiding complex debt-tracking on recipients.
+Full debt-tracking against validators (e.g., transferring slashed stake to treasury) can be added incrementally.
 
 ---
 
@@ -295,7 +288,7 @@ Precompiles need access to `block.number` for deadline calculations. This is pro
 `verify_fraud_proof()` is intentionally decoupled from the bridge precompile:
 
 ```rust
-fn verify_fraud_proof(source_tx_hash: [u8; 32], proof: &[u8]) -> bool {
+fn verify_fraud_proof(source_tx_hash: [u8; 32]) -> bool {
     // Option A: Inline for known chain types
     // Option B: Delegate to BridgeVerifier precompile (0x104)
     // Option C: Governance-upgradable verifier contract
@@ -304,9 +297,9 @@ fn verify_fraud_proof(source_tx_hash: [u8; 32], proof: &[u8]) -> bool {
 
 For the initial implementation, a stub returning `false` is acceptable. The full cryptographic verification can be added incrementally without changing the challenge state machine.
 
-### 8.3 Linked-List Deadline Index
+### 8.3 Linked-List Deadline Index (Future Enhancement)
 
-To enable efficient batch settlement, challenges are indexed by their deadline block height using an in-storage linked list:
+To enable efficient batch settlement, challenges could be indexed by their deadline block height using an in-storage linked list:
 
 ```
 challenges_at_height[height] -> head_tx_hash
@@ -315,7 +308,7 @@ challenge_next[tx_hash_B] -> tx_hash_C
 challenge_next[tx_hash_C] -> 0x00...00 (end)
 ```
 
-A keeper can iterate the list at each block height and call `resolveChallenge` for all expired challenges.
+A keeper could then iterate the list at each block height and call `resolveChallenge` for all expired challenges. This is **not yet implemented**; individual `resolveChallenge` calls are used for now.
 
 ### 8.4 Governance Parameters
 
@@ -339,14 +332,15 @@ The following parameters should be governance-configurable via the Governance pr
 
 ## 10. TODO
 
-- [ ] Implement `initiateChallenge` in `bridge.rs`
-- [ ] Implement `resolveChallenge` in `bridge.rs`
-- [ ] Implement `getChallengeStatus` in `bridge.rs`
-- [ ] Implement `withdrawChallengeBond` in `bridge.rs`
-- [ ] Add challenge storage slot helpers
-- [ ] Add deadline linked-list index
-- [ ] Implement `verify_fraud_proof` stub (full crypto deferred)
-- [ ] Add validator slash integration (`validator.rs`)
+- [x] Implement `initiateChallenge` in `bridge.rs`
+- [x] Implement `resolveChallenge` in `bridge.rs`
+- [x] Implement `getChallengeStatus` in `bridge.rs`
+- [x] Implement `withdrawChallengeBond` in `bridge.rs`
+- [x] Add challenge storage slot helpers
+- [x] Implement `verify_fraud_proof` stub (full crypto deferred)
+- [x] Add validator slash helper (`bridge.rs`)
+- [x] Add challenge period tests
+- [ ] Add deadline linked-list index for batch settlement
 - [ ] Add governance parameter integration (`governance.rs`)
-- [ ] Add challenge period tests
 - [ ] Add keeper/bot for batch resolution
+- [ ] Implement full cryptographic `verify_fraud_proof`
