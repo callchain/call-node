@@ -10,103 +10,17 @@
 //! are provided in the calldata.
 
 use alloy_primitives::{address, Address, U256};
-use revm_precompile::{PrecompileError, PrecompileOutput};
+use revm_precompile::PrecompileError;
 
-use crate::StatefulPrecompile;
+use crate::{
+    decode_address, decode_bytes32, decode_bytes32_array, decode_u128, decode_u64,
+    decode_u256_usize, encode_u64, encode_u8, ok_empty, slot_balance, u128_to_u256,
+    u256_to_u128, u256_to_u64, u64_to_u256, StatefulPrecompile,
+};
 use crate::storage::{storage_slot, StorageCtx};
 
 pub const SHIELDED_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000202");
-
-// ── ABI decoding helpers ──────────────────────────────────────────────
-
-fn decode_u64(input: &[u8], slot_offset: usize) -> Option<u64> {
-    let start = slot_offset + 24;
-    if input.len() < start + 8 {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&input[start..start + 8]);
-    Some(u64::from_be_bytes(buf))
-}
-
-fn decode_u128(input: &[u8], slot_offset: usize) -> Option<u128> {
-    let start = slot_offset + 16;
-    if input.len() < start + 16 {
-        return None;
-    }
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&input[start..start + 16]);
-    Some(u128::from_be_bytes(buf))
-}
-
-fn decode_address(input: &[u8], slot_offset: usize) -> Option<Address> {
-    let start = slot_offset + 12;
-    if input.len() < start + 20 {
-        return None;
-    }
-    Some(Address::from_slice(&input[start..start + 20]))
-}
-
-fn decode_bytes32(input: &[u8], slot_offset: usize) -> Option<[u8; 32]> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(&input[slot_offset..slot_offset + 32]);
-    Some(buf)
-}
-
-fn decode_u256_usize(input: &[u8], slot_offset: usize) -> Option<usize> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let bytes = &input[slot_offset..slot_offset + 32];
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&bytes[24..32]);
-    Some(u64::from_be_bytes(buf) as usize)
-}
-
-fn decode_bytes32_array(input: &[u8], slot_offset: usize) -> Option<Vec<[u8; 32]>> {
-    let data_offset = decode_u256_usize(input, slot_offset)?;
-    let abs_offset = 4 + data_offset; // args start at byte 4
-    if input.len() < abs_offset + 32 {
-        return None;
-    }
-    let len = decode_u256_usize(input, abs_offset)?;
-    let elem_start = abs_offset + 32;
-    if input.len() < elem_start + len * 32 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let elem = decode_bytes32(input, elem_start + i * 32)?;
-        out.push(elem);
-    }
-    Some(out)
-}
-
-// ── Encoding helpers ──────────────────────────────────────────────────
-
-fn u256_to_u64(v: U256) -> u64 {
-    u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().unwrap())
-}
-
-fn u256_to_u128(v: U256) -> u128 {
-    u128::from_be_bytes(v.to_be_bytes::<32>()[16..32].try_into().unwrap())
-}
-
-fn u128_to_u256(v: u128) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn u64_to_u256(v: u64) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
 
 // ── Storage slot helpers ──────────────────────────────────────────────
 
@@ -126,10 +40,6 @@ fn slot_shielded_commitment(index: u64) -> U256 {
     storage_slot(&[b"commitment", &index.to_be_bytes()[..]])
 }
 
-fn slot_balance(asset_id: u64, addr: Address) -> U256 {
-    storage_slot(&[&asset_id.to_be_bytes()[..], addr.as_slice()])
-}
-
 fn slot_tree_node(level: u8, index: u64) -> U256 {
     storage_slot(&[b"tree", &[level], &index.to_be_bytes()])
 }
@@ -138,6 +48,18 @@ fn is_nullifier_spent(nullifier: [u8; 32]) -> bool {
     StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_nullifier(nullifier))
         .map(|v| v.to_be_bytes::<32>()[31] == 1)
         .unwrap_or(false)
+}
+
+// ── Balance helpers ───────────────────────────────────────────────────
+
+fn load_bal(asset_id: u64, addr: Address) -> u128 {
+    StorageCtx::sload(crate::ASSET_ADDRESS, slot_balance(asset_id, addr))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+fn save_bal(asset_id: u64, addr: Address, amount: u128) {
+    StorageCtx::sstore(crate::ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
 }
 
 // ── Incremental Merkle Tree (Poseidon, depth=32) ──────────────────────
@@ -236,14 +158,10 @@ impl ShieldedPrecompile {
             .ok_or_else(|| PrecompileError::Other("invalid commitment".into()))?;
 
         // Deduct transparent balance
-        let sender_slot = slot_balance(asset_id, msg_sender);
-        let sender_bal = StorageCtx::sload(crate::ASSET_ADDRESS, sender_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let sender_bal = sender_bal
+        let sender_bal = load_bal(asset_id, msg_sender)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("shielded deposit: insufficient balance".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, sender_slot, u128_to_u256(sender_bal));
+        save_bal(asset_id, msg_sender, sender_bal);
 
         // Incremental Merkle tree update (A: auto-update root on deposit)
         // Must happen before count is incremented so the insertion index is correct.
@@ -264,8 +182,7 @@ impl ShieldedPrecompile {
             u64_to_u256(count + 1),
         );
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // withdraw(uint64 assetId, address target, uint128 amount, bytes32 nullifier,
@@ -366,17 +283,12 @@ impl ShieldedPrecompile {
         );
 
         // Credit transparent balance
-        let target_slot = slot_balance(asset_id, target);
-        let target_bal = StorageCtx::sload(crate::ASSET_ADDRESS, target_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let target_bal = target_bal
+        let target_bal = load_bal(asset_id, target)
             .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("shielded withdraw: balance overflow".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, target_slot, u128_to_u256(target_bal));
+        save_bal(asset_id, target, target_bal);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // transfer(uint64 assetId, bytes32[] nullifiers, bytes32[] commitments) -> 0x1c3b10f8
@@ -436,8 +348,7 @@ impl ShieldedPrecompile {
             );
         }
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // getMerkleRoot() -> bytes32 -> 0xe0c7497f
@@ -451,7 +362,7 @@ impl ShieldedPrecompile {
         let root = StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_merkle_root())
             .unwrap_or(U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(root.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(root.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -467,9 +378,7 @@ impl ShieldedPrecompile {
             .map(u256_to_u64)
             .unwrap_or(0);
 
-        let mut out = vec![0u8; 32];
-        out[24..32].copy_from_slice(&count.to_be_bytes());
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u64(count).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -487,12 +396,12 @@ impl ShieldedPrecompile {
         let cm = StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_commitment(index))
             .unwrap_or(U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(cm.to_be_bytes::<32>().to_vec()));
+        let out = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::from(cm.to_be_bytes::<32>().to_vec()));
         Ok(crate::storage::fill_precompile_output(out))
     }
 
     // isNullifierSpent(bytes32 nullifier) -> bool -> 0x371dff59
-    fn is_nullifier_spent(&self, input: &[u8]) -> crate::PrecompileResult {
+    fn is_nullifier_spent_call(&self, input: &[u8]) -> crate::PrecompileResult {
         const GAS_COST: u64 = 2000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(PrecompileError::OutOfGas)?;
         if input.len() < 36 {
@@ -504,9 +413,7 @@ impl ShieldedPrecompile {
 
         let spent = is_nullifier_spent(nullifier);
 
-        let mut out = vec![0u8; 32];
-        out[31] = if spent { 1 } else { 0 };
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::from(out));
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(if spent { 1 } else { 0 }).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 }
@@ -528,7 +435,7 @@ impl StatefulPrecompile for ShieldedPrecompile {
             [0xe0, 0xc7, 0x49, 0x7f] => self.get_merkle_root(calldata),
             [0x11, 0x98, 0x5b, 0xa9] => self.get_commitment_count(calldata),
             [0x23, 0x82, 0xd4, 0xc4] => self.get_commitment(calldata),
-            [0x37, 0x1d, 0xff, 0x59] => self.is_nullifier_spent(calldata),
+            [0x37, 0x1d, 0xff, 0x59] => self.is_nullifier_spent_call(calldata),
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }
