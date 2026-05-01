@@ -4,10 +4,13 @@
 //!            getValidatorPubkey, getUnbondHeight, getValidatorByIndex
 
 use alloy_primitives::{address, Address, U256};
-use revm_precompile::{PrecompileError, PrecompileOutput};
+use revm_precompile::PrecompileError;
 
-use crate::StatefulPrecompile;
-use crate::slot_validator_by_addr;
+use crate::{
+    address_to_u256, decode_address, decode_bytes32, decode_u128, decode_u64, encode_u128,
+    encode_u64, encode_u8, ok_empty, slot_balance, slot_validator_by_addr, u128_to_u256,
+    u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StatefulPrecompile,
+};
 use crate::storage::{storage_slot, StorageCtx};
 
 pub const VALIDATOR_ADDRESS: alloy_primitives::Address =
@@ -17,65 +20,6 @@ const CALL_ASSET_ID: u64 = 1;
 const MIN_SELF_STAKE: u128 = 1_000_000;
 const UNBONDING_PERIOD_BLOCKS: u64 = 120_960;
 const STAKING_ESCROW: Address = Address::repeat_byte(0);
-
-// ── ABI decoding helpers ──────────────────────────────────────────────
-
-fn decode_address(input: &[u8], slot_offset: usize) -> Option<Address> {
-    let start = slot_offset + 12;
-    if input.len() < start + 20 {
-        return None;
-    }
-    Some(Address::from_slice(&input[start..start + 20]))
-}
-
-fn decode_u64(input: &[u8], slot_offset: usize) -> Option<u64> {
-    let start = slot_offset + 24;
-    if input.len() < start + 8 {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&input[start..start + 8]);
-    Some(u64::from_be_bytes(buf))
-}
-
-fn decode_u128(input: &[u8], slot_offset: usize) -> Option<u128> {
-    let start = slot_offset + 16;
-    if input.len() < start + 16 {
-        return None;
-    }
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&input[start..start + 16]);
-    Some(u128::from_be_bytes(buf))
-}
-
-fn decode_bytes32(input: &[u8], slot_offset: usize) -> Option<[u8; 32]> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(&input[slot_offset..slot_offset + 32]);
-    Some(buf)
-}
-
-// ── Encoding helpers ──────────────────────────────────────────────────
-
-fn encode_u128(value: u128) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[16..].copy_from_slice(&value.to_be_bytes());
-    out
-}
-
-fn encode_u64(value: u64) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[24..].copy_from_slice(&value.to_be_bytes());
-    out
-}
-
-fn encode_u8(value: u8) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[31] = value;
-    out
-}
 
 // ── Storage slot helpers (match evm_instructions.rs layout) ───────────
 
@@ -111,40 +55,16 @@ fn slot_unbonding(index: u64) -> U256 {
     storage_slot(&[b"unbonding"]) + U256::from(index)
 }
 
-fn slot_balance(asset_id: u64, addr: Address) -> U256 {
-    storage_slot(&[&asset_id.to_be_bytes()[..], addr.as_slice()])
+// ── Balance helpers ───────────────────────────────────────────────────
+
+fn load_bal(asset_id: u64, addr: Address) -> u128 {
+    StorageCtx::sload(crate::ASSET_ADDRESS, slot_balance(asset_id, addr))
+        .map(u256_to_u128)
+        .unwrap_or(0)
 }
 
-// ── U256 <-> primitive helpers ────────────────────────────────────────
-
-fn u256_to_u64(v: U256) -> u64 {
-    u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().unwrap())
-}
-
-fn u256_to_u128(v: U256) -> u128 {
-    u128::from_be_bytes(v.to_be_bytes::<32>()[16..32].try_into().unwrap())
-}
-
-fn u128_to_u256(v: u128) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn u64_to_u256(v: u64) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&v.to_be_bytes());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn address_to_u256(addr: Address) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(addr.as_slice());
-    U256::from_be_bytes::<32>(bytes)
-}
-
-fn u256_to_address(v: U256) -> Address {
-    Address::from_slice(&v.to_be_bytes::<32>()[12..32])
+fn save_bal(asset_id: u64, addr: Address, amount: u128) {
+    StorageCtx::sstore(crate::ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
 }
 
 // ── ValidatorPrecompile ───────────────────────────────────────────────
@@ -181,23 +101,15 @@ impl ValidatorPrecompile {
         }
 
         // Deduct CALL from sender, credit escrow
-        let sender_slot = slot_balance(CALL_ASSET_ID, msg_sender);
-        let sender_bal = StorageCtx::sload(crate::ASSET_ADDRESS, sender_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let sender_bal = sender_bal
+        let sender_bal = load_bal(CALL_ASSET_ID, msg_sender)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("validator stake: insufficient balance".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, sender_slot, u128_to_u256(sender_bal));
+        save_bal(CALL_ASSET_ID, msg_sender, sender_bal);
 
-        let escrow_slot = slot_balance(CALL_ASSET_ID, STAKING_ESCROW);
-        let escrow_bal = StorageCtx::sload(crate::ASSET_ADDRESS, escrow_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let escrow_bal = escrow_bal
+        let escrow_bal = load_bal(CALL_ASSET_ID, STAKING_ESCROW)
             .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("validator stake: escrow overflow".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, escrow_slot, u128_to_u256(escrow_bal));
+        save_bal(CALL_ASSET_ID, STAKING_ESCROW, escrow_bal);
 
         // Register validator
         let count = StorageCtx::sload(VALIDATOR_ADDRESS, slot_validator_count())
@@ -211,8 +123,7 @@ impl ValidatorPrecompile {
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_pubkey(msg_sender), U256::from_be_slice(&pubkey));
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_status(msg_sender), U256::from(1u8));
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // unstake(uint64) -> 0xd29ab87a
@@ -264,8 +175,7 @@ impl ValidatorPrecompile {
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_unbonding(unbonding_count), U256::from_be_slice(&packed));
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_unbonding_count(), u64_to_u256(unbonding_count + 1));
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // claimUnbonded(uint64) -> 0x6ab76049
@@ -326,31 +236,22 @@ impl ValidatorPrecompile {
         }
 
         // Return stake from escrow to sender
-        let escrow_slot = slot_balance(CALL_ASSET_ID, STAKING_ESCROW);
-        let escrow_bal = StorageCtx::sload(crate::ASSET_ADDRESS, escrow_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let escrow_bal = escrow_bal
+        let escrow_bal = load_bal(CALL_ASSET_ID, STAKING_ESCROW)
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("validator claim: escrow underflow".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, escrow_slot, u128_to_u256(escrow_bal));
+        save_bal(CALL_ASSET_ID, STAKING_ESCROW, escrow_bal);
 
-        let sender_slot = slot_balance(CALL_ASSET_ID, msg_sender);
-        let sender_bal = StorageCtx::sload(crate::ASSET_ADDRESS, sender_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let sender_bal = sender_bal
+        let sender_bal = load_bal(CALL_ASSET_ID, msg_sender)
             .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("validator claim: balance overflow".into()))?;
-        StorageCtx::sstore(crate::ASSET_ADDRESS, sender_slot, u128_to_u256(sender_bal));
+        save_bal(CALL_ASSET_ID, msg_sender, sender_bal);
 
         // Clear validator state
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_by_addr(msg_sender), U256::ZERO);
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_stake(msg_sender), U256::ZERO);
         StorageCtx::sstore(VALIDATOR_ADDRESS, slot_validator_status(msg_sender), U256::ZERO);
 
-        let out = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(out))
+        ok_empty()
     }
 
     // getValidatorStake(address) -> 0x34664846
@@ -368,7 +269,7 @@ impl ValidatorPrecompile {
             .map(u256_to_u128)
             .unwrap_or(0);
 
-        let out = PrecompileOutput::new(0, encode_u128(stake).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u128(stake).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -387,7 +288,7 @@ impl ValidatorPrecompile {
             .map(|v| v.to_be_bytes::<32>()[31])
             .unwrap_or(0);
 
-        let out = PrecompileOutput::new(0, encode_u8(status).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u8(status).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -406,7 +307,7 @@ impl ValidatorPrecompile {
             .map(|v| v.to_be_bytes::<32>())
             .unwrap_or([0u8; 32]);
 
-        let out = PrecompileOutput::new(0, pubkey.to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, pubkey.to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -425,7 +326,7 @@ impl ValidatorPrecompile {
             .map(u256_to_u64)
             .unwrap_or(0);
 
-        let out = PrecompileOutput::new(0, encode_u64(height).to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, encode_u64(height).to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 
@@ -446,7 +347,7 @@ impl ValidatorPrecompile {
 
         let mut out = [0u8; 32];
         out[12..32].copy_from_slice(addr.as_slice());
-        let out = PrecompileOutput::new(0, out.to_vec().into());
+        let out = revm_precompile::PrecompileOutput::new(0, out.to_vec().into());
         Ok(crate::storage::fill_precompile_output(out))
     }
 }
@@ -473,7 +374,6 @@ impl StatefulPrecompile for ValidatorPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_primitives::Address;
 
     #[test]
     fn test_validator_address() {
