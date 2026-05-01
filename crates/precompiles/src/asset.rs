@@ -8,132 +8,15 @@
 use alloy_primitives::{address, Address};
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
-use crate::{slot_asset_meta, slot_balance};
+use crate::{
+    address_to_u256, decode_address, decode_address_array, decode_string, decode_u128,
+    decode_u128_array, decode_u64, encode_u128, encode_u64, ok_empty, read_string32,
+    slot_asset_meta, slot_balance, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
+    u64_to_u256, write_string32,
+};
 
 pub const ASSET_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000201");
-
-// ── ABI decoding helpers ──────────────────────────────────────────────
-
-/// Read a uint64 from a 32-byte ABI-encoded slot (big-endian, right-aligned)
-fn decode_u64(input: &[u8], slot_offset: usize) -> Option<u64> {
-    let start = slot_offset + 24;
-    if input.len() < start + 8 {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&input[start..start + 8]);
-    Some(u64::from_be_bytes(buf))
-}
-
-/// Read a u128 from a 32-byte ABI-encoded slot (big-endian, right-aligned)
-fn decode_u128(input: &[u8], slot_offset: usize) -> Option<u128> {
-    let start = slot_offset + 16;
-    if input.len() < start + 16 {
-        return None;
-    }
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&input[start..start + 16]);
-    Some(u128::from_be_bytes(buf))
-}
-
-/// Read an Address from a 32-byte ABI-encoded slot (right-aligned)
-fn decode_address(input: &[u8], slot_offset: usize) -> Option<Address> {
-    let start = slot_offset + 12;
-    if input.len() < start + 20 {
-        return None;
-    }
-    Some(Address::from_slice(&input[start..start + 20]))
-}
-
-/// Read a dynamic string from ABI-encoded input.
-/// `slot_offset` points to the 32-byte offset slot.
-fn decode_string(input: &[u8], slot_offset: usize) -> Option<String> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let data_offset = decode_u256_usize(input, slot_offset)?;
-    let abs_offset = 4 + data_offset; // args start at byte 4
-    if input.len() < abs_offset + 32 {
-        return None;
-    }
-    let len = decode_u256_usize(input, abs_offset)?;
-    let data_start = abs_offset + 32;
-    if input.len() < data_start + len {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&input[data_start..data_start + len])
-            .into_owned(),
-    )
-}
-
-/// Decode a dynamic `address[]` from an ABI-encoded offset slot.
-fn decode_address_array(input: &[u8], slot_offset: usize) -> Option<Vec<Address>> {
-    let data_offset = decode_u256_usize(input, slot_offset)?;
-    let abs_offset = 4 + data_offset; // args start at byte 4
-    if input.len() < abs_offset + 32 {
-        return None;
-    }
-    let len = decode_u256_usize(input, abs_offset)?;
-    let elem_start = abs_offset + 32;
-    if input.len() < elem_start + len * 32 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let addr = decode_address(input, elem_start + i * 32)?;
-        out.push(addr);
-    }
-    Some(out)
-}
-
-/// Decode a dynamic `uint128[]` from an ABI-encoded offset slot.
-fn decode_u128_array(input: &[u8], slot_offset: usize) -> Option<Vec<u128>> {
-    let data_offset = decode_u256_usize(input, slot_offset)?;
-    let abs_offset = 4 + data_offset; // args start at byte 4
-    if input.len() < abs_offset + 32 {
-        return None;
-    }
-    let len = decode_u256_usize(input, abs_offset)?;
-    let elem_start = abs_offset + 32;
-    if input.len() < elem_start + len * 32 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let val = decode_u128(input, elem_start + i * 32)?;
-        out.push(val);
-    }
-    Some(out)
-}
-
-/// Read a uint256 as usize from a 32-byte slot (saturating)
-fn decode_u256_usize(input: &[u8], slot_offset: usize) -> Option<usize> {
-    if input.len() < slot_offset + 32 {
-        return None;
-    }
-    let bytes = &input[slot_offset..slot_offset + 32];
-    // Most values fit in u64; saturate if too large
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&bytes[24..32]);
-    let val = u64::from_be_bytes(buf);
-    Some(val as usize)
-}
-
-/// Encode a uint256 into 32 bytes (big-endian)
-fn encode_u256(value: u128) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[16..].copy_from_slice(&value.to_be_bytes());
-    out
-}
-
-/// Encode a uint64 into 32 bytes (big-endian, right-aligned)
-fn encode_u64_slot(value: u64) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[24..].copy_from_slice(&value.to_be_bytes());
-    out
-}
 
 // ── AssetPrecompile (stateful, uses StorageCtx) ───────────────────────
 
@@ -147,61 +30,6 @@ pub fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> alloy_
         owner.as_slice(),
         spender.as_slice(),
     ])
-}
-
-/// Read a u128 value from a U256 storage word (low 128 bits).
-fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
-    let bytes = v.to_be_bytes::<32>();
-    u128::from_be_bytes(bytes[16..32].try_into().unwrap())
-}
-
-/// Write a u128 value into a U256 storage word (low 128 bits).
-fn u128_to_u256(v: u128) -> alloy_primitives::U256 {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&v.to_be_bytes());
-    alloy_primitives::U256::from_be_bytes::<32>(bytes)
-}
-
-/// Read a bytes32 string from a U256 storage word.
-fn read_string32(v: alloy_primitives::U256) -> String {
-    let bytes = v.to_be_bytes::<32>();
-    let len = bytes.iter().take_while(|b| **b != 0).count();
-    String::from_utf8_lossy(&bytes[..len]).into_owned()
-}
-
-/// Write a short string into a bytes32 U256 storage word.
-fn write_string32(s: &str) -> alloy_primitives::U256 {
-    let mut bytes = [0u8; 32];
-    let src = s.as_bytes();
-    let len = src.len().min(32);
-    bytes[..len].copy_from_slice(&src[..len]);
-    alloy_primitives::U256::from_be_bytes::<32>(bytes)
-}
-
-/// Read an Address from the low 20 bytes of a U256.
-fn u256_to_address(v: alloy_primitives::U256) -> Address {
-    let bytes = v.to_be_bytes::<32>();
-    Address::from_slice(&bytes[12..32])
-}
-
-/// Write an Address into the low 20 bytes of a U256.
-fn address_to_u256(addr: Address) -> alloy_primitives::U256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(addr.as_slice());
-    alloy_primitives::U256::from_be_bytes::<32>(bytes)
-}
-
-/// Read a u64 from the low 8 bytes of a U256.
-fn u256_to_u64(v: alloy_primitives::U256) -> u64 {
-    let bytes = v.to_be_bytes::<32>();
-    u64::from_be_bytes(bytes[24..32].try_into().unwrap())
-}
-
-/// Write a u64 into the low 8 bytes of a U256.
-fn u64_to_u256(v: u64) -> alloy_primitives::U256 {
-    let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&v.to_be_bytes());
-    alloy_primitives::U256::from_be_bytes::<32>(bytes)
 }
 
 // ── Asset metadata helpers ────────────────────────────────────────────
@@ -269,12 +97,6 @@ fn save_balance(asset_id: u64, addr: Address, amount: u128) {
     );
 }
 
-/// Helper: return an empty successful precompile output.
-fn ok_empty() -> PrecompileResult {
-    let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-    Ok(crate::storage::fill_precompile_output(output))
-}
-
 /// Decode the common (asset_id, address, amount) pattern from ABI input.
 fn decode_asset_addr_amount(input: &[u8]) -> Option<(u64, Address, u128)> {
     if input.len() < 100 {
@@ -333,7 +155,7 @@ impl AssetPrecompile {
 
         let balance = load_balance(asset_id, addr);
 
-        let output = PrecompileOutput::new(0, encode_u256(balance).to_vec().into());
+        let output = PrecompileOutput::new(0, encode_u128(balance).to_vec().into());
         Ok(crate::storage::fill_precompile_output(output))
     }
 
@@ -354,7 +176,7 @@ impl AssetPrecompile {
         out[32..64].copy_from_slice(&write_string32(&meta.name).to_be_bytes::<32>());
         out[95] = meta.decimals;
         out[108..128].copy_from_slice(meta.issuer.as_slice());
-        out[128..160].copy_from_slice(&encode_u256(meta.max_supply));
+        out[128..160].copy_from_slice(&encode_u128(meta.max_supply));
         out[191] = meta.status;
 
         let output = PrecompileOutput::new(0, out.to_vec().into());
@@ -600,7 +422,7 @@ impl AssetPrecompile {
         crate::storage::StorageCtx::sstore(ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance"), alloy_primitives::U256::from(0));
         crate::storage::StorageCtx::sstore(ASSET_ADDRESS, slot_asset_meta(asset_id, b"registered_at"), u64_to_u256(0));
 
-        let output = PrecompileOutput::new(0, encode_u64_slot(asset_id).to_vec().into());
+        let output = PrecompileOutput::new(0, encode_u64(asset_id).to_vec().into());
         Ok(crate::storage::fill_precompile_output(output))
     }
 }
