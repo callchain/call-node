@@ -530,6 +530,10 @@ impl HashMapStorageProvider {
         }
     }
 
+    pub fn set_block_number(&mut self, block_number: u64) {
+        self.block_number = block_number;
+    }
+
     pub fn get(&self, address: Address, key: U256) -> Option<U256> {
         self.persistent.get(&(address, key)).copied()
     }

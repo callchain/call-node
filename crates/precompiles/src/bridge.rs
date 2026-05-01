@@ -11,8 +11,9 @@ use std::sync::{Arc, RwLock};
 use revm_precompile::PrecompileError;
 
 use crate::{
-    decode_address, decode_bytes32, decode_u128, decode_u64, decode_u256_usize, encode_u128,
-    ok_empty, slot_asset_meta, slot_balance, u128_to_u256, u256_to_address, u256_to_u128,
+    address_to_u256, decode_address, decode_bytes32, decode_u128, decode_u64, decode_u256_usize,
+    encode_u128, ok_empty, slot_asset_meta, slot_balance, u128_to_u256, u256_to_address,
+    u256_to_u128, u256_to_u64, u64_to_u256,
 };
 use crate::storage::{storage_slot, StorageCtx};
 use crate::StatefulPrecompile;
@@ -93,6 +94,78 @@ fn slot_bridge_paused() -> alloy_primitives::U256 {
 
 fn slot_bridge_processed(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
     storage_slot(&[b"processed", &tx_hash])
+}
+
+// ── Challenge storage slot helpers ────────────────────────────────────
+
+fn slot_bridge_challenge_status(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_status", &tx_hash])
+}
+
+fn slot_bridge_challenge_challenger(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_challenger", &tx_hash])
+}
+
+fn slot_bridge_challenge_deadline(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_deadline", &tx_hash])
+}
+
+fn slot_bridge_challenge_bond(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_bond", &tx_hash])
+}
+
+fn slot_bridge_challenge_proof_hash(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_proof_hash", &tx_hash])
+}
+
+fn slot_bridge_challenge_original_validator(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_validator", &tx_hash])
+}
+
+// ── Deposit metadata storage slot helpers ─────────────────────────────
+
+fn slot_bridge_deposit_asset_id(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"deposit_asset_id", &tx_hash])
+}
+
+fn slot_bridge_deposit_recipient(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"deposit_recipient", &tx_hash])
+}
+
+fn slot_bridge_deposit_amount(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"deposit_amount", &tx_hash])
+}
+
+fn slot_bridge_deposit_block_height(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
+    storage_slot(&[b"deposit_block", &tx_hash])
+}
+
+// ── Challenge period config ───────────────────────────────────────────
+
+const DEFAULT_CHALLENGE_PERIOD: u64 = 100;
+const DEFAULT_CHALLENGE_BOND: u128 = 1000;
+const CALL_ASSET_ID: u64 = 1;
+
+fn slot_challenge_period() -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_period"])
+}
+
+fn slot_challenge_bond_amount() -> alloy_primitives::U256 {
+    storage_slot(&[b"challenge_bond"])
+}
+
+fn get_challenge_period() -> u64 {
+    StorageCtx::sload(BRIDGE_ADDRESS, slot_challenge_period())
+        .map(u256_to_u64)
+        .filter(|&v| v != 0)
+        .unwrap_or(DEFAULT_CHALLENGE_PERIOD)
+}
+
+fn get_challenge_bond() -> u128 {
+    StorageCtx::sload(BRIDGE_ADDRESS, slot_challenge_bond_amount())
+        .map(u256_to_u128)
+        .filter(|&v| v != 0)
+        .unwrap_or(DEFAULT_CHALLENGE_BOND)
 }
 
 // ── Validation helpers ────────────────────────────────────────────────
@@ -181,6 +254,13 @@ fn add_total_withdrawals(amount: u128) {
         .map(u256_to_u128)
         .unwrap_or(0);
     StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_total_withdrawals(), u128_to_u256(total + amount));
+}
+
+fn sub_total_deposits(amount: u128) {
+    let total = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_total_deposits())
+        .map(u256_to_u128)
+        .unwrap_or(0);
+    StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_total_deposits(), u128_to_u256(total.saturating_sub(amount)));
 }
 
 // ── ABI decoding helpers ─────────────────────────────────────────────
@@ -287,7 +367,7 @@ impl BridgePrecompile {
     // -> 0x1aba0700
     // Simplified: credits recipient balance. Full validator signature verification is done
     // at the consensus layer; this precompile is a convenience for validators to relay.
-    fn external_deposit(&self, input: &[u8], _msg_sender: Address) -> crate::PrecompileResult {
+    fn external_deposit(&self, input: &[u8], msg_sender: Address) -> crate::PrecompileResult {
         const GAS_COST: u64 = 30000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
         if input.len() < 132 {
@@ -315,6 +395,14 @@ impl BridgePrecompile {
 
         // Mark as processed
         StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_processed(source_tx_hash), alloy_primitives::U256::from(1u8));
+
+        // Record deposit metadata for challenge period
+        let block_height = StorageCtx::block_number();
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_deposit_asset_id(source_tx_hash), u64_to_u256(asset_id));
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_deposit_recipient(source_tx_hash), address_to_u256(recipient));
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_deposit_amount(source_tx_hash), u128_to_u256(amount));
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_deposit_block_height(source_tx_hash), u64_to_u256(block_height));
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_original_validator(source_tx_hash), address_to_u256(msg_sender));
 
         credit_bal(asset_id, recipient, amount)?;
         add_total_deposits(amount);
@@ -379,9 +467,9 @@ impl BridgePrecompile {
         ok_empty()
     }
 
-    // challengeDeposit(bytes32 sourceTxHash, bytes proof) -> 0x07dee8d0
-    fn challenge_deposit(&self, input: &[u8], _msg_sender: Address) -> crate::PrecompileResult {
-        const GAS_COST: u64 = 10000;
+    // initiateChallenge(bytes32 sourceTxHash, bytes proof) -> 0x07dee8d0
+    fn initiate_challenge(&self, input: &[u8], msg_sender: Address) -> crate::PrecompileResult {
+        const GAS_COST: u64 = 50000;
         StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
         if input.len() < 68 {
             return Err(revm_precompile::PrecompileError::Other("invalid input".into()));
@@ -391,9 +479,10 @@ impl BridgePrecompile {
             .ok_or_else(|| PrecompileError::Other("invalid sourceTxHash".into()))?;
 
         // Decode proof (dynamic bytes)
-        let _proof = decode_bytes(input, 36)
+        let proof = decode_bytes(input, 36)
             .ok_or_else(|| PrecompileError::Other("invalid proof".into()))?;
 
+        // Verify source tx is processed
         let processed = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_processed(source_tx_hash))
             .map(|v| v != alloy_primitives::U256::ZERO)
             .unwrap_or(false);
@@ -401,11 +490,214 @@ impl BridgePrecompile {
             return Err(PrecompileError::Other("source tx not processed".into()));
         }
 
-        // Challenge period queue not yet implemented in EVM-only mode
-        Err(PrecompileError::Other(
-            "challenge deposit: not yet implemented in EVM-only mode".into(),
-        ))
+        // Verify no existing pending challenge
+        let existing_status = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
+        if existing_status != 0 {
+            return Err(PrecompileError::Other("challenge already exists".into()));
+        }
+
+        // Verify still within challenge period
+        let deposit_height = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_block_height(source_tx_hash))
+            .map(u256_to_u64)
+            .unwrap_or(0);
+        let current_height = StorageCtx::block_number();
+        let challenge_period = get_challenge_period();
+        if current_height >= deposit_height + challenge_period {
+            return Err(PrecompileError::Other("challenge period expired".into()));
+        }
+
+        // Deduct bond from challenger
+        let bond = get_challenge_bond();
+        debit_bal(CALL_ASSET_ID, msg_sender, bond)?;
+
+        // Store challenge metadata
+        let deadline = current_height + challenge_period;
+        let proof_hash = alloy_primitives::keccak256(&proof);
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash), alloy_primitives::U256::from(1u8)); // Pending
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_challenger(source_tx_hash), address_to_u256(msg_sender));
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_deadline(source_tx_hash), u64_to_u256(deadline));
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_bond(source_tx_hash), u128_to_u256(bond));
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_proof_hash(source_tx_hash), alloy_primitives::U256::from_be_slice(proof_hash.as_slice()));
+
+        ok_empty()
     }
+
+    // resolveChallenge(bytes32 sourceTxHash) -> 0x8a1e5018
+    fn resolve_challenge(&self, input: &[u8], _msg_sender: Address) -> crate::PrecompileResult {
+        const GAS_COST: u64 = 100000;
+        StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
+        if input.len() < 36 {
+            return Err(revm_precompile::PrecompileError::Other("invalid input".into()));
+        }
+
+        let source_tx_hash = decode_bytes32(input, 4)
+            .ok_or_else(|| PrecompileError::Other("invalid sourceTxHash".into()))?;
+
+        // Validate challenge is pending
+        let status = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
+        if status != 1 {
+            return Err(PrecompileError::Other("challenge not pending".into()));
+        }
+
+        // Validate deadline has passed
+        let deadline = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_deadline(source_tx_hash))
+            .map(u256_to_u64)
+            .unwrap_or(0);
+        let current_height = StorageCtx::block_number();
+        if current_height < deadline {
+            return Err(PrecompileError::Other("challenge deadline not reached".into()));
+        }
+
+        // Verify fraud proof (stub: always returns false)
+        let proof_valid = verify_fraud_proof(source_tx_hash);
+
+        let bond = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_bond(source_tx_hash))
+            .map(u256_to_u128)
+            .unwrap_or(DEFAULT_CHALLENGE_BOND);
+
+        if proof_valid {
+            // Challenge successful: rollback deposit
+            let asset_id = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_asset_id(source_tx_hash))
+                .map(u256_to_u64)
+                .unwrap_or(0);
+            let recipient = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_recipient(source_tx_hash))
+                .map(u256_to_address)
+                .unwrap_or(Address::ZERO);
+            let amount = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_amount(source_tx_hash))
+                .map(u256_to_u128)
+                .unwrap_or(0);
+
+            // Debit recipient balance (may fail if already spent; that's ok)
+            let _ = debit_bal(asset_id, recipient, amount);
+            sub_total_deposits(amount);
+
+            // Clear processed flag so correct deposit can be re-processed
+            StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_processed(source_tx_hash), alloy_primitives::U256::ZERO);
+
+            // Return bond to challenger + reward
+            let challenger = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_challenger(source_tx_hash))
+                .map(u256_to_address)
+                .unwrap_or(Address::ZERO);
+            let _ = credit_bal(CALL_ASSET_ID, challenger, bond + bond / 10); // 10% reward
+
+            // Slash original validator
+            let validator = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_original_validator(source_tx_hash))
+                .map(u256_to_address)
+                .unwrap_or(Address::ZERO);
+            let _ = slash_validator_stake(validator);
+
+            StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash), alloy_primitives::U256::from(2u8)); // Successful
+        } else {
+            // Challenge failed: bond goes to original validator
+            let validator = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_original_validator(source_tx_hash))
+                .map(u256_to_address)
+                .unwrap_or(Address::ZERO);
+            let _ = credit_bal(CALL_ASSET_ID, validator, bond);
+
+            StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash), alloy_primitives::U256::from(3u8)); // Failed
+        }
+
+        ok_empty()
+    }
+
+    // getChallengeStatus(bytes32 sourceTxHash) -> (uint8,uint64,uint128,address)
+    // -> 0x2a5d97e9
+    fn get_challenge_status(&self, input: &[u8]) -> crate::PrecompileResult {
+        const GAS_COST: u64 = 1500;
+        StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
+        if input.len() < 36 {
+            return Err(revm_precompile::PrecompileError::Other("invalid input".into()));
+        }
+
+        let source_tx_hash = decode_bytes32(input, 4)
+            .ok_or_else(|| PrecompileError::Other("invalid sourceTxHash".into()))?;
+
+        let status = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
+        let deadline = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_deadline(source_tx_hash))
+            .map(u256_to_u64)
+            .unwrap_or(0);
+        let bond = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_bond(source_tx_hash))
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        let challenger = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_challenger(source_tx_hash))
+            .map(u256_to_address)
+            .unwrap_or(Address::ZERO);
+
+        let mut out = [0u8; 128];
+        out[31] = status;
+        out[56..64].copy_from_slice(&deadline.to_be_bytes());
+        out[80..96].copy_from_slice(&bond.to_be_bytes());
+        out[108..128].copy_from_slice(challenger.as_slice());
+
+        let output = revm_precompile::PrecompileOutput::new(0, out.to_vec().into());
+        Ok(crate::storage::fill_precompile_output(output))
+    }
+
+    // withdrawChallengeBond(bytes32 sourceTxHash) -> 0x9c4e5e8b
+    fn withdraw_challenge_bond(&self, input: &[u8], msg_sender: Address) -> crate::PrecompileResult {
+        const GAS_COST: u64 = 5000;
+        StorageCtx::deduct_gas(GAS_COST).ok_or(revm_precompile::PrecompileError::OutOfGas)?;
+        if input.len() < 36 {
+            return Err(revm_precompile::PrecompileError::Other("invalid input".into()));
+        }
+
+        let source_tx_hash = decode_bytes32(input, 4)
+            .ok_or_else(|| PrecompileError::Other("invalid sourceTxHash".into()))?;
+
+        let status = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
+        if status != 2 {
+            return Err(PrecompileError::Other("challenge not successful".into()));
+        }
+
+        let challenger = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_challenger(source_tx_hash))
+            .map(u256_to_address)
+            .unwrap_or(Address::ZERO);
+        if challenger != msg_sender {
+            return Err(PrecompileError::Other("not challenger".into()));
+        }
+
+        let bond = StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_bond(source_tx_hash))
+            .map(u256_to_u128)
+            .unwrap_or(DEFAULT_CHALLENGE_BOND);
+
+        // Transfer bond + reward to challenger
+        let reward = bond + bond / 10; // 10% reward
+        credit_bal(CALL_ASSET_ID, challenger, reward)?;
+
+        StorageCtx::sstore(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash), alloy_primitives::U256::from(4u8)); // Withdrawn
+
+        ok_empty()
+    }
+}
+
+/// Verify fraud proof for a challenged deposit.
+/// TODO: Implement actual cryptographic verification based on bridge type.
+fn verify_fraud_proof(_source_tx_hash: [u8; 32]) -> bool {
+    false
+}
+
+/// Slash validator stake. Minimal implementation: reduce stake and clear status.
+fn slash_validator_stake(validator: Address) -> Result<(), PrecompileError> {
+    let stake = StorageCtx::sload(crate::VALIDATOR_ADDRESS, crate::slot_validator_by_addr(validator))
+        .map(u256_to_u64)
+        .unwrap_or(0);
+    if stake == 0 {
+        return Ok(());
+    }
+
+    // For now, just clear validator status to inactive
+    // Full slashing logic (transferring to treasury, reducing stake) can be added later
+    StorageCtx::sstore(crate::VALIDATOR_ADDRESS, crate::slot_validator_by_addr(validator), alloy_primitives::U256::ZERO);
+
+    Ok(())
 }
 
 impl StatefulPrecompile for BridgePrecompile {
@@ -421,7 +713,10 @@ impl StatefulPrecompile for BridgePrecompile {
             &[0x1a, 0xba, 0x07, 0x00] => self.external_deposit(calldata, msg_sender),
             &[0x39, 0x3d, 0xa6, 0x69] => self.external_withdraw(calldata, msg_sender),
             &[0x26, 0x89, 0xcf, 0xc0] => self.deposit(calldata, msg_sender),
-            &[0x07, 0xde, 0xe8, 0xd0] => self.challenge_deposit(calldata, msg_sender),
+            &[0x07, 0xde, 0xe8, 0xd0] => self.initiate_challenge(calldata, msg_sender),
+            &[0x8a, 0x1e, 0x50, 0x18] => self.resolve_challenge(calldata, msg_sender),
+            &[0x2a, 0x5d, 0x97, 0xe9] => self.get_challenge_status(calldata),
+            &[0x9c, 0x4e, 0x5e, 0x8b] => self.withdraw_challenge_bond(calldata, msg_sender),
             _ => Err(revm_precompile::PrecompileError::Other("unknown selector".into())),
         }
     }
@@ -497,6 +792,405 @@ mod tests {
                 buf
             });
             assert_eq!(withdrawals, 2000);
+        });
+    }
+
+    #[test]
+    fn test_external_deposit_records_metadata() {
+        let mut provider = crate::storage::HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            // Register asset_id=1
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                crate::storage::storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+                alloy_primitives::U256::from(1u8),
+            );
+
+            let mut precompile = BridgePrecompile;
+
+            // externalDeposit(sourceTxHash, assetId=1, recipient, amount=1000)
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x1a, 0xba, 0x07, 0x00]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[60..68].copy_from_slice(&1u64.to_be_bytes());
+            input[80..100].copy_from_slice(recipient.as_slice());
+            input[116..132].copy_from_slice(&1000u128.to_be_bytes());
+
+            let result = precompile.call(&input, validator);
+            assert!(result.is_ok(), "external_deposit failed: {:?}", result.err());
+
+            // Verify metadata stored
+            let stored_asset_id = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_asset_id(source_tx_hash))
+                .map(u256_to_u64).unwrap_or(0);
+            assert_eq!(stored_asset_id, 1);
+
+            let stored_recipient = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_recipient(source_tx_hash))
+                .map(u256_to_address).unwrap_or(Address::ZERO);
+            assert_eq!(stored_recipient, recipient);
+
+            let stored_amount = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_amount(source_tx_hash))
+                .map(u256_to_u128).unwrap_or(0);
+            assert_eq!(stored_amount, 1000);
+
+            let stored_height = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_deposit_block_height(source_tx_hash))
+                .map(u256_to_u64).unwrap_or(0);
+            assert_eq!(stored_height, 10);
+
+            let stored_validator = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_original_validator(source_tx_hash))
+                .map(u256_to_address).unwrap_or(Address::ZERO);
+            assert_eq!(stored_validator, validator);
+        });
+    }
+
+    #[test]
+    fn test_initiate_challenge_success() {
+        let mut provider = crate::storage::HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let challenger = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            // Register asset_id=1 and seed challenger balance
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                crate::storage::storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+                alloy_primitives::U256::from(1u8),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, challenger),
+                u128_to_u256(5000),
+            );
+            // Seed recipient balance for externalDeposit
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(1, recipient),
+                u128_to_u256(0),
+            );
+
+            let mut precompile = BridgePrecompile;
+
+            // 1. externalDeposit
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x1a, 0xba, 0x07, 0x00]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[60..68].copy_from_slice(&1u64.to_be_bytes());
+            input[80..100].copy_from_slice(recipient.as_slice());
+            input[116..132].copy_from_slice(&1000u128.to_be_bytes());
+            precompile.call(&input, validator).unwrap();
+
+            // 2. initiateChallenge at block 10 (within period)
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x07, 0xde, 0xe8, 0xd0]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            // proof offset = 64
+            input[36 + 24..36 + 32].copy_from_slice(&64u64.to_be_bytes());
+            // proof data: len=4, data="proof"
+            let proof_abs = 4 + 64;
+            input[proof_abs + 24..proof_abs + 32].copy_from_slice(&5u64.to_be_bytes());
+            input[proof_abs + 32..proof_abs + 37].copy_from_slice(b"proof");
+
+            let result = precompile.call(&input, challenger);
+            assert!(result.is_ok(), "initiate_challenge failed: {:?}", result.err());
+
+            // Verify challenge stored
+            let status = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+                .map(|v| v.to_be_bytes::<32>()[31]).unwrap_or(0);
+            assert_eq!(status, 1); // Pending
+
+            let stored_challenger = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_challenger(source_tx_hash))
+                .map(u256_to_address).unwrap_or(Address::ZERO);
+            assert_eq!(stored_challenger, challenger);
+
+            let deadline = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_deadline(source_tx_hash))
+                .map(u256_to_u64).unwrap_or(0);
+            assert_eq!(deadline, 110); // block 10 + period 100
+
+            // Bond deducted from challenger
+            let challenger_bal = load_bal(CALL_ASSET_ID, challenger);
+            assert_eq!(challenger_bal, 4000); // 5000 - 1000 bond
+        });
+    }
+
+    #[test]
+    fn test_initiate_challenge_fails_not_processed() {
+        let mut provider = crate::storage::HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let challenger = Address::repeat_byte(0x33);
+        let source_tx_hash = [0xABu8; 32];
+
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            let mut precompile = BridgePrecompile;
+
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x07, 0xde, 0xe8, 0xd0]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[36 + 24..36 + 32].copy_from_slice(&64u64.to_be_bytes());
+            let proof_abs = 4 + 64;
+            input[proof_abs + 24..proof_abs + 32].copy_from_slice(&5u64.to_be_bytes());
+            input[proof_abs + 32..proof_abs + 37].copy_from_slice(b"proof");
+
+            let result = precompile.call(&input, challenger);
+            assert!(result.is_err(), "should fail: source tx not processed");
+        });
+    }
+
+    #[test]
+    fn test_initiate_challenge_fails_period_expired() {
+        let mut provider = crate::storage::HashMapStorageProvider::with_block(1_000_000, 1, 100);
+        let validator = Address::repeat_byte(0x11);
+        let challenger = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        // externalDeposit at block 100
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                crate::storage::storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+                alloy_primitives::U256::from(1u8),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, challenger),
+                u128_to_u256(5000),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(1, recipient),
+                u128_to_u256(0),
+            );
+
+            let mut precompile = BridgePrecompile;
+
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x1a, 0xba, 0x07, 0x00]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[60..68].copy_from_slice(&1u64.to_be_bytes());
+            input[80..100].copy_from_slice(recipient.as_slice());
+            input[116..132].copy_from_slice(&1000u128.to_be_bytes());
+            precompile.call(&input, validator).unwrap();
+        });
+
+        // initiateChallenge at block 200 (deposit at block 100, period = 100, so expired)
+        provider.set_block_number(200);
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            let mut precompile = BridgePrecompile;
+
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x07, 0xde, 0xe8, 0xd0]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[36 + 24..36 + 32].copy_from_slice(&64u64.to_be_bytes());
+            let proof_abs = 4 + 64;
+            input[proof_abs + 24..proof_abs + 32].copy_from_slice(&5u64.to_be_bytes());
+            input[proof_abs + 32..proof_abs + 37].copy_from_slice(b"proof");
+
+            let result = precompile.call(&input, challenger);
+            assert!(result.is_err(), "should fail: challenge period expired");
+        });
+    }
+
+    #[test]
+    fn test_initiate_challenge_fails_already_challenged() {
+        let mut provider = crate::storage::HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let challenger = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                crate::storage::storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+                alloy_primitives::U256::from(1u8),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, challenger),
+                u128_to_u256(5000),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(1, recipient),
+                u128_to_u256(0),
+            );
+
+            let mut precompile = BridgePrecompile;
+
+            // externalDeposit
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x1a, 0xba, 0x07, 0x00]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[60..68].copy_from_slice(&1u64.to_be_bytes());
+            input[80..100].copy_from_slice(recipient.as_slice());
+            input[116..132].copy_from_slice(&1000u128.to_be_bytes());
+            precompile.call(&input, validator).unwrap();
+
+            // First challenge
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x07, 0xde, 0xe8, 0xd0]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[36 + 24..36 + 32].copy_from_slice(&64u64.to_be_bytes());
+            let proof_abs = 4 + 64;
+            input[proof_abs + 24..proof_abs + 32].copy_from_slice(&5u64.to_be_bytes());
+            input[proof_abs + 32..proof_abs + 37].copy_from_slice(b"proof");
+            precompile.call(&input, challenger).unwrap();
+
+            // Second challenge should fail
+            let result = precompile.call(&input, challenger);
+            assert!(result.is_err(), "should fail: already challenged");
+        });
+    }
+
+    #[test]
+    fn test_resolve_challenge_false_proof_bond_forfeited() {
+        let mut provider = crate::storage::HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let challenger = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        // Setup state and externalDeposit + initiateChallenge at block 10
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                crate::storage::storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+                alloy_primitives::U256::from(1u8),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, challenger),
+                u128_to_u256(5000),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, validator),
+                u128_to_u256(100),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(1, recipient),
+                u128_to_u256(0),
+            );
+
+            let mut precompile = BridgePrecompile;
+
+            // externalDeposit
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x1a, 0xba, 0x07, 0x00]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[60..68].copy_from_slice(&1u64.to_be_bytes());
+            input[80..100].copy_from_slice(recipient.as_slice());
+            input[116..132].copy_from_slice(&1000u128.to_be_bytes());
+            precompile.call(&input, validator).unwrap();
+
+            // initiateChallenge
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x07, 0xde, 0xe8, 0xd0]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[36 + 24..36 + 32].copy_from_slice(&64u64.to_be_bytes());
+            let proof_abs = 4 + 64;
+            input[proof_abs + 24..proof_abs + 32].copy_from_slice(&5u64.to_be_bytes());
+            input[proof_abs + 32..proof_abs + 37].copy_from_slice(b"proof");
+            precompile.call(&input, challenger).unwrap();
+        });
+
+        // resolveChallenge at block 120 (deadline = 10 + 100 = 110)
+        // Since verify_fraud_proof returns false, challenge fails
+        provider.set_block_number(120);
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            let mut precompile = BridgePrecompile;
+
+            let mut input = vec![0u8; 36];
+            input[0..4].copy_from_slice(&[0x8a, 0x1e, 0x50, 0x18]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+
+            let result = precompile.call(&input, Address::ZERO);
+            assert!(result.is_ok(), "resolve_challenge failed: {:?}", result.err());
+
+            // Status should be Failed (3)
+            let status = crate::storage::StorageCtx::sload(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+                .map(|v| v.to_be_bytes::<32>()[31]).unwrap_or(0);
+            assert_eq!(status, 3);
+
+            // Validator should have received the bond
+            let validator_bal = load_bal(CALL_ASSET_ID, validator);
+            assert_eq!(validator_bal, 1100); // 100 + 1000 bond
+        });
+    }
+
+    #[test]
+    fn test_get_challenge_status() {
+        let mut provider = crate::storage::HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let challenger = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        crate::storage::StorageCtx::enter(&mut provider, || {
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                crate::storage::storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+                alloy_primitives::U256::from(1u8),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, challenger),
+                u128_to_u256(5000),
+            );
+            crate::storage::StorageCtx::sstore(
+                crate::ASSET_ADDRESS,
+                slot_balance(1, recipient),
+                u128_to_u256(0),
+            );
+
+            let mut precompile = BridgePrecompile;
+
+            // externalDeposit
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x1a, 0xba, 0x07, 0x00]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[60..68].copy_from_slice(&1u64.to_be_bytes());
+            input[80..100].copy_from_slice(recipient.as_slice());
+            input[116..132].copy_from_slice(&1000u128.to_be_bytes());
+            precompile.call(&input, validator).unwrap();
+
+            // initiateChallenge
+            let mut input = vec![0u8; 132];
+            input[0..4].copy_from_slice(&[0x07, 0xde, 0xe8, 0xd0]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+            input[36 + 24..36 + 32].copy_from_slice(&64u64.to_be_bytes());
+            let proof_abs = 4 + 64;
+            input[proof_abs + 24..proof_abs + 32].copy_from_slice(&5u64.to_be_bytes());
+            input[proof_abs + 32..proof_abs + 37].copy_from_slice(b"proof");
+            precompile.call(&input, challenger).unwrap();
+
+            // getChallengeStatus
+            let mut input = vec![0u8; 36];
+            input[0..4].copy_from_slice(&[0x2a, 0x5d, 0x97, 0xe9]);
+            input[4..36].copy_from_slice(&source_tx_hash);
+
+            let result = precompile.call(&input, Address::ZERO).unwrap();
+            assert_eq!(result.bytes.len(), 128);
+            assert_eq!(result.bytes[31], 1); // status = Pending
+            let deadline = u64::from_be_bytes({
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&result.bytes[56..64]);
+                buf
+            });
+            assert_eq!(deadline, 110);
+            let bond = u128::from_be_bytes({
+                let mut buf = [0u8; 16];
+                buf.copy_from_slice(&result.bytes[80..96]);
+                buf
+            });
+            assert_eq!(bond, 1000);
+            let returned_challenger = Address::from_slice(&result.bytes[108..128]);
+            assert_eq!(returned_challenger, challenger);
         });
     }
 }
