@@ -169,6 +169,11 @@ pub fn slot_asset_meta(asset_id: u64, suffix: &[u8]) -> alloy_primitives::U256 {
     storage_slot(&[&asset_id.to_be_bytes()[..], suffix])
 }
 
+/// Compute the EVM storage slot for the EVM contract address of an asset.
+pub fn slot_evm_contract(asset_id: u64) -> alloy_primitives::U256 {
+    slot_asset_meta(asset_id, b"evm_contract")
+}
+
 /// Read a u128 value from a U256 storage word (low 128 bits).
 pub fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
     let bytes = v.to_be_bytes::<32>();

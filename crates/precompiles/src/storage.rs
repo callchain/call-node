@@ -9,6 +9,7 @@
 //! - [`HashMapStorageProvider`] is a test double.
 
 use alloy_primitives::{Address, LogData, U256};
+use revm::context_interface::journaled_state::account::JournaledAccountTr;
 use revm::context_interface::journaled_state::JournalCheckpoint;
 use revm::context_interface::JournalTr;
 use revm::database_interface::Database;
@@ -75,6 +76,15 @@ pub trait StorageProvider {
 
     /// Current block beneficiary (coinbase).
     fn beneficiary(&self) -> Address;
+
+    /// Add to the native EVM balance of an address.
+    fn balance_add(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError>;
+
+    /// Subtract from the native EVM balance of an address.
+    fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError>;
+
+    /// Read the native EVM balance of an address.
+    fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError>;
 }
 
 // ── Production: EvmStorageProvider ────────────────────────────────────
@@ -256,6 +266,52 @@ where
     fn beneficiary(&self) -> Address {
         self.beneficiary
     }
+
+    fn balance_add(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
+        if self.is_static {
+            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+        }
+        let success = {
+            let mut account = self
+                .journal
+                .load_account_mut(address)
+                .map_err(|e| PrecompileError::Other(format!("load_account_mut error: {:?}", e).into()))?;
+            account.data.incr_balance(amount)
+        };
+        if !success {
+            return Err(PrecompileError::Other("balance overflow".into()));
+        }
+        self.deduct_gas(100)
+    }
+
+    fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
+        if self.is_static {
+            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+        }
+        let success = {
+            let mut account = self
+                .journal
+                .load_account_mut(address)
+                .map_err(|e| PrecompileError::Other(format!("load_account_mut error: {:?}", e).into()))?;
+            account.data.decr_balance(amount)
+        };
+        if !success {
+            return Err(PrecompileError::Other("insufficient native balance".into()));
+        }
+        self.deduct_gas(100)
+    }
+
+    fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
+        let balance = {
+            let account = self
+                .journal
+                .load_account(address)
+                .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+            account.data.info.balance
+        };
+        self.deduct_gas(100)?;
+        Ok(balance)
+    }
 }
 
 // ── Thread-Local Context ──────────────────────────────────────────────
@@ -316,6 +372,18 @@ impl StorageCtx {
 
     pub fn beneficiary() -> Address {
         Self::with_storage(|s| s.beneficiary())
+    }
+
+    pub fn balance_add(address: Address, amount: U256) -> Option<()> {
+        Self::with_storage(|s| s.balance_add(address, amount).ok())
+    }
+
+    pub fn balance_sub(address: Address, amount: U256) -> Option<()> {
+        Self::with_storage(|s| s.balance_sub(address, amount).ok())
+    }
+
+    pub fn balance_get(address: Address) -> Option<U256> {
+        Self::with_storage(|s| s.balance_get(address).ok())
     }
 
     // Write operations
@@ -423,6 +491,7 @@ pub struct HashMapStorageProvider {
     persistent: HashMap<(Address, U256), U256>,
     transient: HashMap<(Address, U256), U256>,
     events: HashMap<Address, Vec<LogData>>,
+    balances: HashMap<Address, U256>,
     gas_remaining: u64,
     gas_refunded: i64,
     gas_limit: u64,
@@ -436,6 +505,7 @@ pub struct HashMapStorageProvider {
         HashMap<(Address, U256), U256>,
         HashMap<(Address, U256), U256>,
         HashMap<Address, Vec<LogData>>,
+        HashMap<Address, U256>,
         u64,
         i64,
     )>,
@@ -470,6 +540,10 @@ impl HashMapStorageProvider {
 
     pub fn events(&self, address: Address) -> Vec<LogData> {
         self.events.get(&address).cloned().unwrap_or_default()
+    }
+
+    pub fn get_balance(&self, address: Address) -> U256 {
+        self.balances.get(&address).copied().unwrap_or_default()
     }
 }
 
@@ -529,6 +603,7 @@ impl StorageProvider for HashMapStorageProvider {
             self.persistent.clone(),
             self.transient.clone(),
             self.events.clone(),
+            self.balances.clone(),
             self.gas_remaining,
             self.gas_refunded,
         ));
@@ -540,12 +615,13 @@ impl StorageProvider for HashMapStorageProvider {
     }
 
     fn checkpoint_revert(&mut self, _checkpoint: JournalCheckpoint) {
-        if let Some((persistent, transient, events, gas_remaining, gas_refunded)) =
+        if let Some((persistent, transient, events, balances, gas_remaining, gas_refunded)) =
             self.checkpoints.pop()
         {
             self.persistent = persistent;
             self.transient = transient;
             self.events = events;
+            self.balances = balances;
             self.gas_remaining = gas_remaining;
             self.gas_refunded = gas_refunded;
         }
@@ -589,6 +665,33 @@ impl StorageProvider for HashMapStorageProvider {
 
     fn beneficiary(&self) -> Address {
         self.beneficiary
+    }
+
+    fn balance_add(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
+        if self.is_static {
+            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+        }
+        let current = self.balances.get(&address).copied().unwrap_or_default();
+        let new = current.checked_add(amount)
+            .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
+        self.balances.insert(address, new);
+        self.deduct_gas(100)
+    }
+
+    fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
+        if self.is_static {
+            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+        }
+        let current = self.balances.get(&address).copied().unwrap_or_default();
+        let new = current.checked_sub(amount)
+            .ok_or_else(|| PrecompileError::Other("insufficient native balance".into()))?;
+        self.balances.insert(address, new);
+        self.deduct_gas(100)
+    }
+
+    fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
+        self.deduct_gas(100)?;
+        Ok(self.balances.get(&address).copied().unwrap_or_default())
     }
 }
 
@@ -641,6 +744,36 @@ mod tests {
             }
             // reverted
             assert_eq!(StorageCtx::sload(addr, key).unwrap(), U256::from(42));
+        });
+    }
+
+    #[test]
+    fn test_balance_add_sub_get() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let addr = Address::repeat_byte(0x01);
+
+        StorageCtx::enter(&mut provider, || {
+            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(0)));
+            StorageCtx::balance_add(addr, U256::from(500)).unwrap();
+            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(500)));
+            StorageCtx::balance_sub(addr, U256::from(200)).unwrap();
+            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(300)));
+        });
+    }
+
+    #[test]
+    fn test_balance_checkpoint_revert() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let addr = Address::repeat_byte(0x01);
+
+        StorageCtx::enter(&mut provider, || {
+            StorageCtx::balance_add(addr, U256::from(100)).unwrap();
+            {
+                let _guard = StorageCtx::checkpoint();
+                StorageCtx::balance_add(addr, U256::from(50)).unwrap();
+                assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(150)));
+            }
+            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(100)));
         });
     }
 

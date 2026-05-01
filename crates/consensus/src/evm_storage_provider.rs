@@ -189,4 +189,33 @@ impl<'a> StorageProvider for EvmStateStorageProvider<'a> {
     fn beneficiary(&self) -> Address {
         self.beneficiary
     }
+
+    fn balance_add(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
+        if self.is_static {
+            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+        }
+        let current = self.evm_state.get_balance(&address);
+        let new = current
+            .checked_add(amount)
+            .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
+        self.evm_state.set_balance(address, new);
+        self.deduct_gas(100)
+    }
+
+    fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
+        if self.is_static {
+            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+        }
+        let current = self.evm_state.get_balance(&address);
+        let new = current
+            .checked_sub(amount)
+            .ok_or_else(|| PrecompileError::Other("insufficient native balance".into()))?;
+        self.evm_state.set_balance(address, new);
+        self.deduct_gas(100)
+    }
+
+    fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
+        self.deduct_gas(100)?;
+        Ok(self.evm_state.get_balance(&address))
+    }
 }
