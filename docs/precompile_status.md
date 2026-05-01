@@ -2,6 +2,8 @@
 
 > 审计日期：2026-05-01
 > 本次审计覆盖全部 9 个 precompile 模块 + helpers/utils.rs + storage.rs，重点检查：未实现 stub、重复代码、缺失验证、gas 计费、文档一致性。
+>
+> **更正**：原 C-1（gas 双重计费）和 C-2（读函数 gas_used=0）两条 finding 经复核后确认有误。所有 precompile 均通过 `fill_precompile_output` 正确覆盖 `gas_used`，且 `EvmStorageProvider::gas_used()` 返回 `gas_limit - gas_remaining`，gas 计费是准确的。
 
 ---
 
@@ -9,10 +11,8 @@
 
 | # | 严重度 | 问题 | 涉及文件 | 状态 |
 |---|--------|------|----------|------|
-| C-1 | **高** | Gas 双重计费：`StorageCtx::deduct_gas` 已从 provider 扣除 gas，`fill_precompile_output` 将累计值写入 `output.gas_used`，`CallPrecompiles::run` 又调用 `record_cost(output.gas_used)`，导致 gas 被扣两次 | `storage.rs`, `lib.rs` | **未实现** |
-| C-2 | **高** | 读函数 `PrecompileOutput::new(0, ...)` 硬编码 `gas_used=0`，revm 记录为零成本 | 多个 precompile | **未实现** |
-| C-3 | 中 | `load_bal`/`save_bal` 重复定义在 5 个文件中，应统一移到 `utils.rs` | `bridge.rs`, `shielded.rs`, `validator.rs`, `agent.rs`, `asset.rs` | **未实现** |
-| C-4 | 低 | `require_caller` 重复定义 | `switch.rs`, `asset.rs` | **未实现** |
+| C-1 | 中 | `load_bal`/`save_bal` 重复定义在 5 个文件中，应统一移到 `utils.rs` | `bridge.rs`, `shielded.rs`, `validator.rs`, `agent.rs`, `asset.rs` | **未实现** |
+| C-2 | 低 | `require_caller` 重复定义 | `switch.rs`, `asset.rs` | **未实现** |
 
 ---
 
@@ -120,12 +120,10 @@
 ## 修复优先级建议
 
 ### P0（破坏性行为 / 数据错误）
-- [ ] C-1: 修复 gas 双重计费架构问题
 - [ ] O-1: 修复 `decode_u128` 偏移量 bug（oracle.rs）
 - [ ] A-3: 修复 `bridge_deposit` 双重扣款（agent.rs）
 
 ### P1（安全 / 完整性）
-- [ ] C-2: 修复读函数 `gas_used = 0`
 - [ ] M-2: 修复 `check_compliance` ABI 不匹配
 - [ ] G-3: 为所有写函数添加 `is_static` 检查
 - [ ] G-4: 修复 `queue()` 逻辑（yes > no）
@@ -143,8 +141,8 @@
 - [ ] S-2: 修复 switch ERC-20 路径 gas 低估
 
 ### P3（代码优化 / 清理）
-- [ ] C-3: 统一 `load_bal`/`save_bal` 到 `utils.rs`
-- [ ] C-4: 统一 `require_caller` 到 `utils.rs`
+- [ ] C-1: 统一 `load_bal`/`save_bal` 到 `utils.rs`
+- [ ] C-2: 统一 `require_caller` 到 `utils.rs`
 - [ ] G-6: 将 `is_validator`/`require_validator` 移到 `utils.rs`
 - [ ] M-4: 将 `u8_from_u256`/`u256_from_u8` 移到 `utils.rs`
 - [ ] O-5: 移除 `slot_oracle`，改用 `slot_asset_meta`
