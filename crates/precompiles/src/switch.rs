@@ -10,44 +10,17 @@
 //!   - Other assets: ERC-20 storage writes (totalSupply slot 3, balanceOf slot keccak256(addr,4))
 
 use alloy_primitives::{address, Address, U256};
-use revm_precompile::{PrecompileError, PrecompileOutput};
+use revm_precompile::PrecompileError;
 
 use crate::StatefulPrecompile;
 use crate::storage::StorageCtx;
-use crate::{slot_asset_meta, slot_balance, slot_evm_contract, u128_to_u256, u256_to_u128, ASSET_ADDRESS};
+use crate::{
+    decode_address, decode_u128, decode_u64, ok_empty, slot_asset_meta, slot_balance,
+    slot_evm_contract, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
+};
 
 pub const SWITCH_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000207");
-
-// ── ABI decoding helpers (mirroring asset.rs) ─────────────────────────
-
-fn decode_u64(input: &[u8], slot_offset: usize) -> Option<u64> {
-    let start = slot_offset + 24;
-    if input.len() < start + 8 {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&input[start..start + 8]);
-    Some(u64::from_be_bytes(buf))
-}
-
-fn decode_u128(input: &[u8], slot_offset: usize) -> Option<u128> {
-    let start = slot_offset + 16;
-    if input.len() < start + 16 {
-        return None;
-    }
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&input[start..start + 16]);
-    Some(u128::from_be_bytes(buf))
-}
-
-fn decode_address(input: &[u8], slot_offset: usize) -> Option<Address> {
-    let start = slot_offset + 12;
-    if input.len() < start + 20 {
-        return None;
-    }
-    Some(Address::from_slice(&input[start..start + 20]))
-}
 
 // ── ERC-20 storage layout helpers ─────────────────────────────────────
 
@@ -70,6 +43,88 @@ fn erc20_balance_of_slot(holder: Address) -> U256 {
 
 /// Storage slot for `totalSupply` in WrappedToken (slot 3).
 const ERC20_TOTAL_SUPPLY_SLOT: U256 = U256::from_limbs([3, 0, 0, 0]);
+
+// ── Protocol balance helpers ──────────────────────────────────────────
+
+fn load_protocol_bal(asset_id: u64, addr: Address) -> u128 {
+    StorageCtx::sload(ASSET_ADDRESS, slot_balance(asset_id, addr))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+fn save_protocol_bal(asset_id: u64, addr: Address, amount: u128) {
+    StorageCtx::sstore(ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
+}
+
+fn add_protocol_bal(asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
+    let bal = load_protocol_bal(asset_id, addr)
+        .checked_add(amount)
+        .ok_or_else(|| PrecompileError::Other("protocol balance overflow".into()))?;
+    save_protocol_bal(asset_id, addr, bal);
+    Ok(())
+}
+
+fn sub_protocol_bal(asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
+    let bal = load_protocol_bal(asset_id, addr)
+        .checked_sub(amount)
+        .ok_or_else(|| PrecompileError::Other("insufficient protocol balance".into()))?;
+    save_protocol_bal(asset_id, addr, bal);
+    Ok(())
+}
+
+// ── Protocol supply helpers ───────────────────────────────────────────
+
+fn load_protocol_supply(asset_id: u64) -> u128 {
+    StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+fn save_protocol_supply(asset_id: u64, amount: u128) {
+    StorageCtx::sstore(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(amount));
+}
+
+// ── ERC-20 mint/burn helpers ──────────────────────────────────────────
+
+fn erc20_mint(contract: Address, to: Address, amount: u128) -> Result<(), PrecompileError> {
+    let total_supply = StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
+        .map(u256_to_u128)
+        .unwrap_or(0);
+    let total_supply = total_supply
+        .checked_add(amount)
+        .ok_or_else(|| PrecompileError::Other("totalSupply overflow".into()))?;
+    StorageCtx::sstore(contract, ERC20_TOTAL_SUPPLY_SLOT, u128_to_u256(total_supply));
+
+    let balance_slot = erc20_balance_of_slot(to);
+    let to_balance = StorageCtx::sload(contract, balance_slot)
+        .map(u256_to_u128)
+        .unwrap_or(0);
+    let to_balance = to_balance
+        .checked_add(amount)
+        .ok_or_else(|| PrecompileError::Other("ERC-20 balance overflow".into()))?;
+    StorageCtx::sstore(contract, balance_slot, u128_to_u256(to_balance));
+    Ok(())
+}
+
+fn erc20_burn(contract: Address, from: Address, amount: u128) -> Result<(), PrecompileError> {
+    let total_supply = StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
+        .map(u256_to_u128)
+        .unwrap_or(0);
+    let total_supply = total_supply
+        .checked_sub(amount)
+        .ok_or_else(|| PrecompileError::Other("totalSupply underflow".into()))?;
+    StorageCtx::sstore(contract, ERC20_TOTAL_SUPPLY_SLOT, u128_to_u256(total_supply));
+
+    let balance_slot = erc20_balance_of_slot(from);
+    let from_balance = StorageCtx::sload(contract, balance_slot)
+        .map(u256_to_u128)
+        .unwrap_or(0);
+    let from_balance = from_balance
+        .checked_sub(amount)
+        .ok_or_else(|| PrecompileError::Other("insufficient ERC-20 balance".into()))?;
+    StorageCtx::sstore(contract, balance_slot, u128_to_u256(from_balance));
+    Ok(())
+}
 
 // ── SwitchPrecompile ──────────────────────────────────────────────────
 
@@ -134,14 +189,7 @@ impl SwitchPrecompile {
         let _guard = StorageCtx::checkpoint();
 
         // 1. Deduct protocol balance from sender
-        let sender_slot = slot_balance(asset_id, sender);
-        let sender_bal = StorageCtx::sload(ASSET_ADDRESS, sender_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let sender_bal = sender_bal
-            .checked_sub(amount)
-            .ok_or_else(|| PrecompileError::Other("insufficient protocol balance".into()))?;
-        StorageCtx::sstore(ASSET_ADDRESS, sender_slot, u128_to_u256(sender_bal));
+        sub_protocol_bal(asset_id, sender, amount)?;
 
         // 2. Credit EVM side
         if asset_id == 1 {
@@ -151,45 +199,19 @@ impl SwitchPrecompile {
         } else {
             // ERC-20: mint (increase totalSupply and balanceOf[to])
             let contract = Self::read_evm_contract(asset_id)?;
-
-            let total_supply = StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let total_supply = total_supply
-                .checked_add(amount)
-                .ok_or_else(|| PrecompileError::Other("totalSupply overflow".into()))?;
-            StorageCtx::sstore(
-                contract,
-                ERC20_TOTAL_SUPPLY_SLOT,
-                u128_to_u256(total_supply),
-            );
-
-            let balance_slot = erc20_balance_of_slot(to);
-            let to_balance = StorageCtx::sload(contract, balance_slot)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let to_balance = to_balance
-                .checked_add(amount)
-                .ok_or_else(|| PrecompileError::Other("ERC-20 balance overflow".into()))?;
-            StorageCtx::sstore(contract, balance_slot, u128_to_u256(to_balance));
+            erc20_mint(contract, to, amount)?;
         }
 
         // 3. Update protocol-side supply tracking for non-CALL assets
         if asset_id != 1 {
-            let supply_slot = slot_asset_meta(asset_id, b"supply");
-            let protocol_supply = StorageCtx::sload(ASSET_ADDRESS, supply_slot)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let protocol_supply = protocol_supply
+            let supply = load_protocol_supply(asset_id)
                 .checked_sub(amount)
                 .ok_or_else(|| PrecompileError::Other("protocol supply underflow".into()))?;
-            StorageCtx::sstore(ASSET_ADDRESS, supply_slot, u128_to_u256(protocol_supply));
+            save_protocol_supply(asset_id, supply);
         }
 
         _guard.commit();
-
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 
     // switchToProtocol(uint64 assetId, address to, uint128 amount) -> 0xbd8d87d4
@@ -224,55 +246,22 @@ impl SwitchPrecompile {
         } else {
             // ERC-20: burn (decrease totalSupply and balanceOf[sender])
             let contract = Self::read_evm_contract(asset_id)?;
-
-            let total_supply = StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let total_supply = total_supply
-                .checked_sub(amount)
-                .ok_or_else(|| PrecompileError::Other("totalSupply underflow".into()))?;
-            StorageCtx::sstore(
-                contract,
-                ERC20_TOTAL_SUPPLY_SLOT,
-                u128_to_u256(total_supply),
-            );
-
-            let balance_slot = erc20_balance_of_slot(sender);
-            let sender_balance = StorageCtx::sload(contract, balance_slot)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let sender_balance = sender_balance
-                .checked_sub(amount)
-                .ok_or_else(|| PrecompileError::Other("insufficient ERC-20 balance".into()))?;
-            StorageCtx::sstore(contract, balance_slot, u128_to_u256(sender_balance));
+            erc20_burn(contract, sender, amount)?;
         }
 
         // 2. Credit protocol balance to `to`
-        let to_slot = slot_balance(asset_id, to);
-        let to_bal = StorageCtx::sload(ASSET_ADDRESS, to_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let to_bal = to_bal
-            .checked_add(amount)
-            .ok_or_else(|| PrecompileError::Other("protocol balance overflow".into()))?;
-        StorageCtx::sstore(ASSET_ADDRESS, to_slot, u128_to_u256(to_bal));
+        add_protocol_bal(asset_id, to, amount)?;
 
         // 3. Update protocol-side supply tracking for non-CALL assets
         if asset_id != 1 {
-            let supply_slot = slot_asset_meta(asset_id, b"supply");
-            let protocol_supply = StorageCtx::sload(ASSET_ADDRESS, supply_slot)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let protocol_supply = protocol_supply
+            let supply = load_protocol_supply(asset_id)
                 .checked_add(amount)
                 .ok_or_else(|| PrecompileError::Other("protocol supply overflow".into()))?;
-            StorageCtx::sstore(ASSET_ADDRESS, supply_slot, u128_to_u256(protocol_supply));
+            save_protocol_supply(asset_id, supply);
         }
 
         _guard.commit();
-
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 }
 
