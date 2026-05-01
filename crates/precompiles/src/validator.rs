@@ -8,8 +8,8 @@ use revm_precompile::PrecompileError;
 
 use crate::{
     address_to_u256, decode_address, decode_bytes32, decode_u128, decode_u64, encode_u128,
-    encode_u64, encode_u8, ok_empty, slot_balance, slot_validator_by_addr, u128_to_u256,
-    u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StatefulPrecompile,
+    encode_u64, encode_u8, load_bal, ok_empty, save_bal, slot_validator_by_addr,
+    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StatefulPrecompile,
 };
 use crate::storage::{storage_slot, StorageCtx};
 
@@ -53,18 +53,6 @@ fn slot_unbonding_count() -> U256 {
 
 fn slot_unbonding(index: u64) -> U256 {
     storage_slot(&[b"unbonding"]) + U256::from(index)
-}
-
-// ── Balance helpers ───────────────────────────────────────────────────
-
-fn load_bal(asset_id: u64, addr: Address) -> u128 {
-    StorageCtx::sload(crate::ASSET_ADDRESS, slot_balance(asset_id, addr))
-        .map(u256_to_u128)
-        .unwrap_or(0)
-}
-
-fn save_bal(asset_id: u64, addr: Address, amount: u128) {
-    StorageCtx::sstore(crate::ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
 }
 
 // ── ValidatorPrecompile ───────────────────────────────────────────────
@@ -374,6 +362,7 @@ impl StatefulPrecompile for ValidatorPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slot_balance;
 
     #[test]
     fn test_validator_address() {

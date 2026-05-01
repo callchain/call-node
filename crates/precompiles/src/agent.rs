@@ -10,8 +10,8 @@ use revm_precompile::PrecompileError;
 use crate::{
     address_to_u256, decode_address, decode_bytes32, decode_u128, decode_u64,
     decode_u256_usize, decode_address_array, decode_u128_array, encode_u128,
-    ok_empty, slot_balance, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
-    u64_to_u256, StatefulPrecompile,
+    load_bal, ok_empty, save_bal, u128_to_u256, u256_to_address, u256_to_u128,
+    u256_to_u64, u64_to_u256, StatefulPrecompile,
 };
 use crate::storage::{storage_slot, StorageCtx};
 
@@ -83,16 +83,6 @@ fn agent_check_owner(agent_id: u64, sender: Address) -> Result<(), PrecompileErr
 }
 
 // ── Balance helpers ───────────────────────────────────────────────────
-
-fn load_bal(asset_id: u64, addr: Address) -> u128 {
-    StorageCtx::sload(crate::ASSET_ADDRESS, slot_balance(asset_id, addr))
-        .map(u256_to_u128)
-        .unwrap_or(0)
-}
-
-fn save_bal(asset_id: u64, addr: Address, amount: u128) {
-    StorageCtx::sstore(crate::ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
-}
 
 fn load_agent_bal(agent_id: u64, asset_id: u64) -> u128 {
     StorageCtx::sload(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id))
@@ -599,6 +589,7 @@ impl StatefulPrecompile for AgentPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slot_balance;
 
     #[test]
     fn test_agent_address() {

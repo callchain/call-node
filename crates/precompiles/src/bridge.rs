@@ -11,9 +11,9 @@ use std::sync::{Arc, RwLock};
 use revm_precompile::PrecompileError;
 
 use crate::{
-    address_to_u256, decode_address, decode_bytes32, decode_u128, decode_u64, decode_u256_usize,
-    encode_u128, ok_empty, slot_asset_meta, slot_balance, u128_to_u256, u256_to_address,
-    u256_to_u128, u256_to_u64, u64_to_u256,
+    address_to_u256, credit_bal, debit_bal, decode_address, decode_bytes32, decode_u128,
+    decode_u64, decode_u256_usize, encode_u128, ok_empty, slot_asset_meta, u128_to_u256,
+    u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
 };
 use crate::storage::{storage_slot, StorageCtx};
 use crate::StatefulPrecompile;
@@ -209,34 +209,6 @@ fn bridge_validate_basic(asset_id: u64) -> Result<(), PrecompileError> {
     if bridge_is_paused() {
         return Err(PrecompileError::Other("bridge paused".into()));
     }
-    Ok(())
-}
-
-// ── Balance helpers ───────────────────────────────────────────────────
-
-fn load_bal(asset_id: u64, addr: Address) -> u128 {
-    StorageCtx::sload(crate::ASSET_ADDRESS, slot_balance(asset_id, addr))
-        .map(u256_to_u128)
-        .unwrap_or(0)
-}
-
-fn save_bal(asset_id: u64, addr: Address, amount: u128) {
-    StorageCtx::sstore(crate::ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
-}
-
-fn credit_bal(asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
-    let bal = load_bal(asset_id, addr)
-        .checked_add(amount)
-        .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
-    save_bal(asset_id, addr, bal);
-    Ok(())
-}
-
-fn debit_bal(asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
-    let bal = load_bal(asset_id, addr)
-        .checked_sub(amount)
-        .ok_or_else(|| PrecompileError::Other("insufficient balance".into()))?;
-    save_bal(asset_id, addr, bal);
     Ok(())
 }
 
@@ -725,6 +697,7 @@ impl StatefulPrecompile for BridgePrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{load_bal, slot_balance};
 
     #[test]
     fn test_bridge_address() {

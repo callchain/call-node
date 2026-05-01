@@ -15,8 +15,8 @@ use revm_precompile::PrecompileError;
 use crate::StatefulPrecompile;
 use crate::storage::StorageCtx;
 use crate::{
-    decode_address, decode_u128, decode_u64, ok_empty, slot_asset_meta, slot_balance,
-    slot_evm_contract, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
+    decode_address, decode_u128, decode_u64, ok_empty, require_caller, slot_asset_meta,
+    slot_balance, slot_evm_contract, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
 };
 
 pub const SWITCH_ADDRESS: alloy_primitives::Address =
@@ -132,13 +132,6 @@ fn erc20_burn(contract: Address, from: Address, amount: u128) -> Result<(), Prec
 pub struct SwitchPrecompile;
 
 impl SwitchPrecompile {
-    fn require_caller(msg_sender: Address) -> Result<Address, PrecompileError> {
-        if msg_sender == Address::ZERO {
-            return Err(PrecompileError::Other("caller not available".into()));
-        }
-        Ok(msg_sender)
-    }
-
     fn read_evm_contract(asset_id: u64) -> Result<Address, PrecompileError> {
         let addr = StorageCtx::sload(ASSET_ADDRESS, slot_evm_contract(asset_id))
             .and_then(|v| {
@@ -183,7 +176,7 @@ impl SwitchPrecompile {
         let amount = decode_u128(input, 68)
             .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
 
-        let sender = Self::require_caller(msg_sender)?;
+        let sender = require_caller(msg_sender)?;
         Self::check_asset_active(asset_id)?;
 
         let _guard = StorageCtx::checkpoint();
@@ -233,7 +226,7 @@ impl SwitchPrecompile {
         let amount = decode_u128(input, 68)
             .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
 
-        let sender = Self::require_caller(msg_sender)?;
+        let sender = require_caller(msg_sender)?;
         Self::check_asset_active(asset_id)?;
 
         let _guard = StorageCtx::checkpoint();

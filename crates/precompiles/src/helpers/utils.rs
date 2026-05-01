@@ -4,9 +4,10 @@
 //! Precompiles should import from here instead of depending on each other.
 
 use alloy_primitives::{Address, U256};
-use revm_precompile::PrecompileOutput;
+use revm_precompile::{PrecompileError, PrecompileOutput};
 
-use crate::storage::storage_slot;
+use crate::storage::{storage_slot, StorageCtx};
+use crate::ASSET_ADDRESS;
 
 // ── ABI decoding helpers ──────────────────────────────────────────────
 
@@ -274,4 +275,46 @@ pub fn slot_validator_by_addr(addr: Address) -> U256 {
 /// Compute compliance storage slot for an address under a policy.
 pub fn slot_compliance(addr: Address, policy_id: u8) -> U256 {
     storage_slot(&[addr.as_slice(), &[policy_id]])
+}
+
+// ── Balance helpers ───────────────────────────────────────────────────
+
+/// Load an asset balance from storage.
+pub fn load_bal(asset_id: u64, addr: Address) -> u128 {
+    StorageCtx::sload(ASSET_ADDRESS, slot_balance(asset_id, addr))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+/// Save an asset balance to storage.
+pub fn save_bal(asset_id: u64, addr: Address, amount: u128) {
+    StorageCtx::sstore(ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
+}
+
+/// Credit a balance (checked add).
+pub fn credit_bal(asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
+    let bal = load_bal(asset_id, addr)
+        .checked_add(amount)
+        .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
+    save_bal(asset_id, addr, bal);
+    Ok(())
+}
+
+/// Debit a balance (checked sub).
+pub fn debit_bal(asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
+    let bal = load_bal(asset_id, addr)
+        .checked_sub(amount)
+        .ok_or_else(|| PrecompileError::Other("insufficient balance".into()))?;
+    save_bal(asset_id, addr, bal);
+    Ok(())
+}
+
+// ── Caller validation ─────────────────────────────────────────────────
+
+/// Ensure the caller address is available (not in a static/delegate context).
+pub fn require_caller(msg_sender: Address) -> Result<Address, PrecompileError> {
+    if msg_sender == Address::ZERO {
+        return Err(PrecompileError::Other("caller not available".into()));
+    }
+    Ok(msg_sender)
 }

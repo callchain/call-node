@@ -14,8 +14,8 @@ use revm_precompile::PrecompileError;
 
 use crate::{
     decode_address, decode_bytes32, decode_bytes32_array, decode_u128, decode_u64,
-    decode_u256_usize, encode_u64, encode_u8, ok_empty, slot_balance, u128_to_u256,
-    u256_to_u128, u256_to_u64, u64_to_u256, StatefulPrecompile,
+    decode_u256_usize, encode_u64, encode_u8, load_bal, ok_empty, save_bal,
+    u256_to_u64, u64_to_u256, StatefulPrecompile,
 };
 use crate::storage::{storage_slot, StorageCtx};
 
@@ -48,18 +48,6 @@ fn is_nullifier_spent(nullifier: [u8; 32]) -> bool {
     StorageCtx::sload(SHIELDED_ADDRESS, slot_shielded_nullifier(nullifier))
         .map(|v| v.to_be_bytes::<32>()[31] == 1)
         .unwrap_or(false)
-}
-
-// ── Balance helpers ───────────────────────────────────────────────────
-
-fn load_bal(asset_id: u64, addr: Address) -> u128 {
-    StorageCtx::sload(crate::ASSET_ADDRESS, slot_balance(asset_id, addr))
-        .map(u256_to_u128)
-        .unwrap_or(0)
-}
-
-fn save_bal(asset_id: u64, addr: Address, amount: u128) {
-    StorageCtx::sstore(crate::ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
 }
 
 // ── Incremental Merkle Tree (Poseidon, depth=32) ──────────────────────
@@ -444,6 +432,7 @@ impl StatefulPrecompile for ShieldedPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{slot_balance, u128_to_u256, u256_to_u128};
 
     #[test]
     fn test_shielded_address() {
