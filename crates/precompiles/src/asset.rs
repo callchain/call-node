@@ -133,15 +133,6 @@ fn encode_u64_slot(value: u64) -> [u8; 32] {
     out
 }
 
-/// Encode a string into a bytes32 slot (left-aligned, space-padded)
-fn encode_string32(s: &str) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let bytes = s.as_bytes();
-    let len = bytes.len().min(32);
-    out[..len].copy_from_slice(&bytes[..len]);
-    out
-}
-
 // ── AssetPrecompile (stateful, uses StorageCtx) ───────────────────────
 
 use crate::StatefulPrecompile;
@@ -273,6 +264,38 @@ impl AssetMeta {
     }
 }
 
+// ── Balance helpers ───────────────────────────────────────────────────
+
+/// Read a balance from storage for the given asset_id and address.
+fn load_balance(asset_id: u64, addr: Address) -> u128 {
+    crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(asset_id, addr))
+        .map(u256_to_u128)
+        .unwrap_or(0)
+}
+
+/// Write a balance to storage for the given asset_id and address.
+fn save_balance(asset_id: u64, addr: Address, amount: u128) {
+    crate::storage::StorageCtx::sstore(
+        ASSET_ADDRESS,
+        slot_balance(asset_id, addr),
+        u128_to_u256(amount),
+    );
+}
+
+/// Helper: return an empty successful precompile output.
+fn ok_empty() -> PrecompileResult {
+    let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
+    Ok(crate::storage::fill_precompile_output(output))
+}
+
+/// Decode the common (asset_id, address, amount) pattern from ABI input.
+fn decode_asset_addr_amount(input: &[u8]) -> Option<(u64, Address, u128)> {
+    if input.len() < 100 {
+        return None;
+    }
+    Some((decode_u64(input, 4)?, decode_address(input, 36)?, decode_u128(input, 68)?))
+}
+
 /// Stateful asset precompile backed by EVM storage.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AssetPrecompile;
@@ -321,10 +344,7 @@ impl AssetPrecompile {
         let addr = decode_address(input, 36)
             .ok_or_else(|| PrecompileError::Other("invalid address".into()))?;
 
-        let slot = slot_balance(asset_id, addr);
-        let balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
+        let balance = load_balance(asset_id, addr);
 
         let output = PrecompileOutput::new(0, encode_u256(balance).to_vec().into());
         Ok(crate::storage::fill_precompile_output(output))
@@ -358,40 +378,25 @@ impl AssetPrecompile {
         const GAS_COST: u64 = 5000;
         crate::storage::StorageCtx::deduct_gas(GAS_COST)
             .ok_or(PrecompileError::OutOfGas)?;
-        if input.len() < 100 {
-            return Err(PrecompileError::Other("invalid input".into()));
-        }
-        let asset_id = decode_u64(input, 4)
-            .ok_or_else(|| PrecompileError::Other("invalid asset_id".into()))?;
-        let to = decode_address(input, 36)
-            .ok_or_else(|| PrecompileError::Other("invalid to address".into()))?;
-        let amount = decode_u128(input, 68)
-            .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
+        let (asset_id, to, amount) = decode_asset_addr_amount(input)
+            .ok_or_else(|| PrecompileError::Other("invalid input".into()))?;
 
         let from = Self::require_caller(msg_sender)?;
 
         Self::check_compliance(asset_id, &from)?;
         Self::check_compliance(asset_id, &to)?;
 
-        let from_slot = slot_balance(asset_id, from);
-        let from_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, from_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let from_balance = from_balance.checked_sub(amount)
+        let from_balance = load_balance(asset_id, from)
+            .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("insufficient balance".into()))?;
-
-        let to_slot = slot_balance(asset_id, to);
-        let to_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, to_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let to_balance = to_balance.checked_add(amount)
+        let to_balance = load_balance(asset_id, to)
+            .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
 
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, from_slot, u128_to_u256(from_balance));
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, to_slot, u128_to_u256(to_balance));
+        save_balance(asset_id, from, from_balance);
+        save_balance(asset_id, to, to_balance);
 
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 
     fn batch_transfer(&self, input: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -426,50 +431,35 @@ impl AssetPrecompile {
             Self::check_compliance(asset_id, to)?;
         }
 
-        let from_slot = slot_balance(asset_id, from);
-        let mut from_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, from_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
+        let mut from_balance = load_balance(asset_id, from);
 
         for (to, amount) in recipients.iter().zip(amounts.iter()) {
             from_balance = from_balance.checked_sub(*amount)
                 .ok_or_else(|| PrecompileError::Other("insufficient balance".into()))?;
-            let to_slot = slot_balance(asset_id, *to);
-            let to_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, to_slot)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            let to_balance = to_balance.checked_add(*amount)
+            let to_balance = load_balance(asset_id, *to)
+                .checked_add(*amount)
                 .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
-            crate::storage::StorageCtx::sstore(ASSET_ADDRESS, to_slot, u128_to_u256(to_balance));
+            save_balance(asset_id, *to, to_balance);
         }
 
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, from_slot, u128_to_u256(from_balance));
+        save_balance(asset_id, from, from_balance);
 
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 
     fn approve(&self, input: &[u8], msg_sender: Address) -> PrecompileResult {
         const GAS_COST: u64 = 3000;
         crate::storage::StorageCtx::deduct_gas(GAS_COST)
             .ok_or(PrecompileError::OutOfGas)?;
-        if input.len() < 100 {
-            return Err(PrecompileError::Other("invalid input".into()));
-        }
-        let asset_id = decode_u64(input, 4)
-            .ok_or_else(|| PrecompileError::Other("invalid asset_id".into()))?;
-        let spender = decode_address(input, 36)
-            .ok_or_else(|| PrecompileError::Other("invalid spender address".into()))?;
-        let amount = decode_u128(input, 68)
-            .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
+        let (asset_id, spender, amount) = decode_asset_addr_amount(input)
+            .ok_or_else(|| PrecompileError::Other("invalid input".into()))?;
 
         let owner = Self::require_caller(msg_sender)?;
 
         let slot = slot_allowance(asset_id, owner, spender);
         crate::storage::StorageCtx::sstore(ASSET_ADDRESS, slot, u128_to_u256(amount));
 
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 
     fn transfer_from(&self, input: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -503,25 +493,17 @@ impl AssetPrecompile {
         let new_allowance = allowance - amount;
         crate::storage::StorageCtx::sstore(ASSET_ADDRESS, allowance_slot, u128_to_u256(new_allowance));
 
-        let from_slot = slot_balance(asset_id, from);
-        let from_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, from_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let from_balance = from_balance.checked_sub(amount)
+        let from_balance = load_balance(asset_id, from)
+            .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("insufficient balance".into()))?;
-
-        let to_slot = slot_balance(asset_id, to);
-        let to_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, to_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let to_balance = to_balance.checked_add(amount)
+        let to_balance = load_balance(asset_id, to)
+            .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
 
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, from_slot, u128_to_u256(from_balance));
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, to_slot, u128_to_u256(to_balance));
+        save_balance(asset_id, from, from_balance);
+        save_balance(asset_id, to, to_balance);
 
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 
     fn mint(&self, input: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -533,10 +515,8 @@ impl AssetPrecompile {
         }
         let asset_id = decode_u64(input, 4)
             .ok_or_else(|| PrecompileError::Other("invalid asset_id".into()))?;
-        let to = decode_address(input, 36)
-            .ok_or_else(|| PrecompileError::Other("invalid to address".into()))?;
-        let amount = decode_u128(input, 68)
-            .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
+        let (asset_id, to, amount) = decode_asset_addr_amount(input)
+            .ok_or_else(|| PrecompileError::Other("invalid input".into()))?;
 
         let caller = Self::require_caller(msg_sender)?;
 
@@ -553,16 +533,12 @@ impl AssetPrecompile {
         }
         crate::storage::StorageCtx::sstore(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(new_supply));
 
-        let to_slot = slot_balance(asset_id, to);
-        let to_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, to_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let to_balance = to_balance.checked_add(amount)
+        let to_balance = load_balance(asset_id, to)
+            .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, to_slot, u128_to_u256(to_balance));
+        save_balance(asset_id, to, to_balance);
 
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 
     fn burn(&self, input: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -572,12 +548,8 @@ impl AssetPrecompile {
         if input.len() < 100 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let asset_id = decode_u64(input, 4)
-            .ok_or_else(|| PrecompileError::Other("invalid asset_id".into()))?;
-        let from = decode_address(input, 36)
-            .ok_or_else(|| PrecompileError::Other("invalid from address".into()))?;
-        let amount = decode_u128(input, 68)
-            .ok_or_else(|| PrecompileError::Other("invalid amount".into()))?;
+        let (asset_id, from, amount) = decode_asset_addr_amount(input)
+            .ok_or_else(|| PrecompileError::Other("invalid input".into()))?;
 
         let caller = Self::require_caller(msg_sender)?;
 
@@ -597,16 +569,12 @@ impl AssetPrecompile {
             .ok_or_else(|| PrecompileError::Other("supply underflow".into()))?;
         crate::storage::StorageCtx::sstore(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(new_supply));
 
-        let from_slot = slot_balance(asset_id, from);
-        let from_balance = crate::storage::StorageCtx::sload(ASSET_ADDRESS, from_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        let from_balance = from_balance.checked_sub(amount)
+        let from_balance = load_balance(asset_id, from)
+            .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("insufficient balance".into()))?;
-        crate::storage::StorageCtx::sstore(ASSET_ADDRESS, from_slot, u128_to_u256(from_balance));
+        save_balance(asset_id, from, from_balance);
 
-        let output = PrecompileOutput::new(0, alloy_primitives::Bytes::new());
-        Ok(crate::storage::fill_precompile_output(output))
+        ok_empty()
     }
 
     fn register(&self, input: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -703,8 +671,9 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_string32() {
-        let encoded = encode_string32("TEST");
+    fn test_write_string32() {
+        let v = write_string32("TEST");
+        let encoded = v.to_be_bytes::<32>();
         assert_eq!(&encoded[0..4], b"TEST");
         assert_eq!(&encoded[4..32], &[0u8; 28]);
     }
