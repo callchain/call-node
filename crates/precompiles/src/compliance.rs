@@ -6,6 +6,7 @@ use alloy_primitives::address;
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
 use call_protocol::compliance::ComplianceStatus;
+use crate::slot_compliance;
 
 pub const COMPLIANCE_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000205");
@@ -50,12 +51,7 @@ fn decode_compliance_status(status_u8: u8) -> Option<ComplianceStatus> {
 // ── CompliancePrecompile (stateful) ───────────────────────────────────
 
 use crate::StatefulPrecompile;
-use crate::storage::{storage_slot, StorageCtx};
-
-/// Compute compliance storage slot for an address under a policy.
-pub fn slot_compliance(addr: alloy_primitives::Address, policy_id: u8) -> alloy_primitives::U256 {
-    storage_slot(&[addr.as_slice(), &[policy_id]])
-}
+use crate::storage::StorageCtx;
 
 /// Read u8 from last byte of a U256.
 fn u256_to_u8(v: alloy_primitives::U256) -> u8 {

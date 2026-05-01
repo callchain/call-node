@@ -8,6 +8,8 @@
 use alloy_primitives::{address, Address};
 use revm_precompile::{PrecompileError, PrecompileResult, PrecompileOutput};
 
+use crate::{slot_asset_meta, slot_balance};
+
 pub const ASSET_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000201");
 
@@ -138,11 +140,6 @@ fn encode_u64_slot(value: u64) -> [u8; 32] {
 use crate::StatefulPrecompile;
 use crate::storage::storage_slot;
 
-/// Compute the EVM storage slot for an asset balance.
-pub fn slot_balance(asset_id: u64, addr: Address) -> alloy_primitives::U256 {
-    storage_slot(&[&asset_id.to_be_bytes()[..], addr.as_slice()])
-}
-
 /// Compute the EVM storage slot for an allowance.
 pub fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> alloy_primitives::U256 {
     storage_slot(&[
@@ -152,38 +149,28 @@ pub fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> alloy_
     ])
 }
 
-/// Compute the EVM storage slot for asset metadata.
-pub fn slot_asset_meta(asset_id: u64, suffix: &[u8]) -> alloy_primitives::U256 {
-    storage_slot(&[&asset_id.to_be_bytes()[..], suffix])
-}
-
-/// Compute the EVM storage slot for the EVM contract address of an asset.
-pub fn slot_evm_contract(asset_id: u64) -> alloy_primitives::U256 {
-    slot_asset_meta(asset_id, b"evm_contract")
-}
-
 /// Read a u128 value from a U256 storage word (low 128 bits).
-pub fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
+fn u256_to_u128(v: alloy_primitives::U256) -> u128 {
     let bytes = v.to_be_bytes::<32>();
     u128::from_be_bytes(bytes[16..32].try_into().unwrap())
 }
 
 /// Write a u128 value into a U256 storage word (low 128 bits).
-pub fn u128_to_u256(v: u128) -> alloy_primitives::U256 {
+fn u128_to_u256(v: u128) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     bytes[16..32].copy_from_slice(&v.to_be_bytes());
     alloy_primitives::U256::from_be_bytes::<32>(bytes)
 }
 
 /// Read a bytes32 string from a U256 storage word.
-pub fn read_string32(v: alloy_primitives::U256) -> String {
+fn read_string32(v: alloy_primitives::U256) -> String {
     let bytes = v.to_be_bytes::<32>();
     let len = bytes.iter().take_while(|b| **b != 0).count();
     String::from_utf8_lossy(&bytes[..len]).into_owned()
 }
 
 /// Write a short string into a bytes32 U256 storage word.
-pub fn write_string32(s: &str) -> alloy_primitives::U256 {
+fn write_string32(s: &str) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     let src = s.as_bytes();
     let len = src.len().min(32);
@@ -192,26 +179,26 @@ pub fn write_string32(s: &str) -> alloy_primitives::U256 {
 }
 
 /// Read an Address from the low 20 bytes of a U256.
-pub fn u256_to_address(v: alloy_primitives::U256) -> Address {
+fn u256_to_address(v: alloy_primitives::U256) -> Address {
     let bytes = v.to_be_bytes::<32>();
     Address::from_slice(&bytes[12..32])
 }
 
 /// Write an Address into the low 20 bytes of a U256.
-pub fn address_to_u256(addr: Address) -> alloy_primitives::U256 {
+fn address_to_u256(addr: Address) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     bytes[12..32].copy_from_slice(addr.as_slice());
     alloy_primitives::U256::from_be_bytes::<32>(bytes)
 }
 
 /// Read a u64 from the low 8 bytes of a U256.
-pub fn u256_to_u64(v: alloy_primitives::U256) -> u64 {
+fn u256_to_u64(v: alloy_primitives::U256) -> u64 {
     let bytes = v.to_be_bytes::<32>();
     u64::from_be_bytes(bytes[24..32].try_into().unwrap())
 }
 
 /// Write a u64 into the low 8 bytes of a U256.
-pub fn u64_to_u256(v: u64) -> alloy_primitives::U256 {
+fn u64_to_u256(v: u64) -> alloy_primitives::U256 {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&v.to_be_bytes());
     alloy_primitives::U256::from_be_bytes::<32>(bytes)

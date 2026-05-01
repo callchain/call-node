@@ -13,11 +13,8 @@ use alloy_primitives::{address, Address, U256};
 use revm_precompile::{PrecompileError, PrecompileOutput};
 
 use crate::StatefulPrecompile;
-use crate::asset::{
-    slot_asset_meta, slot_balance, slot_evm_contract, u128_to_u256, u256_to_u128,
-};
 use crate::storage::StorageCtx;
-use crate::ASSET_ADDRESS;
+use crate::{slot_asset_meta, slot_balance, slot_evm_contract, u128_to_u256, u256_to_u128, ASSET_ADDRESS};
 
 pub const SWITCH_ADDRESS: alloy_primitives::Address =
     address!("0000000000000000000000000000000000000207");
@@ -300,7 +297,7 @@ impl StatefulPrecompile for SwitchPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::{slot_asset_meta, u128_to_u256, ASSET_ADDRESS};
+    use crate::{address_to_u256, slot_asset_meta, u128_to_u256, ASSET_ADDRESS};
 
     fn addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -408,7 +405,7 @@ mod tests {
             crate::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_evm_contract(asset_id),
-                crate::asset::address_to_u256(contract),
+                crate::address_to_u256(contract),
             );
             // Seed supply tracking
             crate::storage::StorageCtx::sstore(
@@ -472,7 +469,7 @@ mod tests {
             crate::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_evm_contract(asset_id),
-                crate::asset::address_to_u256(contract),
+                crate::address_to_u256(contract),
             );
             // Seed ERC-20 totalSupply
             crate::storage::StorageCtx::sstore(

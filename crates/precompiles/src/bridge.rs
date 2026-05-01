@@ -122,11 +122,11 @@ fn slot_bridge_processed(tx_hash: [u8; 32]) -> alloy_primitives::U256 {
 }
 
 fn slot_balance(asset_id: u64, addr: Address) -> alloy_primitives::U256 {
-    crate::asset::slot_balance(asset_id, addr)
+    crate::slot_balance(asset_id, addr)
 }
 
 fn slot_asset_meta(asset_id: u64, suffix: &[u8]) -> alloy_primitives::U256 {
-    crate::asset::slot_asset_meta(asset_id, suffix)
+    crate::slot_asset_meta(asset_id, suffix)
 }
 
 // ── Validation helpers ────────────────────────────────────────────────

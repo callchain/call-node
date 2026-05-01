@@ -7,6 +7,7 @@ use alloy_primitives::{address, Address, U256};
 use revm_precompile::{PrecompileError, PrecompileOutput};
 
 use crate::StatefulPrecompile;
+use crate::slot_validator_by_addr;
 use crate::storage::{storage_slot, StorageCtx};
 
 pub const VALIDATOR_ADDRESS: alloy_primitives::Address =
@@ -80,10 +81,6 @@ fn encode_u8(value: u8) -> [u8; 32] {
 
 fn slot_validator_count() -> U256 {
     U256::ZERO
-}
-
-pub fn slot_validator_by_addr(addr: Address) -> U256 {
-    storage_slot(&[addr.as_slice(), b"validator_id"])
 }
 
 fn slot_validator_addr(index: u64) -> U256 {
