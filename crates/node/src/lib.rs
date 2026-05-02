@@ -28,7 +28,7 @@ pub(crate) use bft_loop::bft_event_loop;
 
 use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
 use call_consensus::{
-    Block, ConsensusParams, SimplexConsensus, ValidatorStateManager,
+    Block, ConsensusParams, SimplexConsensus,
     ForkManager,
     bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
     block_cache::BlockCache,
@@ -153,7 +153,6 @@ impl CallNode {
                 evm_state: EvmState::new(),
                 bridge_state: BridgeStateManager::default(),
                 shielded_state: ShieldedState::new(),
-                validators: ValidatorStateManager::default(),
                 agent_registry: AgentRegistry::new(),
                 agent_balances: AgentBalances::new(),
                 agent_nonces: call_agent::AgentNonces::new(),
@@ -239,7 +238,6 @@ impl CallNode {
             loaded.compliance,
             loaded.evm_state,
             loaded.bridge_state,
-            loaded.validators,
             loaded.agent_registry,
             loaded.agent_balances,
             loaded.agent_nonces,
@@ -672,16 +670,27 @@ impl CallNode {
                         let epoch_length = state.consensus_params.read().unwrap().epoch_length;
                         let epoch_number = height / epoch_length;
                         let seed = derive_vrf_seed(&ph, epoch_number);
-                        let vs = state.validator_state.read().unwrap();
-                        let qualified = vs.get_qualified_validators();
-                        let pubkeys: std::collections::HashMap<
-                            call_primitives::ValidatorId,
-                            call_primitives::Ed25519PublicKey,
-                        > = vs
-                            .get_all_validators()
-                            .iter()
-                            .map(|(id, stake)| (*id, stake.ed25519_pubkey))
-                            .collect();
+
+                        let (qualified, pubkeys) = {
+                            let evm_state = state.evm_state.read().unwrap();
+                            let params = state.consensus_params.read().unwrap();
+                            let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+                            let mut qualified = Vec::new();
+                            let mut pubkeys = std::collections::HashMap::new();
+                            for id in 1..=count {
+                                let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, id);
+                                if addr == call_primitives::Address::ZERO { continue; }
+                                let stake = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, addr);
+                                let status = call_consensus::exec::evm_instructions::read_validator_status(&evm_state, addr);
+                                let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(&evm_state, addr);
+                                if status != 0 && stake >= params.min_self_stake {
+                                    qualified.push(id as u32);
+                                }
+                                pubkeys.insert(id as u32, pk);
+                            }
+                            (qualified, pubkeys)
+                        };
+
                         let params = state.consensus_params.read().unwrap();
                         let subset =
                             select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
@@ -715,11 +724,12 @@ impl CallNode {
 
                         let mut keys: Vec<ed25519::PublicKey> = Vec::new();
                         {
-                            let vs = state.validator_state.read().unwrap();
-                            let all_validators = vs.get_all_validators();
+                            let evm_state = state.evm_state.read().unwrap();
                             for id in &subset {
-                                if let Some(stake) = all_validators.get(id) {
-                                    if let Ok(pk) = ed25519::PublicKey::decode(&stake.ed25519_pubkey[..]) {
+                                let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, *id as u64);
+                                if addr != call_primitives::Address::ZERO {
+                                    let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(&evm_state, addr);
+                                    if let Ok(pk) = ed25519::PublicKey::decode(&pk[..]) {
                                         keys.push(pk);
                                     }
                                 }
@@ -906,18 +916,21 @@ impl CallNode {
 
             // Build light client from current validator set once at the start
             let (trusted_validators, total_validators, bls_pubkeys) = {
-                let validator_state = state.validator_state.read().unwrap();
-                let validators = validator_state.get_all_validators();
-                let total = validators.len() as u32;
+                let evm_state = state.evm_state.read().unwrap();
+                let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
                 let mut ed25519_map = std::collections::HashMap::new();
                 let mut bls_map = std::collections::HashMap::new();
-                for (id, stake) in validators.iter() {
-                    ed25519_map.insert(*id, stake.ed25519_pubkey);
-                    if stake.bls_pubkey != [0u8; 48] {
-                        bls_map.insert(*id, stake.bls_pubkey);
+                for id in 1..=count {
+                    let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, id);
+                    if addr == call_primitives::Address::ZERO { continue; }
+                    let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(&evm_state, addr);
+                    let bls_pk = call_consensus::exec::evm_instructions::read_validator_bls_pubkey(&evm_state, addr);
+                    ed25519_map.insert(id as u32, pk);
+                    if bls_pk != [0u8; 48] {
+                        bls_map.insert(id as u32, bls_pk);
                     }
                 }
-                (ed25519_map, total, bls_map)
+                (ed25519_map, count as u32, bls_map)
             };
 
             let mut light_client = LightClient::new(

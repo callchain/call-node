@@ -123,7 +123,6 @@ impl NodeBuilder {
             ComplianceEngine::new(),
             call_evm::EvmState::new(),
             call_bridge::BridgeStateManager::default(),
-            call_consensus::ValidatorStateManager::default(),
             call_agent::AgentRegistry::new(),
             call_agent::AgentBalances::new(),
             call_agent::AgentNonces::new(),

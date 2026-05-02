@@ -27,12 +27,17 @@ impl ProposalExecutor for NodeProposalExecutor {
                 tracing::info!(version = ?version, height = activation_block, proposal_id = proposal.id, "governance protocol upgrade scheduled");
             }
             ProposalType::ValidatorSlash { validator_id, reason } => {
-                // Remove validator from consensus state and slash self-stake
-                let mut vs = self.state.validator_state.write().map_err(|_| "validator lock poisoned".to_string())?;
-                let slashed = vs.remove_validator(*validator_id)
-                    .map_err(|e| format!("failed to slash validator: {e}"))?;
-                // Return slashed amount to caller (in production, would transfer to treasury)
-                let _ = slashed;
+                // Slash validator in EVM storage (set stake to 0 and status to 0)
+                let mut evm_state = self.state.evm_state.write().map_err(|_| "evm lock poisoned".to_string())?;
+                let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+                    &evm_state, *validator_id as u64);
+                if addr == call_primitives::Address::ZERO {
+                    return Err(format!("validator {validator_id} not found in EVM storage"));
+                }
+                let slashed = call_consensus::exec::evm_instructions::read_validator_stake(
+                    &evm_state, addr);
+                call_consensus::exec::evm_instructions::remove_validator_evm(
+                    &mut evm_state, addr);
                 tracing::info!(validator_id, reason, slashed_amount = slashed, "validator slashed via governance");
             }
             ProposalType::EmergencyPause { reason } => {
@@ -70,38 +75,38 @@ impl ProposalExecutor for NodeProposalExecutor {
                             }
                             tracing::info!(param_id, new_value, "consensus params updated via executor");
                         } else if param_id.starts_with("validator.") {
-                            let mut vs = self.state.validator_state.write().map_err(|_| "validator state lock poisoned".to_string())?;
+                            let mut cp = self.state.consensus_params.write().map_err(|_| "consensus params lock poisoned".to_string())?;
                             if let Some(v) = val.get("min_self_stake").and_then(|v| v.as_u64()) {
-                                vs.params.min_self_stake = v as u128;
+                                cp.min_self_stake = v as u128;
                             }
                             if let Some(v) = val.get("unbonding_period_blocks").and_then(|v| v.as_u64()) {
-                                vs.params.unbonding_period_blocks = v;
+                                cp.unbonding_period_blocks = v;
                             }
                             if let Some(v) = val.get("offline_slash_rate_bps").and_then(|v| v.as_u64()) {
-                                vs.params.offline_slash_rate_bps = v as u128;
+                                cp.offline_slash_rate_bps = v as u128;
                             }
                             if let Some(v) = val.get("key_rotation_grace_blocks").and_then(|v| v.as_u64()) {
-                                vs.params.key_rotation_grace_blocks = v;
+                                cp.key_rotation_grace_blocks = v;
                             }
                             if let Some(v) = val.get("churn_limit_quotient").and_then(|v| v.as_u64()) {
-                                vs.params.churn_limit_quotient = v;
+                                cp.churn_limit_quotient = v;
                             }
                             if let Some(v) = val.get("min_churn_limit").and_then(|v| v.as_u64()) {
-                                vs.params.min_churn_limit = v;
+                                cp.min_churn_limit = v;
                             }
                             if let Some(v) = val.get("safety_ratio_num").and_then(|v| v.as_u64()) {
-                                vs.params.safety_ratio_num = v as u32;
+                                cp.safety_ratio_num = v as u32;
                             }
                             if let Some(v) = val.get("safety_ratio_den").and_then(|v| v.as_u64()) {
-                                vs.params.safety_ratio_den = v as u32;
+                                cp.safety_ratio_den = v as u32;
                             }
                             if let Some(v) = val.get("unbonding_slash_extend").and_then(|v| v.as_u64()) {
-                                vs.params.unbonding_slash_extend = v as u32;
+                                cp.unbonding_slash_extend = v as u32;
                             }
                             if let Some(v) = val.get("max_unbonding_multiplier").and_then(|v| v.as_u64()) {
-                                vs.params.max_unbonding_multiplier = v as u32;
+                                cp.max_unbonding_multiplier = v as u32;
                             }
-                            tracing::info!(param_id, new_value, "validator params updated via executor");
+                            tracing::info!(param_id, new_value, "validator params updated via executor (consensus_params)");
                         } else if param_id.starts_with("oracle.") {
                             let mut oracle = self.state.oracle.write().map_err(|_| "oracle lock poisoned".to_string())?;
                             let mut config = oracle.config.clone();
@@ -233,24 +238,27 @@ impl ProposalExecutor for NodeProposalExecutor {
                 let recovered = call_crypto::recover_secp256k1_signer(&msg_hash, &sig_arr)
                     .map_err(|e| format!("failed to recover signer from rotation signature: {e}"))?;
 
-                // Look up the validator's current address
-                let vs = self.state.validator_state.read().map_err(|_| "validator lock poisoned".to_string())?;
-                let validator = vs.get_validator_stake(*validator_id)
-                    .ok_or_else(|| format!("validator {validator_id} not found"))?;
+                // Look up the validator's current address from EVM storage
+                let validator_addr = {
+                    let evm_state = self.state.evm_state.read().map_err(|_| "evm lock poisoned".to_string())?;
+                    let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+                        &evm_state, *validator_id as u64);
+                    if addr == call_primitives::Address::ZERO {
+                        return Err(format!("validator {validator_id} not found in EVM storage"));
+                    }
+                    addr
+                };
 
                 // The recovered address must match the validator's address
-                let validator_addr = validator.address;
-                drop(vs);
-
                 if recovered != validator_addr {
                     return Err(format!("rotation signature from wrong address: expected {validator_addr:?}, got {recovered:?}"));
                 }
 
-                // Rotate the key in consensus
-                let mut vs = self.state.validator_state.write().map_err(|_| "validator lock poisoned".to_string())?;
-                vs.rotate_key(*validator_id, *old_pubkey, *new_pubkey)
-                    .map_err(|e| format!("key rotation failed: {e}"))?;
-                tracing::info!(validator_id, "validator key rotated via governance");
+                // Rotate the key in EVM storage
+                let mut evm_state = self.state.evm_state.write().map_err(|_| "evm lock poisoned".to_string())?;
+                call_consensus::exec::evm_instructions::rotate_validator_key_evm(
+                    &mut evm_state, validator_addr, *new_pubkey);
+                tracing::info!(validator_id, "validator key rotated via governance in EVM storage");
             }
         }
 

@@ -127,7 +127,6 @@ async fn test_double_nonce_rejected() {
     let (_secret, sender) = test_keypair();
     {
         let mut evm_state = node.state.evm_state.write().unwrap();
-        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
         consensus.refresh_proposer_subset(&evm_state);

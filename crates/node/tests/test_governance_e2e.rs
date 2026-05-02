@@ -80,7 +80,7 @@ fn test_governance_proposal_full_lifecycle() {
     let submit_tx = call_evm::EvmTransaction {
         caller: proposer,
         nonce: 0,
-        gas_limit: 100_000,
+        gas_limit: 300_000,
         gas_price: 1,
         to: Some(call_primitives::Address::from_slice(
             &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]

@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use call_consensus::{SimplexConsensus, ValidatorStateManager, ForkManager, PersistedConsensusState};
+use call_consensus::{SimplexConsensus, ForkManager, PersistedConsensusState};
 use call_protocol::{
     AccountState, AssetRegistry, ComplianceEngine, FeeParams, FeeCurrencyRegistry, ProtocolReceipt,
 };
@@ -35,7 +35,6 @@ pub(crate) struct LoadedState {
     pub evm_state: EvmState,
     pub bridge_state: BridgeStateManager,
     pub shielded_state: ShieldedState,
-    pub validators: ValidatorStateManager,
     pub agent_registry: AgentRegistry,
     pub agent_balances: AgentBalances,
     pub agent_nonces: call_agent::AgentNonces,
@@ -88,15 +87,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
         Err(e) => {
             tracing::warn!(error = %e, "failed to load shielded state");
             ShieldedState::new()
-        }
-    };
-
-    // Load validator state
-    let validators = match load_validator_state_inner(db_env) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load validator state");
-            ValidatorStateManager::default()
         }
     };
 
@@ -168,7 +158,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
         evm_state,
         bridge_state,
         shielded_state,
-        validators,
         agent_registry: registry,
         agent_balances,
         agent_nonces,
@@ -408,50 +397,6 @@ pub(crate) fn save_shielded_state_inner(db: &DatabaseEnv, state: &ShieldedState)
         .collect();
     db_clear::<CallShieldedCommitments>(db).map_err(|e: StorageError| e.to_string())?;
     db_batch_put::<CallShieldedCommitments>(db, cm_entries).map_err(|e: StorageError| e.to_string())?;
-
-    Ok(())
-}
-
-/// Load validator state from DB
-pub(crate) fn load_validator_state_inner(db: &DatabaseEnv) -> Result<ValidatorStateManager, String> {
-    let data = db_iter_all::<CallValidators>(db).map_err(|e: StorageError| e.to_string())?;
-    let mut manager = ValidatorStateManager::new();
-    for (k, v) in data {
-        let stake: call_consensus::validator::ValidatorStake = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
-        let id: call_primitives::ValidatorId = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
-        manager.register_validator_from_stake(id, stake);
-    }
-
-    // Load global meta-state (queues, counters, params)
-    match db_get::<CallValidatorMeta>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(meta_data) => {
-            let snapshot: call_consensus::validator::ValidatorMetaSnapshot =
-                serde_json::from_slice(&meta_data).map_err(|e| format!("deserialize validator meta: {e}"))?;
-            manager.restore_meta_snapshot(snapshot);
-        }
-        None => {
-            tracing::info!("no validator meta found in DB — using defaults");
-        }
-    }
-
-    Ok(manager)
-}
-
-/// Save validator state to DB
-pub(crate) fn save_validator_state_inner(db: &DatabaseEnv, state: &ValidatorStateManager) -> Result<(), String> {
-    // Save individual validator stakes
-    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
-        .get_all_validators()
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    db_clear::<CallValidators>(db).map_err(|e: StorageError| e.to_string())?;
-    db_batch_put::<CallValidators>(db, entries).map_err(|e: StorageError| e.to_string())?;
-
-    // Save global meta-state (queues, counters, params)
-    let meta = state.meta_snapshot();
-    let meta_data = serde_json::to_vec(&meta).map_err(|e| format!("serialize validator meta: {e}"))?;
-    db_put::<CallValidatorMeta>(db, vec![0], meta_data).map_err(|e: StorageError| e.to_string())?;
 
     Ok(())
 }
@@ -835,26 +780,6 @@ pub(crate) fn save_evm_accounts_no_clear(db: &DatabaseEnv, state: &EvmState) -> 
     for (k, v) in entries {
         db_put::<CallEvmAccounts>(db, k, v).map_err(|e: StorageError| e.to_string())?;
     }
-    Ok(())
-}
-
-/// Save validator state without clearing the table first.
-pub(crate) fn save_validator_state_no_clear(db: &DatabaseEnv, state: &ValidatorStateManager) -> Result<(), String> {
-    // Save individual validator stakes
-    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
-        .get_all_validators()
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    for (k, v) in entries {
-        db_put::<CallValidators>(db, k, v).map_err(|e: StorageError| e.to_string())?;
-    }
-
-    // Save global meta-state
-    let meta = state.meta_snapshot();
-    let meta_data = serde_json::to_vec(&meta).map_err(|e| format!("serialize validator meta: {e}"))?;
-    db_put::<CallValidatorMeta>(db, vec![0], meta_data).map_err(|e: StorageError| e.to_string())?;
-
     Ok(())
 }
 

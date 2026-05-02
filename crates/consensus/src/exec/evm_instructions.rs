@@ -60,6 +60,10 @@ fn slot_validator_unbond_height(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"unbond_at"])
 }
 
+fn slot_validator_bls_pubkey(addr: Address) -> U256 {
+    storage_slot(&[addr.as_slice(), b"bls_pubkey"])
+}
+
 fn slot_unbonding_count() -> U256 {
     U256::from(1)
 }
@@ -390,6 +394,32 @@ pub fn read_validator_status(evm_state: &EvmState, addr: Address) -> u8 {
     evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_status(addr)).to_be_bytes::<32>()[31]
 }
 
+/// Read validator BLS pubkey from EVM storage.
+pub fn read_validator_bls_pubkey(evm_state: &EvmState, addr: Address) -> [u8; 48] {
+    let hi = evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_bls_pubkey(addr));
+    let lo = evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_bls_pubkey(addr) + U256::from(1));
+    let mut pk = [0u8; 48];
+    pk[0..32].copy_from_slice(&hi.to_be_bytes::<32>());
+    pk[32..48].copy_from_slice(&lo.to_be_bytes::<32>()[0..16]);
+    pk
+}
+
+/// Set validator BLS pubkey in EVM storage.
+pub fn set_validator_bls_pubkey(evm_state: &mut EvmState, addr: Address, bls_pubkey: [u8; 48]) {
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_bls_pubkey(addr),
+        U256::from_be_slice(&bls_pubkey[0..32]),
+    );
+    let mut lo_bytes = [0u8; 32];
+    lo_bytes[0..16].copy_from_slice(&bls_pubkey[32..48]);
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_bls_pubkey(addr) + U256::from(1),
+        U256::from_be_slice(&lo_bytes),
+    );
+}
+
 /// Read validator ID by address from EVM storage.
 pub fn read_validator_id_by_addr(evm_state: &EvmState, addr: Address) -> u64 {
     u256_to_u64(evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_by_addr(addr)))
@@ -480,6 +510,26 @@ pub fn seed_validator(
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(stake));
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_pubkey(addr), U256::from_be_slice(&ed25519_pubkey));
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::from(status));
+    set_validator_bls_pubkey(evm_state, addr, [0u8; 48]);
+}
+
+/// Remove a validator from EVM storage (set stake to 0 and status to 0).
+pub fn remove_validator_evm(evm_state: &mut EvmState, addr: Address) {
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), U256::ZERO);
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::ZERO);
+}
+
+/// Rotate a validator's ed25519 pubkey in EVM storage.
+pub fn rotate_validator_key_evm(
+    evm_state: &mut EvmState,
+    addr: Address,
+    new_ed25519_pubkey: [u8; 32],
+) {
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_pubkey(addr),
+        U256::from_be_slice(&new_ed25519_pubkey),
+    );
 }
 
 /// Stake a new validator directly into EVM storage.
@@ -498,6 +548,7 @@ pub fn stake_validator_evm(
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(amount));
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_pubkey(addr), U256::from_be_slice(&ed25519_pubkey));
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::from(1u8));
+    set_validator_bls_pubkey(evm_state, addr, [0u8; 48]);
     validator_id
 }
 

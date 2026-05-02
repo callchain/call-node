@@ -150,8 +150,21 @@ pub(crate) fn handle_network_message(
                 let peer_id_owned = peer_id.to_string();
                 tokio::spawn(async move {
                     let is_validator = {
-                        let vs = state_clone.validator_state.read().unwrap();
-                        !vs.get_active_validators().is_empty()
+                        let evm_state = state_clone.evm_state.read().unwrap();
+                        let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+                        let mut active = 0;
+                        for id in 1..=count {
+                            let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+                                &evm_state, id);
+                            if addr != call_primitives::Address::ZERO {
+                                let status = call_consensus::exec::evm_instructions::read_validator_status(
+                                    &evm_state, addr);
+                                if status != 0 {
+                                    active += 1;
+                                }
+                            }
+                        }
+                        active > 0
                     };
                     if is_validator {
                         // Fetch prices for requested assets using the oracle's tracked assets

@@ -161,18 +161,18 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             .map_err(|e| format!("failed to generate BLS keypair: {e}"))?;
         *node.state.bls_secret_key.write().map_err(|_| "lock poisoned")? = Some(bls_secret);
 
-        // Register BLS pubkey with the validator state if this validator is known
+        // Register BLS pubkey with the validator state in EVM storage if this validator is known
         {
             let signer_guard = node.state.signer.read().map_err(|_| "lock poisoned")?;
             if let Some(ref s) = *signer_guard {
                 let validator_addr = s.address();
-                let mut vs = node.state.validator_state.write().map_err(|_| "lock poisoned")?;
-                for (id, stake) in vs.get_all_validators().clone().iter() {
-                    if stake.address == validator_addr {
-                        let _ = vs.set_validator_bls_pubkey(*id, bls_public_key_bytes(&bls_pubkey));
-                        info!(validator_id = id, "registered BLS pubkey for validator");
-                        break;
-                    }
+                let mut evm_state = node.state.evm_state.write().map_err(|_| "lock poisoned")?;
+                let validator_id = call_consensus::exec::evm_instructions::read_validator_id_by_addr(
+                    &evm_state, validator_addr);
+                if validator_id != 0 {
+                    call_consensus::exec::evm_instructions::set_validator_bls_pubkey(
+                        &mut evm_state, validator_addr, bls_public_key_bytes(&bls_pubkey));
+                    info!(validator_id = validator_id, "registered BLS pubkey for validator in EVM storage");
                 }
             }
         }
@@ -199,7 +199,6 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             *node.state.asset_registry.write().map_err(|_| "lock poisoned")? = genesis_state.registry;
             *node.state.compliance_engine.write().map_err(|_| "lock poisoned")? = genesis_state.compliance;
             *node.state.evm_state.write().map_err(|_| "lock poisoned")? = genesis_state.evm_state;
-            *node.state.validator_state.write().map_err(|_| "lock poisoned")? = genesis_state.validators.clone();
             *node.state.oracle.write().map_err(|_| "lock poisoned")? = genesis_state.oracle;
 
             // Register fee currencies
@@ -321,15 +320,20 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 // from them), and including those in the BFT bootstrap would have
                 // the consensus network try to dial nodes that aren't running a
                 // BFT engine at all.
-                let validator_pubkeys: std::collections::HashSet<Vec<u8>> = node
-                    .state
-                    .validator_state
-                    .read()
-                    .map_err(|_| "validator_state poisoned")?
-                    .get_all_validators()
-                    .values()
-                    .map(|s| s.ed25519_pubkey.as_slice().to_vec())
-                    .collect();
+                let validator_pubkeys: std::collections::HashSet<Vec<u8>> = {
+                    let evm_state = node.state.evm_state.read().map_err(|_| "evm_state poisoned")?;
+                    let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+                    let mut set = std::collections::HashSet::new();
+                    for id in 1..=count {
+                        let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, id);
+                        if addr != call_primitives::Address::ZERO {
+                            let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(
+                                &evm_state, addr);
+                            set.insert(pk.to_vec());
+                        }
+                    }
+                    set
+                };
 
                 // Derive the BFT consensus P2P bootstrap list from the gossip P2P
                 // bootstrap peers: validators reuse their identity key (same ed25519

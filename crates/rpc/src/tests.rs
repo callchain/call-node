@@ -7,7 +7,6 @@ mod tests {
     use call_oracle::OracleManager;
     use call_evm::EvmState;
     use call_bridge::BridgeStateManager;
-    use call_consensus::ValidatorStateManager;
     use call_consensus::exec::evm_instructions;
     use call_agent::{AgentRegistry, AgentBalances};
     use call_shielded::ShieldedState;
@@ -45,7 +44,6 @@ mod tests {
             ComplianceEngine::new(),
             EvmState::new(),
             BridgeStateManager::default(),
-            ValidatorStateManager::default(),
             AgentRegistry::new(),
             AgentBalances::new(),
             call_agent::AgentNonces::new(),

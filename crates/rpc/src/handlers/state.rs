@@ -4,7 +4,7 @@ use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, ProtocolRecei
 use call_protocol::security::MempoolDefense;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_bridge::BridgeStateManager;
-use call_consensus::{ValidatorStateManager, ForkManager, RollbackPlan, ConsensusParams};
+use call_consensus::{ForkManager, RollbackPlan, ConsensusParams};
 use call_consensus::exec::evm_instructions;
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
@@ -127,7 +127,6 @@ pub struct RpcState {
     pub compliance_engine: RwLock<ComplianceEngine>,
     pub evm_state: RwLock<EvmState>,
     pub bridge_state: RwLock<BridgeStateManager>,
-    pub validator_state: RwLock<ValidatorStateManager>,
     pub agent_registry: RwLock<AgentRegistry>,
     pub agent_balances: RwLock<AgentBalances>,
     pub agent_nonces: RwLock<call_agent::AgentNonces>,
@@ -186,7 +185,6 @@ impl RpcState {
         compliance_engine: ComplianceEngine,
         evm_state: EvmState,
         bridge_state: BridgeStateManager,
-        validator_state: ValidatorStateManager,
         agent_registry: AgentRegistry,
         agent_balances: AgentBalances,
         agent_nonces: call_agent::AgentNonces,
@@ -195,14 +193,16 @@ impl RpcState {
         chain_id: u64,
         oracle: OracleManager,
     ) -> Self {
-        let total_validators = validator_state.get_all_validators().len() as u32;
+        let total_validators = {
+            let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+            count as u32
+        };
         Self {
             balance_state: RwLock::new(balance_state),
             asset_registry: RwLock::new(asset_registry),
             compliance_engine: RwLock::new(compliance_engine),
             evm_state: RwLock::new(evm_state),
             bridge_state: RwLock::new(bridge_state),
-            validator_state: RwLock::new(validator_state),
             agent_registry: RwLock::new(agent_registry),
             agent_balances: RwLock::new(agent_balances),
             agent_nonces: RwLock::new(agent_nonces),

@@ -12,7 +12,7 @@ use call_agent::{AgentBalances, AgentRegistry};
 use call_bridge::{BridgeConfig, BridgeStateManager};
 use call_consensus::{
     block::{BlockContext, ExecutionState, Subsystems},
-    Block, BlockExecutionResult, ConsensusError, ForkManager, ValidatorStateManager,
+    Block, BlockExecutionResult, ConsensusError, ForkManager,
 };
 use call_evm::EvmState;
 use call_governance::GovernanceManager;
@@ -32,7 +32,6 @@ pub struct StateWriteBundle<'a> {
     pub compliance: RwLockWriteGuard<'a, ComplianceEngine>,
     pub evm: RwLockWriteGuard<'a, EvmState>,
     pub bridge: RwLockWriteGuard<'a, BridgeStateManager>,
-    pub validator_state: RwLockWriteGuard<'a, ValidatorStateManager>,
     pub agent_registry: RwLockWriteGuard<'a, AgentRegistry>,
     pub agent_balances: RwLockWriteGuard<'a, AgentBalances>,
     pub shielded: RwLockWriteGuard<'a, ShieldedState>,
@@ -52,7 +51,6 @@ pub struct StateReadBundle<'a> {
     pub compliance: RwLockReadGuard<'a, ComplianceEngine>,
     pub evm: RwLockReadGuard<'a, EvmState>,
     pub bridge: RwLockReadGuard<'a, BridgeStateManager>,
-    pub validator_state: RwLockReadGuard<'a, ValidatorStateManager>,
     pub agent_registry: RwLockReadGuard<'a, AgentRegistry>,
     pub agent_balances: RwLockReadGuard<'a, AgentBalances>,
     pub shielded: RwLockReadGuard<'a, ShieldedState>,
@@ -75,7 +73,6 @@ impl RpcState {
             compliance: self.compliance_engine.write().unwrap(),
             evm: self.evm_state.write().unwrap(),
             bridge: self.bridge_state.write().unwrap(),
-            validator_state: self.validator_state.write().unwrap(),
             agent_registry: self.agent_registry.write().unwrap(),
             agent_balances: self.agent_balances.write().unwrap(),
             shielded: self.shielded_state.write().unwrap(),
@@ -94,7 +91,6 @@ impl RpcState {
             compliance: self.compliance_engine.read().unwrap(),
             evm: self.evm_state.read().unwrap(),
             bridge: self.bridge_state.read().unwrap(),
-            validator_state: self.validator_state.read().unwrap(),
             agent_registry: self.agent_registry.read().unwrap(),
             agent_balances: self.agent_balances.read().unwrap(),
             shielded: self.shielded_state.read().unwrap(),

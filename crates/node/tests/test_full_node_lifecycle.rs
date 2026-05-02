@@ -40,7 +40,6 @@ async fn test_node_starts_at_genesis() {
     // Stake validator so proposer selection works
     {
         let mut evm_state = node.state.evm_state.write().unwrap();
-        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(&mut evm_state, test_addr(1), [1u8; 32], one_million_call()).unwrap();
         consensus.refresh_proposer_subset(&evm_state);
@@ -68,7 +67,6 @@ async fn test_node_process_transactions() {
 
     // Stake validator
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
@@ -115,7 +113,6 @@ async fn test_node_persist_and_recover() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
@@ -167,7 +164,6 @@ async fn test_block_chain_continuity() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();

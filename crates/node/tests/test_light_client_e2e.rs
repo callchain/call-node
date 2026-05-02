@@ -23,16 +23,6 @@ async fn test_light_verify_block_header_valid() {
     let (ed25519_pubkey, ed25519_signing_key) = call_crypto::ed25519_generate_keypair();
     let validator_addr = test_addr(1);
 
-    // Stake a dummy validator first so the real validator gets id >= 1
-    // (the RPC rejects proposer == 0)
-    {
-        let mut evm_state = node.state.evm_state.write().unwrap();
-        let mut consensus = node.consensus.write().unwrap();
-        consensus
-            .stake_validator(&mut evm_state, test_addr(99), [0u8; 32], one_million_call())
-            .unwrap();
-    }
-
     // Stake validator in consensus with the Ed25519 pubkey
     let val_id: ValidatorId = {
         let mut evm_state = node.state.evm_state.write().unwrap();
@@ -104,15 +94,6 @@ async fn test_light_verify_block_header_bad_parent() {
 
     let (ed25519_pubkey, ed25519_signing_key) = call_crypto::ed25519_generate_keypair();
     let validator_addr = test_addr(1);
-
-    // Stake a dummy validator first so the real validator gets id >= 1
-    {
-        let mut evm_state = node.state.evm_state.write().unwrap();
-        let mut consensus = node.consensus.write().unwrap();
-        consensus
-            .stake_validator(&mut evm_state, test_addr(99), [0u8; 32], one_million_call())
-            .unwrap();
-    }
 
     let val_id: ValidatorId = {
         let mut evm_state = node.state.evm_state.write().unwrap();
@@ -251,15 +232,6 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
 
     let (ed25519_pubkey, ed25519_signing_key) = call_crypto::ed25519_generate_keypair();
     let validator_addr = test_addr(1);
-
-    // Stake a dummy validator first so the real validator gets id >= 1
-    {
-        let mut evm_state = node.state.evm_state.write().unwrap();
-        let mut consensus = node.consensus.write().unwrap();
-        consensus
-            .stake_validator(&mut evm_state, test_addr(99), [0u8; 32], one_million_call())
-            .unwrap();
-    }
 
     let val_id: ValidatorId = {
         let mut evm_state = node.state.evm_state.write().unwrap();

@@ -4,7 +4,6 @@
 //! state root computation, and chain ID management.
 
 use call_consensus::proposer::ConsensusParams;
-use call_consensus::validator::ValidatorStateManager;
 use call_crypto::{build_merkle_root, keccak256};
 use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
@@ -183,8 +182,6 @@ pub struct GenesisState {
     pub compliance: ComplianceEngine,
     /// EVM state
     pub evm_state: EvmState,
-    /// Validator state manager
-    pub validators: ValidatorStateManager,
     /// Registered fee currency asset IDs
     pub fee_currencies: Vec<AssetId>,
     /// Oracle manager with registered validators and tracked assets
@@ -223,13 +220,12 @@ impl GenesisExecutor {
         let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut evm_state = EvmState::new();
-        let mut validators = ValidatorStateManager::default();
 
         // Step 3: Register assets and distribute initial account (EVM + legacy)
         self.register_assets(&mut account, &mut registry, &mut evm_state)?;
 
-        // Step 4: Register validators (EVM + legacy)
-        self.register_validators(&mut validators, &mut evm_state)?;
+        // Step 4: Register validators (EVM only)
+        self.register_validators(&mut evm_state)?;
 
         // Step 5: Register fee currencies
         let fee_currencies = self.register_fee_currencies(&mut registry)?;
@@ -257,7 +253,6 @@ impl GenesisExecutor {
             registry,
             compliance,
             evm_state,
-            validators,
             fee_currencies,
             oracle,
         })
@@ -359,7 +354,6 @@ impl GenesisExecutor {
     /// Register genesis validators (EVM + legacy)
     fn register_validators(
         &self,
-        validators: &mut ValidatorStateManager,
         evm_state: &mut EvmState,
     ) -> Result<(), GenesisError> {
         use call_precompiles::{address_to_u256, u128_to_u256, u64_to_u256, VALIDATOR_ADDRESS};
@@ -368,11 +362,6 @@ impl GenesisExecutor {
         for (i, gv) in self.genesis.validators.iter().enumerate() {
             let addr = parse_address(&gv.address)?;
             let pubkey = parse_pubkey(&gv.ed25519_pubkey)?;
-
-            // Legacy validator state
-            validators
-                .stake(addr, pubkey, gv.self_stake)
-                .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
 
             // EVM validator slots
             let validator_id = (i + 1) as u64;
@@ -654,8 +643,8 @@ mod tests {
         let executor = GenesisExecutor::new(genesis);
         let state = executor.execute().unwrap();
 
-        let active = state.validators.get_active_validators();
-        assert_eq!(active.len(), 1);
+        let count = call_consensus::exec::evm_instructions::read_validator_count(&state.evm_state);
+        assert_eq!(count, 1);
     }
 
     #[test]

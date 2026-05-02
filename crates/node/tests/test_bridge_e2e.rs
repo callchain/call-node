@@ -174,7 +174,7 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     }
 
-    // Stake sender as validator and register in validator state
+    // Stake sender as validator in EVM storage
     {
         let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
@@ -182,23 +182,6 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
             .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
             .unwrap() as u32;
         consensus.refresh_proposer_subset(&evm_state);
-
-        let mut validator_mgr = node.state.validator_state.write().unwrap();
-        validator_mgr.register_validator_from_stake(
-            val_id,
-            call_consensus::ValidatorStake {
-                validator_id: val_id,
-                address: sender,
-                ed25519_pubkey: [1u8; 32],
-                staked_call: one_million_call(),
-                self_stake: one_million_call(),
-                delegated_call: 0,
-                rewards: 0,
-                slash_history: vec![],
-                unbonding_start: None,
-                bls_pubkey: [0u8; 48],
-            },
-        );
     }
 
     // Produce an empty block (EVM-only mempool, no protocol txs)

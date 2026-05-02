@@ -79,12 +79,6 @@ fn apply_rollback_plan(
         oracle.set_current_block(plan.target_height);
     }
 
-    // 7. Reset validator state block
-    {
-        let mut vs = state.validator_state.write().unwrap();
-        vs.set_current_block(plan.target_height);
-    }
-
     // 8. Delete block files above target height
     let blocks_dir = data_dir.join("blocks");
     if blocks_dir.exists() {
@@ -153,11 +147,16 @@ pub(crate) async fn bft_event_loop(
 
     // Build a mapping from ed25519 pubkey -> validator id for propose lookups
     let pubkey_to_id = {
-        let vs = state.validator_state.read().unwrap();
+        let evm_state = state.evm_state.read().unwrap();
+        let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
         let mut map = std::collections::HashMap::new();
-        for (id, stake) in vs.get_all_validators().iter() {
-            if let Ok(pk) = commonware_cryptography::ed25519::PublicKey::decode(&stake.ed25519_pubkey[..]) {
-                map.insert(pk, *id);
+        for id in 1..=count {
+            let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, id);
+            if addr != Address::ZERO {
+                let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(&evm_state, addr);
+                if let Ok(pk) = commonware_cryptography::ed25519::PublicKey::decode(&pk[..]) {
+                    map.insert(pk, id as u32);
+                }
             }
         }
         map
@@ -555,12 +554,14 @@ pub(crate) async fn bft_event_loop(
                         }
                     }
 
-                    // Sync validators into governance
+                    // Sync validators from EVM storage into governance
                     {
                         let mut gov = state.governance.write().unwrap();
-                        let vs = state.validator_state.read().unwrap();
-                        for (id, stake) in vs.get_all_validators().iter() {
-                            gov.register_validator(*id, stake.address);
+                        let evm_state = state.evm_state.read().unwrap();
+                        let validators = call_consensus::exec::evm_instructions::read_validators(&evm_state);
+                        drop(evm_state);
+                        for (id, addr, _stake) in validators {
+                            gov.register_validator(id as u32, addr);
                         }
                     }
 
@@ -697,17 +698,7 @@ pub(crate) async fn bft_event_loop(
                             call_storage::compute_agent_root(&agents)
                         };
 
-                        let consensus_root = {
-                            let validator_state = state.validator_state.read().unwrap();
-                            let validators: std::collections::HashMap<u32, (Address, u128)> = validator_state
-                                .get_all_validators()
-                                .iter()
-                                .map(|(id, stake)| (*id, (stake.address, stake.staked_call)))
-                                .collect();
-                            call_storage::compute_consensus_root(&validators)
-                        };
-
-                        let roots = StateRoots { protocol_root, evm_root, shielded_root, agent_root, consensus_root };
+                        let roots = StateRoots { protocol_root, evm_root, shielded_root, agent_root, consensus_root: evm_root };
                         let snapshot_dir = db.data_dir.join("snapshots");
                         match produce_state_snapshot(&mut prune_state, roots, new_height, Some(&snapshot_dir)) {
                             Ok(_) => {
