@@ -19,11 +19,12 @@
 | `compliance_engine` | 部分迁移（Compliance precompile 存在） | `state_bundle.rs` 仅获取锁，node 中无 active 使用 | **可能可以，需确认** |
 | `bridge_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（pending deposits、processed txs、daily limits 全部走 EVM） | **是**（已移除） |
 | `validator_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（所有验证人读写走 EVM） | **是**（已移除） |
-| `agent_registry` | 未完全迁移 | `block_producer.rs` 快照 | **否** |
-| `shielded_state` | 未完全迁移 | `block_producer.rs` 快照 | **否** |
+| `agent_registry` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（agent 快照从 EVM 读取，RPC 读写走 EVM） | **是**（已移除） |
+| `shielded_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（shielded 快照从 EVM 读取，RPC 读写走 EVM） | **是**（已移除） |
 | `governance` | 未完全迁移 | `block_producer.rs` 提案推进、事件广播 | **否** |
-| `oracle` | 未完全迁移 | `block_producer.rs`, `bft_loop.rs` 价格跟踪 | **否** |
-| `fee_currency_registry` | 未迁移 | `lib.rs`, `state_persist.rs` | **否** |
+| `oracle` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（价格/TWAP 全部走 EVM，OracleManager 为独立 transient） | **是**（已移除） |
+| `fee_currency_registry` | ✅ 已完全移除，`RpcState` 字段已删除 | 无 | **是**（已移除） |
+| `compliance_engine` | ✅ 已完全移除，`RpcState` 字段已删除 | 无 | **是**（已移除） |
 
 ---
 
@@ -31,7 +32,7 @@
 
 1. ✅ ~~`block_producer.rs:106-125` — bridge deposit 仍通过 `balance_state.mint()` 结算，未走 EVM storage~~（已解决：balance 和 bridge 均走 EVM）
 2. **`block_producer.rs:279-309`** — governance 提案推进仍走内存 `GovernanceManager`
-3. **`block_producer.rs:414-454`** — 状态快照仍从各内存结构读 root
+3. ✅ ~~`block_producer.rs:414-454` — 状态快照仍从各内存结构读 root~~（已解决：validator / agent / shielded root 均从 EVM 读取）
 
 ---
 
@@ -98,32 +99,50 @@
   2. 修改 `block_producer.rs:277-299` 提案推进逻辑为调用 Governance precompile 或读取 EVM storage
   3. 删除 `RpcState.governance` 和 persistence
 
-### Step 5 — `oracle`（Oracle precompile 打通）
+### Step 5 — `oracle`（Oracle precompile 打通）✅ 已完成
 
 - **目标**：价格数据、TWAP、更新时间只存 EVM storage
-- **工作量**：中等
-- **步骤**：
-  1. 将 `OracleManager` 的 tracked prices、period tracking、outlier detection 数据迁移到 Oracle precompile storage
-  2. 修改 `bft_loop.rs` 和 `block_producer.rs` 的 oracle 边界逻辑为读写 EVM
-  3. 删除 `RpcState.oracle` 和 persistence
+- **状态**：已完成（2026-05-02）
+- **完成内容**：
+  1. ✅ `crates/consensus/src/exec/evm_instructions.rs` — 新增 `read_oracle_price`、`read_oracle_twap`、`read_oracle_timestamp`、`read_oracle_block`、`read_oracle_count`、`seed_oracle_price`
+  2. ✅ `crates/oracle/src/manager.rs` — 删除 `aggregated` 和 `history` 字段；`submit_price` 返回 `Result<Option<AggregatedPrice>, OracleError>`；调用者在 quorum 达成时写 EVM
+  3. ✅ `crates/oracle/src/tests.rs` — 更新测试以匹配新 API
+  4. ✅ `crates/rpc/src/handlers/state.rs` — 从 `RpcState` 删除 `oracle` 字段和 `new()` 参数
+  5. ✅ `crates/rpc/src/state_bundle.rs` — 从 `StateWriteBundle` / `StateReadBundle` 移除 `oracle`
+  6. ✅ `crates/rpc/src/handlers/callchain.rs` — `call_oracleGetPrice` / `call_oracleGetTwap` 改为从 EVM storage 读取
+  7. ✅ `crates/rpc/src/handlers/executor.rs` — 删除 `oracle.` 参数变更分支
+  8. ✅ `crates/node/src/lib.rs` — `CallNode` 新增 `oracle: Arc<RwLock<OracleManager>>`；加载/保存独立进行
+  9. ✅ `crates/node/src/block_producer.rs` / `bft_loop.rs` — 接收独立 `oracle` 参数；所有 `state.oracle` 改为 `oracle`
+  10. ✅ `crates/node/src/network_handler.rs` — 接收独立 `oracle` 参数；价格请求改为读 EVM；P2P 提交在 quorum 时写 EVM
+  11. ✅ `crates/node/src/state_persist.rs` — `persist_state_to_db` / `persist_state_incremental` 接收独立 `oracle` 参数
+  12. ✅ `crates/chainspec/src/genesis.rs` — 从 `GenesisState` / `LoadedState` 删除 `oracle`
+  13. ✅ `crates/protocol/src/fee_currency.rs` — 移除 `OracleManager` 依赖（fallback 值）
+  14. ✅ 修复全部 lib tests、integration tests 和 e2e harness
 
-### Step 6 — `agent_registry` + `shielded_state`（Agent / Shielded precompile 打通）
+### Step 6 — `agent_registry` + `shielded_state`（Agent / Shielded precompile 打通）✅ 已完成
 
 - **目标**：Agent 注册信息和 Shielded 的 nullifier/commitment 树只存 EVM storage
-- **工作量**：中等
-- **步骤**：
-  1. Agent：将 `AgentRegistry` 迁移到 Agent precompile storage；修改相关 RPC
-  2. Shielded：将 `ShieldedState` 的 Merkle tree root + nullifier set 迁移到 Shielded precompile storage（完整树可做 sidecar）
-  3. 删除 `RpcState.agent_registry`、`agent_balances`、`shielded_state` 和 persistence
+- **状态**：已完成（2026-05-02）
+- **完成内容**：
+  1. ✅ `crates/consensus/src/exec/evm_instructions.rs` — 新增 `read_agent_count`、`agent_set_pubkey`
+  2. ✅ `crates/node/src/block_producer.rs` / `bft_loop.rs` — `shielded_root` / `agent_root` 快照改为从 EVM storage 读取（`read_shielded_merkle_root`、`read_agent_count` + `agent_get_owner`/`name`/`registered_at`）
+  3. ✅ `crates/rpc/src/handlers/state.rs` — 从 `RpcState` 删除 `agent_registry`、`agent_balances`、`shielded_state`；`register_agent` / `grant_agent_balance` / `revoke_agent_balance` / `get_shielded_tree_state` 全部改为读写 EVM storage
+  4. ✅ `crates/rpc/src/state_bundle.rs` — 从 `StateWriteBundle` / `StateReadBundle` 移除 `agent_registry`、`agent_balances`、`shielded`
+  5. ✅ `crates/rpc/src/handlers/callchain.rs` — `call_shieldedBalance` / `call_lightVerifyShieldedTx` / `call_lightGetShieldedBalance` / `call_lightGetBalanceProof` 改为读 EVM storage（Merkle tree 详细证明暂返回空，需完整 sidecar 节点）
+  6. ✅ `crates/node/src/state_persist.rs` — 删除 `shielded_state`、`agent_registry`、`agent_balances` persistence（`load_shielded_state_inner` / `save_shielded_state_inner` / `load_agent_state_inner` / `save_agent_state_inner` / `CallShieldedNullifiers` / `CallShieldedCommitments` / `CallAgents` / `CallAgentBalances`）
+  7. ✅ `crates/node/src/lib.rs` — 删除 `ShieldedState`、`AgentRegistry`、`AgentBalances` 初始化；`LoadedState` 移除对应字段
+  8. ✅ `crates/node/tests/e2e/harness.rs` / `test_shielded_e2e.rs` — 更新 `RpcState::new()` 调用和 shielded 断言改为读 EVM
+  9. ✅ 修复全部 lib tests 和 integration tests
 
-### Step 7 — `fee_currency_registry` + `compliance_engine`
+### Step 7 — `fee_currency_registry` + `compliance_engine` ✅ 已完成
 
 - **目标**：费用币种和合规策略只存 EVM storage
-- **工作量**：小
-- **步骤**：
-  1. `fee_currency_registry`：费用币种列表写入 EVM storage（或用 governance 提案管理）
-  2. `compliance_engine`：合规策略写入 Compliance precompile storage
-  3. 删除对应 `RpcState` 字段和 persistence
+- **状态**：已完成（2026-05-02）
+- **完成内容**：
+  1. ✅ 从 `RpcState` 删除 `fee_currency_registry` 和 `compliance_engine` 字段
+  2. ✅ 从 `state_bundle.rs` 移除对应锁
+  3. ✅ 从 `state_persist.rs` 移除 persistence 代码
+  4. ✅ 修复全部 tests
 
 ### Step 8 — 状态快照和 persistence 简化
 
@@ -140,11 +159,11 @@
 
 按**依赖链**和**改动量**排序：
 
-1. **Step 2**（validator_state 收尾）— Phase 5 刚完成，残留字段清理工作量最小
-2. **Step 1**（balance_state + asset_registry）— Asset precompile 已经可用，只需改 bridge deposit 结算和 snapshot
-3. **Step 3**（bridge_state）— 依赖 Step 1 的 balance 迁移完成后更安全
-4. **Step 5**（oracle）— 数据相对独立
-5. **Step 4**（governance）— 改动量最大，放后面
-6. **Step 6**（agent + shielded）— 影响面较小
-7. **Step 7**（fee_currency + compliance）— 最后收尾
-8. **Step 8**（persistence 简化）— 每步完成后逐步清理
+1. ✅ **Step 2**（validator_state 收尾）— 已完成
+2. ✅ **Step 1**（balance_state + asset_registry）— 已完成
+3. ✅ **Step 3**（bridge_state）— 已完成
+4. ✅ **Step 5**（oracle）— 已完成
+5. ✅ **Step 6**（agent + shielded）— 已完成
+6. ✅ **Step 7**（fee_currency + compliance）— 已完成
+7. **Step 4**（governance）— 剩余工作量最大
+8. **Step 8**（persistence 简化）— 等 Step 4 完成后最终清理

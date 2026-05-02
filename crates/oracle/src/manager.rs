@@ -1,7 +1,7 @@
 //! OracleManager — full oracle state manager
 
 use crate::{
-    oracle_message_hash, oracle_quorum, AggregatedPrice, HistoricalPrice, OracleConfig,
+    oracle_message_hash, oracle_quorum, AggregatedPrice, OracleConfig,
     OracleError, OracleSubmission, OracleValidatorInfo,
 };
 use alloy_primitives::U256;
@@ -9,7 +9,8 @@ use call_crypto::ed25519_verify;
 use call_primitives::{Address, AssetId, PricePair};
 use std::collections::HashMap;
 
-/// Full oracle state manager
+/// Full oracle state manager (transient protocol-layer logic only).
+/// Aggregated prices, TWAP, and timestamps live in EVM storage.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OracleManager {
     pub config: OracleConfig,
@@ -21,12 +22,10 @@ pub struct OracleManager {
     /// Pending submissions for current period: pair -> (validator_id -> submission)
     #[serde(skip)]
     pending: HashMap<PricePair, HashMap<u32, OracleSubmission>>,
-    /// Current aggregated prices per pair
-    aggregated: HashMap<PricePair, AggregatedPrice>,
-    /// Historical prices for TWAP: pair -> Vec<HistoricalPrice>
-    history: HashMap<PricePair, Vec<HistoricalPrice>>,
     current_block: u64,
-    /// Accumulated fee pool for oracle rewards (reset each period)
+    /// Accumulated fee pool for oracle rewards (reset each period).
+    /// The canonical reward pool lives in EVM storage; this in-memory
+    /// field is used by the protocol-layer distributor.
     pub reward_pool: u128,
     /// Validators who contributed to the last quorum aggregation
     #[serde(skip)]
@@ -50,8 +49,6 @@ impl OracleManager {
             validator_ids_by_address: HashMap::new(),
             tracked_pairs: Vec::new(),
             pending: HashMap::new(),
-            aggregated: HashMap::new(),
-            history: HashMap::new(),
             current_block: 0,
             reward_pool: 0,
             current_contributors: Vec::new(),
@@ -100,8 +97,10 @@ impl OracleManager {
     }
 
     /// Submit a price from a validator.
-    /// Returns Ok(()) if accepted, Err if rejected.
-    pub fn submit_price(&mut self, submission: OracleSubmission) -> Result<(), OracleError> {
+    /// Returns `Ok(Some(aggregated))` if quorum was reached and price aggregated,
+    /// `Ok(None)` if accepted but quorum not yet reached, or `Err` if rejected.
+    /// The caller should write the returned `AggregatedPrice` to EVM storage.
+    pub fn submit_price(&mut self, submission: OracleSubmission) -> Result<Option<AggregatedPrice>, OracleError> {
         let validator = self
             .validators
             .get(&submission.validator_id)
@@ -165,14 +164,16 @@ impl OracleManager {
         // Check if quorum reached
         let submissions = self.pending.get(&pair).unwrap();
         if submissions.len() >= oracle_quorum(self.validators.len()) {
-            self.aggregate_and_publish_price(pair)?;
+            let aggregated = self.aggregate_and_publish_price(pair)?;
+            return Ok(Some(aggregated));
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    /// Aggregate submissions: sort, compute median, mark outliers, append to TWAP history
-    fn aggregate_and_publish_price(&mut self, pair: PricePair) -> Result<(), OracleError> {
+    /// Aggregate submissions: sort, compute median, mark outliers.
+    /// Returns the aggregated price info; caller must write to EVM storage.
+    fn aggregate_and_publish_price(&mut self, pair: PricePair) -> Result<AggregatedPrice, OracleError> {
         let submissions = self
             .pending
             .remove(&pair)
@@ -235,9 +236,6 @@ impl OracleManager {
             outlier_count,
         };
 
-        // Store aggregated price
-        self.aggregated.insert(pair, aggregated);
-
         // Record contributors (non-outlier validators who contributed to quorum)
         self.current_contributors = prices
             .iter()
@@ -253,97 +251,7 @@ impl OracleManager {
         // Record outliers for external slashing
         self.last_outliers = outlier_validators;
 
-        // Append to TWAP history
-        self.history
-            .entry(pair)
-            .or_default()
-            .push(HistoricalPrice {
-                price: median,
-                timestamp: first_ts,
-                block_number: block,
-            });
-
-        // Prune TWAP history beyond window
-        if let Some(entries) = self.history.get_mut(&pair) {
-            if entries.len() > 1 {
-                let cutoff = first_ts.saturating_sub(self.config.twap_window_secs);
-                entries.retain(|e| e.timestamp >= cutoff);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get current aggregated price for a pair
-    pub fn get_price(&self, pair: PricePair) -> Option<&AggregatedPrice> {
-        self.aggregated.get(&pair)
-    }
-
-    /// Legacy compatibility: get price by asset_id, implicitly quoted in USD
-    pub fn get_price_by_asset(&self, asset_id: AssetId) -> Option<&AggregatedPrice> {
-        self.get_price(PricePair::new(asset_id, 0))
-    }
-
-    /// Calculate time-weighted average price over the configured window.
-    ///
-    /// Each historical price is weighted by the duration it was valid
-    /// (time until the next price update, or until `current_timestamp`
-    /// for the most recent entry).
-    pub fn get_twap(&self, pair: PricePair, current_timestamp: u64) -> Option<u128> {
-        let entries = self.history.get(&pair)?;
-        if entries.is_empty() {
-            return None;
-        }
-        let cutoff = current_timestamp.saturating_sub(self.config.twap_window_secs);
-        let relevant: Vec<_> = entries.iter().filter(|e| e.timestamp >= cutoff).collect();
-        if relevant.is_empty() {
-            return None;
-        }
-        if relevant.len() == 1 {
-            return Some(relevant[0].price);
-        }
-
-        let mut weighted_sum = U256::ZERO;
-        let mut total_duration: u64 = 0;
-
-        for i in 0..relevant.len() {
-            let start = relevant[i].timestamp;
-            let end = if i + 1 < relevant.len() {
-                relevant[i + 1].timestamp
-            } else {
-                current_timestamp.min(start + self.config.twap_window_secs)
-            };
-            let duration = end.saturating_sub(start);
-            if duration > 0 {
-                weighted_sum += U256::from(relevant[i].price) * U256::from(duration);
-                total_duration += duration;
-            }
-        }
-
-        if total_duration == 0 {
-            return relevant.first().map(|e| e.price);
-        }
-
-        let result = weighted_sum / U256::from(total_duration);
-        u128::try_from(&result).ok()
-    }
-
-    /// Legacy compatibility: get TWAP by asset_id, implicitly quoted in USD
-    pub fn get_twap_by_asset(&self, asset_id: AssetId, current_timestamp: u64) -> Option<u128> {
-        self.get_twap(PricePair::new(asset_id, 0), current_timestamp)
-    }
-
-    /// Check if a price is stale
-    pub fn is_stale(&self, pair: PricePair, current_timestamp: u64) -> bool {
-        match self.aggregated.get(&pair) {
-            Some(p) => current_timestamp.saturating_sub(p.timestamp) > self.config.staleness_secs,
-            None => true,
-        }
-    }
-
-    /// Legacy compatibility: check staleness by asset_id, implicitly quoted in USD
-    pub fn is_stale_by_asset(&self, asset_id: AssetId, current_timestamp: u64) -> bool {
-        self.is_stale(PricePair::new(asset_id, 0), current_timestamp)
+        Ok(aggregated)
     }
 
     /// Get validator info
@@ -380,43 +288,8 @@ impl OracleManager {
     /// Advance the oracle period for all tracked pairs.
     ///
     /// Called by the block proposer at each `ORACLE_UPDATE_INTERVAL` boundary.
-    /// For pairs where quorum was not reached, the last known price is carried
-    /// forward (graceful degradation) so the oracle never stalls.
-    pub fn advance_period(&mut self, block: u64) {
-        for pair in &self.tracked_pairs.clone() {
-            let has_quorum = self
-                .pending
-                .get(pair)
-                .map(|p| p.len() >= oracle_quorum(self.validators.len()))
-                .unwrap_or(false);
-
-            if !has_quorum {
-                // Carry forward the last known price for this pair
-                if let Some(last) = self.aggregated.get(pair).cloned() {
-                    self.history
-                        .entry(*pair)
-                        .or_default()
-                        .push(HistoricalPrice {
-                            price: last.median_price,
-                            timestamp: last.timestamp,
-                            block_number: block,
-                        });
-                }
-            }
-            // If quorum was reached, aggregate_and_publish_price was already
-            // called during submission — just prune history
-            if let Some(entries) = self.history.get_mut(pair) {
-                if entries.len() > 1 {
-                    let cutoff_ts = entries
-                        .last()
-                        .map(|e| e.timestamp)
-                        .unwrap_or(0)
-                        .saturating_sub(self.config.twap_window_secs);
-                    entries.retain(|e| e.timestamp >= cutoff_ts);
-                }
-            }
-        }
-        // Clear pending for all pairs
+    /// Clears pending submissions; aggregated prices already live in EVM storage.
+    pub fn advance_period(&mut self, _block: u64) {
         self.pending.clear();
     }
 
@@ -471,103 +344,5 @@ impl OracleManager {
         validator.outlier_count = 0;
         validator.is_active = true;
         Ok(())
-    }
-
-    /// Simple price submission — internal/testing only. Bypasses the full validation
-    /// pipeline (signatures, period checks, source validation). Performs minimal
-    /// sanity checks to prevent obviously invalid data.
-    ///
-    /// Only available in test builds. Production code must use `submit_price`.
-    #[cfg(any(test, feature = "test-utils"))]
-    #[doc(hidden)]
-    pub fn simple_submit_price(
-        &mut self,
-        pair: PricePair,
-        price: u128,
-        timestamp: u64,
-        block_number: u64,
-    ) {
-        if price == 0 || block_number == 0 || timestamp == 0 {
-            return;
-        }
-        self.history
-            .entry(pair)
-            .or_default()
-            .push(HistoricalPrice {
-                price,
-                timestamp,
-                block_number,
-            });
-
-        // Update current aggregated price
-        self.aggregated.insert(
-            pair,
-            AggregatedPrice {
-                pair,
-                median_price: price,
-                block_number,
-                timestamp,
-                submission_count: 1,
-                outlier_count: 0,
-            },
-        );
-    }
-
-    /// Legacy compatibility: simple_submit_price by asset_id, implicitly quoted in USD
-    #[cfg(any(test, feature = "test-utils"))]
-    #[doc(hidden)]
-    pub fn simple_submit_price_by_asset(
-        &mut self,
-        asset_id: AssetId,
-        price: u128,
-        timestamp: u64,
-        block_number: u64,
-    ) {
-        self.simple_submit_price(PricePair::new(asset_id, 0), price, timestamp, block_number);
-    }
-
-    /// Directly record a price in history and aggregated state.
-    /// Used by the precompiles crate for legacy integrations.
-    /// Bypasses the full validation pipeline — use with caution.
-    pub fn record_direct_price(
-        &mut self,
-        pair: PricePair,
-        price: u128,
-        timestamp: u64,
-        block_number: u64,
-    ) {
-        if price == 0 || block_number == 0 || timestamp == 0 {
-            return;
-        }
-        self.history
-            .entry(pair)
-            .or_default()
-            .push(HistoricalPrice {
-                price,
-                timestamp,
-                block_number,
-            });
-        self.aggregated.insert(
-            pair,
-            AggregatedPrice {
-                pair,
-                median_price: price,
-                block_number,
-                timestamp,
-                submission_count: 1,
-                outlier_count: 0,
-            },
-        );
-    }
-
-    /// Legacy compatibility: record_direct_price by asset_id, implicitly quoted in USD
-    pub fn record_direct_price_by_asset(
-        &mut self,
-        asset_id: AssetId,
-        price: u128,
-        timestamp: u64,
-        block_number: u64,
-    ) {
-        self.record_direct_price(PricePair::new(asset_id, 0), price, timestamp, block_number);
     }
 }

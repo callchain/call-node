@@ -8,7 +8,6 @@ use crate::CallNode;
 use call_consensus::SimplexConsensus;
 use call_network::{CommonwareConfig, NetworkLimits, load_or_generate_identity_key};
 use call_primitives::Address;
-use call_protocol::fee_currency::FeeCurrencyEntry;
 use call_rpc::RpcConfig;
 use call_crypto::{LocalSigner, SignerRef, load_key as load_keystore_key, bls_generate, bls_public_key_bytes};
 use commonware_cryptography::ed25519;
@@ -195,28 +194,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             // Build consensus before moving genesis EVM state into RpcState
             let new_consensus = SimplexConsensus::new(genesis.consensus_params.clone(), &genesis_state.evm_state);
             // Inject genesis state into RpcState
-            *node.state.compliance_engine.write().map_err(|_| "lock poisoned")? = genesis_state.compliance;
             *node.state.evm_state.write().map_err(|_| "lock poisoned")? = genesis_state.evm_state;
-            *node.state.oracle.write().map_err(|_| "lock poisoned")? = genesis_state.oracle;
-
-            // Register fee currencies
-            {
-                let mut fcr = node.state.fee_currency_registry.write().map_err(|_| "lock poisoned")?;
-                let evm = node.state.evm_state.read().map_err(|_| "lock poisoned")?;
-                for asset_id in &genesis_state.fee_currencies {
-                    let name = call_consensus::exec::evm_instructions::read_asset_name(&evm, *asset_id);
-                    let decimals = call_consensus::exec::evm_instructions::read_asset_decimals(&evm, *asset_id);
-                    let entry = FeeCurrencyEntry {
-                        asset_id: *asset_id,
-                        name: if name.is_empty() { format!("Asset {}", asset_id) } else { name },
-                        decimals,
-                        oracle_price_key: None,
-                        added_at_block: 0,
-                        added_by_proposal: 0,
-                    };
-                    let _ = fcr.add_fee_currency(entry, 0);
-                }
-            }
 
             *node.consensus.write().map_err(|_| "lock poisoned")? = new_consensus;
 
@@ -382,13 +360,6 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             info!("step 7: full/archive node — passive sync only, no block production");
         }
     }
-
-    // Step 8: Start compliance data sync (if URL configured)
-    let compliance_url = std::env::var("CALL_COMPLIANCE_DATA_URL").ok();
-    if compliance_url.is_some() {
-        info!("step 8: starting compliance data sync");
-    }
-    let _compliance_handle = node.start_compliance_sync(compliance_url, 300); // 5 min interval
 
     info!(
         mode = ?config.mode,

@@ -8,8 +8,6 @@
 use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
-use call_protocol::ComplianceEngine;
-use call_oracle::OracleManager;
 use call_transaction_pool::Mempool;
 use call_rpc::RpcState;
 use std::path::PathBuf;
@@ -116,15 +114,10 @@ impl NodeBuilder {
         consensus.refresh_proposer_subset(&evm_state);
 
         let state = Arc::new(RpcState::new(
-            ComplianceEngine::new(),
             call_evm::EvmState::new(),
-            call_agent::AgentRegistry::new(),
-            call_agent::AgentBalances::new(),
             call_agent::AgentNonces::new(),
-            call_shielded::ShieldedState::new(),
             mempool.clone(),
             self.chain_id,
-            OracleManager::default(),
         ));
 
         for (asset_id, addr, amount) in &self.initial_balances {

@@ -15,7 +15,7 @@ use call_network::{
     Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, SyncRequest,
     EpochBoundarySignal,
 };
-use call_oracle::ORACLE_UPDATE_INTERVAL;
+use call_oracle::{OracleManager, ORACLE_UPDATE_INTERVAL};
 use call_primitives::{Address, Hash, FeeCurrency, TxHash};
 use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
@@ -36,6 +36,7 @@ fn apply_rollback_plan(
     prune_state: &mut PruneState,
     data_dir: &std::path::Path,
     db_env: &Arc<reth_db::DatabaseEnv>,
+    oracle: &Arc<RwLock<OracleManager>>,
 ) {
     tracing::warn!(
         target_height = plan.target_height,
@@ -75,8 +76,8 @@ fn apply_rollback_plan(
 
     // 6. Reset oracle block tracking
     {
-        let mut oracle = state.oracle.write().unwrap();
-        oracle.set_current_block(plan.target_height);
+        let mut oracle_guard = oracle.write().unwrap();
+        oracle_guard.set_current_block(plan.target_height);
     }
 
     // 8. Delete block files above target height
@@ -138,6 +139,7 @@ pub(crate) async fn bft_event_loop(
     exit_tx: oneshot::Sender<EpochRotationReason>,
     subset_pubkeys: Vec<[u8; 32]>,
     my_pubkey: [u8; 32],
+    oracle: Arc<RwLock<OracleManager>>,
 ) {
     let mut execution_results: std::collections::HashMap<
         ConsensusDigest,
@@ -174,7 +176,7 @@ pub(crate) async fn bft_event_loop(
     loop {
         // Check for pending emergency rollback and apply if present
         if let Some(plan) = state.pending_rollback.write().unwrap().take() {
-            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db);
+            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle);
         }
 
         // === Epoch boundary quorum check ===
@@ -251,7 +253,7 @@ pub(crate) async fn bft_event_loop(
                 let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
                 if is_oracle_boundary {
                     if let Some(ref net) = network {
-                        let tracked = { state.oracle.read().unwrap().tracked_pairs.clone() };
+                        let tracked = { oracle.read().unwrap().tracked_pairs.clone() };
                         if !tracked.is_empty() {
                             let request = OraclePriceRequest {
                                 pairs: tracked,
@@ -449,10 +451,10 @@ pub(crate) async fn bft_event_loop(
                     // (non-proposing validators advance period but don't broadcast requests — proposer already did)
                     let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
                     if is_oracle_boundary {
-                        let mut oracle = state.oracle.write().unwrap();
-                        oracle.advance_period(height);
-                        let outliers: Vec<u32> = oracle.last_outliers().to_vec();
-                        drop(oracle);
+                        let mut oracle_guard = oracle.write().unwrap();
+                        oracle_guard.advance_period(height);
+                        let outliers: Vec<u32> = oracle_guard.last_outliers().to_vec();
+                        drop(oracle_guard);
                         if !outliers.is_empty() {
                             let mut evm_state = state.evm_state.write().unwrap();
                             let mut c = consensus.write().unwrap();
@@ -464,7 +466,7 @@ pub(crate) async fn bft_event_loop(
                             tracing::info!(outliers = ?outliers, "slashed oracle outliers");
                         }
                         let contributions = {
-                            state.oracle.write().unwrap().distribute_rewards()
+                            oracle.write().unwrap().distribute_rewards()
                         };
                         if !contributions.is_empty() {
                             let mut evm_state = state.evm_state.write().unwrap();
@@ -476,7 +478,7 @@ pub(crate) async fn bft_event_loop(
                             }
                             tracing::info!(count = contributions.len(), "distributed oracle rewards");
                         }
-                        state.oracle.write().unwrap().clear_tracking();
+                        oracle.write().unwrap().clear_tracking();
                     }
 
                     // Commit via consensus
@@ -677,17 +679,23 @@ pub(crate) async fn bft_event_loop(
                         };
 
                         let shielded_root = {
-                            let shielded_state = state.shielded_state.read().unwrap();
-                            shielded_state.merkle_root()
+                            let evm_state = state.evm_state.read().unwrap();
+                            call_consensus::exec::evm_instructions::read_shielded_merkle_root(&evm_state)
                         };
 
                         let agent_root = {
-                            let registry = state.agent_registry.read().unwrap();
-                            let agents: std::collections::HashMap<u64, (Address, String, u64)> = registry
-                                .agents
-                                .iter()
-                                .map(|(id, reg)| (*id, (reg.owner, reg.name.clone(), reg.registered_at)))
-                                .collect();
+                            let evm_state = state.evm_state.read().unwrap();
+                            let count = call_consensus::exec::evm_instructions::read_agent_count(&evm_state);
+                            let mut agents = std::collections::HashMap::new();
+                            for id in 0..count {
+                                let owner = call_consensus::exec::evm_instructions::agent_get_owner(&evm_state, id);
+                                if owner == call_primitives::Address::ZERO {
+                                    continue;
+                                }
+                                let name = call_consensus::exec::evm_instructions::agent_get_name(&evm_state, id);
+                                let registered_at = call_consensus::exec::evm_instructions::agent_get_registered_at(&evm_state, id);
+                                agents.insert(id, (owner, name, registered_at));
+                            }
                             call_storage::compute_agent_root(&agents)
                         };
 
@@ -705,14 +713,14 @@ pub(crate) async fn bft_event_loop(
 
                     // Incremental state persistence
                     let db_env = &db.db;
-                    if let Err(e) = persist_state_incremental(db_env, &state, &consensus) {
+                    if let Err(e) = persist_state_incremental(db_env, &state, &consensus, &oracle) {
                         tracing::warn!(error = %e, "BFT finalize: incremental persist failed");
                     }
 
                     // Full rebuild every 1000 blocks
                     if new_height % 1000 == 0 {
                         let db_env = &db.db;
-                        if let Err(e) = persist_state_to_db(db_env, &state, &consensus) {
+                        if let Err(e) = persist_state_to_db(db_env, &state, &consensus, &oracle) {
                             tracing::warn!(error = %e, "BFT finalize: full persist failed");
                         }
                     }

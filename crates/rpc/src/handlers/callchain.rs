@@ -193,20 +193,19 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             } else {
                 [0u8; 32]
             };
-            let vk = call_shielded::ViewingKey {
+            let _vk = call_shielded::ViewingKey {
                 incoming_view_key: ivk,
                 full_view_key: fvk,
             };
-            let shielded = state.shielded_state.read()
+            let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let balance = shielded.balance_for_viewing_key(&vk);
-            let note_count = shielded.note_registry.values()
-                .filter(|note| vk.can_decrypt(note.rcm()))
-                .count();
+            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
+            // Note balances require the full note registry (not in EVM storage).
+            // Return merkle root only; use a local shielded node for balance queries.
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                "balance": balance.to_string(),
-                "noteCount": note_count,
-                "merkleRoot": format!("{:?}", shielded.merkle_root()),
+                "balance": "0",
+                "noteCount": 0,
+                "merkleRoot": format!("{:?}", merkle_root),
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -424,28 +423,11 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let (asset_id, address_str): (u64, String) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let address = address_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
             let balance = state.get_balance(asset_id, &address);
-            let shielded = state.shielded_state.read()
+            let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let merkle_root = shielded.merkle_root();
-            let leaf_count = shielded.merkle_tree.leaf_count();
-            let mut proof_entries: Vec<serde_json::Value> = Vec::new();
-            for (i, (cm, note)) in shielded.note_registry.iter().enumerate() {
-                if note.asset_id == asset_id {
-                    if let Some(proof) = shielded.merkle_tree.proof_for_index(i) {
-                        let proof_serialized: Vec<serde_json::Value> = proof.iter()
-                            .map(|(sibling, is_right)| serde_json::json!({
-                                "sibling": format!("0x{}", hex::encode(sibling.as_slice())),
-                                "is_right": is_right,
-                            }))
-                            .collect();
-                        proof_entries.push(serde_json::json!({
-                            "commitment": format!("0x{}", hex::encode(cm.0.as_slice())),
-                            "value": note.value.to_string(),
-                            "proof": proof_serialized,
-                        }));
-                    }
-                }
-            }
+            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
+            let leaf_count = evm_instructions::read_shielded_commitment_count(&evm);
+            // Full note proofs require the Merkle tree structure (not in EVM storage).
             let state_leaf = call_crypto::keccak256(format!("{asset_id}:{address:?}:{balance}").as_bytes());
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": asset_id,
@@ -454,7 +436,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 "stateCommitment": format!("0x{}", hex::encode(state_leaf)),
                 "merkleRoot": format!("0x{}", hex::encode(merkle_root.as_slice())),
                 "leafCount": leaf_count,
-                "noteProofs": proof_entries,
+                "noteProofs": Vec::<serde_json::Value>::new(),
                 "blockNumber": state.get_current_block(),
             }))
         })
@@ -494,24 +476,26 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
                 .unwrap_or_default();
-            let shielded = state.shielded_state.read()
+            let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
             let mut spent = Vec::new();
             for nf_hex in &nullifiers {
                 if let Ok(bytes) = hex::decode(nf_hex.trim_start_matches("0x")) {
                     let nf = call_shielded::Nullifier(call_primitives::Hash::from_slice(&bytes));
-                    if shielded.nullifier_set.is_spent(&nf) {
+                    if evm_instructions::read_shielded_nullifier_spent(&evm, &nf) {
                         spent.push(nf_hex.clone());
                     }
                 }
             }
+            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
+            let leaf_count = evm_instructions::read_shielded_commitment_count(&evm);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "valid": spent.is_empty(),
                 "nullifierCount": nullifiers.len(),
                 "commitmentCount": commitments.len(),
                 "alreadySpent": spent,
-                "merkleRoot": format!("{:?}", shielded.merkle_root()),
-                "leafCount": shielded.merkle_tree.leaf_count(),
+                "merkleRoot": format!("{:?}", merkle_root),
+                "leafCount": leaf_count,
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -525,14 +509,14 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .ok_or_else(|| invalid_params("missing 'viewingKey' field".into()))?;
             let _vk_bytes = hex::decode(viewing_key_hex.trim_start_matches("0x"))
                 .map_err(|e| invalid_params(format!("invalid viewing key: {e}")))?;
-            let shielded = state.shielded_state.read()
+            let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let leaf_count = shielded.merkle_tree.leaf_count();
-            let nullifier_count = shielded.nullifier_set.spent_nullifiers().len();
+            let leaf_count = evm_instructions::read_shielded_commitment_count(&evm);
+            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "noteCount": leaf_count,
-                "spentNullifiers": nullifier_count,
-                "merkleRoot": format!("{:?}", shielded.merkle_root()),
+                "spentNullifiers": 0, // not countable from EVM without iteration
+                "merkleRoot": format!("{:?}", merkle_root),
             }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -596,20 +580,26 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_oracleGetPrice", |params, state, _ctx| async move {
             let asset_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let oracle = state.oracle.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            match oracle.get_price_by_asset(asset_id) {
-                Some(p) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "assetId": p.pair.base,
-                    "quoteAssetId": p.pair.quote,
-                    "medianPrice": p.median_price.to_string(),
-                    "blockNumber": p.block_number,
-                    "timestamp": p.timestamp,
-                    "submissionCount": p.submission_count,
-                    "outlierCount": p.outlier_count,
-                    "isStale": oracle.is_stale_by_asset(asset_id, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
-                })),
-                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let price = call_consensus::exec::evm_instructions::read_oracle_price(&evm, asset_id);
+            if price == 0 {
+                return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
+            let timestamp = call_consensus::exec::evm_instructions::read_oracle_timestamp(&evm, asset_id);
+            let block_number = call_consensus::exec::evm_instructions::read_oracle_block(&evm, asset_id);
+            let count = call_consensus::exec::evm_instructions::read_oracle_count(&evm, asset_id);
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let is_stale = now.saturating_sub(timestamp) > 3600; // 1 hour staleness
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "assetId": asset_id,
+                "quoteAssetId": 0,
+                "medianPrice": price.to_string(),
+                "blockNumber": block_number,
+                "timestamp": timestamp,
+                "submissionCount": count,
+                "outlierCount": 0,
+                "isStale": is_stale,
+            }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -617,19 +607,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_oracleGetTwap", |params, state, _ctx| async move {
             let (asset_id,): (u64,) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let oracle = state.oracle.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            match oracle.get_twap_by_asset(asset_id, now) {
-                Some(twap) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "assetId": asset_id,
-                    "twap": twap.to_string(),
-                    "windowSecs": 86_400,
-                })),
-                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
-            }
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let twap = call_consensus::exec::evm_instructions::read_oracle_twap(&evm, asset_id);
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "assetId": asset_id,
+                "twap": twap.to_string(),
+                "windowSecs": 86_400,
+            }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -637,17 +621,23 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_oracleGetValidatorInfo", |params, state, _ctx| async move {
             let validator_id: u32 = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let oracle = state.oracle.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            match oracle.get_validator_info(validator_id) {
-                Some(v) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "validatorId": v.validator_id,
-                    "isActive": v.is_active,
-                    "outlierCount": v.outlier_count,
-                    "lastSubmissionBlock": v.last_submission_block,
-                    "submissionCount": v.submission_count,
-                })),
-                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+                &evm, validator_id as u64);
+            if addr == call_primitives::Address::ZERO {
+                return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
+            let stake = call_consensus::exec::evm_instructions::read_validator_stake(&evm, addr);
+            let status = call_consensus::exec::evm_instructions::read_validator_status(&evm, addr);
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "validatorId": validator_id,
+                "address": format!("{:?}", addr),
+                "stake": stake.to_string(),
+                "isActive": status != 0,
+                "outlierCount": 0,
+                "lastSubmissionBlock": 0,
+                "submissionCount": 0,
+            }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 

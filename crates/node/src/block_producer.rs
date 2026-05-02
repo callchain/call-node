@@ -7,8 +7,8 @@ use call_bridge::BridgeConfig;
 use call_consensus::{Block, SimplexConsensus};
 use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
-use call_oracle::ORACLE_UPDATE_INTERVAL;
-use call_primitives::{Address, FeeCurrency, TxHash};
+use call_oracle::{OracleManager, ORACLE_UPDATE_INTERVAL};
+use call_primitives::{FeeCurrency, TxHash};
 use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
@@ -27,6 +27,7 @@ pub(crate) async fn block_production_loop(
     subscriptions: SubscriptionManager,
     telemetry: Arc<crate::telemetry::TelemetryRegistry>,
     _audit_log: Arc<RwLock<crate::logging::AuditLog>>,
+    oracle: Arc<RwLock<OracleManager>>,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -140,8 +141,8 @@ pub(crate) async fn block_production_loop(
         if is_oracle_boundary {
             if let Some(ref net) = network {
                 let tracked = {
-                    let oracle = state.oracle.read().unwrap();
-                    oracle.tracked_pairs.clone()
+                    let oracle_guard = oracle.read().unwrap();
+                    oracle_guard.tracked_pairs.clone()
                 };
                 if !tracked.is_empty() {
                     let proposer_id = proposer;
@@ -165,14 +166,14 @@ pub(crate) async fn block_production_loop(
 
         // 5. Advance oracle period at interval boundaries
         if is_oracle_boundary {
-            let mut oracle = state.oracle.write().unwrap();
-            oracle.advance_period(height);
+            let mut oracle_guard = oracle.write().unwrap();
+            oracle_guard.advance_period(height);
         }
 
         // 6. Slash oracle outliers before clearing tracking
         {
-            let oracle = state.oracle.read().unwrap();
-            let outliers: Vec<u32> = oracle.last_outliers().to_vec();
+            let oracle_guard = oracle.read().unwrap();
+            let outliers: Vec<u32> = oracle_guard.last_outliers().to_vec();
             if !outliers.is_empty() {
                 let mut evm_state = state.evm_state.write().unwrap();
                 let mut c = consensus.write().unwrap();
@@ -183,12 +184,12 @@ pub(crate) async fn block_production_loop(
                 }
                 tracing::info!(outliers = ?outliers, "slashed oracle outliers");
             }
-            drop(oracle);
+            drop(oracle_guard);
 
             // Distribute oracle rewards to contributors before clearing tracking
             let contributions = {
-                let mut oracle = state.oracle.write().unwrap();
-                oracle.distribute_rewards()
+                let mut oracle_guard = oracle.write().unwrap();
+                oracle_guard.distribute_rewards()
             };
             if !contributions.is_empty() {
                 let mut evm_state = state.evm_state.write().unwrap();
@@ -202,8 +203,8 @@ pub(crate) async fn block_production_loop(
             }
 
             // Clear tracking after slashing and reward distribution
-            let mut oracle = state.oracle.write().unwrap();
-            oracle.clear_tracking();
+            let mut oracle_guard = oracle.write().unwrap();
+            oracle_guard.clear_tracking();
         }
 
         // 7. Commit via consensus (BFT engine handles proposal/verification)
@@ -416,17 +417,23 @@ pub(crate) async fn block_production_loop(
             };
 
             let shielded_root = {
-                let shielded_state = state.shielded_state.read().unwrap();
-                shielded_state.merkle_root()
+                let evm_state = state.evm_state.read().unwrap();
+                call_consensus::exec::evm_instructions::read_shielded_merkle_root(&evm_state)
             };
 
             let agent_root = {
-                let registry = state.agent_registry.read().unwrap();
-                let agents: std::collections::HashMap<u64, (Address, String, u64)> = registry
-                    .agents
-                    .iter()
-                    .map(|(id, reg)| (*id, (reg.owner, reg.name.clone(), reg.registered_at)))
-                    .collect();
+                let evm_state = state.evm_state.read().unwrap();
+                let count = call_consensus::exec::evm_instructions::read_agent_count(&evm_state);
+                let mut agents = std::collections::HashMap::new();
+                for id in 0..count {
+                    let owner = call_consensus::exec::evm_instructions::agent_get_owner(&evm_state, id);
+                    if owner == call_primitives::Address::ZERO {
+                        continue;
+                    }
+                    let name = call_consensus::exec::evm_instructions::agent_get_name(&evm_state, id);
+                    let registered_at = call_consensus::exec::evm_instructions::agent_get_registered_at(&evm_state, id);
+                    agents.insert(id, (owner, name, registered_at));
+                }
                 call_storage::compute_agent_root(&agents)
             };
 
@@ -444,14 +451,14 @@ pub(crate) async fn block_production_loop(
 
         // 14. Incrementally persist state changes after every block
         let db_env = &db.db;
-        if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
+        if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus, &oracle) {
             tracing::warn!(error = %e, "failed to incrementally persist state");
         }
 
         // 15. Full table rebuild every 1000 blocks as safety net
         if new_height % 1000 == 0 {
             let db_env = &db.db;
-            if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
+            if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus, &oracle) {
                 tracing::warn!(error = %e, "failed to full-rebuild persist state");
             }
         }

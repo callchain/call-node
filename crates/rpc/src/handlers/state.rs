@@ -1,16 +1,13 @@
 //! RpcState struct and its methods.
 
-use call_protocol::{ComplianceEngine, ProtocolReceipt, FeeParams, FeeCurrencyRegistry};
+use call_protocol::{ProtocolReceipt, FeeParams};
 use call_protocol::security::MempoolDefense;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_consensus::{ForkManager, RollbackPlan, ConsensusParams};
 use call_consensus::exec::evm_instructions;
-use call_agent::{AgentRegistry, AgentBalances};
-use call_shielded::ShieldedState;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash};
 use call_crypto::SignerRef;
 use call_transaction_pool::Mempool;
-use call_oracle::OracleManager;
 use call_governance::GovernanceManager;
 use alloy_consensus::{TxEnvelope, Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::Bytes;
@@ -121,12 +118,8 @@ pub struct SyncProgress {
 
 /// Shared RPC state — all handlers read from this.
 pub struct RpcState {
-    pub compliance_engine: RwLock<ComplianceEngine>,
     pub evm_state: RwLock<EvmState>,
-    pub agent_registry: RwLock<AgentRegistry>,
-    pub agent_balances: RwLock<AgentBalances>,
     pub agent_nonces: RwLock<call_agent::AgentNonces>,
-    pub shielded_state: RwLock<ShieldedState>,
     pub receipts: RwLock<HashMap<TxHash, ProtocolReceipt>>,
     pub current_block: RwLock<u64>,
     pub fee_params: RwLock<FeeParams>,
@@ -136,9 +129,7 @@ pub struct RpcState {
     pub chain_id: u64,
     pub subscriptions: SubscriptionManager,
     pub governance: RwLock<GovernanceManager>,
-    pub oracle: Arc<RwLock<OracleManager>>,
     pub fork_manager: RwLock<ForkManager>,
-    pub fee_currency_registry: RwLock<FeeCurrencyRegistry>,
     /// When true, governance RPC methods require valid secp256k1 signatures.
     /// When false (default, devnet), unsigned calls are allowed.
     pub require_governance_auth: AtomicBool,
@@ -174,29 +165,19 @@ pub struct RpcState {
 }
 
 impl RpcState {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        compliance_engine: ComplianceEngine,
         evm_state: EvmState,
-        agent_registry: AgentRegistry,
-        agent_balances: AgentBalances,
         agent_nonces: call_agent::AgentNonces,
-        shielded_state: ShieldedState,
         mempool: Arc<RwLock<Mempool>>,
         chain_id: u64,
-        oracle: OracleManager,
     ) -> Self {
         let total_validators = {
             let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
             count as u32
         };
         Self {
-            compliance_engine: RwLock::new(compliance_engine),
             evm_state: RwLock::new(evm_state),
-            agent_registry: RwLock::new(agent_registry),
-            agent_balances: RwLock::new(agent_balances),
             agent_nonces: RwLock::new(agent_nonces),
-            shielded_state: RwLock::new(shielded_state),
             receipts: RwLock::new(HashMap::new()),
             current_block: RwLock::new(0),
             fee_params: RwLock::new(FeeParams::default()),
@@ -206,12 +187,10 @@ impl RpcState {
             chain_id,
             subscriptions: SubscriptionManager::new(),
             governance: RwLock::new(GovernanceManager::new()),
-            oracle: Arc::new(RwLock::new(oracle)),
             fork_manager: RwLock::new(ForkManager::new(
                 call_primitives::ProtocolVersion::new(1, 0, 0),
                 total_validators.max(1),
             )),
-            fee_currency_registry: RwLock::new(FeeCurrencyRegistry::new()),
             require_governance_auth: AtomicBool::new(false),
             signer: RwLock::new(None),
             bls_secret_key: RwLock::new(None),
@@ -404,13 +383,22 @@ impl RpcState {
         pubkey: call_primitives::PublicKey,
         name: String,
         url: String,
-        metadata_hash: [u8; 32],
+        _metadata_hash: [u8; 32],
     ) -> Result<u64, String> {
         let current_block = self.get_current_block();
-        let mut registry = self.agent_registry.write().map_err(|_| "lock poisoned".to_string())?;
-        registry
-            .register_agent(owner, pubkey, name, url, metadata_hash, None, current_block, None)
-            .map_err(|e| e.to_string())
+        let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
+        let count = call_consensus::exec::evm_instructions::read_agent_count(&evm);
+        call_consensus::exec::evm_instructions::seed_agent(&mut evm, count, owner, &name, &url, current_block);
+        // Store first 32 bytes of pubkey as pubkey hash
+        let pubkey_hash: [u8; 32] = if pubkey.len() >= 32 {
+            pubkey[..32].try_into().unwrap()
+        } else {
+            let mut buf = [0u8; 32];
+            buf[..pubkey.len()].copy_from_slice(&pubkey);
+            buf
+        };
+        call_consensus::exec::evm_instructions::agent_set_pubkey(&mut evm, count, &pubkey_hash);
+        Ok(count)
     }
 
     pub fn get_agent_info(&self, agent_id: u64) -> Option<AgentInfoResponse> {
@@ -437,29 +425,28 @@ impl RpcState {
     }
 
     pub fn grant_agent_balance(&self, agent_id: u64, asset_id: AssetId, amount: Balance) -> Result<(), String> {
-        let registry = self.agent_registry.read().map_err(|_| "lock poisoned".to_string())?;
-        let agent = registry.get_agent(agent_id).ok_or("agent not found".to_string())?;
-        let owner = agent.owner;
-        drop(registry);
         let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
+        let owner = call_consensus::exec::evm_instructions::agent_get_owner(&evm, agent_id);
+        if owner == call_primitives::Address::ZERO {
+            return Err("agent not found".into());
+        }
         let owner_balance = call_consensus::exec::evm_instructions::read_balance(&evm, asset_id, owner);
         if owner_balance < amount {
             return Err("insufficient owner balance for grant".into());
         }
         call_consensus::exec::evm_instructions::seed_balance(&mut evm, asset_id, owner, owner_balance - amount);
-        drop(evm);
-        self.agent_balances.write().map_err(|_| "lock poisoned".to_string())?
-            .credit(owner, agent_id, asset_id, amount)
-            .map_err(|e| format!("{:?}", e))?;
+        let agent_balance = call_consensus::exec::evm_instructions::agent_get_balance(&evm, agent_id, asset_id);
+        call_consensus::exec::evm_instructions::agent_set_balance(&mut evm, agent_id, asset_id, agent_balance + amount);
         Ok(())
     }
 
     pub fn revoke_agent_balance(&self, agent_id: u64, asset_id: AssetId) -> Result<(), String> {
-        let registry = self.agent_registry.read().map_err(|_| "lock poisoned".to_string())?;
-        let agent = registry.get_agent(agent_id).ok_or("agent not found".to_string())?;
-        let owner = agent.owner;
-        drop(registry);
-        self.agent_balances.write().map_err(|_| "lock poisoned".to_string())?.revoke_funds(owner, agent_id, asset_id);
+        let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
+        let owner = call_consensus::exec::evm_instructions::agent_get_owner(&evm, agent_id);
+        if owner == call_primitives::Address::ZERO {
+            return Err("agent not found".into());
+        }
+        call_consensus::exec::evm_instructions::agent_set_balance(&mut evm, agent_id, asset_id, 0);
         Ok(())
     }
 
@@ -471,10 +458,10 @@ impl RpcState {
     }
 
     pub fn get_shielded_tree_state(&self) -> ShieldedTreeStateResponse {
-        self.shielded_state.read().map(|s| ShieldedTreeStateResponse {
-            merkle_root: s.merkle_root(),
-            leaf_count: s.merkle_tree.leaf_count() as u64,
-            nullifier_count: s.nullifier_set.len(),
+        self.evm_state.read().map(|evm| ShieldedTreeStateResponse {
+            merkle_root: call_consensus::exec::evm_instructions::read_shielded_merkle_root(&evm),
+            leaf_count: call_consensus::exec::evm_instructions::read_shielded_commitment_count(&evm),
+            nullifier_count: 0, // Nullifiers are not countable from EVM without iteration
         }).unwrap_or(ShieldedTreeStateResponse {
             merkle_root: Hash::ZERO,
             leaf_count: 0,

@@ -35,8 +35,9 @@ fn test_e2e_shielded_deposit_flow() {
     assert_eq!(block.evm_txs.len(), 0);
 
     // Shielded state starts empty
-    let shielded = node.state.shielded_state.read().unwrap();
-    assert_eq!(shielded.merkle_tree.leaf_count(), 0);
+    let evm = node.state.evm_state.read().unwrap();
+    let leaf_count = call_consensus::exec::evm_instructions::read_shielded_commitment_count(&*evm);
+    assert_eq!(leaf_count, 0);
 }
 
 // ── E2E Shielded Withdraw Flow (simplified) ────────────────────────────
@@ -119,8 +120,9 @@ async fn test_e2e_shielded_multi_node_consensus() {
     {
         let node0_ref = runtime.simulator.node(0);
         let node0 = node0_ref.read().unwrap();
-        let shielded0 = node0.state.shielded_state.read().unwrap();
-        assert_eq!(shielded0.merkle_tree.leaf_count(), 0);
+        let evm = node0.state.evm_state.read().unwrap();
+        let leaf_count = call_consensus::exec::evm_instructions::read_shielded_commitment_count(&*evm);
+        assert_eq!(leaf_count, 0);
     }
 }
 

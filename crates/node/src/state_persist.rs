@@ -4,11 +4,9 @@ use std::sync::{Arc, RwLock};
 
 use call_consensus::{SimplexConsensus, ForkManager, PersistedConsensusState};
 use call_protocol::{
-    ComplianceEngine, FeeParams, FeeCurrencyRegistry, ProtocolReceipt,
+    FeeParams, ProtocolReceipt,
 };
 use call_evm::EvmState;
-use call_agent::{AgentRegistry, AgentBalances};
-use call_shielded::ShieldedState;
 use call_oracle::OracleManager;
 use call_governance::GovernanceManager;
 use call_primitives::TxHash;
@@ -17,10 +15,9 @@ use call_storage::{
     StorageError,
     db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
     CallOracleState, CallEvmAccounts,
-    CallShieldedNullifiers, CallShieldedCommitments, CallAgents,
-    CallGovernanceState, CallComplianceState, CallConsensusState,
-    CallReceipts, CallReceiptsByBlock, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
-    CallFeeParams, CallFeeCurrencyRegistry,
+    CallGovernanceState, CallConsensusState,
+    CallReceipts, CallReceiptsByBlock, CallAgentNonces, CallForkState, CallCheckpoint,
+    CallFeeParams,
 };
 use reth_db::DatabaseEnv;
 
@@ -30,14 +27,9 @@ use reth_db::DatabaseEnv;
 /// Replaces the previous 13-element tuple so callers use named fields.
 pub(crate) struct LoadedState {
     pub evm_state: EvmState,
-    pub shielded_state: ShieldedState,
-    pub agent_registry: AgentRegistry,
-    pub agent_balances: AgentBalances,
     pub agent_nonces: call_agent::AgentNonces,
     pub governance: GovernanceManager,
-    pub compliance: ComplianceEngine,
     pub fee_params: FeeParams,
-    pub fee_currency_registry: FeeCurrencyRegistry,
 }
 
 /// Load all state types from the reth-db database.
@@ -49,24 +41,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
         Err(e) => {
             tracing::warn!(error = %e, "failed to load evm accounts");
             EvmState::new()
-        }
-    };
-
-    // Load shielded state
-    let shielded_state = match load_shielded_state_inner(db_env) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load shielded state");
-            ShieldedState::new()
-        }
-    };
-
-    // Load agent state
-    let (registry, agent_balances) = match load_agent_state_inner(db_env) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load agent state");
-            (AgentRegistry::new(), AgentBalances::new())
         }
     };
 
@@ -88,15 +62,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
         }
     };
 
-    // Load compliance state
-    let compliance = match load_compliance_state(db_env) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load compliance state");
-            ComplianceEngine::new()
-        }
-    };
-
     // Load fee params
     let fee_params = match load_fee_params(db_env) {
         Ok(p) => p,
@@ -106,25 +71,11 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
         }
     };
 
-    // Load fee currency registry
-    let fee_currency_registry = match load_fee_currency_registry(db_env) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load fee currency registry");
-            FeeCurrencyRegistry::new()
-        }
-    };
-
     LoadedState {
         evm_state,
-        shielded_state,
-        agent_registry: registry,
-        agent_balances,
         agent_nonces,
         governance,
-        compliance,
         fee_params,
-        fee_currency_registry,
     }
 }
 
@@ -134,6 +85,7 @@ pub(crate) fn persist_state_to_db(
     db_env: &Arc<DatabaseEnv>,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
+    oracle: &Arc<RwLock<OracleManager>>,
 ) -> Result<(), String> {
     // 1. Write pending checkpoint marker
     let checkpoint_hash = {
@@ -150,28 +102,17 @@ pub(crate) fn persist_state_to_db(
             .map_err(|e| format!("save evm: {e}"))?;
     }
 
-    // Persist shielded state
+    // Persist agent nonces
     {
-        let shielded = state.shielded_state.read().unwrap();
-        save_shielded_state_inner(db_env, &shielded)
-            .map_err(|e| format!("save shielded: {e}"))?;
-    }
-
-    // Persist agent state
-    {
-        let registry = state.agent_registry.read().unwrap();
-        let agent_balances = state.agent_balances.read().unwrap();
         let agent_nonces = state.agent_nonces.read().unwrap();
-        save_agent_state_inner(db_env, &registry, &agent_balances)
-            .map_err(|e| format!("save agents: {e}"))?;
         save_agent_nonces_inner(db_env, &agent_nonces)
             .map_err(|e| format!("save agent nonces: {e}"))?;
     }
 
     // Persist oracle state
     {
-        let oracle = state.oracle.read().unwrap();
-        save_oracle_state(db_env, &oracle)
+        let oracle_guard = oracle.read().unwrap();
+        save_oracle_state(db_env, &oracle_guard)
             .map_err(|e| format!("save oracle: {e}"))?;
     }
 
@@ -182,25 +123,11 @@ pub(crate) fn persist_state_to_db(
             .map_err(|e| format!("save governance: {e}"))?;
     }
 
-    // Persist compliance state
-    {
-        let compliance = state.compliance_engine.read().unwrap();
-        save_compliance_state(db_env, &compliance)
-            .map_err(|e| format!("save compliance: {e}"))?;
-    }
-
     // Persist fee params
     {
         let fee_params = state.fee_params.read().unwrap();
         save_fee_params(db_env, &fee_params)
             .map_err(|e| format!("save fee params: {e}"))?;
-    }
-
-    // Persist fee currency registry
-    {
-        let fee_currency_registry = state.fee_currency_registry.read().unwrap();
-        save_fee_currency_registry(db_env, &fee_currency_registry)
-            .map_err(|e| format!("save fee currency registry: {e}"))?;
     }
 
     // Persist consensus state
@@ -256,100 +183,6 @@ pub(crate) fn save_evm_accounts_inner(db: &DatabaseEnv, state: &EvmState) -> Res
     Ok(())
 }
 
-/// Load shielded state from DB
-pub(crate) fn load_shielded_state_inner(db: &DatabaseEnv) -> Result<ShieldedState, String> {
-    let mut state = ShieldedState::new();
-
-    // Load nullifiers
-    let nf_data = db_iter_all::<CallShieldedNullifiers>(db).map_err(|e: StorageError| e.to_string())?;
-    for (k, _) in nf_data {
-        let nf: call_shielded::Nullifier = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
-        state.nullifier_set.insert(&nf);
-    }
-
-    // Load note commitments
-    let cm_data = db_iter_all::<CallShieldedCommitments>(db).map_err(|e: StorageError| e.to_string())?;
-    for (k, v) in cm_data {
-        let key: call_shielded::NoteCommitment = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
-        let value: call_shielded::Note = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
-        state.note_registry.insert(key, value);
-    }
-
-    // Rebuild merkle tree from note commitments
-    for cm in state.note_registry.keys() {
-        let bytes: [u8; 32] = cm.0.into();
-        state.merkle_tree.insert(&bytes);
-    }
-
-    Ok(state)
-}
-
-/// Save shielded state to DB
-pub(crate) fn save_shielded_state_inner(db: &DatabaseEnv, state: &ShieldedState) -> Result<(), String> {
-    // Save nullifiers
-    let nf_entries: Vec<(Vec<u8>, Vec<u8>)> = state
-        .nullifier_set.spent_nullifiers()
-        .iter()
-        .map(|nf| (serde_json::to_vec(nf).unwrap(), vec![0]))
-        .collect();
-    db_clear::<CallShieldedNullifiers>(db).map_err(|e: StorageError| e.to_string())?;
-    db_batch_put::<CallShieldedNullifiers>(db, nf_entries).map_err(|e: StorageError| e.to_string())?;
-
-    // Save note commitments
-    let cm_entries: Vec<(Vec<u8>, Vec<u8>)> = state
-        .note_registry
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    db_clear::<CallShieldedCommitments>(db).map_err(|e: StorageError| e.to_string())?;
-    db_batch_put::<CallShieldedCommitments>(db, cm_entries).map_err(|e: StorageError| e.to_string())?;
-
-    Ok(())
-}
-
-/// Load agent state from DB
-pub(crate) fn load_agent_state_inner(db: &DatabaseEnv) -> Result<(AgentRegistry, AgentBalances), String> {
-    let data = db_iter_all::<CallAgents>(db).map_err(|e: StorageError| e.to_string())?;
-    let mut registry = AgentRegistry::new();
-    let mut next_id: u64 = 0;
-
-    for (k, v) in data {
-        let reg: call_agent::AgentRegistration = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
-        if reg.agent_id >= next_id {
-            next_id = reg.agent_id + 1;
-        }
-        let id: u64 = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
-        registry.agents.insert(id, reg.clone());
-        registry.agents_by_owner.entry(reg.owner).or_default().push(reg.agent_id);
-        registry.agents_by_name.insert(reg.name.clone(), reg.agent_id);
-    }
-    registry.next_id = next_id;
-
-    // Load agent balances
-    let balances = match load_agent_balances_inner(db) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load agent balances");
-            AgentBalances::new()
-        }
-    };
-
-    Ok((registry, balances))
-}
-
-/// Save agent state to DB
-pub(crate) fn save_agent_state_inner(db: &DatabaseEnv, registry: &AgentRegistry, balances: &AgentBalances) -> Result<(), String> {
-    let entries: Vec<(Vec<u8>, Vec<u8>)> = registry
-        .agents
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    db_clear::<CallAgents>(db).map_err(|e: StorageError| e.to_string())?;
-    db_batch_put::<CallAgents>(db, entries).map_err(|e: StorageError| e.to_string())?;
-    save_agent_balances_inner(db, balances)?;
-    Ok(())
-}
-
 /// Save oracle state to the database.
 pub(crate) fn save_oracle_state(db: &DatabaseEnv, state: &OracleManager) -> Result<(), String> {
     let data = serde_json::to_vec(state).map_err(|e| format!("serialize oracle: {e}"))?;
@@ -378,20 +211,6 @@ pub(crate) fn load_fee_params(db: &DatabaseEnv) -> Result<FeeParams, String> {
     }
 }
 
-/// Save fee currency registry to the database.
-pub(crate) fn save_fee_currency_registry(db: &DatabaseEnv, registry: &FeeCurrencyRegistry) -> Result<(), String> {
-    let data = serde_json::to_vec(registry).map_err(|e| format!("serialize fee currency registry: {e}"))?;
-    db_put::<CallFeeCurrencyRegistry>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
-}
-
-/// Load fee currency registry from the database.
-pub(crate) fn load_fee_currency_registry(db: &DatabaseEnv) -> Result<FeeCurrencyRegistry, String> {
-    match db_get::<CallFeeCurrencyRegistry>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize fee currency registry: {e}")),
-        None => Ok(FeeCurrencyRegistry::new()),
-    }
-}
-
 /// Save governance state to the database.
 pub(crate) fn save_governance_state(db: &DatabaseEnv, state: &GovernanceManager) -> Result<(), String> {
     let data = serde_json::to_vec(state).map_err(|e| format!("serialize governance: {e}"))?;
@@ -403,41 +222,6 @@ pub(crate) fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManage
     match db_get::<CallGovernanceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize governance: {e}")),
         None => Ok(GovernanceManager::new()),
-    }
-}
-
-/// Save compliance state to the database.
-pub(crate) fn save_compliance_state(db: &DatabaseEnv, state: &ComplianceEngine) -> Result<(), String> {
-    let snapshot = state.snapshot();
-    let data = serde_json::to_vec(&snapshot).map_err(|e| format!("serialize compliance: {e}"))?;
-    db_put::<CallComplianceState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
-}
-
-/// Load compliance state from the database.
-pub(crate) fn load_compliance_state(db: &DatabaseEnv) -> Result<ComplianceEngine, String> {
-    match db_get::<CallComplianceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => {
-            let snapshot: call_protocol::ComplianceEngineSnapshot =
-                serde_json::from_slice(&data).map_err(|e| format!("deserialize compliance: {e}"))?;
-            let mut engine = ComplianceEngine::new();
-            engine.restore_from_snapshot(&snapshot);
-            Ok(engine)
-        }
-        None => Ok(ComplianceEngine::new()),
-    }
-}
-
-// ── Agent balances persistence ────────────────────────────────────────
-
-pub(crate) fn save_agent_balances_inner(db: &DatabaseEnv, balances: &AgentBalances) -> Result<(), String> {
-    let data = serde_json::to_vec(balances).map_err(|e| format!("serialize agent balances: {e}"))?;
-    db_put::<CallAgentBalances>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
-}
-
-pub(crate) fn load_agent_balances_inner(db: &DatabaseEnv) -> Result<AgentBalances, String> {
-    match db_get::<CallAgentBalances>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize agent balances: {e}")),
-        None => Ok(AgentBalances::new()),
     }
 }
 
@@ -581,6 +365,7 @@ pub(crate) fn persist_state_incremental(
     db_env: &Arc<DatabaseEnv>,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
+    oracle: &Arc<RwLock<OracleManager>>,
 ) -> Result<(), String> {
     // Persist EVM state (overwrite existing entries, no clear)
     {
@@ -588,40 +373,10 @@ pub(crate) fn persist_state_incremental(
         save_evm_accounts_no_clear(db_env, &evm)?;
     }
 
-    // Append-only shielded state: new nullifiers and commitments
-    // (no clear — these are append-only data structures)
-    {
-        let shielded = state.shielded_state.read().map_err(|_| "shielded lock poisoned".to_string())?;
-        // Only write new nullifiers (append, don't clear)
-        let nf_entries: Vec<(Vec<u8>, Vec<u8>)> = shielded
-            .nullifier_set.spent_nullifiers()
-            .iter()
-            .map(|nf| (serde_json::to_vec(nf).unwrap(), vec![0]))
-            .collect();
-        // Clear and rewrite nullifiers (they're small)
-        db_clear::<CallShieldedNullifiers>(db_env).map_err(|e: StorageError| e.to_string())?;
-        db_batch_put::<CallShieldedNullifiers>(db_env, nf_entries).map_err(|e: StorageError| e.to_string())?;
-
-        // Write all commitments (append, no clear)
-        let cm_entries: Vec<(Vec<u8>, Vec<u8>)> = shielded
-            .note_registry
-            .iter()
-            .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-            .collect();
-        db_clear::<CallShieldedCommitments>(db_env).map_err(|e: StorageError| e.to_string())?;
-        db_batch_put::<CallShieldedCommitments>(db_env, cm_entries).map_err(|e: StorageError| e.to_string())?;
-    }
-
-    // Persist agent state (overwrite, no clear)
-    {
-        let registry = state.agent_registry.read().map_err(|_| "agent lock poisoned".to_string())?;
-        save_agent_state_no_clear(db_env, &registry)?;
-    }
-
     // Persist oracle state (overwrite)
     {
-        let oracle = state.oracle.read().map_err(|_| "oracle lock poisoned".to_string())?;
-        save_oracle_state(db_env, &oracle)
+        let oracle_guard = oracle.read().map_err(|_| "oracle lock poisoned".to_string())?;
+        save_oracle_state(db_env, &oracle_guard)
             .map_err(|e| format!("save oracle: {e}"))?;
     }
 
@@ -665,19 +420,6 @@ pub(crate) fn save_evm_accounts_no_clear(db: &DatabaseEnv, state: &EvmState) -> 
         .collect();
     for (k, v) in entries {
         db_put::<CallEvmAccounts>(db, k, v).map_err(|e: StorageError| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// Save agent state without clearing the table first.
-pub(crate) fn save_agent_state_no_clear(db: &DatabaseEnv, registry: &AgentRegistry) -> Result<(), String> {
-    let entries: Vec<(Vec<u8>, Vec<u8>)> = registry
-        .agents
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    for (k, v) in entries {
-        db_put::<CallAgents>(db, k, v).map_err(|e: StorageError| e.to_string())?;
     }
     Ok(())
 }

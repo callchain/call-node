@@ -38,7 +38,7 @@ use call_consensus::{
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, SyncRequest};
 use call_primitives::BlockHash;
 use call_protocol::{
-    ComplianceEngine, FeeParams, FeeCurrencyRegistry,
+    FeeParams,
     security::P2PDefense,
 };
 use call_governance::GovernanceManager;
@@ -56,8 +56,6 @@ use crate::state_persist::{
 };
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
-use call_agent::{AgentRegistry, AgentBalances};
-use call_shielded::ShieldedState;
 use jsonrpsee::server::ServerHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -114,6 +112,8 @@ pub struct CallNode {
     pub audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     /// True when the node started from empty or corrupted state (genesis should be applied).
     pub fresh_start: bool,
+    /// Transient oracle coordinator (prices/TWAP live in EVM storage)
+    pub oracle: Arc<RwLock<OracleManager>>,
 }
 
 impl CallNode {
@@ -149,14 +149,9 @@ impl CallNode {
         let loaded = if recovery_needed {
             state_persist::LoadedState {
                 evm_state: EvmState::new(),
-                shielded_state: ShieldedState::new(),
-                agent_registry: AgentRegistry::new(),
-                agent_balances: AgentBalances::new(),
                 agent_nonces: call_agent::AgentNonces::new(),
                 governance: GovernanceManager::new(),
-                compliance: ComplianceEngine::new(),
                 fee_params: FeeParams::default(),
-                fee_currency_registry: FeeCurrencyRegistry::new(),
             }
         } else {
             load_state_from_db(db_env)
@@ -168,6 +163,7 @@ impl CallNode {
             load_oracle_state(db_env)
                 .map_err(|e| format!("failed to load oracle state: {e}"))?
         };
+        let oracle = Arc::new(RwLock::new(oracle_manager));
 
         let receipts = if recovery_needed {
             std::collections::HashMap::new()
@@ -224,15 +220,10 @@ impl CallNode {
         };
 
         let state = Arc::new(RpcState::new(
-            loaded.compliance,
             loaded.evm_state,
-            loaded.agent_registry,
-            loaded.agent_balances,
             loaded.agent_nonces,
-            loaded.shielded_state,
             mempool.clone(),
             chain_id.unwrap_or(CALLCHAIN_CHAIN_ID),
-            oracle_manager,
         ));
 
         state.set_data_dir(data_dir.clone());
@@ -267,9 +258,8 @@ impl CallNode {
         // Sync current_block from consensus height so RPCs report correct block number after restart
         state.set_current_block(consensus.current_height());
 
-        // Inject loaded fee params and fee currency registry
+        // Inject loaded fee params
         *state.fee_params.write().unwrap() = loaded.fee_params;
-        *state.fee_currency_registry.write().unwrap() = loaded.fee_currency_registry;
 
         // Set parent_hash to the last committed block hash from persisted state
         let parent_hash = consensus.last_block_hash();
@@ -296,6 +286,7 @@ impl CallNode {
             telemetry,
             audit_log,
             fresh_start,
+            oracle,
         })
     }
 
@@ -352,6 +343,7 @@ impl CallNode {
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
         let telemetry = Arc::clone(&self.telemetry);
+        let oracle = Arc::clone(&self.oracle);
         let p2p_defense = std::sync::Mutex::new(P2PDefense::new(10000, 1000, 10 * 1024 * 1024));
         // Tracks SyncRequests we've sent recently. Both the announcement
         // handler (BLOCK_CHANNEL) and the response handler (SYNC_CHANNEL)
@@ -470,7 +462,7 @@ impl CallNode {
                     if let Ok(NetworkMessage::BlockAnnouncement(_)) =
                         bincode::deserialize::<NetworkMessage>(&data)
                     {
-                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight);
+                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle);
                     } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
@@ -484,52 +476,12 @@ impl CallNode {
                         tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
                 } else {
-                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight);
+                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle);
                 }
             }
         });
 
         Ok(())
-    }
-
-    /// Start compliance data source sync task (background fetch of OFAC/KYC lists)
-    pub fn start_compliance_sync(
-        &self,
-        data_url: Option<String>,
-        interval_secs: u64,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        let data_url = data_url?;
-        let state = Arc::clone(&self.state);
-        Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-            loop {
-                interval.tick().await;
-                match reqwest::get(&data_url).await {
-                    Ok(resp) => match resp.json::<Vec<String>>().await {
-                        Ok(addresses) => {
-                            let mut engine = state.compliance_engine.write().unwrap();
-                            let mut added = 0;
-                            for addr_str in addresses {
-                                if let Ok(bytes) = hex::decode(addr_str.trim_start_matches("0x")) {
-                                    if bytes.len() == 20 {
-                                        let addr = call_primitives::Address::from_slice(&bytes);
-                                        engine.add_to_blacklist(addr);
-                                        added += 1;
-                                    }
-                                }
-                            }
-                            tracing::info!(added, url = %data_url, "compliance: synced sanctioned addresses");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "compliance: failed to parse address list");
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "compliance: failed to fetch address list");
-                    }
-                }
-            }
-        }))
     }
 
     /// Start the consensus block production loop
@@ -545,6 +497,7 @@ impl CallNode {
         let audit_log = Arc::clone(&self.audit_log);
 
         let subscriptions = self.state.subscriptions.clone();
+        let oracle = Arc::clone(&self.oracle);
 
         tokio::spawn(block_production_loop(
             state,
@@ -557,6 +510,7 @@ impl CallNode {
             subscriptions,
             telemetry,
             audit_log,
+            oracle,
         ))
     }
 
@@ -582,6 +536,7 @@ impl CallNode {
         let block_cache = Arc::clone(&self.block_cache);
         let telemetry = Arc::clone(&self.telemetry);
         let audit_log = Arc::clone(&self.audit_log);
+        let oracle_manager = Arc::clone(&self.oracle);
 
         std::thread::spawn(move || {
             let bft_data_dir = data_dir.join("bft_journal");
@@ -814,6 +769,7 @@ impl CallNode {
                                 let bytes: [u8; 32] = encoded.as_ref().try_into().expect("ed25519 pubkey is 32 bytes");
                                 bytes
                             },
+                            oracle_manager.clone(),
                         ));
 
                         let reason = exit_rx.await;
@@ -1173,7 +1129,7 @@ impl CallNode {
         }
         // Flush final state to reth-db
         let db_env = &self.db.db;
-        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus) {
+        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus, &self.oracle) {
             tracing::warn!(error = %e, "failed to flush state on shutdown");
         }
         if let Err(e) = db_save_prune(db_env, &self.prune_state) {

@@ -249,6 +249,15 @@ pub fn agent_set_balance(evm_state: &mut EvmState, agent_id: u64, asset_id: u64,
     );
 }
 
+/// Set agent pubkey hash in EVM storage.
+pub fn agent_set_pubkey(evm_state: &mut EvmState, agent_id: u64, pubkey: &[u8; 32]) {
+    evm_state.set_storage(
+        AGENT_ADDRESS,
+        slot_agent_pubkey(agent_id),
+        U256::from_be_slice(pubkey),
+    );
+}
+
 // ── Helpers for tests / genesis / RPC ─────────────────────────────────
 
 /// Seed an asset balance directly into EVM storage.
@@ -615,6 +624,11 @@ pub fn agent_get_registered_at(evm_state: &EvmState, agent_id: u64) -> u64 {
     u256_to_u64(evm_state.get_storage(&AGENT_ADDRESS, slot_agent_registered_at(agent_id)))
 }
 
+/// Read total agent count from EVM storage.
+pub fn read_agent_count(evm_state: &EvmState) -> u64 {
+    u256_to_u64(evm_state.get_storage(&AGENT_ADDRESS, slot_agent_count()))
+}
+
 // ── Validator read helpers ────────────────────────────────────────────
 
 /// Read validator count from EVM storage.
@@ -741,6 +755,50 @@ pub fn read_oracle_reward_pool(evm_state: &EvmState) -> u128 {
 pub fn add_oracle_reward(evm_state: &mut EvmState, amount: u128) {
     let current = read_oracle_reward_pool(evm_state);
     evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_reward_pool(), u128_to_u256(current + amount));
+}
+
+// ── Oracle price read helpers ─────────────────────────────────────────
+
+/// Read oracle price for an asset from EVM storage.
+pub fn read_oracle_price(evm_state: &EvmState, asset_id: u64) -> u128 {
+    u256_to_u128(evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle(asset_id, b"price")))
+}
+
+/// Read oracle TWAP for an asset from EVM storage.
+pub fn read_oracle_twap(evm_state: &EvmState, asset_id: u64) -> u128 {
+    u256_to_u128(evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle(asset_id, b"twap")))
+}
+
+/// Read oracle timestamp for an asset from EVM storage.
+pub fn read_oracle_timestamp(evm_state: &EvmState, asset_id: u64) -> u64 {
+    u256_to_u64(evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle(asset_id, b"ts")))
+}
+
+/// Read oracle block number for an asset from EVM storage.
+pub fn read_oracle_block(evm_state: &EvmState, asset_id: u64) -> u64 {
+    u256_to_u64(evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle(asset_id, b"block")))
+}
+
+/// Read oracle submission count for an asset from EVM storage.
+pub fn read_oracle_count(evm_state: &EvmState, asset_id: u64) -> u64 {
+    u256_to_u64(evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle(asset_id, b"count")))
+}
+
+/// Write oracle price data to EVM storage (used by protocol layer after quorum aggregation).
+pub fn seed_oracle_price(
+    evm_state: &mut EvmState,
+    asset_id: u64,
+    price: u128,
+    twap: u128,
+    timestamp: u64,
+    block: u64,
+    count: u64,
+) {
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"price"), u128_to_u256(price));
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"twap"), u128_to_u256(twap));
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"ts"), u64_to_u256(timestamp));
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"block"), u64_to_u256(block));
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"count"), u64_to_u256(count));
 }
 
 /// Seed validator state directly into EVM storage (for tests / genesis).

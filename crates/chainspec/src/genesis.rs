@@ -8,7 +8,6 @@ use call_crypto::keccak256;
 use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
 use call_protocol::compliance::ComplianceEngine;
-use call_oracle::{OracleConfig, OracleManager};
 use call_protocol::transaction::FeeParams;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
@@ -178,8 +177,6 @@ pub struct GenesisState {
     pub evm_state: EvmState,
     /// Registered fee currency asset IDs
     pub fee_currencies: Vec<AssetId>,
-    /// Oracle manager with registered validators and tracked assets
-    pub oracle: OracleManager,
 }
 
 // ── Genesis Executor ──────────────────────────────────────────────────
@@ -225,18 +222,7 @@ impl GenesisExecutor {
         // Step 6: Deploy EVM ERC-20 templates for non-CALL genesis assets
         self.deploy_evm_templates(&mut evm_state)?;
 
-        // Step 7: Initialize oracle with genesis validators and tracked assets
-        let mut oracle = OracleManager::new(OracleConfig::default());
-        for (i, gv) in self.genesis.validators.iter().enumerate() {
-            let addr = parse_address(&gv.address)?;
-            let pubkey = parse_pubkey(&gv.ed25519_pubkey)?;
-            oracle.register_validator(i as u32, addr, pubkey);
-        }
-        if let Some(ref assets) = self.genesis.oracle_assets {
-            oracle.set_tracked_assets(assets.clone());
-        }
-
-        // Step 8: Compute initial state root (EVM-only)
+        // Step 7: Compute initial state root (EVM-only)
         let state_root = compute_evm_state_root(&evm_state);
 
         Ok(GenesisState {
@@ -244,7 +230,6 @@ impl GenesisExecutor {
             compliance,
             evm_state,
             fee_currencies,
-            oracle,
         })
     }
 

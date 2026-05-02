@@ -4,7 +4,6 @@
 mod tests {
     use call_primitives::{Address, AssetId};
     use call_protocol::ComplianceEngine;
-    use call_oracle::OracleManager;
     use call_evm::EvmState;
     use call_consensus::exec::evm_instructions;
     use call_agent::{AgentRegistry, AgentBalances};
@@ -38,15 +37,10 @@ mod tests {
     fn make_test_state() -> RpcState {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
         RpcState::new(
-            ComplianceEngine::new(),
             EvmState::new(),
-            AgentRegistry::new(),
-            AgentBalances::new(),
             call_agent::AgentNonces::new(),
-            ShieldedState::new(),
             mempool,
             1,
-            OracleManager::default(),
         )
     }
 

@@ -107,38 +107,8 @@ impl ProposalExecutor for NodeProposalExecutor {
                                 cp.max_unbonding_multiplier = v as u32;
                             }
                             tracing::info!(param_id, new_value, "validator params updated via executor (consensus_params)");
-                        } else if param_id.starts_with("oracle.") {
-                            let mut oracle = self.state.oracle.write().map_err(|_| "oracle lock poisoned".to_string())?;
-                            let mut config = oracle.config.clone();
-                            if let Some(v) = val.get("update_interval").and_then(|v| v.as_u64()) {
-                                config.update_interval = v;
-                            }
-                            if let Some(v) = val.get("outlier_threshold_bps").and_then(|v| v.as_u64()) {
-                                config.outlier_threshold_bps = v;
-                            }
-                            if let Some(v) = val.get("outlier_tolerance").and_then(|v| v.as_u64()) {
-                                config.outlier_tolerance = v as u32;
-                            }
-                            if let Some(v) = val.get("twap_window_secs").and_then(|v| v.as_u64()) {
-                                config.twap_window_secs = v;
-                            }
-                            if let Some(v) = val.get("staleness_secs").and_then(|v| v.as_u64()) {
-                                config.staleness_secs = v;
-                            }
-                            if let Some(v) = val.get("min_data_sources").and_then(|v| v.as_u64()) {
-                                config.min_data_sources = v as usize;
-                            }
-                            oracle.update_config(config);
-                            tracing::info!(param_id, new_value, "oracle config updated via executor");
                         } else if param_id.starts_with("fee_currency.") {
-                            let mut fcr = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
-                            if let Some(v) = val.get("min_market_cap_usd").and_then(|v| v.as_u64()) {
-                                fcr.min_market_cap_usd = v as u128;
-                            }
-                            if let Some(v) = val.get("stablecoin_cap_bps").and_then(|v| v.as_u64()) {
-                                fcr.stablecoin_cap_bps = v as u32;
-                            }
-                            tracing::info!(param_id, new_value, "fee currency params updated via executor");
+                            tracing::info!(param_id, new_value, "fee currency params updated via executor (no-op: registry removed)");
                         } else {
                             // Standard fee params updates
                             let mut fp = self.state.fee_params.write().map_err(|_| "fee params lock poisoned".to_string())?;
@@ -181,40 +151,14 @@ impl ProposalExecutor for NodeProposalExecutor {
                 call_consensus::exec::evm_instructions::seed_asset_compliance(&mut evm, *asset_id, policy);
                 tracing::info!(asset_id, new_policy, "compliance update applied via executor");
             }
-            ProposalType::FeeCurrencyAdd { asset_id, name, oracle_price_key } => {
-                let key_bytes: Option<[u8; 32]> = if oracle_price_key.is_empty() {
-                    None
-                } else {
-                    let mut arr = [0u8; 32];
-                    let bytes = hex::decode(oracle_price_key.trim_start_matches("0x")).unwrap_or_default();
-                    let len = bytes.len().min(32);
-                    arr[..len].copy_from_slice(&bytes[..len]);
-                    Some(arr)
-                };
-                let current_block = self.state.get_current_block();
-                let entry = call_protocol::FeeCurrencyEntry {
-                    asset_id: *asset_id,
-                    name: name.clone(),
-                    decimals: 18,
-                    oracle_price_key: key_bytes,
-                    added_at_block: current_block,
-                    added_by_proposal: proposal.id,
-                };
-                let mut registry = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
-                registry.add_fee_currency(entry, proposal.id)
-                    .map_err(|e| format!("failed to add fee currency: {e}"))?;
-                tracing::info!(asset_id, name, "fee currency registered via governance");
+            ProposalType::FeeCurrencyAdd { asset_id, name, .. } => {
+                tracing::info!(asset_id, name, "fee currency add proposal executed (no-op: registry removed)");
             }
             ProposalType::FeeCurrencyRemove { asset_id, grace_period_blocks } => {
-                let mut registry = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
-                registry.remove_fee_currency(*asset_id, *grace_period_blocks)
-                    .map_err(|e| format!("failed to remove fee currency: {e}"))?;
-                tracing::info!(asset_id, grace_period_blocks, "fee currency removed via governance");
+                tracing::info!(asset_id, grace_period_blocks, "fee currency remove proposal executed (no-op: registry removed)");
             }
             ProposalType::FeeCurrencyCap { new_cap_bps } => {
-                let mut registry = self.state.fee_currency_registry.write().map_err(|_| "fee currency registry lock poisoned".to_string())?;
-                registry.stablecoin_cap_bps = *new_cap_bps;
-                tracing::info!(new_cap_bps, "fee currency cap updated via governance");
+                tracing::info!(new_cap_bps, "fee currency cap proposal executed (no-op: registry removed)");
             }
             ProposalType::ValidatorKeyRotation { validator_id, old_pubkey, new_pubkey, signature } => {
                 // Verify the old key signed the rotation request

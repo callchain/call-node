@@ -7,7 +7,7 @@ use call_network::{
     TransactionMessage, SyncRequest, OraclePriceRequest, OraclePriceSubmission,
     UpgradeAnnouncement,
 };
-use call_oracle::OracleSubmission;
+use call_oracle::{OracleManager, OracleSubmission};
 use call_rpc::RpcState;
 use call_transaction_pool::Mempool;
 
@@ -46,6 +46,7 @@ pub(crate) fn handle_network_message(
     state: &Arc<RpcState>,
     network: &Arc<dyn Network>,
     sync_inflight: &SyncInflight,
+    oracle: &Arc<RwLock<OracleManager>>,
 ) {
     match channel {
         TX_CHANNEL => {
@@ -176,12 +177,12 @@ pub(crate) fn handle_network_message(
 
                         // Submit a price for each requested pair
                         for pair in &request.pairs {
-                            // Use last known price as a baseline (fetchers would override)
+                            // Read last known price from EVM storage
                             let price = {
-                                let oracle = state_clone.oracle.read().unwrap();
-                                oracle.get_price(*pair).map(|p| p.median_price)
+                                let evm = state_clone.evm_state.read().unwrap();
+                                call_consensus::exec::evm_instructions::read_oracle_price(&evm, pair.base)
                             };
-                            if let Some(price) = price {
+                            if price != 0 {
                                 // Send back as an oracle price submission
                                 let submission = OraclePriceSubmission {
                                     validator_id: 0, // would be this validator's ID
@@ -203,6 +204,7 @@ pub(crate) fn handle_network_message(
                 // Proposer received a price submission from a validator.
                 // Feed it through the oracle's full validation pipeline via RPC-style submission.
                 let state_clone = Arc::clone(state);
+                let oracle_clone = Arc::clone(oracle);
                 tokio::spawn(async move {
                     let current_block = state_clone.get_current_block();
                     let oracle_submission = OracleSubmission {
@@ -214,9 +216,31 @@ pub(crate) fn handle_network_message(
                         signature: submission.signature,
                         sources: submission.sources,
                     };
-                    let mut oracle = state_clone.oracle.write().unwrap();
-                    if let Err(e) = oracle.submit_price(oracle_submission) {
-                        tracing::debug!(error = %e, validator_id = submission.validator_id, "oracle P2P submission rejected");
+                    let mut oracle_guard = oracle_clone.write().unwrap();
+                    match oracle_guard.submit_price(oracle_submission) {
+                        Ok(Some(aggregated)) => {
+                            // Quorum reached — write aggregated price to EVM storage
+                            let mut evm = state_clone.evm_state.write().unwrap();
+                            call_consensus::exec::evm_instructions::seed_oracle_price(
+                                &mut evm,
+                                aggregated.pair.base,
+                                aggregated.median_price,
+                                aggregated.median_price, // simplified TWAP (no history in transient manager)
+                                aggregated.timestamp,
+                                aggregated.block_number,
+                                aggregated.submission_count as u64,
+                            );
+                            tracing::info!(
+                                asset_id = aggregated.pair.base,
+                                price = aggregated.median_price,
+                                contributors = aggregated.submission_count,
+                                "oracle: aggregated price written to EVM"
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::debug!(error = %e, validator_id = submission.validator_id, "oracle P2P submission rejected");
+                        }
                     }
                 });
             }

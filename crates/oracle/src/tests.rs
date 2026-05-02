@@ -32,11 +32,12 @@ fn submit_all(
     pair: PricePair,
     block: u64,
     price: u128,
-) {
+) -> Option<crate::AggregatedPrice> {
+    let mut result = None;
     for (vid, _, signing_key) in validators {
         let timestamp = block * 1000;
         let sig = sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
-        let _ = manager.submit_price(OracleSubmission {
+        if let Ok(Some(agg)) = manager.submit_price(OracleSubmission {
             validator_id: *vid,
             pair,
             price,
@@ -44,8 +45,11 @@ fn submit_all(
             timestamp,
             signature: sig,
             sources: Vec::new(),
-        });
+        }) {
+            result = Some(agg);
+        }
     }
+    result
 }
 
 fn quorum_for(validators: &[(u32, Ed25519PublicKey, SigningKey)]) -> usize {
@@ -63,16 +67,6 @@ fn test_oracle_quorum_function() {
     assert_eq!(oracle_quorum(216), 144);
 }
 
-fn submit_price_for_pair(
-    manager: &mut OracleManager,
-    validators: &[(u32, Ed25519PublicKey, SigningKey)],
-    pair: PricePair,
-    block: u64,
-    price: u128,
-) {
-    submit_all(manager, validators, pair, block, price);
-}
-
 #[test]
 fn test_oracle_submission_valid() {
     let (mut manager, validators) = make_manager();
@@ -80,10 +74,9 @@ fn test_oracle_submission_valid() {
     let block = 1000u64;
     let price = 2_000_000u128;
 
-    submit_all(&mut manager, &validators, pair, block, price);
+    let agg = submit_all(&mut manager, &validators, pair, block, price).unwrap();
 
     let q = quorum_for(&validators);
-    let agg = manager.get_price(pair).unwrap();
     assert_eq!(agg.median_price, price);
     assert_eq!(agg.submission_count, q);
     assert_eq!(agg.outlier_count, 0);
@@ -160,6 +153,7 @@ fn test_oracle_aggregation_median() {
 
     // Half submit 1_900_000, half submit 2_100_000
     let half = q / 2;
+    let mut agg = None;
     for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
         let timestamp = block * 1000;
         let price = if i < half { 1_900_000 } else { 2_100_000 };
@@ -173,10 +167,12 @@ fn test_oracle_aggregation_median() {
             signature: sig,
             sources: Vec::new(),
         };
-        manager.submit_price(submission).unwrap();
+        if let Ok(Some(a)) = manager.submit_price(submission) {
+            agg = Some(a);
+        }
     }
 
-    let agg = manager.get_price(pair).unwrap();
+    let agg = agg.unwrap();
     // Sorted: [1.9M x half, 2.1M x (q-half)], median at index q/2
     assert_eq!(agg.median_price, 2_100_000);
 }
@@ -189,6 +185,7 @@ fn test_oracle_outlier_detection() {
     let q = quorum_for(&validators);
 
     // All but one submit 2_000_000, last one submits 10_000_000 (500% deviation)
+    let mut agg = None;
     for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
         let timestamp = block * 1000;
         let price = if i == q - 1 { 10_000_000 } else { 2_000_000 };
@@ -202,10 +199,12 @@ fn test_oracle_outlier_detection() {
             signature: sig,
             sources: Vec::new(),
         };
-        manager.submit_price(submission).unwrap();
+        if let Ok(Some(a)) = manager.submit_price(submission) {
+            agg = Some(a);
+        }
     }
 
-    let agg = manager.get_price(pair).unwrap();
+    let agg = agg.unwrap();
     assert_eq!(agg.outlier_count, 1);
 
     // The outlier validator should have 1 strike
@@ -239,7 +238,7 @@ fn test_oracle_outlier_disabled_after_10() {
                 signature: sig,
                 sources: Vec::new(),
             };
-            manager.submit_price(submission).unwrap();
+            let _ = manager.submit_price(submission);
         }
     }
 
@@ -270,68 +269,6 @@ fn test_oracle_outlier_disabled_after_10() {
 }
 
 #[test]
-fn test_oracle_price_staleness() {
-    let (mut manager, validators) = make_manager();
-    let pair = PricePair::new(1, 0);
-    let block = 1000u64;
-
-    submit_price_for_pair(&mut manager, &validators, pair, block, 2_000_000);
-
-    // Not stale immediately
-    let ts = block * 1000;
-    assert!(!manager.is_stale(pair, ts));
-
-    // Stale after 901 seconds
-    assert!(manager.is_stale(pair, ts + 901));
-
-    // Unknown pair is stale
-    assert!(manager.is_stale(PricePair::new(999, 0), ts));
-}
-
-#[test]
-fn test_oracle_twap_calculation() {
-    let (mut manager, validators) = make_manager();
-    let pair = PricePair::new(1, 0);
-    let q = quorum_for(&validators);
-
-    // Submit prices at different timestamps within a 24h window
-    // Blocks must be multiples of ORACLE_UPDATE_INTERVAL (1000)
-    let rounds = [
-        (1_000_000u128, 1000u64, 1_000_000u64),
-        (2_000_000u128, 2000u64, 1_003_600u64),   // +1h
-        (3_000_000u128, 3000u64, 1_007_200u64),    // +2h
-    ];
-
-    for (price, block, timestamp) in rounds {
-        for (vid, _, signing_key) in validators.iter().take(q) {
-            let sig =
-                sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
-            let submission = OracleSubmission {
-                validator_id: *vid,
-                pair,
-                price,
-                block_number: block,
-                timestamp,
-                signature: sig,
-                sources: Vec::new(),
-            };
-            manager.submit_price(submission).unwrap();
-        }
-    }
-
-    // TWAP at ts = 1_007_200 with window 86_400 covers all 3 entries
-    // Time-weighted: 1M*3600 + 2M*3600 + 3M*0 = 10_800_000_000 / 7200 = 1_500_000
-    let current_ts = 1_007_200u64;
-    let twap = manager.get_twap(pair, current_ts).unwrap();
-    assert_eq!(twap, 1_500_000);
-
-    // At current_ts + 1800, last entry gets duration 1800
-    // 1M*3600 + 2M*3600 + 3M*1800 = 16_200_000_000 / 9000 = 1_800_000
-    let twap = manager.get_twap(pair, current_ts + 1800).unwrap();
-    assert_eq!(twap, 1_800_000);
-}
-
-#[test]
 fn test_oracle_reward_pool() {
     let mut manager = OracleManager::new(OracleConfig::default());
     assert_eq!(manager.reward_pool, 0);
@@ -359,14 +296,6 @@ fn test_oracle_contributor_tracking() {
     manager.clear_tracking();
     assert!(manager.current_contributors.is_empty());
     assert!(manager.last_outliers().is_empty());
-}
-
-#[test]
-fn test_legacy_get_price_by_asset() {
-    let mut manager = OracleManager::new(OracleConfig::default());
-    manager.record_direct_price_by_asset(1, 2_000_000, 1000, 100);
-    assert_eq!(manager.get_price_by_asset(1).map(|p| p.median_price), Some(2_000_000));
-    assert!(manager.get_price_by_asset(999).is_none());
 }
 
 #[test]
