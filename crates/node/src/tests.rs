@@ -141,9 +141,10 @@
 
         // Stake a validator so proposer selection works
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Fund sender balance in EVM storage
@@ -188,8 +189,9 @@
 
         // Commit
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
         }
 
         let height_after = node.consensus.read().unwrap().current_height();
@@ -218,9 +220,10 @@
 
         // Stake a validator
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Select and build with empty mempool
@@ -250,8 +253,9 @@
 
         // Commit
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit empty");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("commit empty");
         }
 
         assert_eq!(node.consensus.read().unwrap().current_height(), 1);
@@ -283,9 +287,10 @@
 
         // Stake validators on node1 so it can produce blocks
         {
+            let mut evm_state = node1.state.evm_state.write().unwrap();
             let mut consensus = node1.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Fund sender balance on node1
@@ -332,8 +337,9 @@
 
         // Commit on node1
         {
+            let mut evm_state = node1.state.evm_state.write().unwrap();
             let mut consensus = node1.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
         }
         assert_eq!(node1.consensus.read().unwrap().current_height(), 1, "node1 should be at height 1");
 
@@ -380,9 +386,10 @@
 
         // Stake validator
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Fund sender in EVM storage
@@ -422,8 +429,9 @@
         block.finalize(&result);
 
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
         }
 
         // Persist block
@@ -457,9 +465,10 @@
 
             // Stake validator
             {
+                let mut evm_state = node.state.evm_state.write().unwrap();
                 let mut consensus = node.consensus.write().unwrap();
-                consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-                consensus.refresh_proposer_subset();
+                consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+                consensus.refresh_proposer_subset(&evm_state);
             }
 
             // Fund sender balance in EVM storage
@@ -492,7 +501,7 @@
             let result = {
                 let mut s = node.state.write_all();
                 block.execute(
-                    &mut ExecutionState::new(&mut s.shielded, &mut s.evm),
+                    &mut ExecutionState::new(&mut s.evm),
                     &mut BlockContext::new(height, &mut s.fee_params),
                     &mut Subsystems::none(),
                 )
@@ -501,8 +510,9 @@
             block.finalize(&result);
 
             {
+                let mut evm_state = node.state.evm_state.write().unwrap();
                 let mut consensus = node.consensus.write().unwrap();
-                consensus.commit_block(&block, &result).expect("commit");
+                consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
             }
 
             // Persist state to reth-db immediately
@@ -658,9 +668,10 @@
 
         // Stake validator
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Fund sender with ample balance for fees + transfer
@@ -741,8 +752,10 @@
 
             block.finalize(&result);
 
+            let mut evm_state = node.state.evm_state.write().unwrap();
+
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
         }
 
         // Verify shared state IS modified after finalize
@@ -769,9 +782,10 @@
 
         // Stake validator
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Fund sender with ample balance for fees + transfer
@@ -866,9 +880,10 @@
 
         // Stake validator
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         let height = node.consensus.read().unwrap().current_height();
@@ -893,8 +908,10 @@
 
             block.finalize(&result);
 
+            let mut evm_state = node.state.evm_state.write().unwrap();
+
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("first commit");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("first commit");
         }
 
         // Consensus height should have advanced
@@ -902,8 +919,9 @@
 
         // Attempt to commit the SAME block again should fail due to height mismatch
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            let result = consensus.commit_block(&block, &BlockExecutionResult::default());
+            let result = consensus.commit_block(&block, &BlockExecutionResult::default(), &mut evm_state);
             assert!(
                 result.is_err(),
                 "double-commit of same block should be rejected"
@@ -995,9 +1013,10 @@
 
         // Stake validator so proposer selection works
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Use small epoch length so we cross boundary quickly
@@ -1071,9 +1090,10 @@
 
         // Stake validator
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset();
+            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&evm_state);
         }
 
         // Large epoch length — sync won't cross boundary

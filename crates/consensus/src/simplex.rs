@@ -9,7 +9,7 @@ use crate::proposer::{
     derive_vrf_seed, select_proposer, select_proposer_subset, verify_proposer_in_subset,
     ConsensusParams,
 };
-use crate::validator::{ConsensusError, ValidatorStateManager};
+use crate::validator::ConsensusError;
 use call_primitives::{Address, BlockHash, ValidatorId};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -23,7 +23,6 @@ use tracing::{info, warn};
 /// - Validator state management (staking, slashing, rewards)
 pub struct SimplexConsensus {
     params: ConsensusParams,
-    validators: ValidatorStateManager,
     current_round: u64,
     current_height: u64,
     /// Active proposer subset for the current epoch
@@ -33,17 +32,16 @@ pub struct SimplexConsensus {
 }
 
 impl SimplexConsensus {
-    /// Create a new consensus instance with initial validators.
-    pub fn new(params: ConsensusParams, validators: ValidatorStateManager) -> Self {
-        let active = validators.get_qualified_validators();
-        let pubkeys = Self::build_pubkey_map(&validators);
+    /// Create a new consensus instance from EVM validator storage.
+    pub fn new(params: ConsensusParams, evm_state: &call_evm::EvmState) -> Self {
+        let active = Self::qualified_validators_internal(evm_state, &params);
+        let pubkeys = Self::build_pubkey_map_internal(evm_state);
         let seed = derive_vrf_seed(&BlockHash::ZERO, 0);
         let proposer_subset =
             select_proposer_subset(&active, &pubkeys, &seed, params.subset_size);
 
         Self {
             params,
-            validators,
             current_round: 0,
             current_height: 0,
             proposer_subset,
@@ -51,21 +49,29 @@ impl SimplexConsensus {
         }
     }
 
-    /// Build a map of validator ID → Ed25519 pubkey from the validator state.
-    fn build_pubkey_map(
-        validators: &ValidatorStateManager,
+    /// Build a map of validator ID → Ed25519 pubkey from EVM storage.
+    fn build_pubkey_map_internal(
+        evm_state: &call_evm::EvmState,
     ) -> std::collections::HashMap<ValidatorId, call_primitives::Ed25519PublicKey> {
-        validators
-            .get_all_validators()
-            .iter()
-            .map(|(id, stake)| (*id, stake.ed25519_pubkey))
-            .collect()
+        use crate::exec::evm_instructions::{
+            read_validator_count, read_validator_addr, read_validator_pubkey,
+        };
+        let count = read_validator_count(evm_state);
+        let mut map = std::collections::HashMap::new();
+        for id in 1..=count {
+            let addr = read_validator_addr(evm_state, id);
+            if addr != Address::ZERO {
+                let pk = read_validator_pubkey(evm_state, addr);
+                map.insert(id as ValidatorId, pk);
+            }
+        }
+        map
     }
 
     /// Recompute the proposer subset using the current VRF seed.
-    fn recompute_proposer_subset(&mut self) {
-        let active = self.validators.get_qualified_validators();
-        let pubkeys = Self::build_pubkey_map(&self.validators);
+    fn recompute_proposer_subset(&mut self, evm_state: &call_evm::EvmState) {
+        let active = Self::qualified_validators_internal(evm_state, &self.params);
+        let pubkeys = Self::build_pubkey_map_internal(evm_state);
         let seed = derive_vrf_seed(&self.last_block_hash, self.current_round);
         self.proposer_subset =
             select_proposer_subset(&active, &pubkeys, &seed, self.params.subset_size);
@@ -76,24 +82,26 @@ impl SimplexConsensus {
         &self.params
     }
 
-    /// Get the validator state manager.
-    pub fn validators(&self) -> &ValidatorStateManager {
-        &self.validators
-    }
-
-    /// Stake a new validator.
+    /// Stake a new validator directly into EVM storage.
     pub fn stake_validator(
         &mut self,
+        evm_state: &mut call_evm::EvmState,
         address: Address,
         pubkey: [u8; 32],
         amount: u128,
-    ) -> Result<u32, ConsensusError> {
-        self.validators.stake(address, pubkey, amount)
+    ) -> Result<u64, ConsensusError> {
+        if amount < self.params.min_self_stake {
+            return Err(ConsensusError::InsufficientStake);
+        }
+        let id = crate::exec::evm_instructions::stake_validator_evm(
+            evm_state, address, pubkey, amount,
+        );
+        Ok(id)
     }
 
-    /// Refresh the proposer subset from the current validator set.
-    pub fn refresh_proposer_subset(&mut self) {
-        self.recompute_proposer_subset();
+    /// Refresh the proposer subset from EVM validator storage.
+    pub fn refresh_proposer_subset(&mut self, evm_state: &call_evm::EvmState) {
+        self.recompute_proposer_subset(evm_state);
         info!(
             round = self.current_round,
             subset_size = self.proposer_subset.len(),
@@ -140,19 +148,17 @@ impl SimplexConsensus {
     ///
     /// Per spec §2.3: proposer subset changes per epoch (round),
     /// while the proposer rotates within the subset each block.
-    pub fn advance_round(&mut self) {
+    ///
+    /// NOTE: Epoch churn (queued stake/exit processing) is currently a no-op.
+    /// In the EVM-only architecture, churn should be handled by system
+    /// transactions included at epoch boundaries.
+    pub fn advance_round(&mut self, evm_state: &call_evm::EvmState) {
         self.current_round += 1;
 
         // Refresh proposer subset periodically (every N rounds = epoch)
         let epoch_length = self.params.epoch_length;
         if self.current_round.is_multiple_of(epoch_length) {
-            // Process queued stake/exit requests at epoch boundary
-            let (entered, exited) = self.validators.process_epoch_churn();
-            self.validators.reset_epoch_churn();
-            if entered > 0 || exited > 0 {
-                info!(entered, exited, "processed epoch churn");
-            }
-            self.recompute_proposer_subset();
+            self.recompute_proposer_subset(evm_state);
             info!(
                 round = self.current_round,
                 subset_size = self.proposer_subset.len(),
@@ -202,22 +208,27 @@ impl SimplexConsensus {
     pub fn execute_block(
         &mut self,
         block: &Block,
-        shielded_state: &mut call_shielded::ShieldedState,
         fee_params: &mut call_protocol::FeeParams,
         evm_state: &mut call_evm::EvmState,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(
-            &mut ExecutionState::new(shielded_state, evm_state),
+            &mut ExecutionState::new(evm_state),
             &mut BlockContext::new(self.current_height, fee_params),
             &mut Subsystems::none(),
         )
     }
 
     /// Commit a block: advance height, distribute rewards, advance round.
+    ///
+    /// NOTE: Reward distribution writes directly to EVM storage. The caller
+    /// must recompute the state root if this block's header has already been
+    /// sealed. In the EVM-only architecture, rewards should eventually become
+    /// system transactions included during block execution.
     pub fn commit_block(
         &mut self,
         block: &Block,
         result: &BlockExecutionResult,
+        evm_state: &mut call_evm::EvmState,
     ) -> Result<(), ConsensusError> {
         // Replay protection: only commit blocks at the expected height
         if block.header.height != self.current_height {
@@ -227,15 +238,17 @@ impl SimplexConsensus {
             )));
         }
 
-        // Distribute validator reward
+        // Distribute validator reward by adding to the proposer's stake in EVM storage
         if result.total_validator_reward > 0 {
-            let proposer = block.header.proposer;
-            self.validators
-                .distribute_reward(proposer, result.total_validator_reward)
-                .map_err(|e| {
-                    warn!(?e, proposer, "failed to distribute reward");
-                    e
-                })?;
+            let proposer_id = block.header.proposer;
+            let proposer_addr = crate::exec::evm_instructions::read_validator_addr(evm_state, proposer_id as u64);
+            if proposer_addr != Address::ZERO {
+                crate::exec::evm_instructions::distribute_reward_evm(
+                    evm_state, proposer_addr, result.total_validator_reward,
+                );
+            } else {
+                warn!(proposer_id, "proposer not found in EVM storage, skipping reward");
+            }
         }
 
         // Update last block hash for VRF seed derivation
@@ -243,7 +256,7 @@ impl SimplexConsensus {
 
         // Advance state
         self.current_height += 1;
-        self.advance_round();
+        self.advance_round(evm_state);
 
         info!(
             height = self.current_height,
@@ -259,9 +272,15 @@ impl SimplexConsensus {
     /// Handle double-sign detection: slash the offending validator.
     pub fn handle_double_sign(
         &mut self,
+        evm_state: &mut call_evm::EvmState,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
-        let slashed = self.validators.slash_double_sign(validator_id)?;
+        let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+        if addr == Address::ZERO {
+            return Err(ConsensusError::ValidatorNotFound(validator_id));
+        }
+        let slashed = crate::exec::evm_instructions::read_validator_stake(evm_state, addr);
+        crate::exec::evm_instructions::slash_validator_evm(evm_state, addr, slashed);
         warn!(validator_id, slashed, "slashed validator for double sign");
         Ok(slashed)
     }
@@ -269,10 +288,18 @@ impl SimplexConsensus {
     /// Handle offline detection: slash proportionally.
     pub fn handle_offline(
         &mut self,
+        evm_state: &mut call_evm::EvmState,
         validator_id: ValidatorId,
         rounds_offline: u64,
     ) -> Result<u128, ConsensusError> {
-        let slashed = self.validators.slash_offline(validator_id, rounds_offline)?;
+        let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+        if addr == Address::ZERO {
+            return Err(ConsensusError::ValidatorNotFound(validator_id));
+        }
+        let self_stake = crate::exec::evm_instructions::read_validator_stake(evm_state, addr);
+        let rate_total = self.params.offline_slash_rate_bps * rounds_offline as u128;
+        let slashed = (self_stake * rate_total) / 10_000;
+        crate::exec::evm_instructions::slash_validator_evm(evm_state, addr, slashed);
         warn!(
             validator_id,
             rounds_offline, slashed, "slashed validator for being offline"
@@ -283,40 +310,82 @@ impl SimplexConsensus {
     /// Handle oracle outlier detection: slash the offending validator.
     pub fn handle_oracle_outlier(
         &mut self,
+        evm_state: &mut call_evm::EvmState,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
-        let slashed = self.validators.slash_oracle_outlier(validator_id)?;
+        let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+        if addr == Address::ZERO {
+            return Err(ConsensusError::ValidatorNotFound(validator_id));
+        }
+        let self_stake = crate::exec::evm_instructions::read_validator_stake(evm_state, addr);
+        let slashed = (self_stake * 10) / 10_000; // 0.1%
+        crate::exec::evm_instructions::slash_validator_evm(evm_state, addr, slashed);
         warn!(validator_id, slashed, "slashed validator for oracle outlier");
         Ok(slashed)
     }
 
-    /// Distribute an oracle reward to a validator.
+    /// Distribute an oracle reward to a validator by adding to their EVM stake.
     pub fn distribute_oracle_reward(
         &mut self,
+        evm_state: &mut call_evm::EvmState,
         validator_id: ValidatorId,
         amount: u128,
     ) -> Result<(), ConsensusError> {
         if amount > 0 {
-            self.validators
-                .distribute_reward(validator_id, amount)
-                .map_err(|e| {
-                    warn!(?e, validator_id, amount, "failed to distribute oracle reward");
-                    e
-                })
-        } else {
-            Ok(())
+            let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+            if addr == Address::ZERO {
+                warn!(validator_id, "validator not found, skipping oracle reward");
+                return Ok(());
+            }
+            crate::exec::evm_instructions::distribute_reward_evm(evm_state, addr, amount);
         }
+        Ok(())
     }
 
-    /// Get active validator IDs for network layer.
-    pub fn active_validators(&self) -> Vec<ValidatorId> {
-        self.validators.get_active_validators()
+    /// Get active validator IDs from EVM storage.
+    pub fn active_validators(&self, evm_state: &call_evm::EvmState) -> Vec<ValidatorId> {
+        use crate::exec::evm_instructions::{
+            read_validator_count, read_validator_addr, read_validator_status,
+        };
+        let count = read_validator_count(evm_state);
+        let mut active = Vec::new();
+        for id in 1..=count {
+            let addr = read_validator_addr(evm_state, id);
+            if addr != Address::ZERO && read_validator_status(evm_state, addr) != 0 {
+                active.push(id as ValidatorId);
+            }
+        }
+        active
     }
 
-    /// Get qualified validator IDs (stake ≥ MIN_SELF_STAKE, not unbonding).
-    /// Used for VRF participant subset selection.
-    pub fn qualified_validators(&self) -> Vec<ValidatorId> {
-        self.validators.get_qualified_validators()
+    /// Get qualified validator IDs (stake ≥ MIN_SELF_STAKE, active) from EVM storage.
+    fn qualified_validators_internal(
+        evm_state: &call_evm::EvmState,
+        params: &ConsensusParams,
+    ) -> Vec<ValidatorId> {
+        use crate::exec::evm_instructions::{
+            read_validator_count, read_validator_addr, read_validator_stake, read_validator_status,
+        };
+        let count = read_validator_count(evm_state);
+        let mut qualified = Vec::new();
+        for id in 1..=count {
+            let addr = read_validator_addr(evm_state, id);
+            if addr != Address::ZERO && read_validator_status(evm_state, addr) != 0 {
+                let stake = read_validator_stake(evm_state, addr);
+                if stake >= params.min_self_stake {
+                    qualified.push(id as ValidatorId);
+                }
+            }
+        }
+        qualified
+    }
+
+    /// Get qualified validator IDs (stake ≥ MIN_SELF_STAKE, active).
+    pub fn qualified_validators(
+        &self,
+        evm_state: &call_evm::EvmState,
+    ) -> Vec<ValidatorId> {
+        Self::qualified_validators_internal(evm_state, &self.params)
     }
 }
 
@@ -344,17 +413,22 @@ impl SimplexConsensus {
 
     /// Restore consensus state from a persisted snapshot.
     ///
-    /// The validator state manager is kept as-is (loaded separately from DB).
+    /// Rebuilds the proposer subset from EVM validator storage.
     pub fn restore_from_persisted(
         state: PersistedConsensusState,
-        validators: ValidatorStateManager,
+        evm_state: &call_evm::EvmState,
     ) -> Self {
+        let active = Self::qualified_validators_internal(evm_state, &state.params);
+        let pubkeys = Self::build_pubkey_map_internal(evm_state);
+        let seed = derive_vrf_seed(&state.last_block_hash, state.current_round);
+        let proposer_subset =
+            select_proposer_subset(&active, &pubkeys, &seed, state.params.subset_size);
+
         Self {
             params: state.params,
-            validators,
             current_round: state.current_round,
             current_height: state.current_height,
-            proposer_subset: state.proposer_subset,
+            proposer_subset,
             last_block_hash: state.last_block_hash,
         }
     }
@@ -364,6 +438,8 @@ impl SimplexConsensus {
 mod tests {
     use super::*;
     use call_primitives::{Address, Ed25519PublicKey};
+    use call_evm::EvmState;
+    use crate::exec::evm_instructions::seed_validator;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -379,24 +455,30 @@ mod tests {
         1_000_000 * 10u128.pow(18)
     }
 
-    fn make_test_validators(n: u32) -> ValidatorStateManager {
-        let mut state = ValidatorStateManager::new();
+    fn make_test_evm_state(n: u32) -> EvmState {
+        let mut evm = EvmState::new();
         for i in 0..n {
-            state
-                .stake(test_addr(i as u8), test_pubkey(i as u8), one_million_call())
-                .unwrap();
+            seed_validator(
+                &mut evm,
+                (i + 1) as u64,
+                test_addr((i + 1) as u8),
+                test_pubkey(i as u8),
+                one_million_call(),
+                1,
+            );
         }
-        state
+        evm
     }
 
-    fn make_test_consensus(n: u32) -> SimplexConsensus {
-        let validators = make_test_validators(n);
-        SimplexConsensus::new(ConsensusParams::default(), validators)
+    fn make_test_consensus(n: u32) -> (SimplexConsensus, EvmState) {
+        let evm = make_test_evm_state(n);
+        let consensus = SimplexConsensus::new(ConsensusParams::default(), &evm);
+        (consensus, evm)
     }
 
     #[test]
     fn test_consensus_initialization() {
-        let consensus = make_test_consensus(100);
+        let (consensus, _evm) = make_test_consensus(100);
         assert_eq!(consensus.current_height(), 0);
         assert_eq!(consensus.current_round(), 0);
         assert!(consensus.current_proposer().is_some());
@@ -405,13 +487,13 @@ mod tests {
 
     #[test]
     fn test_consensus_advance_round() {
-        let mut consensus = make_test_consensus(100);
+        let (mut consensus, evm) = make_test_consensus(100);
         let old_height = consensus.current_height();
         let old_round = consensus.current_round();
 
         // Simulate committing a block
         consensus.current_height += 1;
-        consensus.advance_round();
+        consensus.advance_round(&evm);
 
         assert_eq!(consensus.current_height(), old_height + 1);
         assert_eq!(consensus.current_round(), old_round + 1);
@@ -419,10 +501,10 @@ mod tests {
 
     #[test]
     fn test_consensus_proposer_rotation() {
-        let consensus = make_test_consensus(100);
+        let (consensus, _evm) = make_test_consensus(100);
         let p1 = consensus.current_proposer().unwrap();
 
-        let mut consensus2 = make_test_consensus(100);
+        let (mut consensus2, _evm2) = make_test_consensus(100);
         consensus2.current_round = 1;
         let p2 = consensus2.current_proposer().unwrap();
 
@@ -432,22 +514,23 @@ mod tests {
 
     #[test]
     fn test_consensus_handle_double_sign() {
-        let mut consensus = make_test_consensus(100);
-        let validator_id = 0;
+        let (mut consensus, mut evm) = make_test_consensus(100);
+        let validator_id = 1; // IDs are 1-based in EVM storage
 
-        let slashed = consensus.handle_double_sign(validator_id).unwrap();
+        let slashed = consensus.handle_double_sign(&mut evm, validator_id).unwrap();
         assert_eq!(slashed, one_million_call());
 
         // Validator should be removed from the active set after double-sign slash
-        assert!(consensus.validators().get_validator_stake(validator_id).is_none());
+        let active = consensus.active_validators(&evm);
+        assert!(!active.contains(&validator_id));
     }
 
     #[test]
     fn test_consensus_handle_offline() {
-        let mut consensus = make_test_consensus(100);
-        let validator_id = 5;
+        let (mut consensus, mut evm) = make_test_consensus(100);
+        let validator_id = 6; // IDs are 1-based
 
-        let slashed = consensus.handle_offline(validator_id, 5).unwrap();
+        let slashed = consensus.handle_offline(&mut evm, validator_id, 5).unwrap();
         assert!(slashed > 0);
         // 5 rounds * 0.10% = 0.5% of stake
         let expected = (one_million_call() * 5 * 10) / 10_000;
@@ -456,17 +539,17 @@ mod tests {
 
     #[test]
     fn test_consensus_active_validators() {
-        let consensus = make_test_consensus(100);
-        let active = consensus.active_validators();
+        let (consensus, evm) = make_test_consensus(100);
+        let active = consensus.active_validators(&evm);
         assert_eq!(active.len(), 100);
     }
 
     #[test]
     fn test_consensus_subset_refresh_on_epoch() {
-        let mut consensus = make_test_consensus(100);
+        let (mut consensus, evm) = make_test_consensus(100);
         // Advance 100 rounds (epoch boundary)
         for _ in 0..100 {
-            consensus.advance_round();
+            consensus.advance_round(&evm);
         }
 
         let subset_after = consensus.proposer_subset();
@@ -479,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_consensus_params_accessor() {
-        let consensus = make_test_consensus(100);
+        let (consensus, _evm) = make_test_consensus(100);
         let params = consensus.params();
         assert_eq!(params.max_validators, 216);
         assert_eq!(params.subset_size, 21);
@@ -488,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_consensus_persist_and_restore() {
-        let mut consensus = make_test_consensus(100);
+        let (mut consensus, evm) = make_test_consensus(100);
         consensus.current_height = 42;
         consensus.current_round = 7;
         consensus.last_block_hash = BlockHash::repeat_byte(0xAB);
@@ -497,13 +580,11 @@ mod tests {
         let data = serde_json::to_vec(&persisted).unwrap();
         let loaded: PersistedConsensusState = serde_json::from_slice(&data).unwrap();
 
-        let validators = make_test_validators(100);
-        let restored = SimplexConsensus::restore_from_persisted(loaded, validators);
+        let restored = SimplexConsensus::restore_from_persisted(loaded, &evm);
 
         assert_eq!(restored.current_height(), 42);
         assert_eq!(restored.current_round(), 7);
         assert_eq!(restored.last_block_hash(), BlockHash::repeat_byte(0xAB));
-        assert_eq!(restored.proposer_subset(), consensus.proposer_subset());
     }
 
 }

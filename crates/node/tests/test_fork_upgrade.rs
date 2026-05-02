@@ -37,9 +37,11 @@ async fn test_height_activated_upgrade() {
 
     let (_secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000).unwrap();
@@ -98,8 +100,10 @@ async fn test_height_activated_upgrade() {
         block.finalize(&result);
 
         {
+            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut evm_state = node.state.evm_state.write().unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
         }
 
         node.state.set_current_block(height + 1);
@@ -165,9 +169,11 @@ async fn test_governance_triggered_upgrade() {
     let (_secret, sender) = test_keypair();
     let val_addr = sender;
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(val_addr, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000).unwrap();

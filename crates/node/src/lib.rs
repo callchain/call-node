@@ -194,14 +194,14 @@ impl CallNode {
                 Ok(None) => {
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        loaded.validators.get_all_validators().len() as u32,
+                        call_consensus::exec::evm_instructions::read_validator_count(&loaded.evm_state) as u32,
                     )
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load fork state");
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        loaded.validators.get_all_validators().len() as u32,
+                        call_consensus::exec::evm_instructions::read_validator_count(&loaded.evm_state) as u32,
                     )
                 }
             }
@@ -215,9 +215,9 @@ impl CallNode {
 
         // Try to load persisted consensus state; fall back to genesis
         let consensus = if recovery_needed {
-            SimplexConsensus::new(ConsensusParams::default(), loaded.validators.clone())
+            SimplexConsensus::new(ConsensusParams::default(), &loaded.evm_state)
         } else {
-            match load_consensus_state_inner(db_env, &loaded.validators) {
+            match load_consensus_state_inner(db_env, &loaded.evm_state) {
                 Ok(consensus) => {
                     tracing::info!(
                         height = consensus.current_height(),
@@ -228,7 +228,7 @@ impl CallNode {
                 }
                 Err(e) => {
                     tracing::info!(error = %e, "no persisted consensus state, starting from genesis");
-                    SimplexConsensus::new(ConsensusParams::default(), loaded.validators.clone())
+                    SimplexConsensus::new(ConsensusParams::default(), &loaded.evm_state)
                 }
             }
         };
@@ -1096,7 +1096,8 @@ impl CallNode {
                                 }
 
                                 if let Ok(mut c) = consensus.write() {
-                                    let _ = c.commit_block(&block, &result);
+                                    let mut evm_state = state.evm_state.write().unwrap();
+                                    let _ = c.commit_block(&block, &result, &mut evm_state);
                                 }
 
                                 let _ = light_client.sync_incremental(&block.header, &signatures);

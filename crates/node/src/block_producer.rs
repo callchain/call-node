@@ -180,9 +180,10 @@ pub(crate) async fn block_production_loop(
             let oracle = state.oracle.read().unwrap();
             let outliers: Vec<u32> = oracle.last_outliers().to_vec();
             if !outliers.is_empty() {
+                let mut evm_state = state.evm_state.write().unwrap();
                 let mut c = consensus.write().unwrap();
                 for vid in &outliers {
-                    if let Err(e) = c.handle_oracle_outlier(*vid) {
+                    if let Err(e) = c.handle_oracle_outlier(&mut evm_state, *vid) {
                         tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
                     }
                 }
@@ -196,9 +197,10 @@ pub(crate) async fn block_production_loop(
                 oracle.distribute_rewards()
             };
             if !contributions.is_empty() {
+                let mut evm_state = state.evm_state.write().unwrap();
                 let mut c = consensus.write().unwrap();
                 for (vid, amount) in &contributions {
-                    if let Err(e) = c.distribute_oracle_reward(*vid, *amount) {
+                    if let Err(e) = c.distribute_oracle_reward(&mut evm_state, *vid, *amount) {
                         tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
                     }
                 }
@@ -212,8 +214,9 @@ pub(crate) async fn block_production_loop(
 
         // 7. Commit via consensus (BFT engine handles proposal/verification)
         {
+            let mut evm_state = state.evm_state.write().unwrap();
             let mut c = consensus.write().unwrap();
-            if let Err(e) = c.commit_block(&block, &result) {
+            if let Err(e) = c.commit_block(&block, &result, &mut evm_state) {
                 tracing::warn!(error = ?e, "commit failed");
                 continue;
             }

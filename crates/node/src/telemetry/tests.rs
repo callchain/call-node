@@ -195,13 +195,14 @@ fn dummy_health() -> HealthState {
             .as_nanos()
     ));
     let db = call_storage::open_db(tmp).unwrap();
+    let evm = call_evm::EvmState::new();
     HealthState {
         db: db.db,
         network: None,
         consensus: std::sync::Arc::new(std::sync::RwLock::new(
             call_consensus::SimplexConsensus::new(
                 call_consensus::ConsensusParams::default(),
-                call_consensus::ValidatorStateManager::default(),
+                &evm,
             ),
         )),
     }

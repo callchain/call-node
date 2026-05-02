@@ -122,7 +122,6 @@ impl<'a> StateWriteBundle<'a> {
         let validators = call_consensus::exec::evm_instructions::read_validator_addresses(&self.evm);
         block.execute(
             &mut ExecutionState::new(
-                &mut self.shielded,
                 &mut self.evm,
             ),
             &mut BlockContext {
@@ -147,7 +146,6 @@ impl<'a> StateWriteBundle<'a> {
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(
             &mut ExecutionState::new(
-                &mut self.shielded,
                 &mut self.evm,
             ),
             &mut BlockContext::new(height, &mut self.fee_params),
@@ -166,7 +164,6 @@ impl<'a> StateReadBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let mut shielded = self.shielded.clone();
         let mut fee_params = self.fee_params.clone();
         let mut evm = self.evm.clone();
         let mut fork_manager = self.fork_manager.clone();
@@ -175,7 +172,6 @@ impl<'a> StateReadBundle<'a> {
 
         block.execute(
             &mut ExecutionState::new(
-                &mut shielded,
                 &mut evm,
             ),
             &mut BlockContext {
@@ -196,13 +192,11 @@ impl<'a> StateReadBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let mut shielded = self.shielded.clone();
         let mut fee_params = self.fee_params.clone();
         let mut evm = self.evm.clone();
 
         block.execute(
             &mut ExecutionState::new(
-                &mut shielded,
                 &mut evm,
             ),
             &mut BlockContext::new(height, &mut fee_params),

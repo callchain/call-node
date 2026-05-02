@@ -395,6 +395,20 @@ pub fn read_validator_id_by_addr(evm_state: &EvmState, addr: Address) -> u64 {
     u256_to_u64(evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_by_addr(addr)))
 }
 
+/// Read all validator IDs and their stakes from EVM storage.
+pub fn read_validators(evm_state: &EvmState) -> Vec<(u64, Address, u128)> {
+    let count = read_validator_count(evm_state);
+    let mut out = Vec::new();
+    for id in 1..=count {
+        let addr = read_validator_addr(evm_state, id);
+        if addr != Address::ZERO {
+            let stake = read_validator_stake(evm_state, addr);
+            out.push((id, addr, stake));
+        }
+    }
+    out
+}
+
 /// Read all active validator addresses from EVM storage.
 pub fn read_validator_addresses(evm_state: &EvmState) -> Vec<Address> {
     let count = read_validator_count(evm_state);
@@ -466,6 +480,52 @@ pub fn seed_validator(
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(stake));
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_pubkey(addr), U256::from_be_slice(&ed25519_pubkey));
     evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::from(status));
+}
+
+/// Stake a new validator directly into EVM storage.
+/// Returns the assigned validator_id.
+pub fn stake_validator_evm(
+    evm_state: &mut EvmState,
+    addr: Address,
+    ed25519_pubkey: [u8; 32],
+    amount: u128,
+) -> u64 {
+    let count = read_validator_count(evm_state);
+    let validator_id = count + 1;
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_count(), u64_to_u256(validator_id));
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_addr(validator_id), address_to_u256(addr));
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_by_addr(addr), u64_to_u256(validator_id));
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(amount));
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_pubkey(addr), U256::from_be_slice(&ed25519_pubkey));
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::from(1u8));
+    validator_id
+}
+
+/// Slash a validator's stake in EVM storage.
+/// Returns the amount actually slashed.
+pub fn slash_validator_evm(
+    evm_state: &mut EvmState,
+    addr: Address,
+    amount: u128,
+) -> u128 {
+    let current = read_validator_stake(evm_state, addr);
+    let slashed = current.min(amount);
+    let new_stake = current.saturating_sub(slashed);
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(new_stake));
+    if new_stake == 0 {
+        evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::ZERO);
+    }
+    slashed
+}
+
+/// Distribute a reward to a validator by adding to their stake in EVM storage.
+pub fn distribute_reward_evm(
+    evm_state: &mut EvmState,
+    addr: Address,
+    amount: u128,
+) {
+    let current = read_validator_stake(evm_state, addr);
+    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(current + amount));
 }
 
 /// Seed agent metadata directly into EVM storage (for tests / genesis).

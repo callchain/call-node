@@ -54,11 +54,12 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Stake a validator so there is a proposer
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let _ = consensus
-            .stake_validator(voter_addr, [1u8; 32], one_million_call())
+            .stake_validator(&mut evm_state, voter_addr, [1u8; 32], one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Seed EVM storage for proposer fees + deposit (10_000 CALL)

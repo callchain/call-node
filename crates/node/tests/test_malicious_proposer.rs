@@ -7,7 +7,6 @@ mod e2e;
 use e2e::harness::*;
 
 use call_consensus::{ConsensusParams, SimplexConsensus};
-use call_consensus::ValidatorStateManager as ConsensusValidatorState;
 use call_primitives::{Address, BlockHash, ProtocolVersion, ValidatorId};
 use call_evm::EvmTransaction;
 
@@ -38,26 +37,22 @@ async fn test_double_sign_slash() {
     let node = TestNode::new();
 
     let val_addr = test_addr(1);
+    let mut evm_state = node.state.evm_state.write().unwrap();
     let mut consensus = node.consensus.write().unwrap();
-    let val_id: ValidatorId = consensus.stake_validator(val_addr, [1u8; 32], one_million_call()).unwrap();
-    consensus.refresh_proposer_subset();
+    let val_id: ValidatorId = consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], one_million_call()).unwrap() as u32;
+    consensus.refresh_proposer_subset(&evm_state);
 
     // Get stake before slash
-    let stake_before = {
-        let v = consensus.validators().get_validator_stake(val_id).unwrap();
-        v.self_stake
-    };
+    let stake_before = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, val_addr);
     assert_eq!(stake_before, one_million_call());
 
     // Simulate double-sign detection
-    let slashed = consensus.handle_double_sign(val_id).unwrap();
+    let slashed = consensus.handle_double_sign(&mut evm_state, val_id).unwrap();
     assert_eq!(slashed, one_million_call());
 
     // Validator should be removed after double-sign slash
-    assert!(
-        consensus.validators().get_validator_stake(val_id).is_none(),
-        "validator should be removed after double-sign"
-    );
+    let status = call_consensus::exec::evm_instructions::read_validator_status(&evm_state, val_addr);
+    assert_eq!(status, 0, "validator should be removed after double-sign");
 }
 
 /// Offline detection slashes proportionally.
@@ -66,22 +61,23 @@ async fn test_offline_penalty() {
     let node = TestNode::new();
 
     let val_addr = test_addr(1);
+    let mut evm_state = node.state.evm_state.write().unwrap();
     let mut consensus = node.consensus.write().unwrap();
     let stake = one_million_call() * 2;
-    let val_id: ValidatorId = consensus.stake_validator(val_addr, [1u8; 32], stake).unwrap();
-    consensus.refresh_proposer_subset();
+    let val_id: ValidatorId = consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], stake).unwrap() as u32;
+    consensus.refresh_proposer_subset(&evm_state);
 
     // Simulate 5 rounds offline
-    let slashed = consensus.handle_offline(val_id, 5).unwrap();
+    let slashed = consensus.handle_offline(&mut evm_state, val_id, 5).unwrap();
 
     // 5 rounds * 0.10% = 0.5% of stake
     let expected = (stake * 5 * 10) / 10_000;
     assert_eq!(slashed, expected);
 
     // Stake reduced but validator still active (above min_self_stake)
-    let stake_after = consensus.validators().get_validator_stake(val_id).unwrap();
-    assert!(stake_after.self_stake > 0);
-    assert!(stake_after.self_stake < stake);
+    let stake_after = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, val_addr);
+    assert!(stake_after > 0);
+    assert!(stake_after < stake);
 }
 
 /// Invalid transaction (insufficient balance) causes block execution to fail.
@@ -95,9 +91,10 @@ async fn test_invalid_tx_causes_block_failure() {
     let mut node = TestNode::new();
     let (_secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
     // Register asset 1 and fund sender
     {
@@ -129,9 +126,11 @@ async fn test_double_nonce_rejected() {
 
     let (_secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
     {
         node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 20_000).unwrap();
@@ -155,25 +154,26 @@ async fn test_double_nonce_rejected() {
 /// Offline penalty accumulates with repeated offenses.
 #[tokio::test]
 async fn test_cumulative_offline_penalty() {
+    let mut evm_state = call_evm::EvmState::new();
     let mut consensus = SimplexConsensus::new(
         ConsensusParams::default(),
-        ConsensusValidatorState::new(),
+        &evm_state,
     );
 
     let val_addr = test_addr(1);
     let stake = one_million_call() * 2;
-    let val_id: ValidatorId = consensus.stake_validator(val_addr, [1u8; 32], stake).unwrap();
+    let val_id: ValidatorId = consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], stake).unwrap() as u32;
 
     // First offense: 10 rounds
-    let slash1 = consensus.handle_offline(val_id, 10).unwrap();
+    let slash1 = consensus.handle_offline(&mut evm_state, val_id, 10).unwrap();
     // Second offense: another 10 rounds
-    let slash2 = consensus.handle_offline(val_id, 10).unwrap();
+    let slash2 = consensus.handle_offline(&mut evm_state, val_id, 10).unwrap();
 
     // Total slashed
     let total_slashed = slash1 + slash2;
-    let stake_info = consensus.validators().get_validator_stake(val_id).unwrap();
-    assert_eq!(stake_info.slash_history.len(), 2);
+    let stake_after = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, val_addr);
     assert!(total_slashed > 0);
+    assert!(stake_after < stake);
 }
 
 /// Block with invalid proposer is rejected by validate_block.
@@ -183,9 +183,10 @@ async fn test_invalid_proposer_rejected() {
 
     let sender = test_addr(1);
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Try to validate a block from an invalid proposer (not in subset)

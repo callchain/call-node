@@ -106,15 +106,16 @@ impl NodeBuilder {
 
         let mempool = Arc::new(RwLock::new(Mempool::new()));
 
+        let mut evm_state = call_evm::EvmState::new();
         let mut consensus = SimplexConsensus::new(
             ConsensusParams::default(),
-            call_consensus::ValidatorStateManager::default(),
+            &evm_state,
         );
 
         for (addr, pubkey, stake) in &self.validator_stakes {
-            consensus.stake_validator(*addr, *pubkey, *stake).expect("stake validator");
+            consensus.stake_validator(&mut evm_state, *addr, *pubkey, *stake).expect("stake validator");
         }
-        consensus.refresh_proposer_subset();
+        consensus.refresh_proposer_subset(&evm_state);
 
         let state = Arc::new(RpcState::new(
             AccountState::new(),
@@ -239,8 +240,9 @@ impl TestNode {
 
         // Commit
         {
+            let mut evm_state = self.state.evm_state.write().unwrap();
             let mut consensus = self.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit block");
+            consensus.commit_block(&block, &result, &mut evm_state).expect("commit block");
         }
         self.last_result = Some(result.clone());
 

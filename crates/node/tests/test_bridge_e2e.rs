@@ -76,11 +76,12 @@ fn test_bridge_deposit_evm_credits() {
 
     // Stake a validator so there is a proposer
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus
-            .stake_validator(sender, [1u8; 32], one_million_call())
+            .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Fund sender with EVM storage balance for the deposit
@@ -116,11 +117,12 @@ fn test_bridge_withdraw_records_outflow() {
 
     // Stake a validator
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus
-            .stake_validator(sender, [1u8; 32], one_million_call())
+            .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Fund sender with EVM storage balance
@@ -174,11 +176,12 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
 
     // Stake sender as validator and register in validator state
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let val_id = consensus
-            .stake_validator(sender, [1u8; 32], one_million_call())
-            .unwrap();
-        consensus.refresh_proposer_subset();
+            .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
+            .unwrap() as u32;
+        consensus.refresh_proposer_subset(&evm_state);
 
         let mut validator_mgr = node.state.validator_state.write().unwrap();
         validator_mgr.register_validator_from_stake(

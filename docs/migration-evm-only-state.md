@@ -4,14 +4,20 @@
 
 **Reference architecture:** This plan follows the `tempo` precompile pattern: native Rust precompiles at fixed addresses, accessed via standard EVM `CALL`, with state stored in EVM storage slots under each precompile's address. No Solidity system contracts, no TLS protocol-state hooks.
 
-**Current state (as of 2026-04-29):**
-- `BlockHeader` has 5 roots: `payment_root`, `evm_state_root`, `bridge_root`, `receipt_root`, `state_root` (aggregate of the 4).
-- `Block::execute` computes 4 separate roots then hashes them together.
-- `StateHookGuard` injects 6 protocol-state pointers into TLS: `AccountState`, `AssetRegistry`, `ComplianceEngine`, `ShieldedState`, `OracleManager`, `GovernanceManager`. Separate hooks exist for validator, agent, and bridge state.
-- Precompiles are **stateless** (`fn(&[u8], u64) -> PrecompileResult`) and read/write protocol state through these hooks, completely outside revm's state tracking.
-- `RpcState` holds 14+ protocol-state fields plus `evm_state`.
-- Persistence saves/loads 13+ separate state types from reth-db.
-- Validator/agent/bridge precompiles use `OnceLock` registration — fallback stubs exist until an external crate registers the real implementation.
+**Current state (as of 2026-05-02):**
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1 — Storage Layout Design | ✅ Done | Slot layouts defined for all 9 precompiles; `storage_slot()` helper + `slot_balance`, `slot_asset_meta`, etc. in `helpers/utils.rs` |
+| Phase 2 — BlockHeader Simplification | ✅ Done | `BlockHeader` now has single `state_root` = EVM state root; `compute_payment_root` / `bridge_root` / `receipt_root` removed |
+| Phase 3 — Stateful Precompile Infra | ✅ Done | `StorageProvider`, `EvmStorageProvider`, `StorageCtx` (TLS), `StatefulPrecompile` trait, `CallPrecompiles::run`, `input_cost()`, `fill_precompile_output()` all implemented; `state_hook.rs` deleted; `OnceLock` registration removed |
+| Phase 4 — Precompile Migration | ✅ Done | All 9 precompiles fully migrated to `StorageCtx::sload/sstore`. No protocol-state dependencies remain. `shielded.rs` uses `call_shielded` for pure cryptography (Poseidon, ZK proofs, Merkle trees) — not protocol state. |
+| Phase 5 — Consensus/BFT | ✅ Done | `SimplexConsensus` now reads/writes validator state directly from EVM storage via `evm_instructions.rs`. `ValidatorStateManager` removed from `SimplexConsensus`. `ExecutionState` no longer holds `shielded_state`. All consensus callers (`node`, `rpc`, `payload-builder`) updated. Tests pass. |
+| Phase 6 — RpcState | ❌ Not started | `RpcState` still holds `balance_state`, `asset_registry`, `compliance_engine`, `bridge_state`, `validator_state`, `agent_registry`, `shielded_state`, `governance`, `oracle`, `fee_currency_registry` |
+| Phase 7 — Persistence | ❌ Not started | Likely still saves/loads multiple protocol-state tables beyond `EvmState` |
+| Phase 8 — Genesis | ❌ Not started | Genesis probably still initializes `AccountState`, `AssetRegistry`, `ComplianceEngine`, etc. separately |
+| Phase 9 — Testing | 🔄 Partial | Precompile unit tests pass (58/58). Missing: state-root determinism, revert, genesis-hash, RPC-parity tests |
+| Phase 10 — Cleanup | ❌ Not started | `AccountState`, `AssetRegistry`, `ComplianceEngine`, `BridgeStateManager`, `ValidatorStateManager`, `AgentRegistry`, `OracleManager`, `GovernanceManager`, `ShieldedState` still exist in other crates |
 
 **Target architecture:**
 - `BlockHeader` has a single `state_root` field = `evm_state_root`.

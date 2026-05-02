@@ -192,6 +192,8 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             let genesis_state = executor.execute()
                 .map_err(|e| format!("failed to execute genesis: {e}"))?;
 
+            // Build consensus before moving genesis EVM state into RpcState
+            let new_consensus = SimplexConsensus::new(genesis.consensus_params.clone(), &genesis_state.evm_state);
             // Inject genesis state into RpcState
             *node.state.balance_state.write().map_err(|_| "lock poisoned")? = genesis_state.balances;
             *node.state.asset_registry.write().map_err(|_| "lock poisoned")? = genesis_state.registry;
@@ -224,8 +226,6 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 }
             }
 
-            // Replace consensus with genesis validators and params
-            let new_consensus = SimplexConsensus::new(genesis.consensus_params.clone(), genesis_state.validators);
             *node.consensus.write().map_err(|_| "lock poisoned")? = new_consensus;
 
             // Sync consensus params into RpcState

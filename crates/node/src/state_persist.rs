@@ -223,13 +223,6 @@ pub(crate) fn persist_state_to_db(
             .map_err(|e| format!("save shielded: {e}"))?;
     }
 
-    // Persist validator state
-    {
-        let c = consensus.read().unwrap();
-        save_validator_state_inner(db_env, c.validators())
-            .map_err(|e| format!("save validators: {e}"))?;
-    }
-
     // Persist agent state
     {
         let registry = state.agent_registry.read().unwrap();
@@ -713,12 +706,12 @@ pub(crate) fn save_consensus_state_inner(db: &DatabaseEnv, consensus: &SimplexCo
 }
 
 /// Load consensus state from the database.
-pub(crate) fn load_consensus_state_inner(db: &DatabaseEnv, validators: &ValidatorStateManager) -> Result<SimplexConsensus, String> {
+pub(crate) fn load_consensus_state_inner(db: &DatabaseEnv, evm_state: &EvmState) -> Result<SimplexConsensus, String> {
     match db_get::<CallConsensusState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => {
             let state: PersistedConsensusState = serde_json::from_slice(&data)
                 .map_err(|e| format!("deserialize consensus: {e}"))?;
-            Ok(SimplexConsensus::restore_from_persisted(state, validators.clone()))
+            Ok(SimplexConsensus::restore_from_persisted(state, evm_state))
         }
         None => Err("no consensus state in db".to_string()),
     }
@@ -779,12 +772,6 @@ pub(crate) fn persist_state_incremental(
             .collect();
         db_clear::<CallShieldedCommitments>(db_env).map_err(|e: StorageError| e.to_string())?;
         db_batch_put::<CallShieldedCommitments>(db_env, cm_entries).map_err(|e: StorageError| e.to_string())?;
-    }
-
-    // Persist validator state (overwrite, no clear)
-    {
-        let c = consensus.read().map_err(|_| "consensus lock poisoned".to_string())?;
-        save_validator_state_no_clear(db_env, c.validators())?;
     }
 
     // Persist agent state (overwrite, no clear)

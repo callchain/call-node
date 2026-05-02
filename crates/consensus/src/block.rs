@@ -6,7 +6,6 @@ use call_bridge::BridgeConfig;
 use call_crypto::keccak256;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_protocol::FeeParams;
-use call_shielded::ShieldedState;
 use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -136,7 +135,6 @@ pub type EvmTx = Vec<u8>;
 
 /// Core mutable protocol state passed to every block execution.
 pub struct ExecutionState<'a> {
-    pub shielded_state: &'a mut ShieldedState,
     pub evm_state: &'a mut EvmState,
 }
 
@@ -155,11 +153,8 @@ pub struct Subsystems<'a> {
 }
 
 impl<'a> ExecutionState<'a> {
-    pub fn new(
-        shielded_state: &'a mut ShieldedState,
-        evm_state: &'a mut EvmState,
-    ) -> Self {
-        Self { shielded_state, evm_state }
+    pub fn new(evm_state: &'a mut EvmState) -> Self {
+        Self { evm_state }
     }
 }
 

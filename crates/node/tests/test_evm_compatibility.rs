@@ -30,9 +30,11 @@ fn test_evm_state_isolation_from_protocol() {
 
     let sender = test_addr(1);
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Legacy protocol balance is ignored
@@ -119,9 +121,11 @@ async fn test_evm_state_persists_across_blocks() {
 
     let sender = test_addr(1);
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Set EVM balance before block production
@@ -225,9 +229,11 @@ fn test_protocol_and_evm_same_address() {
 
     let sender = test_addr(1);
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Asset balance lives in EVM storage slots

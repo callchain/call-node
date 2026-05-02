@@ -26,20 +26,22 @@ async fn test_light_verify_block_header_valid() {
     // Stake a dummy validator first so the real validator gets id >= 1
     // (the RPC rejects proposer == 0)
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus
-            .stake_validator(test_addr(99), [0u8; 32], one_million_call())
+            .stake_validator(&mut evm_state, test_addr(99), [0u8; 32], one_million_call())
             .unwrap();
     }
 
     // Stake validator in consensus with the Ed25519 pubkey
     let val_id: ValidatorId = {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(&mut evm_state, validator_addr, ed25519_pubkey, one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset();
-        id
+        consensus.refresh_proposer_subset(&evm_state);
+        id as u32
     };
 
     // Seed validator into EVM storage (RPC reads from EVM, not legacy validator_state)
@@ -105,19 +107,21 @@ async fn test_light_verify_block_header_bad_parent() {
 
     // Stake a dummy validator first so the real validator gets id >= 1
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus
-            .stake_validator(test_addr(99), [0u8; 32], one_million_call())
+            .stake_validator(&mut evm_state, test_addr(99), [0u8; 32], one_million_call())
             .unwrap();
     }
 
     let val_id: ValidatorId = {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(&mut evm_state, validator_addr, ed25519_pubkey, one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset();
-        id
+        consensus.refresh_proposer_subset(&evm_state);
+        id as u32
     };
 
     {
@@ -250,19 +254,21 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
 
     // Stake a dummy validator first so the real validator gets id >= 1
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus
-            .stake_validator(test_addr(99), [0u8; 32], one_million_call())
+            .stake_validator(&mut evm_state, test_addr(99), [0u8; 32], one_million_call())
             .unwrap();
     }
 
     let val_id: ValidatorId = {
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(&mut evm_state, validator_addr, ed25519_pubkey, one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset();
-        id
+        consensus.refresh_proposer_subset(&evm_state);
+        id as u32
     };
 
     {

@@ -47,9 +47,11 @@ async fn test_high_throughput_many_transactions() {
 
     let (secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Fund sender with enough for 1000 transfers
@@ -88,9 +90,11 @@ fn test_mempool_capacity_under_pressure() {
 
     let sender = test_addr(1);
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Use multiple senders to exceed per-address limit (256)
@@ -145,9 +149,11 @@ async fn test_base_fee_under_sustained_load() {
 
     let (secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000_000).unwrap();
@@ -180,9 +186,11 @@ async fn test_no_double_spend_concurrent_nonce() {
 
     let (secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
@@ -216,9 +224,11 @@ async fn test_final_state_consistency_after_load() {
 
     let (secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     let initial_balance = 200_000_000u128;
@@ -263,9 +273,11 @@ async fn test_multi_sender_stress() {
 
     let sender = test_addr(1);
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Fund 20 senders
@@ -307,9 +319,11 @@ async fn test_high_volume_block_production() {
 
     let (secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     // Enough CALL for gas + transfers (200 txs * ~110k gas each + 200 * 10 transfer)
@@ -353,9 +367,11 @@ async fn test_rapid_block_production() {
 
     let (secret, sender) = test_keypair();
     {
+        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset();
+        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&evm_state);
     }
 
     node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 600_000_000).unwrap();

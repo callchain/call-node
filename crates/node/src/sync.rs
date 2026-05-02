@@ -240,7 +240,8 @@ pub(crate) fn apply_synced_blocks(
                 }
 
                 if let Ok(mut c) = consensus.write() {
-                    if let Err(e) = c.commit_block(&block, &result) {
+                    let mut evm_state = state.evm_state.write().unwrap();
+                    if let Err(e) = c.commit_block(&block, &result, &mut evm_state) {
                         tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
                     }
                 }

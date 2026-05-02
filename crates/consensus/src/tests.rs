@@ -118,14 +118,11 @@ fn test_block_execution_order() {
     let mut evm_state = call_evm::EvmState::new();
     evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
-    let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
 
     let result = block
         .execute(
-            &mut ExecutionState::new(
-                &mut shielded_state, &mut evm_state,
-            ),
+            &mut ExecutionState::new(&mut evm_state),
             &mut BlockContext {
                 current_block_height: 1,
                 fee_params: &mut fee_params,
@@ -169,15 +166,12 @@ fn test_system_tx_reward_distribution() {
         vec![],
     );
 
-    let mut shielded_state = call_shielded::ShieldedState::new();
     let mut fee_params = FeeParams::default();
     let mut evm_state = call_evm::EvmState::new();
 
     let result = block
         .execute(
-            &mut ExecutionState::new(
-                &mut shielded_state, &mut evm_state,
-            ),
+            &mut ExecutionState::new(&mut evm_state),
             &mut BlockContext {
                 current_block_height: 1,
                 fee_params: &mut fee_params,
