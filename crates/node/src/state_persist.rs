@@ -4,10 +4,9 @@ use std::sync::{Arc, RwLock};
 
 use call_consensus::{SimplexConsensus, ForkManager, PersistedConsensusState};
 use call_protocol::{
-    AccountState, AssetRegistry, ComplianceEngine, FeeParams, FeeCurrencyRegistry, ProtocolReceipt,
+    ComplianceEngine, FeeParams, FeeCurrencyRegistry, ProtocolReceipt,
 };
 use call_evm::EvmState;
-use call_bridge::BridgeStateManager;
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use call_oracle::OracleManager;
@@ -17,12 +16,11 @@ use call_rpc::RpcState;
 use call_storage::{
     StorageError,
     db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
-    save_balances as db_save_balances, load_balances as db_load_balances,
-    CallOracleState, CallEvmAccounts, CallBridgeOps,
-    CallShieldedNullifiers, CallShieldedCommitments, CallValidators, CallAgents,
-    CallGovernanceState, CallComplianceState, CallConsensusState, CallValidatorMeta,
+    CallOracleState, CallEvmAccounts,
+    CallShieldedNullifiers, CallShieldedCommitments, CallAgents,
+    CallGovernanceState, CallComplianceState, CallConsensusState,
     CallReceipts, CallReceiptsByBlock, CallAgentBalances, CallAgentNonces, CallForkState, CallCheckpoint,
-    CallProtocolAssets, CallFeeParams, CallFeeCurrencyRegistry,
+    CallFeeParams, CallFeeCurrencyRegistry,
 };
 use reth_db::DatabaseEnv;
 
@@ -31,16 +29,13 @@ use reth_db::DatabaseEnv;
 /// All on-chain state loaded from reth-db in one struct.
 /// Replaces the previous 13-element tuple so callers use named fields.
 pub(crate) struct LoadedState {
-    pub balance_state: AccountState,
     pub evm_state: EvmState,
-    pub bridge_state: BridgeStateManager,
     pub shielded_state: ShieldedState,
     pub agent_registry: AgentRegistry,
     pub agent_balances: AgentBalances,
     pub agent_nonces: call_agent::AgentNonces,
     pub governance: GovernanceManager,
     pub compliance: ComplianceEngine,
-    pub asset_registry: AssetRegistry,
     pub fee_params: FeeParams,
     pub fee_currency_registry: FeeCurrencyRegistry,
 }
@@ -48,36 +43,12 @@ pub(crate) struct LoadedState {
 /// Load all state types from the reth-db database.
 pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
     // Load balances
-    let (balances, allowances) = match db_load_balances(db_env) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load balances from db");
-            (std::collections::HashMap::new(), std::collections::HashMap::new())
-        }
-    };
-    let mut balance_state = AccountState::new();
-    for ((asset_id, address), balance) in &balances {
-        let _ = balance_state.balances.set_balance(*asset_id, *address, *balance);
-    }
-    for ((asset_id, owner, spender), allowance) in &allowances {
-        balance_state.allowances.set_allowance(*asset_id, *owner, *spender, *allowance);
-    }
-
     // Load EVM accounts
     let evm_state = match load_evm_accounts_inner(db_env) {
         Ok(state) => state,
         Err(e) => {
             tracing::warn!(error = %e, "failed to load evm accounts");
             EvmState::new()
-        }
-    };
-
-    // Load bridge state
-    let bridge_state = match load_bridge_state_inner(db_env) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load bridge state");
-            BridgeStateManager::default()
         }
     };
 
@@ -126,15 +97,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
         }
     };
 
-    // Load asset registry
-    let asset_registry = match load_asset_registry_inner(db_env) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load asset registry");
-            AssetRegistry::new()
-        }
-    };
-
     // Load fee params
     let fee_params = match load_fee_params(db_env) {
         Ok(p) => p,
@@ -154,16 +116,13 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
     };
 
     LoadedState {
-        balance_state,
         evm_state,
-        bridge_state,
         shielded_state,
         agent_registry: registry,
         agent_balances,
         agent_nonces,
         governance,
         compliance,
-        asset_registry,
         fee_params,
         fee_currency_registry,
     }
@@ -184,25 +143,11 @@ pub(crate) fn persist_state_to_db(
     write_checkpoint_pending(db_env, checkpoint_hash)
         .map_err(|e| format!("write checkpoint: {e}"))?;
 
-    // Persist balances
-    {
-        let bs = state.balance_state.read().unwrap();
-        db_save_balances(db_env, bs.balances.balances_map(), bs.allowances.allowances_map())
-            .map_err(|e| format!("save balances: {e}"))?;
-    }
-
     // Persist EVM state
     {
         let evm = state.evm_state.read().unwrap();
         save_evm_accounts_inner(db_env, &evm)
             .map_err(|e| format!("save evm: {e}"))?;
-    }
-
-    // Persist bridge state
-    {
-        let bridge = state.bridge_state.read().unwrap();
-        save_bridge_state_inner(db_env, &bridge)
-            .map_err(|e| format!("save bridge: {e}"))?;
     }
 
     // Persist shielded state
@@ -258,13 +203,6 @@ pub(crate) fn persist_state_to_db(
             .map_err(|e| format!("save fee currency registry: {e}"))?;
     }
 
-    // Persist asset registry
-    {
-        let asset_registry = state.asset_registry.read().unwrap();
-        save_asset_registry_inner(db_env, &asset_registry)
-            .map_err(|e| format!("save asset registry: {e}"))?;
-    }
-
     // Persist consensus state
     {
         let c = consensus.read().unwrap();
@@ -315,38 +253,6 @@ pub(crate) fn save_evm_accounts_inner(db: &DatabaseEnv, state: &EvmState) -> Res
         .collect();
     db_clear::<CallEvmAccounts>(db).map_err(|e: StorageError| e.to_string())?;
     db_batch_put::<CallEvmAccounts>(db, entries).map_err(|e: StorageError| e.to_string())?;
-    Ok(())
-}
-
-/// Load bridge state from DB
-pub(crate) fn load_bridge_state_inner(db: &DatabaseEnv) -> Result<BridgeStateManager, String> {
-    match db_get::<CallBridgeOps>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e: serde_json::Error| e.to_string()),
-        None => Ok(BridgeStateManager::default()),
-    }
-}
-
-/// Save bridge state to DB
-pub(crate) fn save_bridge_state_inner(db: &DatabaseEnv, state: &BridgeStateManager) -> Result<(), String> {
-    let data = serde_json::to_vec(state).map_err(|e: serde_json::Error| e.to_string())?;
-    db_clear::<CallBridgeOps>(db).map_err(|e: StorageError| e.to_string())?;
-    db_put::<CallBridgeOps>(db, vec![0], data).map_err(|e: StorageError| e.to_string())?;
-    Ok(())
-}
-
-/// Load asset registry from DB
-pub(crate) fn load_asset_registry_inner(db: &DatabaseEnv) -> Result<AssetRegistry, String> {
-    match db_get::<CallProtocolAssets>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e: serde_json::Error| e.to_string()),
-        None => Ok(AssetRegistry::new()),
-    }
-}
-
-/// Save asset registry to DB
-pub(crate) fn save_asset_registry_inner(db: &DatabaseEnv, registry: &AssetRegistry) -> Result<(), String> {
-    let data = serde_json::to_vec(registry).map_err(|e: serde_json::Error| e.to_string())?;
-    db_clear::<CallProtocolAssets>(db).map_err(|e: StorageError| e.to_string())?;
-    db_put::<CallProtocolAssets>(db, vec![0], data).map_err(|e: StorageError| e.to_string())?;
     Ok(())
 }
 
@@ -676,23 +582,10 @@ pub(crate) fn persist_state_incremental(
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
 ) -> Result<(), String> {
-    // Persist balances (overwrite existing entries, no clear)
-    {
-        let bs = state.balance_state.read().map_err(|_| "balance lock poisoned".to_string())?;
-        db_save_balances(db_env, bs.balances.balances_map(), bs.allowances.allowances_map())
-            .map_err(|e| format!("save balances: {e}"))?;
-    }
-
     // Persist EVM state (overwrite existing entries, no clear)
     {
         let evm = state.evm_state.read().map_err(|_| "evm lock poisoned".to_string())?;
         save_evm_accounts_no_clear(db_env, &evm)?;
-    }
-
-    // Persist bridge state
-    {
-        let bridge = state.bridge_state.read().map_err(|_| "bridge lock poisoned".to_string())?;
-        save_bridge_state_inner(db_env, &bridge)?;
     }
 
     // Append-only shielded state: new nullifiers and commitments
@@ -737,13 +630,6 @@ pub(crate) fn persist_state_incremental(
         let governance = state.governance.read().map_err(|_| "governance lock poisoned".to_string())?;
         save_governance_state(db_env, &governance)
             .map_err(|e| format!("save governance: {e}"))?;
-    }
-
-    // Persist asset registry (overwrite)
-    {
-        let asset_registry = state.asset_registry.read().map_err(|_| "asset registry lock poisoned".to_string())?;
-        save_asset_registry_inner(db_env, &asset_registry)
-            .map_err(|e| format!("save asset registry: {e}"))?;
     }
 
     // Persist consensus state

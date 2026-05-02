@@ -103,24 +103,18 @@ pub(crate) async fn block_production_loop(
 
         // 3c. Finalize bridge deposits whose challenge period has expired
         {
-            let mut balances = state.balance_state.write().unwrap();
-            let mut bridge_state = state.bridge_state.write().unwrap();
+            let mut evm_state = state.evm_state.write().unwrap();
             let config = BridgeConfig::default();
-            let finalized = bridge_state.finalize_pending_external_deposits(
+            let finalized = call_consensus::exec::evm_instructions::finalize_pending_external_deposits_evm(
+                &mut evm_state,
                 height,
                 config.challenge_period_blocks,
             );
-            for deposit in finalized {
-                if let Err(e) = balances.mint(deposit.asset_id, &call_primitives::Address::ZERO, deposit.recipient, deposit.amount) {
-                    tracing::warn!(error = %e, "bridge: failed to credit finalized deposit");
-                } else {
-                    tracing::info!(
-                        tx_hash = %deposit.source_tx_hash,
-                        recipient = %deposit.recipient,
-                        amount = deposit.amount,
-                        "bridge: deposit finalized and credited"
-                    );
-                }
+            if finalized > 0 {
+                tracing::info!(
+                    count = finalized,
+                    "bridge: deposits finalized and credited"
+                );
             }
         }
 
@@ -415,13 +409,6 @@ pub(crate) async fn block_production_loop(
 
         // 13a. Produce state snapshot at snapshot interval boundaries
         if new_height % prune_config.snapshot_interval == 0 {
-            let balance_state = state.balance_state.read().unwrap();
-            let protocol_root = call_storage::compute_protocol_root(
-                balance_state.balances.balances_map(),
-                balance_state.allowances.allowances_map(),
-            );
-            drop(balance_state);
-
             let evm_root = {
                 let evm_state = state.evm_state.read().unwrap();
                 let root = evm_state.compute_state_root();
@@ -443,7 +430,7 @@ pub(crate) async fn block_production_loop(
                 call_storage::compute_agent_root(&agents)
             };
 
-            let roots = StateRoots { protocol_root, evm_root, shielded_root, agent_root, consensus_root: evm_root };
+            let roots = StateRoots { protocol_root: evm_root, evm_root, shielded_root, agent_root, consensus_root: evm_root };
             let snapshot_dir = db.data_dir.join("snapshots");
             match produce_state_snapshot(&mut prune_state, roots, new_height, Some(&snapshot_dir)) {
                 Ok(_) => {

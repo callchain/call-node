@@ -43,7 +43,10 @@ async fn test_single_validator_block_production() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 1_000_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000,
+        );
     }
 
     // Produce 100 blocks with EVM transactions
@@ -76,7 +79,10 @@ async fn test_base_fee_dynamics() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 1_000_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000,
+        );
     }
 
     let initial_fee = node.base_fee();
@@ -134,7 +140,10 @@ async fn test_validator_reward_accumulation() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 1_000_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000,
+        );
     }
 
     // Produce blocks with EVM transactions to generate fees
@@ -163,7 +172,10 @@ async fn test_block_state_roots() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000,
+        );
     }
 
     node.insert_evm_tx(make_evm_tx(sender, 0, test_addr(2), 1_000));

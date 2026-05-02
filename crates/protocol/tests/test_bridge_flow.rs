@@ -210,7 +210,7 @@ mod test_bridge_flow_impl {
         let (secrets, validators) = generate_bridge_validators(21);
 
         let op = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        let result = process_external_deposit(&op, &mut account, &mut bridge_state, &config, &validators, 100, None).unwrap();
+        let result = process_external_deposit(&op, &mut bridge_state, &config, &validators, 100, None).unwrap();
         assert!(matches!(result, call_bridge::ExternalDepositResult::Queued { .. }));
 
         // Deposit is queued, not credited yet (challenge period)
@@ -229,7 +229,7 @@ mod test_bridge_flow_impl {
         }
 
         // Replay protection
-        let result = process_external_deposit(&op, &mut account, &mut bridge_state, &config, &validators, 200, None);
+        let result = process_external_deposit(&op, &mut bridge_state, &config, &validators, 200, None);
         assert!(result.is_err());
     }
 
@@ -246,7 +246,7 @@ mod test_bridge_flow_impl {
             asset_id: 99, amount: 1000, signatures: vec![],
         };
         assert!(matches!(
-            process_external_deposit(&op, &mut account, &mut bridge_state, &config, &validators, 100, None),
+            process_external_deposit(&op, &mut bridge_state, &config, &validators, 100, None),
             Err(call_bridge::BridgeError::ExternalAssetNotAllowed(99))
         ));
     }
@@ -307,7 +307,7 @@ mod test_bridge_flow_impl {
         let (secrets, validators) = generate_bridge_validators(21);
 
         let op1 = build_external_deposit_with_sigs(&secrets, &(0..14).collect::<Vec<_>>());
-        let result1 = process_external_deposit(&op1, &mut account, &mut bridge_state, &config, &validators, 100, None);
+        let result1 = process_external_deposit(&op1, &mut bridge_state, &config, &validators, 100, None);
         assert!(result1.is_ok());
 
         // Second deposit would exceed daily limit
@@ -321,7 +321,7 @@ mod test_bridge_flow_impl {
                 signature: sign_bridge_event(&secrets[i], &ExternalChain::EthereumMainnet, B256::from_slice(&[1u8; 32]), 101, &[0u8; 32], addr(2), 1, 600),
             }).collect(),
         };
-        let result = process_external_deposit(&op2, &mut account, &mut bridge_state, &config, &validators, 100, None);
+        let result = process_external_deposit(&op2, &mut bridge_state, &config, &validators, 100, None);
         assert!(result.is_err());
     }
 }

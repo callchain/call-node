@@ -9,7 +9,7 @@
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use call_agent::{AgentBalances, AgentRegistry};
-use call_bridge::{BridgeConfig, BridgeStateManager};
+use call_bridge::BridgeConfig;
 use call_consensus::{
     block::{BlockContext, ExecutionState, Subsystems},
     Block, BlockExecutionResult, ConsensusError, ForkManager,
@@ -17,7 +17,7 @@ use call_consensus::{
 use call_evm::EvmState;
 use call_governance::GovernanceManager;
 use call_oracle::OracleManager;
-use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, FeeParams};
+use call_protocol::{ComplianceEngine, FeeParams};
 use call_shielded::ShieldedState;
 
 use crate::handlers::RpcState;
@@ -27,11 +27,8 @@ use crate::handlers::RpcState;
 /// Locks are acquired in the same deterministic order every time to avoid
 /// deadlocks.  Always acquire through [`RpcState::write_all`].
 pub struct StateWriteBundle<'a> {
-    pub balances: RwLockWriteGuard<'a, AccountState>,
-    pub registry: RwLockWriteGuard<'a, AssetRegistry>,
     pub compliance: RwLockWriteGuard<'a, ComplianceEngine>,
     pub evm: RwLockWriteGuard<'a, EvmState>,
-    pub bridge: RwLockWriteGuard<'a, BridgeStateManager>,
     pub agent_registry: RwLockWriteGuard<'a, AgentRegistry>,
     pub agent_balances: RwLockWriteGuard<'a, AgentBalances>,
     pub shielded: RwLockWriteGuard<'a, ShieldedState>,
@@ -46,11 +43,8 @@ pub struct StateWriteBundle<'a> {
 /// Useful for lightweight read-only operations or for cloning state before
 /// the `propose` / `verify` phases of BFT consensus.
 pub struct StateReadBundle<'a> {
-    pub balances: RwLockReadGuard<'a, AccountState>,
-    pub registry: RwLockReadGuard<'a, AssetRegistry>,
     pub compliance: RwLockReadGuard<'a, ComplianceEngine>,
     pub evm: RwLockReadGuard<'a, EvmState>,
-    pub bridge: RwLockReadGuard<'a, BridgeStateManager>,
     pub agent_registry: RwLockReadGuard<'a, AgentRegistry>,
     pub agent_balances: RwLockReadGuard<'a, AgentBalances>,
     pub shielded: RwLockReadGuard<'a, ShieldedState>,
@@ -68,11 +62,8 @@ impl RpcState {
     /// the lock).  In practice this should never happen in normal node operation.
     pub fn write_all(&self) -> StateWriteBundle<'_> {
         StateWriteBundle {
-            balances: self.balance_state.write().unwrap(),
-            registry: self.asset_registry.write().unwrap(),
             compliance: self.compliance_engine.write().unwrap(),
             evm: self.evm_state.write().unwrap(),
-            bridge: self.bridge_state.write().unwrap(),
             agent_registry: self.agent_registry.write().unwrap(),
             agent_balances: self.agent_balances.write().unwrap(),
             shielded: self.shielded_state.write().unwrap(),
@@ -86,11 +77,8 @@ impl RpcState {
     /// Acquire read locks on **all** state components in deterministic order.
     pub fn read_all(&self) -> StateReadBundle<'_> {
         StateReadBundle {
-            balances: self.balance_state.read().unwrap(),
-            registry: self.asset_registry.read().unwrap(),
             compliance: self.compliance_engine.read().unwrap(),
             evm: self.evm_state.read().unwrap(),
-            bridge: self.bridge_state.read().unwrap(),
             agent_registry: self.agent_registry.read().unwrap(),
             agent_balances: self.agent_balances.read().unwrap(),
             shielded: self.shielded_state.read().unwrap(),

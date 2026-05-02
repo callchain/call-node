@@ -8,9 +8,7 @@
 use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
-use call_protocol::{
-    AccountState, AssetRegistry, ComplianceEngine,
-};
+use call_protocol::ComplianceEngine;
 use call_oracle::OracleManager;
 use call_transaction_pool::Mempool;
 use call_rpc::RpcState;
@@ -118,11 +116,8 @@ impl NodeBuilder {
         consensus.refresh_proposer_subset(&evm_state);
 
         let state = Arc::new(RpcState::new(
-            AccountState::new(),
-            AssetRegistry::new(),
             ComplianceEngine::new(),
             call_evm::EvmState::new(),
-            call_bridge::BridgeStateManager::default(),
             call_agent::AgentRegistry::new(),
             call_agent::AgentBalances::new(),
             call_agent::AgentNonces::new(),
@@ -133,13 +128,6 @@ impl NodeBuilder {
         ));
 
         for (asset_id, addr, amount) in &self.initial_balances {
-            state
-                .balance_state
-                .write()
-                .unwrap()
-                .balances
-                .set_balance(*asset_id, *addr, *amount)
-                .expect("set balance");
             let mut evm = state.evm_state.write().unwrap();
             call_consensus::exec::evm_instructions::seed_balance(
                 &mut *evm, *asset_id, *addr, *amount,

@@ -176,14 +176,10 @@ impl ProposalExecutor for NodeProposalExecutor {
                     4 => 4, // Custom
                     _ => return Err(format!("unknown compliance policy id: {new_policy}")),
                 };
-                // Update the asset registry with the new policy
-                let mut registry = self.state.asset_registry.write().map_err(|_| "asset registry lock poisoned".to_string())?;
-                if let Some(asset) = registry.get_asset_mut(*asset_id) {
-                    asset.compliance_policy = policy;
-                    tracing::info!(asset_id, new_policy, "compliance update applied via executor");
-                } else {
-                    return Err(format!("asset {asset_id} not found for compliance update"));
-                }
+                // Update the asset compliance policy in EVM storage
+                let mut evm = self.state.evm_state.write().map_err(|_| "evm lock poisoned".to_string())?;
+                call_consensus::exec::evm_instructions::seed_asset_compliance(&mut evm, *asset_id, policy);
+                tracing::info!(asset_id, new_policy, "compliance update applied via executor");
             }
             ProposalType::FeeCurrencyAdd { asset_id, name, oracle_price_key } => {
                 let key_bytes: Option<[u8; 32]> = if oracle_price_key.is_empty() {

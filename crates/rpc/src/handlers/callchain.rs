@@ -666,37 +666,28 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let mut tx_hash_arr = [0u8; 32];
             tx_hash_arr.copy_from_slice(&tx_hash_bytes);
             let tx_hash = alloy_primitives::B256::from(tx_hash_arr);
-            let bridge = state.bridge_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let status = if let Some(pending) = bridge.pending_external_deposits.iter().find(|d| d.source_tx_hash == tx_hash) {
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let pending_status = evm_instructions::read_bridge_pending_status(&*evm, tx_hash_arr);
+            let is_processed = evm_instructions::read_bridge_processed(&*evm, tx_hash_arr);
+            let status = if pending_status == 1 {
+                let recipient = evm_instructions::read_bridge_pending_recipient(&*evm, tx_hash_arr);
+                let asset_id = evm_instructions::read_bridge_pending_asset(&*evm, tx_hash_arr);
+                let amount = evm_instructions::read_bridge_pending_amount(&*evm, tx_hash_arr);
+                let submitted_at_block = evm_instructions::read_bridge_pending_block(&*evm, tx_hash_arr);
                 serde_json::json!({
                     "status": "pending",
                     "stage": "challenge_period",
                     "sourceTxHash": source_tx_hash_str,
-                    "recipient": format!("{:?}", pending.recipient),
-                    "assetId": pending.asset_id,
-                    "amount": pending.amount.to_string(),
-                    "signaturesCount": pending.signatures_count,
-                    "submittedAtBlock": pending.submitted_at_block,
+                    "recipient": format!("{:?}", recipient),
+                    "assetId": asset_id,
+                    "amount": amount.to_string(),
+                    "submittedAtBlock": submitted_at_block,
                 })
-            } else if let Some(event) = bridge.bridge_events.iter().find(|e| {
-                e.source_tx_hash == Some(tx_hash)
-            }) {
-                use call_bridge::BridgeEventType;
-                let (status_label, stage) = match event.event_type {
-                    BridgeEventType::ExternalDepositQueued => ("queued", "challenge_period"),
-                    BridgeEventType::ExternalDepositFinalized => ("finalized", "complete"),
-                    BridgeEventType::ExternalDepositChallenged => ("challenged", "revoked"),
-                    _ => ("unknown", "unknown"),
-                };
+            } else if is_processed {
                 serde_json::json!({
-                    "status": status_label,
-                    "stage": stage,
+                    "status": "finalized",
+                    "stage": "complete",
                     "sourceTxHash": source_tx_hash_str,
-                    "recipient": event.recipient.map(|a| format!("{:?}", a)),
-                    "assetId": event.asset_id,
-                    "amount": event.amount.to_string(),
-                    "fee": event.fee.to_string(),
-                    "blockHeight": event.block_height,
                 })
             } else {
                 serde_json::json!({
@@ -781,9 +772,8 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                     .ok_or_else(|| invalid_params("light client not initialized".into()))?;
                 let config = call_bridge::BridgeConfig::default();
                 let current_block = _state.get_current_block();
-                let mut balances = _state.balance_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
-                let mut bridge_state = _state.bridge_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
-                match call_bridge::process_light_client_deposit(light_client, &op, &mut balances, &mut bridge_state, &config, current_block) {
+                let mut evm_state = _state.evm_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
+                match call_bridge::process_light_client_deposit_evm(light_client, &op, &mut evm_state, &config, current_block) {
                     Ok(call_bridge::ExternalDepositResult::Queued { finalized_at_block, .. }) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
                         "status": "queued",
                         "assetId": asset_id,

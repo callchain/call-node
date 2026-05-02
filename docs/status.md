@@ -14,10 +14,10 @@
 
 | 字段 | 是否已迁移到 EVM storage | 仍在被谁使用 | 能否删除 |
 |------|------------------------|-------------|---------|
-| `balance_state` | 部分迁移（Asset precompile 已读写 EVM 余额），但 `balance_state` 仍作为内存缓存 | `block_producer.rs` bridge deposit 结算、`state_persist.rs` 快照 | **否** |
-| `asset_registry` | 部分迁移（Asset 元数据已存 EVM） | `state_persist.rs` 加载/保存 | **否** |
+| `balance_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（所有余额读写走 EVM） | **是**（已移除） |
+| `asset_registry` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（所有资产元数据读写走 EVM） | **是**（已移除） |
 | `compliance_engine` | 部分迁移（Compliance precompile 存在） | `state_bundle.rs` 仅获取锁，node 中无 active 使用 | **可能可以，需确认** |
-| `bridge_state` | 未完全迁移（Bridge precompile 存在，但 deposit 结算仍走内存） | `block_producer.rs` `finalize_pending_external_deposits` | **否** |
+| `bridge_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（pending deposits、processed txs、daily limits 全部走 EVM） | **是**（已移除） |
 | `validator_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（所有验证人读写走 EVM） | **是**（已移除） |
 | `agent_registry` | 未完全迁移 | `block_producer.rs` 快照 | **否** |
 | `shielded_state` | 未完全迁移 | `block_producer.rs` 快照 | **否** |
@@ -29,7 +29,7 @@
 
 ## 关键阻塞点
 
-1. **`block_producer.rs:106-125`** — bridge deposit 仍通过 `balance_state.mint()` 结算，未走 EVM storage
+1. ✅ ~~`block_producer.rs:106-125` — bridge deposit 仍通过 `balance_state.mint()` 结算，未走 EVM storage~~（已解决：balance 和 bridge 均走 EVM）
 2. **`block_producer.rs:279-309`** — governance 提案推进仍走内存 `GovernanceManager`
 3. **`block_producer.rs:414-454`** — 状态快照仍从各内存结构读 root
 
@@ -39,16 +39,21 @@
 
 按以下顺序逐步将 node/rpc 层的读写路径切到 EVM storage，每完成一个字段就删除对应的 `RpcState` 字段和 persistence 代码。
 
-### Step 1 — `balance_state` + `asset_registry`（Asset precompile 打通）
+### Step 1 — `balance_state` + `asset_registry`（Asset precompile 打通）✅ 已完成
 
 - **目标**：所有余额和资产元数据只从 EVM storage 读写，`AccountState` 和 `AssetRegistry` 从 `RpcState` 移除
-- **工作量**：中等
-- **步骤**：
-  1. 修改 `block_producer.rs:106-125`：bridge deposit 结算改为调用 `evm_instructions::seed_balance()` 写 EVM storage，不再写 `balance_state`
-  2. 删除快照中的 `protocol_root` 计算（改用 `evm_root` 作为唯一 root）
-  3. 删除 `state_persist.rs` 中的 `save_balances` / `load_balances`（数据已在 EVM accounts 中）
-  4. 删除 `RpcState.balance_state` 和 `RpcState.asset_registry` 字段
-  5. 清理 `state_bundle.rs` 中对应的锁获取
+- **状态**：已完成（2026-05-02）
+- **完成内容**：
+  1. ✅ `crates/consensus/src/exec/evm_instructions.rs` — 新增 `add_balance_evm`、`deduct_balance_evm`、`seed_allowance`、`read_allowance`、`add_asset_supply_evm`、`seed_asset_compliance`、`read_asset_contract_address`、`seed_asset_contract_address`
+  2. ✅ `crates/node/src/block_producer.rs` — bridge deposit 结算改为调用 `evm_instructions::add_balance_evm()` 写 EVM storage，不再写 `balance_state`
+  3. ✅ `crates/node/src/state_persist.rs` — 删除 `balance_state` 和 `asset_registry` 的 persistence 代码
+  4. ✅ `crates/rpc/src/state_bundle.rs` — 从 `StateWriteBundle` / `StateReadBundle` 移除 `balance_state` 和 `asset_registry`
+  5. ✅ `crates/rpc/src/handlers/state.rs` / `callchain.rs` — 从 `RpcState` 删除 `balance_state` 和 `asset_registry` 字段；`grant_agent_balance` 改为从 EVM 读余额
+  6. ✅ `crates/node/src/lib.rs` — 删除 `AccountState` 和 `AssetRegistry` 初始化
+  7. ✅ `crates/node/src/boot.rs` — genesis 注入改为直接写 EVM storage
+  8. ✅ `crates/chainspec/src/genesis.rs` — 从 `GenesisState` 删除 `balances` 和 `registry`；资产注册直接写 EVM
+  9. ✅ `crates/bridge/src/external/deposit.rs` — 删除 `process_external_deposit` / `process_light_client_deposit` 的 `AccountState` 参数
+  10. ✅ 修复全部 lib tests 和 integration tests（12 个测试文件）
 
 ### Step 2 — `validator_state`（Phase 5 收尾）✅ 已完成
 
@@ -68,14 +73,21 @@
   11. ✅ `crates/consensus/src/exec/evm_instructions.rs` — 新增 BLS pubkey storage、validator 删除/轮换 helper
   12. ✅ 修复全部集成测试中的预存在 bug（`evm_state` 重复写锁死锁、gas limit 不匹配、quorum 计算错误）
 
-### Step 3 — `bridge_state`（Bridge precompile 打通）
+### Step 3 — `bridge_state`（Bridge precompile 打通）✅ 已完成
 
 - **目标**：外部 deposit/withdrawal 状态只存 EVM storage
-- **工作量**：中等
-- **步骤**：
-  1. 将 `BridgeStateManager` 的 pending deposits、withdrawal tracking 迁移到 Bridge precompile storage slots
-  2. 修改 `block_producer.rs` bridge 结算逻辑为调用 Bridge precompile
-  3. 删除 `RpcState.bridge_state` 和 persistence
+- **状态**：已完成（2026-05-02）
+- **完成内容**：
+  1. ✅ `crates/consensus/src/exec/evm_instructions.rs` — 新增 `read_bridge_pending_*`、`seed_bridge_pending`、`set_bridge_pending_status`、`read_bridge_processed`、`seed_bridge_processed`、`finalize_pending_external_deposits_evm`
+  2. ✅ `crates/node/src/block_producer.rs` — bridge deposit finalization 改为调用 `finalize_pending_external_deposits_evm()`，直接读写 EVM storage，不再依赖 `BridgeStateManager`
+  3. ✅ `crates/bridge/src/external/deposit.rs` — 新增 `process_external_deposit_evm`、`process_light_client_deposit_evm`，inline EVM slot helpers；保留原有函数供 bridge crate 内部测试
+  4. ✅ `crates/rpc/src/handlers/callchain.rs` — `call_bridgeGetDepositStatus` 改为从 EVM storage 读 pending/processed 状态；`call_lightClientBridgeDeposit` 改为调用 `process_light_client_deposit_evm`
+  5. ✅ `crates/rpc/src/handlers/state.rs` — 从 `RpcState` 删除 `bridge_state` 字段和 `new()` 参数
+  6. ✅ `crates/rpc/src/state_bundle.rs` — 从 `StateWriteBundle` / `StateReadBundle` 移除 `bridge`
+  7. ✅ `crates/node/src/state_persist.rs` — 删除 `bridge_state` persistence（`load_bridge_state_inner` / `save_bridge_state_inner` / `CallBridgeOps`）
+  8. ✅ `crates/node/src/lib.rs` — 删除 `BridgeStateManager` 初始化；`LoadedState` 移除 `bridge_state`
+  9. ✅ `crates/payload-builder/src/builder.rs` — 移除 `BridgeStateManager` 参数
+  10. ✅ 修复全部 lib tests 和 integration tests
 
 ### Step 4 — `governance`（Governance precompile 打通）
 

@@ -22,13 +22,6 @@ fn one_million_call() -> u128 {
 
 /// Register asset 1 and deploy its wrapped ERC-20 contract.
 fn setup_bridge_env(node: &mut TestNode, sender: Address) {
-    {
-        let mut registry = node.state.asset_registry.write().unwrap();
-        registry
-            .register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0)
-            .unwrap();
-    }
-
     let executor = call_evm::EvmExecutor::new(1);
     let mut evm_state = node.state.evm_state.write().unwrap();
     let bridge = alloy_primitives::Address::repeat_byte(0xFF);
@@ -60,10 +53,7 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
         0, // active
     );
     evm_instructions::seed_bridge_contract(&mut evm_state, 1, contract_addr);
-    drop(evm_state);
-
-    let mut registry = node.state.asset_registry.write().unwrap();
-    registry.set_evm_contract_address(1, contract_addr);
+    evm_instructions::seed_asset_contract_address(&mut evm_state, 1, contract_addr);
 }
 
 /// Bridge environment setup and empty block production.
@@ -157,15 +147,6 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     let mut node = TestNode::new();
 
     let (_secret, sender) = test_keypair();
-
-    // Fund sender with CALL for gas
-    node.state
-        .balance_state
-        .write()
-        .unwrap()
-        .balances
-        .set_balance(1, sender, 1_000_000_000)
-        .unwrap();
 
     // Seed EVM storage with CALL balance for fees
     {

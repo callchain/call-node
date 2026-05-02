@@ -38,7 +38,7 @@ use call_consensus::{
 use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, SyncRequest};
 use call_primitives::BlockHash;
 use call_protocol::{
-    AccountState, AssetRegistry, ComplianceEngine, FeeParams, FeeCurrencyRegistry,
+    ComplianceEngine, FeeParams, FeeCurrencyRegistry,
     security::P2PDefense,
 };
 use call_governance::GovernanceManager;
@@ -56,7 +56,6 @@ use crate::state_persist::{
 };
 use call_transaction_pool::Mempool;
 use call_evm::EvmState;
-use call_bridge::BridgeStateManager;
 use call_agent::{AgentRegistry, AgentBalances};
 use call_shielded::ShieldedState;
 use jsonrpsee::server::ServerHandle;
@@ -147,18 +146,15 @@ impl CallNode {
         let fresh_start = recovery_needed || !blocks_exist;
 
         // Load persisted state from reth-db (skip if recovery needed)
-        let mut loaded = if recovery_needed {
+        let loaded = if recovery_needed {
             state_persist::LoadedState {
-                balance_state: AccountState::new(),
                 evm_state: EvmState::new(),
-                bridge_state: BridgeStateManager::default(),
                 shielded_state: ShieldedState::new(),
                 agent_registry: AgentRegistry::new(),
                 agent_balances: AgentBalances::new(),
                 agent_nonces: call_agent::AgentNonces::new(),
                 governance: GovernanceManager::new(),
                 compliance: ComplianceEngine::new(),
-                asset_registry: AssetRegistry::new(),
                 fee_params: FeeParams::default(),
                 fee_currency_registry: FeeCurrencyRegistry::new(),
             }
@@ -206,11 +202,6 @@ impl CallNode {
             }
         };
 
-        // Replay AssetRegistry from block history if db snapshot is empty/missing.
-        // This ensures asset IDs and metadata are reconstructible from canonical history.
-        if loaded.asset_registry.is_empty() && !fresh_start {
-            loaded.asset_registry = replay_asset_registry(&data_dir);
-        }
 
         // Try to load persisted consensus state; fall back to genesis
         let consensus = if recovery_needed {
@@ -233,11 +224,8 @@ impl CallNode {
         };
 
         let state = Arc::new(RpcState::new(
-            loaded.balance_state,
-            loaded.asset_registry,
             loaded.compliance,
             loaded.evm_state,
-            loaded.bridge_state,
             loaded.agent_registry,
             loaded.agent_balances,
             loaded.agent_nonces,
@@ -1241,13 +1229,6 @@ fn load_block(data_dir: &Path, height: u64) -> Option<Block> {
     let path = data_dir.join("blocks").join(format!("{height:012}.json"));
     let data = std::fs::read(&path).ok()?;
     serde_json::from_slice(&data).ok()
-}
-
-/// Replay AssetRegistry from canonical block history.
-/// Scans blocks/*.json in height order and re-executes RegisterAsset instructions
-/// to reconstruct asset IDs and metadata deterministically.
-fn replay_asset_registry(_data_dir: &Path) -> AssetRegistry {
-    AssetRegistry::new()
 }
 
 /// Find the highest block height on disk by scanning the blocks directory.

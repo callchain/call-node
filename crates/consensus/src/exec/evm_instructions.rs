@@ -9,7 +9,7 @@
 
 use call_evm::EvmState;
 use call_precompiles::{
-    address_to_u256, read_string32, slot_asset_meta, slot_balance,
+    address_to_u256, read_string32, slot_allowance, slot_asset_meta, slot_balance,
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
     write_string32,
     AGENT_ADDRESS, ASSET_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
@@ -256,6 +256,41 @@ pub fn seed_balance(evm_state: &mut EvmState, asset_id: u64, addr: Address, amou
     evm_state.set_storage(ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
 }
 
+/// Add to an asset balance in EVM storage (reads current, adds amount, writes back).
+pub fn add_balance_evm(evm_state: &mut EvmState, asset_id: u64, addr: Address, amount: u128) {
+    let current = read_balance(evm_state, asset_id, addr);
+    let new = current.saturating_add(amount);
+    seed_balance(evm_state, asset_id, addr, new);
+}
+
+/// Deduct from an asset balance in EVM storage (reads current, subtracts amount, writes back).
+/// Returns true if deduction succeeded, false if insufficient balance.
+pub fn deduct_balance_evm(evm_state: &mut EvmState, asset_id: u64, addr: Address, amount: u128) -> bool {
+    let current = read_balance(evm_state, asset_id, addr);
+    if current < amount {
+        return false;
+    }
+    seed_balance(evm_state, asset_id, addr, current - amount);
+    true
+}
+
+/// Seed an allowance directly into EVM storage.
+pub fn seed_allowance(evm_state: &mut EvmState, asset_id: u64, owner: Address, spender: Address, amount: u128) {
+    evm_state.set_storage(ASSET_ADDRESS, slot_allowance(asset_id, owner, spender), u128_to_u256(amount));
+}
+
+/// Read an allowance from EVM storage.
+pub fn read_allowance(evm_state: &EvmState, asset_id: u64, owner: Address, spender: Address) -> u128 {
+    u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, slot_allowance(asset_id, owner, spender)))
+}
+
+/// Add to asset supply in EVM storage.
+pub fn add_asset_supply_evm(evm_state: &mut EvmState, asset_id: u64, amount: u128) {
+    let current = read_asset_supply(evm_state, asset_id);
+    let new = current.saturating_add(amount);
+    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(new));
+}
+
 /// Seed asset metadata directly into EVM storage.
 #[allow(clippy::too_many_arguments)]
 pub fn seed_asset(
@@ -315,6 +350,202 @@ pub fn read_bridge_total_withdrawals(evm_state: &EvmState, asset_id: u64) -> u12
     u256_to_u128(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_total_withdrawals(asset_id)))
 }
 
+/// Read bridge pending deposit count from EVM storage.
+pub fn read_bridge_pending_count(evm_state: &EvmState) -> u64 {
+    u256_to_u64(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_count()))
+}
+
+/// Read bridge pending deposit hash by index from EVM storage.
+pub fn read_bridge_pending_hash(evm_state: &EvmState, index: u64) -> [u8; 32] {
+    let val = evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_hash(index));
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&val.to_be_bytes::<32>());
+    hash
+}
+
+/// Read bridge pending deposit status from EVM storage.
+pub fn read_bridge_pending_status(evm_state: &EvmState, tx_hash: [u8; 32]) -> u8 {
+    evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash)).to_be_bytes::<32>()[31]
+}
+
+/// Read bridge pending deposit recipient from EVM storage.
+pub fn read_bridge_pending_recipient(evm_state: &EvmState, tx_hash: [u8; 32]) -> Address {
+    u256_to_address(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_recipient(tx_hash)))
+}
+
+/// Read bridge pending deposit asset_id from EVM storage.
+pub fn read_bridge_pending_asset(evm_state: &EvmState, tx_hash: [u8; 32]) -> u64 {
+    u256_to_u64(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_asset(tx_hash)))
+}
+
+/// Read bridge pending deposit amount from EVM storage.
+pub fn read_bridge_pending_amount(evm_state: &EvmState, tx_hash: [u8; 32]) -> u128 {
+    u256_to_u128(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_amount(tx_hash)))
+}
+
+/// Read bridge pending deposit block from EVM storage.
+pub fn read_bridge_pending_block(evm_state: &EvmState, tx_hash: [u8; 32]) -> u64 {
+    u256_to_u64(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_block(tx_hash)))
+}
+
+/// Queue a pending external deposit in EVM storage.
+pub fn seed_bridge_pending(
+    evm_state: &mut EvmState,
+    tx_hash: [u8; 32],
+    recipient: Address,
+    asset_id: u64,
+    amount: u128,
+    block: u64,
+) {
+    let count = read_bridge_pending_count(evm_state);
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(count), alloy_primitives::U256::from_be_slice(&tx_hash));
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_count(), u64_to_u256(count + 1));
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash), alloy_primitives::U256::from(1u8));
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_recipient(tx_hash), address_to_u256(recipient));
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_asset(tx_hash), u64_to_u256(asset_id));
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_amount(tx_hash), u128_to_u256(amount));
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_block(tx_hash), u64_to_u256(block));
+}
+
+/// Set bridge pending deposit status in EVM storage (0=pending, 2=finalized, 3=rejected).
+pub fn set_bridge_pending_status(evm_state: &mut EvmState, tx_hash: [u8; 32], status: u8) {
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash), alloy_primitives::U256::from(status));
+}
+
+/// Read whether a source tx has been processed from EVM storage.
+pub fn read_bridge_processed(evm_state: &EvmState, tx_hash: [u8; 32]) -> bool {
+    evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_processed(tx_hash)) != U256::ZERO
+}
+
+/// Mark a source tx as processed in EVM storage.
+pub fn seed_bridge_processed(evm_state: &mut EvmState, tx_hash: [u8; 32], block_height: u64) {
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash), u64_to_u256(block_height));
+}
+
+/// Remove a pending deposit from the EVM pending list by swapping with last.
+pub fn remove_bridge_pending(evm_state: &mut EvmState, tx_hash: [u8; 32]) {
+    let count = read_bridge_pending_count(evm_state);
+    if count == 0 {
+        return;
+    }
+    // Find the index of the deposit to remove
+    let mut index = None;
+    for i in 0..count {
+        let hash = read_bridge_pending_hash(evm_state, i);
+        if hash == tx_hash {
+            index = Some(i);
+            break;
+        }
+    }
+    let Some(index) = index else { return };
+    // Swap with last and decrement count
+    if index < count - 1 {
+        let last_hash = read_bridge_pending_hash(evm_state, count - 1);
+        evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(index), alloy_primitives::U256::from_be_slice(&last_hash));
+    }
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(count - 1), U256::ZERO);
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_count(), u64_to_u256(count - 1));
+}
+
+/// Read bridge daily usage for an asset from EVM storage.
+pub fn read_bridge_daily_used(evm_state: &EvmState, asset_id: u64) -> u128 {
+    u256_to_u128(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id)))
+}
+
+/// Read bridge daily usage reset block from EVM storage.
+pub fn read_bridge_daily_day(evm_state: &EvmState, asset_id: u64) -> u64 {
+    u256_to_u64(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id)))
+}
+
+/// Update bridge daily usage for an asset in EVM storage.
+pub fn update_bridge_daily(evm_state: &mut EvmState, asset_id: u64, used: u128, day: u64) {
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id), u128_to_u256(used));
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id), u64_to_u256(day));
+}
+
+/// Read whether external bridge is globally paused from EVM storage.
+pub fn read_bridge_external_paused(evm_state: &EvmState) -> bool {
+    evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_external_paused()) != U256::ZERO
+}
+
+/// Set external bridge pause status in EVM storage.
+pub fn seed_bridge_external_paused(evm_state: &mut EvmState, paused: bool) {
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_external_paused(), if paused { U256::from(1u8) } else { U256::ZERO });
+}
+
+/// Finalize pending external deposits whose challenge period has expired.
+/// Credits recipient balances and increases asset supply for all finalized deposits.
+/// Returns the number of deposits finalized.
+pub fn finalize_pending_external_deposits_evm(
+    evm_state: &mut EvmState,
+    current_block: u64,
+    challenge_period_blocks: u64,
+) -> usize {
+    let count = read_bridge_pending_count(evm_state);
+    if count == 0 {
+        return 0;
+    }
+
+    let mut finalized = 0;
+    // Iterate in reverse so we can safely remove by swapping with last
+    let mut i = count;
+    while i > 0 {
+        i -= 1;
+        let tx_hash = read_bridge_pending_hash(evm_state, i);
+        if tx_hash == [0u8; 32] {
+            continue;
+        }
+        let status = read_bridge_pending_status(evm_state, tx_hash);
+        if status != 1 {
+            // Not pending (already finalized or rejected)
+            continue;
+        }
+        let submitted_at = read_bridge_pending_block(evm_state, tx_hash);
+        if current_block >= submitted_at + challenge_period_blocks {
+            let recipient = read_bridge_pending_recipient(evm_state, tx_hash);
+            let asset_id = read_bridge_pending_asset(evm_state, tx_hash);
+            let amount = read_bridge_pending_amount(evm_state, tx_hash);
+
+            // Credit recipient balance
+            add_balance_evm(evm_state, asset_id, recipient, amount);
+            // Increase asset supply
+            add_asset_supply_evm(evm_state, asset_id, amount);
+            // Mark as finalized
+            set_bridge_pending_status(evm_state, tx_hash, 2);
+
+            finalized += 1;
+        }
+    }
+
+    // Compact the pending list: rebuild only with pending deposits
+    let mut new_count = 0u64;
+    for i in 0..count {
+        let tx_hash = read_bridge_pending_hash(evm_state, i);
+        if tx_hash == [0u8; 32] {
+            continue;
+        }
+        let status = read_bridge_pending_status(evm_state, tx_hash);
+        if status == 1 {
+            // Still pending, keep in list
+            if new_count != i {
+                evm_state.set_storage(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_pending_hash(new_count),
+                    alloy_primitives::U256::from_be_slice(&tx_hash),
+                );
+            }
+            new_count += 1;
+        }
+    }
+    // Zero out removed entries
+    for i in new_count..count {
+        evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(i), U256::ZERO);
+    }
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_count(), u64_to_u256(new_count));
+
+    finalized
+}
+
 // ── Asset read helpers ────────────────────────────────────────────────
 
 /// Read asset name from EVM storage.
@@ -340,6 +571,26 @@ pub fn read_asset_max_supply(evm_state: &EvmState, asset_id: u64) -> u128 {
 /// Read asset compliance policy from EVM storage.
 pub fn read_asset_compliance(evm_state: &EvmState, asset_id: u64) -> u8 {
     evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance")).to_be_bytes::<32>()[31]
+}
+
+/// Set asset compliance policy in EVM storage.
+pub fn seed_asset_compliance(evm_state: &mut EvmState, asset_id: u64, policy: u8) {
+    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance"), call_primitives::U256::from(policy));
+}
+
+/// Read asset contract address from EVM storage.
+pub fn read_asset_contract_address(evm_state: &EvmState, asset_id: u64) -> Option<Address> {
+    let val = evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"contract"));
+    if val.is_zero() {
+        None
+    } else {
+        Some(u256_to_address(val))
+    }
+}
+
+/// Set asset contract address in EVM storage.
+pub fn seed_asset_contract_address(evm_state: &mut EvmState, asset_id: u64, addr: Address) {
+    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"contract"), address_to_u256(addr));
 }
 
 /// Read asset registered_at from EVM storage.

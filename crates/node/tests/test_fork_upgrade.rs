@@ -43,7 +43,10 @@ async fn test_height_activated_upgrade() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
+        );
     }
 
     let upgrade_height = 50u64;
@@ -173,7 +176,10 @@ async fn test_governance_triggered_upgrade() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
+        );
     }
 
     // Simulate a governance proposal for protocol upgrade

@@ -96,14 +96,6 @@ async fn test_invalid_tx_causes_block_failure() {
         consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
         consensus.refresh_proposer_subset(&evm_state);
     }
-    // Register asset 1 and fund sender
-    {
-        let mut registry = node.state.asset_registry.write().unwrap();
-        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
-    }
-    {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
-    }
     // Seed EVM storage with CALL balance for fees
     {
         let mut evm = node.state.evm_state.write().unwrap();
@@ -130,9 +122,6 @@ async fn test_double_nonce_rejected() {
         let mut consensus = node.consensus.write().unwrap();
         consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
         consensus.refresh_proposer_subset(&evm_state);
-    }
-    {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 20_000).unwrap();
     }
     // Seed EVM storage with CALL balance for fees
     {

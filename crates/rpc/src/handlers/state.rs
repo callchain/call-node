@@ -1,9 +1,8 @@
 //! RpcState struct and its methods.
 
-use call_protocol::{AccountState, AssetRegistry, ComplianceEngine, ProtocolReceipt, FeeParams, FeeCurrencyRegistry};
+use call_protocol::{ComplianceEngine, ProtocolReceipt, FeeParams, FeeCurrencyRegistry};
 use call_protocol::security::MempoolDefense;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
-use call_bridge::BridgeStateManager;
 use call_consensus::{ForkManager, RollbackPlan, ConsensusParams};
 use call_consensus::exec::evm_instructions;
 use call_agent::{AgentRegistry, AgentBalances};
@@ -122,11 +121,8 @@ pub struct SyncProgress {
 
 /// Shared RPC state — all handlers read from this.
 pub struct RpcState {
-    pub balance_state: RwLock<AccountState>,
-    pub asset_registry: RwLock<AssetRegistry>,
     pub compliance_engine: RwLock<ComplianceEngine>,
     pub evm_state: RwLock<EvmState>,
-    pub bridge_state: RwLock<BridgeStateManager>,
     pub agent_registry: RwLock<AgentRegistry>,
     pub agent_balances: RwLock<AgentBalances>,
     pub agent_nonces: RwLock<call_agent::AgentNonces>,
@@ -180,11 +176,8 @@ pub struct RpcState {
 impl RpcState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        balance_state: AccountState,
-        asset_registry: AssetRegistry,
         compliance_engine: ComplianceEngine,
         evm_state: EvmState,
-        bridge_state: BridgeStateManager,
         agent_registry: AgentRegistry,
         agent_balances: AgentBalances,
         agent_nonces: call_agent::AgentNonces,
@@ -198,11 +191,8 @@ impl RpcState {
             count as u32
         };
         Self {
-            balance_state: RwLock::new(balance_state),
-            asset_registry: RwLock::new(asset_registry),
             compliance_engine: RwLock::new(compliance_engine),
             evm_state: RwLock::new(evm_state),
-            bridge_state: RwLock::new(bridge_state),
             agent_registry: RwLock::new(agent_registry),
             agent_balances: RwLock::new(agent_balances),
             agent_nonces: RwLock::new(agent_nonces),
@@ -451,8 +441,15 @@ impl RpcState {
         let agent = registry.get_agent(agent_id).ok_or("agent not found".to_string())?;
         let owner = agent.owner;
         drop(registry);
-        let mut balances = self.balance_state.write().map_err(|_| "lock poisoned".to_string())?;
-        self.agent_balances.write().map_err(|_| "lock poisoned".to_string())?.grant_funds(owner, agent_id, asset_id, amount, &mut *balances)
+        let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
+        let owner_balance = call_consensus::exec::evm_instructions::read_balance(&evm, asset_id, owner);
+        if owner_balance < amount {
+            return Err("insufficient owner balance for grant".into());
+        }
+        call_consensus::exec::evm_instructions::seed_balance(&mut evm, asset_id, owner, owner_balance - amount);
+        drop(evm);
+        self.agent_balances.write().map_err(|_| "lock poisoned".to_string())?
+            .credit(owner, agent_id, asset_id, amount)
             .map_err(|e| format!("{:?}", e))?;
         Ok(())
     }

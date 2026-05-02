@@ -4,7 +4,6 @@
     use call_consensus::exec::evm_instructions;
     use call_network::{InMemoryNetwork, EpochBoundarySignal, BlockAnnouncement, SyncResponse};
     use call_primitives::{Address, Ed25519PublicKey};
-    use crate::state_persist::{save_asset_registry_inner, load_asset_registry_inner};
     use std::sync::OnceLock;
 
     fn test_addr(n: u8) -> Address {
@@ -59,47 +58,6 @@
         assert!(node.network.is_none());
         assert_eq!(node.parent_hash, BlockHash::ZERO);
         assert_eq!(node.consensus.read().unwrap().current_height(), 0);
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn test_asset_registry_persistence_roundtrip() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-node-registry-test-{}",
-            std::process::id()
-        ));
-
-        // Phase 1: Direct db test — save and load registry
-        {
-            let db = open_db(tmp.clone()).expect("open db");
-            let mut registry = AssetRegistry::new();
-            let id = registry
-                .register_asset("PERSIST".into(), "Persist Token".into(), 18, test_addr(1), 0, 100, 1_000_000)
-                .unwrap();
-            registry.mint_supply(id, &test_addr(1), 5_000).unwrap();
-            registry.add_evm_supply(id, 3_000).unwrap();
-            save_asset_registry_inner(&db.db, &registry).expect("save");
-        }
-
-        // Give MDBX a moment to release file locks before reopening
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Phase 2: Reopen db and load registry
-        {
-            let db = open_db(tmp.clone()).expect("reopen db");
-            let registry = load_asset_registry_inner(&db.db).expect("load");
-            let asset = registry.get_asset(1).expect("asset should exist after reload");
-            assert_eq!(asset.symbol, "PERSIST");
-            assert_eq!(asset.name, "Persist Token");
-            assert_eq!(asset.decimals, 18);
-            assert_eq!(asset.issuer, test_addr(1));
-            assert_eq!(asset.protocol_supply, 5_000);
-            assert_eq!(asset.evm_supply, 3_000);
-            assert_eq!(asset.max_supply, 1_000_000);
-            assert_eq!(asset.status, call_protocol::registry::AssetStatus::Active);
-            assert_eq!(asset.registered_at, 100);
-        }
-
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -293,10 +251,10 @@
             consensus.refresh_proposer_subset(&evm_state);
         }
 
-        // Fund sender balance on node1
+        // Fund sender balance on node1 (EVM)
         {
-            let mut balances = node1.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, *test_sender(), 10_000).unwrap();
+            let mut evm = node1.state.evm_state.write().unwrap();
+            evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000);
         }
 
         // Verify initial state
@@ -559,11 +517,7 @@
 
         let proposer = call_primitives::Address::repeat_byte(0xAA);
 
-        // Fund proposer in AccountState and EVM storage (asset_id 1 = CALL)
-        {
-            let mut balances = node.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5).expect("fund proposer");
-        }
+        // Fund proposer in EVM storage (asset_id 1 = CALL)
         {
             let mut evm = node.state.evm_state.write().unwrap();
             call_consensus::exec::evm_instructions::seed_balance(
@@ -674,12 +628,7 @@
             consensus.refresh_proposer_subset(&evm_state);
         }
 
-        // Fund sender with ample balance for fees + transfer
-        {
-            let mut balances = node.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, *test_sender(), 10_000_000).unwrap();
-        }
-        // Seed EVM storage with CALL balance for fees
+        // Fund sender with ample balance for fees + transfer (EVM)
         {
             let mut evm = node.state.evm_state.write().unwrap();
             evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
@@ -788,18 +737,11 @@
             consensus.refresh_proposer_subset(&evm_state);
         }
 
-        // Fund sender with ample balance for fees + transfer
+        // Fund sender with ample balance for fees + transfer (EVM)
         {
-            let mut balances = node.state.balance_state.write().unwrap();
-            balances.balances.set_balance(1, *test_sender(), 10_000_000).unwrap();
-        }
-
-        // Register CALL asset so Transfer instructions succeed
-        {
-            let mut registry = node.state.asset_registry.write().unwrap();
-            registry
-                .register_asset("CALL".into(), "Callchain".into(), 18, *test_sender(), 0, 0, 0)
-                .unwrap();
+            let mut evm = node.state.evm_state.write().unwrap();
+            evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
+            evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
         }
 
         let tx = make_evm_tx(0);

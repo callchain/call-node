@@ -54,7 +54,6 @@ async fn test_high_throughput_many_transactions() {
     }
 
     // Fund sender with enough for 1000 transfers
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
@@ -100,7 +99,6 @@ fn test_mempool_capacity_under_pressure() {
     let mut sender_keys: Vec<([u8; 32], Address)> = Vec::new();
     for _ in 0..num_senders {
         let kp = test_keypair();
-        node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 10_000_000).unwrap();
         {
             let mut evm = node.state.evm_state.write().unwrap();
             call_consensus::exec::evm_instructions::seed_balance(
@@ -153,7 +151,6 @@ async fn test_base_fee_under_sustained_load() {
         consensus.refresh_proposer_subset(&evm_state);
     }
 
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000_000).unwrap();
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
@@ -189,7 +186,6 @@ async fn test_no_double_spend_concurrent_nonce() {
         consensus.refresh_proposer_subset(&evm_state);
     }
 
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
@@ -227,7 +223,6 @@ async fn test_final_state_consistency_after_load() {
     }
 
     let initial_balance = 200_000_000u128;
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, initial_balance).unwrap();
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
@@ -278,7 +273,6 @@ async fn test_multi_sender_stress() {
     let mut sender_keys: Vec<([u8; 32], Address)> = Vec::new();
     for _ in 0..20 {
         let kp = test_keypair();
-        node.state.balance_state.write().unwrap().balances.set_balance(1, kp.1, 20_000_000).unwrap();
         {
             let mut evm = node.state.evm_state.write().unwrap();
             call_consensus::exec::evm_instructions::seed_balance(
@@ -320,7 +314,6 @@ async fn test_high_volume_block_production() {
     }
 
     // Enough CALL for gas + transfers (200 txs * ~110k gas each + 200 * 10 transfer)
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 50_000_000).unwrap();
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(
@@ -366,7 +359,6 @@ async fn test_rapid_block_production() {
         consensus.refresh_proposer_subset(&evm_state);
     }
 
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 600_000_000).unwrap();
     {
         let mut evm = node.state.evm_state.write().unwrap();
         call_consensus::exec::evm_instructions::seed_balance(

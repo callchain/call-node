@@ -195,8 +195,6 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             // Build consensus before moving genesis EVM state into RpcState
             let new_consensus = SimplexConsensus::new(genesis.consensus_params.clone(), &genesis_state.evm_state);
             // Inject genesis state into RpcState
-            *node.state.balance_state.write().map_err(|_| "lock poisoned")? = genesis_state.balances;
-            *node.state.asset_registry.write().map_err(|_| "lock poisoned")? = genesis_state.registry;
             *node.state.compliance_engine.write().map_err(|_| "lock poisoned")? = genesis_state.compliance;
             *node.state.evm_state.write().map_err(|_| "lock poisoned")? = genesis_state.evm_state;
             *node.state.oracle.write().map_err(|_| "lock poisoned")? = genesis_state.oracle;
@@ -204,18 +202,13 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             // Register fee currencies
             {
                 let mut fcr = node.state.fee_currency_registry.write().map_err(|_| "lock poisoned")?;
+                let evm = node.state.evm_state.read().map_err(|_| "lock poisoned")?;
                 for asset_id in &genesis_state.fee_currencies {
-                    let registry = node.state.asset_registry.read().map_err(|_| "lock poisoned")?;
-                    let asset = registry.get_asset(*asset_id);
-                    let (name, decimals) = match asset {
-                        Some(a) => (a.name.clone(), a.decimals),
-                        None => (format!("Asset {}", asset_id), 18),
-                    };
-                    drop(registry);
-
+                    let name = call_consensus::exec::evm_instructions::read_asset_name(&evm, *asset_id);
+                    let decimals = call_consensus::exec::evm_instructions::read_asset_decimals(&evm, *asset_id);
                     let entry = FeeCurrencyEntry {
                         asset_id: *asset_id,
-                        name,
+                        name: if name.is_empty() { format!("Asset {}", asset_id) } else { name },
                         decimals,
                         oracle_price_key: None,
                         added_at_block: 0,

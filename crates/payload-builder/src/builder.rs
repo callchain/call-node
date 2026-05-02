@@ -3,7 +3,6 @@
 //! Block assembly from mempool with limits enforcement,
 //! execution ordering, and state root computation.
 
-use call_bridge::BridgeStateManager;
 use call_consensus::block::{Block, BlockExecutionResult, BlockContext, ExecutionState, Subsystems};
 use call_consensus::validator::ConsensusError;
 use call_primitives::{BlockHash, Hash};
@@ -93,7 +92,6 @@ impl PayloadBuilder {
         _account: &mut AccountState,
         _registry: &mut AssetRegistry,
         _compliance: &mut ComplianceEngine,
-        _bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         state_root: Hash,
@@ -193,7 +191,6 @@ impl PayloadBuilder {
         _account: &mut AccountState,
         _registry: &mut AssetRegistry,
         _compliance: &mut ComplianceEngine,
-        _bridge_state: &mut BridgeStateManager,
         shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         evm_state_root: Hash,
@@ -207,7 +204,6 @@ impl PayloadBuilder {
             _account,
             _registry,
             _compliance,
-            _bridge_state,
             shielded_state,
             evm_state,
             evm_state_root,
@@ -257,7 +253,6 @@ mod tests {
         account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
-        let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
 
@@ -267,7 +262,6 @@ mod tests {
             &mut account,
             &mut registry,
             &mut compliance,
-            &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
@@ -296,7 +290,6 @@ mod tests {
         account.balances.set_balance(1, test_sender(), 100_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
-        let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
 
@@ -306,7 +299,6 @@ mod tests {
             &mut account,
             &mut registry,
             &mut compliance,
-            &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
@@ -338,7 +330,6 @@ mod tests {
         account.balances.set_balance(1, test_sender(), 30_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
-        let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
 
@@ -348,7 +339,6 @@ mod tests {
             &mut account,
             &mut registry,
             &mut compliance,
-            &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
@@ -384,7 +374,6 @@ mod tests {
         let mut registry = AssetRegistry::new();
         registry.register_asset("CALL".into(), "Callchain".into(), 18, test_sender(), 0, 0, 0).unwrap();
         let mut compliance = ComplianceEngine::new();
-        let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
@@ -435,7 +424,6 @@ mod tests {
             &mut account,
             &mut registry,
             &mut compliance,
-            &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
@@ -457,7 +445,6 @@ mod tests {
         account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
-        let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
@@ -469,7 +456,6 @@ mod tests {
             &mut account,
             &mut registry,
             &mut compliance,
-            &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
@@ -503,7 +489,6 @@ mod tests {
         account.balances.set_balance(1, test_sender(), 10_000_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
-        let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
@@ -514,7 +499,6 @@ mod tests {
             &mut account,
             &mut registry,
             &mut compliance,
-            &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
@@ -563,7 +547,6 @@ mod tests {
         account.balances.set_balance(1, test_sender(), 10_000).unwrap();
         let mut registry = AssetRegistry::new();
         let mut compliance = ComplianceEngine::new();
-        let mut bridge_state = BridgeStateManager::default();
         let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
@@ -574,7 +557,6 @@ mod tests {
             &mut account,
             &mut registry,
             &mut compliance,
-            &mut bridge_state,
             &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,

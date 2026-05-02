@@ -4,13 +4,11 @@
 //! state root computation, and chain ID management.
 
 use call_consensus::proposer::ConsensusParams;
-use call_crypto::{build_merkle_root, keccak256};
+use call_crypto::keccak256;
 use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
-use call_protocol::AccountState;
 use call_protocol::compliance::ComplianceEngine;
 use call_oracle::{OracleConfig, OracleManager};
-use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::FeeParams;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
@@ -174,10 +172,6 @@ pub enum GenesisError {
 pub struct GenesisState {
     /// Unified state root
     pub state_root: Hash,
-    /// Protocol account
-    pub balances: AccountState,
-    /// Asset registry
-    pub registry: AssetRegistry,
     /// Compliance engine
     pub compliance: ComplianceEngine,
     /// EVM state
@@ -216,22 +210,20 @@ impl GenesisExecutor {
         self.validate()?;
 
         // Step 2: Initialize state tables
-        let mut account = AccountState::new();
-        let mut registry = AssetRegistry::new();
         let compliance = ComplianceEngine::new();
         let mut evm_state = EvmState::new();
 
-        // Step 3: Register assets and distribute initial account (EVM + legacy)
-        self.register_assets(&mut account, &mut registry, &mut evm_state)?;
+        // Step 3: Register assets and distribute initial balances (EVM only)
+        self.register_assets(&mut evm_state)?;
 
         // Step 4: Register validators (EVM only)
         self.register_validators(&mut evm_state)?;
 
         // Step 5: Register fee currencies
-        let fee_currencies = self.register_fee_currencies(&mut registry)?;
+        let fee_currencies = self.register_fee_currencies(&evm_state)?;
 
         // Step 6: Deploy EVM ERC-20 templates for non-CALL genesis assets
-        self.deploy_evm_templates(&mut registry, &mut evm_state)?;
+        self.deploy_evm_templates(&mut evm_state)?;
 
         // Step 7: Initialize oracle with genesis validators and tracked assets
         let mut oracle = OracleManager::new(OracleConfig::default());
@@ -249,8 +241,6 @@ impl GenesisExecutor {
 
         Ok(GenesisState {
             state_root,
-            balances: account,
-            registry,
             compliance,
             evm_state,
             fee_currencies,
@@ -291,48 +281,22 @@ impl GenesisExecutor {
         Ok(())
     }
 
-    /// Register assets and distribute initial account (EVM + legacy)
+    /// Register assets and distribute initial balances (EVM only)
     fn register_assets(
         &self,
-        account: &mut AccountState,
-        registry: &mut AssetRegistry,
         evm_state: &mut EvmState,
     ) -> Result<(), GenesisError> {
         for asset in &self.genesis.initial_assets {
-            // Register asset in registry
-            registry
-                .register_asset(
-                    asset.symbol.clone(),
-                    asset.name.clone(),
-                    asset.decimals,
-                    Address::ZERO, // Genesis assets have no specific issuer
-                    0,             // Default compliance policy
-                    0,             // registered_at (genesis block)
-                    0,             // max_supply (uncapped for genesis assets)
-                )
-                .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
-
-            // Distribute initial balances (legacy + EVM)
+            // Distribute initial balances (EVM only)
             let mut total_allocated: Balance = 0;
             for (address_str, amount) in &asset.distribution {
                 let addr = parse_address(address_str)?;
-                account
-                    .balances
-                    .set_balance(asset.asset_id, addr, *amount)
-                    .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
                 total_allocated = total_allocated
                     .checked_add(*amount)
                     .ok_or_else(|| GenesisError::ExecutionFailed("supply overflow".into()))?;
 
                 // Seed EVM asset storage so get_balance reads from EVM state root
                 evm_instructions::seed_balance(evm_state, asset.asset_id, addr, *amount);
-            }
-
-            // Set protocol_supply to total distributed amount (legacy)
-            if total_allocated > 0 {
-                registry
-                    .mint_supply(asset.asset_id, &Address::ZERO, total_allocated)
-                    .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
             }
 
             // Seed EVM asset metadata
@@ -406,25 +370,11 @@ impl GenesisExecutor {
     /// Register fee currencies
     fn register_fee_currencies(
         &self,
-        registry: &mut AssetRegistry,
+        _evm_state: &EvmState,
     ) -> Result<Vec<AssetId>, GenesisError> {
         let mut ids = Vec::new();
         for currency in &self.genesis.initial_fee_currencies {
             ids.push(currency.asset_id);
-            // If not already registered as an asset, register it
-            if registry.get_asset(currency.asset_id).is_none() {
-                registry
-                    .register_asset(
-                        currency.symbol.clone(),
-                        currency.symbol.clone(),
-                        18,
-                        Address::ZERO,
-                        0,
-                        0, // registered_at (genesis block)
-                        0, // max_supply (uncapped for genesis fee currencies)
-                    )
-                    .map_err(|e| GenesisError::ExecutionFailed(e.to_string()))?;
-            }
         }
         Ok(ids)
     }
@@ -434,7 +384,6 @@ impl GenesisExecutor {
     /// require a WrappedToken contract.
     fn deploy_evm_templates(
         &self,
-        registry: &mut AssetRegistry,
         evm_state: &mut EvmState,
     ) -> Result<(), GenesisError> {
         let executor = EvmExecutor::new(self.genesis.chain_id);
@@ -469,7 +418,7 @@ impl GenesisExecutor {
                 ));
             }
 
-            registry.set_evm_contract_address(asset.asset_id, contract_addr);
+            evm_instructions::seed_asset_contract_address(evm_state, asset.asset_id, contract_addr);
         }
 
         Ok(())
@@ -477,28 +426,6 @@ impl GenesisExecutor {
 }
 
 // ── State Root Computation ────────────────────────────────────────────
-
-/// Compute payment Merkle root from balance state
-pub fn compute_payment_root(account: &AccountState) -> Hash {
-    let mut leaves: Vec<Hash> = account
-        .balances
-        .iter()
-        .map(|(&(asset_id, addr), &balance)| {
-            let mut data = Vec::with_capacity(60);
-            data.extend_from_slice(&asset_id.to_le_bytes());
-            data.extend_from_slice(addr.as_slice());
-            data.extend_from_slice(&balance.to_le_bytes());
-            keccak256(&data)
-        })
-        .collect();
-
-    if leaves.is_empty() {
-        return Hash::ZERO;
-    }
-
-    leaves.sort();
-    build_merkle_root(&leaves).unwrap_or(Hash::ZERO)
-}
 
 /// Compute EVM state root
 pub fn compute_evm_state_root(evm_state: &EvmState) -> Hash {
@@ -616,15 +543,17 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_protocol_balances() {
+    fn test_genesis_evm_balances() {
         let genesis = make_test_genesis();
         let executor = GenesisExecutor::new(genesis);
         let state = executor.execute().unwrap();
 
-        let bal1 = state.balances.balances.get_balance(1, &test_addr(1));
+        let bal1 = call_consensus::exec::evm_instructions::read_balance(
+            &state.evm_state, 1, test_addr(1));
         assert_eq!(bal1, 500_000_000 * 10u128.pow(18));
 
-        let bal2 = state.balances.balances.get_balance(1, &test_addr(2));
+        let bal2 = call_consensus::exec::evm_instructions::read_balance(
+            &state.evm_state, 1, test_addr(2));
         assert_eq!(bal2, 500_000_000 * 10u128.pow(18));
     }
 

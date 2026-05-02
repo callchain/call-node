@@ -36,9 +36,6 @@ fn test_evm_state_isolation_from_protocol() {
         consensus.refresh_proposer_subset(&evm_state);
     }
 
-    // Legacy protocol balance is ignored
-    node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 5_000).unwrap();
-
     // Asset balance lives in EVM storage
     {
         let mut evm = node.state.evm_state.write().unwrap();

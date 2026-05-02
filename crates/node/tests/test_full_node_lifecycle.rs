@@ -47,7 +47,10 @@ async fn test_node_starts_at_genesis() {
 
     // Setup balance
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, test_addr(1), 10_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, test_addr(1), 10_000,
+        );
     }
 
     // Produce first block
@@ -73,14 +76,6 @@ async fn test_node_process_transactions() {
         consensus.refresh_proposer_subset(&evm_state);
     }
 
-    // Register asset 1 and fund sender
-    {
-        let mut registry = node.state.asset_registry.write().unwrap();
-        registry.register_asset("TEST".into(), "TestToken".into(), 18, sender, 0, 0, 0).unwrap();
-    }
-    {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
-    }
     // Seed EVM storage with CALL balance for fees + native balance for gas
     {
         let mut evm = node.state.evm_state.write().unwrap();
@@ -119,7 +114,10 @@ async fn test_node_persist_and_recover() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 10_000_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+        );
     }
 
     // Produce 3 blocks
@@ -170,7 +168,10 @@ async fn test_block_chain_continuity() {
         consensus.refresh_proposer_subset(&evm_state);
     }
     {
-        node.state.balance_state.write().unwrap().balances.set_balance(1, sender, 100_000).unwrap();
+        let mut evm = node.state.evm_state.write().unwrap();
+        call_consensus::exec::evm_instructions::seed_balance(
+            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
+        );
     }
 
     let mut prev_hash = BlockHash::ZERO;

@@ -670,13 +670,6 @@ pub(crate) async fn bft_event_loop(
 
                     // Produce state snapshot at snapshot interval boundaries
                     if new_height % prune_config.snapshot_interval == 0 {
-                        let balance_state = state.balance_state.read().unwrap();
-                        let protocol_root = call_storage::compute_protocol_root(
-                            balance_state.balances.balances_map(),
-                            balance_state.allowances.allowances_map(),
-                        );
-                        drop(balance_state);
-
                         let evm_root = {
                             let evm_state = state.evm_state.read().unwrap();
                             let root = evm_state.compute_state_root();
@@ -698,7 +691,7 @@ pub(crate) async fn bft_event_loop(
                             call_storage::compute_agent_root(&agents)
                         };
 
-                        let roots = StateRoots { protocol_root, evm_root, shielded_root, agent_root, consensus_root: evm_root };
+                        let roots = StateRoots { protocol_root: evm_root, evm_root, shielded_root, agent_root, consensus_root: evm_root };
                         let snapshot_dir = db.data_dir.join("snapshots");
                         match produce_state_snapshot(&mut prune_state, roots, new_height, Some(&snapshot_dir)) {
                             Ok(_) => {
