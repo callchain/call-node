@@ -46,7 +46,7 @@ pub const AGENT_ADDRESS: Address = address!("00000000000000000000000000000000000
 pub use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 pub use alloy_primitives::Bytes;
 
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{address, Address};
 use revm::context::Block;
 use revm::context_interface::cfg::Cfg;
 use revm::context_interface::local::LocalContextTr;
@@ -58,59 +58,12 @@ use crate::storage::{EvmStorageProvider, StorageCtx};
 // ── StatefulPrecompile trait ──────────────────────────────────────────
 
 /// Trait implemented by all Callchain custom precompiles.
-///
-/// During migration, precompiles that still use the old stateless pattern
-/// are wrapped in [`StatelessPrecompileWrapper`].
 pub trait StatefulPrecompile {
     /// Dispatch an EVM call to this precompile.
     ///
     /// `calldata` is ABI-encoded (4-byte selector + args).
     /// `msg_sender` is the EVM caller.
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult;
-}
-
-// ── Wrapper for existing stateless precompile functions ───────────────
-
-/// Bridges a stateless `fn(&[u8], u64) -> PrecompileResult` to [`StatefulPrecompile`].
-///
-/// The old function reads the caller from the [`CURRENT_CALLER`] thread-local,
-/// which is set by [`CallPrecompiles::run`] before invocation.
-struct StatelessPrecompileWrapper(fn(&[u8], u64) -> PrecompileResult);
-
-impl StatefulPrecompile for StatelessPrecompileWrapper {
-    fn call(&mut self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
-        // Pass u64::MAX as gas_limit; the function's own gas accounting is
-        // used, and CallPrecompiles::run records the reported gas_used.
-        (self.0)(calldata, u64::MAX)
-    }
-}
-
-// ── Thread-local call context for write precompiles ───────────────────
-
-thread_local! {
-    static CURRENT_CALLER: std::cell::Cell<Option<Address>> = std::cell::Cell::new(None);
-    static CURRENT_CALL_VALUE: std::cell::Cell<U256> = std::cell::Cell::new(U256::ZERO);
-}
-
-/// Get the caller address of the current precompile invocation (if any).
-/// Write precompiles use this to identify the transaction sender.
-pub fn current_caller() -> Option<Address> {
-    CURRENT_CALLER.with(|c| c.get())
-}
-
-/// Get the call value (ETH sent) of the current precompile invocation.
-pub fn current_call_value() -> U256 {
-    CURRENT_CALL_VALUE.with(|c| c.get())
-}
-
-/// Set the caller address for testing or manual invocation.
-pub fn set_current_caller(addr: Option<Address>) {
-    CURRENT_CALLER.with(|c| c.set(addr));
-}
-
-/// Set the call value for testing or manual invocation.
-pub fn set_current_call_value(value: U256) {
-    CURRENT_CALL_VALUE.with(|c| c.set(value));
 }
 
 // ── Precompile addresses ──────────────────────────────────────────────
@@ -213,10 +166,6 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
                 revm::interpreter::CallInput::Bytes(bytes) => bytes.0.to_vec(),
             };
 
-            // Inject call context for backward compatibility
-            CURRENT_CALLER.with(|c| c.set(Some(inputs.caller)));
-            CURRENT_CALL_VALUE.with(|c| c.set(inputs.call_value()));
-
             // Create storage provider from revm journal
             // Read block/cfg before journal_mut to avoid borrow conflict
             let timestamp = context.block().timestamp();
@@ -238,10 +187,6 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
             let exec_result = StorageCtx::enter(&mut provider, || {
                 precompile.call(&input_bytes, inputs.caller)
             });
-
-            // Clear call context to prevent leakage
-            CURRENT_CALLER.with(|c| c.set(None));
-            CURRENT_CALL_VALUE.with(|c| c.set(U256::ZERO));
 
             match exec_result {
                 Ok(output) => {

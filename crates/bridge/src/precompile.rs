@@ -14,7 +14,6 @@ use call_precompiles::{
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
 use call_validator::ValidatorStorage;
-use call_precompiles::VALIDATOR_ADDRESS;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
 pub const BRIDGE_ADDRESS: Address =

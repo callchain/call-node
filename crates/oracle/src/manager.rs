@@ -4,7 +4,6 @@ use crate::{
     oracle_message_hash, oracle_quorum, AggregatedPrice, OracleConfig,
     OracleError, OracleSubmission, OracleValidatorInfo,
 };
-use alloy_primitives::U256;
 use call_crypto::ed25519_verify;
 use call_primitives::{Address, AssetId, PricePair};
 use std::collections::HashMap;

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use super::alert::{Alert, AlertRule, AlertSeverity, evaluate_alerts, default_alert_rules};
+use super::alert::{Alert, AlertSeverity, evaluate_alerts, default_alert_rules};
 use super::registry::TelemetryRegistry;
 
 // ── Alert Dispatcher ─────────────────────────────────────────────────

@@ -327,9 +327,12 @@ scoped_thread_local!(
 pub struct StorageCtx;
 
 impl StorageCtx {
+    #[allow(unsafe_code)]
     /// Enter a storage context. `provider` must outlive the closure.
     pub fn enter<R>(provider: &mut dyn StorageProvider, f: impl FnOnce() -> R) -> R {
-        // SAFETY: scoped_tls ensures the pointer is only accessible within the closure scope.
+        // SAFETY: The transmuted reference is only stored in a scoped-tls cell that
+        // is destroyed before this function returns. The reference never escapes
+        // the closure scope, so the actual lifetime is respected.
         let provider_static: &mut (dyn StorageProvider + 'static) =
             unsafe { std::mem::transmute(provider) };
         let cell = RefCell::new(provider_static);

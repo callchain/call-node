@@ -417,22 +417,6 @@ fn compute_evm_state_root(evm_state: &EvmState) -> Hash {
     evm_state.compute_state_root()
 }
 
-/// Compute receipt root from block execution results
-pub(crate) fn compute_receipt_root(result: &BlockExecutionResult) -> Hash {
-    let mut data = Vec::new();
-    data.extend_from_slice(&result.evm_gas_used.to_le_bytes());
-    data.extend_from_slice(&(result.evm_tx_count as u64).to_le_bytes());
-    for evm in &result.evm_tx_results {
-        let mut leaf = Vec::new();
-        leaf.extend_from_slice(evm.tx_hash.as_slice());
-        leaf.push(if evm.status { 1 } else { 0 });
-        leaf.extend_from_slice(&evm.gas_used.to_be_bytes());
-        leaf.extend_from_slice(&evm.gas_price.to_be_bytes());
-        data.extend_from_slice(keccak256(&leaf).as_slice());
-    }
-    keccak256(&data)
-}
-
 /// Attempt to decode raw EVM transaction bytes into a structured EvmTransaction.
 /// Supports RLP-encoded Legacy and EIP-1559 transactions.
 /// Falls back to JSON deserialization for backward compatibility with test data.

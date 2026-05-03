@@ -151,7 +151,7 @@ pub fn process_external_deposit_evm<B: StorageBackend>(
         asset_id,
         recipient,
         amount,
-        signatures,
+        signatures: _,
         ..
     } = op
     else {

@@ -8,7 +8,6 @@ mod withdraw;
 mod external;
 pub mod precompile;
 
-pub use deposit::*;
 pub use withdraw::*;
 pub use external::*;
 pub use precompile::{BridgePrecompile, BRIDGE_ADDRESS};

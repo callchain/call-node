@@ -12,8 +12,6 @@ use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use call_consensus::exec::state_accessors;
-use call_precompiles::VALIDATOR_ADDRESS;
-use call_precompiles::storage::storage_slot;
 
 // ── Genesis Types ─────────────────────────────────────────────────────
 

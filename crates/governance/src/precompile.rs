@@ -9,7 +9,7 @@ use call_asset::AssetStorage;
 use call_precompiles::{
     address_to_u256, dispatch, journal_backend::JournalBackend, require_caller,
     storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
-    u64_to_u256, ASSET_ADDRESS,
+    u64_to_u256,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;

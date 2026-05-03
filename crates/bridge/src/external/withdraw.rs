@@ -3,7 +3,7 @@
 use alloy_primitives::{Address, B256};
 use call_primitives::{AssetId, Signature};
 use call_crypto::secp256k1_sign;
-use crate::external::types::{ExternalBridgeOp, ExternalChain, bridge_event_hash};
+use crate::external::types::{ExternalChain, bridge_event_hash};
 
 /// Sign a bridge event as a validator (per spec §5.6.2)
 ///

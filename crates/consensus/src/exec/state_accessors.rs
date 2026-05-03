@@ -20,14 +20,19 @@ use call_precompiles::storage::storage_slot;
 use call_primitives::{Address, U256};
 // ── Constants ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 /// Default unbonding period in blocks (~8.4h at 250ms block time)
 const UNBONDING_PERIOD_BLOCKS: u64 = 120_960;
+#[allow(dead_code)]
 /// Minimum self-stake to become a validator
 const MIN_SELF_STAKE: u128 = 1_000_000;
+#[allow(dead_code)]
 /// Proposal deposit in CALL
 const PROPOSAL_DEPOSIT: u128 = 10_000;
+#[allow(dead_code)]
 /// Governance timelock in blocks
 const GOV_TIMELOCK_BLOCKS: u64 = 100;
+#[allow(dead_code)]
 /// Governance quorum threshold (basis points)
 const GOV_QUORUM_BPS: u128 = 3_333;
 
@@ -57,7 +62,8 @@ fn slot_validator_status(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"status"])
 }
 
-fn slot_validator_unbond_height(addr: Address) -> U256 {
+#[allow(dead_code)]
+fn _slot_validator_unbond_height(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"unbond_at"])
 }
 
@@ -65,11 +71,13 @@ fn slot_validator_bls_pubkey(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"bls_pubkey"])
 }
 
-fn slot_unbonding_count() -> U256 {
+#[allow(dead_code)]
+fn _slot_unbonding_count() -> U256 {
     U256::from(1)
 }
 
-fn slot_unbonding(index: u64) -> U256 {
+#[allow(dead_code)]
+fn _slot_unbonding(index: u64) -> U256 {
     storage_slot(&[b"unbonding"]) + U256::from(index)
 }
 
@@ -97,11 +105,13 @@ fn slot_gov_paused() -> U256 {
     storage_slot(&[b"paused"])
 }
 
-fn slot_gov_pause_reason() -> U256 {
+#[allow(dead_code)]
+fn _slot_gov_pause_reason() -> U256 {
     storage_slot(&[b"pause_reason"])
 }
 
-fn slot_gov_proposal_deposit() -> U256 {
+#[allow(dead_code)]
+fn _slot_gov_proposal_deposit() -> U256 {
     storage_slot(&[b"deposit_fee"])
 }
 
@@ -167,11 +177,13 @@ fn slot_bridge_pending_block(source_tx_hash: [u8; 32]) -> U256 {
     storage_slot(&[b"pending_block", &source_tx_hash])
 }
 
-fn slot_bridge_withdrawal_period_start() -> U256 {
+#[allow(dead_code)]
+fn _slot_bridge_withdrawal_period_start() -> U256 {
     storage_slot(&[b"withdrawal_start"])
 }
 
-fn slot_bridge_withdrawal_period_used(asset_id: u64) -> U256 {
+#[allow(dead_code)]
+fn _slot_bridge_withdrawal_period_used(asset_id: u64) -> U256 {
     storage_slot(&[b"withdrawal_period", &asset_id.to_be_bytes()[..]])
 }
 
@@ -221,7 +233,8 @@ pub(crate) fn pack_agent_perms(per_tx_limit: u128, expires_at: u64, flags: u8) -
     U256::from_be_slice(&packed)
 }
 
-pub(crate) fn unpack_agent_perms(perms: U256) -> (u128, u64, u8) {
+#[allow(dead_code)]
+pub(crate) fn _unpack_agent_perms(perms: U256) -> (u128, u64, u8) {
     let bytes = perms.to_be_bytes::<32>();
     let per_tx_limit = u128::from_be_bytes(bytes[0..16].try_into().unwrap());
     let expires_at = u64::from_be_bytes(bytes[16..24].try_into().unwrap());
