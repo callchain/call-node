@@ -159,6 +159,43 @@ The `call_lightClientBridgeDeposit` RPC endpoint (feature-gated by `light-client
 
 ---
 
+## Known Architecture Issues
+
+### `call_lightClientBridgeDeposit` writes EVM storage directly from RPC layer
+
+**Issue:** The `call_lightClientBridgeDeposit` RPC endpoint previously performed light-client verification (MPT proofs, receipt parsing) and then **directly wrote to `EvmState`** via `process_light_client_deposit_evm()`.
+
+**Status: BLOCKED (2026-05-03).** The endpoint now returns an error immediately:
+```
+call_lightClientBridgeDeposit is disabled: direct EVM writes are not permitted.
+Use standard bridge deposit flow.
+```
+
+The original direct-execution code has been removed from `crates/rpc/src/handlers/callchain.rs`.
+
+**Why the original code was problematic:**
+
+| Aspect | Normal EVM transaction path | `call_lightClientBridgeDeposit` (old) |
+|--------|---------------------------|---------------------------------------|
+| Submission | `eth_sendRawTransaction` | Direct RPC call |
+| Execution | Mempool → consensus → block producer → EVM execution | RPC handler only |
+| Transaction record | Has tx hash, receipt, gas consumed | **No transaction record** |
+| State root inclusion | Changes captured in block state root | **Only local node state changes** |
+| Network verification | All nodes re-execute and validate | **Other nodes do not know about it** |
+
+**Impact:** This broke the EVM-Only State Architecture invariant that *all state mutations go through the EVM execution path and are captured in the block state root*. In a multi-node network, nodes that did not receive this RPC call would have divergent EVM state.
+
+**Mitigation applied:**
+- Endpoint blocked at RPC layer. No direct EVM writes.
+- `call_submit` (the legacy protocol-transaction submission endpoint) also removed entirely.
+
+**Future path (when re-implemented):**
+1. Users submit the proof as an EVM transaction (via a precompile at a dedicated address).
+2. The precompile delegates heavy verification (RLP, MPT) to native code (similar to `ecrecover`).
+3. Block producers validate proofs during block execution, state change committed atomically with the block.
+
+---
+
 ## Test Status
 
 - `cargo test -p call-light-client` — 26 tests covering MPT compact encode/decode roundtrip, single leaf proof, extension+leaf proof, branch proof, key not found, tampered hash rejection, header chain submission (valid, wrong parent, before anchor, duplicate, gap with buffer flush, multi-block chain), gap buffer flush, buffer full rejection, consensus verification, reorg unwind, anchor advancement, header pruning

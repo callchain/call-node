@@ -13,20 +13,6 @@ use std::sync::Arc;
 
 /// Register Callchain extension RPC methods
 pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(), ErrorObjectOwned> {
-    // ── Unified Write Endpoint ─────────────────────────────────────
-
-    // call_submit — DEPRECATED: The mempool is EVM-only.
-    // Submit transactions via eth_sendRawTransaction instead.
-    module
-        .register_async_method("call_submit", |_params, _state, _ctx| async move {
-            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
-                -32601,
-                "call_submit is deprecated: submit via eth_sendRawTransaction",
-                None::<()>,
-            ))
-        })
-        .map_err(|e| internal_error(e.to_string()))?;
-
     // ── Read-Only Query Endpoints ──────────────────────────────────
 
     // call_assetInfo
@@ -705,92 +691,20 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
-    // ── Light Client Bridge (Direct Execution — not yet instruction-based)
+    // ── Light Client Bridge (Blocked — Direct Execution Removed) ──
 
-    // call_lightClientBridgeDeposit
+    // call_lightClientBridgeDeposit — BLOCKED.
+    // Previously performed direct EVM state writes from the RPC layer, which
+    // violates the EVM-Only State Architecture (state mutations must go through
+    // consensus/EVM execution). Disabled until re-implemented as a precompile
+    // transaction path (see docs/light-client.md).
     module
         .register_async_method("call_lightClientBridgeDeposit", |_params, _state, _ctx| async move {
-            #[cfg(not(feature = "light-client-bridge"))]
-            return Err::<serde_json::Value, _>(internal_error(
-                "light client bridge is not enabled".into()));
-
-            #[cfg(feature = "light-client-bridge")]
-            async {
-                let call_obj: serde_json::Value = _params.one().map_err(|e| invalid_params(e.to_string()))?;
-                let header_hex = call_obj.get("headerRlp")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| invalid_params("missing 'headerRlp' field".into()))?;
-                let header_bytes = hex::decode(header_hex.trim_start_matches("0x"))
-                    .map_err(|e| invalid_params(format!("invalid headerRlp: {e}")))?;
-                let source_chain_str = call_obj.get("sourceChain")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| invalid_params("missing 'sourceChain' field".into()))?;
-                let source_chain = match source_chain_str.to_lowercase().as_str() {
-                    "ethereum" | "ethereummainnet" => call_bridge::ExternalChain::EthereumMainnet,
-                    "arbitrum" => call_bridge::ExternalChain::Arbitrum,
-                    _ => return Err(invalid_params("unknown source chain".into())),
-                };
-                let recipient_hex = call_obj.get("recipient")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| invalid_params("missing 'recipient' field".into()))?;
-                let recipient = recipient_hex.parse::<alloy_primitives::Address>()
-                    .map_err(|e| invalid_params(format!("invalid recipient: {e}")))?;
-                let asset_id = call_obj.get("assetId")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| invalid_params("missing 'assetId' field".into()))?;
-                let amount_str = call_obj.get("amount")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| invalid_params("missing 'amount' field (must be string)".into()))?;
-                let amount: u128 = amount_str
-                    .parse()
-                    .map_err(|_| invalid_params("invalid amount: must be a numeric string".into()))?;
-                let tx_proof_nodes: Vec<Vec<u8>> = call_obj.get("txProof")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())).collect())
-                    .ok_or_else(|| invalid_params("missing 'txProof' field".into()))?;
-                let receipt_proof_nodes: Vec<Vec<u8>> = call_obj.get("receiptProof")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())).collect())
-                    .ok_or_else(|| invalid_params("missing 'receiptProof' field".into()))?;
-                let receipt_index = call_obj.get("receiptIndex")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| invalid_params("missing 'receiptIndex' field".into()))?;
-                use call_light_client::{EthHeader, TxInclusionProof, ReceiptProof, MptProofNode};
-                let header = EthHeader::from_rlp(header_bytes);
-                let tx_proof = TxInclusionProof::new(
-                    tx_proof_nodes.into_iter().map(MptProofNode::new).collect(),
-                );
-                let receipt_proof = ReceiptProof::new(
-                    receipt_index,
-                    receipt_proof_nodes.into_iter().map(MptProofNode::new).collect(),
-                );
-                let op = call_bridge::ExternalBridgeOp::LightClientDeposit {
-                    source_chain,
-                    header,
-                    tx_proof,
-                    receipt_proof,
-                    recipient,
-                    asset_id,
-                    amount,
-                };
-                let mut light_client_guard = _state.light_client.write().map_err(|_| internal_error("lock poisoned".into()))?;
-                let light_client = light_client_guard.as_mut()
-                    .ok_or_else(|| invalid_params("light client not initialized".into()))?;
-                let config = call_bridge::BridgeConfig::default();
-                let current_block = _state.get_current_block();
-                let mut evm_state = _state.evm_state.write().map_err(|_| internal_error("lock poisoned".into()))?;
-                match call_bridge::process_light_client_deposit_evm(light_client, &op, &mut evm_state, &config, current_block) {
-                    Ok(call_bridge::ExternalDepositResult::Queued { finalized_at_block, .. }) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                        "status": "queued",
-                        "assetId": asset_id,
-                        "amount": amount.to_string(),
-                        "recipient": format!("0x{}", hex::encode(recipient.as_slice())),
-                        "challengePeriodBlocks": config.challenge_period_blocks,
-                        "finalizedAtBlock": finalized_at_block,
-                    })),
-                    Err(e) => Err(invalid_params(e.to_string())),
-                }
-            }.await
+            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
+                -32601,
+                "call_lightClientBridgeDeposit is disabled: direct EVM writes are not permitted. Use standard bridge deposit flow.",
+                None::<()>,
+            ))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
