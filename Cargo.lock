@@ -1911,35 +1911,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "call-payload-builder"
-version = "0.1.0"
-dependencies = [
- "call-bridge",
- "call-consensus",
- "call-crypto",
- "call-evm",
- "call-payload-types",
- "call-primitives",
- "call-protocol",
- "call-shielded",
- "call-transaction-pool",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "call-payload-types"
-version = "0.1.0"
-dependencies = [
- "call-primitives",
- "call-protocol",
- "call-storage",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "call-precompiles"
 version = "0.1.0"
 dependencies = [

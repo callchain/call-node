@@ -14,8 +14,6 @@ members = [
     "crates/node",
     "crates/chainspec",
     "crates/transaction-pool",
-    "crates/payload-builder",
-    "crates/payload-types",
     "crates/precompiles",
     "crates/bridge",
     "crates/light-client",
@@ -76,8 +74,6 @@ call-governance = { path = "crates/governance" }
 call-consensus = { path = "crates/consensus" }
 call-network = { path = "crates/network" }
 call-transaction-pool = { path = "crates/transaction-pool" }
-call-payload-types = { path = "crates/payload-types" }
-call-payload-builder = { path = "crates/payload-builder" }
 call-chainspec = { path = "crates/chainspec" }
 call-agent = { path = "crates/agent" }
 call-shielded = { path = "crates/shielded" }

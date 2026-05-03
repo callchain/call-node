@@ -74,7 +74,6 @@ Callchain features a dual-domain architecture with a single consensus validator 
 | `call-shielded` | ZK proofs and shielded transaction support |
 | `call-agent` | AI agent registration and balance management |
 | `call-precompiles` | EVM precompiled contracts |
-| `call-payload-builder` | Block payload construction |
 | `call-node` | Node application, CLI, boot sequence |
 
 ## Development
