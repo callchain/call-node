@@ -12,6 +12,7 @@ workspace = true
 call-primitives.workspace = true
 call-protocol.workspace = true
 call-precompiles.workspace = true
+call-asset.workspace = true
 call-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true

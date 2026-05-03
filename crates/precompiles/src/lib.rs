@@ -13,7 +13,6 @@
 
 mod oracle;
 mod bridge;
-mod asset;
 mod switch;
 mod shielded;
 mod governance;
@@ -22,11 +21,11 @@ mod compliance;
 mod agent;
 pub mod storage;
 pub mod helpers;
+pub mod journal_backend;
 
 pub use helpers::utils::*;
 pub use oracle::*;
 pub use bridge::*;
-pub use asset::*;
 pub use switch::*;
 pub use shielded::*;
 pub use governance::*;
@@ -140,52 +139,24 @@ pub struct CallPrecompiles {
 
 impl CallPrecompiles {
     /// Create a new CallPrecompiles for the given spec.
+    ///
+    /// Custom precompiles must be registered via [`with_custom`].
     pub fn new(spec: revm::primitives::hardfork::SpecId) -> Self {
-        let mut custom: HashMap<Address, Box<dyn StatefulPrecompile>> = HashMap::new();
-
-        // Custom stateful precompiles (wrapped during migration)
-        custom.insert(
-            ORACLE_ADDRESS,
-            Box::new(OraclePrecompile),
-        );
-        custom.insert(
-            BRIDGE_ADDRESS,
-            Box::new(BridgePrecompile),
-        );
-        custom.insert(
-            ASSET_ADDRESS,
-            Box::new(AssetPrecompile),
-        );
-        custom.insert(
-            SHIELDED_ADDRESS,
-            Box::new(ShieldedPrecompile),
-        );
-        custom.insert(
-            GOVERNANCE_ADDRESS,
-            Box::new(GovernancePrecompile),
-        );
-        custom.insert(
-            VALIDATOR_ADDRESS,
-            Box::new(ValidatorPrecompile),
-        );
-        custom.insert(
-            COMPLIANCE_ADDRESS,
-            Box::new(CompliancePrecompile),
-        );
-        custom.insert(
-            SWITCH_ADDRESS,
-            Box::new(SwitchPrecompile),
-        );
-        custom.insert(
-            AGENT_ADDRESS,
-            Box::new(AgentPrecompile),
-        );
-
         Self {
             standard: build_standard_precompiles(spec),
-            custom,
+            custom: HashMap::new(),
             spec,
         }
+    }
+
+    /// Register a custom stateful precompile at the given address.
+    pub fn with_custom(
+        mut self,
+        address: Address,
+        precompile: Box<dyn StatefulPrecompile>,
+    ) -> Self {
+        self.custom.insert(address, precompile);
+        self
     }
 }
 
@@ -366,6 +337,14 @@ impl CallPrecompiles {
 /// Build the full Callchain precompiles set (standard + custom).
 pub fn build_precompiles() -> CallPrecompiles {
     CallPrecompiles::new(revm::primitives::hardfork::SpecId::CANCUN)
+        .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
+        .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
+        .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
+        .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+        .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
+        .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+        .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
+        .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile))
 }
 
 #[cfg(test)]
@@ -393,13 +372,13 @@ mod tests {
         assert!(precompiles.contains(&Address::left_padding_from(&[1])));
         assert!(precompiles.contains(&ORACLE_ADDRESS));
         assert!(precompiles.contains(&BRIDGE_ADDRESS));
-        assert!(precompiles.contains(&ASSET_ADDRESS));
         assert!(precompiles.contains(&SHIELDED_ADDRESS));
         assert!(precompiles.contains(&GOVERNANCE_ADDRESS));
         assert!(precompiles.contains(&VALIDATOR_ADDRESS));
         assert!(precompiles.contains(&COMPLIANCE_ADDRESS));
         assert!(precompiles.contains(&SWITCH_ADDRESS));
         assert!(precompiles.contains(&AGENT_ADDRESS));
-        assert_eq!(precompiles.len(), 19);
+        // AssetPrecompile now lives in call-asset, not registered here
+        assert_eq!(precompiles.len(), 18);
     }
 }

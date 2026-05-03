@@ -1,7 +1,6 @@
-pub mod backend;
 pub mod precompile;
 
-pub use backend::{EvmStateBackend, EvmStateRefBackend};
+pub use precompile::AssetPrecompile;
 
 use call_precompiles::{
     slot_allowance, slot_asset_meta, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
@@ -213,6 +212,18 @@ impl<B: StorageBackend> AssetStorage<B> {
     ) -> Result<(), AssetError> {
         self.deduct_balance(asset_id, from, amount)?;
         self.add_balance(asset_id, to, amount)?;
+        Ok(())
+    }
+
+    pub fn batch_transfer(
+        &mut self,
+        asset_id: u64,
+        from: Address,
+        recipients: &[(Address, Balance)],
+    ) -> Result<(), AssetError> {
+        for (to, amount) in recipients {
+            self.transfer(asset_id, from, *to, *amount)?;
+        }
         Ok(())
     }
 

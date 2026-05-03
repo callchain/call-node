@@ -4,9 +4,11 @@
 
 mod executor;
 mod state;
+pub mod backend;
 pub mod db;
 pub mod erc20_bytecode;
 
 pub use executor::*;
 pub use state::*;
+pub use backend::*;
 pub use alloy_primitives::{U256, Bytes};

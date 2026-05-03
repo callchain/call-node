@@ -1,4 +1,4 @@
-use call_evm::EvmState;
+use crate::EvmState;
 use call_protocol::storage_backend::StorageBackend;
 use call_primitives::{Address, U256};
 

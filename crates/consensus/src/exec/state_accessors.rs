@@ -7,8 +7,8 @@
 //! This replaces the legacy `AccountState` / `AssetRegistry` mutation path
 //! so that the block state_root captures all state changes.
 
-use call_asset::{AssetStorage, EvmStateBackend, EvmStateRefBackend};
-use call_evm::EvmState;
+use call_asset::AssetStorage;
+use call_evm::{EvmState, EvmStateBackend, EvmStateRefBackend};
 use call_precompiles::{
     address_to_u256, read_string32,
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,

@@ -3,11 +3,14 @@
 //! ABI decode/encode, U256 conversions, and common storage slot layouts.
 //! Precompiles should import from here instead of depending on each other.
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{address, Address, U256};
 use revm_precompile::{PrecompileError, PrecompileOutput};
 
 use crate::storage::{storage_slot, StorageCtx};
-use crate::{ASSET_ADDRESS, VALIDATOR_ADDRESS};
+use crate::VALIDATOR_ADDRESS;
+
+/// Asset precompile address (0x201).
+pub const ASSET_ADDRESS: Address = address!("0000000000000000000000000000000000000201");
 
 // ── ABI decoding helpers ──────────────────────────────────────────────
 
@@ -281,6 +284,15 @@ pub fn slot_asset_meta(asset_id: u64, suffix: &[u8]) -> U256 {
 /// Compute the EVM storage slot for the EVM contract address of an asset.
 pub fn slot_evm_contract(asset_id: u64) -> U256 {
     slot_asset_meta(asset_id, b"evm_contract")
+}
+
+/// Compute the EVM storage slot for an allowance.
+pub fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> U256 {
+    storage_slot(&[
+        &asset_id.to_be_bytes()[..],
+        owner.as_slice(),
+        spender.as_slice(),
+    ])
 }
 
 /// Compute the validator storage slot for an address.

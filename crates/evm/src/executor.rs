@@ -3,7 +3,15 @@
 //! EVM transaction execution, ERC-20 deployment, gas tracking, validation.
 
 use call_primitives::Address;
-use call_precompiles::CallPrecompiles;
+use call_precompiles::{
+    CallPrecompiles,
+    AgentPrecompile, BridgePrecompile, CompliancePrecompile, GovernancePrecompile,
+    OraclePrecompile, ShieldedPrecompile, SwitchPrecompile, ValidatorPrecompile,
+    AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
+    ORACLE_ADDRESS, SHIELDED_ADDRESS, SWITCH_ADDRESS, VALIDATOR_ADDRESS,
+    ASSET_ADDRESS,
+};
+use call_asset::AssetPrecompile;
 use alloy_primitives::{U256, Bytes, keccak256, FixedBytes};
 use revm::{
     database::InMemoryDB,
@@ -99,8 +107,18 @@ impl EvmExecutor {
             .with_db(db)
             .modify_cfg_chained(|cfg| cfg.set_spec(self.spec_id));
 
-        // Build EVM with Callchain custom precompiles (0x101/0x102/0x103)
-        let mut evm = ctx.build_mainnet().with_precompiles(CallPrecompiles::new(self.spec_id));
+        // Build EVM with Callchain custom precompiles
+        let precompiles = CallPrecompiles::new(self.spec_id)
+            .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
+            .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
+            .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
+            .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
+            .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+            .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
+            .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+            .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
+            .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile));
+        let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
 
         let mut block_env = revm::context::BlockEnv::default();
         block_env.number = U256::from(block_number);

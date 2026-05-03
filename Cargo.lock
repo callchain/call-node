@@ -1654,7 +1654,6 @@ name = "call-asset"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "call-evm",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
@@ -1768,6 +1767,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie",
+ "call-asset",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
