@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use call_bridge::BridgeConfig;
 use call_consensus::{Block, SimplexConsensus};
+use call_governance::GovernanceManager;
 use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
 use call_oracle::{OracleManager, ORACLE_UPDATE_INTERVAL};
@@ -28,6 +29,7 @@ pub(crate) async fn block_production_loop(
     telemetry: Arc<crate::telemetry::TelemetryRegistry>,
     _audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     oracle: Arc<RwLock<OracleManager>>,
+    governance: Arc<RwLock<GovernanceManager>>,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -271,7 +273,7 @@ pub(crate) async fn block_production_loop(
 
         // 10b. Advance governance proposal state machine
         {
-            let mut gov = state.governance.write().unwrap();
+            let mut gov = governance.write().unwrap();
             gov.set_current_block(new_height);
             gov.advance(new_height);
             // Drain and broadcast governance events
@@ -296,7 +298,7 @@ pub(crate) async fn block_production_loop(
 
         // 10c. Sync validators from EVM storage into governance
         {
-            let mut gov = state.governance.write().unwrap();
+            let mut gov = governance.write().unwrap();
             let evm_state = state.evm_state.read().unwrap();
             let validators = call_consensus::exec::evm_instructions::read_validators(&evm_state);
             drop(evm_state);
@@ -451,14 +453,14 @@ pub(crate) async fn block_production_loop(
 
         // 14. Incrementally persist state changes after every block
         let db_env = &db.db;
-        if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus, &oracle) {
+        if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus, &oracle, &governance) {
             tracing::warn!(error = %e, "failed to incrementally persist state");
         }
 
         // 15. Full table rebuild every 1000 blocks as safety net
         if new_height % 1000 == 0 {
             let db_env = &db.db;
-            if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus, &oracle) {
+            if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus, &oracle, &governance) {
                 tracing::warn!(error = %e, "failed to full-rebuild persist state");
             }
         }

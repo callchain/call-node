@@ -527,41 +527,56 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_governanceGetProposal", |params, state, _ctx| async move {
             let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            match gov.get_proposal(proposal_id) {
-                Some(p) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
-                    "id": p.id,
-                    "proposer": format!("{:?}", p.proposer),
-                    "title": p.title,
-                    "description": p.description,
-                    "state": format!("{:?}", p.state),
-                    "votingPowerYes": p.voting_power_yes.to_string(),
-                    "votingPowerNo": p.voting_power_no.to_string(),
-                    "votingPowerAbstain": p.voting_power_abstain.to_string(),
-                    "quorumRequired": p.quorum_required.to_string(),
-                    "startBlock": p.start_block,
-                    "endBlock": p.end_block,
-                    "executionBlock": p.execution_block,
-                })),
-                None => Ok::<_, ErrorObjectOwned>(serde_json::json!(null)),
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let count = evm_instructions::read_gov_proposal_count(&evm);
+            if proposal_id == 0 || proposal_id > count {
+                return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
+            let status = evm_instructions::read_gov_proposal_status(&evm, proposal_id);
+            let proposer = evm_instructions::read_gov_proposal_proposer(&evm, proposal_id);
+            let title_bytes = evm_instructions::read_gov_proposal_title(&evm, proposal_id);
+            let desc_bytes = evm_instructions::read_gov_proposal_description(&evm, proposal_id);
+            let (yes, no, abstain) = evm_instructions::read_gov_proposal_votes(&evm, proposal_id);
+            let deposit = evm_instructions::read_gov_proposal_deposit(&evm, proposal_id);
+            let queued_at = evm_instructions::read_gov_proposal_queued_at(&evm, proposal_id);
+            let title = String::from_utf8_lossy(&title_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
+            let description = String::from_utf8_lossy(&desc_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "id": proposal_id,
+                "proposer": format!("{:?}", proposer),
+                "title": title,
+                "description": description,
+                "status": status,
+                "votingPowerYes": yes.to_string(),
+                "votingPowerNo": no.to_string(),
+                "votingPowerAbstain": abstain.to_string(),
+                "deposit": deposit.to_string(),
+                "queuedAt": queued_at,
+            }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
     // call_governanceGetAllProposals
     module
         .register_async_method("call_governanceGetAllProposals", |_params, state, _ctx| async move {
-            let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let proposals: Vec<serde_json::Value> = gov.get_all_proposals().values()
-                .map(|p| serde_json::json!({
-                    "id": p.id,
-                    "proposer": format!("{:?}", p.proposer),
-                    "title": p.title,
-                    "state": format!("{:?}", p.state),
-                    "votingPowerYes": p.voting_power_yes.to_string(),
-                    "votingPowerNo": p.voting_power_no.to_string(),
-                }))
-                .collect();
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let count = evm_instructions::read_gov_proposal_count(&evm);
+            let mut proposals = Vec::with_capacity(count as usize);
+            for id in 1..=count {
+                let status = evm_instructions::read_gov_proposal_status(&evm, id);
+                let proposer = evm_instructions::read_gov_proposal_proposer(&evm, id);
+                let title_bytes = evm_instructions::read_gov_proposal_title(&evm, id);
+                let (yes, no, _abstain) = evm_instructions::read_gov_proposal_votes(&evm, id);
+                let title = String::from_utf8_lossy(&title_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
+                proposals.push(serde_json::json!({
+                    "id": id,
+                    "proposer": format!("{:?}", proposer),
+                    "title": title,
+                    "status": status,
+                    "votingPowerYes": yes.to_string(),
+                    "votingPowerNo": no.to_string(),
+                }));
+            }
             Ok::<_, ErrorObjectOwned>(serde_json::json!({ "proposals": proposals }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -569,8 +584,9 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_governanceIsPaused
     module
         .register_async_method("call_governanceIsPaused", |_params, state, _ctx| async move {
-            let gov = state.governance.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "isPaused": gov.is_paused() }))
+            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let paused = evm_instructions::read_gov_paused(&evm);
+            Ok::<_, ErrorObjectOwned>(serde_json::json!({ "isPaused": paused }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 

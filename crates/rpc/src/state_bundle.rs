@@ -14,7 +14,6 @@ use call_consensus::{
     Block, BlockExecutionResult, ConsensusError, ForkManager,
 };
 use call_evm::EvmState;
-use call_governance::GovernanceManager;
 use call_protocol::FeeParams;
 
 use crate::handlers::RpcState;
@@ -26,7 +25,6 @@ use crate::handlers::RpcState;
 pub struct StateWriteBundle<'a> {
     pub evm: RwLockWriteGuard<'a, EvmState>,
     pub fee_params: RwLockWriteGuard<'a, FeeParams>,
-    pub governance: RwLockWriteGuard<'a, GovernanceManager>,
     pub fork_manager: RwLockWriteGuard<'a, ForkManager>,
 }
 
@@ -37,7 +35,6 @@ pub struct StateWriteBundle<'a> {
 pub struct StateReadBundle<'a> {
     pub evm: RwLockReadGuard<'a, EvmState>,
     pub fee_params: RwLockReadGuard<'a, FeeParams>,
-    pub governance: RwLockReadGuard<'a, GovernanceManager>,
     pub fork_manager: RwLockReadGuard<'a, ForkManager>,
 }
 
@@ -51,7 +48,6 @@ impl RpcState {
         StateWriteBundle {
             evm: self.evm_state.write().unwrap(),
             fee_params: self.fee_params.write().unwrap(),
-            governance: self.governance.write().unwrap(),
             fork_manager: self.fork_manager.write().unwrap(),
         }
     }
@@ -61,7 +57,6 @@ impl RpcState {
         StateReadBundle {
             evm: self.evm_state.read().unwrap(),
             fee_params: self.fee_params.read().unwrap(),
-            governance: self.governance.read().unwrap(),
             fork_manager: self.fork_manager.read().unwrap(),
         }
     }

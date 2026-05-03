@@ -8,7 +8,6 @@ use call_consensus::exec::evm_instructions;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash};
 use call_crypto::SignerRef;
 use call_transaction_pool::Mempool;
-use call_governance::GovernanceManager;
 use alloy_consensus::{TxEnvelope, Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
@@ -128,7 +127,6 @@ pub struct RpcState {
     pub mempool_defense: RwLock<MempoolDefense>,
     pub chain_id: u64,
     pub subscriptions: SubscriptionManager,
-    pub governance: RwLock<GovernanceManager>,
     pub fork_manager: RwLock<ForkManager>,
     /// When true, governance RPC methods require valid secp256k1 signatures.
     /// When false (default, devnet), unsigned calls are allowed.
@@ -186,7 +184,6 @@ impl RpcState {
             mempool_defense: RwLock::new(MempoolDefense::new(1000, 1000, 10000, 2000)),
             chain_id,
             subscriptions: SubscriptionManager::new(),
-            governance: RwLock::new(GovernanceManager::new()),
             fork_manager: RwLock::new(ForkManager::new(
                 call_primitives::ProtocolVersion::new(1, 0, 0),
                 total_validators.max(1),

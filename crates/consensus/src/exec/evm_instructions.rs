@@ -729,6 +729,54 @@ pub fn read_gov_paused(evm_state: &EvmState) -> bool {
     evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_paused()).to_be_bytes::<32>()[31] == 1
 }
 
+/// Read governance proposal count from EVM storage.
+pub fn read_gov_proposal_count(evm_state: &EvmState) -> u64 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal_count()))
+}
+
+/// Read governance proposal proposer from EVM storage.
+pub fn read_gov_proposal_proposer(evm_state: &EvmState, proposal_id: u64) -> Address {
+    u256_to_address(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer")))
+}
+
+/// Read governance proposal title bytes from EVM storage.
+pub fn read_gov_proposal_title(evm_state: &EvmState, proposal_id: u64) -> [u8; 32] {
+    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"title")).to_be_bytes::<32>()
+}
+
+/// Read governance proposal description bytes from EVM storage.
+pub fn read_gov_proposal_description(evm_state: &EvmState, proposal_id: u64) -> [u8; 32] {
+    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"desc")).to_be_bytes::<32>()
+}
+
+/// Read governance proposal data hash from EVM storage.
+pub fn read_gov_proposal_data_hash(evm_state: &EvmState, proposal_id: u64) -> [u8; 32] {
+    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"data")).to_be_bytes::<32>()
+}
+
+/// Read governance proposal votes from EVM storage.
+pub fn read_gov_proposal_votes(evm_state: &EvmState, proposal_id: u64) -> (u128, u128, u128) {
+    let for_votes = u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_for")));
+    let against = u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_against")));
+    let abstain = u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_abstain")));
+    (for_votes, against, abstain)
+}
+
+/// Read governance proposal deposit from EVM storage.
+pub fn read_gov_proposal_deposit(evm_state: &EvmState, proposal_id: u64) -> u128 {
+    u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"deposit")))
+}
+
+/// Read governance proposal queued_at block from EVM storage.
+pub fn read_gov_proposal_queued_at(evm_state: &EvmState, proposal_id: u64) -> u64 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"queued_at")))
+}
+
+/// Read whether a specific voter has voted on a proposal.
+pub fn read_gov_voter_vote(evm_state: &EvmState, proposal_id: u64, voter: Address) -> u8 {
+    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_voter(proposal_id, voter)).to_be_bytes::<32>()[31]
+}
+
 // ── Compliance read helpers ───────────────────────────────────────────
 
 /// Read compliance status for an address under a policy from EVM storage.

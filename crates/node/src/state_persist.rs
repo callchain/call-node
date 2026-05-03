@@ -86,6 +86,7 @@ pub(crate) fn persist_state_to_db(
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
     oracle: &Arc<RwLock<OracleManager>>,
+    governance: &Arc<RwLock<call_governance::GovernanceManager>>,
 ) -> Result<(), String> {
     // 1. Write pending checkpoint marker
     let checkpoint_hash = {
@@ -118,7 +119,7 @@ pub(crate) fn persist_state_to_db(
 
     // Persist governance state
     {
-        let governance = state.governance.read().unwrap();
+        let governance = governance.read().unwrap();
         save_governance_state(db_env, &governance)
             .map_err(|e| format!("save governance: {e}"))?;
     }
@@ -279,23 +280,6 @@ pub(crate) fn load_receipts(db: &DatabaseEnv) -> Result<std::collections::HashMa
     Ok(receipts)
 }
 
-pub(crate) fn load_receipts_by_block(db: &DatabaseEnv, block_number: u64) -> Result<Vec<TxHash>, String> {
-    let key = block_number.to_be_bytes().to_vec();
-    match db_get::<CallReceiptsByBlock>(db, &key) {
-        Ok(Some(v)) => serde_json::from_slice(&v).map_err(|e| e.to_string()),
-        Ok(None) => Ok(vec![]),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-pub(crate) fn delete_receipts_by_block(db: &DatabaseEnv, block_number: u64) -> Result<(), String> {
-    let tx_hashes = load_receipts_by_block(db, block_number)?;
-    for tx_hash in tx_hashes {
-        db_del::<CallReceipts>(db, tx_hash.as_slice()).map_err(|e: StorageError| e.to_string())?;
-    }
-    db_del::<CallReceiptsByBlock>(db, &block_number.to_be_bytes()).map_err(|e: StorageError| e.to_string())
-}
-
 // ── Checkpoint / WAL persistence ──────────────────────────────────────
 
 /// Write a checkpoint marker to signal that a state write is in progress.
@@ -366,6 +350,7 @@ pub(crate) fn persist_state_incremental(
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
     oracle: &Arc<RwLock<OracleManager>>,
+    governance: &Arc<RwLock<call_governance::GovernanceManager>>,
 ) -> Result<(), String> {
     // Persist EVM state (overwrite existing entries, no clear)
     {
@@ -382,7 +367,7 @@ pub(crate) fn persist_state_incremental(
 
     // Persist governance state (overwrite)
     {
-        let governance = state.governance.read().map_err(|_| "governance lock poisoned".to_string())?;
+        let governance = governance.read().map_err(|_| "governance lock poisoned".to_string())?;
         save_governance_state(db_env, &governance)
             .map_err(|e| format!("save governance: {e}"))?;
     }

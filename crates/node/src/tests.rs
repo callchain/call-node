@@ -475,7 +475,7 @@
 
             // Persist state to reth-db immediately
             let db_env = &node.db.db;
-            persist_state_to_db(db_env, &node.state, &node.consensus, &node.oracle)
+            persist_state_to_db(db_env, &node.state, &node.consensus, &node.oracle, &node.governance)
                 .expect("persist state");
 
             // Node is dropped here, simulating shutdown
@@ -527,7 +527,7 @@
 
         // Register some validators so quorum can be met
         {
-            let mut gov = node.state.governance.write().unwrap();
+            let mut gov = node.governance.write().unwrap();
             for i in 1u32..=3 {
                 gov.register_validator(i, call_primitives::Address::repeat_byte(i as u8));
                 gov.set_call_balance(call_primitives::Address::repeat_byte(i as u8), 1);
@@ -536,7 +536,7 @@
 
         // Submit a proposal
         let proposal_id = {
-            let mut gov = node.state.governance.write().unwrap();
+            let mut gov = node.governance.write().unwrap();
             gov.submit_proposal(
                 proposer,
                 ProposalType::ParameterChange {
@@ -551,14 +551,14 @@
 
         // Verify proposal was created
         {
-            let gov = node.state.governance.read().unwrap();
+            let gov = node.governance.read().unwrap();
             let p = gov.get_proposal(proposal_id).expect("proposal exists");
             assert_eq!(p.state, call_governance::ProposalState::Pending);
         }
 
         // Advance to voting period and vote with all validators
         {
-            let mut gov = node.state.governance.write().unwrap();
+            let mut gov = node.governance.write().unwrap();
             gov.set_current_block(REVIEW_PERIOD_BLOCKS);
             // Vote yes from all 3 registered validators
             for i in 1u32..=3 {
@@ -569,13 +569,13 @@
 
         // Advance through all phases
         {
-            let mut gov = node.state.governance.write().unwrap();
+            let mut gov = node.governance.write().unwrap();
             gov.advance(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + TIMELOCK_PERIOD_BLOCKS + 1);
         }
 
         // Should be queued or executed (depending on timelock)
         {
-            let gov = node.state.governance.read().unwrap();
+            let gov = node.governance.read().unwrap();
             let p = gov.get_proposal(proposal_id).expect("proposal exists");
             assert!(
                 matches!(p.state, call_governance::ProposalState::Queued | call_governance::ProposalState::Executed),
@@ -585,7 +585,7 @@
 
         // Advance past timelock to execute
         {
-            let mut gov = node.state.governance.write().unwrap();
+            let mut gov = node.governance.write().unwrap();
             let exec = gov.get_proposal(proposal_id).unwrap().execution_block.unwrap();
             gov.advance(exec + 1);
             // Drain events
@@ -595,7 +595,7 @@
 
         // Should be executed
         {
-            let gov = node.state.governance.read().unwrap();
+            let gov = node.governance.read().unwrap();
             let p = gov.get_proposal(proposal_id).expect("proposal exists");
             assert_eq!(p.state, call_governance::ProposalState::Executed);
         }

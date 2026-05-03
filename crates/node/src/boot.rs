@@ -206,7 +206,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
 
             // Register genesis validators into governance for voting
             {
-                let mut gov = node.state.governance.write().map_err(|_| "lock poisoned")?;
+                let mut gov = node.governance.write().map_err(|_| "lock poisoned")?;
                 for (i, val) in genesis.validators.iter().enumerate() {
                     let addr = parse_address(&val.address)?;
                     gov.register_validator(i as u32, addr);

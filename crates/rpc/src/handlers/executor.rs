@@ -1,6 +1,6 @@
 //! NodeProposalExecutor and governance wiring.
 
-use call_governance::{ProposalExecutor, Proposal};
+use call_governance::{GovernanceManager, ProposalExecutor, Proposal};
 use call_primitives::Address;
 use crate::handlers::state::RpcState;
 use std::sync::Arc;
@@ -222,7 +222,7 @@ fn parse_version(s: &str) -> Option<call_primitives::ProtocolVersion> {
 
 /// Wire the governance executor so proposals can trigger real side effects.
 /// Called after RpcState is wrapped in Arc.
-pub fn wire_governance_executor(state: &Arc<RpcState>) {
+pub fn wire_governance_executor(gov: &mut GovernanceManager, state: &Arc<RpcState>) {
     let executor = Arc::new(NodeProposalExecutor {
         state: Arc::clone(state),
     });
@@ -234,8 +234,6 @@ pub fn wire_governance_executor(state: &Arc<RpcState>) {
             }).unwrap_or(0)
         })
     };
-    if let Ok(mut gov) = state.governance.write() {
-        gov.executor = Some(executor);
-        gov.balance_source = Some(balance_source);
-    }
+    gov.executor = Some(executor);
+    gov.balance_source = Some(balance_source);
 }

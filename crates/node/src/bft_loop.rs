@@ -15,6 +15,7 @@ use call_network::{
     Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, SyncRequest,
     EpochBoundarySignal,
 };
+use call_governance::GovernanceManager;
 use call_oracle::{OracleManager, ORACLE_UPDATE_INTERVAL};
 use call_primitives::{Address, Hash, FeeCurrency, TxHash};
 use call_protocol::ProtocolReceipt;
@@ -37,6 +38,7 @@ fn apply_rollback_plan(
     data_dir: &std::path::Path,
     db_env: &Arc<reth_db::DatabaseEnv>,
     oracle: &Arc<RwLock<OracleManager>>,
+    governance: &Arc<RwLock<GovernanceManager>>,
 ) {
     tracing::warn!(
         target_height = plan.target_height,
@@ -70,7 +72,7 @@ fn apply_rollback_plan(
 
     // 5. Reset governance block
     {
-        let mut gov = state.governance.write().unwrap();
+        let mut gov = governance.write().unwrap();
         gov.set_current_block(plan.target_height);
     }
 
@@ -140,6 +142,7 @@ pub(crate) async fn bft_event_loop(
     subset_pubkeys: Vec<[u8; 32]>,
     my_pubkey: [u8; 32],
     oracle: Arc<RwLock<OracleManager>>,
+    governance: Arc<RwLock<GovernanceManager>>,
 ) {
     let mut execution_results: std::collections::HashMap<
         ConsensusDigest,
@@ -176,7 +179,7 @@ pub(crate) async fn bft_event_loop(
     loop {
         // Check for pending emergency rollback and apply if present
         if let Some(plan) = state.pending_rollback.write().unwrap().take() {
-            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle);
+            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle, &governance);
         }
 
         // === Epoch boundary quorum check ===
@@ -534,7 +537,7 @@ pub(crate) async fn bft_event_loop(
 
                     // Advance governance
                     {
-                        let mut gov = state.governance.write().unwrap();
+                        let mut gov = governance.write().unwrap();
                         gov.set_current_block(new_height);
                         gov.advance(new_height);
                         for event in gov.drain_events() {
@@ -558,7 +561,7 @@ pub(crate) async fn bft_event_loop(
 
                     // Sync validators from EVM storage into governance
                     {
-                        let mut gov = state.governance.write().unwrap();
+                        let mut gov = governance.write().unwrap();
                         let evm_state = state.evm_state.read().unwrap();
                         let validators = call_consensus::exec::evm_instructions::read_validators(&evm_state);
                         drop(evm_state);
@@ -713,14 +716,14 @@ pub(crate) async fn bft_event_loop(
 
                     // Incremental state persistence
                     let db_env = &db.db;
-                    if let Err(e) = persist_state_incremental(db_env, &state, &consensus, &oracle) {
+                    if let Err(e) = persist_state_incremental(db_env, &state, &consensus, &oracle, &governance) {
                         tracing::warn!(error = %e, "BFT finalize: incremental persist failed");
                     }
 
                     // Full rebuild every 1000 blocks
                     if new_height % 1000 == 0 {
                         let db_env = &db.db;
-                        if let Err(e) = persist_state_to_db(db_env, &state, &consensus, &oracle) {
+                        if let Err(e) = persist_state_to_db(db_env, &state, &consensus, &oracle, &governance) {
                             tracing::warn!(error = %e, "BFT finalize: full persist failed");
                         }
                     }

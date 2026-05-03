@@ -114,6 +114,8 @@ pub struct CallNode {
     pub fresh_start: bool,
     /// Transient oracle coordinator (prices/TWAP live in EVM storage)
     pub oracle: Arc<RwLock<OracleManager>>,
+    /// Governance proposal state machine (proposals live in EVM, sidecar manages transitions)
+    pub governance: Arc<RwLock<GovernanceManager>>,
 }
 
 impl CallNode {
@@ -246,11 +248,10 @@ impl CallNode {
         // Inject loaded fork state
         *state.fork_manager.write().unwrap() = fork_manager;
 
-        // Replace default governance with persisted state
-        *state.governance.write().unwrap() = loaded.governance;
-
+        let mut governance = loaded.governance;
         // Wire governance executor so proposals can trigger real side effects
-        wire_governance_executor(&state);
+        wire_governance_executor(&mut governance, &state);
+        let governance = Arc::new(RwLock::new(governance));
 
         // Sync consensus params from SimplexConsensus into RpcState for governance updates
         *state.consensus_params.write().unwrap() = *consensus.params();
@@ -287,6 +288,7 @@ impl CallNode {
             audit_log,
             fresh_start,
             oracle,
+            governance,
         })
     }
 
@@ -498,6 +500,7 @@ impl CallNode {
 
         let subscriptions = self.state.subscriptions.clone();
         let oracle = Arc::clone(&self.oracle);
+        let governance = Arc::clone(&self.governance);
 
         tokio::spawn(block_production_loop(
             state,
@@ -511,6 +514,7 @@ impl CallNode {
             telemetry,
             audit_log,
             oracle,
+            governance,
         ))
     }
 
@@ -537,6 +541,7 @@ impl CallNode {
         let telemetry = Arc::clone(&self.telemetry);
         let audit_log = Arc::clone(&self.audit_log);
         let oracle_manager = Arc::clone(&self.oracle);
+        let governance = Arc::clone(&self.governance);
 
         std::thread::spawn(move || {
             let bft_data_dir = data_dir.join("bft_journal");
@@ -770,6 +775,7 @@ impl CallNode {
                                 bytes
                             },
                             oracle_manager.clone(),
+                            governance.clone(),
                         ));
 
                         let reason = exit_rx.await;
@@ -1129,7 +1135,7 @@ impl CallNode {
         }
         // Flush final state to reth-db
         let db_env = &self.db.db;
-        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus, &self.oracle) {
+        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus, &self.oracle, &self.governance) {
             tracing::warn!(error = %e, "failed to flush state on shutdown");
         }
         if let Err(e) = db_save_prune(db_env, &self.prune_state) {
