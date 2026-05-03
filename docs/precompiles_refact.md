@@ -873,3 +873,480 @@ GovernanceAdvancer
 | `checkCompliance` | `AssetPrecompile::check_compliance` | `read_compliance_status` | `call-asset::AssetStorage::check_compliance` |
 | `seed_balance` | — | `seed_balance` | `call-asset::AssetStorage::write_balance` |
 | `seed_asset` | — | `seed_asset` | `call-asset::AssetStorage::register` / `write_meta` |
+
+---
+
+## 实施计划（全部未实现）
+
+> 以下所有步骤状态为 `- [ ]`（未实现），每完成一项后由实施者勾选 `- [x]` 并提交。
+
+---
+
+### Phase 0 — 前置准备
+
+- [ ] **P0.1** 确认全项目当前编译通过：`cargo check`
+- [ ] **P0.2** 确认 `call-protocol` 已依赖 `call-primitives` 和 `call-evm`
+- [ ] **P0.3** 列出 `call-precompiles` 中所有 `slot_*` 辅助函数，确认 `call-asset` 可复用
+- [ ] **P0.4** 在根目录 `Cargo.toml` 的 `[workspace.members]` 中预留 `"crates/asset"`
+
+---
+
+### Phase 1 第一波：Asset 核心功能迁移（功能优先，框架延后）
+
+#### 步骤 1 — `call-protocol` 添加 `StorageBackend` trait
+
+- [ ] **1.1** 新建 `crates/protocol/src/storage_backend.rs`
+
+```rust
+use call_primitives::{Address, U256};
+
+pub trait StorageBackend {
+    fn load(&self, address: Address, slot: U256) -> U256;
+    fn store(&mut self, address: Address, slot: U256, value: U256);
+}
+```
+
+- [ ] **1.2** 在 `crates/protocol/src/lib.rs` 中追加 `pub mod storage_backend;`
+- [ ] **1.3** 编译验证：`cargo check -p call-protocol`
+
+#### 步骤 2 — 创建 `crates/asset/` 独立 crate
+
+- [ ] **2.1** 新建 `crates/asset/Cargo.toml`
+
+```toml
+[package]
+name = "call-asset"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+call-primitives.workspace = true
+call-protocol.workspace = true
+call-precompiles.workspace = true
+call-evm.workspace = true
+alloy-primitives.workspace = true
+revm-precompile.workspace = true
+```
+
+- [ ] **2.2** 新建 `crates/asset/src/backend.rs`
+
+```rust
+use call_evm::EvmState;
+use call_protocol::storage_backend::StorageBackend;
+use call_primitives::{Address, U256};
+
+pub struct EvmStateBackend<'a>(pub &'a mut EvmState);
+
+impl<'a> StorageBackend for EvmStateBackend<'a> {
+    fn load(&self, address: Address, slot: U256) -> U256 {
+        self.0.get_storage(&address, slot)
+    }
+    fn store(&mut self, address: Address, slot: U256, value: U256) {
+        self.0.set_storage(address, slot, value);
+    }
+}
+```
+
+- [ ] **2.3** 新建 `crates/asset/src/lib.rs`，提取 `AssetStorage<B>`
+
+从 `crates/precompiles/src/asset.rs` 和 `crates/consensus/src/exec/state_accessors.rs` 提取以下方法：
+
+| 方法 | 来源 |
+|------|------|
+| `read_balance` | precompile `load_bal` / protocol `read_balance` |
+| `write_balance` | precompile `save_bal` / protocol `seed_balance` |
+| `add_balance` | protocol `add_balance_evm` |
+| `deduct_balance` | protocol `deduct_balance_evm` |
+| `read_allowance` | precompile + protocol `read_allowance` |
+| `write_allowance` | protocol `seed_allowance` |
+| `read_meta`（symbol/name/decimals/issuer/max/supply/status） | precompile `get_asset_info` / protocol `read_asset_*` |
+| `write_meta` / `register` | precompile `register` / protocol `seed_asset` |
+| `transfer` | precompile `transfer` |
+| `approve` | precompile `approve` |
+| `transfer_from` | precompile `transfer_from` |
+| `mint` | precompile `mint` |
+| `burn` | precompile `burn` |
+
+```rust
+use call_precompiles::{slot_allowance, slot_asset_meta, slot_balance, ASSET_ADDRESS};
+use call_protocol::storage_backend::StorageBackend;
+use call_primitives::{Address, Balance, U256};
+
+#[derive(Debug)]
+pub enum AssetError {
+    InsufficientBalance,
+    BalanceOverflow,
+    SupplyOverflow,
+    MaxSupplyExceeded,
+    NotIssuer,
+    AssetNotFound,
+}
+
+pub struct AssetStorage<B: StorageBackend> {
+    backend: B,
+}
+
+impl<B: StorageBackend> AssetStorage<B> {
+    pub fn new(backend: B) -> Self { Self { backend } }
+
+    pub fn read_balance(&self, asset_id: u64, addr: Address) -> Balance {
+        let slot = slot_balance(asset_id, addr);
+        u256_to_u128(self.backend.load(ASSET_ADDRESS, slot))
+    }
+
+    pub fn write_balance(&mut self, asset_id: u64, addr: Address, amount: Balance) {
+        let slot = slot_balance(asset_id, addr);
+        self.backend.store(ASSET_ADDRESS, slot, u128_to_u256(amount));
+    }
+
+    pub fn add_balance(&mut self, asset_id: u64, addr: Address, amount: Balance) -> Result<(), AssetError> {
+        let current = self.read_balance(asset_id, addr);
+        let new = current.checked_add(amount).ok_or(AssetError::BalanceOverflow)?;
+        self.write_balance(asset_id, addr, new);
+        Ok(())
+    }
+
+    pub fn deduct_balance(&mut self, asset_id: u64, addr: Address, amount: Balance) -> Result<(), AssetError> {
+        let current = self.read_balance(asset_id, addr);
+        let new = current.checked_sub(amount).ok_or(AssetError::InsufficientBalance)?;
+        self.write_balance(asset_id, addr, new);
+        Ok(())
+    }
+
+    pub fn transfer(&mut self, asset_id: u64, from: Address, to: Address, amount: Balance) -> Result<(), AssetError> {
+        self.deduct_balance(asset_id, from, amount)?;
+        self.add_balance(asset_id, to, amount)?;
+        Ok(())
+    }
+
+    // ... read_allowance, write_allowance, read_meta, write_meta,
+    // ... approve, transfer_from, mint, burn, register 等
+}
+```
+
+- [ ] **2.4** 新建 `crates/asset/src/precompile.rs`（薄层入口）
+
+```rust
+use call_precompiles::{JournalBackend, StatefulPrecompile};
+use call_primitives::Address;
+use revm_precompile::{PrecompileError, PrecompileResult};
+use crate::AssetStorage;
+
+pub struct AssetPrecompile;
+
+impl StatefulPrecompile for AssetPrecompile {
+    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+        // 暂时保持原有 selector match，内部改为 AssetStorage 调用
+        // TODO: Phase 1 第二波替换为 dispatch_call
+        // ...
+    }
+}
+```
+
+- [ ] **2.5** 新建 `crates/asset/src/lib.rs` 入口模块导出
+
+```rust
+pub mod backend;
+pub mod precompile;
+
+mod storage;
+pub use storage::{AssetStorage, AssetError};
+```
+
+- [ ] **2.6** 在根目录 `Cargo.toml` 的 `[workspace.members]` 中添加 `"crates/asset"`
+- [ ] **2.7** 编译验证：`cargo check -p call-asset`
+
+#### 步骤 3 — `call-precompiles` 瘦身（移除 asset.rs）
+
+- [ ] **3.1** 从 `crates/precompiles/src/lib.rs` 移除 `mod asset;` 和 `pub use asset::*;`
+- [ ] **3.2** 确认 `slot_balance`、`slot_allowance`、`slot_asset_meta`、`ASSET_ADDRESS` 仍保留在 `call-precompiles`（供 `call-asset` 使用）
+- [ ] **3.3** 编译验证：`cargo check -p call-precompiles`
+
+#### 步骤 4 — 迁移调用方（逐个文件替换）
+
+- [ ] **4.1** `crates/consensus/src/exec/state_accessors.rs`
+  - 删除 asset 相关 helper（`seed_balance`、`seed_asset`、`read_balance`、`read_asset_*`、`add_balance_evm`、`deduct_balance_evm`、`seed_allowance`、`read_allowance`）
+  - 改为 `use call_asset::{AssetStorage, EvmStateBackend};`
+
+- [ ] **4.2** `crates/consensus/src/block.rs`
+  - 原 `add_balance_evm` 调用改为 `AssetStorage::new(EvmStateBackend(&mut evm)).add_balance(...)`
+
+- [ ] **4.3** `crates/rpc/src/handlers/state.rs`
+  - 原 `read_balance` 调用改为 `AssetStorage::new(EvmStateBackend(&mut evm)).read_balance(...)`
+  - `get_asset_info` 改为 `AssetStorage::new(...).read_meta(...)`
+
+- [ ] **4.4** `crates/rpc/src/handlers/executor.rs`
+  - 涉及 asset 余额检查的部分改为 `AssetStorage`
+
+- [ ] **4.5** `crates/node/src/lib.rs`（创世注入）
+  - 原 `seed_balance`、`seed_asset` 改为 `AssetStorage::new(EvmStateBackend(&mut evm)).write_balance(...)` / `.register(...)`
+
+- [ ] **4.6** `crates/node/src/tests.rs`
+  - 测试中的 `seed_balance` 改为 `AssetStorage`
+
+- [ ] **4.7** `crates/node/tests/e2e/harness.rs`
+  - E2E harness 中的 balance 设置改为 `AssetStorage`
+
+- [ ] **4.8** `crates/node/tests/e2e/*.rs`（所有集成测试）
+  - 批量替换 `seed_balance`、`seed_asset` 调用
+
+- [ ] **4.9** `crates/chainspec/src/genesis.rs`
+  - 如果 `GenesisState` 的 `balances` / `registry` 字段已无用，删除这些字段
+  - 创世注入改为 `AssetStorage`
+
+#### 步骤 5 — 清理 `protocol/src/evm_instructions.rs`
+
+- [ ] **5.1** 删除该文件中所有 asset 相关函数
+- [ ] **5.2** 如果文件已空，删除整个文件并在 `protocol/src/lib.rs` 中移除对应 `mod`
+
+#### 步骤 6 — Phase 1 第一波编译验证
+
+- [ ] **6.1** `cargo check`（全项目）
+- [ ] **6.2** `cargo test -p call-asset`
+- [ ] **6.3** `cargo test -p call-precompiles`
+- [ ] **6.4** `cargo test -p call-protocol`
+- [ ] **6.5** `cargo test -p call-consensus`
+- [ ] **6.6** `cargo test -p call-rpc`
+- [ ] **6.7** `cargo test -p call-node --lib`
+- [ ] **6.8** `cargo test -p call-node --tests`
+- [ ] **6.9** `cargo build`（无未使用 import 警告）
+
+---
+
+### Phase 1 第二波：统一分发 + 自动 Gas（Asset 验证通过后实施）
+
+#### 步骤 7 — `call-precompiles` 实现统一分发框架
+
+- [ ] **7.1** 新建 `crates/precompiles/src/dispatch.rs`
+
+```rust
+use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
+use call_primitives::Address;
+
+pub fn dispatch_call<T, F>(
+    calldata: &[u8],
+    decode: impl FnOnce(&[u8]) -> Result<T, PrecompileError>,
+    handler: F,
+) -> PrecompileResult
+where
+    F: FnOnce(T) -> PrecompileResult,
+{
+    let input_gas = INPUT_GAS_PER_BYTE * calldata.len() as u64;
+    crate::storage::StorageCtx::deduct_gas(input_gas)
+        .ok_or(PrecompileError::OutOfGas)?;
+    let call = decode(calldata)
+        .map_err(|e| PrecompileError::Other(format!("decode error: {:?}", e)))?;
+    handler(call)
+}
+
+pub fn view<T, R>(call: T, handler: impl FnOnce(&T) -> R) -> PrecompileResult
+where
+    R: alloy_sol_types::SolValue,
+{
+    let result = handler(&call);
+    let encoded = result.abi_encode();
+    Ok(PrecompileOutput::new(0, encoded.into()))
+}
+
+pub fn mutate<T, E>(
+    call: T,
+    msg_sender: Address,
+    handler: impl FnOnce(Address, &T) -> Result<(), E>,
+) -> PrecompileResult
+where
+    E: ToString,
+{
+    handler(msg_sender, &call)
+        .map_err(|e| PrecompileError::Other(e.to_string()))?;
+    Ok(PrecompileOutput::new(0, alloy_primitives::Bytes::default()))
+}
+```
+
+- [ ] **7.2** 在 `crates/precompiles/src/lib.rs` 中导出 `pub mod dispatch;`
+
+#### 步骤 8 — `JournalBackend` 升级自动 gas 计量
+
+- [ ] **8.1** 在 `crates/precompiles/src/journal_backend.rs` 中加入 `AccessTracker`
+
+```rust
+pub struct AccessTracker {
+    accessed: HashSet<(Address, U256)>,
+}
+
+impl AccessTracker {
+    pub fn load_gas(&mut self, address: Address, slot: U256) -> u64 {
+        let key = (address, slot);
+        if self.accessed.insert(key) {
+            COLD_SLOAD_COST // 2100
+        } else {
+            WARM_STORAGE_READ_COST // 100
+        }
+    }
+
+    pub fn store_gas(&mut self, address: Address, slot: U256, value: U256) -> u64 {
+        // TODO: 实现 0→非0 / 非0→0 / 同值 的 gas 差异
+        SSTORE_STATIC // 5000
+    }
+}
+```
+
+- [ ] **8.2** `JournalBackend::load` / `store` 中调用 `access_tracker.load_gas` / `store_gas` 并自动 `deduct_gas`
+- [ ] **8.3** 编译验证：`cargo check -p call-precompiles`
+
+#### 步骤 9 — 重写 `AssetPrecompile` 为统一分发模式
+
+- [ ] **9.1** `crates/asset/src/precompile.rs` 改用 `dispatch_call` + `sol!`
+
+```rust
+use call_precompiles::dispatch::{dispatch_call, view, mutate};
+use alloy_sol_types::sol;
+
+sol! {
+    #[derive(Debug)]
+    interface IProtocolAsset {
+        function getBalance(uint64 assetId, address account) external view returns (uint128);
+        function getAssetInfo(uint64 assetId) external view returns (string, string, uint8, address, uint128, uint8);
+        function transfer(uint64 assetId, address to, uint128 amount) external returns (bool);
+        function batchTransfer(uint64 assetId, address[] to, uint128[] amounts) external returns (bool);
+        function approve(uint64 assetId, address spender, uint128 amount) external returns (bool);
+        function transferFrom(uint64 assetId, address from, address to, uint128 amount) external returns (bool);
+        function register(string symbol, string name, uint8 decimals, uint128 maxSupply) external returns (uint64);
+        function mint(uint64 assetId, address to, uint128 amount) external returns (bool);
+        function burn(uint64 assetId, address from, uint128 amount) external returns (bool);
+    }
+}
+
+pub struct AssetPrecompile {
+    storage: AssetStorage<JournalBackend>,
+}
+
+impl StatefulPrecompile for AssetPrecompile {
+    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+        dispatch_call(calldata, IProtocolAssetCall::abi_decode, |call| match call {
+            IProtocolAssetCall::getBalance(c) => {
+                view(c, |c| self.storage.read_balance(c.assetId, c.account))
+            }
+            IProtocolAssetCall::getAssetInfo(c) => {
+                view(c, |c| self.storage.read_meta(c.assetId))
+            }
+            IProtocolAssetCall::transfer(c) => {
+                mutate(c, msg_sender, |sender, c| {
+                    self.storage.transfer(c.assetId, sender, c.to, c.amount)
+                })
+            }
+            // ... 其他 match arm
+            _ => Err(PrecompileError::Other("unknown selector".into())),
+        })
+    }
+}
+```
+
+- [ ] **9.2** 验证 `precompile.rs` 行数 < 120
+- [ ] **9.3** 编译验证：`cargo check -p call-asset`
+
+#### 步骤 10 — Phase 1 第二波编译验证
+
+- [ ] **10.1** `cargo test -p call-precompiles`
+- [ ] **10.2** `cargo test -p call-asset`
+- [ ] **10.3** `cargo test -p call-consensus`
+- [ ] **10.4** `cargo test -p call-rpc`
+- [ ] **10.5** `cargo test -p call-node --lib`
+- [ ] **10.6** `cargo test -p call-node --tests`
+- [ ] **10.7** `cargo build`（无未使用 import 警告）
+
+---
+
+### Phase 2-N：其他 Precompile（同模式批量实施）
+
+> 每个 crate 按相同 3 文件结构创建，依赖底层已完成的 crate。
+
+#### Phase 2 — Validator
+
+- [ ] **V.1** 新建 `crates/validator/`（`Cargo.toml`、`src/lib.rs`、`src/precompile.rs`、`src/backend.rs`）
+- [ ] **V.2** 提取 `ValidatorStorage<B>`：stake / unstake / claim_unbonded / get_validator / slash_stake
+- [ ] **V.3** `ValidatorStorage::stake()` 内部调用 `AssetStorage::transfer(CALL_ASSET_ID, caller, VALIDATOR_ESCROW, amount)`
+- [ ] **V.4** `ValidatorPrecompile` 入口薄层
+- [ ] **V.5** `SimplexConsensus` 中 validator 注册改为 `ValidatorStorage::register_validator()`
+- [ ] **V.6** 编译验证：`cargo check -p call-validator`
+- [ ] **V.7** 全项目测试通过
+
+#### Phase 3 — Bridge
+
+- [ ] **B.1** 新建 `crates/bridge/`
+- [ ] **B.2** 提取 `BridgeStorage<B>`：external_deposit / external_withdraw / bridge_to_evm / bridge_to_protocol / initiate_challenge / resolve_challenge / withdraw_bond
+- [ ] **B.3** 删除 `crates/bridge/src/state.rs` 中的 `BridgeStateManager` 内存状态
+- [ ] **B.4** `BridgeStorage` 跨域调用：`AssetStorage::transfer`（bond）、`ValidatorStorage::slash_stake`（challenge）
+- [ ] **B.5** `block_producer.rs:104-125` 改为从 `BridgeStorage` 读 finalized deposits，调用 `AssetStorage::add_balance`
+- [ ] **B.6** `BridgePrecompile` 入口薄层
+- [ ] **B.7** 编译验证：`cargo check -p call-bridge`
+- [ ] **B.8** 全项目测试通过
+
+#### Phase 4 — Oracle
+
+- [ ] **O.1** 新建 `crates/oracle/`
+- [ ] **O.2** 提取 `OracleStorage<B>`：submit_price / get_price / get_twap / is_stale
+- [ ] **O.3** 删除 `crates/consensus/src/oracle/` 中的旧内存 `OracleManager`
+- [ ] **O.4** `OracleStorage` 跨域调用：读 `ValidatorStorage`（验证 caller 身份）
+- [ ] **O.5** `block_producer.rs:144-212` 改为从 `OracleStorage` 读价格，调用 `ValidatorStorage::slash_stake` 和 `AssetStorage::transfer`
+- [ ] **O.6** `OraclePrecompile` 入口薄层
+- [ ] **O.7** 编译验证：`cargo check -p call-oracle`
+- [ ] **O.8** 全项目测试通过
+
+#### Phase 5 — Governance
+
+- [ ] **G.1** 新建 `crates/governance/`
+- [ ] **G.2** 提取 `GovernanceStorage<B>`：submit_proposal / vote / queue / execute / emergency_pause / emergency_resume
+- [ ] **G.3** 新建 `crates/governance/src/advancer.rs`：`GovernanceAdvancer<'a, B>`
+- [ ] **G.4** `GovernanceAdvancer::advance()` 扫描 EVM 提案状态，临时生成事件，不持久化
+- [ ] **G.5** `block_producer.rs:277-309` 改为调用 `GovernanceAdvancer::advance()`
+- [ ] **G.6** 删除 `crates/governance/src/manager.rs` 中内存状态机（~20 字段）
+- [ ] **G.7** `GovernanceStorage` 跨域调用：`AssetStorage`（deposit 扣款）、`ValidatorStorage`（quorum）、`ComplianceStorage`
+- [ ] **G.8** `GovernancePrecompile` 入口薄层
+- [ ] **G.9** 编译验证：`cargo check -p call-governance`
+- [ ] **G.10** 全项目测试通过
+
+#### Phase 6 — Agent
+
+- [ ] **A.1** 新建 `crates/agent/`
+- [ ] **A.2** 提取 `AgentStorage<B>`：注册、元数据读写、余额授权
+- [ ] **A.3** `agent_root` 快照改为从 `AgentStorage` 遍历 EVM 计算
+- [ ] **A.4** `AgentPrecompile` 入口薄层
+- [ ] **A.5** 编译验证：`cargo check -p call-agent`
+- [ ] **A.6** 全项目测试通过
+
+#### Phase 7 — Shielded
+
+- [ ] **S.1** 新建 `crates/shielded/`
+- [ ] **S.2** 提取 `ShieldedStorage<B>`：Merkle root、nullifier、commitment 计数
+- [ ] **S.3** Merkle tree sidecar 策略决策：完全 EVM 存储 vs 重启重建
+- [ ] **S.4** `ShieldedPrecompile` 入口薄层
+- [ ] **S.5** 编译验证：`cargo check -p call-shielded`
+- [ ] **S.6** 全项目测试通过
+
+#### Phase 8 — Compliance
+
+- [ ] **C.1** 新建 `crates/compliance/`
+- [ ] **C.2** 提取 `ComplianceStorage<B>`：地址合规状态读写
+- [ ] **C.3** `CompliancePrecompile` 入口薄层
+- [ ] **C.4** 编译验证：`cargo check -p call-compliance`
+- [ ] **C.5** 全项目测试通过
+
+---
+
+### Phase 8 — 最终清理
+
+- [ ] **F.1** `call-precompiles` 最终瘦身：只保留 `StorageCtx`、`JournalBackend`、`StatefulPrecompile`、`dispatch.rs`
+- [ ] **F.2** 删除 `protocol/src/evm_instructions.rs`（如果还存在）
+- [ ] **F.3** 删除所有已废弃的内存状态机文件（`GovernanceManager` 旧版等）
+- [ ] **F.4** 删除 `state_persist.rs` 中所有 protocol-state 持久化代码
+- [ ] **F.5** 删除 `state_bundle.rs` 中已移除字段的锁获取
+- [ ] **F.6** `cargo build` 全项目无警告
+- [ ] **F.7** `cargo test` 全项目通过
+- [ ] **F.8** 最终审查：各领域 crate 的 `precompile.rs` 行数均 < 120
+- [ ] **F.9** 最终审查：无重复 `slot_*` 辅助函数
+- [ ] **F.10** 文档更新：`docs/precompiles_refact.md` 中所有 `- [ ]` 改为 `- [x]`
