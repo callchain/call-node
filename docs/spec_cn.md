@@ -152,12 +152,12 @@ struct BlockHeader {
     parent_hash: Hash,
     height: u64,
     timestamp_millis: u64,          // 亚秒级时间戳
-    payment_root: Hash,             // 协议余额 Merkle 根
-    evm_state_root: Hash,           // EVM 状态根
-    bridge_root: Hash,              // 桥接状态 Merkle 根
-    receipt_root: Hash,             // 交易收据 Merkle 根
+    state_root: Hash,               // EVM 状态根（唯一真相来源）
     proposer: ValidatorId,
     signature: Signature,
+    version: ProtocolVersion,       // 协议版本（§19）
+    bls_aggregate_signature: Option<Vec<u8>>,  // BLS12-381 聚合签名
+    bls_signer_bitmap: Vec<u8>,     // BLS 签名者位掩码
 }
 ```
 
@@ -2312,24 +2312,24 @@ commitment 树增长估算：
 ```rust
 struct StateSnapshot {
     height: u64,
-    protocol_root: Hash,         // 协议余额 Merkle 根
-    evm_root: Hash,              // EVM 状态根
-    shielded_root: Hash,         // Shielded Merkle 根
-    agent_root: Hash,            // Agent 状态根
-    consensus_root: Hash,        // 验证者集哈希
+    state_root: Hash,            // EVM 状态根（唯一真相来源）
+    shielded_root: Hash,         // Shielded Merkle 根（从 EVM 读取）
+    agent_root: Hash,            // Agent 状态根（从 EVM 计算）
+    consensus_root: Hash,        // 验证者集哈希（从 EVM 读取）
     total_size: u64,             // 快照大小（字节）
     validator_signatures: Vec<ValidatorSignature>,  // 2/3 签名
 }
 
 // 快照生成（每 snapshot_interval 个区块）
+// 所有状态根都从 EVM 存储派生；不再有独立的协议状态树。
 fn generate_snapshot(state: &State, height: u64) -> StateSnapshot {
+    let evm_root = compute_evm_root(&state.evm);
     StateSnapshot {
         height,
-        protocol_root: compute_protocol_root(&state.protocol),
-        evm_root: compute_evm_root(&state.evm),
-        shielded_root: compute_shielded_root(&state.shielded),
-        agent_root: compute_agent_root(&state.agent),
-        consensus_root: compute_consensus_root(&state.validators),
+        state_root: evm_root,
+        shielded_root: read_shielded_merkle_root(&state.evm),
+        agent_root: compute_agent_root_from_evm(&state.evm),
+        consensus_root: compute_consensus_root_from_evm(&state.evm),
         total_size: estimate_state_size(state),
         validator_signatures: collect_validator_signatures(state),
     }
@@ -3596,7 +3596,7 @@ struct ConsensusParams {
 4. 注册初始验证者集
 5. 注册初始 Gas 支付币种到 FeeCurrencyRegistry
 6. 创建创世区块（height=0, parent_hash=0x0）
-7. 计算初始状态根（payment_root + evm_state_root + bridge_root）
+7. 计算初始状态根（EVM 状态根）
 8. 节点从高度 0 开始运行共识
 ```
 
@@ -3819,29 +3819,22 @@ struct ExternalBridgeReceipt {
 
 #### 18.4.5 区块收据树
 
-每个区块的收据打包成一棵 Merkle Tree，根哈希写入区块头：
+收据通过区块号和交易哈希在 RPC 层索引。区块头仅包含单一的 `state_root`（EVM 状态根）；
+收据完整性由收据数据库维护，而非区块头中的 Merkle 根。
 
 ```rust
-/// 区块头增加字段
+/// 收据通过数据库存储，由 RPC 提供服务
+/// 区块头仅有 state_root —— 没有独立的 receipt_root
 struct BlockHeader {
     parent_hash: Hash,
     height: u64,
     timestamp_millis: u64,
-    payment_root: Hash,
-    evm_state_root: Hash,
-    bridge_root: Hash,
-    receipt_root: Hash,             // 新增：收据 Merkle 根
+    state_root: Hash,               // EVM 状态根
     proposer: ValidatorId,
     signature: Signature,
-}
-
-/// 收据 Merkle 树
-/// 按交易顺序排列，根哈希保证收据完整性
-fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
-    let leaves: Vec<Hash> = receipts.iter()
-        .map(|r| keccak256(rlp_encode(r)))
-        .collect();
-    build_merkle_root(&leaves)
+    version: ProtocolVersion,
+    bls_aggregate_signature: Option<Vec<u8>>,
+    bls_signer_bitmap: Vec<u8>,
 }
 ```
 
@@ -3908,7 +3901,7 @@ fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
 ```
 - 近期收据（最近 keep_receipt 区块）：完整存储
 - 历史收据：超过 keep_receipt 后 prune
-- 收据根哈希（receipt_root）：永远保留在区块头
+- 收据存储在数据库中并按节点模式修剪；区块头中没有收据根
 - prune 后仍可通过 Merkle 证明验证某条收据属于某区块
 ```
 

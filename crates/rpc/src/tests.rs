@@ -3,11 +3,8 @@
 #[cfg(test)]
 mod tests {
     use call_primitives::{Address, AssetId};
-    use call_protocol::ComplianceEngine;
     use call_evm::EvmState;
     use call_consensus::exec::evm_instructions;
-    use call_agent::{AgentRegistry, AgentBalances};
-    use call_shielded::ShieldedState;
     use call_transaction_pool::Mempool;
     use crate::handlers::RpcState;
     use std::sync::{Arc, RwLock, OnceLock};

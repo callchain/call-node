@@ -5,12 +5,10 @@
 //! - Agent balance management
 //! - Agent transaction verification and execution with gas discount
 
-mod registry;
 mod permissions;
-mod balances;
-pub use registry::*;
+mod nonces;
 pub use permissions::*;
-pub use balances::*;
+pub use nonces::*;
 
 use call_primitives::{Address, AssetId};
 use thiserror::Error;

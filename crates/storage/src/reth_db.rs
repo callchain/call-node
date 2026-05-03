@@ -1,9 +1,7 @@
 //! reth-db (MDBX) integration for Callchain state persistence.
 //!
 //! Defines custom database tables and provides initialization/persistence
-//! for all state types (balances, EVM, bridge, shielded, agents, validators).
-//!
-//! Uses raw byte keys/values with serde_json serialization to avoid
+//! helpers. Uses raw byte keys/values with serde_json serialization to avoid
 //! the complexity of reth-codecs trait implementations for every type.
 //!
 //! Generic CRUD helpers are provided here. Type-specific save/load functions
@@ -25,26 +23,6 @@ use crate::StorageError;
 
 // ── Custom Table Definitions ──────────────────────────────────────────
 
-/// Protocol balances: serialized (asset_id, address) -> serialized balance
-#[derive(Debug)]
-pub struct CallProtocolBalances;
-impl Table for CallProtocolBalances {
-    const NAME: &'static str = "call_protocol_balances";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Protocol allowances: serialized (asset_id, owner, spender) -> serialized allowance
-#[derive(Debug)]
-pub struct CallProtocolAllowances;
-impl Table for CallProtocolAllowances {
-    const NAME: &'static str = "call_protocol_allowances";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
 /// EVM accounts: serialized Address -> serialized EvmAccount
 #[derive(Debug)]
 pub struct CallEvmAccounts;
@@ -60,67 +38,6 @@ impl Table for CallEvmAccounts {
 pub struct CallEvmStorage;
 impl Table for CallEvmStorage {
     const NAME: &'static str = "call_evm_storage";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Bridge pending ops: serialized op_id -> serialized PendingBridgeOp
-#[derive(Debug)]
-pub struct CallBridgeOps;
-impl Table for CallBridgeOps {
-    const NAME: &'static str = "call_bridge_ops";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Shielded nullifiers: serialized Hash -> ()
-#[derive(Debug)]
-pub struct CallShieldedNullifiers;
-impl Table for CallShieldedNullifiers {
-    const NAME: &'static str = "call_shielded_nullifiers";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Shielded commitments: serialized NoteCommitment -> serialized Note
-#[derive(Debug)]
-pub struct CallShieldedCommitments;
-impl Table for CallShieldedCommitments {
-    const NAME: &'static str = "call_shielded_commitments";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Validator set: serialized ValidatorId -> serialized ValidatorStake
-#[derive(Debug)]
-pub struct CallValidators;
-impl Table for CallValidators {
-    const NAME: &'static str = "call_validators";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Validator meta state: single entry () -> serialized ValidatorMetaSnapshot
-/// Stores queues, churn counters, next_id, and params.
-#[derive(Debug)]
-pub struct CallValidatorMeta;
-impl Table for CallValidatorMeta {
-    const NAME: &'static str = "call_validator_meta";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Agent registrations: serialized agent_id -> serialized AgentRegistration
-#[derive(Debug)]
-pub struct CallAgents;
-impl Table for CallAgents {
-    const NAME: &'static str = "call_agents";
     const DUPSORT: bool = false;
     type Key = Vec<u8>;
     type Value = Vec<u8>;
@@ -146,16 +63,6 @@ impl Table for CallPruneState {
     type Value = Vec<u8>;
 }
 
-/// Compliance state: single entry () -> serialized ComplianceEngineSnapshot
-#[derive(Debug)]
-pub struct CallComplianceState;
-impl Table for CallComplianceState {
-    const NAME: &'static str = "call_compliance_state";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
 /// Governance state: single entry () -> serialized GovernanceManager snapshot
 #[derive(Debug)]
 pub struct CallGovernanceState;
@@ -176,63 +83,11 @@ impl Table for CallConsensusState {
     type Value = Vec<u8>;
 }
 
-// ── Missing tables (added for full 34-table coverage) ─────────────────
-
-/// Protocol assets: serialized asset_id -> serialized AssetEntry
-#[derive(Debug)]
-pub struct CallProtocolAssets;
-impl Table for CallProtocolAssets {
-    const NAME: &'static str = "call_protocol_assets";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Shielded Merkle tree: serialized node_index -> serialized node_hash
-#[derive(Debug)]
-pub struct CallShieldedMerkleTree;
-impl Table for CallShieldedMerkleTree {
-    const NAME: &'static str = "call_shielded_merkle_tree";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Shielded viewing keys: serialized address -> encrypted key material
-#[derive(Debug)]
-pub struct CallShieldedViewingKeys;
-impl Table for CallShieldedViewingKeys {
-    const NAME: &'static str = "call_shielded_viewing_keys";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Agent balances: serialized (owner, agent_id, asset_id) -> serialized balance
-#[derive(Debug)]
-pub struct CallAgentBalances;
-impl Table for CallAgentBalances {
-    const NAME: &'static str = "call_agent_balances";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
 /// Agent nonces: serialized (owner, agent_id) -> serialized nonce
 #[derive(Debug)]
 pub struct CallAgentNonces;
 impl Table for CallAgentNonces {
     const NAME: &'static str = "call_agent_nonces";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// EVM contracts: serialized address -> serialized bytecode
-#[derive(Debug)]
-pub struct CallEvmContracts;
-impl Table for CallEvmContracts {
-    const NAME: &'static str = "call_evm_contracts";
     const DUPSORT: bool = false;
     type Key = Vec<u8>;
     type Value = Vec<u8>;
@@ -258,26 +113,6 @@ impl Table for CallMetadataChainId {
     type Value = Vec<u8>;
 }
 
-/// Metadata compliance: serialized asset_id -> serialized compliance policy
-#[derive(Debug)]
-pub struct CallMetadataCompliance;
-impl Table for CallMetadataCompliance {
-    const NAME: &'static str = "call_metadata_compliance";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Metadata agents: serialized agent_id -> serialized status
-#[derive(Debug)]
-pub struct CallMetadataAgents;
-impl Table for CallMetadataAgents {
-    const NAME: &'static str = "call_metadata_agents";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
 /// Receipts: serialized tx_hash -> serialized ProtocolReceipt
 #[derive(Debug)]
 pub struct CallReceipts;
@@ -298,141 +133,11 @@ impl Table for CallReceiptsByBlock {
     type Value = Vec<u8>;
 }
 
-/// Logs: serialized (block_number, log_index) -> serialized LogEntry
-#[derive(Debug)]
-pub struct CallLogs;
-impl Table for CallLogs {
-    const NAME: &'static str = "call_logs";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Memos: serialized tx_hash -> serialized memo data
-#[derive(Debug)]
-pub struct CallMemos;
-impl Table for CallMemos {
-    const NAME: &'static str = "call_memos";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Fee currency registry: serialized asset_id -> serialized FeeCurrencyEntry
-#[derive(Debug)]
-pub struct CallFeeCurrencyRegistry;
-impl Table for CallFeeCurrencyRegistry {
-    const NAME: &'static str = "call_fee_currency_registry";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
 /// Fee params: single entry () -> serialized FeeParams
 #[derive(Debug)]
 pub struct CallFeeParams;
 impl Table for CallFeeParams {
     const NAME: &'static str = "call_fee_params";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Oracle prices: serialized (asset_id, block_number) -> serialized price
-#[derive(Debug)]
-pub struct CallOraclePrices;
-impl Table for CallOraclePrices {
-    const NAME: &'static str = "call_oracle_prices";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Oracle validator info: serialized validator_id -> serialized oracle status
-#[derive(Debug)]
-pub struct CallOracleValidatorInfo;
-impl Table for CallOracleValidatorInfo {
-    const NAME: &'static str = "call_oracle_validator_info";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Governance proposals: serialized proposal_id -> serialized proposal
-#[derive(Debug)]
-pub struct CallGovernanceProposals;
-impl Table for CallGovernanceProposals {
-    const NAME: &'static str = "call_governance_proposals";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Vote delegations: serialized (delegator, validator_id) -> serialized delegation
-#[derive(Debug)]
-pub struct CallVoteDelegations;
-impl Table for CallVoteDelegations {
-    const NAME: &'static str = "call_vote_delegations";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Sponsor auths: serialized (owner, sponsor) -> serialized authorization
-#[derive(Debug)]
-pub struct CallSponsorAuths;
-impl Table for CallSponsorAuths {
-    const NAME: &'static str = "call_sponsor_auths";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Sponsor pools: serialized sponsor_address -> serialized pool balance
-#[derive(Debug)]
-pub struct CallSponsorPools;
-impl Table for CallSponsorPools {
-    const NAME: &'static str = "call_sponsor_pools";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Sponsor daily usage: serialized (sponsor_address, day) -> serialized usage
-#[derive(Debug)]
-pub struct CallSponsorDailyUsage;
-impl Table for CallSponsorDailyUsage {
-    const NAME: &'static str = "call_sponsor_daily_usage";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Session keys: serialized session_key -> serialized (owner, expiry)
-#[derive(Debug)]
-pub struct CallSessionKeys;
-impl Table for CallSessionKeys {
-    const NAME: &'static str = "call_session_keys";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Multi-sig configs: serialized address -> serialized MultiSigConfig
-#[derive(Debug)]
-pub struct CallMultiSigConfigs;
-impl Table for CallMultiSigConfigs {
-    const NAME: &'static str = "call_multi_sig_configs";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Social recovery configs: serialized address -> serialized RecoveryConfig
-#[derive(Debug)]
-pub struct CallSocialRecoveryConfigs;
-impl Table for CallSocialRecoveryConfigs {
-    const NAME: &'static str = "call_social_recovery_configs";
     const DUPSORT: bool = false;
     type Key = Vec<u8>;
     type Value = Vec<u8>;
@@ -467,49 +172,20 @@ impl TableSet for CallTables {
         }
         Box::new(
             [
-                box_info::<CallProtocolAssets>,
-                box_info::<CallProtocolBalances>,
-                box_info::<CallProtocolAllowances>,
-                box_info::<CallShieldedMerkleTree>,
-                box_info::<CallShieldedNullifiers>,
-                box_info::<CallShieldedCommitments>,
-                box_info::<CallShieldedViewingKeys>,
-                box_info::<CallAgents>,
-                box_info::<CallAgentBalances>,
-                box_info::<CallAgentNonces>,
                 box_info::<CallEvmAccounts>,
-                box_info::<CallEvmContracts>,
                 box_info::<CallEvmStorage>,
-                box_info::<CallBridgeOps>,
-                box_info::<CallConsensusBlocks>,
-                box_info::<CallConsensusState>,
-                box_info::<CallMetadataChainId>,
-                box_info::<CallValidators>,
-                box_info::<CallValidatorMeta>,
-                box_info::<CallMetadataCompliance>,
-                box_info::<CallMetadataAgents>,
-                box_info::<CallReceipts>,
-                box_info::<CallReceiptsByBlock>,
-                box_info::<CallLogs>,
-                box_info::<CallMemos>,
-                box_info::<CallFeeCurrencyRegistry>,
-                box_info::<CallFeeParams>,
-                box_info::<CallOraclePrices>,
-                box_info::<CallOracleValidatorInfo>,
-                box_info::<CallGovernanceProposals>,
-                box_info::<CallVoteDelegations>,
-                box_info::<CallSponsorAuths>,
-                box_info::<CallSponsorPools>,
-                box_info::<CallSponsorDailyUsage>,
-                box_info::<CallSessionKeys>,
-                box_info::<CallMultiSigConfigs>,
-                box_info::<CallSocialRecoveryConfigs>,
-                box_info::<CallForkState>,
-                box_info::<CallCheckpoint>,
+                box_info::<CallOracleState>,
                 box_info::<CallPruneState>,
                 box_info::<CallGovernanceState>,
-                box_info::<CallComplianceState>,
-                box_info::<CallOracleState>,
+                box_info::<CallConsensusState>,
+                box_info::<CallAgentNonces>,
+                box_info::<CallConsensusBlocks>,
+                box_info::<CallMetadataChainId>,
+                box_info::<CallReceipts>,
+                box_info::<CallReceiptsByBlock>,
+                box_info::<CallFeeParams>,
+                box_info::<CallForkState>,
+                box_info::<CallCheckpoint>,
             ]
             .into_iter()
             .map(|f| f()),
@@ -638,59 +314,6 @@ pub fn db_clear<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv) -> R
 
 // ── Convenience Methods for Each Table ────────────────────────────────
 
-/// Save all protocol balances to the database (replaces entire table).
-pub fn save_balances(
-    db: &DatabaseEnv,
-    balances: &std::collections::HashMap<(call_primitives::AssetId, call_primitives::Address), u128>,
-    allowances: &std::collections::HashMap<(call_primitives::AssetId, call_primitives::Address, call_primitives::Address), u128>,
-) -> Result<(), StorageError> {
-    let balance_entries: Vec<(Vec<u8>, Vec<u8>)> = balances
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    let allowance_entries: Vec<(Vec<u8>, Vec<u8>)> = allowances
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-
-    // Clear and repopulate in a single batch
-    db_clear::<CallProtocolBalances>(db)?;
-    db_batch_put::<CallProtocolBalances>(db, balance_entries)?;
-    db_clear::<CallProtocolAllowances>(db)?;
-    db_batch_put::<CallProtocolAllowances>(db, allowance_entries)?;
-    Ok(())
-}
-
-/// Load all protocol balances from the database.
-pub fn load_balances(
-    db: &DatabaseEnv,
-) -> Result<(
-    std::collections::HashMap<(call_primitives::AssetId, call_primitives::Address), u128>,
-    std::collections::HashMap<(call_primitives::AssetId, call_primitives::Address, call_primitives::Address), u128>,
-), StorageError> {
-    let balance_data = db_iter_all::<CallProtocolBalances>(db)?;
-    let allowance_data = db_iter_all::<CallProtocolAllowances>(db)?;
-
-    let balances = balance_data
-        .into_iter()
-        .map(|(k, v)| {
-            let key: (call_primitives::AssetId, call_primitives::Address) = serde_json::from_slice(&k).unwrap();
-            let value: u128 = serde_json::from_slice(&v).unwrap();
-            (key, value)
-        })
-        .collect();
-    let allowances = allowance_data
-        .into_iter()
-        .map(|(k, v)| {
-            let key: (call_primitives::AssetId, call_primitives::Address, call_primitives::Address) =
-                serde_json::from_slice(&k).unwrap();
-            let value: u128 = serde_json::from_slice(&v).unwrap();
-            (key, value)
-        })
-        .collect();
-    Ok((balances, allowances))
-}
-
 /// Save prune state to the database.
 pub fn save_prune_state(db: &DatabaseEnv, state: &crate::prune::PruneState) -> Result<(), StorageError> {
     let data = serde_json::to_vec(state).map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -709,10 +332,8 @@ pub fn load_prune_state(db: &DatabaseEnv) -> Result<crate::prune::PruneState, St
 mod integration_tests {
     use super::*;
     use crate::db::{CallDb, open_db};
-    use call_primitives::Address;
-    use std::collections::HashMap;
-    use std::thread;
     use std::sync::Arc;
+    use std::thread;
 
     fn temp_db() -> CallDb {
         let path = std::env::temp_dir().join(format!(
@@ -730,20 +351,20 @@ mod integration_tests {
         let db_a = Arc::clone(&db.db);
         let handle_a = thread::spawn(move || {
             for i in 0..100 {
-                let key = format!("balance_{}", i).into_bytes();
+                let key = format!("account_{}", i).into_bytes();
                 let value: u128 = i as u128 * 1_000_000;
                 let data = serde_json::to_vec(&value).unwrap();
-                db_put::<CallProtocolBalances>(&db_a, key, data).unwrap();
+                db_put::<CallEvmAccounts>(&db_a, key, data).unwrap();
             }
         });
 
         let db_b = Arc::clone(&db.db);
         let handle_b = thread::spawn(move || {
             for i in 0..100 {
-                let key = format!("allowance_{}", i).into_bytes();
+                let key = format!("receipt_{}", i).into_bytes();
                 let value: u128 = i as u128 * 500_000;
                 let data = serde_json::to_vec(&value).unwrap();
-                db_put::<CallProtocolAllowances>(&db_b, key, data).unwrap();
+                db_put::<CallReceipts>(&db_b, key, data).unwrap();
             }
         });
 
@@ -751,13 +372,13 @@ mod integration_tests {
         handle_b.join().unwrap();
 
         for i in 0..100 {
-            let key = format!("balance_{}", i).into_bytes();
-            let data = db_get::<CallProtocolBalances>(&db.db, &key).unwrap().unwrap();
+            let key = format!("account_{}", i).into_bytes();
+            let data = db_get::<CallEvmAccounts>(&db.db, &key).unwrap().unwrap();
             let value: u128 = serde_json::from_slice(&data).unwrap();
             assert_eq!(value, i as u128 * 1_000_000);
 
-            let key = format!("allowance_{}", i).into_bytes();
-            let data = db_get::<CallProtocolAllowances>(&db.db, &key).unwrap().unwrap();
+            let key = format!("receipt_{}", i).into_bytes();
+            let data = db_get::<CallReceipts>(&db.db, &key).unwrap().unwrap();
             let value: u128 = serde_json::from_slice(&data).unwrap();
             assert_eq!(value, i as u128 * 500_000);
         }
@@ -777,28 +398,12 @@ mod integration_tests {
     #[test]
     fn test_compaction_flag() {
         let db = temp_db();
-        save_balances(&db.db, &HashMap::new(), &HashMap::new()).unwrap();
+        let state = crate::prune::PruneState::new();
+        save_prune_state(&db.db, &state).unwrap();
         compact_db(&db.db).unwrap();
 
-        let (balances, allowances) = load_balances(&db.db).unwrap();
-        assert!(balances.is_empty());
-        assert!(allowances.is_empty());
-    }
-
-    #[test]
-    fn test_save_load_balances_roundtrip() {
-        let db = temp_db();
-        let mut balances = HashMap::new();
-        let mut allowances = HashMap::new();
-        balances.insert((1, Address::repeat_byte(0x01)), 1_000_000);
-        balances.insert((2, Address::repeat_byte(0x02)), 2_000_000);
-        allowances.insert((1, Address::repeat_byte(0x01), Address::repeat_byte(0x03)), 500);
-
-        save_balances(&db.db, &balances, &allowances).unwrap();
-        let (loaded_balances, loaded_allowances) = load_balances(&db.db).unwrap();
-
-        assert_eq!(loaded_balances, balances);
-        assert_eq!(loaded_allowances, allowances);
+        let loaded = load_prune_state(&db.db).unwrap();
+        assert_eq!(serde_json::to_string(&state).unwrap(), serde_json::to_string(&loaded).unwrap());
     }
 
     #[test]

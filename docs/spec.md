@@ -150,12 +150,12 @@ struct BlockHeader {
     parent_hash: Hash,
     height: u64,
     timestamp_millis: u64,          // sub-second timestamp
-    payment_root: Hash,             // protocol balance Merkle root
-    evm_state_root: Hash,           // EVM state root
-    bridge_root: Hash,              // bridge state Merkle root
-    receipt_root: Hash,             // transaction receipt Merkle root
+    state_root: Hash,               // EVM state root (single source of truth)
     proposer: ValidatorId,
     signature: Signature,
+    version: ProtocolVersion,       // protocol version (per spec §19)
+    bls_aggregate_signature: Option<Vec<u8>>,  // BLS12-381 aggregated signature
+    bls_signer_bitmap: Vec<u8>,     // bitmask of BLS signers
 }
 ```
 
@@ -2180,24 +2180,24 @@ Commitment tree growth estimate:
 ```rust
 struct StateSnapshot {
     height: u64,
-    protocol_root: Hash,         // protocol balance Merkle root
-    evm_root: Hash,              // EVM state root
-    shielded_root: Hash,         // Shielded Merkle root
-    agent_root: Hash,            // Agent state root
-    consensus_root: Hash,        // validator set hash
+    state_root: Hash,            // EVM state root (single source of truth)
+    shielded_root: Hash,         // Shielded Merkle root (read from EVM)
+    agent_root: Hash,            // Agent state root (computed from EVM)
+    consensus_root: Hash,        // validator set hash (read from EVM)
     total_size: u64,             // snapshot size (bytes)
     validator_signatures: Vec<ValidatorSignature>,  // 2/3 signatures
 }
 
 // Snapshot generation (every snapshot_interval blocks)
+// All roots are derived from EVM storage; no separate protocol-state trees.
 fn generate_snapshot(state: &State, height: u64) -> StateSnapshot {
+    let evm_root = compute_evm_root(&state.evm);
     StateSnapshot {
         height,
-        protocol_root: compute_protocol_root(&state.protocol),
-        evm_root: compute_evm_root(&state.evm),
-        shielded_root: compute_shielded_root(&state.shielded),
-        agent_root: compute_agent_root(&state.agent),
-        consensus_root: compute_consensus_root(&state.validators),
+        state_root: evm_root,
+        shielded_root: read_shielded_merkle_root(&state.evm),
+        agent_root: compute_agent_root_from_evm(&state.evm),
+        consensus_root: compute_consensus_root_from_evm(&state.evm),
         total_size: estimate_state_size(state),
         validator_signatures: collect_validator_signatures(state),
     }
@@ -3439,7 +3439,7 @@ The genesis configuration is provided in JSON format:
 4. Register initial validator set
 5. Register initial Gas payment currencies to FeeCurrencyRegistry
 6. Create genesis block (height=0, parent_hash=0x0)
-7. Compute initial state root (payment_root + evm_state_root + bridge_root)
+7. Compute initial state root (EVM state root)
 8. Nodes begin running consensus from height 0
 ```
 
@@ -3652,29 +3652,23 @@ struct ExternalBridgeReceipt {
 
 #### 18.4.5 Block Receipt Tree
 
-Each block's receipts are packed into a Merkle Tree, with the root hash written into the block header:
+Receipts are indexed by block number and transaction hash in the RPC layer.
+The block header contains a single `state_root` (EVM state root); receipt integrity
+is maintained through the receipts database, not a Merkle root in the header.
 
 ```rust
-/// Block header adds new field
+/// Receipts are stored in the database and served via RPC
+/// Block header has a single state_root — no separate receipt_root
 struct BlockHeader {
     parent_hash: Hash,
     height: u64,
     timestamp_millis: u64,
-    payment_root: Hash,
-    evm_state_root: Hash,
-    bridge_root: Hash,
-    receipt_root: Hash,             // new: receipt Merkle root
+    state_root: Hash,               // EVM state root
     proposer: ValidatorId,
     signature: Signature,
-}
-
-/// Receipt Merkle tree
-/// Ordered by transaction, root hash guarantees receipt integrity
-fn compute_receipt_root(receipts: &[Receipt]) -> Hash {
-    let leaves: Vec<Hash> = receipts.iter()
-        .map(|r| keccak256(rlp_encode(r)))
-        .collect();
-    build_merkle_root(&leaves)
+    version: ProtocolVersion,
+    bls_aggregate_signature: Option<Vec<u8>>,
+    bls_signer_bitmap: Vec<u8>,
 }
 ```
 
@@ -3741,7 +3735,7 @@ Receipt data grows quickly but is primarily used for historical queries. Prune s
 ```
 - Recent receipts (most recent keep_receipt blocks): fully stored
 - Historical receipts: pruned after keep_receipt
-- Receipt root hash (receipt_root): always retained in block header
+- Receipts are stored in the database and pruned per node mode; no receipt root in block header
 - After pruning, receipts can still be verified as belonging to a block via Merkle proof
 ```
 
