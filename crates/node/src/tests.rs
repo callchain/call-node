@@ -1,7 +1,7 @@
     use super::*;
     use call_consensus::BlockExecutionResult;
     use call_consensus::block::{ExecutionState, BlockContext, Subsystems};
-    use call_consensus::exec::evm_instructions;
+    use call_consensus::exec::state_accessors;
     use call_network::{InMemoryNetwork, EpochBoundarySignal, BlockAnnouncement, SyncResponse};
     use call_primitives::{Address, Ed25519PublicKey};
     use std::sync::OnceLock;
@@ -254,7 +254,7 @@
         // Fund sender balance on node1 (EVM)
         {
             let mut evm = node1.state.evm_state.write().unwrap();
-            evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000);
+            state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000);
         }
 
         // Verify initial state
@@ -432,8 +432,8 @@
             // Fund sender balance in EVM storage
             {
                 let mut evm = node.state.evm_state.write().unwrap();
-                evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), initial_balance);
-                evm_instructions::seed_asset(&mut *evm, 1, "CALL", "Callchain", 18, *test_sender(), 0, initial_balance, 0);
+                state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), initial_balance);
+                state_accessors::seed_asset(&mut *evm, 1, "CALL", "Callchain", 18, *test_sender(), 0, initial_balance, 0);
                 // Set native EVM balance for gas payment
                 evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
             }
@@ -520,7 +520,7 @@
         // Fund proposer in EVM storage (asset_id 1 = CALL)
         {
             let mut evm = node.state.evm_state.write().unwrap();
-            call_consensus::exec::evm_instructions::seed_balance(
+            call_consensus::exec::state_accessors::seed_balance(
                 &mut *evm, call_protocol::CALL_ASSET_ID, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5,
             );
         }
@@ -631,7 +631,7 @@
         // Fund sender with ample balance for fees + transfer (EVM)
         {
             let mut evm = node.state.evm_state.write().unwrap();
-            evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
+            state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
             // Set native EVM balance for gas payment
             evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
         }
@@ -740,7 +740,7 @@
         // Fund sender with ample balance for fees + transfer (EVM)
         {
             let mut evm = node.state.evm_state.write().unwrap();
-            evm_instructions::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
+            state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
             evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
         }
 

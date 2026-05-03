@@ -48,7 +48,7 @@ async fn test_node_starts_at_genesis() {
     // Setup balance
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, test_addr(1), 10_000,
         );
     }
@@ -79,7 +79,7 @@ async fn test_node_process_transactions() {
     // Seed EVM storage with CALL balance for fees + native balance for gas
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
         evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
@@ -115,7 +115,7 @@ async fn test_node_persist_and_recover() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
     }
@@ -169,7 +169,7 @@ async fn test_block_chain_continuity() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
         );
     }

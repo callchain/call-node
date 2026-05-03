@@ -66,10 +66,10 @@ fn test_governance_proposal_full_lifecycle() {
     // Also seed native EVM balance for gas payment
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, proposer, one_million_call() * 3,
         );
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, voter_addr, one_million_call(),
         );
         evm.set_balance(proposer, call_primitives::U256::from(100_000_000_000u128));

@@ -10,7 +10,7 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::Address;
-use call_consensus::exec::evm_instructions;
+use call_consensus::exec::state_accessors;
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -41,7 +41,7 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
     assert!(result.success, "ERC-20 deploy failed");
 
     // Seed EVM storage for bridge ops
-    evm_instructions::seed_asset(
+    state_accessors::seed_asset(
         &mut evm_state,
         1,
         "TEST",
@@ -52,8 +52,8 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
         0,
         0, // active
     );
-    evm_instructions::seed_bridge_contract(&mut evm_state, 1, contract_addr);
-    evm_instructions::seed_asset_contract_address(&mut evm_state, 1, contract_addr);
+    state_accessors::seed_bridge_contract(&mut evm_state, 1, contract_addr);
+    state_accessors::seed_asset_contract_address(&mut evm_state, 1, contract_addr);
 }
 
 /// Bridge environment setup and empty block production.
@@ -77,7 +77,7 @@ fn test_bridge_deposit_evm_credits() {
     // Fund sender with EVM storage balance for the deposit
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        evm_instructions::seed_balance(&mut evm, 1, sender, 10_000);
+        state_accessors::seed_balance(&mut evm, 1, sender, 10_000);
         evm.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
         evm.create_account(sender);
         evm.create_account(recipient);
@@ -92,7 +92,7 @@ fn test_bridge_deposit_evm_credits() {
     // Verify the EVM storage seeding is intact
     let evm = node.state.evm_state.read().unwrap();
     assert_eq!(
-        evm_instructions::read_balance(&*evm, 1, sender),
+        state_accessors::read_balance(&*evm, 1, sender),
         10_000,
         "sender should have 10_000 balance"
     );
@@ -118,7 +118,7 @@ fn test_bridge_withdraw_records_outflow() {
     // Fund sender with EVM storage balance
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        evm_instructions::seed_balance(&mut evm, 1, sender, 10_000);
+        state_accessors::seed_balance(&mut evm, 1, sender, 10_000);
         evm.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
         evm.create_account(sender);
     }
@@ -135,7 +135,7 @@ fn test_bridge_withdraw_records_outflow() {
     // Verify EVM storage balance is intact
     let evm = node.state.evm_state.read().unwrap();
     assert_eq!(
-        evm_instructions::read_balance(&*evm, 1, sender),
+        state_accessors::read_balance(&*evm, 1, sender),
         10_000,
         "sender should still have 10_000 balance"
     );
@@ -151,7 +151,7 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     // Seed EVM storage with CALL balance for fees
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        evm_instructions::seed_balance(
+        state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
     }
 

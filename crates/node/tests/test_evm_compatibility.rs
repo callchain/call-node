@@ -39,7 +39,7 @@ fn test_evm_state_isolation_from_protocol() {
     // Asset balance lives in EVM storage
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 7_000,
         );
     }
@@ -233,7 +233,7 @@ fn test_protocol_and_evm_same_address() {
     // Asset balance lives in EVM storage slots
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 5_000,
         );
     }

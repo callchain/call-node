@@ -166,10 +166,10 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             if let Some(ref s) = *signer_guard {
                 let validator_addr = s.address();
                 let mut evm_state = node.state.evm_state.write().map_err(|_| "lock poisoned")?;
-                let validator_id = call_consensus::exec::evm_instructions::read_validator_id_by_addr(
+                let validator_id = call_consensus::exec::state_accessors::read_validator_id_by_addr(
                     &evm_state, validator_addr);
                 if validator_id != 0 {
-                    call_consensus::exec::evm_instructions::set_validator_bls_pubkey(
+                    call_consensus::exec::state_accessors::set_validator_bls_pubkey(
                         &mut evm_state, validator_addr, bls_public_key_bytes(&bls_pubkey));
                     info!(validator_id = validator_id, "registered BLS pubkey for validator in EVM storage");
                 }
@@ -293,12 +293,12 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 // BFT engine at all.
                 let validator_pubkeys: std::collections::HashSet<Vec<u8>> = {
                     let evm_state = node.state.evm_state.read().map_err(|_| "evm_state poisoned")?;
-                    let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+                    let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
                     let mut set = std::collections::HashSet::new();
                     for id in 1..=count {
-                        let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, id);
+                        let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, id);
                         if addr != call_primitives::Address::ZERO {
-                            let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(
+                            let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
                                 &evm_state, addr);
                             set.insert(pk.to_vec());
                         }

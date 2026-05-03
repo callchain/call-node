@@ -44,7 +44,7 @@ async fn test_single_validator_block_production() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000,
         );
     }
@@ -80,7 +80,7 @@ async fn test_base_fee_dynamics() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000,
         );
     }
@@ -141,7 +141,7 @@ async fn test_validator_reward_accumulation() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000,
         );
     }
@@ -173,7 +173,7 @@ async fn test_block_state_roots() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000,
         );
     }

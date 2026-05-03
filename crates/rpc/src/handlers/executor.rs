@@ -29,14 +29,14 @@ impl ProposalExecutor for NodeProposalExecutor {
             ProposalType::ValidatorSlash { validator_id, reason } => {
                 // Slash validator in EVM storage (set stake to 0 and status to 0)
                 let mut evm_state = self.state.evm_state.write().map_err(|_| "evm lock poisoned".to_string())?;
-                let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+                let addr = call_consensus::exec::state_accessors::read_validator_addr(
                     &evm_state, *validator_id as u64);
                 if addr == call_primitives::Address::ZERO {
                     return Err(format!("validator {validator_id} not found in EVM storage"));
                 }
-                let slashed = call_consensus::exec::evm_instructions::read_validator_stake(
+                let slashed = call_consensus::exec::state_accessors::read_validator_stake(
                     &evm_state, addr);
-                call_consensus::exec::evm_instructions::remove_validator_evm(
+                call_consensus::exec::state_accessors::remove_validator_evm(
                     &mut evm_state, addr);
                 tracing::info!(validator_id, reason, slashed_amount = slashed, "validator slashed via governance");
             }
@@ -148,7 +148,7 @@ impl ProposalExecutor for NodeProposalExecutor {
                 };
                 // Update the asset compliance policy in EVM storage
                 let mut evm = self.state.evm_state.write().map_err(|_| "evm lock poisoned".to_string())?;
-                call_consensus::exec::evm_instructions::seed_asset_compliance(&mut evm, *asset_id, policy);
+                call_consensus::exec::state_accessors::seed_asset_compliance(&mut evm, *asset_id, policy);
                 tracing::info!(asset_id, new_policy, "compliance update applied via executor");
             }
             ProposalType::FeeCurrencyAdd { asset_id, name, .. } => {
@@ -181,7 +181,7 @@ impl ProposalExecutor for NodeProposalExecutor {
                 // Look up the validator's current address from EVM storage
                 let validator_addr = {
                     let evm_state = self.state.evm_state.read().map_err(|_| "evm lock poisoned".to_string())?;
-                    let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+                    let addr = call_consensus::exec::state_accessors::read_validator_addr(
                         &evm_state, *validator_id as u64);
                     if addr == call_primitives::Address::ZERO {
                         return Err(format!("validator {validator_id} not found in EVM storage"));
@@ -196,7 +196,7 @@ impl ProposalExecutor for NodeProposalExecutor {
 
                 // Rotate the key in EVM storage
                 let mut evm_state = self.state.evm_state.write().map_err(|_| "evm lock poisoned".to_string())?;
-                call_consensus::exec::evm_instructions::rotate_validator_key_evm(
+                call_consensus::exec::state_accessors::rotate_validator_key_evm(
                     &mut evm_state, validator_addr, *new_pubkey);
                 tracing::info!(validator_id, "validator key rotated via governance in EVM storage");
             }
@@ -230,7 +230,7 @@ pub fn wire_governance_executor(gov: &mut GovernanceManager, state: &Arc<RpcStat
         let state = Arc::clone(state);
         Arc::new(move |addr: Address| {
             state.evm_state.read().ok().map(|s| {
-                call_consensus::exec::evm_instructions::read_balance(&s, call_protocol::CALL_ASSET_ID, addr)
+                call_consensus::exec::state_accessors::read_balance(&s, call_protocol::CALL_ASSET_ID, addr)
             }).unwrap_or(0)
         })
     };

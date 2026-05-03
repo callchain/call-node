@@ -201,7 +201,7 @@ impl PayloadBuilder {
 mod tests {
     use super::*;
     use call_primitives::{Address, ProtocolVersion};
-    use call_consensus::exec::evm_instructions;
+    use call_consensus::exec::state_accessors;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -236,7 +236,7 @@ mod tests {
 
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
-        evm_instructions::seed_balance(
+        state_accessors::seed_balance(
             &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000,
         );
 
@@ -267,7 +267,7 @@ mod tests {
 
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
-        evm_instructions::seed_balance(
+        state_accessors::seed_balance(
             &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 100_000,
         );
 
@@ -300,7 +300,7 @@ mod tests {
 
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
-        evm_instructions::seed_balance(
+        state_accessors::seed_balance(
             &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 30_000,
         );
 
@@ -338,7 +338,7 @@ mod tests {
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
         evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
-        evm_instructions::seed_balance(
+        state_accessors::seed_balance(
             &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000_000,
         );
 
@@ -362,7 +362,7 @@ mod tests {
         assert!(deploy_result.success);
 
         // Seed EVM storage for bridge ops
-        evm_instructions::seed_asset(
+        state_accessors::seed_asset(
             &mut evm_state,
             1,
             "CALL",
@@ -373,7 +373,7 @@ mod tests {
             0,
             0,
         );
-        evm_instructions::seed_bridge_contract(&mut evm_state, 1, contract_addr);
+        state_accessors::seed_bridge_contract(&mut evm_state, 1, contract_addr);
 
         let bridge_config = call_bridge::BridgeConfig::default();
 
@@ -432,7 +432,7 @@ mod tests {
 
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
-        evm_instructions::seed_balance(
+        state_accessors::seed_balance(
             &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000_000,
         );
 
@@ -483,7 +483,7 @@ mod tests {
 
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
-        evm_instructions::seed_balance(
+        state_accessors::seed_balance(
             &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000,
         );
 

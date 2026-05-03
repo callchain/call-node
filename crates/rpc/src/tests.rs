@@ -4,7 +4,7 @@
 mod tests {
     use call_primitives::{Address, AssetId};
     use call_evm::EvmState;
-    use call_consensus::exec::evm_instructions;
+    use call_consensus::exec::state_accessors;
     use call_transaction_pool::Mempool;
     use crate::handlers::RpcState;
     use std::sync::{Arc, RwLock, OnceLock};
@@ -59,7 +59,7 @@ mod tests {
         let issuer = test_addr(1);
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_asset(&mut *evm, 1, "TEST", "Test Token", 18, issuer, 0, 8_000, 0,
+            state_accessors::seed_asset(&mut *evm, 1, "TEST", "Test Token", 18, issuer, 0, 8_000, 0,
             );
         }
 
@@ -84,7 +84,7 @@ mod tests {
         let issuer = test_addr(1);
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_asset(
+            state_accessors::seed_asset(
                 &mut *evm, 1, "CAPPED", "Capped Token", 18, issuer, 10_000, 0, 1,
             );
         }
@@ -104,7 +104,7 @@ mod tests {
         // Set balance in EVM storage
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_balance(&mut *evm, asset_id, addr, 5000);
+            state_accessors::seed_balance(&mut *evm, asset_id, addr, 5000);
         }
 
         let balance = state.get_balance(asset_id, &addr);
@@ -121,7 +121,7 @@ mod tests {
 
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_asset(
+            state_accessors::seed_asset(
                 &mut *evm, asset_id, "CALL", "Call Token", 18, Address::ZERO, 0, 6_000, 0,
             );
         }
@@ -137,7 +137,7 @@ mod tests {
 
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_agent(
+            state_accessors::seed_agent(
                 &mut *evm, 0, owner, "test-agent", "https://agent.example.com", 0,
             );
         }
@@ -160,12 +160,12 @@ mod tests {
 
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_balance(&mut *evm, 1, owner, 50_000,
+            state_accessors::seed_balance(&mut *evm, 1, owner, 50_000,
             );
-            evm_instructions::seed_agent(
+            state_accessors::seed_agent(
                 &mut *evm, 0, owner, "balance-agent", "https://a.com", 0,
             );
-            evm_instructions::agent_set_balance(&mut *evm, 0, 1, 10_000,
+            state_accessors::agent_set_balance(&mut *evm, 0, 1, 10_000,
             );
         }
 
@@ -175,7 +175,7 @@ mod tests {
         // Revoke
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::agent_set_balance(&mut *evm, 0, 1, 0,
+            state_accessors::agent_set_balance(&mut *evm, 0, 1, 0,
             );
         }
         let balance = state.get_agent_total_balance(0);
@@ -411,7 +411,7 @@ mod tests {
         // Set up balance in EVM storage
         {
             let mut evm = state.evm_state.write().unwrap();
-            evm_instructions::seed_balance(&mut *evm, asset_id, sender, 10_000);
+            state_accessors::seed_balance(&mut *evm, asset_id, sender, 10_000);
         }
 
         // Protocol transactions are rejected in EVM-only mempool mode

@@ -37,7 +37,7 @@ async fn test_light_verify_block_header_valid() {
     // Seed validator into EVM storage (RPC reads from EVM, not legacy validator_state)
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_validator(
+        call_consensus::exec::state_accessors::seed_validator(
             &mut *evm,
             val_id as u64,
             validator_addr,
@@ -107,7 +107,7 @@ async fn test_light_verify_block_header_bad_parent() {
 
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_validator(
+        call_consensus::exec::state_accessors::seed_validator(
             &mut *evm,
             val_id as u64,
             validator_addr,
@@ -170,7 +170,7 @@ async fn test_light_get_balance_proof() {
     // Set balance in EVM storage
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, asset_id, addr, balance,
         );
     }
@@ -245,7 +245,7 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
 
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_validator(
+        call_consensus::exec::state_accessors::seed_validator(
             &mut *evm,
             val_id as u64,
             validator_addr,

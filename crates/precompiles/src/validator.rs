@@ -21,7 +21,7 @@ const MIN_SELF_STAKE: u128 = 1_000_000;
 const UNBONDING_PERIOD_BLOCKS: u64 = 120_960;
 const STAKING_ESCROW: Address = address!("0000000000000000000000000000000000000ACE");
 
-// ── Storage slot helpers (match evm_instructions.rs layout) ───────────
+// ── Storage slot helpers (match state_accessors.rs layout) ───────────
 
 fn slot_validator_count() -> U256 {
     U256::ZERO

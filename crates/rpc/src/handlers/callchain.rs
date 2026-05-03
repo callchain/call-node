@@ -5,7 +5,7 @@
 
 use crate::handlers::state::RpcState;
 use crate::handlers::helpers::{invalid_params, internal_error};
-use call_consensus::exec::evm_instructions;
+use call_consensus::exec::state_accessors;
 use call_primitives::Address;
 use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
@@ -199,7 +199,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             };
             let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
+            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
             // Note balances require the full note registry (not in EVM storage).
             // Return merkle root only; use a local shielded node for balance queries.
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -375,23 +375,23 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .ok_or_else(|| invalid_params("missing signatures array".into()))?;
             let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let validators = evm_instructions::read_validator_addresses(&*evm);
+            let validators = state_accessors::read_validator_addresses(&*evm);
             let total = validators.len() as u32;
             let quorum = (2 * total as usize).div_ceil(3).max(1);
             let block_hash_bytes = block_hash.as_slice();
             let mut valid_count = 0;
             for entry in sigs_array {
                 if let Some(validator_id) = entry.get(0).and_then(|v| v.as_u64()) {
-                    let addr = evm_instructions::read_validator_addr(&*evm, validator_id);
+                    let addr = state_accessors::read_validator_addr(&*evm, validator_id);
                     if addr != Address::ZERO {
-                        let status = evm_instructions::read_validator_status(&*evm, addr);
+                        let status = state_accessors::read_validator_status(&*evm, addr);
                         if status != 0 {
                             if let Some(sig_hex) = entry.get(2).and_then(|v| v.as_str()) {
                                 if let Ok(sig_bytes) = hex::decode(sig_hex.trim_start_matches("0x")) {
                                     if sig_bytes.len() == 64 {
                                         let mut sig = [0u8; 64];
                                         sig.copy_from_slice(&sig_bytes);
-                                        let pk = evm_instructions::read_validator_pubkey(&*evm, addr);
+                                        let pk = state_accessors::read_validator_pubkey(&*evm, addr);
                                         if call_crypto::ed25519_verify(
                                             &pk,
                                             &sig,
@@ -425,8 +425,8 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let balance = state.get_balance(asset_id, &address);
             let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
-            let leaf_count = evm_instructions::read_shielded_commitment_count(&evm);
+            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
+            let leaf_count = state_accessors::read_shielded_commitment_count(&evm);
             // Full note proofs require the Merkle tree structure (not in EVM storage).
             let state_leaf = call_crypto::keccak256(format!("{asset_id}:{address:?}:{balance}").as_bytes());
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -482,13 +482,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             for nf_hex in &nullifiers {
                 if let Ok(bytes) = hex::decode(nf_hex.trim_start_matches("0x")) {
                     let nf = call_shielded::Nullifier(call_primitives::Hash::from_slice(&bytes));
-                    if evm_instructions::read_shielded_nullifier_spent(&evm, &nf) {
+                    if state_accessors::read_shielded_nullifier_spent(&evm, &nf) {
                         spent.push(nf_hex.clone());
                     }
                 }
             }
-            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
-            let leaf_count = evm_instructions::read_shielded_commitment_count(&evm);
+            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
+            let leaf_count = state_accessors::read_shielded_commitment_count(&evm);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "valid": spent.is_empty(),
                 "nullifierCount": nullifiers.len(),
@@ -511,8 +511,8 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .map_err(|e| invalid_params(format!("invalid viewing key: {e}")))?;
             let evm = state.evm_state.read()
                 .map_err(|_| internal_error("lock poisoned".into()))?;
-            let leaf_count = evm_instructions::read_shielded_commitment_count(&evm);
-            let merkle_root = evm_instructions::read_shielded_merkle_root(&evm);
+            let leaf_count = state_accessors::read_shielded_commitment_count(&evm);
+            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "noteCount": leaf_count,
                 "spentNullifiers": 0, // not countable from EVM without iteration
@@ -528,17 +528,17 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         .register_async_method("call_governanceGetProposal", |params, state, _ctx| async move {
             let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let count = evm_instructions::read_gov_proposal_count(&evm);
+            let count = state_accessors::read_gov_proposal_count(&evm);
             if proposal_id == 0 || proposal_id > count {
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
-            let status = evm_instructions::read_gov_proposal_status(&evm, proposal_id);
-            let proposer = evm_instructions::read_gov_proposal_proposer(&evm, proposal_id);
-            let title_bytes = evm_instructions::read_gov_proposal_title(&evm, proposal_id);
-            let desc_bytes = evm_instructions::read_gov_proposal_description(&evm, proposal_id);
-            let (yes, no, abstain) = evm_instructions::read_gov_proposal_votes(&evm, proposal_id);
-            let deposit = evm_instructions::read_gov_proposal_deposit(&evm, proposal_id);
-            let queued_at = evm_instructions::read_gov_proposal_queued_at(&evm, proposal_id);
+            let status = state_accessors::read_gov_proposal_status(&evm, proposal_id);
+            let proposer = state_accessors::read_gov_proposal_proposer(&evm, proposal_id);
+            let title_bytes = state_accessors::read_gov_proposal_title(&evm, proposal_id);
+            let desc_bytes = state_accessors::read_gov_proposal_description(&evm, proposal_id);
+            let (yes, no, abstain) = state_accessors::read_gov_proposal_votes(&evm, proposal_id);
+            let deposit = state_accessors::read_gov_proposal_deposit(&evm, proposal_id);
+            let queued_at = state_accessors::read_gov_proposal_queued_at(&evm, proposal_id);
             let title = String::from_utf8_lossy(&title_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
             let description = String::from_utf8_lossy(&desc_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -560,13 +560,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_governanceGetAllProposals", |_params, state, _ctx| async move {
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let count = evm_instructions::read_gov_proposal_count(&evm);
+            let count = state_accessors::read_gov_proposal_count(&evm);
             let mut proposals = Vec::with_capacity(count as usize);
             for id in 1..=count {
-                let status = evm_instructions::read_gov_proposal_status(&evm, id);
-                let proposer = evm_instructions::read_gov_proposal_proposer(&evm, id);
-                let title_bytes = evm_instructions::read_gov_proposal_title(&evm, id);
-                let (yes, no, _abstain) = evm_instructions::read_gov_proposal_votes(&evm, id);
+                let status = state_accessors::read_gov_proposal_status(&evm, id);
+                let proposer = state_accessors::read_gov_proposal_proposer(&evm, id);
+                let title_bytes = state_accessors::read_gov_proposal_title(&evm, id);
+                let (yes, no, _abstain) = state_accessors::read_gov_proposal_votes(&evm, id);
                 let title = String::from_utf8_lossy(&title_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
                 proposals.push(serde_json::json!({
                     "id": id,
@@ -585,7 +585,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_governanceIsPaused", |_params, state, _ctx| async move {
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let paused = evm_instructions::read_gov_paused(&evm);
+            let paused = state_accessors::read_gov_paused(&evm);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({ "isPaused": paused }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -597,13 +597,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         .register_async_method("call_oracleGetPrice", |params, state, _ctx| async move {
             let asset_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let price = call_consensus::exec::evm_instructions::read_oracle_price(&evm, asset_id);
+            let price = call_consensus::exec::state_accessors::read_oracle_price(&evm, asset_id);
             if price == 0 {
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
-            let timestamp = call_consensus::exec::evm_instructions::read_oracle_timestamp(&evm, asset_id);
-            let block_number = call_consensus::exec::evm_instructions::read_oracle_block(&evm, asset_id);
-            let count = call_consensus::exec::evm_instructions::read_oracle_count(&evm, asset_id);
+            let timestamp = call_consensus::exec::state_accessors::read_oracle_timestamp(&evm, asset_id);
+            let block_number = call_consensus::exec::state_accessors::read_oracle_block(&evm, asset_id);
+            let count = call_consensus::exec::state_accessors::read_oracle_count(&evm, asset_id);
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
             let is_stale = now.saturating_sub(timestamp) > 3600; // 1 hour staleness
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -624,7 +624,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         .register_async_method("call_oracleGetTwap", |params, state, _ctx| async move {
             let (asset_id,): (u64,) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let twap = call_consensus::exec::evm_instructions::read_oracle_twap(&evm, asset_id);
+            let twap = call_consensus::exec::state_accessors::read_oracle_twap(&evm, asset_id);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": asset_id,
                 "twap": twap.to_string(),
@@ -638,13 +638,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
         .register_async_method("call_oracleGetValidatorInfo", |params, state, _ctx| async move {
             let validator_id: u32 = params.one().map_err(|e| invalid_params(e.to_string()))?;
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+            let addr = call_consensus::exec::state_accessors::read_validator_addr(
                 &evm, validator_id as u64);
             if addr == call_primitives::Address::ZERO {
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
-            let stake = call_consensus::exec::evm_instructions::read_validator_stake(&evm, addr);
-            let status = call_consensus::exec::evm_instructions::read_validator_status(&evm, addr);
+            let stake = call_consensus::exec::state_accessors::read_validator_stake(&evm, addr);
+            let status = call_consensus::exec::state_accessors::read_validator_status(&evm, addr);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "validatorId": validator_id,
                 "address": format!("{:?}", addr),
@@ -673,13 +673,13 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             tx_hash_arr.copy_from_slice(&tx_hash_bytes);
             let _tx_hash = alloy_primitives::B256::from(tx_hash_arr);
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let pending_status = evm_instructions::read_bridge_pending_status(&*evm, tx_hash_arr);
-            let is_processed = evm_instructions::read_bridge_processed(&*evm, tx_hash_arr);
+            let pending_status = state_accessors::read_bridge_pending_status(&*evm, tx_hash_arr);
+            let is_processed = state_accessors::read_bridge_processed(&*evm, tx_hash_arr);
             let status = if pending_status == 1 {
-                let recipient = evm_instructions::read_bridge_pending_recipient(&*evm, tx_hash_arr);
-                let asset_id = evm_instructions::read_bridge_pending_asset(&*evm, tx_hash_arr);
-                let amount = evm_instructions::read_bridge_pending_amount(&*evm, tx_hash_arr);
-                let submitted_at_block = evm_instructions::read_bridge_pending_block(&*evm, tx_hash_arr);
+                let recipient = state_accessors::read_bridge_pending_recipient(&*evm, tx_hash_arr);
+                let asset_id = state_accessors::read_bridge_pending_asset(&*evm, tx_hash_arr);
+                let amount = state_accessors::read_bridge_pending_amount(&*evm, tx_hash_arr);
+                let submitted_at_block = state_accessors::read_bridge_pending_block(&*evm, tx_hash_arr);
                 serde_json::json!({
                     "status": "pending",
                     "stage": "challenge_period",
@@ -800,23 +800,23 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_validatorList", |_params, state, _ctx| async move {
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let count = evm_instructions::read_validator_count(&*evm);
+            let count = state_accessors::read_validator_count(&*evm);
             let mut validators = Vec::new();
             for i in 1..=count {
-                let addr = evm_instructions::read_validator_addr(&*evm, i);
+                let addr = state_accessors::read_validator_addr(&*evm, i);
                 if addr == Address::ZERO {
                     continue;
                 }
-                let status = evm_instructions::read_validator_status(&*evm, addr);
+                let status = state_accessors::read_validator_status(&*evm, addr);
                 if status == 0 {
                     continue;
                 }
                 validators.push(serde_json::json!({
                     "validatorId": i,
                     "address": format!("0x{}", hex::encode(addr.as_slice())),
-                    "ed25519Pubkey": format!("0x{}", hex::encode(evm_instructions::read_validator_pubkey(&*evm, addr))),
-                    "selfStake": evm_instructions::read_validator_stake(&*evm, addr).to_string(),
-                    "stakedCall": evm_instructions::read_validator_stake(&*evm, addr).to_string(),
+                    "ed25519Pubkey": format!("0x{}", hex::encode(state_accessors::read_validator_pubkey(&*evm, addr))),
+                    "selfStake": state_accessors::read_validator_stake(&*evm, addr).to_string(),
+                    "stakedCall": state_accessors::read_validator_stake(&*evm, addr).to_string(),
                     "delegatedCall": "0",
                     "rewards": "0",
                     "isUnbonding": status == 2,

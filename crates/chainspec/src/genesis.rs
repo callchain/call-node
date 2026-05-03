@@ -11,7 +11,7 @@ use call_protocol::transaction::FeeParams;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use call_consensus::exec::evm_instructions;
+use call_consensus::exec::state_accessors;
 use call_precompiles::VALIDATOR_ADDRESS;
 use call_precompiles::storage::storage_slot;
 
@@ -276,11 +276,11 @@ impl GenesisExecutor {
                     .ok_or_else(|| GenesisError::ExecutionFailed("supply overflow".into()))?;
 
                 // Seed EVM asset storage so get_balance reads from EVM state root
-                evm_instructions::seed_balance(evm_state, asset.asset_id, addr, *amount);
+                state_accessors::seed_balance(evm_state, asset.asset_id, addr, *amount);
             }
 
             // Seed EVM asset metadata
-            evm_instructions::seed_asset(
+            state_accessors::seed_asset(
                 evm_state,
                 asset.asset_id,
                 &asset.symbol,
@@ -337,7 +337,7 @@ impl GenesisExecutor {
             );
 
             // Seed staking escrow balance
-            evm_instructions::seed_balance(
+            state_accessors::seed_balance(
                 evm_state,
                 call_protocol::CALL_ASSET_ID,
                 call_consensus::STAKING_ESCROW,
@@ -398,7 +398,7 @@ impl GenesisExecutor {
                 ));
             }
 
-            evm_instructions::seed_asset_contract_address(evm_state, asset.asset_id, contract_addr);
+            state_accessors::seed_asset_contract_address(evm_state, asset.asset_id, contract_addr);
         }
 
         Ok(())
@@ -528,11 +528,11 @@ mod tests {
         let executor = GenesisExecutor::new(genesis);
         let state = executor.execute().unwrap();
 
-        let bal1 = call_consensus::exec::evm_instructions::read_balance(
+        let bal1 = call_consensus::exec::state_accessors::read_balance(
             &state.evm_state, 1, test_addr(1));
         assert_eq!(bal1, 500_000_000 * 10u128.pow(18));
 
-        let bal2 = call_consensus::exec::evm_instructions::read_balance(
+        let bal2 = call_consensus::exec::state_accessors::read_balance(
             &state.evm_state, 1, test_addr(2));
         assert_eq!(bal2, 500_000_000 * 10u128.pow(18));
     }
@@ -552,7 +552,7 @@ mod tests {
         let executor = GenesisExecutor::new(genesis);
         let state = executor.execute().unwrap();
 
-        let count = call_consensus::exec::evm_instructions::read_validator_count(&state.evm_state);
+        let count = call_consensus::exec::state_accessors::read_validator_count(&state.evm_state);
         assert_eq!(count, 1);
     }
 

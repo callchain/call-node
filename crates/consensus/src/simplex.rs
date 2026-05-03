@@ -53,7 +53,7 @@ impl SimplexConsensus {
     fn build_pubkey_map_internal(
         evm_state: &call_evm::EvmState,
     ) -> std::collections::HashMap<ValidatorId, call_primitives::Ed25519PublicKey> {
-        use crate::exec::evm_instructions::{
+        use crate::exec::state_accessors::{
             read_validator_count, read_validator_addr, read_validator_pubkey,
         };
         let count = read_validator_count(evm_state);
@@ -93,7 +93,7 @@ impl SimplexConsensus {
         if amount < self.params.min_self_stake {
             return Err(ConsensusError::InsufficientStake);
         }
-        let id = crate::exec::evm_instructions::stake_validator_evm(
+        let id = crate::exec::state_accessors::stake_validator_evm(
             evm_state, address, pubkey, amount,
         );
         Ok(id)
@@ -241,9 +241,9 @@ impl SimplexConsensus {
         // Distribute validator reward by adding to the proposer's stake in EVM storage
         if result.total_validator_reward > 0 {
             let proposer_id = block.header.proposer;
-            let proposer_addr = crate::exec::evm_instructions::read_validator_addr(evm_state, proposer_id as u64);
+            let proposer_addr = crate::exec::state_accessors::read_validator_addr(evm_state, proposer_id as u64);
             if proposer_addr != Address::ZERO {
-                crate::exec::evm_instructions::distribute_reward_evm(
+                crate::exec::state_accessors::distribute_reward_evm(
                     evm_state, proposer_addr, result.total_validator_reward,
                 );
             } else {
@@ -275,12 +275,12 @@ impl SimplexConsensus {
         evm_state: &mut call_evm::EvmState,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
-        let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+        let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
         if addr == Address::ZERO {
             return Err(ConsensusError::ValidatorNotFound(validator_id));
         }
-        let slashed = crate::exec::evm_instructions::read_validator_stake(evm_state, addr);
-        crate::exec::evm_instructions::slash_validator_evm(evm_state, addr, slashed);
+        let slashed = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
+        crate::exec::state_accessors::slash_validator_evm(evm_state, addr, slashed);
         warn!(validator_id, slashed, "slashed validator for double sign");
         Ok(slashed)
     }
@@ -292,14 +292,14 @@ impl SimplexConsensus {
         validator_id: ValidatorId,
         rounds_offline: u64,
     ) -> Result<u128, ConsensusError> {
-        let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+        let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
         if addr == Address::ZERO {
             return Err(ConsensusError::ValidatorNotFound(validator_id));
         }
-        let self_stake = crate::exec::evm_instructions::read_validator_stake(evm_state, addr);
+        let self_stake = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
         let rate_total = self.params.offline_slash_rate_bps * rounds_offline as u128;
         let slashed = (self_stake * rate_total) / 10_000;
-        crate::exec::evm_instructions::slash_validator_evm(evm_state, addr, slashed);
+        crate::exec::state_accessors::slash_validator_evm(evm_state, addr, slashed);
         warn!(
             validator_id,
             rounds_offline, slashed, "slashed validator for being offline"
@@ -313,13 +313,13 @@ impl SimplexConsensus {
         evm_state: &mut call_evm::EvmState,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
-        let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+        let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
         if addr == Address::ZERO {
             return Err(ConsensusError::ValidatorNotFound(validator_id));
         }
-        let self_stake = crate::exec::evm_instructions::read_validator_stake(evm_state, addr);
+        let self_stake = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
         let slashed = (self_stake * 10) / 10_000; // 0.1%
-        crate::exec::evm_instructions::slash_validator_evm(evm_state, addr, slashed);
+        crate::exec::state_accessors::slash_validator_evm(evm_state, addr, slashed);
         warn!(validator_id, slashed, "slashed validator for oracle outlier");
         Ok(slashed)
     }
@@ -332,19 +332,19 @@ impl SimplexConsensus {
         amount: u128,
     ) -> Result<(), ConsensusError> {
         if amount > 0 {
-            let addr = crate::exec::evm_instructions::read_validator_addr(evm_state, validator_id as u64);
+            let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
             if addr == Address::ZERO {
                 warn!(validator_id, "validator not found, skipping oracle reward");
                 return Ok(());
             }
-            crate::exec::evm_instructions::distribute_reward_evm(evm_state, addr, amount);
+            crate::exec::state_accessors::distribute_reward_evm(evm_state, addr, amount);
         }
         Ok(())
     }
 
     /// Get active validator IDs from EVM storage.
     pub fn active_validators(&self, evm_state: &call_evm::EvmState) -> Vec<ValidatorId> {
-        use crate::exec::evm_instructions::{
+        use crate::exec::state_accessors::{
             read_validator_count, read_validator_addr, read_validator_status,
         };
         let count = read_validator_count(evm_state);
@@ -363,7 +363,7 @@ impl SimplexConsensus {
         evm_state: &call_evm::EvmState,
         params: &ConsensusParams,
     ) -> Vec<ValidatorId> {
-        use crate::exec::evm_instructions::{
+        use crate::exec::state_accessors::{
             read_validator_count, read_validator_addr, read_validator_stake, read_validator_status,
         };
         let count = read_validator_count(evm_state);
@@ -439,7 +439,7 @@ mod tests {
     use super::*;
     use call_primitives::{Address, Ed25519PublicKey};
     use call_evm::EvmState;
-    use crate::exec::evm_instructions::seed_validator;
+    use crate::exec::state_accessors::seed_validator;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)

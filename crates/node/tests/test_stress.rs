@@ -56,7 +56,7 @@ async fn test_high_throughput_many_transactions() {
     // Fund sender with enough for 1000 transfers
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
         evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
@@ -101,7 +101,7 @@ fn test_mempool_capacity_under_pressure() {
         let kp = test_keypair();
         {
             let mut evm = node.state.evm_state.write().unwrap();
-            call_consensus::exec::evm_instructions::seed_balance(
+            call_consensus::exec::state_accessors::seed_balance(
                 &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 10_000_000,
             );
             evm.set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
@@ -153,7 +153,7 @@ async fn test_base_fee_under_sustained_load() {
 
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000_000,
         );
         evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
@@ -188,7 +188,7 @@ async fn test_no_double_spend_concurrent_nonce() {
 
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
         evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
@@ -225,7 +225,7 @@ async fn test_final_state_consistency_after_load() {
     let initial_balance = 200_000_000u128;
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, initial_balance,
         );
         evm.set_balance(sender, call_primitives::U256::from(initial_balance));
@@ -275,7 +275,7 @@ async fn test_multi_sender_stress() {
         let kp = test_keypair();
         {
             let mut evm = node.state.evm_state.write().unwrap();
-            call_consensus::exec::evm_instructions::seed_balance(
+            call_consensus::exec::state_accessors::seed_balance(
                 &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 20_000_000,
             );
             evm.set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
@@ -316,7 +316,7 @@ async fn test_high_volume_block_production() {
     // Enough CALL for gas + transfers (200 txs * ~110k gas each + 200 * 10 transfer)
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 50_000_000,
         );
         evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
@@ -361,7 +361,7 @@ async fn test_rapid_block_production() {
 
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 600_000_000,
         );
         evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));

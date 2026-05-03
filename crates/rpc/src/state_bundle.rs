@@ -75,7 +75,7 @@ impl<'a> StateWriteBundle<'a> {
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let bridge_config = BridgeConfig::default();
-        let validators = call_consensus::exec::evm_instructions::read_validator_addresses(&self.evm);
+        let validators = call_consensus::exec::state_accessors::read_validator_addresses(&self.evm);
         block.execute(
             &mut ExecutionState::new(
                 &mut self.evm,
@@ -124,7 +124,7 @@ impl<'a> StateReadBundle<'a> {
         let mut evm = self.evm.clone();
         let mut fork_manager = self.fork_manager.clone();
         let bridge_config = BridgeConfig::default();
-        let validators = call_consensus::exec::evm_instructions::read_validator_addresses(&self.evm);
+        let validators = call_consensus::exec::state_accessors::read_validator_addresses(&self.evm);
 
         block.execute(
             &mut ExecutionState::new(

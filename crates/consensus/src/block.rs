@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use crate::validator::ConsensusError;
 use crate::ForkManager;
-use crate::exec::evm_instructions;
+use crate::exec::state_accessors;
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
 
@@ -276,7 +276,7 @@ impl Block {
             if evm_balance_u128 < gas_cost_u128 {
                 let needed = gas_cost_u128 - evm_balance_u128;
                 let protocol_balance =
-                    evm_instructions::read_balance(state.evm_state, call_protocol::CALL_ASSET_ID, caller);
+                    state_accessors::read_balance(state.evm_state, call_protocol::CALL_ASSET_ID, caller);
                 if protocol_balance < needed {
                     tracing::warn!(?caller, needed, protocol_balance, evm_balance = evm_balance_u128, "block: insufficient unified gas, skipping");
                     continue;
@@ -284,7 +284,7 @@ impl Block {
                 let new_protocol_bal = protocol_balance
                     .checked_sub(needed)
                     .expect("checked above");
-                evm_instructions::seed_balance(
+                state_accessors::seed_balance(
                     state.evm_state,
                     call_protocol::CALL_ASSET_ID,
                     caller,
@@ -356,7 +356,7 @@ impl Block {
 
         let total_fees = total_gas as u128 * ctx.fee_params.base_fee;
         let oracle_share = total_fees * ctx.fee_params.oracle_fee_share_bps as u128 / 10_000;
-        evm_instructions::add_oracle_reward(state.evm_state, oracle_share);
+        state_accessors::add_oracle_reward(state.evm_state, oracle_share);
 
         // Compute state root (EVM-only mode)
         result.state_root = compute_evm_state_root(state.evm_state);

@@ -12,7 +12,7 @@
 | Phase 2 — BlockHeader Simplification | ✅ Done | `BlockHeader` now has single `state_root` = EVM state root; `compute_payment_root` / `bridge_root` / `receipt_root` removed |
 | Phase 3 — Stateful Precompile Infra | ✅ Done | `StorageProvider`, `EvmStorageProvider`, `StorageCtx` (TLS), `StatefulPrecompile` trait, `CallPrecompiles::run`, `input_cost()`, `fill_precompile_output()` all implemented; `state_hook.rs` deleted; `OnceLock` registration removed |
 | Phase 4 — Precompile Migration | ✅ Done | All 9 precompiles fully migrated to `StorageCtx::sload/sstore`. No protocol-state dependencies remain. `shielded.rs` uses `call_shielded` for pure cryptography (Poseidon, ZK proofs, Merkle trees) — not protocol state. |
-| Phase 5 — Consensus/BFT | ✅ Done | `SimplexConsensus` now reads/writes validator state directly from EVM storage via `evm_instructions.rs`. `ValidatorStateManager` removed from `SimplexConsensus`. `ExecutionState` no longer holds `shielded_state`. All consensus callers (`node`, `rpc`, `payload-builder`) updated. Tests pass. |
+| Phase 5 — Consensus/BFT | ✅ Done | `SimplexConsensus` now reads/writes validator state directly from EVM storage via `state_accessors.rs`. `ValidatorStateManager` removed from `SimplexConsensus`. `ExecutionState` no longer holds `shielded_state`. All consensus callers (`node`, `rpc`, `payload-builder`) updated. Tests pass. |
 | Phase 6 — RpcState | ✅ Done | All protocol-state fields removed from `RpcState`: `balance_state`, `asset_registry`, `compliance_engine`, `bridge_state`, `validator_state`, `agent_registry`, `shielded_state`, `governance`, `oracle`, `fee_currency_registry`. Remaining: `evm_state` + non-chain metadata (receipts, filters, network handles, etc.). |
 | Phase 7 — Persistence | ✅ Done | `LoadedState` simplified to `evm_state` + `agent_nonces` + `governance` + `fee_params`. Protocol-state save/load removed. Unused DB table types cleaned up from `reth_db.rs`. Only 14 used table types remain. |
 | Phase 8 — Genesis | ✅ Done | Genesis initializes only `EvmState` with pre-seeded system storage slots. No separate `AccountState`, `AssetRegistry`, `ComplianceEngine`, etc. initialization. |
@@ -164,7 +164,7 @@ All 9 precompiles migrated to `StorageCtx::sload/sstore`. No protocol-state depe
 
 **Files:** `crates/consensus/src/validator.rs`, `crates/consensus/src/block.rs`, `crates/consensus/src/simplex.rs`
 
-- `SimplexConsensus` reads/writes validator state directly from EVM storage via `evm_instructions.rs`
+- `SimplexConsensus` reads/writes validator state directly from EVM storage via `state_accessors.rs`
 - `ValidatorStateManager` removed from `SimplexConsensus`
 - `ExecutionState` no longer holds `shielded_state`
 - All consensus callers (`node`, `rpc`, `payload-builder`) updated

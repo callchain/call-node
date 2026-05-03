@@ -108,7 +108,7 @@ pub(crate) async fn block_production_loop(
         {
             let mut evm_state = state.evm_state.write().unwrap();
             let config = BridgeConfig::default();
-            let finalized = call_consensus::exec::evm_instructions::finalize_pending_external_deposits_evm(
+            let finalized = call_consensus::exec::state_accessors::finalize_pending_external_deposits_evm(
                 &mut evm_state,
                 height,
                 config.challenge_period_blocks,
@@ -300,7 +300,7 @@ pub(crate) async fn block_production_loop(
         {
             let mut gov = governance.write().unwrap();
             let evm_state = state.evm_state.read().unwrap();
-            let validators = call_consensus::exec::evm_instructions::read_validators(&evm_state);
+            let validators = call_consensus::exec::state_accessors::read_validators(&evm_state);
             drop(evm_state);
             for (id, addr, _stake) in validators {
                 gov.register_validator(id as u32, addr);
@@ -420,20 +420,20 @@ pub(crate) async fn block_production_loop(
 
             let shielded_root = {
                 let evm_state = state.evm_state.read().unwrap();
-                call_consensus::exec::evm_instructions::read_shielded_merkle_root(&evm_state)
+                call_consensus::exec::state_accessors::read_shielded_merkle_root(&evm_state)
             };
 
             let agent_root = {
                 let evm_state = state.evm_state.read().unwrap();
-                let count = call_consensus::exec::evm_instructions::read_agent_count(&evm_state);
+                let count = call_consensus::exec::state_accessors::read_agent_count(&evm_state);
                 let mut agents = std::collections::HashMap::new();
                 for id in 0..count {
-                    let owner = call_consensus::exec::evm_instructions::agent_get_owner(&evm_state, id);
+                    let owner = call_consensus::exec::state_accessors::agent_get_owner(&evm_state, id);
                     if owner == call_primitives::Address::ZERO {
                         continue;
                     }
-                    let name = call_consensus::exec::evm_instructions::agent_get_name(&evm_state, id);
-                    let registered_at = call_consensus::exec::evm_instructions::agent_get_registered_at(&evm_state, id);
+                    let name = call_consensus::exec::state_accessors::agent_get_name(&evm_state, id);
+                    let registered_at = call_consensus::exec::state_accessors::agent_get_registered_at(&evm_state, id);
                     agents.insert(id, (owner, name, registered_at));
                 }
                 call_storage::compute_agent_root(&agents)

@@ -44,7 +44,7 @@ async fn test_height_activated_upgrade() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
         );
     }
@@ -177,7 +177,7 @@ async fn test_governance_triggered_upgrade() {
     }
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
         );
     }

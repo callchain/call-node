@@ -152,13 +152,13 @@ pub(crate) fn handle_network_message(
                 tokio::spawn(async move {
                     let is_validator = {
                         let evm_state = state_clone.evm_state.read().unwrap();
-                        let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+                        let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
                         let mut active = 0;
                         for id in 1..=count {
-                            let addr = call_consensus::exec::evm_instructions::read_validator_addr(
+                            let addr = call_consensus::exec::state_accessors::read_validator_addr(
                                 &evm_state, id);
                             if addr != call_primitives::Address::ZERO {
-                                let status = call_consensus::exec::evm_instructions::read_validator_status(
+                                let status = call_consensus::exec::state_accessors::read_validator_status(
                                     &evm_state, addr);
                                 if status != 0 {
                                     active += 1;
@@ -180,7 +180,7 @@ pub(crate) fn handle_network_message(
                             // Read last known price from EVM storage
                             let price = {
                                 let evm = state_clone.evm_state.read().unwrap();
-                                call_consensus::exec::evm_instructions::read_oracle_price(&evm, pair.base)
+                                call_consensus::exec::state_accessors::read_oracle_price(&evm, pair.base)
                             };
                             if price != 0 {
                                 // Send back as an oracle price submission
@@ -221,7 +221,7 @@ pub(crate) fn handle_network_message(
                         Ok(Some(aggregated)) => {
                             // Quorum reached — write aggregated price to EVM storage
                             let mut evm = state_clone.evm_state.write().unwrap();
-                            call_consensus::exec::evm_instructions::seed_oracle_price(
+                            call_consensus::exec::state_accessors::seed_oracle_price(
                                 &mut evm,
                                 aggregated.pair.base,
                                 aggregated.median_price,

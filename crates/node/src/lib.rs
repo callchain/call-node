@@ -187,14 +187,14 @@ impl CallNode {
                 Ok(None) => {
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        call_consensus::exec::evm_instructions::read_validator_count(&loaded.evm_state) as u32,
+                        call_consensus::exec::state_accessors::read_validator_count(&loaded.evm_state) as u32,
                     )
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load fork state");
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        call_consensus::exec::evm_instructions::read_validator_count(&loaded.evm_state) as u32,
+                        call_consensus::exec::state_accessors::read_validator_count(&loaded.evm_state) as u32,
                     )
                 }
             }
@@ -622,15 +622,15 @@ impl CallNode {
                         let (qualified, pubkeys) = {
                             let evm_state = state.evm_state.read().unwrap();
                             let params = state.consensus_params.read().unwrap();
-                            let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+                            let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
                             let mut qualified = Vec::new();
                             let mut pubkeys = std::collections::HashMap::new();
                             for id in 1..=count {
-                                let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, id);
+                                let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, id);
                                 if addr == call_primitives::Address::ZERO { continue; }
-                                let stake = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, addr);
-                                let status = call_consensus::exec::evm_instructions::read_validator_status(&evm_state, addr);
-                                let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(&evm_state, addr);
+                                let stake = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, addr);
+                                let status = call_consensus::exec::state_accessors::read_validator_status(&evm_state, addr);
+                                let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm_state, addr);
                                 if status != 0 && stake >= params.min_self_stake {
                                     qualified.push(id as u32);
                                 }
@@ -674,9 +674,9 @@ impl CallNode {
                         {
                             let evm_state = state.evm_state.read().unwrap();
                             for id in &subset {
-                                let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, *id as u64);
+                                let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, *id as u64);
                                 if addr != call_primitives::Address::ZERO {
-                                    let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(&evm_state, addr);
+                                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm_state, addr);
                                     if let Ok(pk) = ed25519::PublicKey::decode(&pk[..]) {
                                         keys.push(pk);
                                     }
@@ -867,14 +867,14 @@ impl CallNode {
             // Build light client from current validator set once at the start
             let (trusted_validators, total_validators, bls_pubkeys) = {
                 let evm_state = state.evm_state.read().unwrap();
-                let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+                let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
                 let mut ed25519_map = std::collections::HashMap::new();
                 let mut bls_map = std::collections::HashMap::new();
                 for id in 1..=count {
-                    let addr = call_consensus::exec::evm_instructions::read_validator_addr(&evm_state, id);
+                    let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, id);
                     if addr == call_primitives::Address::ZERO { continue; }
-                    let pk = call_consensus::exec::evm_instructions::read_validator_pubkey(&evm_state, addr);
-                    let bls_pk = call_consensus::exec::evm_instructions::read_validator_bls_pubkey(&evm_state, addr);
+                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm_state, addr);
+                    let bls_pk = call_consensus::exec::state_accessors::read_validator_bls_pubkey(&evm_state, addr);
                     ed25519_map.insert(id as u32, pk);
                     if bls_pk != [0u8; 48] {
                         bls_map.insert(id as u32, bls_pk);

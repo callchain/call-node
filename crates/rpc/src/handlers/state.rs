@@ -4,7 +4,7 @@ use call_protocol::{ProtocolReceipt, FeeParams};
 use call_protocol::security::MempoolDefense;
 use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_consensus::{ForkManager, RollbackPlan, ConsensusParams};
-use call_consensus::exec::evm_instructions;
+use call_consensus::exec::state_accessors;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash};
 use call_crypto::SignerRef;
 use call_transaction_pool::Mempool;
@@ -170,7 +170,7 @@ impl RpcState {
         chain_id: u64,
     ) -> Self {
         let total_validators = {
-            let count = call_consensus::exec::evm_instructions::read_validator_count(&evm_state);
+            let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
             count as u32
         };
         Self {
@@ -207,7 +207,7 @@ impl RpcState {
     }
 
     pub fn get_balance(&self, asset_id: AssetId, address: &Address) -> Balance {
-        self.evm_state.read().map(|s| evm_instructions::read_balance(&s, asset_id, *address)).unwrap_or(0)
+        self.evm_state.read().map(|s| state_accessors::read_balance(&s, asset_id, *address)).unwrap_or(0)
     }
 
     pub fn get_nonce(&self, address: &Address) -> u64 {
@@ -217,35 +217,35 @@ impl RpcState {
     pub fn get_total_balance(&self, asset_id: AssetId) -> Balance {
         self.evm_state
             .read()
-            .map(|s| evm_instructions::read_asset_supply(&s, asset_id))
+            .map(|s| state_accessors::read_asset_supply(&s, asset_id))
             .unwrap_or(0)
     }
 
     pub fn get_asset_info(&self, asset_id: AssetId) -> Option<AssetInfoResponse> {
         self.evm_state.read().ok().and_then(|evm| {
-            let symbol = evm_instructions::read_asset_symbol(&evm, asset_id);
+            let symbol = state_accessors::read_asset_symbol(&evm, asset_id);
             if symbol.is_empty() {
                 return None;
             }
-            let supply = evm_instructions::read_asset_supply(&evm, asset_id);
+            let supply = state_accessors::read_asset_supply(&evm, asset_id);
             Some(AssetInfoResponse {
                 id: asset_id,
                 symbol,
-                name: evm_instructions::read_asset_name(&evm, asset_id),
-                decimals: evm_instructions::read_asset_decimals(&evm, asset_id),
-                issuer: evm_instructions::read_asset_issuer(&evm, asset_id),
+                name: state_accessors::read_asset_name(&evm, asset_id),
+                decimals: state_accessors::read_asset_decimals(&evm, asset_id),
+                issuer: state_accessors::read_asset_issuer(&evm, asset_id),
                 protocol_supply: supply,
                 evm_supply: supply,
                 all_supply: supply,
-                max_supply: evm_instructions::read_asset_max_supply(&evm, asset_id),
-                status: match evm_instructions::read_asset_status(&evm, asset_id) {
+                max_supply: state_accessors::read_asset_max_supply(&evm, asset_id),
+                status: match state_accessors::read_asset_status(&evm, asset_id) {
                     0 => "Active".to_string(),
                     1 => "Frozen".to_string(),
                     2 => "Delisted".to_string(),
                     _ => "Unknown".to_string(),
                 },
-                compliance_policy: evm_instructions::read_asset_compliance(&evm, asset_id),
-                registered_at: evm_instructions::read_asset_registered_at(&evm, asset_id),
+                compliance_policy: state_accessors::read_asset_compliance(&evm, asset_id),
+                registered_at: state_accessors::read_asset_registered_at(&evm, asset_id),
             })
         })
     }
@@ -384,8 +384,8 @@ impl RpcState {
     ) -> Result<u64, String> {
         let current_block = self.get_current_block();
         let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let count = call_consensus::exec::evm_instructions::read_agent_count(&evm);
-        call_consensus::exec::evm_instructions::seed_agent(&mut evm, count, owner, &name, &url, current_block);
+        let count = call_consensus::exec::state_accessors::read_agent_count(&evm);
+        call_consensus::exec::state_accessors::seed_agent(&mut evm, count, owner, &name, &url, current_block);
         // Store first 32 bytes of pubkey as pubkey hash
         let pubkey_hash: [u8; 32] = if pubkey.len() >= 32 {
             pubkey[..32].try_into().unwrap()
@@ -394,22 +394,22 @@ impl RpcState {
             buf[..pubkey.len()].copy_from_slice(&pubkey);
             buf
         };
-        call_consensus::exec::evm_instructions::agent_set_pubkey(&mut evm, count, &pubkey_hash);
+        call_consensus::exec::state_accessors::agent_set_pubkey(&mut evm, count, &pubkey_hash);
         Ok(count)
     }
 
     pub fn get_agent_info(&self, agent_id: u64) -> Option<AgentInfoResponse> {
         self.evm_state.read().ok().and_then(|evm| {
-            if !evm_instructions::agent_exists(&evm, agent_id) {
+            if !state_accessors::agent_exists(&evm, agent_id) {
                 return None;
             }
             Some(AgentInfoResponse {
                 agent_id,
-                owner: evm_instructions::agent_get_owner(&evm, agent_id),
-                name: evm_instructions::agent_get_name(&evm, agent_id),
-                url: evm_instructions::agent_get_url(&evm, agent_id),
+                owner: state_accessors::agent_get_owner(&evm, agent_id),
+                name: state_accessors::agent_get_name(&evm, agent_id),
+                url: state_accessors::agent_get_url(&evm, agent_id),
                 domain_verified: false,
-                registered_at: evm_instructions::agent_get_registered_at(&evm, agent_id),
+                registered_at: state_accessors::agent_get_registered_at(&evm, agent_id),
             })
         })
     }
@@ -417,47 +417,47 @@ impl RpcState {
     pub fn get_agent_total_balance(&self, agent_id: u64) -> Balance {
         self.evm_state
             .read()
-            .map(|s| evm_instructions::agent_get_balance(&s, agent_id, call_protocol::CALL_ASSET_ID))
+            .map(|s| state_accessors::agent_get_balance(&s, agent_id, call_protocol::CALL_ASSET_ID))
             .unwrap_or(0)
     }
 
     pub fn grant_agent_balance(&self, agent_id: u64, asset_id: AssetId, amount: Balance) -> Result<(), String> {
         let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let owner = call_consensus::exec::evm_instructions::agent_get_owner(&evm, agent_id);
+        let owner = call_consensus::exec::state_accessors::agent_get_owner(&evm, agent_id);
         if owner == call_primitives::Address::ZERO {
             return Err("agent not found".into());
         }
-        let owner_balance = call_consensus::exec::evm_instructions::read_balance(&evm, asset_id, owner);
+        let owner_balance = call_consensus::exec::state_accessors::read_balance(&evm, asset_id, owner);
         if owner_balance < amount {
             return Err("insufficient owner balance for grant".into());
         }
-        call_consensus::exec::evm_instructions::seed_balance(&mut evm, asset_id, owner, owner_balance - amount);
-        let agent_balance = call_consensus::exec::evm_instructions::agent_get_balance(&evm, agent_id, asset_id);
-        call_consensus::exec::evm_instructions::agent_set_balance(&mut evm, agent_id, asset_id, agent_balance + amount);
+        call_consensus::exec::state_accessors::seed_balance(&mut evm, asset_id, owner, owner_balance - amount);
+        let agent_balance = call_consensus::exec::state_accessors::agent_get_balance(&evm, agent_id, asset_id);
+        call_consensus::exec::state_accessors::agent_set_balance(&mut evm, agent_id, asset_id, agent_balance + amount);
         Ok(())
     }
 
     pub fn revoke_agent_balance(&self, agent_id: u64, asset_id: AssetId) -> Result<(), String> {
         let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let owner = call_consensus::exec::evm_instructions::agent_get_owner(&evm, agent_id);
+        let owner = call_consensus::exec::state_accessors::agent_get_owner(&evm, agent_id);
         if owner == call_primitives::Address::ZERO {
             return Err("agent not found".into());
         }
-        call_consensus::exec::evm_instructions::agent_set_balance(&mut evm, agent_id, asset_id, 0);
+        call_consensus::exec::state_accessors::agent_set_balance(&mut evm, agent_id, asset_id, 0);
         Ok(())
     }
 
     pub fn get_compliance_policy(&self, asset_id: AssetId) -> u8 {
         self.evm_state
             .read()
-            .map(|s| evm_instructions::read_asset_compliance(&s, asset_id))
+            .map(|s| state_accessors::read_asset_compliance(&s, asset_id))
             .unwrap_or(0)
     }
 
     pub fn get_shielded_tree_state(&self) -> ShieldedTreeStateResponse {
         self.evm_state.read().map(|evm| ShieldedTreeStateResponse {
-            merkle_root: call_consensus::exec::evm_instructions::read_shielded_merkle_root(&evm),
-            leaf_count: call_consensus::exec::evm_instructions::read_shielded_commitment_count(&evm),
+            merkle_root: call_consensus::exec::state_accessors::read_shielded_merkle_root(&evm),
+            leaf_count: call_consensus::exec::state_accessors::read_shielded_commitment_count(&evm),
             nullifier_count: 0, // Nullifiers are not countable from EVM without iteration
         }).unwrap_or(ShieldedTreeStateResponse {
             merkle_root: Hash::ZERO,

@@ -43,7 +43,7 @@ async fn test_double_sign_slash() {
     consensus.refresh_proposer_subset(&evm_state);
 
     // Get stake before slash
-    let stake_before = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, val_addr);
+    let stake_before = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, val_addr);
     assert_eq!(stake_before, one_million_call());
 
     // Simulate double-sign detection
@@ -51,7 +51,7 @@ async fn test_double_sign_slash() {
     assert_eq!(slashed, one_million_call());
 
     // Validator should be removed after double-sign slash
-    let status = call_consensus::exec::evm_instructions::read_validator_status(&evm_state, val_addr);
+    let status = call_consensus::exec::state_accessors::read_validator_status(&evm_state, val_addr);
     assert_eq!(status, 0, "validator should be removed after double-sign");
 }
 
@@ -75,7 +75,7 @@ async fn test_offline_penalty() {
     assert_eq!(slashed, expected);
 
     // Stake reduced but validator still active (above min_self_stake)
-    let stake_after = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, val_addr);
+    let stake_after = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, val_addr);
     assert!(stake_after > 0);
     assert!(stake_after < stake);
 }
@@ -99,7 +99,7 @@ async fn test_invalid_tx_causes_block_failure() {
     // Seed EVM storage with CALL balance for fees
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
     }
@@ -126,7 +126,7 @@ async fn test_double_nonce_rejected() {
     // Seed EVM storage with CALL balance for fees
     {
         let mut evm = node.state.evm_state.write().unwrap();
-        call_consensus::exec::evm_instructions::seed_balance(
+        call_consensus::exec::state_accessors::seed_balance(
             &mut *evm, call_protocol::CALL_ASSET_ID, sender, 20_000,
         );
     }
@@ -159,7 +159,7 @@ async fn test_cumulative_offline_penalty() {
 
     // Total slashed
     let total_slashed = slash1 + slash2;
-    let stake_after = call_consensus::exec::evm_instructions::read_validator_stake(&evm_state, val_addr);
+    let stake_after = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, val_addr);
     assert!(total_slashed > 0);
     assert!(stake_after < stake);
 }
