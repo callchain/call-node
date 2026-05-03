@@ -14,6 +14,7 @@ members = [
     "crates/chainspec",
     "crates/transaction-pool",
     "crates/precompiles",
+    "crates/asset",
     "crates/bridge",
     "crates/light-client",
     "crates/oracle",
@@ -65,6 +66,7 @@ call-crypto = { path = "crates/crypto" }
 call-storage = { path = "crates/storage" }
 call-protocol = { path = "crates/protocol" }
 call-precompiles = { path = "crates/precompiles" }
+call-asset = { path = "crates/asset" }
 call-evm = { path = "crates/evm" }
 call-bridge = { path = "crates/bridge" }
 call-light-client = { path = "crates/light-client" }

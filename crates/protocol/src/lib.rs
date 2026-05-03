@@ -5,6 +5,7 @@ pub mod compliance;
 pub mod gas;
 pub mod receipts;
 pub mod economics;
+pub mod storage_backend;
 
 pub use compliance::*;
 pub use gas::*;

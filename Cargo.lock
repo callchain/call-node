@@ -1650,6 +1650,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "call-asset"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "call-evm",
+ "call-precompiles",
+ "call-primitives",
+ "call-protocol",
+ "revm-precompile",
+]
+
+[[package]]
 name = "call-bridge"
 version = "0.1.0"
 dependencies = [
