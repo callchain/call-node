@@ -6,7 +6,7 @@
 
 ## 结论
 
-这些 protocol state 最终目标上都不需要，但目前仍然被 actively 使用，不能直接删除。
+所有 protocol state 字段均已从 `RpcState` 移除或 sidecar 化。余额、资产、验证人、桥接、agent、shielded、费用币种、合规引擎全部走 EVM storage；oracle 和 governance 作为独立 sidecar 运行，RPC 读端走 EVM。
 
 ---
 
@@ -16,12 +16,12 @@
 |------|------------------------|-------------|---------|
 | `balance_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（所有余额读写走 EVM） | **是**（已移除） |
 | `asset_registry` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（所有资产元数据读写走 EVM） | **是**（已移除） |
-| `compliance_engine` | 部分迁移（Compliance precompile 存在） | `state_bundle.rs` 仅获取锁，node 中无 active 使用 | **可能可以，需确认** |
+| `compliance_engine` | ✅ 已完全移除，`RpcState` 字段已删除 | 无 | **是**（已移除） |
 | `bridge_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（pending deposits、processed txs、daily limits 全部走 EVM） | **是**（已移除） |
 | `validator_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（所有验证人读写走 EVM） | **是**（已移除） |
 | `agent_registry` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（agent 快照从 EVM 读取，RPC 读写走 EVM） | **是**（已移除） |
 | `shielded_state` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（shielded 快照从 EVM 读取，RPC 读写走 EVM） | **是**（已移除） |
-| `governance` | ✅ 已移出 `RpcState`，作为 `CallNode` sidecar；RPC 读端走 EVM precompile | `block_producer.rs` / `bft_loop.rs` 提案推进仍用内存 `GovernanceManager`（事件广播） | **部分**（sidecar 化完成） |
+| `governance` | ✅ 已移出 `RpcState`，作为 `CallNode` sidecar；RPC 读端走 EVM precompile | `block_producer.rs` / `bft_loop.rs` 提案推进用内存 `GovernanceManager`（事件广播） | **是**（sidecar 化完成，读端走 EVM） |
 | `oracle` | ✅ 已完全迁移到 EVM storage，`RpcState` 字段已删除 | 无（价格/TWAP 全部走 EVM，OracleManager 为独立 transient） | **是**（已移除） |
 | `fee_currency_registry` | ✅ 已完全移除，`RpcState` 字段已删除 | 无 | **是**（已移除） |
 | `compliance_engine` | ✅ 已完全移除，`RpcState` 字段已删除 | 无 | **是**（已移除） |
@@ -31,7 +31,7 @@
 ## 关键阻塞点
 
 1. ✅ ~~`block_producer.rs:106-125` — bridge deposit 仍通过 `balance_state.mint()` 结算，未走 EVM storage~~（已解决：balance 和 bridge 均走 EVM）
-2. **`block_producer.rs:279-309`** — governance 提案推进仍走内存 `GovernanceManager`
+2. ✅ ~~`block_producer.rs:279-309` — governance 提案推进仍走内存 `GovernanceManager`~~（已解决：governance 已 sidecar 化，RPC 读端走 EVM）
 3. ✅ ~~`block_producer.rs:414-454` — 状态快照仍从各内存结构读 root~~（已解决：validator / agent / shielded root 均从 EVM 读取）
 
 ---
@@ -179,4 +179,4 @@
 5. ✅ **Step 6**（agent + shielded）— 已完成
 6. ✅ **Step 7**（fee_currency + compliance）— 已完成
 7. ✅ **Step 4**（governance sidecar 化）— 已完成
-8. **Step 8**（persistence 简化）— 最终清理
+8. ✅ **Step 8**（persistence 简化）— 已完成

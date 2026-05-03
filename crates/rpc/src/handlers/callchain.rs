@@ -671,7 +671,7 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             }
             let mut tx_hash_arr = [0u8; 32];
             tx_hash_arr.copy_from_slice(&tx_hash_bytes);
-            let tx_hash = alloy_primitives::B256::from(tx_hash_arr);
+            let _tx_hash = alloy_primitives::B256::from(tx_hash_arr);
             let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
             let pending_status = evm_instructions::read_bridge_pending_status(&*evm, tx_hash_arr);
             let is_processed = evm_instructions::read_bridge_processed(&*evm, tx_hash_arr);
