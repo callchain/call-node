@@ -1,65 +1,13 @@
 //! Security & Attack Prevention (per spec §13)
 //!
-//! Block limits, mempool attack prevention, shielded pool defense,
-//! P2P rate limiting, consensus attack defense, and MEV protection.
+//! Mempool attack prevention, P2P rate limiting.
 
-use call_primitives::{Address, TxHash, ValidatorId};
+use call_primitives::{Address, TxHash};
 use std::collections::{HashMap, HashSet};
-
-// ─── Block Limits (per spec §13.5) ─────────────────────────────────
-
-/// Block and transaction size limits
-#[derive(Debug, Clone, Copy)]
-pub struct BlockLimits {
-    /// Maximum transaction size in bytes (64 KB)
-    pub max_tx_size: usize,
-    /// Maximum instructions per transaction (256)
-    pub max_instructions: usize,
-    /// Maximum batch transfer recipients (100)
-    pub max_batch_recipients: usize,
-    /// Maximum shielded proofs per block (50)
-    pub max_shielded_proofs_per_block: usize,
-    /// Maximum total block tx count (10000)
-    pub max_txs_per_block: usize,
-    /// Maximum block size in bytes (4 MB)
-    pub max_block_size: usize,
-}
-
-impl Default for BlockLimits {
-    fn default() -> Self {
-        Self {
-            max_tx_size: 64 * 1024,
-            max_instructions: 256,
-            max_batch_recipients: 100,
-            max_shielded_proofs_per_block: 50,
-            max_txs_per_block: 10_000,
-            max_block_size: 4 * 1024 * 1024,
-        }
-    }
-}
-
-impl BlockLimits {
-    /// Validate a block's total size
-    pub fn validate_block_size(&self, tx_count: usize, total_size: usize) -> Result<(), SecurityError> {
-        if tx_count > self.max_txs_per_block {
-            return Err(SecurityError::TooManyTxsInBlock {
-                count: tx_count,
-                max: self.max_txs_per_block,
-            });
-        }
-        if total_size > self.max_block_size {
-            return Err(SecurityError::BlockTooLarge {
-                size: total_size,
-                max: self.max_block_size,
-            });
-        }
-        Ok(())
-    }
-}
 
 // ─── Mempool Attack Prevention ─────────────────────────────────────
 
-/// Rate limiter for mempool and P2P
+/// Rate limiter for mempool
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
     /// Maximum requests per window
@@ -216,73 +164,6 @@ impl MempoolDefense {
     }
 }
 
-// ─── Shielded Pool Defense ─────────────────────────────────────────
-
-/// Shielded pool per-block limits and nullifier tracking
-#[derive(Debug)]
-pub struct ShieldedDefense {
-    /// Max shielded transactions per block
-    pub max_per_block: usize,
-    /// Known nullifiers (never expire)
-    nullifiers: HashSet<[u8; 32]>,
-    /// Current block shielded tx count
-    current_block_count: usize,
-}
-
-impl ShieldedDefense {
-    pub fn new(max_per_block: usize) -> Self {
-        Self {
-            max_per_block,
-            nullifiers: HashSet::new(),
-            current_block_count: 0,
-        }
-    }
-
-    /// Start a new block
-    pub fn begin_block(&mut self) {
-        self.current_block_count = 0;
-    }
-
-    /// Validate a shielded transaction: check per-block limit and nullifier uniqueness
-    pub fn validate_shielded_tx(
-        &mut self,
-        nullifiers: &[[u8; 32]],
-    ) -> Result<(), SecurityError> {
-        // Per-block limit
-        if self.current_block_count + nullifiers.len() > self.max_per_block {
-            return Err(SecurityError::ShieldedPerBlockLimit {
-                count: self.current_block_count + nullifiers.len(),
-                max: self.max_per_block,
-            });
-        }
-
-        // Nullifier double-spend check
-        for nf in nullifiers {
-            if self.nullifiers.contains(nf) {
-                return Err(SecurityError::NullifierDoubleSpend);
-            }
-        }
-
-        // Record nullifiers
-        for nf in nullifiers {
-            self.nullifiers.insert(*nf);
-        }
-        self.current_block_count += nullifiers.len();
-
-        Ok(())
-    }
-
-    /// Check if a nullifier has been seen (never expires)
-    pub fn has_nullifier(&self, nullifier: &[u8; 32]) -> bool {
-        self.nullifiers.contains(nullifier)
-    }
-
-    /// Get total nullifier count
-    pub fn nullifier_count(&self) -> usize {
-        self.nullifiers.len()
-    }
-}
-
 // ─── P2P Defense ───────────────────────────────────────────────────
 
 /// P2P rate limiting and large message defense
@@ -349,224 +230,23 @@ impl P2PDefense {
     }
 }
 
-// ─── Consensus Defense ─────────────────────────────────────────────
-
-/// Consensus attack detection and slashing triggers
-#[derive(Debug)]
-pub struct ConsensusDefense {
-    /// Tracks blocks signed by each validator (for double-sign detection)
-    blocks_per_round: HashMap<u64, HashMap<ValidatorId, [u8; 32]>>, // round -> (validator -> block_hash)
-    /// Validators that have been slashed for double-signing
-    slashed_validators: HashSet<ValidatorId>,
-}
-
-impl Default for ConsensusDefense {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ConsensusDefense {
-    pub fn new() -> Self {
-        Self {
-            blocks_per_round: HashMap::new(),
-            slashed_validators: HashSet::new(),
-        }
-    }
-
-    /// Record a block signature and detect double-signing.
-    /// Returns Some(double_sign_evidence) if a validator signed two different blocks at the same round.
-    pub fn record_block_signature(
-        &mut self,
-        validator_id: ValidatorId,
-        round: u64,
-        block_hash: [u8; 32],
-    ) -> Option<DoubleSignEvidence> {
-        if self.slashed_validators.contains(&validator_id) {
-            return None; // Already slashed
-        }
-
-        let round_map = self.blocks_per_round.entry(round).or_default();
-
-        if let Some(&existing_hash) = round_map.get(&validator_id) {
-            if existing_hash != block_hash {
-                // Double sign detected!
-                let evidence = DoubleSignEvidence {
-                    validator_id,
-                    round,
-                    block_hash_a: existing_hash,
-                    block_hash_b: block_hash,
-                };
-                self.slashed_validators.insert(validator_id);
-                return Some(evidence);
-            }
-        }
-
-        round_map.insert(validator_id, block_hash);
-        None
-    }
-
-    /// Check if a validator has been slashed
-    pub fn is_slashed(&self, validator_id: ValidatorId) -> bool {
-        self.slashed_validators.contains(&validator_id)
-    }
-
-    /// Get slashed validator count
-    pub fn slashed_count(&self) -> usize {
-        self.slashed_validators.len()
-    }
-
-    /// Cleanup old rounds (keep only recent)
-    pub fn cleanup_old_rounds(&mut self, keep_rounds: u64, current_round: u64) {
-        let cutoff = current_round.saturating_sub(keep_rounds);
-        self.blocks_per_round.retain(|round, _| *round >= cutoff);
-    }
-}
-
-/// Evidence of double-signing
-#[derive(Debug, Clone)]
-pub struct DoubleSignEvidence {
-    pub validator_id: ValidatorId,
-    pub round: u64,
-    pub block_hash_a: [u8; 32],
-    pub block_hash_b: [u8; 32],
-}
-
-// ─── MEV Protection ────────────────────────────────────────────────
-
-/// Proposer-Builder Separation state
-#[derive(Debug, Default)]
-pub struct MevProtection {
-    /// Whether PBS is enabled
-    pub pbs_enabled: bool,
-    /// Registered builders
-    pub registered_builders: HashSet<Address>,
-    /// Commit-reveal state: committed hashes awaiting reveal
-    pub pending_commits: HashMap<[u8; 32], CommitEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CommitEntry {
-    pub committer: Address,
-    pub committed_at: u64,
-    /// Revealed transaction (None until revealed)
-    pub revealed: Option<Vec<u8>>,
-}
-
-impl MevProtection {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Register a block builder
-    pub fn register_builder(&mut self, builder: Address) {
-        self.registered_builders.insert(builder);
-    }
-
-    /// Check if an address is a registered builder
-    pub fn is_registered_builder(&self, builder: &Address) -> bool {
-        self.registered_builders.contains(builder)
-    }
-
-    /// Commit a transaction hash (first phase of commit-reveal)
-    pub fn commit_tx(
-        &mut self,
-        commitment: [u8; 32],
-        committer: Address,
-        current_time_ms: u64,
-    ) -> Result<(), SecurityError> {
-        if self.pending_commits.contains_key(&commitment) {
-            return Err(SecurityError::DuplicateCommitment);
-        }
-
-        self.pending_commits.insert(
-            commitment,
-            CommitEntry {
-                committer,
-                committed_at: current_time_ms,
-                revealed: None,
-            },
-        );
-        Ok(())
-    }
-
-    /// Reveal a transaction (second phase of commit-reveal)
-    pub fn reveal_tx(
-        &mut self,
-        commitment: [u8; 32],
-        revealed_data: Vec<u8>,
-    ) -> Result<Vec<u8>, SecurityError> {
-        let entry = self
-            .pending_commits
-            .get_mut(&commitment)
-            .ok_or(SecurityError::CommitmentNotFound)?;
-
-        if entry.revealed.is_some() {
-            return Err(SecurityError::AlreadyRevealed);
-        }
-
-        // Verify the commitment matches the revealed data
-        let computed_commitment = keccak256_hash(&revealed_data);
-        if computed_commitment != commitment {
-            return Err(SecurityError::CommitmentMismatch);
-        }
-
-        entry.revealed = Some(revealed_data.clone());
-        Ok(revealed_data)
-    }
-
-    /// Cleanup expired commitments (older than timeout_ms)
-    pub fn cleanup_expired(&mut self, current_time_ms: u64, timeout_ms: u64) {
-        self.pending_commits
-            .retain(|_, entry| current_time_ms < entry.committed_at + timeout_ms);
-    }
-}
-
-/// Simple keccak256 wrapper for commit-reveal verification
-fn keccak256_hash(data: &[u8]) -> [u8; 32] {
-    use call_crypto::keccak256;
-    keccak256(data).into()
-}
-
 // ─── Errors ────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecurityError {
-    #[error("transaction too large: {size} > {max}")]
-    TxTooLarge { size: usize, max: usize },
-    #[error("batch transfer too large: {count} > {max}")]
-    BatchTooLarge { count: usize, max: usize },
-    #[error("too many txs in block: {count} > {max}")]
-    TooManyTxsInBlock { count: usize, max: usize },
-    #[error("block too large: {size} > {max}")]
-    BlockTooLarge { size: usize, max: usize },
     #[error("rate limited")]
     RateLimited,
     #[error("replay detected")]
     ReplayDetected,
     #[error("address saturation limit reached")]
     AddressSaturation,
-    #[error("shielded per-block limit exceeded: {count} > {max}")]
-    ShieldedPerBlockLimit { count: usize, max: usize },
-    #[error("nullifier double-spend detected")]
-    NullifierDoubleSpend,
     #[error("message too large: {size} > {max}")]
     MessageTooLarge { size: usize, max: usize },
     #[error("peer rate limited")]
     PeerRateLimited,
-    #[error("double-sign detected for validator {validator_id} at round {round}")]
-    DoubleSign { validator_id: ValidatorId, round: u64 },
-    #[error("duplicate commitment")]
-    DuplicateCommitment,
-    #[error("commitment not found")]
-    CommitmentNotFound,
-    #[error("already revealed")]
-    AlreadyRevealed,
-    #[error("commitment mismatch")]
-    CommitmentMismatch,
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────
+// ─── Tests ─────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -655,50 +335,6 @@ mod tests {
     }
 
     #[test]
-    fn test_shielded_per_block_limit() {
-        let mut defense = ShieldedDefense::new(5);
-
-        defense.begin_block();
-
-        // Valid: 2 nullifiers
-        let nf1 = [1u8; 32];
-        let nf2 = [2u8; 32];
-        assert!(defense.validate_shielded_tx(&[nf1, nf2]).is_ok());
-
-        // Valid: 2 more nullifiers (total 4)
-        let nf3 = [3u8; 32];
-        let nf4 = [4u8; 32];
-        assert!(defense.validate_shielded_tx(&[nf3, nf4]).is_ok());
-
-        // Exceeds limit: 2 more would make 6 > 5
-        let nf5 = [5u8; 32];
-        let nf6 = [6u8; 32];
-        let err = defense.validate_shielded_tx(&[nf5, nf6]).unwrap_err();
-        assert!(matches!(err, SecurityError::ShieldedPerBlockLimit { .. }));
-    }
-
-    #[test]
-    fn test_shielded_nullifier_double_spend() {
-        let mut defense = ShieldedDefense::new(100);
-
-        defense.begin_block();
-
-        let nf = [42u8; 32];
-
-        // First use should pass
-        assert!(defense.validate_shielded_tx(&[nf]).is_ok());
-
-        // Second use (double-spend) should fail
-        let err = defense.validate_shielded_tx(&[nf]).unwrap_err();
-        assert!(matches!(err, SecurityError::NullifierDoubleSpend));
-
-        // Nullifier persists across blocks
-        defense.begin_block();
-        let err = defense.validate_shielded_tx(&[nf]).unwrap_err();
-        assert!(matches!(err, SecurityError::NullifierDoubleSpend));
-    }
-
-    #[test]
     fn test_p2p_rate_limiting() {
         let mut p2p = P2PDefense::new(3, 1000, 1024 * 1024);
 
@@ -730,43 +366,5 @@ mod tests {
             .validate_message("peer3".to_string(), 2 * 1024 * 1024, 2002)
             .unwrap_err();
         assert!(matches!(err, SecurityError::MessageTooLarge { .. }));
-    }
-
-    #[test]
-    fn test_consensus_double_sign_slash() {
-        let mut defense = ConsensusDefense::new();
-
-        let validator = 5u32;
-        let round = 100u64;
-        let block_a = [1u8; 32];
-        let block_b = [2u8; 32];
-
-        // First block should be fine
-        assert!(defense
-            .record_block_signature(validator, round, block_a)
-            .is_none());
-
-        // Same block again (re-signing) should be fine
-        assert!(defense
-            .record_block_signature(validator, round, block_a)
-            .is_none());
-
-        // Different block at same round = double sign!
-        let evidence = defense
-            .record_block_signature(validator, round, block_b)
-            .expect("should detect double sign");
-        assert_eq!(evidence.validator_id, validator);
-        assert_eq!(evidence.round, round);
-        assert_eq!(evidence.block_hash_a, block_a);
-        assert_eq!(evidence.block_hash_b, block_b);
-
-        // Validator should be marked as slashed
-        assert!(defense.is_slashed(validator));
-        assert_eq!(defense.slashed_count(), 1);
-
-        // After slashing, further signs should be ignored
-        assert!(defense
-            .record_block_signature(validator, round + 1, [3u8; 32])
-            .is_none());
     }
 }

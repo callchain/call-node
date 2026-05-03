@@ -492,8 +492,9 @@ impl RpcState {
             data,
             chain_id: self.chain_id,
         };
+        let base_fee = self.fee_params.read().map_err(|_| "lock poisoned".to_string())?.base_fee;
 
-        executor.execute_tx(tx, &mut state, 0).map_err(|e| format!("{e}"))
+        executor.execute_tx(tx, &mut state, 0, base_fee).map_err(|e| format!("{e}"))
     }
 
     // ── EVM submission (inserts into mempool + executes) ──────────────
