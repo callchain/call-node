@@ -475,7 +475,7 @@
 
             // Persist state to reth-db immediately
             let db_env = &node.db.db;
-            persist_state_to_db(db_env, &node.state, &node.consensus, &node.governance)
+            persist_state_to_db(db_env, &node.state, &node.consensus)
                 .expect("persist state");
 
             // Node is dropped here, simulating shutdown
@@ -502,111 +502,6 @@
 
             let _ = std::fs::remove_dir_all(&tmp);
         }
-    }
-
-    // ── Governance full cycle integration ─────────────────────────────
-
-    #[test]
-    fn test_governance_full_cycle() {
-        use call_governance::{ProposalType, GovernanceEvent, DEFAULT_PROPOSAL_DEPOSIT, REVIEW_PERIOD_BLOCKS, VOTING_PERIOD_BLOCKS, TIMELOCK_PERIOD_BLOCKS};
-
-        let tmp = std::env::temp_dir().join("call_gov_cycle_test");
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        let node = CallNode::new(tmp.clone()).expect("node creation");
-
-        let proposer = call_primitives::Address::repeat_byte(0xAA);
-
-        // Fund proposer in EVM storage (asset_id 1 = CALL)
-        {
-            let mut evm = node.state.evm_state.write().unwrap();
-            call_consensus::exec::state_accessors::seed_balance(
-                &mut *evm, call_protocol::CALL_ASSET_ID, proposer, DEFAULT_PROPOSAL_DEPOSIT * 5,
-            );
-        }
-
-        // Register some validators so quorum can be met
-        {
-            let mut gov = node.governance.write().unwrap();
-            for i in 1u32..=3 {
-                gov.register_validator(i, call_primitives::Address::repeat_byte(i as u8));
-                gov.set_call_balance(call_primitives::Address::repeat_byte(i as u8), 1);
-            }
-        }
-
-        // Submit a proposal
-        let proposal_id = {
-            let mut gov = node.governance.write().unwrap();
-            gov.submit_proposal(
-                proposer,
-                ProposalType::ParameterChange {
-                    param_id: "test_param".into(),
-                    new_value: "{\"base_fee\": 100}".into(),
-                },
-                "Test proposal".into(),
-                "Integration test".into(),
-                vec![],
-            ).expect("submit proposal")
-        };
-
-        // Verify proposal was created
-        {
-            let gov = node.governance.read().unwrap();
-            let p = gov.get_proposal(proposal_id).expect("proposal exists");
-            assert_eq!(p.state, call_governance::ProposalState::Pending);
-        }
-
-        // Advance to voting period and vote with all validators
-        {
-            let mut gov = node.governance.write().unwrap();
-            gov.set_current_block(REVIEW_PERIOD_BLOCKS);
-            // Vote yes from all 3 registered validators
-            for i in 1u32..=3 {
-                let validator_addr = call_primitives::Address::repeat_byte(i as u8);
-                let _ = gov.vote(proposal_id, validator_addr, call_governance::Vote::Yes);
-            }
-        }
-
-        // Advance through all phases
-        {
-            let mut gov = node.governance.write().unwrap();
-            gov.advance(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + TIMELOCK_PERIOD_BLOCKS + 1);
-        }
-
-        // Should be queued or executed (depending on timelock)
-        {
-            let gov = node.governance.read().unwrap();
-            let p = gov.get_proposal(proposal_id).expect("proposal exists");
-            assert!(
-                matches!(p.state, call_governance::ProposalState::Queued | call_governance::ProposalState::Executed),
-                "expected queued or executed, got {:?}", p.state
-            );
-        }
-
-        // Advance past timelock to execute
-        {
-            let mut gov = node.governance.write().unwrap();
-            let exec = gov.get_proposal(proposal_id).unwrap().execution_block.unwrap();
-            gov.advance(exec + 1);
-            // Drain events
-            let events = gov.drain_events();
-            assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalExecuted { .. })));
-        }
-
-        // Should be executed
-        {
-            let gov = node.governance.read().unwrap();
-            let p = gov.get_proposal(proposal_id).expect("proposal exists");
-            assert_eq!(p.state, call_governance::ProposalState::Executed);
-        }
-
-        // Verify fee_params were updated by executor
-        {
-            let fp = node.state.fee_params.read().unwrap();
-            assert_eq!(fp.base_fee, 100); // Should match the JSON in execution_data
-        }
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ── State isolation tests (Phase 1) ─────────────────────────────────

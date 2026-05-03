@@ -9,8 +9,7 @@ use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsen
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
 use call_transaction_pool::Mempool;
-use call_governance::GovernanceManager;
-use call_rpc::{RpcState, wire_governance_executor};
+use call_rpc::RpcState;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -127,10 +126,6 @@ impl NodeBuilder {
             );
         }
 
-        let mut governance = GovernanceManager::new();
-        wire_governance_executor(&mut governance, &state);
-        let governance = Arc::new(RwLock::new(governance));
-
         TestNode {
             state,
             mempool,
@@ -141,7 +136,6 @@ impl NodeBuilder {
             height: 0,
             blocks_produced: Vec::new(),
             last_result: None,
-            governance,
         }
     }
 }
@@ -163,8 +157,6 @@ pub struct TestNode {
     pub blocks_produced: Vec<Block>,
     /// The execution result of the most recent `produce_block()` call.
     pub last_result: Option<BlockExecutionResult>,
-    /// Governance state machine (sidecar, not in RpcState)
-    pub governance: Arc<RwLock<GovernanceManager>>,
 }
 
 impl TestNode {
@@ -217,10 +209,6 @@ impl TestNode {
         );
 
         // Execute
-        {
-            let mut gov = self.governance.write().unwrap();
-            gov.set_current_block(height);
-        }
         let result = {
             let mut s = self.state.write_all();
             s.execute_block(&block, height)

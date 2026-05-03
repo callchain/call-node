@@ -16,6 +16,7 @@ pub mod block_producer;
 pub mod bft_loop;
 pub mod sync;
 pub mod network_handler;
+pub mod governance_advancer;
 
 pub(crate) use network_handler::{
     handle_network_message, SyncInflight,
@@ -41,9 +42,8 @@ use call_protocol::{
     FeeParams,
     security::P2PDefense,
 };
-use call_governance::GovernanceManager;
 use call_oracle::OracleTracker;
-use call_rpc::{RpcState, RpcConfig, build_rpc_module, wire_governance_executor};
+use call_rpc::{RpcState, RpcConfig, build_rpc_module};
 use call_storage::{CallDb, open_db, PruneState};
 use call_storage::reth_db::{
     save_prune_state as db_save_prune,
@@ -114,8 +114,8 @@ pub struct CallNode {
     pub fresh_start: bool,
     /// Transient oracle coordinator (prices/TWAP live in EVM storage)
     pub oracle_tracker: Arc<RwLock<OracleTracker>>,
-    /// Governance proposal state machine (proposals live in EVM, sidecar manages transitions)
-    pub governance: Arc<RwLock<GovernanceManager>>,
+    /// Stateless governance proposal advancer (all state lives in EVM)
+    pub governance_advancer: governance_advancer::GovernanceAdvancer,
 }
 
 impl CallNode {
@@ -151,7 +151,6 @@ impl CallNode {
         let loaded = if recovery_needed {
             state_persist::LoadedState {
                 evm_state: EvmState::new(),
-                governance: GovernanceManager::new(),
                 fee_params: FeeParams::default(),
             }
         } else {
@@ -240,10 +239,13 @@ impl CallNode {
         // Inject loaded fork state
         *state.fork_manager.write().unwrap() = fork_manager;
 
-        let mut governance = loaded.governance;
-        // Wire governance executor so proposals can trigger real side effects
-        wire_governance_executor(&mut governance, &state);
-        let governance = Arc::new(RwLock::new(governance));
+        // Seed governance config defaults into EVM on fresh start
+        if fresh_start {
+            let mut evm = state.evm_state.write().unwrap();
+            call_consensus::exec::state_accessors::seed_gov_config(&mut evm);
+        }
+
+        let governance_advancer = governance_advancer::GovernanceAdvancer;
 
         // Sync consensus params from SimplexConsensus into RpcState for governance updates
         *state.consensus_params.write().unwrap() = *consensus.params();
@@ -280,7 +282,7 @@ impl CallNode {
             audit_log,
             fresh_start,
             oracle_tracker,
-            governance,
+            governance_advancer,
         })
     }
 
@@ -492,7 +494,7 @@ impl CallNode {
 
         let subscriptions = self.state.subscriptions.clone();
         let oracle_tracker = Arc::clone(&self.oracle_tracker);
-        let governance = Arc::clone(&self.governance);
+        let governance_advancer = self.governance_advancer;
 
         tokio::spawn(block_production_loop(
             state,
@@ -506,7 +508,7 @@ impl CallNode {
             telemetry,
             audit_log,
             oracle_tracker,
-            governance,
+            governance_advancer,
         ))
     }
 
@@ -533,7 +535,7 @@ impl CallNode {
         let telemetry = Arc::clone(&self.telemetry);
         let audit_log = Arc::clone(&self.audit_log);
         let oracle_tracker = Arc::clone(&self.oracle_tracker);
-        let governance = Arc::clone(&self.governance);
+        let governance_advancer = self.governance_advancer;
 
         std::thread::spawn(move || {
             let bft_data_dir = data_dir.join("bft_journal");
@@ -767,7 +769,7 @@ impl CallNode {
                                 bytes
                             },
                             oracle_tracker.clone(),
-                            governance.clone(),
+                            governance_advancer,
                         ));
 
                         let reason = exit_rx.await;
@@ -1127,7 +1129,7 @@ impl CallNode {
         }
         // Flush final state to reth-db
         let db_env = &self.db.db;
-        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus, &self.governance) {
+        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus) {
             tracing::warn!(error = %e, "failed to flush state on shutdown");
         }
         if let Err(e) = db_save_prune(db_env, &self.prune_state) {

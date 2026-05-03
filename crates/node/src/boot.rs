@@ -204,13 +204,10 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 *node.state.consensus_params.write().map_err(|_| "lock poisoned")? = *consensus.params();
             }
 
-            // Register genesis validators into governance for voting
+            // Seed governance config defaults into EVM
             {
-                let mut gov = node.governance.write().map_err(|_| "lock poisoned")?;
-                for (i, val) in genesis.validators.iter().enumerate() {
-                    let addr = parse_address(&val.address)?;
-                    gov.register_validator(i as u32, addr);
-                }
+                let mut evm = node.state.evm_state.write().map_err(|_| "lock poisoned")?;
+                call_consensus::exec::state_accessors::seed_gov_config(&mut evm);
             }
 
             info!("genesis applied successfully");

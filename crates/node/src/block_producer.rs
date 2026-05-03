@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use call_bridge::BridgeConfig;
 use call_consensus::{Block, SimplexConsensus};
-use call_governance::GovernanceManager;
 use call_primitives::BlockHash;
 use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
 use call_oracle::{OracleTracker, ORACLE_UPDATE_INTERVAL};
@@ -16,6 +15,7 @@ use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
 use call_transaction_pool::Mempool;
 use crate::{persist_block, persist_state_incremental, persist_state_to_db};
 use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL};
+use crate::governance_advancer::GovernanceAdvancer;
 
 pub(crate) async fn block_production_loop(
     state: Arc<RpcState>,
@@ -29,7 +29,7 @@ pub(crate) async fn block_production_loop(
     telemetry: Arc<crate::telemetry::TelemetryRegistry>,
     _audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     oracle_tracker: Arc<RwLock<OracleTracker>>,
-    governance: Arc<RwLock<GovernanceManager>>,
+    governance_advancer: GovernanceAdvancer,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -288,11 +288,10 @@ pub(crate) async fn block_production_loop(
 
         // 10b. Advance governance proposal state machine
         {
-            let mut gov = governance.write().unwrap();
-            gov.set_current_block(new_height);
-            gov.advance(new_height);
-            // Drain and broadcast governance events
-            for event in gov.drain_events() {
+            let mut evm_state = state.evm_state.write().unwrap();
+            let events = governance_advancer.advance(&mut evm_state, new_height);
+            drop(evm_state);
+            for event in events {
                 let (event_str, proposal_id) = match &event {
                     call_governance::GovernanceEvent::ProposalAdvanced { id, from, to } => {
                         (format!("{:?} → {:?}", from, to), *id)
@@ -308,17 +307,6 @@ pub(crate) async fn block_production_loop(
                     }
                 };
                 subscriptions.broadcast_governance(event_str, proposal_id, String::new());
-            }
-        }
-
-        // 10c. Sync validators from EVM storage into governance
-        {
-            let mut gov = governance.write().unwrap();
-            let evm_state = state.evm_state.read().unwrap();
-            let validators = call_consensus::exec::state_accessors::read_validators(&evm_state);
-            drop(evm_state);
-            for (id, addr, _stake) in validators {
-                gov.register_validator(id as u32, addr);
             }
         }
 
@@ -468,14 +456,14 @@ pub(crate) async fn block_production_loop(
 
         // 14. Incrementally persist state changes after every block
         let db_env = &db.db;
-        if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus, &governance) {
+        if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
             tracing::warn!(error = %e, "failed to incrementally persist state");
         }
 
         // 15. Full table rebuild every 1000 blocks as safety net
         if new_height % 1000 == 0 {
             let db_env = &db.db;
-            if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus, &governance) {
+            if let Err(ref e) = persist_state_to_db(db_env, &state, &consensus) {
                 tracing::warn!(error = %e, "failed to full-rebuild persist state");
             }
         }

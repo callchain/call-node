@@ -24,6 +24,11 @@ pub const PROPOSAL_DEPOSIT: u128 = 10_000;
 pub const GOV_TIMELOCK_BLOCKS: u64 = 100;
 pub const GOV_QUORUM_BPS: u128 = 3_333;
 
+// Governance config defaults (mirrors GovernanceConfig in manager.rs)
+pub const GOV_REVIEW_PERIOD: u64 = 10;
+pub const GOV_VOTING_PERIOD: u64 = 100;
+pub const GOV_EXEC_TIMEOUT: u64 = 1000;
+
 // ── Storage slot helpers ──────────────────────────────────────────────
 
 fn slot_gov_proposal_count() -> U256 {
@@ -44,6 +49,11 @@ fn slot_gov_paused() -> U256 {
 
 fn slot_gov_pause_reason() -> U256 {
     storage_slot(&[b"pause_reason"])
+}
+
+// Config slots
+fn slot_gov_config(suffix: &[u8]) -> U256 {
+    storage_slot(&[b"gov_config", suffix])
 }
 
 // ── GovernanceStorage ─────────────────────────────────────────────────
@@ -68,6 +78,26 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             .to_be_bytes::<32>()[31]
     }
 
+    pub fn read_proposal_u64(&self, proposal_id: u64, suffix: &[u8]) -> u64 {
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix)),
+        )
+    }
+
+    pub fn read_proposal_u8(&self, proposal_id: u64, suffix: &[u8]) -> u8 {
+        self.backend
+            .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix))
+            .to_be_bytes::<32>()[31]
+    }
+
+    pub fn read_proposal_u128(&self, proposal_id: u64, suffix: &[u8]) -> u128 {
+        u256_to_u128(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix)),
+        )
+    }
+
     pub fn require_proposal_status(
         &self,
         proposal_id: u64,
@@ -85,6 +115,32 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix)),
         )
+    }
+
+    // ── Config read helpers ─────────────────────────────────────────────
+
+    pub fn read_config_u64(&self, suffix: &[u8]) -> u64 {
+        u256_to_u64(self.backend.load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)))
+    }
+
+    pub fn read_config_u128(&self, suffix: &[u8]) -> u128 {
+        u256_to_u128(self.backend.load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)))
+    }
+
+    pub fn write_config_u64(&mut self, suffix: &[u8], value: u64) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_config(suffix),
+            u64_to_u256(value),
+        );
+    }
+
+    pub fn write_config_u128(&mut self, suffix: &[u8], value: u128) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_config(suffix),
+            u128_to_u256(value),
+        );
     }
 
     pub fn increment_tally(&mut self, proposal_id: u64, suffix: &[u8]) {
@@ -121,6 +177,14 @@ impl<B: StorageBackend> GovernanceStorage<B> {
 
         let count = self.read_proposal_count();
         let proposal_id = count + 1;
+        let current_block = call_precompiles::storage::StorageCtx::block_number();
+        let voting_period = self.read_config_u64(b"voting_period");
+        let voting_period = if voting_period == 0 {
+            GOV_VOTING_PERIOD
+        } else {
+            voting_period
+        };
+
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal_count(),
@@ -171,6 +235,21 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"deposit"),
             u128_to_u256(PROPOSAL_DEPOSIT),
+        );
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"start_block"),
+            u64_to_u256(current_block),
+        );
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"end_block"),
+            u64_to_u256(current_block + voting_period),
+        );
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"proposal_type"),
+            U256::ZERO,
         );
 
         Ok(proposal_id)
@@ -231,6 +310,13 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             ));
         }
 
+        let timelock = self.read_config_u64(b"timelock");
+        let timelock = if timelock == 0 {
+            GOV_TIMELOCK_BLOCKS
+        } else {
+            timelock
+        };
+
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"status"),
@@ -240,6 +326,11 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"queued_at"),
             u64_to_u256(current_block),
+        );
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"execution_block"),
+            u64_to_u256(current_block + timelock),
         );
 
         Ok(())

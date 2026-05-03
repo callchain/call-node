@@ -7,14 +7,13 @@ use call_protocol::{
     FeeParams, ProtocolReceipt,
 };
 use call_evm::EvmState;
-use call_governance::GovernanceManager;
 use call_primitives::TxHash;
 use call_rpc::RpcState;
 use call_storage::{
     StorageError,
     db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
     CallEvmAccounts,
-    CallGovernanceState, CallConsensusState,
+    CallConsensusState,
     CallReceipts, CallReceiptsByBlock, CallForkState, CallCheckpoint,
     CallFeeParams,
 };
@@ -26,28 +25,17 @@ use reth_db::DatabaseEnv;
 /// Replaces the previous 13-element tuple so callers use named fields.
 pub(crate) struct LoadedState {
     pub evm_state: EvmState,
-    pub governance: GovernanceManager,
     pub fee_params: FeeParams,
 }
 
 /// Load all state types from the reth-db database.
 pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
-    // Load balances
     // Load EVM accounts
     let evm_state = match load_evm_accounts_inner(db_env) {
         Ok(state) => state,
         Err(e) => {
             tracing::warn!(error = %e, "failed to load evm accounts");
             EvmState::new()
-        }
-    };
-
-    // Load governance state
-    let governance = match load_governance_state(db_env) {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load governance state");
-            GovernanceManager::new()
         }
     };
 
@@ -62,7 +50,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
 
     LoadedState {
         evm_state,
-        governance,
         fee_params,
     }
 }
@@ -73,7 +60,6 @@ pub(crate) fn persist_state_to_db(
     db_env: &Arc<DatabaseEnv>,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
-    governance: &Arc<RwLock<call_governance::GovernanceManager>>,
 ) -> Result<(), String> {
     // 1. Write pending checkpoint marker
     let checkpoint_hash = {
@@ -88,13 +74,6 @@ pub(crate) fn persist_state_to_db(
         let evm = state.evm_state.read().unwrap();
         save_evm_accounts_inner(db_env, &evm)
             .map_err(|e| format!("save evm: {e}"))?;
-    }
-
-    // Persist governance state
-    {
-        let governance = governance.read().unwrap();
-        save_governance_state(db_env, &governance)
-            .map_err(|e| format!("save governance: {e}"))?;
     }
 
     // Persist fee params
@@ -168,20 +147,6 @@ pub(crate) fn load_fee_params(db: &DatabaseEnv) -> Result<FeeParams, String> {
     match db_get::<CallFeeParams>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize fee params: {e}")),
         None => Ok(FeeParams::default()),
-    }
-}
-
-/// Save governance state to the database.
-pub(crate) fn save_governance_state(db: &DatabaseEnv, state: &GovernanceManager) -> Result<(), String> {
-    let data = serde_json::to_vec(state).map_err(|e| format!("serialize governance: {e}"))?;
-    db_put::<CallGovernanceState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
-}
-
-/// Load governance state from the database.
-pub(crate) fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManager, String> {
-    match db_get::<CallGovernanceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize governance: {e}")),
-        None => Ok(GovernanceManager::new()),
     }
 }
 
@@ -294,19 +259,11 @@ pub(crate) fn persist_state_incremental(
     db_env: &Arc<DatabaseEnv>,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
-    governance: &Arc<RwLock<call_governance::GovernanceManager>>,
 ) -> Result<(), String> {
     // Persist EVM state (overwrite existing entries, no clear)
     {
         let evm = state.evm_state.read().map_err(|_| "evm lock poisoned".to_string())?;
         save_evm_accounts_no_clear(db_env, &evm)?;
-    }
-
-    // Persist governance state (overwrite)
-    {
-        let governance = governance.read().map_err(|_| "governance lock poisoned".to_string())?;
-        save_governance_state(db_env, &governance)
-            .map_err(|e| format!("save governance: {e}"))?;
     }
 
     // Persist consensus state
