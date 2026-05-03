@@ -1,6 +1,8 @@
 pub mod backend;
 pub mod precompile;
 
+pub use backend::{EvmStateBackend, EvmStateRefBackend};
+
 use call_precompiles::{
     slot_allowance, slot_asset_meta, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
 };
@@ -123,25 +125,25 @@ impl<B: StorageBackend> AssetStorage<B> {
 
     // ── Metadata operations ───────────────────────────────────────────
 
-    fn load_meta_u256(&self, asset_id: u64, key: &[u8]) -> U256 {
+    pub fn load_meta_u256(&self, asset_id: u64, key: &[u8]) -> U256 {
         self.backend.load(ASSET_ADDRESS, slot_asset_meta(asset_id, key))
     }
 
-    fn load_meta_u128(&self, asset_id: u64, key: &[u8]) -> u128 {
+    pub fn load_meta_u128(&self, asset_id: u64, key: &[u8]) -> u128 {
         u256_to_u128(self.load_meta_u256(asset_id, key))
     }
 
-    fn load_meta_u8(&self, asset_id: u64, key: &[u8]) -> u8 {
+    pub fn load_meta_u8(&self, asset_id: u64, key: &[u8]) -> u8 {
         self.load_meta_u256(asset_id, key)
             .to_be_bytes::<32>()[31]
     }
 
-    fn load_meta_address(&self, asset_id: u64, key: &[u8]) -> Address {
+    pub fn load_meta_address(&self, asset_id: u64, key: &[u8]) -> Address {
         let v = self.load_meta_u256(asset_id, key);
         Address::from_slice(&v.to_be_bytes::<32>()[12..32])
     }
 
-    fn load_meta_string(&self, asset_id: u64, key: &[u8]) -> String {
+    pub fn load_meta_string(&self, asset_id: u64, key: &[u8]) -> String {
         let v = self.load_meta_u256(asset_id, key);
         let bytes = v.to_be_bytes::<32>();
         // Trim trailing nulls
@@ -149,7 +151,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         String::from_utf8_lossy(&bytes[..len]).into_owned()
     }
 
-    fn store_meta_u256(&mut self, asset_id: u64, key: &[u8], value: U256) {
+    pub fn store_meta_u256(&mut self, asset_id: u64, key: &[u8], value: U256) {
         self.backend
             .store(ASSET_ADDRESS, slot_asset_meta(asset_id, key), value);
     }

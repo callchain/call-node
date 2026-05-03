@@ -18,6 +18,7 @@ call-evm.workspace = true
 call-governance.workspace = true
 call-crypto.workspace = true
 call-precompiles.workspace = true
+call-asset.workspace = true
 # commonware-consensus integration deferred to P7 (network layer)
 # These deps compile successfully on current Rust version:
 commonware-cryptography.workspace = true

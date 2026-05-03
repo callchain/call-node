@@ -15,3 +15,17 @@ impl<'a> StorageBackend for EvmStateBackend<'a> {
         self.0.set_storage(address, slot, value);
     }
 }
+
+/// StorageBackend implementation backed by an immutable EvmState reference.
+///
+/// Panics on store — use only for read-only operations.
+pub struct EvmStateRefBackend<'a>(pub &'a EvmState);
+
+impl<'a> StorageBackend for EvmStateRefBackend<'a> {
+    fn load(&self, address: Address, slot: U256) -> U256 {
+        self.0.get_storage(&address, slot)
+    }
+    fn store(&mut self, _address: Address, _slot: U256, _value: U256) {
+        panic!("EvmStateRefBackend is read-only");
+    }
+}

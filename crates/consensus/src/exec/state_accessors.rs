@@ -7,12 +7,13 @@
 //! This replaces the legacy `AccountState` / `AssetRegistry` mutation path
 //! so that the block state_root captures all state changes.
 
+use call_asset::{AssetStorage, EvmStateBackend, EvmStateRefBackend};
 use call_evm::EvmState;
 use call_precompiles::{
-    address_to_u256, read_string32, slot_allowance, slot_asset_meta, slot_balance,
+    address_to_u256, read_string32,
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
     write_string32,
-    AGENT_ADDRESS, ASSET_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
+    AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
     ORACLE_ADDRESS, SHIELDED_ADDRESS, VALIDATOR_ADDRESS,
 };
 use call_precompiles::storage::storage_slot;
@@ -262,42 +263,41 @@ pub fn agent_set_pubkey(evm_state: &mut EvmState, agent_id: u64, pubkey: &[u8; 3
 
 /// Seed an asset balance directly into EVM storage.
 pub fn seed_balance(evm_state: &mut EvmState, asset_id: u64, addr: Address, amount: u128) {
-    evm_state.set_storage(ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    store.write_balance(asset_id, addr, amount);
 }
 
 /// Add to an asset balance in EVM storage (reads current, adds amount, writes back).
 pub fn add_balance_evm(evm_state: &mut EvmState, asset_id: u64, addr: Address, amount: u128) {
-    let current = read_balance(evm_state, asset_id, addr);
-    let new = current.saturating_add(amount);
-    seed_balance(evm_state, asset_id, addr, new);
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    store.add_balance(asset_id, addr, amount).ok();
 }
 
 /// Deduct from an asset balance in EVM storage (reads current, subtracts amount, writes back).
 /// Returns true if deduction succeeded, false if insufficient balance.
 pub fn deduct_balance_evm(evm_state: &mut EvmState, asset_id: u64, addr: Address, amount: u128) -> bool {
-    let current = read_balance(evm_state, asset_id, addr);
-    if current < amount {
-        return false;
-    }
-    seed_balance(evm_state, asset_id, addr, current - amount);
-    true
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    store.deduct_balance(asset_id, addr, amount).is_ok()
 }
 
 /// Seed an allowance directly into EVM storage.
 pub fn seed_allowance(evm_state: &mut EvmState, asset_id: u64, owner: Address, spender: Address, amount: u128) {
-    evm_state.set_storage(ASSET_ADDRESS, slot_allowance(asset_id, owner, spender), u128_to_u256(amount));
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    store.write_allowance(asset_id, owner, spender, amount);
 }
 
 /// Read an allowance from EVM storage.
 pub fn read_allowance(evm_state: &EvmState, asset_id: u64, owner: Address, spender: Address) -> u128 {
-    u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, slot_allowance(asset_id, owner, spender)))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_allowance(asset_id, owner, spender)
 }
 
 /// Add to asset supply in EVM storage.
 pub fn add_asset_supply_evm(evm_state: &mut EvmState, asset_id: u64, amount: u128) {
-    let current = read_asset_supply(evm_state, asset_id);
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    let current = store.read_meta(asset_id).supply;
     let new = current.saturating_add(amount);
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(new));
+    store.store_meta_u256(asset_id, b"supply", u128_to_u256(new));
 }
 
 /// Seed asset metadata directly into EVM storage.
@@ -313,35 +313,47 @@ pub fn seed_asset(
     supply: u128,
     status: u8,
 ) {
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"symbol"), write_string32(symbol));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"name"), write_string32(name));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"decimals"), call_primitives::U256::from(decimals));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"issuer"), address_to_u256(issuer));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"max_supply"), u128_to_u256(max_supply));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"), u128_to_u256(supply));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"status"), call_primitives::U256::from(status));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance"), call_primitives::U256::from(0));
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"registered_at"), call_primitives::U256::from(0));
+    use call_asset::AssetMeta;
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    store.write_meta(
+        asset_id,
+        &AssetMeta {
+            symbol: symbol.to_string(),
+            name: name.to_string(),
+            decimals,
+            issuer,
+            max_supply,
+            supply,
+            status,
+        },
+    );
+    // Compliance and registered_at defaults
+    store.store_meta_u256(asset_id, b"compliance", call_primitives::U256::from(0));
+    store.store_meta_u256(asset_id, b"registered_at", call_primitives::U256::from(0));
 }
 
 /// Read an asset balance from EVM storage.
 pub fn read_balance(evm_state: &EvmState, asset_id: u64, addr: Address) -> u128 {
-    u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, slot_balance(asset_id, addr)))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_balance(asset_id, addr)
 }
 
 /// Read asset info from EVM storage.
 pub fn read_asset_symbol(evm_state: &EvmState, asset_id: u64) -> String {
-    read_string32(evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"symbol")))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_meta(asset_id).symbol
 }
 
 /// Read asset issuer from EVM storage.
 pub fn read_asset_issuer(evm_state: &EvmState, asset_id: u64) -> Address {
-    u256_to_address(evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"issuer")))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_meta(asset_id).issuer
 }
 
 /// Read asset status from EVM storage.
 pub fn read_asset_status(evm_state: &EvmState, asset_id: u64) -> u8 {
-    evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"status")).to_be_bytes::<32>()[31]
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_meta(asset_id).status
 }
 
 /// Seed bridge contract address for an asset in EVM storage.
@@ -569,37 +581,44 @@ pub fn finalize_pending_external_deposits_evm(
 
 /// Read asset name from EVM storage.
 pub fn read_asset_name(evm_state: &EvmState, asset_id: u64) -> String {
-    read_string32(evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"name")))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_meta(asset_id).name
 }
 
 /// Read asset decimals from EVM storage.
 pub fn read_asset_decimals(evm_state: &EvmState, asset_id: u64) -> u8 {
-    evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"decimals")).to_be_bytes::<32>()[31]
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_meta(asset_id).decimals
 }
 
 /// Read asset supply from EVM storage.
 pub fn read_asset_supply(evm_state: &EvmState, asset_id: u64) -> u128 {
-    u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply")))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_meta(asset_id).supply
 }
 
 /// Read asset max supply from EVM storage.
 pub fn read_asset_max_supply(evm_state: &EvmState, asset_id: u64) -> u128 {
-    u256_to_u128(evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"max_supply")))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.read_meta(asset_id).max_supply
 }
 
 /// Read asset compliance policy from EVM storage.
 pub fn read_asset_compliance(evm_state: &EvmState, asset_id: u64) -> u8 {
-    evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance")).to_be_bytes::<32>()[31]
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.load_meta_u8(asset_id, b"compliance")
 }
 
 /// Set asset compliance policy in EVM storage.
 pub fn seed_asset_compliance(evm_state: &mut EvmState, asset_id: u64, policy: u8) {
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance"), call_primitives::U256::from(policy));
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    store.store_meta_u256(asset_id, b"compliance", call_primitives::U256::from(policy));
 }
 
 /// Read asset contract address from EVM storage.
 pub fn read_asset_contract_address(evm_state: &EvmState, asset_id: u64) -> Option<Address> {
-    let val = evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"contract"));
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    let val = store.load_meta_u256(asset_id, b"contract");
     if val.is_zero() {
         None
     } else {
@@ -609,12 +628,17 @@ pub fn read_asset_contract_address(evm_state: &EvmState, asset_id: u64) -> Optio
 
 /// Set asset contract address in EVM storage.
 pub fn seed_asset_contract_address(evm_state: &mut EvmState, asset_id: u64, addr: Address) {
-    evm_state.set_storage(ASSET_ADDRESS, slot_asset_meta(asset_id, b"contract"), address_to_u256(addr));
+    let mut store = AssetStorage::new(EvmStateBackend(evm_state));
+    store.store_meta_u256(asset_id, b"contract", address_to_u256(addr));
 }
 
 /// Read asset registered_at from EVM storage.
 pub fn read_asset_registered_at(evm_state: &EvmState, asset_id: u64) -> u64 {
-    u256_to_u64(evm_state.get_storage(&ASSET_ADDRESS, slot_asset_meta(asset_id, b"registered_at")))
+    let store = AssetStorage::new(EvmStateRefBackend(evm_state));
+    store.load_meta_u256(asset_id, b"registered_at")
+        .try_into()
+        .map(|v: u128| v as u64)
+        .unwrap_or(0)
 }
 
 // ── Agent read helpers ────────────────────────────────────────────────
