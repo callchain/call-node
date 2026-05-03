@@ -444,7 +444,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     module
         .register_async_method("eth_gasPrice", |_params, state, _ctx| async move {
             let base_fee = state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee;
-            let gas_price = base_fee.saturating_add(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS);
+            let gas_price = base_fee.saturating_add(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS);
             Ok::<_, ErrorObjectOwned>(format!("0x{:x}", gas_price))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -452,7 +452,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_maxPriorityFeePerGas
     module
         .register_async_method("eth_maxPriorityFeePerGas", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS))
+            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 

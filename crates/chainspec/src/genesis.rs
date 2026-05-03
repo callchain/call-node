@@ -7,7 +7,7 @@ use call_consensus::proposer::ConsensusParams;
 use call_crypto::keccak256;
 use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
-use call_protocol::transaction::FeeParams;
+use call_protocol::gas::FeeParams;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

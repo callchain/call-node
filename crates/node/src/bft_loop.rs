@@ -519,7 +519,7 @@ pub(crate) async fn bft_event_loop(
                             .map(|p| {
                                 let p = (*p as f64).min(100.0).max(0.0);
                                 let idx = ((n - 1) as f64 * p / 100.0).round() as usize;
-                                evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::transaction::MIN_PRIORITY_FEE_PER_GAS)
+                                evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS)
                             })
                             .collect();
                         let entry = call_rpc::handlers::BlockFeeEntry {

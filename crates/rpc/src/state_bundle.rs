@@ -14,7 +14,7 @@ use call_consensus::{
     Block, BlockExecutionResult, ConsensusError, ForkManager,
 };
 use call_evm::EvmState;
-use call_protocol::FeeParams;
+use call_protocol::gas::FeeParams;
 
 use crate::handlers::RpcState;
 

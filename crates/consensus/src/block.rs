@@ -5,7 +5,7 @@
 use call_bridge::BridgeConfig;
 use call_crypto::keccak256;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
-use call_protocol::FeeParams;
+use call_protocol::gas::FeeParams;
 use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -409,7 +409,7 @@ impl BlockExecutionResult {
 
 /// Update base fee after block execution (delegates to protocol layer)
 pub(crate) fn update_base_fee_after_block(params: &mut FeeParams, gas_used: u64) {
-    call_protocol::transaction::update_base_fee(params, gas_used);
+    call_protocol::gas::update_base_fee(params, gas_used);
 }
 
 /// Compute EVM state root from the EVM state trie

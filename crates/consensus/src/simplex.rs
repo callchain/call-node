@@ -208,7 +208,7 @@ impl SimplexConsensus {
     pub fn execute_block(
         &mut self,
         block: &Block,
-        fee_params: &mut call_protocol::FeeParams,
+        fee_params: &mut call_protocol::gas::FeeParams,
         evm_state: &mut call_evm::EvmState,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         block.execute(

@@ -6,7 +6,7 @@
 use call_consensus::block::{Block, BlockExecutionResult, BlockContext, ExecutionState, Subsystems};
 use call_consensus::validator::ConsensusError;
 use call_primitives::{BlockHash, Hash};
-use call_protocol::transaction::FeeParams;
+use call_protocol::gas::FeeParams;
 use call_payload_types::{BlockLimits, PayloadAttributes};
 use call_transaction_pool::MempoolSelection;
 use tracing::info;

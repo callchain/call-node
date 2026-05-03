@@ -2,15 +2,12 @@
 
 pub mod security;
 pub mod compliance;
-pub mod transaction;
+pub mod gas;
 pub mod receipts;
 pub mod economics;
 
-// Transaction submodules
-pub mod tx;
-
 pub use compliance::*;
-pub use transaction::*;
+pub use gas::*;
 pub use receipts::*;
 pub use economics::*;
 

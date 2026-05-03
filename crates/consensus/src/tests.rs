@@ -2,7 +2,7 @@ use crate::*;
 use crate::ForkManager;
 use call_primitives::{Address, BlockHash, Hash, ProtocolVersion};
 use call_evm::EvmTransaction;
-use call_protocol::FeeParams;
+use call_protocol::gas::FeeParams;
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
