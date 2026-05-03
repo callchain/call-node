@@ -41,7 +41,25 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 
 ### State Access
 
-Precompiles access native protocol state (`AccountState`, `AssetRegistry`, `ComplianceEngine`, etc.) through a thread-local `StateHookGuard` injected at the start of `Block::execute()`. The guard provides raw pointer references to all protocol state and is automatically cleared when execution completes.
+Precompiles access EVM storage slots via a thread-local `StorageCtx` that binds to revm's journal during transaction execution. Protocol state (balances, asset metadata, validator stakes, etc.) is stored directly in EVM storage via precompile-specific address/slot layouts. No in-memory protocol state structs (`AccountState`, `AssetRegistry`, etc.) are accessed during precompile execution.
+
+```
+┌──────────────┐     ┌─────────────────┐     ┌─────────────────────┐
+│   MetaMask   │ ──▶ │  EVM tx (to=0x201) │ ──▶ │  revm journal       │
+└──────────────┘     └─────────────────┘     └─────────────────────┘
+                                                      │
+                                          ┌───────────▼────────────┐
+                                          │ StorageCtx (TLS)        │
+                                          │  ├─ sload(addr, slot)   │
+                                          │  └─ sstore(addr, slot)  │
+                                          └───────────┬────────────┘
+                                                      │
+                                          ┌───────────▼────────────┐
+                                          │ EVM storage slots       │
+                                          │ (balance, asset_meta,   │
+                                          │  validator_stake, etc.) │
+                                          └─────────────────────────┘
+```
 
 ---
 
@@ -594,10 +612,16 @@ Callchain's asset precompile (`0xCCC*`) uses a similar prefix pattern but curren
 
 ### 10.6 Applicability to Callchain
 
-| Pattern | Callchain Status | Recommendation |
-|---------|------------------|----------------|
-| TLS `StorageCtx` | Manual `&mut EvmState` passing | **High value** — simplifies signatures and nesting |
-| `#[contract]` macro | Manual slot constants + accessors | Medium value — useful if adding many new precompiles |
-| Unified dispatch | Hand-written `match` per precompile | Medium value — reduces boilerplate |
-| Built-in gas metering | Manual gas deduction | **High value** — correctness and maintainability |
-| Dynamic prefix lookup | Static address list | Low-medium value — already functional |
+| Pattern | Callchain Status | 实施计划 |
+|---------|------------------|---------|
+| TLS `StorageCtx` | ✅ 已实施 | 保持现状，`StorageCtx` 已是当前架构核心 |
+| `#[contract]` macro | ❌ 未实施 | **暂缓** — 宏开发工作量大，与拆 crate 正交，不一起实施 |
+| Unified dispatch | ❌ 手写 `match` | **Phase 1 一起实施** — 拆 crate 时 precompile.rs 重写，顺手替换为 `dispatch_call` |
+| Built-in gas metering | ❌ 手动扣 gas | **Phase 1 一起实施** — `JournalBackend` 升级为自动 warm/cold 追踪，业务层彻底无 gas |
+| Dynamic prefix lookup | 静态地址列表 | **不需要** — 地址固定 `0x101-0x209`，无动态前缀需求 |
+
+#### 实施路线图
+
+1. **Phase 1 (Asset pilot)**：拆 `crates/asset/` + 统一分发框架 + 自动 gas 计量
+2. **Phase 2-8**：其余领域按同模式拆分，复用 `dispatch_call` 和 `JournalBackend`
+3. **`#[contract]` macro**：如后续新增大量 precompile 再考虑，当前手写 slot 常量足够

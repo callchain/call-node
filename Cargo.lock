@@ -1968,7 +1968,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "call-bridge",
- "call-chainspec",
  "call-consensus",
  "call-crypto",
  "call-evm",
