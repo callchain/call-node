@@ -565,24 +565,222 @@ crates/<domain>/
 - `JournalBackend`
 - `StatefulPrecompile` trait
 
+---
+
+### 各 Precompile 改造影响预览
+
+基于对当前代码的逐文件分析，以下是每个 precompile 的详细改造影响评估：
+
+#### Validator（`crates/precompiles/src/validator.rs`，~547 行）
+
+**当前功能：** `stake`、`unstake`、`claimUnbonded`、`getValidatorStake`、`getValidatorStatus`、`getValidatorPubkey`、`getUnbondHeight`、`getValidatorByIndex`
+
+**跨域依赖：**
+- **Asset 强依赖** — `load_bal` / `save_bal`（CALL 质押代币的 escrow 转移）。`stake` 从 caller 扣 CALL，锁到 validator slot；`claimUnbonded` 从 validator slot 释放给 caller。
+
+**改造影响：**
+- `ValidatorPrecompile` → `crates/validator/src/precompile.rs`（~60 行，统一分发后）
+- 业务逻辑提取为 `ValidatorManager<B>`，包含：`stake`、`unstake`、`claim_unbonded`、`get_validator`、`get_validator_by_index`
+- **跨域调用：** `ValidatorManager::stake()` 内部调用 `AssetManager::transfer(CALL_ASSET_ID, caller, VALIDATOR_ESCROW, amount)`
+- `SimplexConsensus`（`crates/consensus/`）当前直接操作 `evm_state.set_storage` 进行 validator 注册，改造后改用 `ValidatorManager::register_validator()`
+
+**复杂度：** 中。核心挑战是质押 escrow 与 Asset 的耦合，但模式清晰（类似 Asset 内部转账）。
+
+---
+
+#### Bridge（`crates/precompiles/src/bridge.rs`，~1210 行）
+
+**当前功能：** `getTotalDeposits`、`getTotalWithdrawals`、`bridgeToEvm`、`bridgeToProtocol`、`externalDeposit`、`externalWithdraw`、`deposit`、`initiateChallenge`、`resolveChallenge`、`getChallengeStatus`、`withdrawChallengeBond`
+
+**跨域依赖：**
+- **Asset 强依赖** — `credit_bal` / `debit_bal`（bridge 出入金时的余额变更）
+- **Asset 元数据依赖** — `slot_asset_meta`（读取 asset decimals 等）
+- **Validator 依赖** — `slot_validator_by_addr` + `VALIDATOR_ADDRESS`（challenge 成功后的 slash 调用）
+
+**改造影响：**
+- `BridgePrecompile` → `crates/bridge/src/precompile.rs`（~100 行）
+- 业务逻辑提取为 `BridgeManager<B>`，包含：`external_deposit`、`external_withdraw`、`bridge_to_evm`、`bridge_to_protocol`、`initiate_challenge`、`resolve_challenge`、`withdraw_bond`
+- **Pending deposit 队列：** 当前 `BridgeState` 结构体已废弃（标记为 `// Deprecated`），预编译已用 EVM storage slot 存储 pending deposit。但 `crates/bridge/src/state.rs` 中的 `BridgeStateManager`（内存状态）仍被 `block_producer.rs` 使用，需彻底移除。
+- **Challenge 系统：** Challenge 的 bond 扣款走 `AssetManager::transfer`，challenge 成功后的 slash 走 `ValidatorManager::slash_stake`
+- `block_producer.rs:104-125` 的 deposit settlement 逻辑改为：从 `BridgeManager` 读取 finalized deposits，调用 `AssetManager::add_balance` 到账
+
+**复杂度：** 中高。Bridge 是交互最复杂的预编译（challenge + 多币种 + 跨链），但大部分逻辑已在预编译中，只需提取。
+
+---
+
+#### Oracle（`crates/precompiles/src/oracle.rs`，~351 行）
+
+**当前功能：** `getPrice`、`getTWAP`、`isStale`、`submitPrice`
+
+**跨域依赖：**
+- **Validator 只读依赖** — `VALIDATOR_ADDRESS` + `slot_validator_by_addr(msg_sender)`（验证 caller 是否为 validator）
+
+**改造影响：**
+- `OraclePrecompile` → `crates/oracle/src/precompile.rs`（~40 行）
+- 业务逻辑提取为 `OracleManager<B>`，包含：`submit_price`、`get_price`、`get_twap`、`is_stale`
+- **奖励池：** 当前预编译中 `add_oracle_reward` / `read_oracle_reward_pool` 已在 EVM storage 中。但 `crates/consensus/src/oracle/` 里的 `OracleManager`（内存版）维护了 `contributors`、`reward_pool` 等，需删除。
+- **出块器改造：** `block_producer.rs:144-212` 的 oracle period advancement、outlier slashing、reward distribution 改为：从 `OracleManager` 读取价格历史，计算 outliers，调用 `ValidatorManager::slash_stake`，调用 `AssetManager::transfer` 分发奖励。
+
+**复杂度：** 中。核心挑战是出块器中的 outlier detection 和奖励分发逻辑需要跨域调用（Oracle → Validator → Asset）。
+
+---
+
+#### Governance（`crates/precompiles/src/governance.rs`，~713 行）
+
+**当前功能：** `submitProposal`、`vote`、`queue`、`execute`、`emergencyPause`、`emergencyResume`、`getProposalStatus`、`getProposalVotes`、`isPaused`、`getProposalCount`
+
+**跨域依赖：**
+- **Asset 强依赖** — `load_bal` / `save_bal`（proposal deposit 扣除与退回）
+
+**改造影响：**
+- `GovernancePrecompile` → `crates/governance/src/precompile.rs`（~70 行）
+- 业务逻辑提取为 `GovernanceStorage<B>`（或保留 `GovernanceManager` 名称但语义改变），包含：`submit_proposal`、`vote`、`queue`、`execute`、`emergency_pause`、`emergency_resume`
+- **GovernanceManager 内存状态机删除：** `crates/governance/src/manager.rs` 中 ~20 个内存字段全部改为 EVM storage 读取（详见上文 [Governance 特例](#governance-特例)）
+- **事件队列：** 改为 ephemeral 生成，不持久化
+- `block_producer.rs:277-309` 的 governance advancement 改为调用 `GovernanceAdvancer::advance()`
+
+**复杂度：** 高。内存状态机最庞大，且涉及事件系统重构。
+
+---
+
+#### Agent（`crates/precompiles/src/agent.rs`）
+
+**当前功能：** Agent 注册、元数据读写、余额授权
+
+**跨域依赖：** 无（自包含）。
+
+**改造影响：**
+- `AgentPrecompile` → `crates/agent/src/precompile.rs`
+- 业务逻辑提取为 `AgentManager<B>`
+- `agent_root` 快照当前由内存 `AgentRegistry` 计算，改造后改为从 `AgentManager` 遍历 EVM storage 计算（或缓存）
+
+**复杂度：** 低。
+
+---
+
+#### Shielded（`crates/precompiles/src/shielded.rs`）
+
+**当前功能：** Merkle root、nullifier 检查、commitment 计数
+
+**跨域依赖：** 无（自包含）。
+
+**改造影响：**
+- `ShieldedPrecompile` → `crates/shielded/src/precompile.rs`
+- 业务逻辑提取为 `ShieldedManager<B>`
+- **Merkle tree 重建：** 当前内存 `shielded_state` 维护了完整 Merkle tree（不只是 root）。改造后：tree 从 EVM commitments 重建，或作为 sidecar 缓存（不持久化，重启后重建）
+- `merkle_root` 快照直接读 EVM storage
+
+**复杂度：** 低。核心决策是 Merkle tree 是否完全存入 EVM（precompile 已有 `slot_tree_node`）还是作为 sidecar。
+
+---
+
+#### Compliance（`crates/precompiles/src/compliance.rs`）
+
+**当前功能：** 地址合规状态读写（冻结/解冻）
+
+**跨域依赖：** 无（自包含，但 Asset / Bridge / Governance 会读取）。
+
+**改造影响：**
+- `CompliancePrecompile` → `crates/compliance/src/precompile.rs`
+- 业务逻辑提取为 `ComplianceManager<B>`
+- 当前 `RpcState` 中的 `compliance_engine` 内存字段删除，所有合规检查改为读 EVM storage
+
+**复杂度：** 低。
+
+---
+
+### 依赖关系总结（改造后）
+
+```
+call-asset（无跨域依赖）
+  ▲
+  │ 被依赖
+  ├─ call-validator（依赖 asset 的 CALL 转账）
+  ├─ call-bridge（依赖 asset 的余额操作 + validator 的 slash）
+  ├─ call-governance（依赖 asset 的 deposit 扣款）
+  └─ call-oracle（不依赖 asset，只依赖 validator）
+
+call-validator（依赖 asset）
+  ▲
+  │ 被依赖
+  ├─ call-bridge（challenge slash）
+  ├─ call-oracle（validator 身份校验）
+  └─ call-governance（quorum 计算读总质押量）
+```
+
+**无循环依赖。** 底层 crate（asset、validator）不依赖上层 crate（bridge、governance、oracle）。
+
 ### Governance 特例
 
-`GovernanceManager`（当前在 `crates/governance/src/manager.rs`）维护内存事件队列（`events: Vec<GovernanceEvent>`），每出块时 drained 给 WebSocket 广播。
+`GovernanceManager`（当前在 `crates/governance/src/manager.rs`，~971 行）维护着约 20 个内存字段，每出块时通过 `advance()` 推进提案状态、通过 `drain_events()` 向 WebSocket 广播事件。改造后 `GovernanceManager` 变为 **纯状态扫描器**，不再维护独立内存，所有数据从 EVM storage 读取。
 
-**解决方案：** `call-governance` crate 的 `GovernanceStorage::advance_proposals()` 从 EVM storage 读取提案状态，计算状态转换，并**临时生成事件**（不持久化）。事件只在 `advance()` 执行期间存在并立即消费。
+#### 字段映射
+
+| GovernanceManager 字段 | 原语义 | 改造后来源 |
+|-----------------------|--------|-----------|
+| `proposals: HashMap<u64, Proposal>` | 内存提案列表 | Governance precompile EVM slots（`slot_gov_proposal(id, *)`） |
+| `next_proposal_id: u64` | 自增 ID | `slot_gov_proposal_count` |
+| `validator_addresses` | 提案人地址 | Validator precompile（只读） |
+| `call_balances` | CALL 余额 | Asset precompile（只读） |
+| `asset_issuers` | 资产发行者 | Asset precompile（只读） |
+| `delegations` | 投票委托 | 新增 `slot_gov_delegation` EVM slot |
+| `deposits` | 提案保证金 | `slot_gov_proposal(id, b"deposit")` |
+| `voted_addresses` | 已投票地址集合 | `slot_gov_voter(id, addr)` |
+| `last_submission_block` | 上次提交区块 | `slot_gov_proposal(id, b"submitted_at")` |
+| `current_block` | 当前区块 | 由调用方传入 |
+| `emergency_pause` | 紧急暂停状态 | `slot_gov_paused` |
+| `events` | 内存事件队列 | **临时生成**（`advance()` 扫描时生成，立即消费） |
+| `executor` | 提案执行器 | **保留**（`ProposalExecutor` trait 不变） |
+| `balance_source` | 余额来源 | 删除，统一走 `AssetManager` |
+| `scheduled_upgrades` | 计划升级 | 新增 `slot_gov_upgrade` EVM slot |
+| `compliance_policies` | 合规策略 | Compliance precompile（只读） |
+| `fee_currencies` | 手续费币种 | 新增 `slot_gov_fee_currency` EVM slot |
+| `fee_currencies_pending_removal` | 待移除币种 | 新增 `slot_gov_fee_removal` EVM slot |
+| `fee_currency_cap_bps` | 手续费上限 | `slot_gov_fee_cap` |
+| `validator_pubkeys` | 验证者公钥 | Validator precompile（只读） |
+
+**删除的字段：** `call_balances`、`asset_issuers`、`balance_source`、`validator_addresses`、`validator_pubkeys`、`events` — 这些全部改为实时从对应 precompile EVM storage 读取，或从调用方传入。
+
+#### `advance()` 改造
 
 ```rust
-// crates/governance/src/lib.rs
-impl<B: StorageBackend> GovernanceStorage<B> {
-    pub fn advance_proposals(&mut self, current_block: u64) -> Vec<GovernanceEvent> {
+// crates/governance/src/advancer.rs
+pub struct GovernanceAdvancer<'a, B: StorageBackend> {
+    backend: B,
+    executor: &'a dyn ProposalExecutor,
+}
+
+impl<'a, B: StorageBackend> GovernanceAdvancer<'a, B> {
+    /// 扫描所有提案，推进状态，返回事件（不持久化）。
+    pub fn advance(&mut self, current_block: u64) -> Vec<GovernanceEvent> {
         let mut events = Vec::new();
         let count = self.read_proposal_count();
+
         for id in 1..=count {
-            let old_status = self.read_status(id);
-            let new_status = self.compute_new_status(id, current_block);
-            if old_status != new_status {
+            let status = self.read_status(id);
+            let submitted_at = self.read_submitted_at(id);
+            let timelock = self.read_timelock(id);
+            let yes_votes = self.read_yes_votes(id);
+            let no_votes = self.read_no_votes(id);
+            let total_stake = self.read_total_validator_stake(); // 从 Validator precompile
+
+            let new_status = compute_status(status, current_block, submitted_at, timelock,
+                                            yes_votes, no_votes, total_stake);
+
+            if new_status != status {
                 self.write_status(id, new_status);
                 events.push(GovernanceEvent::StatusChanged { proposal_id: id, new_status });
+
+                if new_status == ProposalStatus::Queued {
+                    // 即将执行 — 通过 ProposalExecutor 应用 side effects
+                    let proposal = self.read_proposal(id);
+                    if let Err(e) = self.executor.execute(&proposal) {
+                        self.write_status(id, ProposalStatus::Failed);
+                        events.push(GovernanceEvent::ExecutionFailed { proposal_id: id, reason: e });
+                    } else {
+                        events.push(GovernanceEvent::Executed { proposal_id: id });
+                    }
+                }
             }
         }
         events
@@ -590,7 +788,19 @@ impl<B: StorageBackend> GovernanceStorage<B> {
 }
 ```
 
-这样 `crates/governance/` 这个 crate 可以保留（作为 governance 领域的业务逻辑 crate），但其内部状态机不再维护独立内存，而是从 EVM storage 读取。
+**事件 ephemeral 语义：** `advance()` 返回的 `Vec<GovernanceEvent>` 由调用方（`block_producer.rs` 或 `bft_loop.rs`）立即消费——写入 WebSocket subscription buffer 后丢弃。不存入 EVM storage，不持久化到磁盘。
+
+#### 依赖关系变化
+
+```
+GovernanceAdvancer
+  ├─ 读 ──▶ AssetManager（保证金退回时的余额操作）
+  ├─ 读 ──▶ ValidatorManager（总质押量用于 quorum 计算）
+  ├─ 读 ──▶ ComplianceManager（验证合规策略提案）
+  └─ 调用 ──▶ ProposalExecutor（跨系统 side effects）
+```
+
+`call-governance` crate 将依赖 `call-asset`、`call-validator`、`call-compliance` 的 `*Manager` 类型（只读），但**不循环依赖**——这些领域 crate 不依赖 `call-governance`。
 
 ---
 
