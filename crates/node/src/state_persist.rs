@@ -16,7 +16,7 @@ use call_storage::{
     db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
     CallOracleState, CallEvmAccounts,
     CallGovernanceState, CallConsensusState,
-    CallReceipts, CallReceiptsByBlock, CallAgentNonces, CallForkState, CallCheckpoint,
+    CallReceipts, CallReceiptsByBlock, CallForkState, CallCheckpoint,
     CallFeeParams,
 };
 use reth_db::DatabaseEnv;
@@ -27,7 +27,6 @@ use reth_db::DatabaseEnv;
 /// Replaces the previous 13-element tuple so callers use named fields.
 pub(crate) struct LoadedState {
     pub evm_state: EvmState,
-    pub agent_nonces: call_agent::AgentNonces,
     pub governance: GovernanceManager,
     pub fee_params: FeeParams,
 }
@@ -41,15 +40,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
         Err(e) => {
             tracing::warn!(error = %e, "failed to load evm accounts");
             EvmState::new()
-        }
-    };
-
-    // Load agent nonces
-    let agent_nonces = match load_agent_nonces_inner(db_env) {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load agent nonces");
-            call_agent::AgentNonces::new()
         }
     };
 
@@ -73,7 +63,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
 
     LoadedState {
         evm_state,
-        agent_nonces,
         governance,
         fee_params,
     }
@@ -101,13 +90,6 @@ pub(crate) fn persist_state_to_db(
         let evm = state.evm_state.read().unwrap();
         save_evm_accounts_inner(db_env, &evm)
             .map_err(|e| format!("save evm: {e}"))?;
-    }
-
-    // Persist agent nonces
-    {
-        let agent_nonces = state.agent_nonces.read().unwrap();
-        save_agent_nonces_inner(db_env, &agent_nonces)
-            .map_err(|e| format!("save agent nonces: {e}"))?;
     }
 
     // Persist oracle state
@@ -223,20 +205,6 @@ pub(crate) fn load_governance_state(db: &DatabaseEnv) -> Result<GovernanceManage
     match db_get::<CallGovernanceState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize governance: {e}")),
         None => Ok(GovernanceManager::new()),
-    }
-}
-
-// ── Agent nonces persistence ──────────────────────────────────────────
-
-pub(crate) fn save_agent_nonces_inner(db: &DatabaseEnv, nonces: &call_agent::AgentNonces) -> Result<(), String> {
-    let data = serde_json::to_vec(nonces).map_err(|e| format!("serialize agent nonces: {e}"))?;
-    db_put::<CallAgentNonces>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
-}
-
-pub(crate) fn load_agent_nonces_inner(db: &DatabaseEnv) -> Result<call_agent::AgentNonces, String> {
-    match db_get::<CallAgentNonces>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize agent nonces: {e}")),
-        None => Ok(call_agent::AgentNonces::new()),
     }
 }
 

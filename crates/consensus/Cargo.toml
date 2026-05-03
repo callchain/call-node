@@ -15,7 +15,6 @@ call-oracle.workspace = true
 call-bridge.workspace = true
 call-shielded.workspace = true
 call-evm.workspace = true
-call-agent.workspace = true
 call-governance.workspace = true
 call-crypto.workspace = true
 call-precompiles.workspace = true

@@ -35,7 +35,6 @@ mod tests {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
         RpcState::new(
             EvmState::new(),
-            call_agent::AgentNonces::new(),
             mempool,
             1,
         )

@@ -28,7 +28,6 @@ call-evm.workspace = true
 call-precompiles.workspace = true
 call-bridge.workspace = true
 call-consensus.workspace = true
-call-agent.workspace = true
 call-shielded.workspace = true
 call-crypto.workspace = true
 call-chainspec.workspace = true

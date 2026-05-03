@@ -83,16 +83,6 @@ impl Table for CallConsensusState {
     type Value = Vec<u8>;
 }
 
-/// Agent nonces: serialized (owner, agent_id) -> serialized nonce
-#[derive(Debug)]
-pub struct CallAgentNonces;
-impl Table for CallAgentNonces {
-    const NAME: &'static str = "call_agent_nonces";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
 /// Consensus blocks: serialized height -> serialized Block
 #[derive(Debug)]
 pub struct CallConsensusBlocks;
@@ -178,7 +168,6 @@ impl TableSet for CallTables {
                 box_info::<CallPruneState>,
                 box_info::<CallGovernanceState>,
                 box_info::<CallConsensusState>,
-                box_info::<CallAgentNonces>,
                 box_info::<CallConsensusBlocks>,
                 box_info::<CallMetadataChainId>,
                 box_info::<CallReceipts>,

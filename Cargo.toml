@@ -4,7 +4,6 @@ members = [
     "crates/crypto",
     "crates/serialization",
     "crates/protocol",
-    "crates/agent",
     "crates/shielded",
     "crates/evm",
     "crates/consensus",
@@ -75,7 +74,6 @@ call-consensus = { path = "crates/consensus" }
 call-network = { path = "crates/network" }
 call-transaction-pool = { path = "crates/transaction-pool" }
 call-chainspec = { path = "crates/chainspec" }
-call-agent = { path = "crates/agent" }
 call-shielded = { path = "crates/shielded" }
 call-rpc = { path = "crates/rpc" }
 

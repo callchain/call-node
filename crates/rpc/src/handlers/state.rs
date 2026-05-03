@@ -118,7 +118,6 @@ pub struct SyncProgress {
 /// Shared RPC state — all handlers read from this.
 pub struct RpcState {
     pub evm_state: RwLock<EvmState>,
-    pub agent_nonces: RwLock<call_agent::AgentNonces>,
     pub receipts: RwLock<HashMap<TxHash, ProtocolReceipt>>,
     pub current_block: RwLock<u64>,
     pub fee_params: RwLock<FeeParams>,
@@ -165,7 +164,6 @@ pub struct RpcState {
 impl RpcState {
     pub fn new(
         evm_state: EvmState,
-        agent_nonces: call_agent::AgentNonces,
         mempool: Arc<RwLock<Mempool>>,
         chain_id: u64,
     ) -> Self {
@@ -175,7 +173,6 @@ impl RpcState {
         };
         Self {
             evm_state: RwLock::new(evm_state),
-            agent_nonces: RwLock::new(agent_nonces),
             receipts: RwLock::new(HashMap::new()),
             current_block: RwLock::new(0),
             fee_params: RwLock::new(FeeParams::default()),

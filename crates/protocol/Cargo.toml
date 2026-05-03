@@ -36,5 +36,4 @@ hex = "0.4"
 proptest = "1"
 criterion = { workspace = true }
 call-bridge.workspace = true
-call-agent.workspace = true
 call-consensus.workspace = true

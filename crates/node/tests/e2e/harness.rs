@@ -116,7 +116,6 @@ impl NodeBuilder {
 
         let state = Arc::new(RpcState::new(
             call_evm::EvmState::new(),
-            call_agent::AgentNonces::new(),
             mempool.clone(),
             self.chain_id,
         ));

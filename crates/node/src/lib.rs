@@ -151,7 +151,6 @@ impl CallNode {
         let loaded = if recovery_needed {
             state_persist::LoadedState {
                 evm_state: EvmState::new(),
-                agent_nonces: call_agent::AgentNonces::new(),
                 governance: GovernanceManager::new(),
                 fee_params: FeeParams::default(),
             }
@@ -223,7 +222,6 @@ impl CallNode {
 
         let state = Arc::new(RpcState::new(
             loaded.evm_state,
-            loaded.agent_nonces,
             mempool.clone(),
             chain_id.unwrap_or(CALLCHAIN_CHAIN_ID),
         ));
