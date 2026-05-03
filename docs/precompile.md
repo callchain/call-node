@@ -495,3 +495,109 @@ pub const AGENT_ADDRESS: Address = address!("00000000000000000000000000000000000
 | `crates/precompiles/src/governance.rs` | Governance precompile (`0x203`) |
 | `crates/precompiles/src/bridge.rs` | Bridge precompile (`0x103`) |
 | `crates/precompiles/src/compliance.rs` | Compliance precompile (`0x205`) |
+
+---
+
+## 10. Design Reference: Tempo Precompile Patterns
+
+> This section summarizes patterns from the **tempo** codebase (`tempo/` directory) that are applicable to Callchain's precompile architecture.
+
+### 10.1 TLS-based `StorageCtx`
+
+Tempo uses `scoped_thread_local!` to provide EVM storage access without threading `&mut EvmState` through every precompile method signature.
+
+```rust
+scoped_thread_local!(static STORAGE: RefCell<&mut dyn PrecompileStorageProvider>);
+
+pub struct StorageCtx;
+impl StorageCtx {
+    pub fn enter<S, R>(storage: &mut S, f: impl FnOnce() -> R) -> R { ... }
+    pub fn sload(&self, address: Address, key: U256) -> Result<U256> { ... }
+    pub fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<()> { ... }
+}
+```
+
+**Benefits:**
+- Precompile methods stay clean: `fn transfer(&mut self, msg_sender: Address, call: TransferCall)` — no `evm: &mut EvmState` parameter.
+- Nested precompile calls (A calling B) automatically share the same storage context.
+- Natural integration with revm's journal/checkpoint system.
+
+### 10.2 `#[contract]` Storage Layout Macro
+
+Tempo's `precompiles-macros` crate provides a `#[contract]` attribute that transforms a Rust struct defining storage layout into a full contract with type-safe getters and setters.
+
+```rust
+#[contract]
+pub struct TIP20Token {
+    name: String,
+    symbol: String,
+    total_supply: U256,
+    balances: Mapping<Address, U256>,
+    allowances: Mapping<Address, Mapping<Address, U256>>,
+}
+```
+
+The macro generates:
+- Automatic slot allocation following Solidity layout rules
+- `self.balances[addr].read()` / `self.balances[addr].write(amount)?`
+- `Storable` derive for custom structs
+
+### 10.3 Unified Dispatch Framework
+
+Tempo uses `alloy_sol_types::sol!` to generate ABI types from Solidity interfaces, then routes via a `dispatch_call` macro:
+
+```rust
+impl Precompile for TIP20Token {
+    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+        dispatch_call(calldata, TIP20Call::decode, |call| match call {
+            TIP20Call::balanceOf(call) => view(call, |c| self.balance_of(c)),
+            TIP20Call::transfer(call)  => mutate(call, msg_sender, |s, c| self.transfer(s, c)),
+            // ...
+        })
+    }
+}
+```
+
+`metadata`, `view`, and `mutate` helper macros handle:
+- Gas deduction for input bytes
+- ABI decoding of calldata
+- ABI encoding of return values
+- Permission checking (mutate receives `msg_sender`)
+
+### 10.4 Built-in Gas Metering
+
+Tempo's `EvmPrecompileStorageProvider` wraps `EvmInternals` and automatically applies EIP gas rules:
+
+| Operation | Gas Charged |
+|-----------|-------------|
+| `sload` (warm) | `warm_storage_read_cost` |
+| `sload` (cold) | + `cold_storage_additional_cost` |
+| `sstore` (static) | `sstore_static_gas` |
+| `sstore` (dynamic) | `sstore_dynamic_gas(...)` |
+| `emit_event` | `LOG + log_cost(topics, data_len)` |
+
+Precompile developers do not manually calculate gas — it is deducted automatically at the storage layer.
+
+### 10.5 Dynamic Address-Prefix Registration
+
+Tempo registers precompiles via a lookup function rather than a static list, enabling address-prefix routing:
+
+```rust
+precompiles.set_precompile_lookup(move |address: &Address| {
+    if is_tip20_prefix(*address) { Some(TIP20Token::create_precompile(*address, &cfg)) }
+    else if *address == FACTORY_ADDRESS { Some(Factory::create_precompile(&cfg)) }
+    // ...
+});
+```
+
+Callchain's asset precompile (`0xCCC*`) uses a similar prefix pattern but currently enumerates addresses statically. Adopting dynamic lookup would simplify registration.
+
+### 10.6 Applicability to Callchain
+
+| Pattern | Callchain Status | Recommendation |
+|---------|------------------|----------------|
+| TLS `StorageCtx` | Manual `&mut EvmState` passing | **High value** — simplifies signatures and nesting |
+| `#[contract]` macro | Manual slot constants + accessors | Medium value — useful if adding many new precompiles |
+| Unified dispatch | Hand-written `match` per precompile | Medium value — reduces boilerplate |
+| Built-in gas metering | Manual gas deduction | **High value** — correctness and maintainability |
+| Dynamic prefix lookup | Static address list | Low-medium value — already functional |
