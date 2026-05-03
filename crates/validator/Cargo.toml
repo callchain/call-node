@@ -1,5 +1,5 @@
 [package]
-name = "call-precompiles"
+name = "call-validator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,14 +11,8 @@ workspace = true
 [dependencies]
 call-primitives.workspace = true
 call-protocol.workspace = true
-call-oracle.workspace = true
-call-shielded.workspace = true
-call-governance.workspace = true
+call-precompiles.workspace = true
+call-asset.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 revm-precompile.workspace = true
-revm.workspace = true
-scoped-tls = "1"
-tracing.workspace = true
-
-[dev-dependencies]

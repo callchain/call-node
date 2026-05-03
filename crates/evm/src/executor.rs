@@ -5,13 +5,16 @@
 use call_primitives::Address;
 use call_precompiles::{
     CallPrecompiles,
-    AgentPrecompile, BridgePrecompile, CompliancePrecompile, GovernancePrecompile,
-    OraclePrecompile, ShieldedPrecompile, SwitchPrecompile, ValidatorPrecompile,
+    BridgePrecompile, GovernancePrecompile,
+    OraclePrecompile, ShieldedPrecompile, SwitchPrecompile,
     AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
     ORACLE_ADDRESS, SHIELDED_ADDRESS, SWITCH_ADDRESS, VALIDATOR_ADDRESS,
     ASSET_ADDRESS,
 };
 use call_asset::AssetPrecompile;
+use call_validator::ValidatorPrecompile;
+use call_compliance::CompliancePrecompile;
+use call_agent::AgentPrecompile;
 use alloy_primitives::{U256, Bytes, keccak256, FixedBytes};
 use revm::{
     database::InMemoryDB,

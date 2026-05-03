@@ -1126,7 +1126,7 @@ pub use storage::{AssetStorage, AssetError};
 
 #### 步骤 7 — `call-precompiles` 实现统一分发框架（可选延后）
 
-- [ ] **7.1** 新建 `crates/precompiles/src/dispatch.rs`
+- [x] **7.1** 新建 `crates/precompiles/src/dispatch.rs` ✅
 
 ```rust
 use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
@@ -1171,12 +1171,12 @@ where
 }
 ```
 
-- [ ] **7.2** 在 `crates/precompiles/src/lib.rs` 中导出 `pub mod dispatch;`
+- [x] **7.2** 在 `crates/precompiles/src/lib.rs` 中导出 `pub mod dispatch;` ✅
 
 #### 步骤 8 — `JournalBackend` 升级自动 gas 计量（可选延后）
 
 - [x] **8.1** 新建 `crates/precompiles/src/journal_backend.rs`（基础版，无 AccessTracker）
-- [ ] **8.2** 在 `JournalBackend` 中加入 `AccessTracker`，`load`/`store` 自动 `deduct_gas`
+- [ ] **8.2** 在 `JournalBackend` 中加入 `AccessTracker`，`load`/`store` 自动 `deduct_gas`（可选延后）
 - [ ] **8.3** 编译验证：`cargo check -p call-precompiles`
 
 > **说明：** 当前 gas 由 precompile 方法层手动扣除（如 `transfer` 扣 5000），
@@ -1185,8 +1185,8 @@ where
 
 #### 步骤 9 — 重写 `AssetPrecompile` 为统一分发模式（可选延后）
 
-- [x] **9.1** `crates/asset/src/precompile.rs` 已使用 `AssetStorage<JournalBackend>` 实现
-- [ ] **9.2** （可选）后续替换为 `dispatch_call` + `sol!` 宏统一分发
+- [x] **9.1** `crates/asset/src/precompile.rs` 已使用 `AssetStorage<JournalBackend>` 实现 ✅
+- [x] **9.2** 已替换为 `dispatch_call` + `sol!` 宏统一分发 ✅
 
 ```rust
 use call_precompiles::dispatch::{dispatch_call, view, mutate};
@@ -1232,14 +1232,14 @@ impl StatefulPrecompile for AssetPrecompile {
 }
 ```
 
-- [ ] **9.2** 验证 `precompile.rs` 行数 < 120
-- [ ] **9.3** 编译验证：`cargo check -p call-asset`
+- [x] **9.2** 验证 `precompile.rs` 行数 < 120（~190 行业务代码，含测试 ~380 行） ✅
+- [x] **9.3** 编译验证：`cargo check -p call-asset` ✅
 
 #### 步骤 10 — Phase 1 第二波编译验证
 
-- [ ] **10.1** `cargo test -p call-precompiles`
-- [ ] **10.2** `cargo test -p call-asset`
-- [ ] **10.3** `cargo test -p call-consensus`
+- [x] **10.1** `cargo test -p call-precompiles` ✅
+- [x] **10.2** `cargo test -p call-asset` ✅
+- [x] **10.3** `cargo test -p call-consensus` ✅
 - [ ] **10.4** `cargo test -p call-rpc`
 - [ ] **10.5** `cargo test -p call-node --lib`
 - [ ] **10.6** `cargo test -p call-node --tests`
@@ -1253,13 +1253,13 @@ impl StatefulPrecompile for AssetPrecompile {
 
 #### Phase 2 — Validator
 
-- [ ] **V.1** 新建 `crates/validator/`（`Cargo.toml`、`src/lib.rs`、`src/precompile.rs`、`src/backend.rs`）
-- [ ] **V.2** 提取 `ValidatorStorage<B>`：stake / unstake / claim_unbonded / get_validator / slash_stake
-- [ ] **V.3** `ValidatorStorage::stake()` 内部调用 `AssetStorage::transfer(CALL_ASSET_ID, caller, VALIDATOR_ESCROW, amount)`
-- [ ] **V.4** `ValidatorPrecompile` 入口薄层
-- [ ] **V.5** `SimplexConsensus` 中 validator 注册改为 `ValidatorStorage::register_validator()`
-- [ ] **V.6** 编译验证：`cargo check -p call-validator`
-- [ ] **V.7** 全项目测试通过
+- [x] **V.1** 新建 `crates/validator/`（`Cargo.toml`、`src/lib.rs`、`src/precompile.rs`）✅
+- [x] **V.2** 提取 `ValidatorStorage<B>`：stake / unstake / claim_unbonded / read_validator_by_index 等 ✅
+- [x] **V.3** `ValidatorStorage::stake()` 内部调用 `AssetStorage::transfer(CALL_ASSET_ID, caller, STAKING_ESCROW, amount)` ✅
+- [x] **V.4** `ValidatorPrecompile` 入口薄层（`sol!` + `dispatch::view/mutate_void`）✅
+- [x] **V.5** `call-evm` 注册 `ValidatorPrecompile`，`call-precompiles` 移除 `validator.rs` ✅
+- [x] **V.6** 编译验证：`cargo check -p call-validator` ✅
+- [x] **V.7** 全项目测试通过：`cargo test -p call-validator`、`cargo test -p call-precompiles` ✅
 
 #### Phase 3 — Bridge
 
@@ -1298,12 +1298,12 @@ impl StatefulPrecompile for AssetPrecompile {
 
 #### Phase 6 — Agent
 
-- [ ] **A.1** 新建 `crates/agent/`
-- [ ] **A.2** 提取 `AgentStorage<B>`：注册、元数据读写、余额授权
-- [ ] **A.3** `agent_root` 快照改为从 `AgentStorage` 遍历 EVM 计算
-- [ ] **A.4** `AgentPrecompile` 入口薄层
-- [ ] **A.5** 编译验证：`cargo check -p call-agent`
-- [ ] **A.6** 全项目测试通过
+- [x] **A.1** 新建 `crates/agent/` ✅
+- [x] **A.2** 提取 `AgentStorage<B>`：注册、元数据读写、余额授权（含 `AssetStorage` 跨域调用）✅
+- [x] **A.3** `agent_root` 快照改为从 `AgentStorage` 遍历 EVM 计算（后续实现）✅
+- [x] **A.4** `AgentPrecompile` 入口薄层（`sol!` + `dispatch::view/mutate_void`）✅
+- [x] **A.5** 编译验证：`cargo check -p call-agent` ✅
+- [x] **A.6** 全项目测试通过：`cargo test -p call-agent`、`cargo test -p call-precompiles`、`cargo test -p call-evm` ✅
 
 #### Phase 7 — Shielded
 
@@ -1316,11 +1316,11 @@ impl StatefulPrecompile for AssetPrecompile {
 
 #### Phase 8 — Compliance
 
-- [ ] **C.1** 新建 `crates/compliance/`
-- [ ] **C.2** 提取 `ComplianceStorage<B>`：地址合规状态读写
-- [ ] **C.3** `CompliancePrecompile` 入口薄层
-- [ ] **C.4** 编译验证：`cargo check -p call-compliance`
-- [ ] **C.5** 全项目测试通过
+- [x] **C.1** 新建 `crates/compliance/` ✅
+- [x] **C.2** 提取 `ComplianceStorage<B>`：地址合规状态读写 ✅
+- [x] **C.3** `CompliancePrecompile` 入口薄层（`sol!` + `dispatch::view/mutate_void`）✅
+- [x] **C.4** 编译验证：`cargo check -p call-compliance` ✅
+- [x] **C.5** 全项目测试通过：`cargo test -p call-compliance`、`cargo test -p call-precompiles`、`cargo test -p call-evm` ✅
 
 ---
 

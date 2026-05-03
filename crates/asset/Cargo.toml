@@ -13,4 +13,5 @@ call-primitives.workspace = true
 call-protocol.workspace = true
 call-precompiles.workspace = true
 alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
 revm-precompile.workspace = true

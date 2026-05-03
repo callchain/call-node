@@ -16,12 +16,10 @@ mod bridge;
 mod switch;
 mod shielded;
 mod governance;
-mod validator;
-mod compliance;
-mod agent;
 pub mod storage;
 pub mod helpers;
 pub mod journal_backend;
+pub mod dispatch;
 
 pub use helpers::utils::*;
 pub use oracle::*;
@@ -29,15 +27,21 @@ pub use bridge::*;
 pub use switch::*;
 pub use shielded::*;
 pub use governance::*;
-pub use validator::*;
-pub use compliance::*;
-pub use agent::*;
+
+/// Validator precompile address (0x204).
+pub const VALIDATOR_ADDRESS: Address = address!("0000000000000000000000000000000000000204");
+
+/// Compliance precompile address (0x205).
+pub const COMPLIANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000205");
+
+/// Agent precompile address (0x209).
+pub const AGENT_ADDRESS: Address = address!("0000000000000000000000000000000000000209");
 
 // Re-export types needed by external precompile implementations
 pub use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 pub use alloy_primitives::Bytes;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{address, Address, U256};
 use revm::context::Block;
 use revm::context_interface::cfg::Cfg;
 use revm::context_interface::local::LocalContextTr;
@@ -335,16 +339,17 @@ impl CallPrecompiles {
 }
 
 /// Build the full Callchain precompiles set (standard + custom).
+///
+/// Note: AssetPrecompile (0x201), ValidatorPrecompile (0x204),
+/// CompliancePrecompile (0x205), and AgentPrecompile (0x209) are registered
+/// externally by `call-evm` since they live in their own domain crates.
 pub fn build_precompiles() -> CallPrecompiles {
     CallPrecompiles::new(revm::primitives::hardfork::SpecId::CANCUN)
         .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
         .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
         .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
         .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
-        .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
-        .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
         .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
-        .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile))
 }
 
 #[cfg(test)]
@@ -374,11 +379,8 @@ mod tests {
         assert!(precompiles.contains(&BRIDGE_ADDRESS));
         assert!(precompiles.contains(&SHIELDED_ADDRESS));
         assert!(precompiles.contains(&GOVERNANCE_ADDRESS));
-        assert!(precompiles.contains(&VALIDATOR_ADDRESS));
-        assert!(precompiles.contains(&COMPLIANCE_ADDRESS));
         assert!(precompiles.contains(&SWITCH_ADDRESS));
-        assert!(precompiles.contains(&AGENT_ADDRESS));
-        // AssetPrecompile now lives in call-asset, not registered here
-        assert_eq!(precompiles.len(), 18);
+        // AssetPrecompile, ValidatorPrecompile, CompliancePrecompile, and AgentPrecompile live in domain crates
+        assert_eq!(precompiles.len(), 15);
     }
 }

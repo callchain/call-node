@@ -1,0 +1,179 @@
+//! Compliance precompile entry point (0x205).
+//!
+//! Thin wrapper that routes EVM calls to [`ComplianceStorage`] backed by
+//! [`JournalBackend`]. Business logic lives in [`ComplianceStorage`]; this
+//! file only handles ABI decode/encode, gas accounting and selector dispatch.
+
+use crate::ComplianceStorage;
+use alloy_sol_types::{sol, SolCall};
+use call_precompiles::{
+    dispatch, journal_backend::JournalBackend, require_caller,
+};
+use call_primitives::Address;
+use revm_precompile::{PrecompileError, PrecompileResult};
+
+sol! {
+    interface IProtocolCompliance {
+        function updateCompliance(uint64 assetId, address target, uint8 status) external;
+        function checkCompliance(uint64 assetId, address target) external view returns (bool);
+    }
+}
+
+/// Stateful compliance precompile backed by EVM storage.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompliancePrecompile;
+
+impl CompliancePrecompile {
+    fn update_compliance(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolCompliance::updateComplianceCall, _>(
+            calldata,
+            6000,
+            |call| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = ComplianceStorage::new(JournalBackend);
+                store
+                    .update_compliance(call.assetId, call.target, call.status, caller)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
+    }
+
+    fn check_compliance(&self, calldata: &[u8]) -> PrecompileResult {
+        dispatch::view::<IProtocolCompliance::checkComplianceCall, _, _>(
+            calldata,
+            1000,
+            |call| {
+                let store = ComplianceStorage::new(JournalBackend);
+                Ok(store.check_compliance(call.assetId, call.target))
+            },
+        )
+    }
+}
+
+impl call_precompiles::StatefulPrecompile for CompliancePrecompile {
+    fn call(&mut self,
+        calldata: &[u8],
+        msg_sender: Address,
+    ) -> PrecompileResult {
+        if calldata.len() < 4 {
+            return Err(PrecompileError::Other("invalid input".into()));
+        }
+        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        match selector {
+            IProtocolCompliance::updateComplianceCall::SELECTOR => {
+                self.update_compliance(calldata, msg_sender)
+            }
+            IProtocolCompliance::checkComplianceCall::SELECTOR => {
+                self.check_compliance(calldata)
+            }
+            _ => Err(PrecompileError::Other("unknown selector".into())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use call_precompiles::storage::HashMapStorageProvider;
+    use call_precompiles::{
+        storage::{storage_slot, StorageCtx},
+        u8_to_u256, ASSET_ADDRESS, StatefulPrecompile,
+    };
+    use call_primitives::Address;
+
+    fn address_to_u256_word(addr: Address) -> alloy_primitives::U256 {
+        let mut bytes = [0u8; 32];
+        bytes[12..32].copy_from_slice(addr.as_slice());
+        alloy_primitives::U256::from_be_bytes::<32>(bytes)
+    }
+
+    #[test]
+    fn test_compliance_precompile_update_and_check() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let issuer = Address::repeat_byte(0x11);
+        let target = Address::repeat_byte(0x22);
+
+        StorageCtx::enter(&mut provider, || {
+            // Seed asset metadata: register asset_id=1 with issuer and policy_id=1
+            let asset_id = 1u64;
+            StorageCtx::sstore(
+                ASSET_ADDRESS,
+                storage_slot(&[&asset_id.to_be_bytes()[..], b"issuer"]),
+                address_to_u256_word(issuer),
+            );
+            StorageCtx::sstore(
+                ASSET_ADDRESS,
+                storage_slot(&[&asset_id.to_be_bytes()[..], b"compliance"]),
+                u8_to_u256(1),
+            );
+
+            let mut precompile = CompliancePrecompile;
+
+            // updateCompliance(assetId=1, target, status=Restricted=3)
+            let input = IProtocolCompliance::updateComplianceCall {
+                assetId: 1,
+                target,
+                status: 3,
+            }
+            .abi_encode();
+
+            let result = precompile.call(&input, issuer);
+            assert!(result.is_ok(), "update_compliance failed: {:?}", result.err());
+
+            // checkCompliance(assetId=1, target) -> false (Restricted)
+            let input = IProtocolCompliance::checkComplianceCall {
+                assetId: 1,
+                target,
+            }
+            .abi_encode();
+
+            let result = precompile.call(&input, Address::ZERO).unwrap();
+            // bool false = 0 in last byte
+            assert_eq!(result.bytes[31], 0);
+
+            // checkCompliance(assetId=999, target) -> true (no policy, asset not registered)
+            let input = IProtocolCompliance::checkComplianceCall {
+                assetId: 999,
+                target,
+            }
+            .abi_encode();
+
+            let result = precompile.call(&input, Address::ZERO).unwrap();
+            // bool true = 1 in last byte
+            assert_eq!(result.bytes[31], 1);
+        });
+    }
+
+    #[test]
+    fn test_compliance_precompile_not_issuer() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let issuer = Address::repeat_byte(0x11);
+
+        StorageCtx::enter(&mut provider, || {
+            let asset_id = 1u64;
+            StorageCtx::sstore(
+                ASSET_ADDRESS,
+                storage_slot(&[&asset_id.to_be_bytes()[..], b"issuer"]),
+                address_to_u256_word(issuer),
+            );
+            StorageCtx::sstore(
+                ASSET_ADDRESS,
+                storage_slot(&[&asset_id.to_be_bytes()[..], b"compliance"]),
+                u8_to_u256(1),
+            );
+
+            let mut precompile = CompliancePrecompile;
+
+            let input = IProtocolCompliance::updateComplianceCall {
+                assetId: 1,
+                target: Address::repeat_byte(0x22),
+                status: 3,
+            }
+            .abi_encode();
+
+            let result = precompile.call(&input, Address::repeat_byte(0x99));
+            assert!(result.is_err());
+        });
+    }
+}

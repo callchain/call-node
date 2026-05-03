@@ -1650,10 +1650,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "call-agent"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "call-asset",
+ "call-precompiles",
+ "call-primitives",
+ "call-protocol",
+ "revm-precompile",
+]
+
+[[package]]
 name = "call-asset"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
@@ -1692,6 +1706,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "call-compliance"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "call-precompiles",
+ "call-primitives",
+ "call-protocol",
+ "revm-precompile",
 ]
 
 [[package]]
@@ -1767,11 +1793,14 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie",
+ "call-agent",
  "call-asset",
+ "call-compliance",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
  "call-storage",
+ "call-validator",
  "hex",
  "reth-db",
  "reth-db-api",
@@ -1907,6 +1936,7 @@ name = "call-precompiles"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "call-governance",
  "call-oracle",
  "call-primitives",
@@ -2076,6 +2106,19 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "call-validator"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "call-asset",
+ "call-precompiles",
+ "call-primitives",
+ "call-protocol",
+ "revm-precompile",
 ]
 
 [[package]]
