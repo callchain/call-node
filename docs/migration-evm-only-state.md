@@ -17,7 +17,7 @@
 | Phase 7 — Persistence | ✅ Done | `LoadedState` simplified to `evm_state` + `agent_nonces` + `governance` + `fee_params`. Protocol-state save/load removed. Unused DB table types cleaned up from `reth_db.rs`. Only 14 used table types remain. |
 | Phase 8 — Genesis | ✅ Done | Genesis initializes only `EvmState` with pre-seeded system storage slots. No separate `AccountState`, `AssetRegistry`, `ComplianceEngine`, etc. initialization. |
 | Phase 9 — Testing | ✅ Done | Precompile unit tests pass (58/58). All crate tests pass: `call-consensus` 76/76, `call-rpc` 17/17, `call-node` lib 65/65, `call-node` integration all pass. |
-| Phase 10 — Cleanup | ✅ Done | Dead protocol-state structs removed: `FeeCurrencyRegistry` (deleted), `ValidatorStateManager`/`ValidatorMetaSnapshot` (removed from `validator.rs`), `AgentRegistry`/`AgentBalances` (deleted from `call_agent`), unused DB table types removed from `reth_db.rs`, `save_balances`/`load_balances` deleted. `AccountState`, `AssetRegistry`, `ComplianceEngine`, `BridgeStateManager`, `ShieldedState` remain in source crates (still used by bridge/issuer/payload-builder). `OracleManager` and `GovernanceManager` remain as sidecars. `docs/spec.md` and `docs/spec_cn.md` BlockHeader sections updated. |
+| Phase 10 — Cleanup | ✅ Done | All dead protocol-state structs removed: `AccountState`, `AssetRegistry`, `ComplianceEngine`, `BridgeStateManager`, `FeeCurrencyRegistry`, `ValidatorStateManager`/`ValidatorMetaSnapshot`, `AgentRegistry`/`AgentBalances`, `IssuerState`, `SponsorRegistry`. Unused DB table types removed from `reth_db.rs`. `save_balances`/`load_balances` deleted. `OracleManager` and `GovernanceManager` remain as sidecars. `docs/spec.md` and `docs/spec_cn.md` BlockHeader sections updated. |
 
 **Target architecture:**
 - `BlockHeader` has a single `state_root` field = `evm_state_root`.
@@ -233,7 +233,7 @@ pub struct RpcState {
 
 ## Phase 7: Persistence Layer
 
-**Status:** 🔄 Partial
+**Status:** ✅ Complete
 
 **Files:** `crates/node/src/state_persist.rs`, `crates/storage/src/reth_db.rs`
 
@@ -268,9 +268,9 @@ pub(crate) struct LoadedState {
 - `load_receipts_by_block`, `delete_receipts_by_block` deleted from `state_persist.rs`
 - Balance/asset/bridge/shielded/agent/validator/compliance persistence removed
 
-### 7.4 Remaining cleanup
+### 7.4 Cleanup completed
 
-- Unused DB table types in `reth_db.rs` (e.g., `CallProtocolAssets`, `CallBridgeOps`, `CallShieldedNullifiers`, etc.) — defined but never used
+- Unused DB table types removed from `reth_db.rs` (e.g., `CallProtocolAssets`, `CallBridgeOps`, `CallShieldedNullifiers`, etc.)
 
 ---
 
@@ -308,30 +308,32 @@ All precompiles, consensus, RPC, and integration tests pass after migration.
 
 ## Phase 10: Cleanup & Deprecation
 
-**Status:** 🔄 Partial
+**Status:** ✅ Complete
 
-### 10.1 Dead structs (still exist in source, unused in node/rpc paths)
+### 10.1 Dead structs (all removed)
 
 | Struct | Location | Status |
 |---|---|---|
-| `AccountState` | `call_protocol::account` | Exists, unused |
-| `AssetRegistry` | `call_protocol::registry` | Exists, unused |
-| `ComplianceEngine` | `call_protocol::compliance` | Exists, unused |
-| `FeeCurrencyRegistry` | `call_protocol::fee_currency` | Exists, unused |
-| `BridgeStateManager` | `call_bridge::lib` | Exists, unused |
-| `ValidatorStateManager` | `call_consensus::validator` | Exists, unused |
-| `AgentRegistry` | `call_agent::registry` | Exists, unused |
-| `AgentBalances` | `call_agent::balances` | Exists, unused |
-| `ShieldedState` | `call_shielded::lib` | Exists, unused |
-| `OracleManager` | `call_oracle::manager` | **Used as sidecar** |
-| `GovernanceManager` | `call_governance` | **Used as sidecar** |
+| `AccountState` | `call_protocol::account` | ✅ Deleted |
+| `AssetRegistry` | `call_protocol::registry` | ✅ Deleted |
+| `ComplianceEngine` | `call_protocol::compliance` | ✅ Gutted — `CompliancePolicy`/`ComplianceStatus` enums kept for precompile |
+| `FeeCurrencyRegistry` | `call_protocol::fee_currency` | ✅ Deleted |
+| `BridgeStateManager` | `call_bridge::lib` | ✅ Deleted |
+| `ValidatorStateManager`/`ValidatorMetaSnapshot` | `call_consensus::validator` | ✅ Removed from `validator.rs` |
+| `AgentRegistry` | `call_agent::registry` | ✅ Deleted |
+| `AgentBalances` | `call_agent::balances` | ✅ Deleted |
+| `IssuerState` | `call_protocol::issuer` | ✅ Deleted |
+| `SponsorRegistry` | `call_protocol::sponsor` | ✅ Deleted |
+| `ShieldedState` | `call_shielded::lib` | ✅ Retained in `call_shielded` (active, not protocol-state) |
+| `OracleManager` | `call_oracle::manager` | ✅ **Used as sidecar** |
+| `GovernanceManager` | `call_governance` | ✅ **Used as sidecar** |
 
-### 10.2 Remaining cleanup tasks
+### 10.2 Cleanup completed
 
-- Delete unused DB table types from `reth_db.rs`
-- Delete dead protocol-state structs (or mark `#[deprecated]`)
-- Remove `save_balances` / `load_balances` from `call_storage` (only used in tests)
-- Update `docs/spec.md` / `docs/spec_cn.md` BlockHeader section
+- ✅ Deleted unused DB table types from `reth_db.rs`
+- ✅ Deleted dead protocol-state structs from source crates
+- ✅ Removed `save_balances` / `load_balances` from `call_storage`
+- ✅ Updated `docs/spec.md` / `docs/spec_cn.md` BlockHeader section
 
 ---
 
