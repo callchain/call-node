@@ -70,7 +70,7 @@ call-precompiles ──▶ call-protocol（StorageBackend trait）
                         │
 call-asset ─────────────┼──▶ call-precompiles（JournalBackend + helpers）
                         │
-call-consensus ─────────┼──▶ call-asset（AssetManager + EvmStateBackend）
+call-consensus ─────────┼──▶ call-asset（AssetStorage + EvmStateBackend）
 call-rpc ───────────────┤
 call-node ──────────────┤
 call-chainspec ─────────┘
@@ -90,7 +90,7 @@ call-chainspec ─────────┘
 crates/asset/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs              # AssetManager<B> 业务逻辑 + 错误类型
+    ├── lib.rs              # AssetStorage<B> 业务逻辑 + 错误类型
     ├── precompile.rs       # AssetPrecompile（selector 分发，薄层）
     └── backend.rs          # EvmStateBackend（&mut EvmState 包装）
 ```
@@ -180,18 +180,18 @@ impl<'a> StorageBackend for EvmStateBackend<'a> {
 }
 ```
 
-**`src/lib.rs`（AssetManager 业务逻辑）：**
+**`src/lib.rs`（AssetStorage 业务逻辑）：**
 
 ```rust
 use call_precompiles::{slot_allowance, slot_asset_meta, slot_balance, ...};
 use call_protocol::storage_backend::StorageBackend;
 use call_primitives::{Address, U256};
 
-pub struct AssetManager<B: StorageBackend> {
+pub struct AssetStorage<B: StorageBackend> {
     backend: B,
 }
 
-impl<B: StorageBackend> AssetManager<B> {
+impl<B: StorageBackend> AssetStorage<B> {
     pub fn new(backend: B) -> Self {
         Self { backend }
     }
@@ -262,7 +262,7 @@ impl StatefulPrecompile for AssetPrecompile {
             TRANSFER_SELECTOR => {
                 let (asset_id, to, amount) = decode_asset_addr_amount(calldata)?;
                 let from = require_caller(msg_sender)?;
-                let mut store = AssetManager::new(JournalBackend);
+                let mut store = AssetStorage::new(JournalBackend);
                 store.transfer(asset_id, from, to, amount)
                     .map_err(|e| PrecompileError::Other(e.to_string()))?;
                 ok_empty()
@@ -314,7 +314,7 @@ sol! {
 }
 
 pub struct AssetPrecompile {
-    storage: AssetManager<JournalBackend>,
+    storage: AssetStorage<JournalBackend>,
 }
 
 impl StatefulPrecompile for AssetPrecompile {
@@ -485,7 +485,7 @@ impl StorageBackend for JournalBackend {
 **业务层彻底无 gas：**
 
 ```rust
-// AssetManager::transfer 里没有任何 gas 相关代码
+// AssetStorage::transfer 里没有任何 gas 相关代码
 pub fn transfer(&mut self, asset_id: u64, from: Address, to: Address, amount: u128) -> Result<(), AssetError> {
     // 只有业务逻辑，gas 由 backend 自动处理
     let from_bal = self.read_balance(asset_id, from);
@@ -503,13 +503,13 @@ pub fn transfer(&mut self, asset_id: u64, from: Address, to: Address, amount: u1
 
 | 文件 | 原用法 | 新用法 |
 |------|--------|--------|
-| `crates/consensus/src/exec/state_accessors.rs` | `seed_balance`、`seed_asset` | `AssetManager::new(EvmStateBackend).write_balance(...)` |
-| `crates/consensus/src/block.rs` | `add_balance_evm` | `AssetManager::new(EvmStateBackend).add_balance(...)` |
-| `crates/rpc/src/handlers/state.rs` | `read_balance`、`read_asset_*` | `AssetManager::new(EvmStateBackend).read_balance(...)` |
-| `crates/node/src/lib.rs`（创世） | `seed_balance`、`seed_asset` | `AssetManager::new(EvmStateBackend)` |
-| `crates/node/src/tests.rs` | `seed_balance` | `AssetManager::new(EvmStateBackend)` |
-| `crates/node/tests/e2e/*.rs` | `seed_balance`、`seed_asset` | `AssetManager::new(EvmStateBackend)` |
-| `crates/chainspec/src/genesis.rs` | `seed_asset` | `AssetManager::new(EvmStateBackend)` |
+| `crates/consensus/src/exec/state_accessors.rs` | `seed_balance`、`seed_asset` | `AssetStorage::new(EvmStateBackend).write_balance(...)` |
+| `crates/consensus/src/block.rs` | `add_balance_evm` | `AssetStorage::new(EvmStateBackend).add_balance(...)` |
+| `crates/rpc/src/handlers/state.rs` | `read_balance`、`read_asset_*` | `AssetStorage::new(EvmStateBackend).read_balance(...)` |
+| `crates/node/src/lib.rs`（创世） | `seed_balance`、`seed_asset` | `AssetStorage::new(EvmStateBackend)` |
+| `crates/node/src/tests.rs` | `seed_balance` | `AssetStorage::new(EvmStateBackend)` |
+| `crates/node/tests/e2e/*.rs` | `seed_balance`、`seed_asset` | `AssetStorage::new(EvmStateBackend)` |
+| `crates/chainspec/src/genesis.rs` | `seed_asset` | `AssetStorage::new(EvmStateBackend)` |
 
 **示例：**
 
@@ -520,8 +520,8 @@ seed_balance(&mut evm, 1, addr, 1000);
 seed_asset(&mut evm, 1, "TEST", "Test Token", 18, issuer, 0, 8000, 0);
 
 // 改造后（call-asset）
-use call_asset::{AssetManager, EvmStateBackend};
-let mut store = AssetManager::new(EvmStateBackend(&mut evm));
+use call_asset::{AssetStorage, EvmStateBackend};
+let mut store = AssetStorage::new(EvmStateBackend(&mut evm));
 store.write_balance(1, addr, 1000);
 store.register(1, "TEST", "Test Token", 18, issuer, 0, 8000, 0);
 ```
@@ -580,9 +580,9 @@ crates/<domain>/
 
 **改造影响：**
 - `ValidatorPrecompile` → `crates/validator/src/precompile.rs`（~60 行，统一分发后）
-- 业务逻辑提取为 `ValidatorManager<B>`，包含：`stake`、`unstake`、`claim_unbonded`、`get_validator`、`get_validator_by_index`
-- **跨域调用：** `ValidatorManager::stake()` 内部调用 `AssetManager::transfer(CALL_ASSET_ID, caller, VALIDATOR_ESCROW, amount)`
-- `SimplexConsensus`（`crates/consensus/`）当前直接操作 `evm_state.set_storage` 进行 validator 注册，改造后改用 `ValidatorManager::register_validator()`
+- 业务逻辑提取为 `ValidatorStorage<B>`，包含：`stake`、`unstake`、`claim_unbonded`、`get_validator`、`get_validator_by_index`
+- **跨域调用：** `ValidatorStorage::stake()` 内部调用 `AssetStorage::transfer(CALL_ASSET_ID, caller, VALIDATOR_ESCROW, amount)`
+- `SimplexConsensus`（`crates/consensus/`）当前直接操作 `evm_state.set_storage` 进行 validator 注册，改造后改用 `ValidatorStorage::register_validator()`
 
 **复杂度：** 中。核心挑战是质押 escrow 与 Asset 的耦合，但模式清晰（类似 Asset 内部转账）。
 
@@ -599,10 +599,10 @@ crates/<domain>/
 
 **改造影响：**
 - `BridgePrecompile` → `crates/bridge/src/precompile.rs`（~100 行）
-- 业务逻辑提取为 `BridgeManager<B>`，包含：`external_deposit`、`external_withdraw`、`bridge_to_evm`、`bridge_to_protocol`、`initiate_challenge`、`resolve_challenge`、`withdraw_bond`
+- 业务逻辑提取为 `BridgeStorage<B>`，包含：`external_deposit`、`external_withdraw`、`bridge_to_evm`、`bridge_to_protocol`、`initiate_challenge`、`resolve_challenge`、`withdraw_bond`
 - **Pending deposit 队列：** 当前 `BridgeState` 结构体已废弃（标记为 `// Deprecated`），预编译已用 EVM storage slot 存储 pending deposit。但 `crates/bridge/src/state.rs` 中的 `BridgeStateManager`（内存状态）仍被 `block_producer.rs` 使用，需彻底移除。
-- **Challenge 系统：** Challenge 的 bond 扣款走 `AssetManager::transfer`，challenge 成功后的 slash 走 `ValidatorManager::slash_stake`
-- `block_producer.rs:104-125` 的 deposit settlement 逻辑改为：从 `BridgeManager` 读取 finalized deposits，调用 `AssetManager::add_balance` 到账
+- **Challenge 系统：** Challenge 的 bond 扣款走 `AssetStorage::transfer`，challenge 成功后的 slash 走 `ValidatorStorage::slash_stake`
+- `block_producer.rs:104-125` 的 deposit settlement 逻辑改为：从 `BridgeStorage` 读取 finalized deposits，调用 `AssetStorage::add_balance` 到账
 
 **复杂度：** 中高。Bridge 是交互最复杂的预编译（challenge + 多币种 + 跨链），但大部分逻辑已在预编译中，只需提取。
 
@@ -617,9 +617,9 @@ crates/<domain>/
 
 **改造影响：**
 - `OraclePrecompile` → `crates/oracle/src/precompile.rs`（~40 行）
-- 业务逻辑提取为 `OracleManager<B>`，包含：`submit_price`、`get_price`、`get_twap`、`is_stale`
-- **奖励池：** 当前预编译中 `add_oracle_reward` / `read_oracle_reward_pool` 已在 EVM storage 中。但 `crates/consensus/src/oracle/` 里的 `OracleManager`（内存版）维护了 `contributors`、`reward_pool` 等，需删除。
-- **出块器改造：** `block_producer.rs:144-212` 的 oracle period advancement、outlier slashing、reward distribution 改为：从 `OracleManager` 读取价格历史，计算 outliers，调用 `ValidatorManager::slash_stake`，调用 `AssetManager::transfer` 分发奖励。
+- 业务逻辑提取为 `OracleStorage<B>`，包含：`submit_price`、`get_price`、`get_twap`、`is_stale`
+- **奖励池：** 当前预编译中 `add_oracle_reward` / `read_oracle_reward_pool` 已在 EVM storage 中。但 `crates/consensus/src/oracle/` 里的旧 `OracleManager`（内存版）维护了 `contributors`、`reward_pool` 等，需删除。
+- **出块器改造：** `block_producer.rs:144-212` 的 oracle period advancement、outlier slashing、reward distribution 改为：从 `OracleStorage` 读取价格历史，计算 outliers，调用 `ValidatorStorage::slash_stake`，调用 `AssetStorage::transfer` 分发奖励。
 
 **复杂度：** 中。核心挑战是出块器中的 outlier detection 和奖励分发逻辑需要跨域调用（Oracle → Validator → Asset）。
 
@@ -651,8 +651,8 @@ crates/<domain>/
 
 **改造影响：**
 - `AgentPrecompile` → `crates/agent/src/precompile.rs`
-- 业务逻辑提取为 `AgentManager<B>`
-- `agent_root` 快照当前由内存 `AgentRegistry` 计算，改造后改为从 `AgentManager` 遍历 EVM storage 计算（或缓存）
+- 业务逻辑提取为 `AgentStorage<B>`
+- `agent_root` 快照当前由内存 `AgentRegistry` 计算，改造后改为从 `AgentStorage` 遍历 EVM storage 计算（或缓存）
 
 **复杂度：** 低。
 
@@ -666,7 +666,7 @@ crates/<domain>/
 
 **改造影响：**
 - `ShieldedPrecompile` → `crates/shielded/src/precompile.rs`
-- 业务逻辑提取为 `ShieldedManager<B>`
+- 业务逻辑提取为 `ShieldedStorage<B>`
 - **Merkle tree 重建：** 当前内存 `shielded_state` 维护了完整 Merkle tree（不只是 root）。改造后：tree 从 EVM commitments 重建，或作为 sidecar 缓存（不持久化，重启后重建）
 - `merkle_root` 快照直接读 EVM storage
 
@@ -682,7 +682,7 @@ crates/<domain>/
 
 **改造影响：**
 - `CompliancePrecompile` → `crates/compliance/src/precompile.rs`
-- 业务逻辑提取为 `ComplianceManager<B>`
+- 业务逻辑提取为 `ComplianceStorage<B>`
 - 当前 `RpcState` 中的 `compliance_engine` 内存字段删除，所有合规检查改为读 EVM storage
 
 **复杂度：** 低。
@@ -731,7 +731,7 @@ call-validator（依赖 asset）
 | `emergency_pause` | 紧急暂停状态 | `slot_gov_paused` |
 | `events` | 内存事件队列 | **临时生成**（`advance()` 扫描时生成，立即消费） |
 | `executor` | 提案执行器 | **保留**（`ProposalExecutor` trait 不变） |
-| `balance_source` | 余额来源 | 删除，统一走 `AssetManager` |
+| `balance_source` | 余额来源 | 删除，统一走 `AssetStorage` |
 | `scheduled_upgrades` | 计划升级 | 新增 `slot_gov_upgrade` EVM slot |
 | `compliance_policies` | 合规策略 | Compliance precompile（只读） |
 | `fee_currencies` | 手续费币种 | 新增 `slot_gov_fee_currency` EVM slot |
@@ -794,13 +794,13 @@ impl<'a, B: StorageBackend> GovernanceAdvancer<'a, B> {
 
 ```
 GovernanceAdvancer
-  ├─ 读 ──▶ AssetManager（保证金退回时的余额操作）
-  ├─ 读 ──▶ ValidatorManager（总质押量用于 quorum 计算）
-  ├─ 读 ──▶ ComplianceManager（验证合规策略提案）
+  ├─ 读 ──▶ AssetStorage（保证金退回时的余额操作）
+  ├─ 读 ──▶ ValidatorStorage（总质押量用于 quorum 计算）
+  ├─ 读 ──▶ ComplianceStorage（验证合规策略提案）
   └─ 调用 ──▶ ProposalExecutor（跨系统 side effects）
 ```
 
-`call-governance` crate 将依赖 `call-asset`、`call-validator`、`call-compliance` 的 `*Manager` 类型（只读），但**不循环依赖**——这些领域 crate 不依赖 `call-governance`。
+`call-governance` crate 将依赖 `call-asset`、`call-validator`、`call-compliance` 的 `*Storage` 类型（只读），但**不循环依赖**——这些领域 crate 不依赖 `call-governance`。
 
 ---
 
@@ -861,15 +861,15 @@ GovernanceAdvancer
 
 | 函数 | 原 precompile 位置 | 原 protocol 位置 | 新位置 |
 |------|-------------------|-----------------|--------|
-| `getBalance` | `AssetPrecompile::get_balance` | `read_balance` | `call-asset::AssetManager::read_balance` |
-| `getAssetInfo` | `AssetPrecompile::get_asset_info` | `read_asset_symbol/name/...` | `call-asset::AssetManager::read_meta` |
-| `transfer` | `AssetPrecompile::transfer` | `deduct_balance_evm` + `add_balance_evm` | `call-asset::AssetManager::transfer` |
-| `batchTransfer` | `AssetPrecompile::batch_transfer` | （内联） | `call-asset::AssetManager::batch_transfer` |
-| `approve` | `AssetPrecompile::approve` | `seed_allowance` | `call-asset::AssetManager::approve` |
-| `transferFrom` | `AssetPrecompile::transfer_from` | `read_allowance` | `call-asset::AssetManager::transfer_from` |
-| `mint` | `AssetPrecompile::mint` | `add_asset_supply_evm` + `add_balance_evm` | `call-asset::AssetManager::mint` |
-| `burn` | `AssetPrecompile::burn` | `deduct_balance_evm` + supply 更新 | `call-asset::AssetManager::burn` |
-| `register` | `AssetPrecompile::register` | `seed_asset` | `call-asset::AssetManager::register` |
-| `checkCompliance` | `AssetPrecompile::check_compliance` | `read_compliance_status` | `call-asset::AssetManager::check_compliance` |
-| `seed_balance` | — | `seed_balance` | `call-asset::AssetManager::write_balance` |
-| `seed_asset` | — | `seed_asset` | `call-asset::AssetManager::register` / `write_meta` |
+| `getBalance` | `AssetPrecompile::get_balance` | `read_balance` | `call-asset::AssetStorage::read_balance` |
+| `getAssetInfo` | `AssetPrecompile::get_asset_info` | `read_asset_symbol/name/...` | `call-asset::AssetStorage::read_meta` |
+| `transfer` | `AssetPrecompile::transfer` | `deduct_balance_evm` + `add_balance_evm` | `call-asset::AssetStorage::transfer` |
+| `batchTransfer` | `AssetPrecompile::batch_transfer` | （内联） | `call-asset::AssetStorage::batch_transfer` |
+| `approve` | `AssetPrecompile::approve` | `seed_allowance` | `call-asset::AssetStorage::approve` |
+| `transferFrom` | `AssetPrecompile::transfer_from` | `read_allowance` | `call-asset::AssetStorage::transfer_from` |
+| `mint` | `AssetPrecompile::mint` | `add_asset_supply_evm` + `add_balance_evm` | `call-asset::AssetStorage::mint` |
+| `burn` | `AssetPrecompile::burn` | `deduct_balance_evm` + supply 更新 | `call-asset::AssetStorage::burn` |
+| `register` | `AssetPrecompile::register` | `seed_asset` | `call-asset::AssetStorage::register` |
+| `checkCompliance` | `AssetPrecompile::check_compliance` | `read_compliance_status` | `call-asset::AssetStorage::check_compliance` |
+| `seed_balance` | — | `seed_balance` | `call-asset::AssetStorage::write_balance` |
+| `seed_asset` | — | `seed_asset` | `call-asset::AssetStorage::register` / `write_meta` |
