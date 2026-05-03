@@ -6,9 +6,6 @@
 use call_consensus::block::{Block, BlockExecutionResult, BlockContext, ExecutionState, Subsystems};
 use call_consensus::validator::ConsensusError;
 use call_primitives::{BlockHash, Hash};
-use call_protocol::AccountState;
-use call_protocol::compliance::ComplianceEngine;
-use call_protocol::registry::AssetRegistry;
 use call_protocol::transaction::FeeParams;
 use call_payload_types::{BlockLimits, PayloadAttributes};
 use call_transaction_pool::MempoolSelection;
@@ -89,10 +86,6 @@ impl PayloadBuilder {
         &self,
         attrs: &PayloadAttributes,
         evm_txs: Vec<Vec<u8>>,
-        _account: &mut AccountState,
-        _registry: &mut AssetRegistry,
-        _compliance: &mut ComplianceEngine,
-        shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         state_root: Hash,
         bridge_config: Option<&call_bridge::BridgeConfig>,
@@ -188,10 +181,6 @@ impl PayloadBuilder {
         &self,
         attrs: &PayloadAttributes,
         selection: MempoolSelection,
-        _account: &mut AccountState,
-        _registry: &mut AssetRegistry,
-        _compliance: &mut ComplianceEngine,
-        shielded_state: &mut call_shielded::ShieldedState,
         evm_state: &mut call_evm::EvmState,
         evm_state_root: Hash,
         bridge_config: Option<&call_bridge::BridgeConfig>,
@@ -201,10 +190,6 @@ impl PayloadBuilder {
         self.build(
             attrs,
             evm_txs,
-            _account,
-            _registry,
-            _compliance,
-            shielded_state,
             evm_state,
             evm_state_root,
             bridge_config,
@@ -249,20 +234,15 @@ mod tests {
 
         let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
 
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::new();
-        let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_instructions::seed_balance(
+            &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000,
+        );
 
         let payload = builder.build(
             &attrs,
             evm_txs,
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
             None,
@@ -283,23 +263,17 @@ mod tests {
         let builder = PayloadBuilder::with_limits(fee_params, limits);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        // Send more evm txs than limit
         let evm_txs: Vec<Vec<u8>> = (0..10).map(|_| make_evm_tx_bytes(21_000)).collect();
 
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 100_000).unwrap();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::new();
-        let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_instructions::seed_balance(
+            &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 100_000,
+        );
 
         let payload = builder.build(
             &attrs,
             evm_txs,
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
             None,
@@ -310,7 +284,6 @@ mod tests {
 
     #[test]
     fn test_payload_evm_gas_limit() {
-        // Test that EVM transactions exceeding gas limits are skipped.
         let fee_params = FeeParams::default();
         let limits = BlockLimits {
             max_evm_gas_per_block: 50_000,
@@ -320,32 +293,25 @@ mod tests {
         let builder = PayloadBuilder::with_limits(fee_params, limits);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        // Two EVM txs: one within gas limit, one exceeding
         let evm_txs: Vec<Vec<u8>> = vec![
             make_evm_tx_bytes(21_000),
             make_evm_tx_bytes(100_000),
         ];
 
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 30_000).unwrap();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::new();
-        let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
+        evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_instructions::seed_balance(
+            &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 30_000,
+        );
 
         let payload = builder.build(
             &attrs,
             evm_txs,
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
             None,
         ).unwrap();
 
-        // Only the tx within gas limit should be included
         assert_eq!(payload.tx_count, 1);
     }
 
@@ -369,12 +335,6 @@ mod tests {
             serde_json::to_vec(&tx).unwrap()
         }];
 
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 10_000_000).unwrap();
-        let mut registry = AssetRegistry::new();
-        registry.register_asset("CALL".into(), "Callchain".into(), 18, test_sender(), 0, 0, 0).unwrap();
-        let mut compliance = ComplianceEngine::new();
-        let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
         evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
@@ -382,7 +342,7 @@ mod tests {
             &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000_000,
         );
 
-        // Deploy wrapped token contract for asset 1 (use separate deployer to avoid nonce conflict)
+        // Deploy wrapped token contract for asset 1
         let deployer = test_addr(99);
         evm_state.set_balance(deployer, call_primitives::U256::from(100_000_000_000_000u128));
         let deploy_executor = call_evm::EvmExecutor::new(1);
@@ -400,7 +360,6 @@ mod tests {
             )
             .unwrap();
         assert!(deploy_result.success);
-        registry.set_evm_contract_address(1, contract_addr);
 
         // Seed EVM storage for bridge ops
         evm_instructions::seed_asset(
@@ -412,7 +371,7 @@ mod tests {
             test_sender(),
             0,
             0,
-            0, // active
+            0,
         );
         evm_instructions::seed_bridge_contract(&mut evm_state, 1, contract_addr);
 
@@ -421,10 +380,6 @@ mod tests {
         let payload = builder.build(
             &attrs,
             evm_txs,
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
             Some(&bridge_config),
@@ -441,22 +396,12 @@ mod tests {
 
         let evm_txs: Vec<Vec<u8>> = vec![make_evm_tx_bytes(21_000)];
 
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::new();
-        let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
 
-        // Hash::ZERO expected bypasses the state-root check; payload should succeed
         let result = builder.build(
             &attrs,
             evm_txs,
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
             None,
@@ -485,21 +430,15 @@ mod tests {
             }],
         };
 
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 10_000_000).unwrap();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::new();
-        let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_instructions::seed_balance(
+            &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000_000,
+        );
 
         let payload = builder.build_from_mempool(
             &attrs,
             selection,
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
             None,
@@ -520,7 +459,6 @@ mod tests {
         let builder = PayloadBuilder::with_limits(fee_params, limits);
         let attrs = PayloadAttributes::new(1, BlockHash::ZERO, 1000, 1, ProtocolVersion::new(1, 0, 0));
 
-        // One small EVM tx, one large EVM tx
         let small_tx = serde_json::to_vec(&call_evm::EvmTransaction {
             caller: test_sender(),
             nonce: 0,
@@ -543,27 +481,20 @@ mod tests {
         }).unwrap();
         let evm_txs: Vec<Vec<u8>> = vec![small_tx, large_tx];
 
-        let mut account = AccountState::new();
-        account.balances.set_balance(1, test_sender(), 10_000).unwrap();
-        let mut registry = AssetRegistry::new();
-        let mut compliance = ComplianceEngine::new();
-        let mut shielded_state = call_shielded::ShieldedState::default();
         let mut evm_state = call_evm::EvmState::new();
         evm_state.set_balance(test_sender(), call_primitives::U256::from(100_000_000_000_000u128));
+        evm_instructions::seed_balance(
+            &mut evm_state, call_protocol::CALL_ASSET_ID, test_sender(), 10_000,
+        );
 
         let payload = builder.build(
             &attrs,
             evm_txs,
-            &mut account,
-            &mut registry,
-            &mut compliance,
-            &mut shielded_state,
             &mut evm_state,
             Hash::ZERO,
             None,
         ).unwrap();
 
-        // Only the small tx should be included
         assert_eq!(payload.tx_count, 1);
     }
 }

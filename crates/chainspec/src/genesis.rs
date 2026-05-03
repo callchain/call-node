@@ -7,7 +7,6 @@ use call_consensus::proposer::ConsensusParams;
 use call_crypto::keccak256;
 use call_evm::{EvmExecutor, EvmState};
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
-use call_protocol::compliance::ComplianceEngine;
 use call_protocol::transaction::FeeParams;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
@@ -171,8 +170,6 @@ pub enum GenesisError {
 pub struct GenesisState {
     /// Unified state root
     pub state_root: Hash,
-    /// Compliance engine
-    pub compliance: ComplianceEngine,
     /// EVM state
     pub evm_state: EvmState,
     /// Registered fee currency asset IDs
@@ -207,7 +204,6 @@ impl GenesisExecutor {
         self.validate()?;
 
         // Step 2: Initialize state tables
-        let compliance = ComplianceEngine::new();
         let mut evm_state = EvmState::new();
 
         // Step 3: Register assets and distribute initial balances (EVM only)
@@ -227,7 +223,6 @@ impl GenesisExecutor {
 
         Ok(GenesisState {
             state_root,
-            compliance,
             evm_state,
             fee_currencies,
         })

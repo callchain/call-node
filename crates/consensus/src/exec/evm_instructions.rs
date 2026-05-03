@@ -482,6 +482,16 @@ pub fn seed_bridge_external_paused(evm_state: &mut EvmState, paused: bool) {
     evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_external_paused(), if paused { U256::from(1u8) } else { U256::ZERO });
 }
 
+/// Read whether bridge is paused for a specific asset from EVM storage.
+pub fn read_bridge_paused(evm_state: &EvmState, asset_id: u64) -> bool {
+    evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_paused(asset_id)) != U256::ZERO
+}
+
+/// Set bridge pause status for a specific asset in EVM storage.
+pub fn seed_bridge_paused(evm_state: &mut EvmState, asset_id: u64, paused: bool) {
+    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_paused(asset_id), if paused { U256::from(1u8) } else { U256::ZERO });
+}
+
 /// Finalize pending external deposits whose challenge period has expired.
 /// Credits recipient balances and increases asset supply for all finalized deposits.
 /// Returns the number of deposits finalized.

@@ -1,27 +1,19 @@
 //! Callchain Protocol Layer — Core protocol types, execution, and economics.
 
 pub mod security;
-pub mod registry;
-pub mod account;
 pub mod compliance;
 pub mod transaction;
 pub mod smart_accounts;
-pub mod sponsor;
 pub mod receipts;
-pub mod issuer;
 pub mod economics;
 
 // Transaction submodules
 pub mod tx;
 
-pub use registry::*;
-pub use account::*;
 pub use compliance::*;
 pub use transaction::*;
 pub use smart_accounts::*;
-pub use sponsor::*;
 pub use receipts::*;
-pub use issuer::*;
 pub use economics::*;
 
 use alloy_primitives::Address;

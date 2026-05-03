@@ -9,9 +9,7 @@
 pub mod types;
 pub(crate) mod deposit;
 pub(crate) mod withdraw;
-pub(crate) mod challenge;
 
 pub use types::*;
 pub use deposit::*;
 pub use withdraw::*;
-pub use challenge::*;
