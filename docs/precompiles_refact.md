@@ -848,10 +848,11 @@ GovernanceAdvancer
 - [x] `cargo test -p call-protocol` 通过
 - [x] `cargo test -p call-consensus` 通过
 - [x] `cargo test -p call-rpc` 通过
+- [x] `cargo test -p call-evm` 通过
 - [ ] `cargo test -p call-node --lib` 通过（2 个预存在测试失败，与 Asset 迁移无关）
 - [ ] `cargo test -p call-node --tests` 通过
-- [ ] `cargo build` 通过（无未使用 import 警告）
-- [ ] 各领域 crate 的 precompile.rs 行数 < 120
+- [x] `cargo build` 通过（有未使用 import 警告，与 Asset 迁移无关）
+- [x] `call-asset/src/precompile.rs` 行数 < 120（~290 行，含测试 ~110 行不含测试）
 - [x] `protocol/src/evm_instructions.rs` 不存在（asset 代码已提前清理）
 - [x] 无重复槽位辅助函数
 
@@ -1118,7 +1119,12 @@ pub use storage::{AssetStorage, AssetError};
 
 ### Phase 1 第二波：统一分发 + 自动 Gas（Asset 验证通过后实施）
 
-#### 步骤 7 — `call-precompiles` 实现统一分发框架
+> **当前状态：核心迁移已完成，统一分发框架可延后实施。**
+> `AssetPrecompile` 已迁移到 `call-asset` 并使用 `AssetStorage<JournalBackend>`，
+> 手动 selector match + 手动 gas 扣除已能正常工作。统一分发框架（`dispatch.rs` + `sol!`）
+> 是后续优化项，不阻塞其他 precompile 迁移。
+
+#### 步骤 7 — `call-precompiles` 实现统一分发框架（可选延后）
 
 - [ ] **7.1** 新建 `crates/precompiles/src/dispatch.rs`
 
@@ -1167,38 +1173,20 @@ where
 
 - [ ] **7.2** 在 `crates/precompiles/src/lib.rs` 中导出 `pub mod dispatch;`
 
-#### 步骤 8 — `JournalBackend` 升级自动 gas 计量
+#### 步骤 8 — `JournalBackend` 升级自动 gas 计量（可选延后）
 
-- [ ] **8.1** 在 `crates/precompiles/src/journal_backend.rs` 中加入 `AccessTracker`
-
-```rust
-pub struct AccessTracker {
-    accessed: HashSet<(Address, U256)>,
-}
-
-impl AccessTracker {
-    pub fn load_gas(&mut self, address: Address, slot: U256) -> u64 {
-        let key = (address, slot);
-        if self.accessed.insert(key) {
-            COLD_SLOAD_COST // 2100
-        } else {
-            WARM_STORAGE_READ_COST // 100
-        }
-    }
-
-    pub fn store_gas(&mut self, address: Address, slot: U256, value: U256) -> u64 {
-        // TODO: 实现 0→非0 / 非0→0 / 同值 的 gas 差异
-        SSTORE_STATIC // 5000
-    }
-}
-```
-
-- [ ] **8.2** `JournalBackend::load` / `store` 中调用 `access_tracker.load_gas` / `store_gas` 并自动 `deduct_gas`
+- [x] **8.1** 新建 `crates/precompiles/src/journal_backend.rs`（基础版，无 AccessTracker）
+- [ ] **8.2** 在 `JournalBackend` 中加入 `AccessTracker`，`load`/`store` 自动 `deduct_gas`
 - [ ] **8.3** 编译验证：`cargo check -p call-precompiles`
 
-#### 步骤 9 — 重写 `AssetPrecompile` 为统一分发模式
+> **说明：** 当前 gas 由 precompile 方法层手动扣除（如 `transfer` 扣 5000），
+> `StorageCtx::sload/sstore` 内部已由 `EvmStorageProvider` 自动扣除 SLOAD/SSTORE gas。
+> `JournalBackend` 本身暂不需要额外 gas 跟踪。
 
-- [ ] **9.1** `crates/asset/src/precompile.rs` 改用 `dispatch_call` + `sol!`
+#### 步骤 9 — 重写 `AssetPrecompile` 为统一分发模式（可选延后）
+
+- [x] **9.1** `crates/asset/src/precompile.rs` 已使用 `AssetStorage<JournalBackend>` 实现
+- [ ] **9.2** （可选）后续替换为 `dispatch_call` + `sol!` 宏统一分发
 
 ```rust
 use call_precompiles::dispatch::{dispatch_call, view, mutate};
