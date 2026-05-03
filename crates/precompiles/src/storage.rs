@@ -500,12 +500,15 @@ pub struct HashMapStorageProvider {
     timestamp: U256,
     block_number: u64,
     beneficiary: Address,
+    // Access tracking for warm/cold gas accounting
+    accessed_slots: HashMap<(Address, U256), U256>,
     // Checkpoint stack for revert semantics
     checkpoints: Vec<(
         HashMap<(Address, U256), U256>,
         HashMap<(Address, U256), U256>,
         HashMap<Address, Vec<LogData>>,
         HashMap<Address, U256>,
+        HashMap<(Address, U256), U256>,
         u64,
         i64,
     )>,
@@ -527,6 +530,20 @@ impl HashMapStorageProvider {
             chain_id,
             block_number,
             ..Default::default()
+        }
+    }
+
+    /// True if this slot has been accessed (read or written) in the current call.
+    fn is_warm(&self, address: Address, key: U256) -> bool {
+        self.accessed_slots.contains_key(&(address, key))
+    }
+
+    /// Mark a slot as accessed (warm).
+    fn warm_slot(&mut self, address: Address, key: U256) {
+        if !self.accessed_slots.contains_key(&(address, key)) {
+            // Store original value for SSTORE refund calculation
+            let original = self.persistent.get(&(address, key)).copied().unwrap_or_default();
+            self.accessed_slots.insert((address, key), original);
         }
     }
 
@@ -557,7 +574,10 @@ impl HashMapStorageProvider {
 
 impl StorageProvider for HashMapStorageProvider {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
-        self.deduct_gas(100)?; // always warm in tests
+        let is_warm = self.is_warm(address, key);
+        let gas = if is_warm { 100 } else { 2100 };
+        self.deduct_gas(gas)?;
+        self.warm_slot(address, key);
         Ok(self.persistent.get(&(address, key)).copied().unwrap_or_default())
     }
 
@@ -570,7 +590,25 @@ impl StorageProvider for HashMapStorageProvider {
         if self.is_static {
             return Err(PrecompileError::Other("static call".into()));
         }
-        self.deduct_gas(20000)?;
+        let is_warm = self.is_warm(address, key);
+        let static_gas = 20000u64;
+        let dynamic_gas = if is_warm { 0 } else { 2100 };
+        self.deduct_gas(static_gas + dynamic_gas)?;
+
+        // Track original value for refund calculation
+        let present = self.persistent.get(&(address, key)).copied().unwrap_or_default();
+        let original = self.accessed_slots.get(&(address, key)).copied().unwrap_or_default();
+
+        // Cancun refund rules (simplified)
+        if original == value && present != value {
+            // Reset to original value
+            self.refund_gas(4800);
+        } else if present != U256::ZERO && value == U256::ZERO {
+            // Clearing a slot
+            self.refund_gas(4800);
+        }
+
+        self.warm_slot(address, key);
         self.persistent.insert((address, key), value);
         Ok(())
     }
@@ -612,6 +650,7 @@ impl StorageProvider for HashMapStorageProvider {
             self.transient.clone(),
             self.events.clone(),
             self.balances.clone(),
+            self.accessed_slots.clone(),
             self.gas_remaining,
             self.gas_refunded,
         ));
@@ -623,13 +662,21 @@ impl StorageProvider for HashMapStorageProvider {
     }
 
     fn checkpoint_revert(&mut self, _checkpoint: JournalCheckpoint) {
-        if let Some((persistent, transient, events, balances, gas_remaining, gas_refunded)) =
-            self.checkpoints.pop()
+        if let Some((
+            persistent,
+            transient,
+            events,
+            balances,
+            accessed_slots,
+            gas_remaining,
+            gas_refunded,
+        )) = self.checkpoints.pop()
         {
             self.persistent = persistent;
             self.transient = transient;
             self.events = events;
             self.balances = balances;
+            self.accessed_slots = accessed_slots;
             self.gas_remaining = gas_remaining;
             self.gas_refunded = gas_refunded;
         }

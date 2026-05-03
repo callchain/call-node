@@ -2,6 +2,19 @@
 //!
 //! Used by domain precompiles (e.g. `call-asset::AssetPrecompile`) to delegate
 //! business-logic storage operations to the live revm journal.
+//!
+//! # Automatic gas metering
+//!
+//! Gas for SLOAD / SSTORE is **not** tracked inside `JournalBackend`. Instead,
+//! it is automatically deducted by the underlying [`StorageProvider`] (e.g.
+//! [`EvmStorageProvider`](crate::storage::EvmStorageProvider)) via revm's
+//! native warm/cold access flags and Cancun SSTORE refund rules.
+//!
+//! `JournalBackend::load()` calls `StorageCtx::sload()`, which goes through the
+//! provider and triggers automatic gas deduction. The same applies to
+//! `store()` → `StorageCtx::sstore()`. Precompile dispatch functions then
+//! propagate the accumulated `gas_used` / `gas_refunded` from `StorageCtx`
+//! back into the [`PrecompileOutput`] via [`fill_precompile_output`](crate::storage::fill_precompile_output).
 
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;

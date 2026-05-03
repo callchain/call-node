@@ -1176,8 +1176,9 @@ where
 #### 步骤 8 — `JournalBackend` 升级自动 gas 计量（可选延后）
 
 - [x] **8.1** 新建 `crates/precompiles/src/journal_backend.rs`（基础版，无 AccessTracker）
-- [ ] **8.2** 在 `JournalBackend` 中加入 `AccessTracker`，`load`/`store` 自动 `deduct_gas`（可选延后）
-- [ ] **8.3** 编译验证：`cargo check -p call-precompiles`
+- [x] **8.2** 在 `StorageProvider` 层实现自动 gas 计量（`EvmStorageProvider` 通过 revm `is_cold` 标志，`HashMapStorageProvider` 通过 `accessed_slots` warm/cold 跟踪）✅
+- [x] **8.3** `dispatch::view_void` / `mutate_void` 正确传播 `gas_used` / `gas_refunded` ✅
+- [x] **8.4** 编译验证：`cargo check -p call-precompiles` ✅
 
 > **说明：** 当前 gas 由 precompile 方法层手动扣除（如 `transfer` 扣 5000），
 > `StorageCtx::sload/sstore` 内部已由 `EvmStorageProvider` 自动扣除 SLOAD/SSTORE gas。

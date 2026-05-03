@@ -62,7 +62,8 @@ where
         .ok_or(PrecompileError::OutOfGas)?;
     let decoded = decode_call::<T>(calldata)?;
     handler(decoded)?;
-    crate::helpers::utils::ok_empty()
+    let output = PrecompileOutput::new(0, Bytes::default());
+    Ok(crate::storage::fill_precompile_output(output))
 }
 
 /// Execute a **state-mutating** precompile method.
@@ -100,5 +101,6 @@ where
     let guard = crate::storage::StorageCtx::checkpoint();
     handler(decoded)?;
     guard.commit();
-    crate::helpers::utils::ok_empty()
+    let output = PrecompileOutput::new(0, Bytes::default());
+    Ok(crate::storage::fill_precompile_output(output))
 }
