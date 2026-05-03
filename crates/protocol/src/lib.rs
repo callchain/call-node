@@ -3,7 +3,6 @@
 pub mod security;
 pub mod compliance;
 pub mod transaction;
-pub mod smart_accounts;
 pub mod receipts;
 pub mod economics;
 
@@ -12,7 +11,6 @@ pub mod tx;
 
 pub use compliance::*;
 pub use transaction::*;
-pub use smart_accounts::*;
 pub use receipts::*;
 pub use economics::*;
 

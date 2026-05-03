@@ -324,6 +324,7 @@ All precompiles, consensus, RPC, and integration tests pass after migration.
 | `AgentBalances` | `call_agent::balances` | ✅ Deleted |
 | `IssuerState` | `call_protocol::issuer` | ✅ Deleted |
 | `SponsorRegistry` | `call_protocol::sponsor` | ✅ Deleted |
+| `SmartAccountRegistry` | `call_protocol::smart_accounts` | ✅ Deleted |
 | `ShieldedState` | `call_shielded::lib` | ✅ Retained in `call_shielded` (active, not protocol-state) |
 | `OracleManager` | `call_oracle::manager` | ✅ **Used as sidecar** |
 | `GovernanceManager` | `call_governance` | ✅ **Used as sidecar** |
