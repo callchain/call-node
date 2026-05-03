@@ -475,7 +475,7 @@
 
             // Persist state to reth-db immediately
             let db_env = &node.db.db;
-            persist_state_to_db(db_env, &node.state, &node.consensus, &node.oracle, &node.governance)
+            persist_state_to_db(db_env, &node.state, &node.consensus, &node.governance)
                 .expect("persist state");
 
             // Node is dropped here, simulating shutdown
@@ -932,7 +932,7 @@
             &node.state,
             &network,
             &sync_inflight,
-            &node.oracle,
+            &node.oracle_tracker,
         );
 
         // Verify peer_heights was updated

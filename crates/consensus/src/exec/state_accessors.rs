@@ -896,6 +896,45 @@ pub fn seed_oracle_price(
     evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"count"), u64_to_u256(count));
 }
 
+// ── Oracle tracked assets ─────────────────────────────────────────────
+
+fn slot_oracle_tracked_count() -> U256 {
+    storage_slot(&[b"tracked_count"])
+}
+
+fn slot_oracle_tracked_asset(index: u64) -> U256 {
+    storage_slot(&[b"tracked", &index.to_be_bytes()[..]])
+}
+
+/// Read the number of tracked oracle assets from EVM storage.
+pub fn read_oracle_tracked_count(evm_state: &EvmState) -> u64 {
+    u256_to_u64(evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle_tracked_count()))
+}
+
+/// Read a tracked oracle asset ID by index from EVM storage.
+pub fn read_oracle_tracked_asset(evm_state: &EvmState, index: u64) -> u64 {
+    u256_to_u64(evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle_tracked_asset(index)))
+}
+
+/// Set the list of tracked oracle assets in EVM storage.
+pub fn seed_oracle_tracked_assets(evm_state: &mut EvmState, asset_ids: Vec<u64>) {
+    let count = asset_ids.len() as u64;
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_tracked_count(), u64_to_u256(count));
+    for (i, asset_id) in asset_ids.iter().enumerate() {
+        evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_tracked_asset(i as u64), u64_to_u256(*asset_id));
+    }
+    // Zero out any old entries beyond the new list
+    let old_count = read_oracle_tracked_count(evm_state);
+    for i in asset_ids.len() as u64..old_count {
+        evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_tracked_asset(i), U256::ZERO);
+    }
+}
+
+/// Zero out the oracle reward pool in EVM storage.
+pub fn zero_oracle_reward_pool(evm_state: &mut EvmState) {
+    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_reward_pool(), U256::ZERO);
+}
+
 /// Seed validator state directly into EVM storage (for tests / genesis).
 pub fn seed_validator(
     evm_state: &mut EvmState,

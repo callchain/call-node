@@ -42,7 +42,7 @@ use call_protocol::{
     security::P2PDefense,
 };
 use call_governance::GovernanceManager;
-use call_oracle::OracleManager;
+use call_oracle::OracleTracker;
 use call_rpc::{RpcState, RpcConfig, build_rpc_module, wire_governance_executor};
 use call_storage::{CallDb, open_db, PruneState};
 use call_storage::reth_db::{
@@ -50,7 +50,7 @@ use call_storage::reth_db::{
 };
 use crate::state_persist::{
     load_state_from_db, persist_state_to_db, persist_state_incremental,
-    load_oracle_state, load_receipts, load_fork_state,
+    load_receipts, load_fork_state,
     check_recovery_needed, clear_checkpoint,
     load_consensus_state_inner, save_consensus_state_inner,
 };
@@ -113,7 +113,7 @@ pub struct CallNode {
     /// True when the node started from empty or corrupted state (genesis should be applied).
     pub fresh_start: bool,
     /// Transient oracle coordinator (prices/TWAP live in EVM storage)
-    pub oracle: Arc<RwLock<OracleManager>>,
+    pub oracle_tracker: Arc<RwLock<OracleTracker>>,
     /// Governance proposal state machine (proposals live in EVM, sidecar manages transitions)
     pub governance: Arc<RwLock<GovernanceManager>>,
 }
@@ -158,13 +158,7 @@ impl CallNode {
             load_state_from_db(db_env)
         };
 
-        let oracle_manager = if recovery_needed {
-            OracleManager::default()
-        } else {
-            load_oracle_state(db_env)
-                .map_err(|e| format!("failed to load oracle state: {e}"))?
-        };
-        let oracle = Arc::new(RwLock::new(oracle_manager));
+        let oracle_tracker = Arc::new(RwLock::new(call_oracle::OracleTracker::default()));
 
         let receipts = if recovery_needed {
             std::collections::HashMap::new()
@@ -285,7 +279,7 @@ impl CallNode {
             telemetry,
             audit_log,
             fresh_start,
-            oracle,
+            oracle_tracker,
             governance,
         })
     }
@@ -343,7 +337,7 @@ impl CallNode {
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
         let telemetry = Arc::clone(&self.telemetry);
-        let oracle = Arc::clone(&self.oracle);
+        let oracle_tracker = Arc::clone(&self.oracle_tracker);
         let p2p_defense = std::sync::Mutex::new(P2PDefense::new(10000, 1000, 10 * 1024 * 1024));
         // Tracks SyncRequests we've sent recently. Both the announcement
         // handler (BLOCK_CHANNEL) and the response handler (SYNC_CHANNEL)
@@ -462,7 +456,7 @@ impl CallNode {
                     if let Ok(NetworkMessage::BlockAnnouncement(_)) =
                         bincode::deserialize::<NetworkMessage>(&data)
                     {
-                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle);
+                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker);
                     } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
@@ -476,7 +470,7 @@ impl CallNode {
                         tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
                 } else {
-                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle);
+                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker);
                 }
             }
         });
@@ -497,7 +491,7 @@ impl CallNode {
         let audit_log = Arc::clone(&self.audit_log);
 
         let subscriptions = self.state.subscriptions.clone();
-        let oracle = Arc::clone(&self.oracle);
+        let oracle_tracker = Arc::clone(&self.oracle_tracker);
         let governance = Arc::clone(&self.governance);
 
         tokio::spawn(block_production_loop(
@@ -511,7 +505,7 @@ impl CallNode {
             subscriptions,
             telemetry,
             audit_log,
-            oracle,
+            oracle_tracker,
             governance,
         ))
     }
@@ -538,7 +532,7 @@ impl CallNode {
         let block_cache = Arc::clone(&self.block_cache);
         let telemetry = Arc::clone(&self.telemetry);
         let audit_log = Arc::clone(&self.audit_log);
-        let oracle_manager = Arc::clone(&self.oracle);
+        let oracle_tracker = Arc::clone(&self.oracle_tracker);
         let governance = Arc::clone(&self.governance);
 
         std::thread::spawn(move || {
@@ -772,7 +766,7 @@ impl CallNode {
                                 let bytes: [u8; 32] = encoded.as_ref().try_into().expect("ed25519 pubkey is 32 bytes");
                                 bytes
                             },
-                            oracle_manager.clone(),
+                            oracle_tracker.clone(),
                             governance.clone(),
                         ));
 
@@ -1133,7 +1127,7 @@ impl CallNode {
         }
         // Flush final state to reth-db
         let db_env = &self.db.db;
-        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus, &self.oracle, &self.governance) {
+        if let Err(e) = persist_state_to_db(db_env, &self.state, &self.consensus, &self.governance) {
             tracing::warn!(error = %e, "failed to flush state on shutdown");
         }
         if let Err(e) = db_save_prune(db_env, &self.prune_state) {

@@ -16,7 +16,7 @@ use call_network::{
     EpochBoundarySignal,
 };
 use call_governance::GovernanceManager;
-use call_oracle::{OracleManager, ORACLE_UPDATE_INTERVAL};
+use call_oracle::{OracleTracker, ORACLE_UPDATE_INTERVAL};
 use call_primitives::{Address, Hash, FeeCurrency, TxHash};
 use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
@@ -37,7 +37,7 @@ fn apply_rollback_plan(
     prune_state: &mut PruneState,
     data_dir: &std::path::Path,
     db_env: &Arc<reth_db::DatabaseEnv>,
-    oracle: &Arc<RwLock<OracleManager>>,
+    oracle_tracker: &Arc<RwLock<OracleTracker>>,
     governance: &Arc<RwLock<GovernanceManager>>,
 ) {
     tracing::warn!(
@@ -78,8 +78,8 @@ fn apply_rollback_plan(
 
     // 6. Reset oracle block tracking
     {
-        let mut oracle_guard = oracle.write().unwrap();
-        oracle_guard.set_current_block(plan.target_height);
+        let mut tracker_guard = oracle_tracker.write().unwrap();
+        tracker_guard.clear_pending();
     }
 
     // 8. Delete block files above target height
@@ -141,7 +141,7 @@ pub(crate) async fn bft_event_loop(
     exit_tx: oneshot::Sender<EpochRotationReason>,
     subset_pubkeys: Vec<[u8; 32]>,
     my_pubkey: [u8; 32],
-    oracle: Arc<RwLock<OracleManager>>,
+    oracle_tracker: Arc<RwLock<OracleTracker>>,
     governance: Arc<RwLock<GovernanceManager>>,
 ) {
     let mut execution_results: std::collections::HashMap<
@@ -179,7 +179,7 @@ pub(crate) async fn bft_event_loop(
     loop {
         // Check for pending emergency rollback and apply if present
         if let Some(plan) = state.pending_rollback.write().unwrap().take() {
-            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle, &governance);
+            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle_tracker, &governance);
         }
 
         // === Epoch boundary quorum check ===
@@ -256,7 +256,16 @@ pub(crate) async fn bft_event_loop(
                 let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
                 if is_oracle_boundary {
                     if let Some(ref net) = network {
-                        let tracked = { oracle.read().unwrap().tracked_pairs.clone() };
+                        let tracked = {
+                            let evm = state.evm_state.read().unwrap();
+                            let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(&evm);
+                            let mut pairs = Vec::new();
+                            for i in 0..count {
+                                let asset_id = call_consensus::exec::state_accessors::read_oracle_tracked_asset(&evm, i);
+                                pairs.push(call_primitives::PricePair::new(asset_id, 0));
+                            }
+                            pairs
+                        };
                         if !tracked.is_empty() {
                             let request = OraclePriceRequest {
                                 pairs: tracked,
@@ -454,10 +463,10 @@ pub(crate) async fn bft_event_loop(
                     // (non-proposing validators advance period but don't broadcast requests — proposer already did)
                     let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
                     if is_oracle_boundary {
-                        let mut oracle_guard = oracle.write().unwrap();
-                        oracle_guard.advance_period(height);
-                        let outliers: Vec<u32> = oracle_guard.last_outliers().to_vec();
-                        drop(oracle_guard);
+                        let mut tracker_guard = oracle_tracker.write().unwrap();
+                        tracker_guard.clear_pending();
+                        let outliers: Vec<u32> = tracker_guard.last_outliers().to_vec();
+                        drop(tracker_guard);
                         if !outliers.is_empty() {
                             let mut evm_state = state.evm_state.write().unwrap();
                             let mut c = consensus.write().unwrap();
@@ -469,7 +478,17 @@ pub(crate) async fn bft_event_loop(
                             tracing::info!(outliers = ?outliers, "slashed oracle outliers");
                         }
                         let contributions = {
-                            oracle.write().unwrap().distribute_rewards()
+                            let mut tracker_guard = oracle_tracker.write().unwrap();
+                            let reward_pool = {
+                                let evm = state.evm_state.read().unwrap();
+                                call_consensus::exec::state_accessors::read_oracle_reward_pool(&evm)
+                            };
+                            let rewards = tracker_guard.distribute_rewards(reward_pool);
+                            if !rewards.is_empty() {
+                                let mut evm = state.evm_state.write().unwrap();
+                                call_consensus::exec::state_accessors::zero_oracle_reward_pool(&mut evm);
+                            }
+                            rewards
                         };
                         if !contributions.is_empty() {
                             let mut evm_state = state.evm_state.write().unwrap();
@@ -481,7 +500,7 @@ pub(crate) async fn bft_event_loop(
                             }
                             tracing::info!(count = contributions.len(), "distributed oracle rewards");
                         }
-                        oracle.write().unwrap().clear_tracking();
+                        oracle_tracker.write().unwrap().clear_tracking();
                     }
 
                     // Commit via consensus
@@ -716,14 +735,14 @@ pub(crate) async fn bft_event_loop(
 
                     // Incremental state persistence
                     let db_env = &db.db;
-                    if let Err(e) = persist_state_incremental(db_env, &state, &consensus, &oracle, &governance) {
+                    if let Err(e) = persist_state_incremental(db_env, &state, &consensus, &governance) {
                         tracing::warn!(error = %e, "BFT finalize: incremental persist failed");
                     }
 
                     // Full rebuild every 1000 blocks
                     if new_height % 1000 == 0 {
                         let db_env = &db.db;
-                        if let Err(e) = persist_state_to_db(db_env, &state, &consensus, &oracle, &governance) {
+                        if let Err(e) = persist_state_to_db(db_env, &state, &consensus, &governance) {
                             tracing::warn!(error = %e, "BFT finalize: full persist failed");
                         }
                     }

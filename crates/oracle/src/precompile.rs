@@ -41,6 +41,14 @@ fn slot_oracle_count(asset_id: u64) -> U256 {
     storage_slot(&[&asset_id.to_be_bytes()[..], b"count"])
 }
 
+fn slot_oracle_tracked_count() -> U256 {
+    storage_slot(&[b"tracked_count"])
+}
+
+fn slot_oracle_tracked_asset(index: u64) -> U256 {
+    storage_slot(&[b"tracked", &index.to_be_bytes()[..]])
+}
+
 // ── OracleStorage ─────────────────────────────────────────────────────
 
 /// Business logic for oracle operations backed by any StorageBackend.
@@ -76,6 +84,38 @@ impl<B: StorageBackend> OracleStorage<B> {
     pub fn is_stale(&self, asset_id: u64, current_ts: u64) -> bool {
         let stored_ts = self.read_timestamp(asset_id);
         stored_ts + STALE_THRESHOLD_SECS < current_ts
+    }
+
+    pub fn read_tracked_count(&self) -> u64 {
+        u256_to_u64(self.backend.load(ORACLE_ADDRESS, slot_oracle_tracked_count()))
+    }
+
+    pub fn read_tracked_asset(&self, index: u64) -> u64 {
+        u256_to_u64(self.backend.load(ORACLE_ADDRESS, slot_oracle_tracked_asset(index)))
+    }
+
+    pub fn set_tracked_assets(&mut self, asset_ids: Vec<u64>) {
+        self.backend.store(
+            ORACLE_ADDRESS,
+            slot_oracle_tracked_count(),
+            u64_to_u256(asset_ids.len() as u64),
+        );
+        for (i, asset_id) in asset_ids.iter().enumerate() {
+            self.backend.store(
+                ORACLE_ADDRESS,
+                slot_oracle_tracked_asset(i as u64),
+                u64_to_u256(*asset_id),
+            );
+        }
+        // Zero out any old entries beyond the new list
+        let old_count = self.read_tracked_count();
+        for i in asset_ids.len() as u64..old_count {
+            self.backend.store(
+                ORACLE_ADDRESS,
+                slot_oracle_tracked_asset(i),
+                U256::ZERO,
+            );
+        }
     }
 
     pub fn submit_price(
@@ -129,6 +169,7 @@ sol! {
         function getTWAP(uint64 assetId) external view returns (uint128);
         function isStale(uint64 assetId) external view returns (uint8);
         function submitPrice(uint64 assetId, uint128 price, uint64 timestamp, uint64 blockNumber) external;
+        function setTrackedAssets(uint64[] assetIds) external;
     }
 }
 
@@ -193,6 +234,26 @@ impl OraclePrecompile {
             Ok(())
         })
     }
+
+    fn set_tracked_assets(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolOracle::setTrackedAssetsCall, _>(calldata, 50_000, |call| {
+            let caller = require_caller(msg_sender)?;
+
+            // Verify caller is a registered validator
+            let validator_store = ValidatorStorage::new(JournalBackend);
+            let validator_id = validator_store.read_validator_id(caller);
+            if validator_id == 0 {
+                return Err(PrecompileError::Other(
+                    "oracle setTrackedAssets: caller is not a validator".into(),
+                ));
+            }
+
+            let mut store = OracleStorage::new(JournalBackend);
+            store.set_tracked_assets(call.assetIds.to_vec());
+
+            Ok(())
+        })
+    }
 }
 
 impl call_precompiles::StatefulPrecompile for OraclePrecompile {
@@ -206,6 +267,7 @@ impl call_precompiles::StatefulPrecompile for OraclePrecompile {
             IProtocolOracle::getTWAPCall::SELECTOR => self.get_twap(calldata),
             IProtocolOracle::isStaleCall::SELECTOR => self.is_stale(calldata),
             IProtocolOracle::submitPriceCall::SELECTOR => self.submit_price(calldata, msg_sender),
+            IProtocolOracle::setTrackedAssetsCall::SELECTOR => self.set_tracked_assets(calldata, msg_sender),
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }

@@ -4,7 +4,7 @@
 //! outlier detection, and TWAP history.
 
 pub mod constants;
-pub mod manager;
+pub mod tracker;
 pub mod crypto;
 pub mod fetcher;
 pub mod precompile;
@@ -12,7 +12,7 @@ pub mod precompile;
 pub mod tests;
 
 pub use constants::*;
-pub use manager::OracleManager;
+pub use tracker::OracleTracker;
 pub use crypto::*;
 pub use fetcher::*;
 

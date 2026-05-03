@@ -7,14 +7,13 @@ use call_protocol::{
     FeeParams, ProtocolReceipt,
 };
 use call_evm::EvmState;
-use call_oracle::OracleManager;
 use call_governance::GovernanceManager;
 use call_primitives::TxHash;
 use call_rpc::RpcState;
 use call_storage::{
     StorageError,
     db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
-    CallOracleState, CallEvmAccounts,
+    CallEvmAccounts,
     CallGovernanceState, CallConsensusState,
     CallReceipts, CallReceiptsByBlock, CallForkState, CallCheckpoint,
     CallFeeParams,
@@ -74,7 +73,6 @@ pub(crate) fn persist_state_to_db(
     db_env: &Arc<DatabaseEnv>,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
-    oracle: &Arc<RwLock<OracleManager>>,
     governance: &Arc<RwLock<call_governance::GovernanceManager>>,
 ) -> Result<(), String> {
     // 1. Write pending checkpoint marker
@@ -90,13 +88,6 @@ pub(crate) fn persist_state_to_db(
         let evm = state.evm_state.read().unwrap();
         save_evm_accounts_inner(db_env, &evm)
             .map_err(|e| format!("save evm: {e}"))?;
-    }
-
-    // Persist oracle state
-    {
-        let oracle_guard = oracle.read().unwrap();
-        save_oracle_state(db_env, &oracle_guard)
-            .map_err(|e| format!("save oracle: {e}"))?;
     }
 
     // Persist governance state
@@ -164,20 +155,6 @@ pub(crate) fn save_evm_accounts_inner(db: &DatabaseEnv, state: &EvmState) -> Res
     db_clear::<CallEvmAccounts>(db).map_err(|e: StorageError| e.to_string())?;
     db_batch_put::<CallEvmAccounts>(db, entries).map_err(|e: StorageError| e.to_string())?;
     Ok(())
-}
-
-/// Save oracle state to the database.
-pub(crate) fn save_oracle_state(db: &DatabaseEnv, state: &OracleManager) -> Result<(), String> {
-    let data = serde_json::to_vec(state).map_err(|e| format!("serialize oracle: {e}"))?;
-    db_put::<CallOracleState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
-}
-
-/// Load oracle state from the database.
-pub(crate) fn load_oracle_state(db: &DatabaseEnv) -> Result<OracleManager, String> {
-    match db_get::<CallOracleState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e| format!("deserialize oracle: {e}")),
-        None => Ok(OracleManager::default()),
-    }
 }
 
 /// Save fee params to the database.
@@ -317,20 +294,12 @@ pub(crate) fn persist_state_incremental(
     db_env: &Arc<DatabaseEnv>,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
-    oracle: &Arc<RwLock<OracleManager>>,
     governance: &Arc<RwLock<call_governance::GovernanceManager>>,
 ) -> Result<(), String> {
     // Persist EVM state (overwrite existing entries, no clear)
     {
         let evm = state.evm_state.read().map_err(|_| "evm lock poisoned".to_string())?;
         save_evm_accounts_no_clear(db_env, &evm)?;
-    }
-
-    // Persist oracle state (overwrite)
-    {
-        let oracle_guard = oracle.read().map_err(|_| "oracle lock poisoned".to_string())?;
-        save_oracle_state(db_env, &oracle_guard)
-            .map_err(|e| format!("save oracle: {e}"))?;
     }
 
     // Persist governance state (overwrite)

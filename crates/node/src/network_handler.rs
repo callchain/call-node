@@ -7,7 +7,7 @@ use call_network::{
     TransactionMessage, SyncRequest, OraclePriceRequest, OraclePriceSubmission,
     UpgradeAnnouncement,
 };
-use call_oracle::{OracleManager, OracleSubmission};
+use call_oracle::{OracleTracker, OracleSubmission, OracleConfig, OracleValidatorInfo};
 use call_rpc::RpcState;
 use call_transaction_pool::Mempool;
 
@@ -46,7 +46,7 @@ pub(crate) fn handle_network_message(
     state: &Arc<RpcState>,
     network: &Arc<dyn Network>,
     sync_inflight: &SyncInflight,
-    oracle: &Arc<RwLock<OracleManager>>,
+    oracle_tracker: &Arc<RwLock<OracleTracker>>,
 ) {
     match channel {
         TX_CHANNEL => {
@@ -204,7 +204,7 @@ pub(crate) fn handle_network_message(
                 // Proposer received a price submission from a validator.
                 // Feed it through the oracle's full validation pipeline via RPC-style submission.
                 let state_clone = Arc::clone(state);
-                let oracle_clone = Arc::clone(oracle);
+                let tracker_clone = Arc::clone(oracle_tracker);
                 tokio::spawn(async move {
                     let current_block = state_clone.get_current_block();
                     let oracle_submission = OracleSubmission {
@@ -216,8 +216,31 @@ pub(crate) fn handle_network_message(
                         signature: submission.signature,
                         sources: submission.sources,
                     };
-                    let mut oracle_guard = oracle_clone.write().unwrap();
-                    match oracle_guard.submit_price(oracle_submission) {
+                    let mut tracker_guard = tracker_clone.write().unwrap();
+                    // Build validator set and config from EVM state
+                    let (config, validators) = {
+                        let evm = state_clone.evm_state.read().unwrap();
+                        let config = OracleConfig::default();
+                        let count = call_consensus::exec::state_accessors::read_validator_count(&evm);
+                        let mut validators = std::collections::HashMap::new();
+                        for id in 1..=count {
+                            let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm, id);
+                            if addr == call_primitives::Address::ZERO { continue; }
+                            let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm, addr);
+                            let status = call_consensus::exec::state_accessors::read_validator_status(&evm, addr);
+                            validators.insert(id as u32, OracleValidatorInfo {
+                                validator_id: id as u32,
+                                address: addr,
+                                public_key: pk,
+                                is_active: status != 0,
+                                outlier_count: 0,
+                                last_submission_block: 0,
+                                submission_count: 0,
+                            });
+                        }
+                        (config, validators)
+                    };
+                    match tracker_guard.submit_price(oracle_submission, &config, &validators) {
                         Ok(Some(aggregated)) => {
                             // Quorum reached — write aggregated price to EVM storage
                             let mut evm = state_clone.evm_state.write().unwrap();
@@ -225,7 +248,7 @@ pub(crate) fn handle_network_message(
                                 &mut evm,
                                 aggregated.pair.base,
                                 aggregated.median_price,
-                                aggregated.median_price, // simplified TWAP (no history in transient manager)
+                                aggregated.median_price, // simplified TWAP (no history in transient tracker)
                                 aggregated.timestamp,
                                 aggregated.block_number,
                                 aggregated.submission_count as u64,
