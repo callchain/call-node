@@ -6,6 +6,7 @@ pub mod types;
 pub mod config;
 pub mod error;
 pub mod manager;
+pub mod precompile;
 
 #[cfg(test)]
 mod tests;

@@ -23,6 +23,7 @@ members = [
     "crates/validator",
     "crates/compliance",
     "crates/agent",
+    "crates/switch",
     "xtask",
 ]
 resolver = "2"
@@ -84,6 +85,7 @@ call-rpc = { path = "crates/rpc" }
 call-validator = { path = "crates/validator" }
 call-compliance = { path = "crates/compliance" }
 call-agent = { path = "crates/agent" }
+call-switch = { path = "crates/switch" }
 
 # Commonware
 commonware-consensus = "2026.3.0"

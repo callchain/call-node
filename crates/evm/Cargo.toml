@@ -17,6 +17,11 @@ call-validator.workspace = true
 call-compliance.workspace = true
 call-agent.workspace = true
 call-storage.workspace = true
+call-shielded.workspace = true
+call-bridge.workspace = true
+call-oracle.workspace = true
+call-governance.workspace = true
+call-switch.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 revm = { workspace = true, features = ["std"] }

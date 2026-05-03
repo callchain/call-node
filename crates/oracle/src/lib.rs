@@ -7,6 +7,7 @@ pub mod constants;
 pub mod manager;
 pub mod crypto;
 pub mod fetcher;
+pub mod precompile;
 #[cfg(test)]
 pub mod tests;
 

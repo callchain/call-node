@@ -11,11 +11,14 @@ workspace = true
 [dependencies]
 call-primitives.workspace = true
 call-protocol.workspace = true
-call-evm.workspace = true
 call-precompiles.workspace = true
+call-asset.workspace = true
+call-validator.workspace = true
 call-crypto.workspace = true
 call-light-client = { workspace = true, optional = true }
 alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+revm-precompile.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

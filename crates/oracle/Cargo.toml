@@ -10,8 +10,13 @@ workspace = true
 
 [dependencies]
 call-primitives.workspace = true
+call-protocol.workspace = true
+call-precompiles.workspace = true
+call-validator.workspace = true
 call-crypto.workspace = true
 alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+revm-precompile.workspace = true
 ed25519-dalek = "2"
 serde.workspace = true
 serde_bytes.workspace = true

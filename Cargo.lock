@@ -1679,12 +1679,15 @@ name = "call-bridge"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
+ "call-asset",
  "call-crypto",
- "call-evm",
  "call-light-client",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
+ "call-validator",
+ "revm-precompile",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -1795,11 +1798,16 @@ dependencies = [
  "alloy-trie",
  "call-agent",
  "call-asset",
+ "call-bridge",
  "call-compliance",
+ "call-governance",
+ "call-oracle",
  "call-precompiles",
  "call-primitives",
  "call-protocol",
+ "call-shielded",
  "call-storage",
+ "call-switch",
  "call-validator",
  "hex",
  "reth-db",
@@ -1813,8 +1821,15 @@ dependencies = [
 name = "call-governance"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "call-asset",
+ "call-precompiles",
  "call-primitives",
+ "call-protocol",
+ "call-validator",
  "hex",
+ "revm-precompile",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1919,11 +1934,16 @@ name = "call-oracle"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "call-crypto",
+ "call-precompiles",
  "call-primitives",
+ "call-protocol",
+ "call-validator",
  "ed25519-dalek",
  "hex",
  "reqwest",
+ "revm-precompile",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -1937,11 +1957,8 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
- "call-governance",
- "call-oracle",
  "call-primitives",
  "call-protocol",
- "call-shielded",
  "revm",
  "revm-precompile",
  "scoped-tls",
@@ -1967,11 +1984,8 @@ dependencies = [
  "call-bridge",
  "call-consensus",
  "call-crypto",
- "call-governance",
- "call-oracle",
  "call-primitives",
  "call-serialization",
- "call-shielded",
  "call-storage",
  "criterion 0.5.1",
  "ed25519-dalek",
@@ -2052,6 +2066,7 @@ name = "call-shielded"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-sol-types",
  "ark-bn254 0.4.0",
  "ark-crypto-primitives",
  "ark-ec 0.4.2",
@@ -2063,11 +2078,14 @@ dependencies = [
  "ark-snark",
  "ark-std 0.4.0",
  "call-crypto",
+ "call-precompiles",
  "call-primitives",
+ "call-protocol",
  "chacha20poly1305",
  "criterion 0.5.1",
  "poseidon-ark-no-std",
  "rand 0.8.5",
+ "revm-precompile",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.18",
@@ -2090,6 +2108,19 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "call-switch"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "call-asset",
+ "call-precompiles",
+ "call-primitives",
+ "call-protocol",
+ "revm-precompile",
 ]
 
 [[package]]

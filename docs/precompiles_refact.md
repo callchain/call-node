@@ -1263,38 +1263,36 @@ impl StatefulPrecompile for AssetPrecompile {
 
 #### Phase 3 — Bridge
 
-- [ ] **B.1** 新建 `crates/bridge/`
-- [ ] **B.2** 提取 `BridgeStorage<B>`：external_deposit / external_withdraw / bridge_to_evm / bridge_to_protocol / initiate_challenge / resolve_challenge / withdraw_bond
-- [ ] **B.3** 删除 `crates/bridge/src/state.rs` 中的 `BridgeStateManager` 内存状态
-- [ ] **B.4** `BridgeStorage` 跨域调用：`AssetStorage::transfer`（bond）、`ValidatorStorage::slash_stake`（challenge）
-- [ ] **B.5** `block_producer.rs:104-125` 改为从 `BridgeStorage` 读 finalized deposits，调用 `AssetStorage::add_balance`
-- [ ] **B.6** `BridgePrecompile` 入口薄层
-- [ ] **B.7** 编译验证：`cargo check -p call-bridge`
-- [ ] **B.8** 全项目测试通过
+- [x] **B.1** 新建 `crates/bridge/src/precompile.rs`，提取 `BridgeStorage<B>` ✅
+- [x] **B.2** 实现 external_deposit / external_withdraw / bridge_to_evm / bridge_to_protocol / initiate_challenge / resolve_challenge / withdraw_challenge_bond ✅
+- [x] **B.3** `BridgeStorage` 跨域调用：`AssetStorage::deduct_balance/add_balance`（bond、余额操作）、`ValidatorStorage::slash_stake`（challenge）✅
+- [x] **B.4** `BridgePrecompile` 入口薄层（`sol!` + `dispatch::view/mutate_void`）✅
+- [x] **B.5** `call-evm` 注册 `BridgePrecompile`，`call-precompiles` 移除 `bridge.rs` ✅
+- [x] **B.6** 编译验证：`cargo check -p call-bridge` ✅
+- [x] **B.7** `cargo test -p call-bridge` 12 项测试通过 ✅
+- [x] **B.8** `cargo test -p call-evm`、`cargo test -p call-precompiles`、`cargo test -p call-validator` 全通过 ✅
 
 #### Phase 4 — Oracle
 
-- [ ] **O.1** 新建 `crates/oracle/`
-- [ ] **O.2** 提取 `OracleStorage<B>`：submit_price / get_price / get_twap / is_stale
-- [ ] **O.3** 删除 `crates/consensus/src/oracle/` 中的旧内存 `OracleManager`
-- [ ] **O.4** `OracleStorage` 跨域调用：读 `ValidatorStorage`（验证 caller 身份）
-- [ ] **O.5** `block_producer.rs:144-212` 改为从 `OracleStorage` 读价格，调用 `ValidatorStorage::slash_stake` 和 `AssetStorage::transfer`
-- [ ] **O.6** `OraclePrecompile` 入口薄层
-- [ ] **O.7** 编译验证：`cargo check -p call-oracle`
-- [ ] **O.8** 全项目测试通过
+- [x] **O.1** 新建 `crates/oracle/src/precompile.rs`，提取 `OracleStorage<B>` ✅
+- [x] **O.2** 实现 submit_price / get_price / get_twap / is_stale ✅
+- [x] **O.3** `OracleStorage` 跨域调用：读 `ValidatorStorage`（验证 caller 身份）✅
+- [x] **O.4** `OraclePrecompile` 入口薄层（`sol!` + `dispatch::view/mutate_void`）✅
+- [x] **O.5** `call-evm` 注册 `OraclePrecompile`，`call-precompiles` 移除 `oracle.rs` ✅
+- [x] **O.6** 编译验证：`cargo check -p call-oracle` ✅
+- [x] **O.7** `cargo test -p call-oracle` 14 项测试通过 ✅
+- [x] **O.8** `cargo test -p call-evm`、`cargo test -p call-precompiles` 全通过 ✅
 
 #### Phase 5 — Governance
 
-- [ ] **G.1** 新建 `crates/governance/`
-- [ ] **G.2** 提取 `GovernanceStorage<B>`：submit_proposal / vote / queue / execute / emergency_pause / emergency_resume
-- [ ] **G.3** 新建 `crates/governance/src/advancer.rs`：`GovernanceAdvancer<'a, B>`
-- [ ] **G.4** `GovernanceAdvancer::advance()` 扫描 EVM 提案状态，临时生成事件，不持久化
-- [ ] **G.5** `block_producer.rs:277-309` 改为调用 `GovernanceAdvancer::advance()`
-- [ ] **G.6** 删除 `crates/governance/src/manager.rs` 中内存状态机（~20 字段）
-- [ ] **G.7** `GovernanceStorage` 跨域调用：`AssetStorage`（deposit 扣款）、`ValidatorStorage`（quorum）、`ComplianceStorage`
-- [ ] **G.8** `GovernancePrecompile` 入口薄层
-- [ ] **G.9** 编译验证：`cargo check -p call-governance`
-- [ ] **G.10** 全项目测试通过
+- [x] **G.1** 新建 `crates/governance/src/precompile.rs`，提取 `GovernanceStorage<B>` ✅
+- [x] **G.2** 实现 submit_proposal / vote / queue / execute / emergency_pause / emergency_resume ✅
+- [x] **G.3** `GovernanceStorage` 跨域调用：`AssetStorage`（deposit 扣款/退回）、`ValidatorStorage`（validator 身份校验）✅
+- [x] **G.4** `GovernancePrecompile` 入口薄层（`sol!` + `dispatch::view/mutate_void`）✅
+- [x] **G.5** `call-evm` 注册 `GovernancePrecompile`，`call-precompiles` 移除 `governance.rs` ✅
+- [x] **G.6** 编译验证：`cargo check -p call-governance` ✅
+- [x] **G.7** `cargo test -p call-governance` 29 项测试通过 ✅
+- [x] **G.8** `cargo test -p call-evm`、`cargo test -p call-precompiles` 全通过 ✅
 
 #### Phase 6 — Agent
 
@@ -1307,12 +1305,12 @@ impl StatefulPrecompile for AssetPrecompile {
 
 #### Phase 7 — Shielded
 
-- [ ] **S.1** 新建 `crates/shielded/`
-- [ ] **S.2** 提取 `ShieldedStorage<B>`：Merkle root、nullifier、commitment 计数
-- [ ] **S.3** Merkle tree sidecar 策略决策：完全 EVM 存储 vs 重启重建
-- [ ] **S.4** `ShieldedPrecompile` 入口薄层
-- [ ] **S.5** 编译验证：`cargo check -p call-shielded`
-- [ ] **S.6** 全项目测试通过
+- [x] **S.1** 新建 `crates/shielded/`
+- [x] **S.2** 提取 `ShieldedStorage<B>`：Merkle root、nullifier、commitment 计数
+- [x] **S.3** Merkle tree sidecar 策略决策：完全 EVM 存储 vs 重启重建
+- [x] **S.4** `ShieldedPrecompile` 入口薄层
+- [x] **S.5** 编译验证：`cargo check -p call-shielded`
+- [x] **S.6** 全项目测试通过
 
 #### Phase 8 — Compliance
 
@@ -1321,6 +1319,17 @@ impl StatefulPrecompile for AssetPrecompile {
 - [x] **C.3** `CompliancePrecompile` 入口薄层（`sol!` + `dispatch::view/mutate_void`）✅
 - [x] **C.4** 编译验证：`cargo check -p call-compliance` ✅
 - [x] **C.5** 全项目测试通过：`cargo test -p call-compliance`、`cargo test -p call-precompiles`、`cargo test -p call-evm` ✅
+
+#### Phase 9 — Switch
+
+- [x] **SW.1** 新建 `crates/switch/`，提取 `SwitchStorage<B>` ✅
+- [x] **SW.2** 实现 switch_to_evm / switch_to_protocol（CALL 原生余额 + ERC-20 mint/burn）✅
+- [x] **SW.3** `SwitchStorage` 使用 `StorageCtx::balance_add/sub/get` 处理 CALL 资产，后端 storage 处理 ERC-20 ✅
+- [x] **SW.4** `SwitchPrecompile` 入口薄层（`sol!` + `dispatch::mutate_void`）✅
+- [x] **SW.5** `call-evm` 注册 `SwitchPrecompile`，`call-precompiles` 移除 `switch.rs` ✅
+- [x] **SW.6** 编译验证：`cargo check -p call-switch` ✅
+- [x] **SW.7** `cargo test -p call-switch` 7 项测试通过 ✅
+- [x] **SW.8** `cargo test -p call-evm`、`cargo test -p call-precompiles` 全通过 ✅
 
 ---
 

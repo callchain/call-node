@@ -11,28 +11,33 @@
 //! - `0x207` Switch: switchToEvm, switchToProtocol
 //! - `0x209` Agent: register, grant, revoke
 
-mod oracle;
-mod bridge;
-mod switch;
-mod shielded;
-mod governance;
 pub mod storage;
 pub mod helpers;
 pub mod journal_backend;
 pub mod dispatch;
 
 pub use helpers::utils::*;
-pub use oracle::*;
-pub use bridge::*;
-pub use switch::*;
-pub use shielded::*;
-pub use governance::*;
+
+/// Oracle precompile address (0x101).
+pub const ORACLE_ADDRESS: Address = address!("0000000000000000000000000000000000000101");
+
+/// Bridge precompile address (0x103).
+pub const BRIDGE_ADDRESS: Address = address!("0000000000000000000000000000000000000103");
+
+/// Governance precompile address (0x203).
+pub const GOVERNANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000203");
+
+/// Shielded precompile address (0x202).
+pub const SHIELDED_ADDRESS: Address = address!("0000000000000000000000000000000000000202");
 
 /// Validator precompile address (0x204).
 pub const VALIDATOR_ADDRESS: Address = address!("0000000000000000000000000000000000000204");
 
 /// Compliance precompile address (0x205).
 pub const COMPLIANCE_ADDRESS: Address = address!("0000000000000000000000000000000000000205");
+
+/// Switch precompile address (0x207).
+pub const SWITCH_ADDRESS: Address = address!("0000000000000000000000000000000000000207");
 
 /// Agent precompile address (0x209).
 pub const AGENT_ADDRESS: Address = address!("0000000000000000000000000000000000000209");
@@ -340,16 +345,14 @@ impl CallPrecompiles {
 
 /// Build the full Callchain precompiles set (standard + custom).
 ///
-/// Note: AssetPrecompile (0x201), ValidatorPrecompile (0x204),
-/// CompliancePrecompile (0x205), and AgentPrecompile (0x209) are registered
-/// externally by `call-evm` since they live in their own domain crates.
+/// Note: AssetPrecompile (0x201), BridgePrecompile (0x103),
+/// OraclePrecompile (0x101), GovernancePrecompile (0x203),
+/// ValidatorPrecompile (0x204), CompliancePrecompile (0x205),
+/// ShieldedPrecompile (0x202), AgentPrecompile (0x209), and
+/// SwitchPrecompile (0x207) are registered externally by `call-evm`
+/// since they live in their own domain crates.
 pub fn build_precompiles() -> CallPrecompiles {
     CallPrecompiles::new(revm::primitives::hardfork::SpecId::CANCUN)
-        .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
-        .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
-        .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
-        .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
-        .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
 }
 
 #[cfg(test)]
@@ -375,12 +378,9 @@ mod tests {
     fn test_build_precompiles_contains_custom() {
         let precompiles = build_precompiles();
         assert!(precompiles.contains(&Address::left_padding_from(&[1])));
-        assert!(precompiles.contains(&ORACLE_ADDRESS));
-        assert!(precompiles.contains(&BRIDGE_ADDRESS));
-        assert!(precompiles.contains(&SHIELDED_ADDRESS));
-        assert!(precompiles.contains(&GOVERNANCE_ADDRESS));
-        assert!(precompiles.contains(&SWITCH_ADDRESS));
-        // AssetPrecompile, ValidatorPrecompile, CompliancePrecompile, and AgentPrecompile live in domain crates
-        assert_eq!(precompiles.len(), 15);
+        // AssetPrecompile, BridgePrecompile, OraclePrecompile, GovernancePrecompile,
+        // ShieldedPrecompile, ValidatorPrecompile, CompliancePrecompile,
+        // AgentPrecompile, and SwitchPrecompile live in domain crates
+        assert_eq!(precompiles.len(), 10);
     }
 }

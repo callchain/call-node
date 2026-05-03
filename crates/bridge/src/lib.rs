@@ -6,10 +6,12 @@
 mod deposit;
 mod withdraw;
 mod external;
+pub mod precompile;
 
 pub use deposit::*;
 pub use withdraw::*;
 pub use external::*;
+pub use precompile::{BridgePrecompile, BRIDGE_ADDRESS};
 
 use alloy_primitives::{Address, B256, U256};
 use call_primitives::AssetId;

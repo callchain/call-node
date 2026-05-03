@@ -4,16 +4,14 @@
 //! All bridge state (limits, pauses, pending deposits) lives in EVM storage.
 
 use alloy_primitives::{Address, U256};
-use call_evm::EvmState;
-use crate::{BridgeError};
+use crate::BridgeError;
 
-/// Check if there is sufficient EVM balance for a withdrawal
+/// Check if there is sufficient EVM balance for a withdrawal.
 pub fn check_withdraw_balance(
-    evm_state: &EvmState,
     from: Address,
+    balance: U256,
     amount: u128,
 ) -> Result<(), BridgeError> {
-    let balance = evm_state.get_balance(&from);
     let amount_u256 = U256::from(amount);
     if balance < amount_u256 {
         Err(BridgeError::InsufficientEvmBalance(from, amount_u256))
@@ -25,7 +23,6 @@ pub fn check_withdraw_balance(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_evm::EvmState;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -33,10 +30,7 @@ mod tests {
 
     #[test]
     fn test_withdraw_insufficient_evm_balance() {
-        let mut evm_state = EvmState::new();
-        evm_state.set_balance(test_addr(1), U256::from(100));
-
-        assert!(check_withdraw_balance(&evm_state, test_addr(1), 500).is_err());
-        assert!(check_withdraw_balance(&evm_state, test_addr(1), 100).is_ok());
+        assert!(check_withdraw_balance(test_addr(1), U256::from(100), 500).is_err());
+        assert!(check_withdraw_balance(test_addr(1), U256::from(100), 100).is_ok());
     }
 }

@@ -16,6 +16,7 @@ mod compliance;
 
 pub mod poseidon;
 pub mod merkle_poseidon;
+pub mod precompile;
 #[cfg(feature = "real-prover")]
 pub mod circuit_deposit;
 #[cfg(feature = "real-prover")]

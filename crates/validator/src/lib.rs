@@ -365,4 +365,45 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
         Ok(())
     }
+
+    /// Slash a validator's stake. Deducts staked amount from escrow and clears
+    /// all validator state. Returns the slashed amount (0 if not a validator).
+    pub fn slash_stake(
+        &mut self,
+        asset_store: &mut AssetStorage<B>,
+        validator: Address,
+    ) -> Result<u128, ValidatorError> {
+        let validator_id = self.read_validator_id(validator);
+        if validator_id == 0 {
+            return Ok(0);
+        }
+
+        let stake = self.read_stake(validator);
+
+        if stake > 0 {
+            asset_store
+                .deduct_balance(CALL_ASSET_ID, STAKING_ESCROW, stake)
+                .map_err(|_| ValidatorError::EscrowUnderflow)?;
+        }
+
+        // Clear validator state
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            call_precompiles::slot_validator_by_addr(validator),
+            U256::ZERO,
+        );
+        self.backend
+            .store(VALIDATOR_ADDRESS, slot_validator_stake(validator), U256::ZERO);
+        self.backend
+            .store(VALIDATOR_ADDRESS, slot_validator_status(validator), U256::ZERO);
+        self.backend
+            .store(VALIDATOR_ADDRESS, slot_validator_pubkey(validator), U256::ZERO);
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_validator_unbond_height(validator),
+            U256::ZERO,
+        );
+
+        Ok(stake)
+    }
 }
