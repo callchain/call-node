@@ -167,7 +167,8 @@ where
         // Cancun SSTORE gas accounting (simplified but safe upper bound)
         let static_gas = 20000u64;
         let dynamic_gas = if result.is_cold { 2100 } else { 0 };
-        self.deduct_gas(static_gas + dynamic_gas)?;
+        let total = static_gas + dynamic_gas;
+        self.deduct_gas(total)?;
 
         // Refunds (Cancun rules, simplified)
         let s = &result.data;

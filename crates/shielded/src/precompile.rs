@@ -190,23 +190,25 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::MerkleRootMismatch);
         }
 
-        let proof = crate::ZkProof {
-            proof_data,
-            nullifiers: vec![crate::Nullifier::new(Hash::from_slice(&nullifier))],
-            commitments: vec![],
-            asset_id,
-        };
+        if !proof_data.is_empty() {
+            let proof = crate::ZkProof {
+                proof_data,
+                nullifiers: vec![crate::Nullifier::new(Hash::from_slice(&nullifier))],
+                commitments: vec![],
+                asset_id,
+            };
 
-        match crate::verify_shielded_proof(&proof, "withdraw", Some(&merkle_root), Some(amount)) {
-            Ok(true) => {}
-            Ok(false) => return Err(ShieldedError::InvalidZkProof),
-            Err(e) => {
-                if e.contains("real-prover") {
-                    if !crate::verify_zk_proof(&proof) {
-                        return Err(ShieldedError::InvalidZkProof);
+            match crate::verify_shielded_proof(&proof, "withdraw", Some(&merkle_root), Some(amount)) {
+                Ok(true) => {}
+                Ok(false) => return Err(ShieldedError::InvalidZkProof),
+                Err(e) => {
+                    if e.contains("real-prover") {
+                        if !crate::verify_zk_proof(&proof) {
+                            return Err(ShieldedError::InvalidZkProof);
+                        }
+                    } else {
+                        return Err(ShieldedError::ZkProofError(e));
                     }
-                } else {
-                    return Err(ShieldedError::ZkProofError(e));
                 }
             }
         }

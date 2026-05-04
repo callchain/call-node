@@ -147,7 +147,6 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
         inputs: &revm::interpreter::CallInputs,
     ) -> Result<Option<Self::Output>, String> {
         let address = inputs.bytecode_address;
-
         // Try custom precompiles first
         if let Some(precompile) = self.custom.get_mut(&address) {
             let mut result = revm::interpreter::InterpreterResult {
