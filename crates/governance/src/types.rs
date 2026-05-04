@@ -174,6 +174,3 @@ pub struct FeeCurrencyEntry {
     pub added_at_block: u64,
 }
 
-pub(crate) fn default_fee_currency_cap() -> u32 {
-    10_000 // 100%
-}

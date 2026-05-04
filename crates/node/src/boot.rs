@@ -7,7 +7,6 @@ use crate::config::{NodeConfig, NodeMode, parse_bootstrap_peers};
 use crate::CallNode;
 use call_consensus::SimplexConsensus;
 use call_network::{CommonwareConfig, NetworkLimits, load_or_generate_identity_key};
-use call_primitives::Address;
 use call_rpc::RpcConfig;
 use call_crypto::{LocalSigner, SignerRef, load_key as load_keystore_key, bls_generate, bls_public_key_bytes};
 use commonware_cryptography::ed25519;
@@ -18,15 +17,6 @@ use tracing::info;
 
 /// Result type for boot sequence
 pub type BootResult = Result<CallNode, String>;
-
-fn parse_address(s: &str) -> Result<Address, String> {
-    let bytes = hex::decode(s.trim_start_matches("0x"))
-        .map_err(|e| format!("invalid address hex: {e}"))?;
-    if bytes.len() != 20 {
-        return Err(format!("address must be 20 bytes, got {}", bytes.len()));
-    }
-    Ok(Address::from_slice(&bytes))
-}
 
 /// Load or derive an ed25519 private key for BFT consensus.
 ///
