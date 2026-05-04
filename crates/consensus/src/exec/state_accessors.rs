@@ -101,7 +101,7 @@ fn slot_gov_voter(proposal_id: u64, voter: Address) -> U256 {
     storage_slot(&[b"vote", &proposal_id.to_be_bytes()[..], voter.as_slice()])
 }
 
-fn slot_gov_paused() -> U256 {
+pub fn slot_gov_paused() -> U256 {
     storage_slot(&[b"paused"])
 }
 
@@ -844,6 +844,40 @@ pub fn read_gov_proposal_type(evm_state: &EvmState, proposal_id: u64) -> u8 {
     evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposal_type")).to_be_bytes::<32>()[31]
 }
 
+/// Read governance proposal review period end block from EVM storage.
+pub fn read_gov_proposal_review_end(evm_state: &EvmState, proposal_id: u64) -> u64 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"review_end")))
+}
+
+/// Write governance proposal review period end block to EVM storage.
+pub fn write_gov_proposal_review_end(evm_state: &mut EvmState, proposal_id: u64, review_end: u64) {
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"review_end"), u64_to_u256(review_end));
+}
+
+/// Read governance proposal quorum required from EVM storage.
+pub fn read_gov_proposal_quorum_required(evm_state: &EvmState, proposal_id: u64) -> u128 {
+    u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"quorum_required")))
+}
+
+/// Write governance proposal quorum required to EVM storage.
+pub fn write_gov_proposal_quorum_required(evm_state: &mut EvmState, proposal_id: u64, quorum: u128) {
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"quorum_required"), u128_to_u256(quorum));
+}
+
+/// Read last submission block for an address from EVM storage.
+pub fn read_gov_last_submission_block(evm_state: &EvmState, addr: Address) -> u64 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_last_submission(addr)))
+}
+
+/// Write last submission block for an address to EVM storage.
+pub fn write_gov_last_submission_block(evm_state: &mut EvmState, addr: Address, block: u64) {
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_last_submission(addr), u64_to_u256(block));
+}
+
+fn slot_gov_last_submission(addr: Address) -> U256 {
+    storage_slot(&[b"last_submit", addr.as_slice()])
+}
+
 // ── Governance config helpers ─────────────────────────────────────────
 
 pub fn slot_gov_config(suffix: &[u8]) -> U256 {
@@ -875,6 +909,36 @@ pub fn read_gov_config_quorum_bps(evm_state: &EvmState) -> u128 {
     u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"quorum_bps")))
 }
 
+/// Read governance config review_period from EVM storage.
+pub fn read_gov_config_review_period(evm_state: &EvmState) -> u64 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"review_period")))
+}
+
+/// Read governance config validator_quorum_bps from EVM storage.
+pub fn read_gov_config_validator_quorum_bps(evm_state: &EvmState) -> u32 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"validator_quorum_bps"))) as u32
+}
+
+/// Read governance config supply_quorum_bps from EVM storage.
+pub fn read_gov_config_supply_quorum_bps(evm_state: &EvmState) -> u32 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"supply_quorum_bps"))) as u32
+}
+
+/// Read governance config treasury_quorum_bps from EVM storage.
+pub fn read_gov_config_treasury_quorum_bps(evm_state: &EvmState) -> u32 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"treasury_quorum_bps"))) as u32
+}
+
+/// Read governance config simple_majority_bps from EVM storage.
+pub fn read_gov_config_simple_majority_bps(evm_state: &EvmState) -> u32 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"simple_majority_bps"))) as u32
+}
+
+/// Read governance config proposal_cooldown from EVM storage.
+pub fn read_gov_config_proposal_cooldown(evm_state: &EvmState) -> u64 {
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"proposal_cooldown")))
+}
+
 /// Write governance proposal status to EVM storage.
 pub fn write_gov_proposal_status(evm_state: &mut EvmState, proposal_id: u64, status: u8) {
     evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"), U256::from(status));
@@ -887,6 +951,12 @@ pub fn seed_gov_config(evm_state: &mut EvmState) {
     evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"execution_timeout"), u64_to_u256(1000));
     evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"deposit"), u128_to_u256(10_000));
     evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"quorum_bps"), u128_to_u256(3_333));
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"review_period"), u64_to_u256(10));
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"validator_quorum_bps"), u64_to_u256(6667));
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"supply_quorum_bps"), u64_to_u256(2000));
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"treasury_quorum_bps"), u64_to_u256(2000));
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"simple_majority_bps"), u64_to_u256(5001));
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"proposal_cooldown"), u64_to_u256(345_600));
 }
 
 // ── Compliance read helpers ───────────────────────────────────────────

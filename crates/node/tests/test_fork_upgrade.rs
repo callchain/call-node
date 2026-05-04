@@ -160,11 +160,9 @@ async fn test_chain_fork_and_reconcile() {
     }
 }
 
-/// Governance-style upgrade: proposal passes, upgrade activates at height.
+/// Governance-style upgrade: schedule via fork_manager, upgrade activates at height.
 #[tokio::test]
 async fn test_governance_triggered_upgrade() {
-    use call_governance::{GovernanceManager, ProposalType};
-
     let mut node = TestNode::new();
 
     let (_secret, sender) = test_keypair();
@@ -182,34 +180,36 @@ async fn test_governance_triggered_upgrade() {
         );
     }
 
-    // Simulate a governance proposal for protocol upgrade
-    let mut gov = GovernanceManager::new();
+    let upgrade_height = 5u64;
+    {
+        let mut fm = node.state.fork_manager.write().unwrap();
+        fm.schedule_upgrade(
+            call_consensus::fork::UpgradeEntry {
+                version: ProtocolVersion::new(2, 0, 0),
+                activation_height: upgrade_height,
+                applied: false,
+                proposal_id: Some(1),
+                approved_at_height: Some(0),
+            },
+        );
+    }
 
-    // Register a proposer
-    let proposer = test_addr(10);
-    gov.set_call_balance(proposer, 20_000 * 10u128.pow(18));
+    let mut upgraded = false;
 
-    // Submit upgrade proposal
-    let proposal_id = gov.submit_proposal(
-        proposer,
-        ProposalType::ProtocolUpgrade {
-            activation_block: 100,
-            changelog: "v2.0.0".into(),
-        },
-        "Protocol Upgrade".into(),
-        "Upgrade to v2".into(),
-        vec![],
-    ).unwrap();
-
-    // The upgrade is scheduled for block 100
-    let proposal = gov.get_proposal(proposal_id).unwrap();
-    assert_eq!(proposal.state, call_governance::ProposalState::Pending);
-
-    // Produce blocks up to the activation height
+    // Produce blocks up to and past the upgrade height
     for i in 0..10 {
         node.insert_evm_tx(make_evm_tx(sender, i as u64, test_addr(30 + i as u8), 100));
         node.produce_block(1_000_000 + i * 250);
+
+        let height = node.consensus_height();
+        {
+            let mut fm = node.state.fork_manager.write().unwrap();
+            if fm.check_upgrades_at_height(height).is_some() {
+                upgraded = true;
+            }
+        }
     }
 
+    assert!(upgraded, "governance upgrade should have activated at height {upgrade_height}");
     assert_eq!(node.consensus_height(), 10);
 }

@@ -14,7 +14,7 @@ Registration executes atomically during block execution, is ordered relative to 
 
 During block execution, the Asset precompile (`0x201`) processes `register` as follows:
 
-1. **Fee collection**: Deduct `asset_registration_fee` (in CALL, asset_id = 1) from the sender's balance. The fee amount is read from `GovernanceManager::config.asset_registration_fee`.
+1. **Fee collection**: Deduct `asset_registration_fee` (in CALL, asset_id = 1) from the sender's balance. The fee amount is read from the governance config stored in EVM storage at `GOVERNANCE_ADDRESS` (`0x203`).
 2. **Asset allocation**: Register the asset in `AssetRegistry`:
    - Allocate a monotonically increasing `asset_id` (starting from 1).
    - Store metadata: `symbol`, `name`, `decimals`, `issuer = sender`, `protocol_supply = 0`, `evm_supply = 0`, `max_supply` (from tx), `status = Active`, `compliance_policy = 0`, `registered_at = current_block_height`.

@@ -1,6 +1,7 @@
 # CallChain Protocol Precompiles
 
-**Crate**: `crates/precompiles/` (`call-precompiles`)
+**Infrastructure crate**: `crates/precompiles/` (`call-precompiles`)
+**Domain crates**: `crates/asset/`, `crates/oracle/`, `crates/bridge/`, `crates/governance/`, `crates/validator/`, `crates/compliance/`, `crates/switch/`, `crates/agent/`, `crates/shielded/`
 
 ---
 
@@ -15,11 +16,11 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 |  MetaMask /   |  ->  |  EvmTransaction  |  ->  |  revm            |
 |  Solidity     |      |  (RLP, to=0x201) |      |  (precompile)    |
 +---------------+      +------------------+      +------------------+
-                                                          |
-                                                          v
+                                                         |
+                                                         v
 +---------------+      +------------------+      +------------------+
-|  AccountState |  <-  |  Rust handler    |  <-  |  selector + args |
-|  ShieldedState|      |  (protocol state)|      |  ABI decode      |
+|  EVM storage  |  <-  |  JournalBackend  |  <-  |  selector + args |
+|  slots        |      |  (StorageCtx)    |      |  ABI decode      |
 +---------------+      +------------------+      +------------------+
 ```
 
@@ -27,12 +28,12 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 
 | Address | Name | Functions |
 |---------|------|-----------|
-| `0x101` | **Oracle** | `getPrice`, `getTWAP`, `isStale`, `submitPrice` |
+| `0x101` | **Oracle** | `getPrice`, `getTWAP`, `isStale`, `submitPrice`, `setTrackedAssets` |
 | `0x103` | **Bridge** | `getTotalDeposits`, `getTotalWithdrawals`, `externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit` |
-| `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `register`, `mint`, `burn` |
+| `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `register`, `mint`, `issuerMint`, `burn` |
 | `0x202` | **Shielded** | `deposit`, `withdraw`, `transfer` |
-| `0x203` | **Governance** | `submitProposal`, `vote`, `queue`, `execute`, `emergencyPause`, `emergencyResume` |
-| `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded` |
+| `0x203` | **Governance** | `submitProposal`, `vote`, `queue`, `execute`, `emergencyPause`, `emergencyResume`, `getProposalStatus`, `getProposalVotes`, `isPaused`, `getProposalCount` |
+| `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded`, `getValidatorStake`, `getValidatorStatus`, `getValidatorPubkey`, `getUnbondHeight`, `getValidatorByIndex` |
 | `0x205` | **Compliance** | `updateCompliance`, `checkCompliance` |
 | `0x207` | **Switch** | `switchToEvm`, `switchToProtocol` |
 | `0x209` | **Agent** | `register`, `grant`, `revoke` |
@@ -41,7 +42,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 
 ### State Access
 
-Precompiles access EVM storage slots via a thread-local `StorageCtx` that binds to revm's journal during transaction execution. Protocol state (balances, asset metadata, validator stakes, etc.) is stored directly in EVM storage via precompile-specific address/slot layouts. No in-memory protocol state structs (`AccountState`, `AssetRegistry`, etc.) are accessed during precompile execution.
+Precompiles access EVM storage slots via a thread-local `StorageCtx` that binds to revm's journal during transaction execution. All state (balances, asset metadata, validator stakes, governance proposals, etc.) is stored directly in EVM storage under precompile-specific addresses. No in-memory protocol state structs (`AccountState`, `AssetRegistry`, etc.) are accessed during precompile execution.
 
 ```
 ┌──────────────┐     ┌─────────────────┐     ┌─────────────────────┐
@@ -65,9 +66,9 @@ Precompiles access EVM storage slots via a thread-local `StorageCtx` that binds 
 
 ## 1. Asset Precompile (`0x201`)
 
-**File**: `crates/precompiles/src/asset.rs`
+**File**: `crates/asset/src/precompile.rs`
 
-Unified asset operations: queries, transfers, allowances, and issuer mint/burn. Replaces the deprecated `0x102` Balance precompile.
+Unified asset operations: queries, transfers, allowances, issuer mint/burn, and registration. Replaces the deprecated `0x102` Balance precompile.
 
 ### Solidity Interface
 
@@ -79,32 +80,33 @@ interface IProtocolAsset {
 
     function getAssetInfo(uint64 assetId)
         external view returns (
-            string memory symbol,
-            string memory name,
+            bytes32 symbol,
+            bytes32 name,
             uint8 decimals,
             address issuer,
-            address erc20Address
+            uint128 maxSupply,
+            uint8 status
         );
 
     // ── Transfer ──
     function transfer(uint64 assetId, address to, uint128 amount)
-        external returns (bool);
+        external;
 
     function batchTransfer(
         uint64 assetId,
         address[] calldata to,
         uint128[] calldata amounts
-    ) external returns (bool);
+    ) external;
 
     function approve(uint64 assetId, address spender, uint128 amount)
-        external returns (bool);
+        external;
 
     function transferFrom(
         uint64 assetId,
         address from,
         address to,
         uint128 amount
-    ) external returns (bool);
+    ) external;
 
     // ── Issuer ──
     function register(
@@ -112,30 +114,34 @@ interface IProtocolAsset {
         string calldata name,
         uint8 decimals,
         uint128 maxSupply
-    ) external returns (uint64 assetId, address erc20Address);
+    ) external returns (uint64 assetId);
 
     function mint(uint64 assetId, address to, uint128 amount)
-        external returns (bool); // issuer only
+        external; // issuer only
+
+    function issuerMint(uint64 assetId, address to, uint128 amount)
+        external; // issuer only, mints on EVM layer
 
     function burn(uint64 assetId, address from, uint128 amount)
-        external returns (bool); // any holder
+        external; // any holder
 }
 ```
 
 ### Behavior
 
 - `transfer`: Deducts from sender's protocol balance, credits recipient. Checks compliance on both parties.
-- `batchTransfer`: Executes multiple transfers atomically. Gas = 5,000 per recipient.
+- `batchTransfer`: Executes multiple transfers atomically.
 - `approve` / `transferFrom`: Protocol-level allowance system (separate from ERC-20 allowances).
-- `register`: Registers a new asset in `AssetRegistry` and auto-deploys a `WrappedToken` ERC-20 contract via `EvmExecutor::deploy_erc20_template`.
-- `mint`: Only callable by the asset's registered issuer.
-- `burn`: Any holder can burn their own balance (or a balance they have allowance over via `transferFrom` semantics).
+- `register`: Registers a new asset in `AssetStorage` and auto-deploys a `WrappedToken` ERC-20 contract.
+- `mint`: Only callable by the asset's registered issuer. Mints on the protocol layer.
+- `issuerMint`: Only callable by the asset's registered issuer. Mints wrapped ERC-20 tokens directly on the EVM layer (no protocol balance created).
+- `burn`: Any holder can burn their own balance.
 
 ---
 
 ## 2. Switch Precompile (`0x207`)
 
-**File**: `crates/precompiles/src/switch.rs`
+**File**: `crates/switch/src/precompile.rs`
 
 Bidirectional bridge between protocol-layer balances and EVM-layer wrapped ERC-20 tokens.
 
@@ -145,11 +151,11 @@ Bidirectional bridge between protocol-layer balances and EVM-layer wrapped ERC-2
 interface IProtocolSwitch {
     // protocol balance -> EVM ERC-20 (mint wrapped token)
     function switchToEvm(uint64 assetId, address to, uint128 amount)
-        external returns (bool);
+        external;
 
     // EVM ERC-20 -> protocol balance (burn wrapped token)
     function switchToProtocol(uint64 assetId, address to, uint128 amount)
-        external returns (bool);
+        external;
 }
 ```
 
@@ -157,20 +163,17 @@ interface IProtocolSwitch {
 
 - `switchToEvm`:
   1. Deduct protocol balance from caller
-  2. Mint wrapped ERC-20 token on EVM layer (via `evm_call_mint`)
-  3. Update `AssetRegistry.evm_supply`
+  2. Mint wrapped ERC-20 token on EVM layer
 - `switchToProtocol`:
-  1. Burn wrapped ERC-20 token on EVM layer (via `evm_call_burn`)
+  1. Burn wrapped ERC-20 token on EVM layer
   2. Credit protocol balance to recipient
-  3. Update `AssetRegistry.evm_supply`
-- Asset ID `0` (virtual USD) is rejected on both directions.
 - Asset ID `1` (native CALL) bridges as native EVM balance (not wrapped ERC-20).
 
 ---
 
 ## 3. Oracle Precompile (`0x101`)
 
-**File**: `crates/precompiles/src/oracle.rs`
+**File**: `crates/oracle/src/precompile.rs`
 
 Price feed queries and validator price submission.
 
@@ -182,34 +185,36 @@ interface IProtocolOracle {
     function getPrice(uint64 assetId)
         external view returns (uint128);
 
-    function getTWAP(uint64 assetId, uint64 currentTimestamp)
+    function getTWAP(uint64 assetId)
         external view returns (uint128);
 
-    function isStale(uint64 assetId, uint64 currentTimestamp)
-        external view returns (bool);
+    function isStale(uint64 assetId)
+        external view returns (uint8);
 
     // ── Write (validator only) ──
     function submitPrice(
         uint64 assetId,
         uint128 price,
-        uint64 blockNumber,
         uint64 timestamp,
-        bytes calldata signature,
-        bytes[] calldata sources
-    ) external returns (bool);
+        uint64 blockNumber
+    ) external;
+
+    function setTrackedAssets(uint64[] calldata assetIds)
+        external;
 }
 ```
 
 ### Behavior
 
-- Read functions query the `OracleManager` for latest price, time-weighted average, and staleness.
-- `submitPrice`: Rejects the call unless the caller is a **qualified validator** (staked ≥ `min_self_stake`, not unbonding — i.e. in the current BFT epoch validator set). Candidates and unbonding validators cannot submit.
+- Read functions query `OracleStorage` for latest price, time-weighted average, and staleness.
+- `submitPrice`: Rejects the call unless the caller is a **qualified validator** (staked and active in the current validator set).
+- `setTrackedAssets`: Configures which asset IDs the oracle tracks. Callable by authorized callers.
 
 ---
 
 ## 4. Agent Precompile (`0x209`)
 
-**File**: `crates/precompiles/src/agent.rs`
+**File**: `crates/agent/src/precompile.rs`
 
 Agent registration and balance management.
 
@@ -225,11 +230,11 @@ interface IProtocolAgent {
 
     // owner only
     function grant(uint64 agentId, uint64 assetId, uint128 amount)
-        external returns (bool);
+        external;
 
     // owner only
     function revoke(uint64 agentId, uint64 assetId)
-        external returns (bool);
+        external;
 }
 ```
 
@@ -243,7 +248,7 @@ interface IProtocolAgent {
 
 ## 5. Shielded Precompile (`0x202`)
 
-**File**: `crates/precompiles/src/shielded.rs`
+**File**: `crates/shielded/src/precompile.rs`
 
 Privacy-preserving deposits, withdrawals, and transfers via the Shielded Pool.
 
@@ -256,7 +261,7 @@ interface IProtocolShielded {
         uint128 amount,
         bytes32 commitment,
         bytes calldata encryptedNote
-    ) external returns (bool);
+    ) external;
 
     function withdraw(
         uint64 assetId,
@@ -264,7 +269,7 @@ interface IProtocolShielded {
         uint128 amount,
         bytes calldata proof,
         bytes32 nullifier
-    ) external returns (bool);
+    ) external;
 
     function transfer(
         uint64 assetId,
@@ -272,7 +277,7 @@ interface IProtocolShielded {
         bytes32[] calldata nullifiers,
         bytes32[] calldata commitments,
         bytes[] calldata encryptedNotes
-    ) external returns (bool);
+    ) external;
 }
 ```
 
@@ -286,7 +291,7 @@ interface IProtocolShielded {
 
 ## 6. Validator Precompile (`0x204`)
 
-**File**: `crates/precompiles/src/validator.rs`
+**File**: `crates/validator/src/precompile.rs`
 
 Validator staking operations.
 
@@ -294,28 +299,44 @@ Validator staking operations.
 
 ```solidity
 interface IProtocolValidator {
-    function stake(bytes32 ed25519Pubkey, uint128 amount)
-        external returns (bool);
+    function stake(bytes32 pubkey, uint128 amount)
+        external;
 
-    function unstake(uint32 validatorId)
-        external returns (bool);
+    function unstake(uint64 validatorId)
+        external;
 
-    function claimUnbonded(uint32 validatorId)
-        external returns (bool);
+    function claimUnbonded(uint64 validatorId)
+        external;
+
+    function getValidatorStake(address validator)
+        external view returns (uint128 stake);
+
+    function getValidatorStatus(address validator)
+        external view returns (uint8 status);
+
+    function getValidatorPubkey(address validator)
+        external view returns (bytes32 pubkey);
+
+    function getUnbondHeight(address validator)
+        external view returns (uint64 height);
+
+    function getValidatorByIndex(uint64 index)
+        external view returns (address validator);
 }
 ```
 
 ### Behavior
 
-- `stake`: Deducts CALL from sender's protocol balance, registers validator in `ValidatorStateManager`.
+- `stake`: Deducts CALL from sender's balance, registers validator in `ValidatorStorage`.
 - `unstake`: Initiates unstake, moves stake to unbonding queue.
 - `claimUnbonded`: Claims matured unbonded stake back to sender's balance.
+- Query functions read validator state directly from EVM storage slots.
 
 ---
 
 ## 7. Governance Precompile (`0x203`)
 
-**File**: `crates/precompiles/src/governance.rs`
+**File**: `crates/governance/src/precompile.rs`
 
 Governance proposal lifecycle and emergency controls.
 
@@ -324,43 +345,56 @@ Governance proposal lifecycle and emergency controls.
 ```solidity
 interface IProtocolGovernance {
     function submitProposal(
-        uint8 proposalType,
-        string calldata title,
-        string calldata description,
-        bytes calldata executionData
-    ) external returns (uint64 proposalId);
+        bytes32 title,
+        bytes32 description,
+        bytes32 dataHash,
+        uint8 proposalType
+    ) external;
 
     function vote(uint64 proposalId, uint8 vote)
-        external returns (bool);
+        external;
 
     function queue(uint64 proposalId)
-        external returns (bool);
+        external;
 
     function execute(uint64 proposalId)
-        external returns (bool);
+        external;
 
     // validator only
-    function emergencyPause(string calldata reason)
-        external returns (bool);
+    function emergencyPause(bytes32 reason)
+        external;
 
     function emergencyResume()
-        external returns (bool);
+        external;
+
+    function getProposalStatus(uint64 proposalId)
+        external view returns (uint8);
+
+    function getProposalVotes(uint64 proposalId)
+        external view returns (uint128 votesFor, uint128 votesAgainst, uint128 votesAbstain);
+
+    function isPaused()
+        external view returns (uint8);
+
+    function getProposalCount()
+        external view returns (uint64);
 }
 ```
 
 ### Behavior
 
-- `submitProposal`: Requires 10,000 CALL deposit. Creates a new governance proposal.
-- `vote`: Casts a vote (For/Against/Abstain) on an active proposal.
+- `submitProposal`: Requires `proposal_deposit` CALL (governable, default 10,000 CALL). Creates a new governance proposal stored in EVM storage under `GOVERNANCE_ADDRESS`.
+- `vote`: Casts a vote (1=For, 2=Against, 3=Abstain) on an active proposal.
 - `queue`: Queues a passed proposal for execution after the timelock.
-- `execute`: Executes a queued proposal's payload.
+- `execute`: Executes a queued proposal's payload (requires `current_block >= execution_block`).
 - `emergencyPause` / `emergencyResume`: Requires 2/3 validator consensus.
+- Query functions read proposal state directly from EVM storage slots.
 
 ---
 
 ## 8. Bridge Precompile (`0x103`)
 
-**File**: `crates/precompiles/src/bridge.rs`
+**File**: `crates/bridge/src/precompile.rs`
 
 Cross-chain bridging with validator multi-signature attestation.
 
@@ -385,25 +419,25 @@ interface IProtocolBridge {
         uint64 assetId,
         uint128 amount,
         bytes calldata validatorSignatures
-    ) external returns (bool);
+    ) external;
 
     function externalBridgeWithdraw(
         uint8 targetChain,
         bytes calldata targetAddress,
         uint64 assetId,
         uint128 amount
-    ) external returns (bool);
+    ) external;
 
     function challengeBridgeDeposit(
         bytes32 sourceTxHash,
         bytes calldata proof
-    ) external returns (bool);
+    ) external;
 }
 ```
 
 ### Behavior
 
-- `externalBridgeDeposit`: Verifies 14-of-21 validator signatures, queues deposit in challenge period (~7 days), then mints on Callchain.
+- `externalBridgeDeposit`: Verifies validator signatures, queues deposit in challenge period, then mints on Callchain.
 - `externalBridgeWithdraw`: Burns Callchain assets, queues withdrawal for validator attestation.
 - `challengeBridgeDeposit`: Anyone can challenge a fraudulent deposit during the challenge period.
 
@@ -411,7 +445,7 @@ interface IProtocolBridge {
 
 ## 9. Compliance Precompile (`0x205`)
 
-**File**: `crates/precompiles/src/compliance.rs`
+**File**: `crates/compliance/src/precompile.rs`
 
 Per-asset compliance policy enforcement.
 
@@ -421,7 +455,7 @@ Per-asset compliance policy enforcement.
 interface IProtocolCompliance {
     // issuer only
     function updateCompliance(uint64 assetId, address target, uint8 status)
-        external returns (bool);
+        external;
 
     function checkCompliance(uint64 assetId, address target)
         external view returns (uint8);
@@ -430,7 +464,7 @@ interface IProtocolCompliance {
 
 ### Behavior
 
-- `updateCompliance`: Asset issuer sets address compliance status (`Clear`/`UnderReview`/`Flagged`/`Restricted`).
+- `updateCompliance`: Asset issuer sets address compliance status (0=Clear, 1=UnderReview, 2=Flagged, 3=Restricted).
 - `checkCompliance`: Returns the compliance status for an address under an asset's policy.
 - `Restricted` status blocks all value-moving operations for that address unconditionally.
 
@@ -438,51 +472,58 @@ interface IProtocolCompliance {
 
 ## Gas Pricing
 
-| Function | Gas | EVM Equivalent |
-|----------|-----|----------------|
-| `getBalance` | 800 | ERC-20 `balanceOf` ~2,100 |
-| `getAssetInfo` | 1,000 | Read query |
-| `transfer` | 5,000 | ERC-20 `transfer` ~25,000 |
-| `batchTransfer` (per recipient) | 5,000 | Loop ERC-20 ~25,000 each |
-| `approve` | 4,000 | ERC-20 `approve` ~20,000 |
-| `transferFrom` | 5,500 | ERC-20 `transferFrom` ~28,000 |
-| `register` | 50,000 | Contract deployment |
-| `mint` | 6,000 | ERC-20 `mint` ~35,000 |
-| `burn` | 5,000 | ERC-20 `burn` ~25,000 |
-| `switchToEvm` | 8,000 | Protocol->EVM switch |
-| `switchToProtocol` | 8,000 | EVM->Protocol switch |
-| `getPrice` | 1,000 | Read query |
-| `getTWAP` | 1,500 | Read query |
-| `isStale` | 800 | Read query |
-| `submitPrice` | 3,000 | Oracle submission |
-| `register` | 6,000 | Agent registration |
-| `grant` | 6,000 | Balance grant |
-| `revoke` | 6,000 | Balance revoke |
-| `deposit` | 50,000 | Not possible in Solidity |
-| `withdraw` | 50,000 | Not possible in Solidity |
-| `transfer` | 100,000 | Not possible in Solidity |
-| `stake` | 20,000 | Not possible in Solidity |
-| `unstake` | 20,000 | Not possible in Solidity |
-| `claimUnbonded` | 15,000 | Not possible in Solidity |
-| `submitProposal` | 10,000 | Governor Bravo ~80,000 |
-| `vote` | 10,000 | Governor Bravo ~50,000 |
-| `queue` | 15,000 | Governance queue |
-| `execute` | 30,000 | Governance execute |
-| `emergencyPause` | 20,000 | Emergency pause |
-| `emergencyResume` | 20,000 | Emergency resume |
-| `getTotalDeposits` | 800 | Read query |
-| `getTotalWithdrawals` | 800 | Read query |
-| `externalBridgeDeposit` | 10,000 | Multi-sig verification |
-| `externalBridgeWithdraw` | 8,000 | Cross-chain withdrawal |
-| `challengeBridgeDeposit` | 6,000 | Fraud challenge |
-| `updateCompliance` | 6,000 | Compliance update |
-| `checkCompliance` | 1,000 | Read query |
+Gas is computed at two layers:
+
+1. **Fixed base gas**: Deducted at the start of each precompile method via `dispatch::view` / `dispatch::mutate`. This covers decoding, validation, and business logic overhead.
+2. **Dynamic storage gas**: Automatically tracked by `EvmStorageProvider` on every `sload`/`sstore` call through `StorageCtx`. Warm/cold access and SSTORE refunds are applied per Cancun rules.
+
+| Function | Base Gas | Notes |
+|----------|----------|-------|
+| `getBalance` | 800 | + warm/cold sload |
+| `getAssetInfo` | 1,000 | + multiple sloads |
+| `transfer` | 5,000 | + 2 sloads + 2 sstores |
+| `batchTransfer` (per recipient) | 5,000 | + sload/sstore per recipient |
+| `approve` | 4,000 | + sload + sstore |
+| `transferFrom` | 5,500 | + 3 sloads + 2 sstores |
+| `register` | 50,000 | + contract deployment gas |
+| `mint` | 6,000 | + sload + sstore + supply update |
+| `issuerMint` | 6,000 | + EVM contract call |
+| `burn` | 5,000 | + sload + sstore + supply update |
+| `switchToEvm` | 8,000 | + EVM contract call |
+| `switchToProtocol` | 8,000 | + EVM contract call |
+| `getPrice` | 1,000 | + sload |
+| `getTWAP` | 1,500 | + multiple sloads |
+| `isStale` | 800 | + sload |
+| `submitPrice` | 3,000 | + sstore |
+| `setTrackedAssets` | 3,000 | + sstores |
+| `register` (agent) | 6,000 | + sstore |
+| `grant` | 6,000 | + balance transfer |
+| `revoke` | 6,000 | + balance transfer |
+| `deposit` (shielded) | 50,000 | + Merkle tree update |
+| `withdraw` (shielded) | 50,000 | + ZK verification |
+| `transfer` (shielded) | 100,000 | + ZK verification |
+| `stake` | 20,000 | + balance transfer + validator registration |
+| `unstake` | 20,000 | + unbonding queue |
+| `claimUnbonded` | 15,000 | + balance transfer |
+| `submitProposal` | 10,000 | + deposit transfer + proposal sstores |
+| `vote` | 10,000 | + vote sstore |
+| `queue` | 15,000 | + status sstore |
+| `execute` | 30,000 | + side effects |
+| `emergencyPause` | 20,000 | + pause sstore |
+| `emergencyResume` | 20,000 | + pause sstore |
+| `getTotalDeposits` | 800 | + sload |
+| `getTotalWithdrawals` | 800 | + sload |
+| `externalBridgeDeposit` | 10,000 | + signature verification |
+| `externalBridgeWithdraw` | 8,000 | + burn + queue |
+| `challengeBridgeDeposit` | 6,000 | + challenge sstore |
+| `updateCompliance` | 6,000 | + sstore |
+| `checkCompliance` | 1,000 | + sload |
 
 ---
 
 ## Registration
 
-All precompiles are registered in `build_precompiles_for_spec()` in `crates/precompiles/src/lib.rs`:
+Precompile address constants are defined in `crates/precompiles/src/lib.rs`:
 
 ```rust
 pub const ORACLE_ADDRESS: Address = address!("0000000000000000000000000000000000000101");
@@ -496,132 +537,153 @@ pub const SWITCH_ADDRESS: Address = address!("0000000000000000000000000000000000
 pub const AGENT_ADDRESS: Address = address!("0000000000000000000000000000000000000209");
 ```
 
+Custom precompiles are registered in `crates/evm/src/executor.rs` via `CallPrecompiles::with_custom()`:
+
+```rust
+let precompiles = call_precompiles::build_precompiles()
+    .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
+    .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
+    .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
+    .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
+    .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+    .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
+    .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+    .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
+    .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile));
+```
+
 ---
 
 ## File Map
 
+### Shared infrastructure (`call-precompiles`)
+
 | File | Role |
 |------|------|
-| `crates/precompiles/src/lib.rs` | Precompile registration, address constants |
-| `crates/precompiles/src/state_hook.rs` | Thread-local state sharing (`StateHookGuard`) |
-| `crates/precompiles/src/asset.rs` | Asset precompile (`0x201`) |
-| `crates/precompiles/src/switch.rs` | Switch precompile (`0x207`) |
-| `crates/precompiles/src/oracle.rs` | Oracle precompile (`0x101`) |
-| `crates/precompiles/src/agent.rs` | Agent precompile (`0x209`) |
-| `crates/precompiles/src/shielded.rs` | Shielded precompile (`0x202`) |
-| `crates/precompiles/src/validator.rs` | Validator precompile (`0x204`) |
-| `crates/precompiles/src/governance.rs` | Governance precompile (`0x203`) |
-| `crates/precompiles/src/bridge.rs` | Bridge precompile (`0x103`) |
-| `crates/precompiles/src/compliance.rs` | Compliance precompile (`0x205`) |
+| `crates/precompiles/src/lib.rs` | `StatefulPrecompile` trait, address constants, `CallPrecompiles` provider |
+| `crates/precompiles/src/storage.rs` | `StorageCtx` (TLS), `StorageProvider` trait, `EvmStorageProvider`, `HashMapStorageProvider` |
+| `crates/precompiles/src/journal_backend.rs` | `JournalBackend` — `StorageBackend` impl for precompile execution |
+| `crates/precompiles/src/dispatch.rs` | `view` / `view_void` / `mutate` / `mutate_void` — unified dispatch helpers |
+| `crates/precompiles/src/helpers/` | ABI encode/decode utilities, `storage_slot()` helper, slot constants |
+
+### Domain precompiles (one crate per precompile)
+
+| File | Role |
+|------|------|
+| `crates/asset/src/precompile.rs` | Asset precompile (`0x201`) |
+| `crates/asset/src/lib.rs` | `AssetStorage<B>` business logic |
+| `crates/switch/src/precompile.rs` | Switch precompile (`0x207`) |
+| `crates/switch/src/lib.rs` | `SwitchStorage<B>` business logic |
+| `crates/oracle/src/precompile.rs` | Oracle precompile (`0x101`) |
+| `crates/oracle/src/lib.rs` | `OracleStorage<B>` business logic |
+| `crates/agent/src/precompile.rs` | Agent precompile (`0x209`) |
+| `crates/agent/src/lib.rs` | `AgentStorage<B>` business logic |
+| `crates/shielded/src/precompile.rs` | Shielded precompile (`0x202`) |
+| `crates/shielded/src/lib.rs` | `ShieldedStorage<B>` business logic |
+| `crates/validator/src/precompile.rs` | Validator precompile (`0x204`) |
+| `crates/validator/src/lib.rs` | `ValidatorStorage<B>` business logic |
+| `crates/governance/src/precompile.rs` | Governance precompile (`0x203`) |
+| `crates/governance/src/lib.rs` | `GovernanceStorage<B>` business logic |
+| `crates/bridge/src/precompile.rs` | Bridge precompile (`0x103`) |
+| `crates/bridge/src/lib.rs` | `BridgeStorage<B>` business logic |
+| `crates/compliance/src/precompile.rs` | Compliance precompile (`0x205`) |
+| `crates/compliance/src/lib.rs` | `ComplianceStorage<B>` business logic |
 
 ---
 
-## 10. Design Reference: Tempo Precompile Patterns
+## Architecture Patterns
 
-> This section summarizes patterns from the **tempo** codebase (`tempo/` directory) that are applicable to Callchain's precompile architecture.
+### TLS-based `StorageCtx`
 
-### 10.1 TLS-based `StorageCtx`
-
-Tempo uses `scoped_thread_local!` to provide EVM storage access without threading `&mut EvmState` through every precompile method signature.
+Precompiles use `scoped_thread_local!` to provide EVM storage access without threading `&mut EvmState` through every method signature.
 
 ```rust
-scoped_thread_local!(static STORAGE: RefCell<&mut dyn PrecompileStorageProvider>);
+scoped_thread_local!(static TL_STORAGE: RefCell<&mut (dyn StorageProvider + 'static)>);
 
 pub struct StorageCtx;
 impl StorageCtx {
-    pub fn enter<S, R>(storage: &mut S, f: impl FnOnce() -> R) -> R { ... }
-    pub fn sload(&self, address: Address, key: U256) -> Result<U256> { ... }
-    pub fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<()> { ... }
+    pub fn enter<R>(provider: &mut dyn StorageProvider, f: impl FnOnce() -> R) -> R { ... }
+    pub fn sload(address: Address, key: U256) -> Option<U256> { ... }
+    pub fn sstore(address: Address, key: U256, value: U256) -> Option<()> { ... }
 }
 ```
 
 **Benefits:**
-- Precompile methods stay clean: `fn transfer(&mut self, msg_sender: Address, call: TransferCall)` — no `evm: &mut EvmState` parameter.
-- Nested precompile calls (A calling B) automatically share the same storage context.
+- Precompile methods stay clean: no `evm: &mut EvmState` parameter.
+- Nested precompile calls automatically share the same storage context.
 - Natural integration with revm's journal/checkpoint system.
 
-### 10.2 `#[contract]` Storage Layout Macro
+### Unified Dispatch Framework
 
-Tempo's `precompiles-macros` crate provides a `#[contract]` attribute that transforms a Rust struct defining storage layout into a full contract with type-safe getters and setters.
-
-```rust
-#[contract]
-pub struct TIP20Token {
-    name: String,
-    symbol: String,
-    total_supply: U256,
-    balances: Mapping<Address, U256>,
-    allowances: Mapping<Address, Mapping<Address, U256>>,
-}
-```
-
-The macro generates:
-- Automatic slot allocation following Solidity layout rules
-- `self.balances[addr].read()` / `self.balances[addr].write(amount)?`
-- `Storable` derive for custom structs
-
-### 10.3 Unified Dispatch Framework
-
-Tempo uses `alloy_sol_types::sol!` to generate ABI types from Solidity interfaces, then routes via a `dispatch_call` macro:
+All domain precompiles use `alloy_sol_types::sol!` to generate ABI types from Solidity interfaces, then route via `dispatch::view` / `dispatch::mutate`:
 
 ```rust
-impl Precompile for TIP20Token {
+impl StatefulPrecompile for AssetPrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch_call(calldata, TIP20Call::decode, |call| match call {
-            TIP20Call::balanceOf(call) => view(call, |c| self.balance_of(c)),
-            TIP20Call::transfer(call)  => mutate(call, msg_sender, |s, c| self.transfer(s, c)),
-            // ...
-        })
+        let selector = &calldata[..4];
+        match selector {
+            IProtocolAsset::transfer::SELECTOR => {
+                dispatch::mutate_void::<IProtocolAsset::transferCall, _>(
+                    calldata, 5000, |call| {
+                        let mut store = AssetStorage::new(JournalBackend);
+                        store.transfer(call.assetId, msg_sender, call.to, call.amount)
+                            .map_err(|e| PrecompileError::Other(e.to_string().into()))
+                    }
+                )
+            }
+            // ... other arms
+        }
     }
 }
 ```
 
-`metadata`, `view`, and `mutate` helper macros handle:
-- Gas deduction for input bytes
-- ABI decoding of calldata
-- ABI encoding of return values
-- Permission checking (mutate receives `msg_sender`)
+`dispatch::view`, `dispatch::mutate`, and their `_void` variants handle:
+- Gas deduction for the base operation cost
+- ABI decoding of calldata via `SolCall`
+- ABI encoding of return values via `SolValue`
+- Checkpoint wrapping for mutating operations (auto-revert on error)
+- Gas accounting propagation via `fill_precompile_output`
 
-### 10.4 Built-in Gas Metering
+### Built-in Gas Metering
 
-Tempo's `EvmPrecompileStorageProvider` wraps `EvmInternals` and automatically applies EIP gas rules:
+`EvmStorageProvider` wraps revm's live journal and automatically applies EIP-7623 gas rules:
 
 | Operation | Gas Charged |
 |-----------|-------------|
-| `sload` (warm) | `warm_storage_read_cost` |
-| `sload` (cold) | + `cold_storage_additional_cost` |
-| `sstore` (static) | `sstore_static_gas` |
-| `sstore` (dynamic) | `sstore_dynamic_gas(...)` |
-| `emit_event` | `LOG + log_cost(topics, data_len)` |
+| `sload` (warm) | 100 |
+| `sload` (cold) | 2,100 |
+| `sstore` (static) | 20,000 |
+| `sstore` (cold) | +2,100 |
+| `sstore` refund (reset to original) | -4,800 |
+| `sstore` refund (clear slot) | -4,800 |
+| `tload` | 100 |
+| `tstore` | 100 |
+| `balance_add/sub/get` | 100 |
+| `emit_event` | 375 + 375/topic + 8/byte |
 
-Precompile developers do not manually calculate gas — it is deducted automatically at the storage layer.
+Precompile developers do not manually calculate storage gas — it is deducted automatically at the `StorageProvider` layer. Only the fixed base gas for each operation needs to be specified in `dispatch::view` / `dispatch::mutate`.
 
-### 10.5 Dynamic Address-Prefix Registration
+---
 
-Tempo registers precompiles via a lookup function rather than a static list, enabling address-prefix routing:
+## Dependency Graph
 
-```rust
-precompiles.set_precompile_lookup(move |address: &Address| {
-    if is_tip20_prefix(*address) { Some(TIP20Token::create_precompile(*address, &cfg)) }
-    else if *address == FACTORY_ADDRESS { Some(Factory::create_precompile(&cfg)) }
-    // ...
-});
+```
+call-precompiles (shared infra)
+  ├── StorageCtx, JournalBackend, dispatch, helpers
+  └── call-protocol (StorageBackend trait)
+
+Domain crates (each depends on call-precompiles + call-protocol)
+  ├── call-asset      ──▶ AssetStorage<B>   ──▶ AssetPrecompile (0x201)
+  ├── call-switch     ──▶ SwitchStorage<B>  ──▶ SwitchPrecompile (0x207)
+  ├── call-oracle     ──▶ OracleStorage<B>  ──▶ OraclePrecompile (0x101)
+  ├── call-agent      ──▶ AgentStorage<B>   ──▶ AgentPrecompile (0x209)
+  ├── call-shielded   ──▶ ShieldedStorage<B> ──▶ ShieldedPrecompile (0x202)
+  ├── call-validator  ──▶ ValidatorStorage<B> ──▶ ValidatorPrecompile (0x204)
+  ├── call-governance ──▶ GovernanceStorage<B> ──▶ GovernancePrecompile (0x203)
+  ├── call-bridge     ──▶ BridgeStorage<B>  ──▶ BridgePrecompile (0x103)
+  └── call-compliance ──▶ ComplianceStorage<B> ──▶ CompliancePrecompile (0x205)
+
+call-evm (registers all precompiles via with_custom())
 ```
 
-Callchain's asset precompile (`0xCCC*`) uses a similar prefix pattern but currently enumerates addresses statically. Adopting dynamic lookup would simplify registration.
-
-### 10.6 Applicability to Callchain
-
-| Pattern | Callchain Status | 实施计划 |
-|---------|------------------|---------|
-| TLS `StorageCtx` | ✅ 已实施 | 保持现状，`StorageCtx` 已是当前架构核心 |
-| `#[contract]` macro | ❌ 未实施 | **暂缓** — 宏开发工作量大，与拆 crate 正交，不一起实施 |
-| Unified dispatch | ❌ 手写 `match` | **Phase 1 一起实施** — 拆 crate 时 precompile.rs 重写，顺手替换为 `dispatch_call` |
-| Built-in gas metering | ❌ 手动扣 gas | **Phase 1 一起实施** — `JournalBackend` 升级为自动 warm/cold 追踪，业务层彻底无 gas |
-| Dynamic prefix lookup | 静态地址列表 | **不需要** — 地址固定 `0x101-0x209`，无动态前缀需求 |
-
-#### 实施路线图
-
-1. **Phase 1 (Asset pilot)**：拆 `crates/asset/` + 统一分发框架 + 自动 gas 计量
-2. **Phase 2-8**：其余领域按同模式拆分，复用 `dispatch_call` 和 `JournalBackend`
-3. **`#[contract]` macro**：如后续新增大量 precompile 再考虑，当前手写 slot 常量足够
+No circular dependencies exist. `call-precompiles` and `call-protocol` form the base layer; all domain crates depend on them but not on each other (except for cross-domain reads via `StorageCtx::sload` to other precompile addresses).

@@ -1,896 +1,647 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use call_asset::AssetStorage;
+use call_precompiles::{
+    journal_backend::JournalBackend,
+    save_bal,
+    storage::{HashMapStorageProvider, StorageCtx},
+};
+use call_protocol::CALL_ASSET_ID;
+use call_primitives::Address;
 
-use crate::*;
+use crate::precompile::{GovernanceStorage, PROPOSAL_DEPOSIT};
 
-// ── Proposal Submit & Vote ────────────────────────────────────────
+fn test_addr(n: u8) -> Address {
+    Address::repeat_byte(n)
+}
+
+fn with_ctx<R>(block_number: u64, f: impl FnOnce() -> R) -> R {
+    let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, block_number);
+    StorageCtx::enter(&mut provider, f)
+}
+
+fn seed_balance(addr: Address, amount: u128) {
+    save_bal(CALL_ASSET_ID, addr, amount);
+}
+
+// ── Submit ────────────────────────────────────────────────────────
 
 #[test]
-fn test_proposal_submit_and_vote() {
-    let mut mgr = make_manager_with_validators(3);
+fn test_submit_proposal_success() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
 
-    // Give proposer enough balance for deposit
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        // review_period=0 so proposal is active immediately
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
 
-    let id = mgr
-        .submit_proposal(
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                [1u8; 32],
+                [2u8; 32],
+                [3u8; 32],
+                0, // ParameterChange
+                proposer,
+            )
+            .unwrap();
+
+        assert_eq!(id, 1);
+        assert_eq!(gov.read_proposal_count(), 1);
+        assert_eq!(gov.read_proposal_status(id), 1); // Active
+        assert_eq!(gov.read_proposal_u8(id, b"proposal_type"), 0);
+        assert_eq!(gov.read_proposal_proposer(id), proposer);
+
+        // Deposit deducted
+        let balance = asset.read_balance(CALL_ASSET_ID, proposer);
+        assert_eq!(balance, PROPOSAL_DEPOSIT * 2 - PROPOSAL_DEPOSIT);
+    });
+}
+
+#[test]
+fn test_submit_proposal_insufficient_balance() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT - 1);
+
+        let result = gov.submit_proposal(
+            &mut asset,
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            0,
             proposer,
-            ProposalType::ParameterChange {
-                param_id: "max_block_size".into(),
-                new_value: "10000000".into(),
-            },
-            "Increase block size".into(),
-            "Double the max block size".into(),
-            vec![],
-        )
-        .unwrap();
-
-    assert_eq!(id, 0);
-
-    // Deposit was deducted
-    let balance = mgr.call_balances.get(&proposer).unwrap();
-    assert_eq!(*balance, mgr.config.proposal_deposit);
-
-    // Advance to voting period
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
-
-    // Validators vote yes
-    mgr.vote(id, test_addr(1), Vote::Yes).unwrap();
-    mgr.vote(id, test_addr(2), Vote::Yes).unwrap();
-    mgr.vote(id, test_addr(3), Vote::No).unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.voting_power_yes, 2); // 2 validators voted yes
-    assert_eq!(proposal.voting_power_no, 1);
+        );
+        assert!(result.is_err());
+    });
 }
 
-// ── Quorum Pass ───────────────────────────────────────────────────
-
 #[test]
-fn test_proposal_passes_quorum() {
-    let mut mgr = make_manager_with_validators(3);
+fn test_rate_limiting() {
+    let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, 100);
+    StorageCtx::enter(&mut provider, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
 
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 10);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"proposal_cooldown", 50);
 
-    let id = mgr
-        .submit_proposal(
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                [1u8; 32],
+                [2u8; 32],
+                [3u8; 32],
+                0,
+                proposer,
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+
+        // Same block (100): rate limited
+        let result = gov.submit_proposal(
+            &mut asset,
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            0,
             proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test proposal".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Advance past voting
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
-
-    // All 3 validators voted yes during voting (we'll simulate by directly setting)
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3;
-    }
-
-    // Queue should pass and move to queued
-    mgr.queue_proposal(id).unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.state, ProposalState::Queued);
-    assert!(proposal.execution_block.is_some());
-}
-
-// ── Quorum Fail ───────────────────────────────────────────────────
-
-#[test]
-fn test_proposal_fails_quorum() {
-    let mut mgr = make_manager_with_validators(3);
-
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test proposal".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Advance past voting without any votes
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
-
-    let result = mgr.queue_proposal(id);
-    assert!(result.is_err());
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.state, ProposalState::Defeated);
-}
-
-// ── Timelock Execution ────────────────────────────────────────────
-
-#[test]
-fn test_proposal_timelock_execution() {
-    let mut mgr = make_manager_with_validators(3);
-
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test proposal".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Set votes, advance past voting
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3;
-    }
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
-    mgr.queue_proposal(id).unwrap();
-
-    // Cannot execute before timelock
-    let result = mgr.execute_proposal(id, proposer);
-    assert!(result.is_err());
-
-    // Advance past timelock
-    let exec_block = mgr.get_proposal(id).unwrap().execution_block.unwrap();
-    mgr.set_current_block(exec_block + 1);
-    mgr.execute_proposal(id, proposer).unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.state, ProposalState::Executed);
-
-    // Deposit returned to proposer
-    let balance = mgr.call_balances.get(&proposer).unwrap();
-    assert_eq!(*balance, mgr.config.proposal_deposit * 2 - mgr.config.proposal_deposit + mgr.config.proposal_deposit); // deposit deducted then restored
-}
-
-// ── Proposal Expire ───────────────────────────────────────────────
-
-#[test]
-fn test_proposal_expire_confiscate_deposit() {
-    let mut mgr = make_manager_with_validators(3);
-
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test proposal".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Queue the proposal
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3;
-    }
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
-    mgr.queue_proposal(id).unwrap();
-
-    // Advance past execution timeout
-    let exec_block = mgr.get_proposal(id).unwrap().execution_block.unwrap();
-    mgr.set_current_block(exec_block + EXECUTION_TIMEOUT_BLOCKS + 1);
-
-    mgr.expire_proposal(id).unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.state, ProposalState::Expired);
-
-    // Deposit confiscated
-    assert!(mgr.deposits.get(&proposer).is_none());
-}
-
-// ── Validator 1=1 Voting ─────────────────────────────────────────
-
-#[test]
-fn test_validator_voting_1_1() {
-    let mut mgr = make_manager_with_validators(3);
-
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ValidatorSlash {
-                validator_id: 99,
-                reason: "offline".into(),
-            },
-            "Slash offline validator".into(),
-            "Validator 99 has been offline".into(),
-            vec![],
-        )
-        .unwrap();
-
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
-
-    // Each validator gets 1 vote regardless of balance
-    mgr.vote(id, test_addr(1), Vote::Yes).unwrap();
-    mgr.vote(id, test_addr(2), Vote::Yes).unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.voting_power_yes, 2);
-}
-
-// ── CALL Holder Balance-Weighted Voting ───────────────────────────
-
-#[test]
-fn test_call_holder_voting_balance_weighted() {
-    let mut mgr = make_manager_with_validators(3);
-
-    let proposer = test_addr(10);
-    let big_holder = test_addr(20);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-    mgr.set_call_balance(big_holder, TOTAL_SUPPLY / 4); // 25% of supply
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::TreasurySpend {
-                recipient: test_addr(30),
-                amount: one_million_call(),
-                asset_id: 0,
-            },
-            "Treasury spend".into(),
-            "Send 1M CALL to address".into(),
-            vec![],
-        )
-        .unwrap();
-
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
-
-    // Big holder votes yes — voting power = their CALL balance
-    mgr.vote(id, big_holder, Vote::Yes).unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.voting_power_yes, TOTAL_SUPPLY / 4);
-}
-
-// ── Vote Delegation ───────────────────────────────────────────────
-
-#[test]
-fn test_vote_delegation() {
-    let mut mgr = make_manager_with_validators(3);
-
-    let delegator = test_addr(50);
-    let delegate = test_addr(51);
-    mgr.set_call_balance(delegator, 5_000_000);
-    mgr.set_call_balance(delegate, 1_000_000);
-
-    mgr.delegate_vote(delegator, delegate, 5_000_000, 1_000_000)
-        .unwrap();
-
-    // Delegated power for delegate
-    let delegated = mgr.get_delegated_voting_power(delegate);
-    assert_eq!(delegated, 5_000_000);
-
-    // Undelegate
-    mgr.undelegate_vote(delegator).unwrap();
-    let delegated = mgr.get_delegated_voting_power(delegate);
-    assert_eq!(delegated, 0);
-}
-
-// ── Emergency Pause ───────────────────────────────────────────────
-
-#[test]
-fn test_emergency_pause_2_3_signatures() {
-    let mut mgr = make_manager_with_validators(3);
-
-    // With 3 validators and 6667 BPS, ceil(3 * 6667 / 10000) = 3, so ALL 3 needed
-    let result = mgr
-        .emergency_pause_initiate(1, "critical bug".into())
-        .unwrap();
-    assert!(!result); // need more signatures
-
-    let result = mgr
-        .emergency_pause_initiate(2, "critical bug".into())
-        .unwrap();
-    assert!(!result); // still need one more
-
-    let result = mgr
-        .emergency_pause_initiate(3, "critical bug".into())
-        .unwrap();
-    assert!(result); // 3/3 reached, pause activated
-
-    assert!(mgr.is_paused());
-    assert_eq!(mgr.emergency_pause.pause_reason, "critical bug");
-
-    // Resume
-    mgr.emergency_pause_resume().unwrap();
-    assert!(!mgr.is_paused());
-}
-
-// ── Compliance Update Joint Voting ────────────────────────────────
-
-#[test]
-fn test_compliance_update_issuer_validator_joint() {
-    let mut mgr = make_manager_with_validators(3);
-
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    // Register an issuer
-    let issuer = test_addr(20);
-    mgr.register_asset_issuer(1, issuer);
-    mgr.set_call_balance(issuer, mgr.config.proposal_deposit);
-
-    let id = mgr
-        .submit_proposal(
-            issuer,
-            ProposalType::ComplianceUpdate {
-                asset_id: 1,
-                new_policy: 1, // OFAC blacklist
-            },
-            "Update compliance".into(),
-            "Enable OFAC blacklist".into(),
-            vec![],
-        )
-        .unwrap();
-
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
-
-    // Issuer votes — should have weight of total_supply / 10
-    mgr.vote(id, issuer, Vote::Yes).unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.voting_power_yes, TOTAL_SUPPLY / 10);
-
-    // A validator also votes — adds 1 more
-    mgr.vote(id, test_addr(1), Vote::Yes).unwrap();
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.voting_power_yes, TOTAL_SUPPLY / 10 + 1);
-}
-
-// ── Insufficient Deposit ──────────────────────────────────────────
-
-#[test]
-fn test_proposal_insufficient_deposit() {
-    let mut mgr = GovernanceManager::new();
-    let proposer = test_addr(1);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit - 1);
-
-    let result = mgr.submit_proposal(
-        proposer,
-        ProposalType::ParameterChange {
-            param_id: "test".into(),
-            new_value: "1".into(),
-        },
-        "Test".into(),
-        "Test".into(),
-        vec![],
-    );
-    assert!(matches!(result, Err(GovernanceError::InsufficientDeposit)));
-}
-
-// ── Voting Period Enforcement ─────────────────────────────────────
-
-#[test]
-fn test_voting_before_period_rejected() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Voting hasn't started yet (need to pass REVIEW_PERIOD_BLOCKS)
-    let result = mgr.vote(id, test_addr(1), Vote::Yes);
-    assert!(matches!(result, Err(GovernanceError::VotingNotStarted)));
-}
-
-// ── Fee Currency Proposal Types ───────────────────────────────────
-
-#[test]
-fn test_fee_currency_proposal_lifecycle() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    // FeeCurrencyAdd proposal
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::FeeCurrencyAdd {
-                asset_id: 5,
-                name: "USDC".into(),
-                oracle_price_key: "USDC/USD".into(),
-            },
-            "Add USDC as fee currency".into(),
-            "USDC market cap > 100M".into(),
-            vec![],
-        )
-        .unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    // Simple majority quorum for fee currency proposals
-    assert_eq!(proposal.quorum_required, 2); // 3/2 + 1 = 2
-}
-
-// ── Proposal State Transitions ────────────────────────────────────
-
-#[test]
-fn test_proposal_state_machine_full() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
-
-    let p = mgr.get_proposal(id).unwrap();
-    assert_eq!(p.state, ProposalState::Pending);
-
-    // Advance past review into voting
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
-
-    // Vote
-    mgr.vote(id, test_addr(1), Vote::Yes).unwrap();
-    let p = mgr.get_proposal(id).unwrap();
-    assert_eq!(p.state, ProposalState::Active);
-
-    // Advance past voting, pass
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3; // ensure quorum
-    }
-    mgr.queue_proposal(id).unwrap();
-
-    let p = mgr.get_proposal(id).unwrap();
-    assert_eq!(p.state, ProposalState::Queued);
-
-    // Advance past timelock, execute
-    let exec = p.execution_block.unwrap();
-    mgr.set_current_block(exec + 1);
-    mgr.execute_proposal(id, proposer).unwrap();
-
-    let p = mgr.get_proposal(id).unwrap();
-    assert_eq!(p.state, ProposalState::Executed);
-}
-
-// ── Duplicate Vote Prevention ─────────────────────────────────────
-
-#[test]
-fn test_voter_cannot_vote_twice_same_proposal() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
-
-    mgr.set_current_block(REVIEW_PERIOD_BLOCKS + 1);
-    mgr.vote(id, test_addr(1), Vote::Yes).unwrap();
-    // Second vote by same address should be rejected
-    assert!(matches!(
-        mgr.vote(id, test_addr(1), Vote::Yes),
-        Err(GovernanceError::AlreadyVoted)
-    ));
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    assert_eq!(proposal.voting_power_yes, 1);
-}
-
-// ── Protocol Upgrade Quorum ───────────────────────────────────────
-
-#[test]
-fn test_protocol_upgrade_dual_quorum() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ProtocolUpgrade {
-                activation_block: 1_000_000,
-                changelog: "v1.1.0 release".into(),
-            },
-            "Protocol upgrade".into(),
-            "Upgrade to v1.1.0".into(),
-            vec![],
-        )
-        .unwrap();
-
-    let proposal = mgr.get_proposal(id).unwrap();
-    // max(2/3 validators, 20% total supply)
-    // 2/3 of 3 = 2, 20% of 1B = 200M
-    assert_eq!(proposal.quorum_required, TOTAL_SUPPLY / 5);
-}
-
-// ── Auto-advance state machine ────────────────────────────────────
-
-#[test]
-fn test_advance_auto_transitions() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Initially pending
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Pending);
-
-    // Advance to review period — should auto-activate
-    mgr.advance(REVIEW_PERIOD_BLOCKS + 1);
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Active);
-
-    // Set votes for quorum
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3;
-    }
-
-    // Advance past voting — should auto-queue and auto-execute
-    let voting_end = mgr.get_proposal(id).unwrap().end_block;
-    mgr.advance(voting_end + 1);
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Queued);
-
-    // Advance past timelock — should auto-execute
-    let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
-    mgr.advance(exec + 1);
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Executed);
+        );
+        assert!(result.is_err());
+    });
 }
 
 #[test]
-fn test_advance_auto_defeat() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
+fn test_rate_limiting_expires_after_cooldown() {
+    let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, 0);
+    StorageCtx::enter(&mut provider, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
 
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 10);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"proposal_cooldown", 50);
 
-    // Advance past review
-    mgr.advance(REVIEW_PERIOD_BLOCKS + 1);
+        gov.submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+    });
 
-    // No votes — advance past voting end
-    let voting_end = mgr.get_proposal(id).unwrap().end_block;
-    mgr.advance(voting_end + 1);
+    // Advance past cooldown (0 + 50 = 50, so 51 is past)
+    provider.set_block_number(51);
+    StorageCtx::enter(&mut provider, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
 
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Defeated);
-    // Deposit confiscated
-    assert!(mgr.deposits.get(&proposer).is_none());
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 10);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"proposal_cooldown", 50);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+        assert_eq!(id, 2);
+    });
+}
+
+// ── Vote ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_vote_yes_and_tally() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+        let voter = test_addr(2);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        seed_balance(voter, 500_000);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        gov.vote(id, 1, voter, 500_000).unwrap();
+
+        assert_eq!(gov.read_vote_tally(id, b"votes_for"), 500_000);
+        assert_eq!(gov.read_vote_tally(id, b"votes_against"), 0);
+        assert_eq!(gov.read_vote_tally(id, b"votes_abstain"), 0);
+    });
 }
 
 #[test]
-fn test_advance_auto_expire() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
+fn test_vote_before_start_rejected() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+        let voter = test_addr(2);
 
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        seed_balance(voter, 500_000);
+        // review_period=10, so start_block=10
+        gov.write_config_u64(b"review_period", 10);
+        gov.write_config_u64(b"voting_period", 100);
 
-    // Set votes, advance to queued
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3;
-    }
-    mgr.advance(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
 
-    // Should be queued now
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Queued);
-
-    // Advance past execution timeout
-    let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
-    mgr.advance(exec + EXECUTION_TIMEOUT_BLOCKS + 1);
-
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Expired);
-    assert!(mgr.deposits.get(&proposer).is_none());
+        // Block 0 < start_block 10: voting not started
+        let result = gov.vote(id, 1, voter, 500_000);
+        assert!(result.is_err());
+    });
 }
-
-// ── Event emission ────────────────────────────────────────────────
 
 #[test]
-fn test_advance_emits_events() {
-    let mut mgr = make_manager_with_validators(3);
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
+fn test_vote_after_end_rejected() {
+    let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, 0);
+    let id = StorageCtx::enter(&mut provider, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
 
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
 
-    // Advance to active
-    mgr.advance(REVIEW_PERIOD_BLOCKS + 1);
-    let events = mgr.drain_events();
-    assert_eq!(events.len(), 1);
-    assert!(matches!(&events[0], GovernanceEvent::ProposalAdvanced { id: event_id, from: ProposalState::Pending, to: ProposalState::Active } if *event_id == id));
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+        id
+    });
 
-    // Set votes, advance past voting
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3;
-    }
-    let voting_end = mgr.get_proposal(id).unwrap().end_block;
-    mgr.advance(voting_end + 1);
-    let events = mgr.drain_events();
-    // Queued transition emits event
-    assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalAdvanced { to: ProposalState::Queued, .. })));
+    // Advance past voting end (start=0, end=100, so vote at 101 should fail)
+    provider.set_block_number(101);
+    StorageCtx::enter(&mut provider, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let voter = test_addr(2);
+        seed_balance(voter, 500_000);
 
-    // Advance past timelock to execute
-    let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
-    mgr.advance(exec + 1);
-    let events = mgr.drain_events();
-    assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalExecuted { id: event_id, .. } if *event_id == id)));
-
-    // drain_events clears the buffer
-    assert!(mgr.drain_events().is_empty());
+        let result = gov.vote(id, 1, voter, 500_000);
+        assert!(result.is_err());
+    });
 }
-
-// ── Balance source ────────────────────────────────────────────────
 
 #[test]
-fn test_balance_source_fallback() {
-    let mut mgr = GovernanceManager::new();
-    let addr = test_addr(1);
+fn test_duplicate_vote_rejected() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+        let voter = test_addr(2);
 
-    // Without balance_source, uses call_balances
-    mgr.set_call_balance(addr, 500_000);
-    assert_eq!(mgr.get_voting_balance(addr), 500_000);
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        seed_balance(voter, 500_000);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
 
-    // With balance_source set, uses external
-    mgr.balance_source = Some(Arc::new(|_| 1_000_000));
-    assert_eq!(mgr.get_voting_balance(addr), 1_000_000);
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        gov.vote(id, 1, voter, 500_000).unwrap();
+        let result = gov.vote(id, 1, voter, 500_000);
+        assert!(result.is_err());
+
+        assert_eq!(gov.read_vote_tally(id, b"votes_for"), 500_000);
+    });
 }
 
-// ── GovernanceConfig ──────────────────────────────────────────────
+#[test]
+fn test_vote_no_and_abstain() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+        let voter_a = test_addr(2);
+        let voter_b = test_addr(3);
+        let voter_c = test_addr(4);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        seed_balance(voter_a, 100_000);
+        seed_balance(voter_b, 200_000);
+        seed_balance(voter_c, 300_000);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        gov.vote(id, 1, voter_a, 100_000).unwrap(); // Yes
+        gov.vote(id, 2, voter_b, 200_000).unwrap(); // No
+        gov.vote(id, 3, voter_c, 300_000).unwrap(); // Abstain
+
+        assert_eq!(gov.read_vote_tally(id, b"votes_for"), 100_000);
+        assert_eq!(gov.read_vote_tally(id, b"votes_against"), 200_000);
+        assert_eq!(gov.read_vote_tally(id, b"votes_abstain"), 300_000);
+    });
+}
+
+// ── Queue ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_queue_with_quorum() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        // Cast votes exceeding quorum
+        gov.vote(id, 1, test_addr(2), 1_000_000).unwrap();
+
+        gov.queue(id, 101).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 2); // Queued
+        let exec_block = gov.read_proposal_u64(id, b"execution_block");
+        assert!(exec_block > 101); // timelock applied
+    });
+}
+
+#[test]
+fn test_queue_without_quorum_defeated() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        // No votes cast
+        let result = gov.queue(id, 101);
+        assert!(result.is_err());
+
+        assert_eq!(gov.read_proposal_status(id), 4); // Defeated
+        // Deposit confiscated
+        assert_eq!(gov.read_proposal_u128(id, b"deposit"), 0);
+    });
+}
+
+#[test]
+fn test_queue_more_against_than_for_defeated() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        gov.vote(id, 2, test_addr(2), 500_000).unwrap(); // No
+        gov.vote(id, 1, test_addr(3), 100_000).unwrap(); // Yes
+
+        let result = gov.queue(id, 101);
+        assert!(result.is_err());
+        assert_eq!(gov.read_proposal_status(id), 4); // Defeated
+    });
+}
+
+#[test]
+fn test_queue_emergency_pause_skips_timelock() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                [1u8; 32],
+                [2u8; 32],
+                [3u8; 32],
+                5, // EmergencyPause
+                proposer,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000).unwrap();
+
+        let current_block = 101;
+        gov.queue(id, current_block).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 2); // Queued
+        let exec_block = gov.read_proposal_u64(id, b"execution_block");
+        assert_eq!(exec_block, current_block); // No timelock
+    });
+}
+
+// ── Execute ───────────────────────────────────────────────────────
+
+#[test]
+fn test_execute_after_timelock() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 50);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000).unwrap();
+        gov.queue(id, 101).unwrap();
+
+        let exec_block = gov.read_proposal_u64(id, b"execution_block");
+
+        // Before timelock: rejected
+        let result = gov.execute(&mut asset, id, exec_block - 1, proposer);
+        assert!(result.is_err());
+
+        // After timelock: succeeds
+        gov.execute(&mut asset, id, exec_block, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+
+        // Deposit refunded
+        let balance = asset.read_balance(CALL_ASSET_ID, proposer);
+        assert_eq!(balance, PROPOSAL_DEPOSIT * 2 - PROPOSAL_DEPOSIT + PROPOSAL_DEPOSIT);
+    });
+}
+
+#[test]
+fn test_execute_deposit_refunded() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000).unwrap();
+        gov.queue(id, 1).unwrap();
+        // execution_block = 1 + timelock(1) = 2
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        // Deposit returned
+        let balance = asset.read_balance(CALL_ASSET_ID, proposer);
+        assert_eq!(balance, PROPOSAL_DEPOSIT * 2);
+    });
+}
+
+#[test]
+fn test_execute_emergency_pause_sets_paused() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                [1u8; 32],
+                [2u8; 32],
+                [3u8; 32],
+                5, // EmergencyPause
+                proposer,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        assert!(!gov.is_paused());
+        gov.execute(&mut asset, id, 1, proposer).unwrap();
+        assert!(gov.is_paused());
+    });
+}
+
+// ── Emergency pause / resume ──────────────────────────────────────
+
+#[test]
+fn test_emergency_pause_and_resume() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+
+        assert!(!gov.is_paused());
+
+        gov.emergency_pause([1u8; 32], test_addr(1));
+        assert!(gov.is_paused());
+
+        gov.emergency_resume();
+        assert!(!gov.is_paused());
+    });
+}
+
+// ── Proposal types ────────────────────────────────────────────────
+
+#[test]
+fn test_proposal_types_stored_correctly() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 20);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        for proposal_type in 0u8..=9 {
+            let id = gov
+                .submit_proposal(
+                    &mut asset,
+                    [proposal_type; 32],
+                    [2u8; 32],
+                    [3u8; 32],
+                    proposal_type,
+                    proposer,
+                )
+                .unwrap();
+            let read = gov.read_proposal_u8(id, b"proposal_type");
+            assert_eq!(read, proposal_type);
+        }
+    });
+}
+
+// ── Config / periods ──────────────────────────────────────────────
+
+#[test]
+fn test_custom_review_and_voting_periods() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 25);
+        gov.write_config_u64(b"voting_period", 75);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 0); // Pending
+        let start_block = gov.read_proposal_u64(id, b"start_block");
+        let end_block = gov.read_proposal_u64(id, b"end_block");
+        assert_eq!(start_block, 25);
+        assert_eq!(end_block, 100);
+    });
+}
+
+// ── Deposit confiscation ──────────────────────────────────────────
+
+#[test]
+fn test_deposit_confiscated_on_defeat() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+
+        assert_eq!(gov.read_proposal_u128(id, b"deposit"), PROPOSAL_DEPOSIT);
+
+        // Queue without quorum → defeat
+        let _ = gov.queue(id, 101);
+        assert_eq!(gov.read_proposal_status(id), 4); // Defeated
+        assert_eq!(gov.read_proposal_u128(id, b"deposit"), 0); // Confiscated
+    });
+}
+
+// ── Full lifecycle ────────────────────────────────────────────────
+
+#[test]
+fn test_full_lifecycle_submit_vote_queue_execute() {
+    with_ctx(0, || {
+        let mut gov = GovernanceStorage::new(JournalBackend);
+        let mut asset = AssetStorage::new(JournalBackend);
+        let proposer = test_addr(1);
+
+        seed_balance(proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 10);
+
+        // Submit
+        let id = gov
+            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer)
+            .unwrap();
+        assert_eq!(gov.read_proposal_status(id), 1); // Active
+
+        // Vote
+        gov.vote(id, 1, test_addr(2), 1_000_000).unwrap();
+        assert_eq!(gov.read_vote_tally(id, b"votes_for"), 1_000_000);
+
+        // Queue
+        gov.queue(id, 1).unwrap();
+        assert_eq!(gov.read_proposal_status(id), 2); // Queued
+
+        // Execute
+        let exec_block = gov.read_proposal_u64(id, b"execution_block");
+        gov.execute(&mut asset, id, exec_block, proposer).unwrap();
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+// ── Config quorum calculations ────────────────────────────────────
 
 #[test]
 fn test_config_quorum_calculations() {
-    let config = GovernanceConfig::default();
+    let config = crate::config::GovernanceConfig::default();
 
-    // With div_ceil and 6667 BPS, small validator sets round up
     assert_eq!(config.validator_quorum(3), 3); // ceil(3 * 6667 / 10000) = 3
     assert_eq!(config.validator_quorum(10), 7); // ceil(10 * 6667 / 10000) = 7
 
-    assert_eq!(config.supply_quorum(), TOTAL_SUPPLY / 5); // 20%
-    assert_eq!(config.treasury_quorum(), TOTAL_SUPPLY / 5); // 20%
+    assert_eq!(config.supply_quorum(), crate::config::TOTAL_SUPPLY / 5); // 20%
+    assert_eq!(config.treasury_quorum(), crate::config::TOTAL_SUPPLY / 5); // 20%
 
     assert_eq!(config.simple_majority(3), 2); // ceil(3 * 5001 / 10000) = 2
     assert_eq!(config.emergency_pause_threshold(3), 3); // ceil(3 * 6667 / 10000) = 3
-}
-
-#[test]
-fn test_config_custom_periods() {
-    let config = GovernanceConfig {
-        review_period_blocks: 100,
-        voting_period_blocks: 500,
-        timelock_period_blocks: 1000,
-        execution_timeout_blocks: 5000,
-        ..GovernanceConfig::default()
-    };
-
-    let mut mgr = GovernanceManager::new().with_config(config.clone());
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Should activate at review_period_blocks (100), not default (691200)
-    mgr.advance(101);
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Active);
-}
-
-// ── Rate limiting ─────────────────────────────────────────────────
-
-#[test]
-fn test_proposal_rate_limiting() {
-    let mut mgr = GovernanceManager::new();
-    let proposer = test_addr(1);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 10);
-
-    // First proposal should succeed
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
-    assert_eq!(id, 0);
-
-    // Immediate second proposal should be rate limited
-    let result = mgr.submit_proposal(
-        proposer,
-        ProposalType::ParameterChange {
-            param_id: "test2".into(),
-            new_value: "2".into(),
-        },
-        "Test2".into(),
-        "Test2".into(),
-        vec![],
-    );
-    assert!(matches!(result, Err(GovernanceError::ProposalRateLimited(_))));
-
-    // Advance past cooldown and try again
-    mgr.set_current_block(PROPOSAL_COOLDOWN_BLOCKS + 1);
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test2".into(),
-                new_value: "2".into(),
-            },
-            "Test2".into(),
-            "Test2".into(),
-            vec![],
-        )
-        .unwrap();
-    assert_eq!(id, 1);
-}
-
-// ── Full cycle (submit → advance → execute) ───────────────────────
-
-#[test]
-fn test_full_lifecycle_with_executor() {
-    struct TestExecutor {
-        executed_count: AtomicU64,
-    }
-    impl ProposalExecutor for TestExecutor {
-        fn on_proposal_executed(&self, _proposal: &Proposal) -> Result<(), String> {
-            self.executed_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    let mut mgr = GovernanceManager::new()
-        .with_executor(Arc::new(TestExecutor { executed_count: AtomicU64::new(0) }));
-    let proposer = test_addr(10);
-    mgr.set_call_balance(proposer, mgr.config.proposal_deposit * 2);
-
-    // Register validators
-    for i in 1u8..=3 {
-        mgr.register_validator(i as u32, test_addr(i));
-        mgr.set_call_balance(test_addr(i), 1);
-    }
-
-    let id = mgr
-        .submit_proposal(
-            proposer,
-            ProposalType::ParameterChange {
-                param_id: "test".into(),
-                new_value: "1".into(),
-            },
-            "Test".into(),
-            "Test".into(),
-            vec![],
-        )
-        .unwrap();
-
-    // Set votes for quorum before advancing past voting
-    {
-        let p = mgr.proposals.get_mut(&id).unwrap();
-        p.voting_power_yes = 3; // All 3 validators
-    }
-
-    // Step 1: Advance past review + voting to get queued
-    mgr.advance(REVIEW_PERIOD_BLOCKS + VOTING_PERIOD_BLOCKS + 1);
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Queued);
-
-    // Drain events from first advance
-    let events = mgr.drain_events();
-    assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalAdvanced { to: ProposalState::Queued, .. })));
-
-    // Step 2: Advance past timelock to execute
-    let exec = mgr.get_proposal(id).unwrap().execution_block.unwrap();
-    mgr.advance(exec + 1);
-    assert_eq!(mgr.get_proposal(id).unwrap().state, ProposalState::Executed);
-
-    // Drain events — should include ProposalExecuted
-    let events = mgr.drain_events();
-    assert!(events.iter().any(|e| matches!(e, GovernanceEvent::ProposalExecuted { id: eid, .. } if *eid == id)));
 }

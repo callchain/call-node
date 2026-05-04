@@ -43,31 +43,11 @@ impl Table for CallEvmStorage {
     type Value = Vec<u8>;
 }
 
-/// Oracle state: single entry () -> serialized OracleManager
-#[derive(Debug)]
-pub struct CallOracleState;
-impl Table for CallOracleState {
-    const NAME: &'static str = "call_oracle_state";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
 /// Prune state: single entry () -> serialized PruneState
 #[derive(Debug)]
 pub struct CallPruneState;
 impl Table for CallPruneState {
     const NAME: &'static str = "call_prune_state";
-    const DUPSORT: bool = false;
-    type Key = Vec<u8>;
-    type Value = Vec<u8>;
-}
-
-/// Governance state: single entry () -> serialized GovernanceManager snapshot
-#[derive(Debug)]
-pub struct CallGovernanceState;
-impl Table for CallGovernanceState {
-    const NAME: &'static str = "call_governance_state";
     const DUPSORT: bool = false;
     type Key = Vec<u8>;
     type Value = Vec<u8>;
@@ -164,9 +144,7 @@ impl TableSet for CallTables {
             [
                 box_info::<CallEvmAccounts>,
                 box_info::<CallEvmStorage>,
-                box_info::<CallOracleState>,
                 box_info::<CallPruneState>,
-                box_info::<CallGovernanceState>,
                 box_info::<CallConsensusState>,
                 box_info::<CallConsensusBlocks>,
                 box_info::<CallMetadataChainId>,

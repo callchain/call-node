@@ -29,17 +29,21 @@ The CallChain governance system enables decentralized decision-making for protoc
                       │
                       ▼
               ┌───────────────────┐
-              │ GovernanceManager │ ← persisted to reth-db (CallGovernanceState)
-              │ (Arc<RwLock>)     │    balance_source reads from real BalanceState
-              └────────┬──────────┘
+              │ GovernanceStorage │ ← stateless, backed by EVM storage slots
+              │ (B: StorageBackend) │    reads all state from EVM, writes results back
+              └────────┬────────────┘
                        │
-                       ├── auto-advance every block in production loop
-                       │  (Pending → Active → Queued → Executed/Expired)
+                       ├── submit / vote / queue / execute (precompile calls)
                        │
               ┌────────┴──────────┐
-              │ NodeProposalExecutor │ ← wired via wire_governance_executor()
-              │ (trait impl)         │
-              └────────┬────────────┘
+              │ GovernanceAdvancer │ ← stateless per-block state machine
+              │   auto-advance    │    (Pending → Active → Queued → Executed/Expired)
+              └────────┬───────────┘
+                       │
+              ┌────────┴──────────┐
+              │ ProposalExecutor  │ ← wired via node layer for side effects
+              │ (trait impl)      │
+              └────────┬──────────┘
                        │
       ┌────────────────┼────────────────┬──────────────┬─────────────┬──────────────┐
       ▼                ▼                ▼              ▼             ▼              ▼
@@ -66,29 +70,30 @@ The **Governance precompile at `0x203`** exposes all governance operations via s
 
 See [precompile.md](precompile.md) for the full ABI.
 
-## GovernanceManager
+## GovernanceStorage
 
-### State
+`GovernanceStorage<B: StorageBackend>` is a stateless business-logic wrapper that reads and writes governance state directly from EVM storage. It has no in-memory fields — all proposal data lives in EVM storage slots under `GOVERNANCE_ADDRESS` (`0x203`).
 
-| Field | Purpose |
+### EVM Storage Layout
+
+| Slot Key | Purpose |
 |---|---|
-| `proposals` | All proposals keyed by ID |
-| `validator_addresses` | Validator ID → Address mapping for 1=1 voting |
-| `call_balances` | Address → CALL balance for balance-weighted voting (fallback) |
-| `balance_source` | `Option<BalanceSource>` — reads real on-chain CALL balances |
-| `asset_issuers` | Asset ID → Issuer Address for joint voting |
-| `delegations` | Delegator → VoteDelegation for delegated voting |
-| `deposits` | Proposer → Deposit amount (escrowed) |
-| `voted_addresses` | Proposal ID → Set of voters who already voted |
-| `current_block` | Current block height for time-based transitions |
-| `emergency_pause` | Emergency pause state with signature collection |
-| `executor` | `Option<Arc<dyn ProposalExecutor>>` — real on-chain effects |
-| `scheduled_upgrades` | Protocol upgrades scheduled via governance proposals |
-| `compliance_policies` | Asset ID → compliance policy ID |
-| `fee_currencies` | Asset ID → `FeeCurrencyEntry` (name, oracle key, added block) |
-| `fee_currencies_pending_removal` | Asset ID → grace period end block |
-| `fee_currency_cap_bps` | Fee currency cap in basis points |
-| `validator_pubkeys` | Validator ID → Ed25519 public key (32 bytes) |
+| `slot_gov_proposal_count()` | Total number of proposals |
+| `slot_gov_proposal(id, "status")` | Proposal status (0=Pending, 1=Active, 2=Queued, 3=Executed, 4=Defeated, 5=Expired) |
+| `slot_gov_proposal(id, "proposer")` | Proposer address |
+| `slot_gov_proposal(id, "start_block")` | Voting start block |
+| `slot_gov_proposal(id, "end_block")` | Voting end block |
+| `slot_gov_proposal(id, "proposal_type")` | Proposal type (0–9) |
+| `slot_gov_proposal(id, "votes_for")` | Yes vote tally (u128) |
+| `slot_gov_proposal(id, "votes_against")` | No vote tally (u128) |
+| `slot_gov_proposal(id, "votes_abstain")` | Abstain vote tally (u128) |
+| `slot_gov_proposal(id, "deposit")` | Escrowed deposit amount |
+| `slot_gov_proposal(id, "quorum_required")` | Computed quorum for this proposal |
+| `slot_gov_proposal(id, "execution_block")` | Block when execution becomes available |
+| `slot_gov_voter(id, addr)` | Individual voter's choice (1=Yes, 2=No, 3=Abstain) |
+| `slot_gov_config(suffix)` | Governance configuration (timelock, periods, quorum BPS) |
+| `slot_gov_paused()` | Chain pause flag |
+| `slot_gov_last_submission(addr)` | Rate-limit tracking per proposer |
 
 ### Proposal Types (10 variants)
 
@@ -113,7 +118,7 @@ See [precompile.md](precompile.md) for the full ABI.
 
 ### Proposal State Machine
 
-Proposals auto-advance every block via `GovernanceManager::advance()` called in the block production loop:
+Proposals auto-advance every block via `GovernanceAdvancer::advance()` called in the block production loop:
 
 ```
 Pending ──(review period passes)──► Active ──(voting period passes)──┐
@@ -220,80 +225,54 @@ Two independent mechanisms can pause the chain:
 
 ### Balance Source
 
-Deposit checks and voting power calculations read from the real on-chain `BalanceState` (asset ID 0 = CALL), not a separate in-memory map:
+Deposit checks and voting power calculations read CALL balances directly from EVM `ASSET_ADDRESS` (`0x201`) storage via `AssetStorage::read_balance()`:
 
 ```rust
-pub type BalanceSource = Arc<dyn Fn(Address) -> Balance + Send + Sync>;
+let balance = AssetStorage::new(backend).read_balance(CALL_ASSET_ID, voter);
 ```
 
-Wired in `wire_governance_executor()`:
-```rust
-let balance_source = Arc::new(move |addr: Address| {
-    state.balance_state.read().ok()
-        .map(|s| s.balances.get_balance(0, &addr)).unwrap_or(0)
-});
-```
-
-`call_balances` is retained as a fallback (used in tests where real balances aren't set up). The field is `#[serde(skip)]` and rewired on every node load.
+For `GovernanceStorage<B>` used in precompiles, the `StorageBackend` (`JournalBackend`) provides access to the live EVM journal, so balance checks see the current block's state including any prior transactions. For `GovernanceAdvancer` used in consensus, the `EvmStateBackend` provides access to the committed `EvmState`.
 
 ### Execution Model
 
-Governance uses a two-phase execution model:
+Governance execution is split across three layers, all reading/writing EVM storage under `GOVERNANCE_ADDRESS` (`0x203`):
 
-1. **`apply_proposal`** — Updates governance-internal state (always runs)
-2. **`ProposalExecutor::on_proposal_executed`** — Applies cross-system side effects (runs if executor is wired)
+1. **Precompile operations** (`GovernanceStorage<B>`) — Handles `submitProposal`, `vote`, `queue`, and `execute` calls from EVM transactions. Reads proposal state from EVM slots, validates rules, and writes results back.
 
-```rust
-pub trait ProposalExecutor: Send + Sync {
-    fn on_proposal_executed(&self, proposal: &Proposal) -> Result<(), String>;
-}
-```
+2. **Per-block auto-advance** (`GovernanceAdvancer`) — Called every block in the production loop. Scans all proposals from EVM storage, computes status transitions (Pending→Active, Active→Queued/Defeated, Queued→Executed/Expired), and writes new statuses back.
 
-`GovernanceManager` holds `executor: Option<Arc<dyn ProposalExecutor>>`. The node layer provides `NodeProposalExecutor` (`crates/rpc/src/handlers.rs`) which dispatches by proposal type.
+3. **Cross-system side effects** — Applied by the node layer when proposals reach `Executed`. The node wiring dispatches by proposal type to update consensus params, validator state, fee currency registry, fork manager, asset registry, and oracle config via their respective EVM storage domains.
 
-#### `apply_proposal` Internal Effects
+#### Proposal Execution Effects
 
-| Proposal Type | Internal State Change |
+When a proposal is executed, the following effects are applied by writing to EVM storage or calling domain storage modules:
+
+| Proposal Type | Effect |
 |---|---|
-| `ParameterChange` | Updates `GovernanceConfig` fields for `governance.*` and `protocol.*` params |
-| `ProtocolUpgrade` | Appends to `scheduled_upgrades` (tracks proposal_id, activation_block, changelog) |
-| `TreasurySpend` | Transfers CALL from treasury to recipient via `call_balances` |
-| `ValidatorSlash` | Removes validator from `validator_addresses`, `call_balances`, and `validator_pubkeys` |
-| `ComplianceUpdate` | Updates `compliance_policies[asset_id] = new_policy` |
-| `EmergencyPause` | Sets `emergency_pause.is_paused = true` and records reason |
-| `FeeCurrencyAdd` | Inserts into `fee_currencies` and cancels any pending removal |
-| `FeeCurrencyRemove` | Records grace period end block in `fee_currencies_pending_removal` |
-| `FeeCurrencyCap` | Updates `fee_currency_cap_bps` |
-| `ValidatorKeyRotation` | Updates `validator_pubkeys[validator_id] = new_pubkey` |
-
-#### `NodeProposalExecutor` Cross-System Effects
-
-| Proposal Type | Cross-System Action |
-|---|---|
-| `ProtocolUpgrade` | `ForkManager.schedule_governance_upgrade(version, activation_block, proposal_id, current_height)` |
-| `ValidatorSlash` | `ValidatorStateManager.remove_validator(validator_id)` — removes from consensus set |
-| `EmergencyPause` | Confirmed via logging (pause state is governance-internal) |
-| `ParameterChange` | Routes by `param_id` prefix to consensus, validator, oracle, fee_currency, and fee params (see below) |
-| `ComplianceUpdate` | Maps `new_policy` u8 to `CompliancePolicy`, updates `AssetRegistry.compliance_policy` |
-| `FeeCurrencyAdd` | `FeeCurrencyRegistry.add_fee_currency(entry, proposal_id)` with decoded oracle key |
-| `FeeCurrencyRemove` | `FeeCurrencyRegistry.remove_fee_currency(asset_id, grace_period_blocks)` |
-| `FeeCurrencyCap` | `FeeCurrencyRegistry.stablecoin_cap_bps = new_cap_bps` |
-| `TreasurySpend` | Confirmed via logging (transfer is governance-internal) |
-| `ValidatorKeyRotation` | Verifies old-key signature, calls `ValidatorStateManager.rotate_key()` |
+| `ParameterChange` | Writes new parameter value to `slot_gov_config(suffix)` (governance params); node layer routes `consensus.*`, `validator.*`, `oracle.*`, `fee_currency.*`, and `fee.*` prefixes to their respective EVM storage domains |
+| `ProtocolUpgrade` | Schedules upgrade via `ForkManager`; records activation block in EVM storage |
+| `TreasurySpend` | Transfers CALL from treasury address to recipient via `AssetStorage` |
+| `ValidatorSlash` | Removes validator via `ValidatorStorage`; slashes stake in validator EVM storage |
+| `ComplianceUpdate` | Updates compliance policy in `ComplianceStorage` |
+| `EmergencyPause` | Sets `slot_gov_paused()` to active |
+| `FeeCurrencyAdd` | Registers fee currency in `FeeCurrencyRegistry` |
+| `FeeCurrencyRemove` | Records grace period in fee-currency EVM storage |
+| `FeeCurrencyCap` | Updates stablecoin cap BPS in fee-currency EVM storage |
+| `ValidatorKeyRotation` | Updates validator Ed25519 pubkey in validator EVM storage |
 
 #### ParameterChange Prefix Routing
 
 `ParameterChange` proposals use a `param_id` prefix system to route updates to the correct subsystem. The `new_value` field is parsed as JSON. Supported prefixes:
 
-| Prefix | Handler | Target Subsystem | Example `param_id` | Example `new_value` |
-|---|---|---|---|---|
-| `governance.*` | `apply_proposal` (internal) | `GovernanceConfig` | `governance.proposal_deposit` | `{"proposal_deposit": 5000000000000000000000}` |
-| `protocol.*` | `apply_proposal` (internal) | `GovernanceConfig` (protocol-level) | `protocol.asset_registration_fee` | `{"asset_registration_fee": 5000000000000000000}` |
-| `consensus.*` | Executor | `ConsensusParams` | `consensus.subset_size` | `{"subset_size": 31}` |
-| `validator.*` | Executor | `ValidatorStateManager` | `validator.min_self_stake` | `{"min_self_stake": 500000000000000000000000}` |
-| `oracle.*` | Executor | `OracleConfig` | `oracle.outlier_threshold_bps` | `{"outlier_threshold_bps": 300}` |
-| `fee_currency.*` | Executor | `FeeCurrencyRegistry` | `fee_currency.min_market_cap_usd` | `{"min_market_cap_usd": 50000000}` |
-| (no prefix / `fee.*`) | Executor | `FeeParams` | `base_fee` | `{"base_fee": 20}` |
+| Prefix | Target Subsystem | Example `param_id` | Example `new_value` |
+|---|---|---|---|
+| `governance.*` | `slot_gov_config` (governance params) | `governance.proposal_deposit` | `{"proposal_deposit": 5000000000000000000000}` |
+| `protocol.*` | `slot_gov_config` (protocol-level params) | `protocol.asset_registration_fee` | `{"asset_registration_fee": 5000000000000000000}` |
+| `consensus.*` | `ConsensusParams` EVM storage | `consensus.subset_size` | `{"subset_size": 31}` |
+| `validator.*` | `ValidatorStorage` | `validator.min_self_stake` | `{"min_self_stake": 500000000000000000000000}` |
+| `oracle.*` | `OracleConfig` / `OracleStorage` | `oracle.outlier_threshold_bps` | `{"outlier_threshold_bps": 300}` |
+| `fee_currency.*` | `FeeCurrencyRegistry` | `fee_currency.min_market_cap_usd` | `{"min_market_cap_usd": 50000000}` |
+| (no prefix / `fee.*`) | `FeeParams` | `base_fee` | `{"base_fee": 20}` |
 
 All parameter changes take effect immediately upon proposal execution (no restart required).
 
@@ -316,18 +295,18 @@ Validators are registered into governance from two sources:
 
 ### Persistence
 
-`GovernanceManager` derives `Serialize`/`Deserialize`. Non-serializable fields (`executor`, `balance_source`) are skipped via `#[serde(skip)]`. State is persisted to reth-db:
+Governance state lives entirely in EVM storage under `GOVERNANCE_ADDRESS` (`0x203`). No separate serialization or sidecar persistence is required — the state is saved and loaded automatically as part of `EvmState` via `CallEvmAccounts`.
 
 | Table | Purpose |
 |---|---|
-| `CallGovernanceState` | Single-entry snapshot of full `GovernanceManager` state |
+| `CallEvmAccounts` | EVM accounts and storage (includes all governance slots) |
 
-Persistence is wired through:
-- `save_governance_state` / `load_governance_state` in `crates/node/src/lib.rs`
-- Called in `persist_state_to_db` (full rebuild every 1000 blocks + shutdown flush)
-- Called in `persist_state_incremental` (every block)
-- Loaded in `CallNode::new()` and `load_state_from_db`
-- `executor` and `balance_source` rewired after load via `wire_governance_executor()`
+This means:
+- Governance state is committed atomically with every block's EVM state root
+- On node restart, governance state is restored from `EvmState` DB snapshot
+- No replay reconstruction is needed (unlike `AssetRegistry`, which replays from block history)
+
+`GovernanceAdvancer` is stateless; it scans EVM storage every block and has no persisted state of its own.
 
 ---
 
@@ -386,9 +365,17 @@ When no signature is provided, the call proceeds (backwards compatible for devne
 crates/governance/
 ├── Cargo.toml
 └── src/
-    └── lib.rs          # GovernanceManager, ProposalType, Vote, errors,
-                        # ProposalExecutor trait, BalanceSource, EmergencyPauseState,
-                        # ScheduledUpgrade, FeeCurrencyEntry
+    ├── lib.rs          # GovernanceStorage<B>, ProposalType, Vote, errors,
+    ├── types.rs        # Proposal, Vote, GovernanceEvent, ProposalStatus
+    ├── config.rs       # GovernanceConfig
+    ├── error.rs        # GovernanceError
+    ├── precompile.rs   # GovernancePrecompile (selector dispatch)
+    └── tests.rs        # GovernanceStorage unit tests (JournalBackend)
+```
+
+```
+crates/node/src/
+└── governance_advancer.rs  # GovernanceAdvancer — per-block state machine
 ```
 
 ### Dependencies
@@ -402,8 +389,7 @@ crates/governance/
 
 | Crate | Usage |
 |---|---|
-| `call-rpc` | `GovernanceManager` in `RpcState`, RPC handlers, `NodeProposalExecutor`, `FeeCurrencyRegistry` |
-| `call-protocol` | Test suite (`test_governance_flow.rs`), `FeeCurrencyRegistry`, `AssetRegistry` |
-| `call-node` | Integration tests, DB persistence wiring, boot sequence, block loop advance |
-| `call-storage` | `CallGovernanceState` table definition |
-| `call-consensus` | `ValidatorStateManager.remove_validator()` for slashing |
+| `call-rpc` | `GovernanceStorage` in RPC handlers (read-only queries), `NodeProposalExecutor` |
+| `call-protocol` | Test suite (`test_governance_flow.rs`) |
+| `call-node` | `GovernanceAdvancer`, integration tests, DB persistence wiring, boot sequence, block loop advance |
+| `call-consensus` | `ValidatorStorage.remove_validator()` for slashing |

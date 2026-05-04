@@ -5,7 +5,6 @@
 pub mod types;
 pub mod config;
 pub mod error;
-pub mod manager;
 pub mod precompile;
 
 #[cfg(test)]
@@ -14,4 +13,3 @@ mod tests;
 pub use types::*;
 pub use config::*;
 pub use error::*;
-pub use manager::*;

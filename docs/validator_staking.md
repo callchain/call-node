@@ -422,7 +422,7 @@ pub enum ConsensusParamKey {
 
 When a `UpdateConsensusParam` proposal passes timelock:
 
-1. `GovernanceManager::execute()` decodes the proposal.
+1. The `GovernanceAdvancer` applies side effects for an executed proposal by reading proposal data from EVM storage and dispatching to the appropriate subsystem.
 2. It acquires a write lock on the shared `ConsensusParams` (or sends a message to `bft_loop`).
 3. The new value is written to both:
    - **In-memory** `ConsensusParams` (effective immediately for new blocks)

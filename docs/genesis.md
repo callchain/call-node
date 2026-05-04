@@ -93,7 +93,7 @@ Registers the initial validator set at genesis.
 
 ### Notes
 
-- Validators are automatically registered in the `ValidatorStateManager` (staked), the `OracleManager` (for price submission), and the `GovernanceManager` (for voting).
+- Validators are automatically registered in the `ValidatorStorage` (staked), the `OracleTracker` (for price submission), and the governance system via EVM storage at `GOVERNANCE_ADDRESS` (`0x203`).
 - Validator IDs are assigned sequentially starting from `0` in the order they appear in the array.
 
 ---
