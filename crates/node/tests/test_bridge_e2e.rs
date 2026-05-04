@@ -159,7 +159,7 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
     {
         let mut evm_state = node.state.evm_state.write().unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        let val_id = consensus
+        let _val_id = consensus
             .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
             .unwrap() as u32;
         consensus.refresh_proposer_subset(&evm_state);

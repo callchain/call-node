@@ -10,7 +10,6 @@ mod shielded_flow {
     use call_shielded::encryption::{encrypt_note, decrypt_note};
     use call_shielded::ShieldedComplianceMode;
     use call_shielded::poseidon::{poseidon_hash, bytes_to_fr, fr_to_bytes, domain};
-    use call_crypto::keccak256;
     use ark_bn254::Fr;
     use ark_ff::Field;
 
@@ -18,9 +17,6 @@ mod shielded_flow {
         Fr::from_random_bytes(tag.as_bytes()).unwrap_or_default()
     }
 
-    fn test_addr(n: u8) -> call_primitives::Address {
-        call_primitives::Address::repeat_byte(n)
-    }
 
     fn test_hash(n: u8) -> call_primitives::Hash {
         call_primitives::Hash::repeat_byte(n)
@@ -568,7 +564,7 @@ mod shielded_flow {
     #[test]
     fn test_real_compliance_kyc_shielded() {
         let sk = test_spending_key(1);
-        let vk = ViewingKey::generate(&sk);
+        let _vk = ViewingKey::generate(&sk);
         let note = test_note(500, 1, 1);
         let recipient = ShieldedComplianceMode::derive_address_from_ivk(&note);
         let kyc_registry = vec![recipient];
@@ -580,7 +576,7 @@ mod shielded_flow {
     #[test]
     fn test_real_compliance_whitelist_shielded() {
         let sk = test_spending_key(1);
-        let vk = ViewingKey::generate(&sk);
+        let _vk = ViewingKey::generate(&sk);
         let note = test_note(500, 1, 1);
         let recipient = ShieldedComplianceMode::derive_address_from_ivk(&note);
         let mut whitelist = std::collections::HashSet::new();

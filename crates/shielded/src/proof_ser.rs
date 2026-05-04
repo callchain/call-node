@@ -148,7 +148,7 @@ mod tests {
     use super::*;
     use ark_groth16::Groth16;
     use ark_std::rand::rngs::StdRng;
-    use ark_std::rand::{Rng, SeedableRng};
+    use ark_std::rand::SeedableRng;
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
     use ark_bn254::Fr;
     use ark_snark::SNARK;
@@ -164,8 +164,6 @@ mod tests {
         fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
             use ark_r1cs_std::alloc::AllocVar;
             use ark_r1cs_std::fields::fp::FpVar;
-            use ark_ff::Zero;
-
             let a = Fr::from(3u64);
             let b = Fr::from(5u64);
             let c = Fr::from(15u64); // a * b = c

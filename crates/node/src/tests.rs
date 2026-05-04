@@ -415,7 +415,7 @@
             std::process::id()
         ));
         let initial_balance: u128 = 10_000_000;
-        let transfer_amount: u128 = 5_000;
+        let _transfer_amount: u128 = 5_000;
 
         // === Phase 1: Create node, fund account, produce block, persist state ===
         {

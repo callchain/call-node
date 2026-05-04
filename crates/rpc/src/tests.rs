@@ -26,11 +26,6 @@ mod tests {
             .0
     }
 
-    fn sign_tx_hash(tx_hash: &[u8; 32]) -> [u8; 65] {
-        let secret = &TEST_SENDER.get().expect("TEST_SENDER initialized").1;
-        call_crypto::secp256k1_sign(secret, tx_hash)
-    }
-
     fn make_test_state() -> RpcState {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
         RpcState::new(

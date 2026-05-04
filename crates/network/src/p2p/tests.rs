@@ -269,8 +269,6 @@ fn test_commonware_config_local() {
 
 #[test]
 fn test_peer_exchange_serialization() {
-    use std::net::SocketAddr;
-
     let pex = PeerExchange::new(
         vec![
             ("abcd".to_string(), "127.0.0.1:5001".parse().unwrap()),
@@ -292,8 +290,6 @@ fn test_peer_exchange_serialization() {
 
 #[test]
 fn test_peer_exchange_truncate() {
-    use std::net::SocketAddr;
-
     let mut pex = PeerExchange::new(
         (0..100)
             .map(|i| (format!("peer_{i}"), format!("127.0.0.1:{i}").parse().unwrap()))
