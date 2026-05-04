@@ -7,7 +7,7 @@ use call_consensus::{ForkManager, RollbackPlan, ConsensusParams};
 use call_consensus::exec::state_accessors;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash};
 use call_crypto::SignerRef;
-use call_transaction_pool::Mempool;
+use call_mempool::Mempool;
 use alloy_consensus::{TxEnvelope, Transaction as _, transaction::SignerRecoverable};
 use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;

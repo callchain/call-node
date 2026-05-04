@@ -12,7 +12,7 @@ use call_primitives::{FeeCurrency, TxHash};
 use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
-use call_transaction_pool::Mempool;
+use call_mempool::Mempool;
 use crate::{persist_block, persist_state_incremental, persist_state_to_db};
 use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL};
 use crate::governance_advancer::GovernanceAdvancer;

@@ -1,5 +1,5 @@
 [package]
-name = "call-transaction-pool"
+name = "call-mempool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

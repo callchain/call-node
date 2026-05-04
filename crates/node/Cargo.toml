@@ -19,7 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 call-rpc.workspace = true
-call-transaction-pool.workspace = true
+call-mempool.workspace = true
 call-primitives.workspace = true
 call-protocol.workspace = true
 call-governance.workspace = true

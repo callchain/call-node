@@ -5,7 +5,7 @@ mod tests {
     use call_primitives::{Address, AssetId};
     use call_evm::EvmState;
     use call_consensus::exec::state_accessors;
-    use call_transaction_pool::Mempool;
+    use call_mempool::Mempool;
     use crate::handlers::RpcState;
     use std::sync::{Arc, RwLock, OnceLock};
 

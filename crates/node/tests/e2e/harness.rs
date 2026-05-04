@@ -8,7 +8,7 @@
 use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
-use call_transaction_pool::Mempool;
+use call_mempool::Mempool;
 use call_rpc::RpcState;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

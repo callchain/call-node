@@ -12,7 +12,7 @@ members = [
     "crates/rpc",
     "crates/node",
     "crates/chainspec",
-    "crates/transaction-pool",
+    "crates/mempool",
     "crates/precompile",
     "crates/asset",
     "crates/bridge",
@@ -78,7 +78,7 @@ call-oracle = { path = "crates/oracle" }
 call-governance = { path = "crates/governance" }
 call-consensus = { path = "crates/consensus" }
 call-network = { path = "crates/network" }
-call-transaction-pool = { path = "crates/transaction-pool" }
+call-mempool = { path = "crates/mempool" }
 call-chainspec = { path = "crates/chainspec" }
 call-shielded = { path = "crates/shielded" }
 call-rpc = { path = "crates/rpc" }

@@ -1,6 +1,6 @@
 # CallChain Transaction System
 
-**Crate**: `crates/protocol/` (`call-protocol`), `crates/transaction-pool/` (`call-transaction-pool`)
+**Crate**: `crates/protocol/` (`call-protocol`), `crates/mempool/` (`call-mempool`)
 **Spec**: §3.5, §12.2, §17
 
 ---
@@ -279,9 +279,9 @@ All components are production-ready with no open gaps.
 | `crates/protocol/src/smart_accounts.rs` | `SmartAccountRegistry`, MultiSig, social recovery, session keys |
 | `crates/consensus/src/block.rs` | `Block`, `BlockHeader`, `BlockExecutionResult`, `TransactionResult`, `compute_receipt_root`, `Block::execute()` |
 | `crates/consensus/src/exec/validator.rs` | `execute_validator_precompile()` — inline validator stake/unstake/claim execution |
-| `crates/transaction-pool/src/lib.rs` | `Mempool`, multi-pool management, admission, selection |
-| `crates/transaction-pool/src/pool.rs` | `MempoolEntry`, `PriorityPool`, capacity limits |
-| `crates/transaction-pool/src/priority.rs` | `PoolKind`, `PoolLimits`, `protocol_priority_score()` |
+| `crates/mempool/src/lib.rs` | `Mempool`, multi-pool management, admission, selection |
+| `crates/mempool/src/pool.rs` | `MempoolEntry`, `PriorityPool`, capacity limits |
+| `crates/mempool/src/priority.rs` | `PoolKind`, `PoolLimits`, `protocol_priority_score()` |
 | `crates/storage/src/reth_db.rs` | `CallReceipts`, `CallReceiptsByBlock` table definitions |
 | `crates/node/src/state_persist.rs` | `save_receipts()`, `load_receipts()`, `load_receipts_by_block()`, `delete_receipts_by_block()` |
 | `crates/rpc/src/handlers/state.rs` | `RpcState::store_receipt()`, `get_receipt()`, `get_receipts_by_block()` |
@@ -291,6 +291,6 @@ All components are production-ready with no open gaps.
 ## Test Status
 
 - `cargo test -p call-protocol` — unit tests cover precompile execution, rollback, memo limits, mint/burn authorization, gas calculation, base fee dynamics, fee deduction (all sponsor modes), mempool admission, signature verification (zero/ones/wrong-key/malleation/replay/insufficient-multisig/session-key mismatch), serde round-trips
-- `cargo test -p call-transaction-pool` — unit tests cover mempool insert/duplicate/fee/gas/address-limit/capacity/eviction/expiry/confirm/stats, priority scoring, priority pool operations
+- `cargo test -p call-mempool` — unit tests cover mempool insert/duplicate/fee/gas/address-limit/capacity/eviction/expiry/confirm/stats, priority scoring, priority pool operations
 - `cargo test -p call-consensus` — unit tests cover block execution, `TransactionResult` generation, receipt root computation, validator precompile execution, snapshot rollback
 - Missing: ZK shielded transfer execution tests (require `real-prover` feature), bridge challenge execution tests, smart account social recovery end-to-end tests

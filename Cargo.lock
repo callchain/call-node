@@ -1853,6 +1853,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "call-mempool"
+version = "0.1.0"
+dependencies = [
+ "call-bridge",
+ "call-consensus",
+ "call-crypto",
+ "call-evm",
+ "call-network",
+ "call-primitives",
+ "call-protocol",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "call-network"
 version = "0.1.0"
 dependencies = [
@@ -1890,6 +1906,7 @@ dependencies = [
  "call-crypto",
  "call-evm",
  "call-governance",
+ "call-mempool",
  "call-network",
  "call-oracle",
  "call-precompile",
@@ -1898,7 +1915,6 @@ dependencies = [
  "call-rpc",
  "call-shielded",
  "call-storage",
- "call-transaction-pool",
  "clap",
  "commonware-codec",
  "commonware-consensus",
@@ -2030,12 +2046,12 @@ dependencies = [
  "call-evm",
  "call-governance",
  "call-light-client",
+ "call-mempool",
  "call-network",
  "call-oracle",
  "call-primitives",
  "call-protocol",
  "call-shielded",
- "call-transaction-pool",
  "dashmap",
  "hex",
  "jsonrpsee",
@@ -2121,22 +2137,6 @@ dependencies = [
  "call-primitives",
  "call-protocol",
  "revm-precompile",
-]
-
-[[package]]
-name = "call-transaction-pool"
-version = "0.1.0"
-dependencies = [
- "call-bridge",
- "call-consensus",
- "call-crypto",
- "call-evm",
- "call-network",
- "call-primitives",
- "call-protocol",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

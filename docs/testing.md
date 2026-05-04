@@ -30,7 +30,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | `call-agent` | ~105 | Registration, permissions, balances, nonces, precompile call extraction, transaction verification, execution |
 | `call-governance` | ~51 | Proposal lifecycle, voting, execution, delegation, timelock |
 | `call-oracle` | ~22 | Price submission, aggregation, validator info |
-| `call-transaction-pool` | ~46 | Pool ordering, priority, eviction, duplicate handling |
+| `call-mempool` | ~46 | Pool ordering, priority, eviction, duplicate handling |
 | `call-payload-builder` | ~15 | Block construction, gas accounting, transaction selection |
 | `call-node` | ~147 | Telemetry, logging, light client, config, boot |
 | `call-precompile` | ~53 | Asset (getBalance, getAssetInfo, transfer, batchTransfer, approve, transferFrom, mint, burn, register), Oracle (getPrice, getTWAP, isStale, submitPrice), Bridge (getTotalDeposits, getTotalWithdrawals, externalBridgeDeposit, externalBridgeWithdraw, challengeBridgeDeposit), Switch, Shielded, Governance, Validator, Compliance, Agent, state hook lifecycle |

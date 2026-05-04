@@ -9,7 +9,7 @@ use call_network::{
 };
 use call_oracle::{OracleTracker, OracleSubmission, OracleConfig, OracleValidatorInfo};
 use call_rpc::RpcState;
-use call_transaction_pool::Mempool;
+use call_mempool::Mempool;
 
 /// P2P channel for transaction gossip.
 pub(crate) const TX_CHANNEL: u64 = 1;

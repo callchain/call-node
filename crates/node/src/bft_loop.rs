@@ -20,7 +20,7 @@ use call_primitives::{Address, Hash, FeeCurrency, TxHash};
 use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
-use call_transaction_pool::Mempool;
+use call_mempool::Mempool;
 use commonware_codec::extensions::DecodeExt;
 use commonware_cryptography::Digest;
 use crate::{current_timestamp_millis, persist_block, load_block, persist_state_incremental, persist_state_to_db};

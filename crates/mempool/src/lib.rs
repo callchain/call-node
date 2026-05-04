@@ -1,4 +1,4 @@
-//! call-transaction-pool — Mempool for Callchain.
+//! call-mempool — Mempool for Callchain.
 //!
 //! Multi-pool transaction management with priority ordering,
 //! capacity limits, eviction, and anti-spam (per spec §17).

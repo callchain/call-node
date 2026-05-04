@@ -68,7 +68,7 @@ Callchain features a dual-domain architecture with a single consensus validator 
 | `call-evm` | EVM execution via revm |
 | `call-consensus` | Simplex BFT consensus and block production |
 | `call-network` | P2P networking via commonware-p2p |
-| `call-transaction-pool` | Mempool and transaction management |
+| `call-mempool` | Mempool and transaction management |
 | `call-rpc` | JSON-RPC server (HTTP + WebSocket) |
 | `call-bridge` | Cross-chain bridge state management |
 | `call-shielded` | ZK proofs and shielded transaction support |
