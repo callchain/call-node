@@ -11,7 +11,7 @@ workspace = true
 [dependencies]
 call-primitives.workspace = true
 call-protocol.workspace = true
-call-precompiles.workspace = true
+call-precompile.workspace = true
 call-asset.workspace = true
 call-validator.workspace = true
 alloy-primitives.workspace = true

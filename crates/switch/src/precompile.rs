@@ -10,7 +10,7 @@
 //!   - Other assets: ERC-20 storage writes (totalSupply slot 3, balanceOf slot keccak256(addr,4))
 
 use alloy_sol_types::{sol, SolCall};
-use call_precompiles::{
+use call_precompile::{
     dispatch, journal_backend::JournalBackend, require_caller,
     slot_asset_meta, slot_balance, slot_evm_contract, storage::StorageCtx, u128_to_u256,
     u256_to_u128, u256_to_address, ASSET_ADDRESS,
@@ -316,7 +316,7 @@ impl SwitchPrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for SwitchPrecompile {
+impl call_precompile::StatefulPrecompile for SwitchPrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -337,10 +337,10 @@ impl call_precompiles::StatefulPrecompile for SwitchPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompiles::{
+    use call_precompile::{
         address_to_u256, slot_asset_meta, u128_to_u256, u256_to_u128, StatefulPrecompile,
     };
-    use call_precompiles::storage::HashMapStorageProvider;
+    use call_precompile::storage::HashMapStorageProvider;
 
     fn addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -360,9 +360,9 @@ mod tests {
         let sender = addr(0x33);
         let recipient = addr(0x44);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed protocol balance for sender
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(1, sender),
                 u128_to_u256(1000),
@@ -379,13 +379,13 @@ mod tests {
             assert!(result.is_ok(), "switchToEvm failed: {:?}", result.err());
 
             // Protocol balance deducted
-            let sender_bal = call_precompiles::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(1, sender))
+            let sender_bal = call_precompile::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(1, sender))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(sender_bal, 500);
 
             // Native EVM balance credited
-            let evm_bal = call_precompiles::storage::StorageCtx::balance_get(recipient);
+            let evm_bal = call_precompile::storage::StorageCtx::balance_get(recipient);
             assert_eq!(evm_bal, Some(U256::from(500)));
         });
     }
@@ -396,9 +396,9 @@ mod tests {
         let sender = addr(0x33);
         let recipient = addr(0x44);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed native balance for sender
-            call_precompiles::storage::StorageCtx::balance_add(sender, U256::from(800)).unwrap();
+            call_precompile::storage::StorageCtx::balance_add(sender, U256::from(800)).unwrap();
 
             let mut input = vec![0u8; 100];
             input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
@@ -411,11 +411,11 @@ mod tests {
             assert!(result.is_ok(), "switchToProtocol failed: {:?}", result.err());
 
             // Native EVM balance deducted
-            let evm_bal = call_precompiles::storage::StorageCtx::balance_get(sender);
+            let evm_bal = call_precompile::storage::StorageCtx::balance_get(sender);
             assert_eq!(evm_bal, Some(U256::from(500)));
 
             // Protocol balance credited to recipient
-            let recipient_bal = call_precompiles::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(1, recipient))
+            let recipient_bal = call_precompile::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(1, recipient))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(recipient_bal, 300);
@@ -430,27 +430,27 @@ mod tests {
         let contract = addr(0xAA);
         let asset_id = 2u64;
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed protocol balance
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(asset_id, sender),
                 u128_to_u256(1000),
             );
             // Register asset as active
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_asset_meta(asset_id, b"status"),
                 U256::from(0),
             );
             // Register EVM contract address
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_evm_contract(asset_id),
                 address_to_u256(contract),
             );
             // Seed supply tracking
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_asset_meta(asset_id, b"supply"),
                 u128_to_u256(1000),
@@ -467,25 +467,25 @@ mod tests {
             assert!(result.is_ok(), "switchToEvm ERC-20 failed: {:?}", result.err());
 
             // Protocol balance deducted
-            let sender_bal = call_precompiles::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(asset_id, sender))
+            let sender_bal = call_precompile::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(asset_id, sender))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(sender_bal, 600);
 
             // ERC-20 totalSupply increased
-            let total_supply = call_precompiles::storage::StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
+            let total_supply = call_precompile::storage::StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(total_supply, 400);
 
             // ERC-20 balanceOf recipient increased
-            let recipient_bal = call_precompiles::storage::StorageCtx::sload(contract, erc20_balance_of_slot(recipient))
+            let recipient_bal = call_precompile::storage::StorageCtx::sload(contract, erc20_balance_of_slot(recipient))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(recipient_bal, 400);
 
             // Protocol supply tracking decreased
-            let protocol_supply = call_precompiles::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"))
+            let protocol_supply = call_precompile::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(protocol_supply, 600);
@@ -500,33 +500,33 @@ mod tests {
         let contract = addr(0xAA);
         let asset_id = 3u64;
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Register asset as active
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_asset_meta(asset_id, b"status"),
                 U256::from(0),
             );
             // Register EVM contract address
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_evm_contract(asset_id),
                 address_to_u256(contract),
             );
             // Seed ERC-20 totalSupply
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 contract,
                 ERC20_TOTAL_SUPPLY_SLOT,
                 u128_to_u256(500),
             );
             // Seed ERC-20 balance for sender
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 contract,
                 erc20_balance_of_slot(sender),
                 u128_to_u256(500),
             );
             // Seed protocol supply tracking
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_asset_meta(asset_id, b"supply"),
                 u128_to_u256(0),
@@ -543,25 +543,25 @@ mod tests {
             assert!(result.is_ok(), "switchToProtocol ERC-20 failed: {:?}", result.err());
 
             // ERC-20 totalSupply decreased
-            let total_supply = call_precompiles::storage::StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
+            let total_supply = call_precompile::storage::StorageCtx::sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(total_supply, 300);
 
             // ERC-20 balanceOf sender decreased
-            let sender_bal = call_precompiles::storage::StorageCtx::sload(contract, erc20_balance_of_slot(sender))
+            let sender_bal = call_precompile::storage::StorageCtx::sload(contract, erc20_balance_of_slot(sender))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(sender_bal, 300);
 
             // Protocol balance credited to recipient
-            let recipient_bal = call_precompiles::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(asset_id, recipient))
+            let recipient_bal = call_precompile::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(asset_id, recipient))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(recipient_bal, 200);
 
             // Protocol supply tracking increased
-            let protocol_supply = call_precompiles::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"))
+            let protocol_supply = call_precompile::storage::StorageCtx::sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply"))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(protocol_supply, 200);
@@ -573,9 +573,9 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = addr(0x33);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Only 100 protocol balance
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(1, sender),
                 u128_to_u256(100),
@@ -592,7 +592,7 @@ mod tests {
             assert!(result.is_err(), "should fail due to insufficient balance");
 
             // Balance unchanged
-            let bal = call_precompiles::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(1, sender))
+            let bal = call_precompile::storage::StorageCtx::sload(ASSET_ADDRESS, slot_balance(1, sender))
                 .map(u256_to_u128)
                 .unwrap_or(0);
             assert_eq!(bal, 100);
@@ -605,13 +605,13 @@ mod tests {
         let sender = addr(0x33);
         let asset_id = 5u64;
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
-            call_precompiles::storage::StorageCtx::sstore(
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(asset_id, sender),
                 u128_to_u256(1000),
             );
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_asset_meta(asset_id, b"status"),
                 U256::from(0),

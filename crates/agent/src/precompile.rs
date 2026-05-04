@@ -7,7 +7,7 @@
 use crate::AgentStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
-use call_precompiles::{
+use call_precompile::{
     dispatch, journal_backend::JournalBackend, require_caller,
 };
 use call_primitives::Address;
@@ -42,7 +42,7 @@ impl AgentPrecompile {
             |call| {
                 let caller = require_caller(msg_sender)?;
                 let mut store = AgentStorage::new(JournalBackend);
-                let block_number = call_precompiles::storage::StorageCtx::block_number();
+                let block_number = call_precompile::storage::StorageCtx::block_number();
                 store
                     .register_agent(&call.name, &call.url, call.pubkeyHash.into(), caller, block_number)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -98,7 +98,7 @@ impl AgentPrecompile {
                 let backend = JournalBackend;
                 let mut agent_store = AgentStorage::new(backend);
                 let mut asset_store = AssetStorage::new(backend);
-                let block_number = call_precompiles::storage::StorageCtx::block_number();
+                let block_number = call_precompile::storage::StorageCtx::block_number();
                 agent_store
                     .pay(
                         &mut asset_store,
@@ -124,7 +124,7 @@ impl AgentPrecompile {
                 let backend = JournalBackend;
                 let mut agent_store = AgentStorage::new(backend);
                 let mut asset_store = AssetStorage::new(backend);
-                let block_number = call_precompiles::storage::StorageCtx::block_number();
+                let block_number = call_precompile::storage::StorageCtx::block_number();
                 agent_store
                     .batch_pay(
                         &mut asset_store,
@@ -148,7 +148,7 @@ impl AgentPrecompile {
             |call| {
                 let caller = require_caller(msg_sender)?;
                 let mut store = AgentStorage::new(JournalBackend);
-                let block_number = call_precompiles::storage::StorageCtx::block_number();
+                let block_number = call_precompile::storage::StorageCtx::block_number();
                 store
                     .bridge_deposit(
                         call.agentId,
@@ -234,7 +234,7 @@ impl AgentPrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for AgentPrecompile {
+impl call_precompile::StatefulPrecompile for AgentPrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
@@ -261,16 +261,16 @@ impl call_precompiles::StatefulPrecompile for AgentPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompiles::{
+    use call_precompile::{
         slot_balance, u128_to_u256, ASSET_ADDRESS, StatefulPrecompile,
     };
-    use call_precompiles::storage::{HashMapStorageProvider, StorageCtx};
+    use call_precompile::storage::{HashMapStorageProvider, StorageCtx};
     use call_primitives::Address;
 
     #[test]
     fn test_agent_address() {
         assert_eq!(
-            call_precompiles::AGENT_ADDRESS,
+            call_precompile::AGENT_ADDRESS,
             alloy_primitives::address!("0000000000000000000000000000000000000209")
         );
     }

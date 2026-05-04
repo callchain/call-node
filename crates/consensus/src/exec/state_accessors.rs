@@ -9,14 +9,14 @@
 
 use call_asset::AssetStorage;
 use call_evm::{EvmState, EvmStateBackend, EvmStateRefBackend};
-use call_precompiles::{
+use call_precompile::{
     address_to_u256, read_string32,
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
     write_string32,
     AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
     ORACLE_ADDRESS, SHIELDED_ADDRESS, VALIDATOR_ADDRESS,
 };
-use call_precompiles::storage::storage_slot;
+use call_precompile::storage::storage_slot;
 use call_primitives::{Address, U256};
 // ── Constants ─────────────────────────────────────────────────────────
 

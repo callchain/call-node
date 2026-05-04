@@ -5,7 +5,7 @@
 
 use alloy_primitives::{Address, LogData, U256};
 use call_evm::EvmState;
-use call_precompiles::storage::StorageProvider;
+use call_precompile::storage::StorageProvider;
 use revm::context_interface::journaled_state::JournalCheckpoint;
 use revm_precompile::PrecompileError;
 use std::collections::HashMap;

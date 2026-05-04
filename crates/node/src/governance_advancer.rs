@@ -7,7 +7,7 @@
 use call_consensus::exec::state_accessors as sa;
 use call_evm::EvmState;
 use call_governance::{GovernanceEvent, ProposalState};
-use call_precompiles::u64_to_u256;
+use call_precompile::u64_to_u256;
 use call_primitives::{Address, U256};
 
 /// Total supply: 1B CALL * 10^18 (18 decimals)
@@ -257,7 +257,7 @@ mod tests {
     use super::*;
     use call_consensus::exec::state_accessors as sa;
     use call_evm::EvmState;
-    use call_precompiles::{u64_to_u256, GOVERNANCE_ADDRESS};
+    use call_precompile::{u64_to_u256, GOVERNANCE_ADDRESS};
     use call_primitives::{Address, U256};
 
     fn test_addr(n: u8) -> Address {
@@ -329,7 +329,7 @@ mod tests {
         evm.set_storage(
             GOVERNANCE_ADDRESS,
             sa::slot_gov_proposal(proposal_id, b"proposer"),
-            call_precompiles::address_to_u256(test_addr(10)),
+            call_precompile::address_to_u256(test_addr(10)),
         );
     }
 

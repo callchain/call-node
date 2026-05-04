@@ -12,11 +12,11 @@
 //! - `0x209` Agent: register, grant, revoke
 
 pub mod storage;
-pub mod helpers;
+pub mod utils;
 pub mod journal_backend;
 pub mod dispatch;
 
-pub use helpers::utils::*;
+pub use utils::*;
 
 /// Oracle precompile address (0x101).
 pub const ORACLE_ADDRESS: Address = address!("0000000000000000000000000000000000000101");

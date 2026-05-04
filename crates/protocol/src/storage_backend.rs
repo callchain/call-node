@@ -4,7 +4,7 @@ use call_primitives::{Address, U256};
 ///
 /// Two implementations:
 /// - `EvmStateBackend` — in domain crates (call-asset, etc.), for consensus/RPC/tests
-/// - `JournalBackend` — in call-precompiles, for precompile execution
+/// - `JournalBackend` — in call-precompile, for precompile execution
 pub trait StorageBackend {
     fn load(&self, address: Address, slot: U256) -> U256;
     fn store(&mut self, address: Address, slot: U256, value: U256);

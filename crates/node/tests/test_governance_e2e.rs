@@ -12,7 +12,7 @@ use e2e::harness::*;
 
 use alloy_primitives::U256;
 use call_crypto::keccak256;
-use call_precompiles::GOVERNANCE_ADDRESS;
+use call_precompile::GOVERNANCE_ADDRESS;
 
 fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)

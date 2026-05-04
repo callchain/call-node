@@ -298,8 +298,8 @@ impl GenesisExecutor {
         &self,
         evm_state: &mut EvmState,
     ) -> Result<(), GenesisError> {
-        use call_precompiles::{address_to_u256, u128_to_u256, u64_to_u256, VALIDATOR_ADDRESS};
-        use call_precompiles::storage::storage_slot;
+        use call_precompile::{address_to_u256, u128_to_u256, u64_to_u256, VALIDATOR_ADDRESS};
+        use call_precompile::storage::storage_slot;
 
         for (i, gv) in self.genesis.validators.iter().enumerate() {
             let addr = parse_address(&gv.address)?;

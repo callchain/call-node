@@ -22,47 +22,47 @@ pub enum ExternalDepositResult {
 const BRIDGE_ADDRESS: alloy_primitives::Address = alloy_primitives::address!("0000000000000000000000000000000000000103");
 
 fn slot_bridge_processed(tx_hash: [u8; 32]) -> U256 {
-    call_precompiles::storage::storage_slot(&[b"processed", &tx_hash])
+    call_precompile::storage::storage_slot(&[b"processed", &tx_hash])
 }
 
 fn slot_bridge_pending_count() -> U256 {
-    call_precompiles::storage::storage_slot(&[b"pending_count"])
+    call_precompile::storage::storage_slot(&[b"pending_count"])
 }
 
 fn slot_bridge_pending_hash(index: u64) -> U256 {
-    call_precompiles::storage::storage_slot(&[b"pending_list"]) + U256::from(index)
+    call_precompile::storage::storage_slot(&[b"pending_list"]) + U256::from(index)
 }
 
 fn slot_bridge_pending_status(tx_hash: [u8; 32]) -> U256 {
-    call_precompiles::storage::storage_slot(&[b"pending_status", &tx_hash])
+    call_precompile::storage::storage_slot(&[b"pending_status", &tx_hash])
 }
 
 fn slot_bridge_pending_recipient(tx_hash: [u8; 32]) -> U256 {
-    call_precompiles::storage::storage_slot(&[b"pending_recipient", &tx_hash])
+    call_precompile::storage::storage_slot(&[b"pending_recipient", &tx_hash])
 }
 
 fn slot_bridge_pending_asset(tx_hash: [u8; 32]) -> U256 {
-    call_precompiles::storage::storage_slot(&[b"pending_asset", &tx_hash])
+    call_precompile::storage::storage_slot(&[b"pending_asset", &tx_hash])
 }
 
 fn slot_bridge_pending_amount(tx_hash: [u8; 32]) -> U256 {
-    call_precompiles::storage::storage_slot(&[b"pending_amount", &tx_hash])
+    call_precompile::storage::storage_slot(&[b"pending_amount", &tx_hash])
 }
 
 fn slot_bridge_pending_block(tx_hash: [u8; 32]) -> U256 {
-    call_precompiles::storage::storage_slot(&[b"pending_block", &tx_hash])
+    call_precompile::storage::storage_slot(&[b"pending_block", &tx_hash])
 }
 
 fn slot_bridge_daily_used(asset_id: u64) -> U256 {
-    call_precompiles::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"daily"])
+    call_precompile::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"daily"])
 }
 
 fn slot_bridge_daily_day(asset_id: u64) -> U256 {
-    call_precompiles::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"daily_day"])
+    call_precompile::storage::storage_slot(&[&asset_id.to_be_bytes()[..], b"daily_day"])
 }
 
 fn slot_bridge_external_paused() -> U256 {
-    call_precompiles::storage::storage_slot(&[b"external_paused"])
+    call_precompile::storage::storage_slot(&[b"external_paused"])
 }
 
 fn read_bridge_processed<B: StorageBackend>(backend: &B, tx_hash: [u8; 32]) -> bool {
@@ -70,15 +70,15 @@ fn read_bridge_processed<B: StorageBackend>(backend: &B, tx_hash: [u8; 32]) -> b
 }
 
 fn read_bridge_pending_count<B: StorageBackend>(backend: &B) -> u64 {
-    call_precompiles::u256_to_u64(backend.load(BRIDGE_ADDRESS, slot_bridge_pending_count()))
+    call_precompile::u256_to_u64(backend.load(BRIDGE_ADDRESS, slot_bridge_pending_count()))
 }
 
 fn read_bridge_daily_used<B: StorageBackend>(backend: &B, asset_id: u64) -> u128 {
-    call_precompiles::u256_to_u128(backend.load(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id)))
+    call_precompile::u256_to_u128(backend.load(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id)))
 }
 
 fn read_bridge_daily_day<B: StorageBackend>(backend: &B, asset_id: u64) -> u64 {
-    call_precompiles::u256_to_u64(backend.load(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id)))
+    call_precompile::u256_to_u64(backend.load(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id)))
 }
 
 fn read_bridge_external_paused<B: StorageBackend>(backend: &B) -> bool {
@@ -95,21 +95,21 @@ fn seed_bridge_pending<B: StorageBackend>(
 ) {
     let count = read_bridge_pending_count(backend);
     backend.store(BRIDGE_ADDRESS, slot_bridge_pending_hash(count), U256::from_be_slice(&tx_hash));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_count(), call_precompiles::u64_to_u256(count + 1));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_count(), call_precompile::u64_to_u256(count + 1));
     backend.store(BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash), U256::from(1u8));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_recipient(tx_hash), call_precompiles::address_to_u256(recipient));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_asset(tx_hash), call_precompiles::u64_to_u256(asset_id));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_amount(tx_hash), call_precompiles::u128_to_u256(amount));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_block(tx_hash), call_precompiles::u64_to_u256(block));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_recipient(tx_hash), call_precompile::address_to_u256(recipient));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_asset(tx_hash), call_precompile::u64_to_u256(asset_id));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_amount(tx_hash), call_precompile::u128_to_u256(amount));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_block(tx_hash), call_precompile::u64_to_u256(block));
 }
 
 fn seed_bridge_processed<B: StorageBackend>(backend: &mut B, tx_hash: [u8; 32], block_height: u64) {
-    backend.store(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash), call_precompiles::u64_to_u256(block_height));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash), call_precompile::u64_to_u256(block_height));
 }
 
 fn update_bridge_daily<B: StorageBackend>(backend: &mut B, asset_id: u64, used: u128, day: u64) {
-    backend.store(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id), call_precompiles::u128_to_u256(used));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id), call_precompiles::u64_to_u256(day));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id), call_precompile::u128_to_u256(used));
+    backend.store(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id), call_precompile::u64_to_u256(day));
 }
 
 /// Check and update daily limit using EVM storage.

@@ -3,11 +3,11 @@ pub mod precompile;
 pub use precompile::ValidatorPrecompile;
 
 use call_asset::AssetStorage;
-use call_precompiles::{
+use call_precompile::{
     address_to_u256, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
     u64_to_u256, VALIDATOR_ADDRESS,
 };
-use call_precompiles::storage::storage_slot;
+use call_precompile::storage::storage_slot;
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
 
@@ -119,7 +119,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
     }
 
     pub fn read_validator_id(&self, addr: Address) -> u64 {
-        let slot = call_precompiles::slot_validator_by_addr(addr);
+        let slot = call_precompile::slot_validator_by_addr(addr);
         self.backend
             .load(VALIDATOR_ADDRESS, slot)
             .try_into()
@@ -194,7 +194,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         );
         self.backend.store(
             VALIDATOR_ADDRESS,
-            call_precompiles::slot_validator_by_addr(caller),
+            call_precompile::slot_validator_by_addr(caller),
             u64_to_u256(validator_id),
         );
         self.backend.store(
@@ -348,7 +348,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         // Clear validator state
         self.backend.store(
             VALIDATOR_ADDRESS,
-            call_precompiles::slot_validator_by_addr(caller),
+            call_precompile::slot_validator_by_addr(caller),
             U256::ZERO,
         );
         self.backend
@@ -389,7 +389,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         // Clear validator state
         self.backend.store(
             VALIDATOR_ADDRESS,
-            call_precompiles::slot_validator_by_addr(validator),
+            call_precompile::slot_validator_by_addr(validator),
             U256::ZERO,
         );
         self.backend

@@ -2,7 +2,7 @@ pub mod precompile;
 
 pub use precompile::AssetPrecompile;
 
-use call_precompiles::{
+use call_precompile::{
     slot_allowance, slot_asset_meta, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
 };
 use call_protocol::storage_backend::StorageBackend;

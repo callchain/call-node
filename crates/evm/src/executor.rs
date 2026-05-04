@@ -3,7 +3,7 @@
 //! EVM transaction execution, ERC-20 deployment, gas tracking, validation.
 
 use call_primitives::Address;
-use call_precompiles::{
+use call_precompile::{
     CallPrecompiles,
     AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
     ORACLE_ADDRESS, SHIELDED_ADDRESS, SWITCH_ADDRESS, VALIDATOR_ADDRESS,

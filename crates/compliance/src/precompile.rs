@@ -6,7 +6,7 @@
 
 use crate::ComplianceStorage;
 use alloy_sol_types::{sol, SolCall};
-use call_precompiles::{
+use call_precompile::{
     dispatch, journal_backend::JournalBackend, require_caller,
 };
 use call_primitives::Address;
@@ -51,7 +51,7 @@ impl CompliancePrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for CompliancePrecompile {
+impl call_precompile::StatefulPrecompile for CompliancePrecompile {
     fn call(&mut self,
         calldata: &[u8],
         msg_sender: Address,
@@ -75,8 +75,8 @@ impl call_precompiles::StatefulPrecompile for CompliancePrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompiles::storage::HashMapStorageProvider;
-    use call_precompiles::{
+    use call_precompile::storage::HashMapStorageProvider;
+    use call_precompile::{
         storage::{storage_slot, StorageCtx},
         u8_to_u256, ASSET_ADDRESS, StatefulPrecompile,
     };

@@ -7,7 +7,7 @@
 use crate::ValidatorStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
-use call_precompiles::{
+use call_precompile::{
     dispatch, journal_backend::JournalBackend, require_caller,
 };
 use call_primitives::{Address, U256};
@@ -48,7 +48,7 @@ impl ValidatorPrecompile {
         dispatch::mutate_void::<IProtocolValidator::unstakeCall, _>(calldata, 20000, |call| {
             let caller = require_caller(msg_sender)?;
             let mut validator_store = ValidatorStorage::new(JournalBackend);
-            let block_number = call_precompiles::storage::StorageCtx::block_number();
+            let block_number = call_precompile::storage::StorageCtx::block_number();
             validator_store
                 .unstake(call.validatorId, caller, block_number)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -62,7 +62,7 @@ impl ValidatorPrecompile {
             let backend = JournalBackend;
             let mut validator_store = ValidatorStorage::new(backend);
             let mut asset_store = AssetStorage::new(backend);
-            let block_number = call_precompiles::storage::StorageCtx::block_number();
+            let block_number = call_precompile::storage::StorageCtx::block_number();
             validator_store
                 .claim_unbonded(&mut asset_store, call.validatorId, caller, block_number,
                 )
@@ -107,7 +107,7 @@ impl ValidatorPrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for ValidatorPrecompile {
+impl call_precompile::StatefulPrecompile for ValidatorPrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -141,8 +141,8 @@ impl call_precompiles::StatefulPrecompile for ValidatorPrecompile {
 mod tests {
     use super::*;
     use crate::CALL_ASSET_ID;
-    use call_precompiles::storage::HashMapStorageProvider;
-    use call_precompiles::{slot_balance, u128_to_u256, u256_to_u128, u256_to_u64, StatefulPrecompile, VALIDATOR_ADDRESS};
+    use call_precompile::storage::HashMapStorageProvider;
+    use call_precompile::{slot_balance, u128_to_u256, u256_to_u128, u256_to_u64, StatefulPrecompile, VALIDATOR_ADDRESS};
     use call_primitives::Address;
 
     #[test]
@@ -158,10 +158,10 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x11);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed sender balance
-            call_precompiles::storage::StorageCtx::sstore(
-                call_precompiles::ASSET_ADDRESS,
+            call_precompile::storage::StorageCtx::sstore(
+                call_precompile::ASSET_ADDRESS,
                 slot_balance(CALL_ASSET_ID, sender),
                 u128_to_u256(10_000_000),
             );
@@ -206,10 +206,10 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x11);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed sender balance
-            call_precompiles::storage::StorageCtx::sstore(
-                call_precompiles::ASSET_ADDRESS,
+            call_precompile::storage::StorageCtx::sstore(
+                call_precompile::ASSET_ADDRESS,
                 slot_balance(CALL_ASSET_ID, sender),
                 u128_to_u256(10_000_000),
             );
@@ -249,10 +249,10 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x11);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed sender balance
-            call_precompiles::storage::StorageCtx::sstore(
-                call_precompiles::ASSET_ADDRESS,
+            call_precompile::storage::StorageCtx::sstore(
+                call_precompile::ASSET_ADDRESS,
                 slot_balance(CALL_ASSET_ID, sender),
                 u128_to_u256(10_000_000),
             );

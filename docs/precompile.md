@@ -1,6 +1,6 @@
 # CallChain Protocol Precompiles
 
-**Infrastructure crate**: `crates/precompiles/` (`call-precompiles`)
+**Infrastructure crate**: `crates/precompile/` (`call-precompile`)
 **Domain crates**: `crates/asset/`, `crates/oracle/`, `crates/bridge/`, `crates/governance/`, `crates/validator/`, `crates/compliance/`, `crates/switch/`, `crates/agent/`, `crates/shielded/`
 
 ---
@@ -523,7 +523,7 @@ Gas is computed at two layers:
 
 ## Registration
 
-Precompile address constants are defined in `crates/precompiles/src/lib.rs`:
+Precompile address constants are defined in `crates/precompile/src/lib.rs`:
 
 ```rust
 pub const ORACLE_ADDRESS: Address = address!("0000000000000000000000000000000000000101");
@@ -540,7 +540,7 @@ pub const AGENT_ADDRESS: Address = address!("00000000000000000000000000000000000
 Custom precompiles are registered in `crates/evm/src/executor.rs` via `CallPrecompiles::with_custom()`:
 
 ```rust
-let precompiles = call_precompiles::build_precompiles()
+let precompiles = call_precompile::build_precompiles()
     .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
     .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
     .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
@@ -556,15 +556,15 @@ let precompiles = call_precompiles::build_precompiles()
 
 ## File Map
 
-### Shared infrastructure (`call-precompiles`)
+### Shared infrastructure (`call-precompile`)
 
 | File | Role |
 |------|------|
-| `crates/precompiles/src/lib.rs` | `StatefulPrecompile` trait, address constants, `CallPrecompiles` provider |
-| `crates/precompiles/src/storage.rs` | `StorageCtx` (TLS), `StorageProvider` trait, `EvmStorageProvider`, `HashMapStorageProvider` |
-| `crates/precompiles/src/journal_backend.rs` | `JournalBackend` — `StorageBackend` impl for precompile execution |
-| `crates/precompiles/src/dispatch.rs` | `view` / `view_void` / `mutate` / `mutate_void` — unified dispatch helpers |
-| `crates/precompiles/src/helpers/` | ABI encode/decode utilities, `storage_slot()` helper, slot constants |
+| `crates/precompile/src/lib.rs` | `StatefulPrecompile` trait, address constants, `CallPrecompiles` provider |
+| `crates/precompile/src/storage.rs` | `StorageCtx` (TLS), `StorageProvider` trait, `EvmStorageProvider`, `HashMapStorageProvider` |
+| `crates/precompile/src/journal_backend.rs` | `JournalBackend` — `StorageBackend` impl for precompile execution |
+| `crates/precompile/src/dispatch.rs` | `view` / `view_void` / `mutate` / `mutate_void` — unified dispatch helpers |
+| `crates/precompile/src/helpers/` | ABI encode/decode utilities, `storage_slot()` helper, slot constants |
 
 ### Domain precompiles (one crate per precompile)
 
@@ -668,11 +668,11 @@ Precompile developers do not manually calculate storage gas — it is deducted a
 ## Dependency Graph
 
 ```
-call-precompiles (shared infra)
+call-precompile (shared infra)
   ├── StorageCtx, JournalBackend, dispatch, helpers
   └── call-protocol (StorageBackend trait)
 
-Domain crates (each depends on call-precompiles + call-protocol)
+Domain crates (each depends on call-precompile + call-protocol)
   ├── call-asset      ──▶ AssetStorage<B>   ──▶ AssetPrecompile (0x201)
   ├── call-switch     ──▶ SwitchStorage<B>  ──▶ SwitchPrecompile (0x207)
   ├── call-oracle     ──▶ OracleStorage<B>  ──▶ OraclePrecompile (0x101)
@@ -686,4 +686,4 @@ Domain crates (each depends on call-precompiles + call-protocol)
 call-evm (registers all precompiles via with_custom())
 ```
 
-No circular dependencies exist. `call-precompiles` and `call-protocol` form the base layer; all domain crates depend on them but not on each other (except for cross-domain reads via `StorageCtx::sload` to other precompile addresses).
+No circular dependencies exist. `call-precompile` and `call-protocol` form the base layer; all domain crates depend on them but not on each other (except for cross-domain reads via `StorageCtx::sload` to other precompile addresses).

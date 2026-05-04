@@ -6,7 +6,7 @@
 
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
-use call_precompiles::{
+use call_precompile::{
     address_to_u256, dispatch, journal_backend::JournalBackend, require_caller,
     storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
     u64_to_u256,
@@ -192,7 +192,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         proposal_type: u8,
         proposer: Address,
     ) -> Result<u64, PrecompileError> {
-        let current_block = call_precompiles::storage::StorageCtx::block_number();
+        let current_block = call_precompile::storage::StorageCtx::block_number();
 
         // Rate limiting
         let cooldown = self.read_config_u64(b"proposal_cooldown");
@@ -333,7 +333,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         }
 
         let status = self.read_proposal_status(proposal_id);
-        let current_block = call_precompiles::storage::StorageCtx::block_number();
+        let current_block = call_precompile::storage::StorageCtx::block_number();
         let start_block = self.read_proposal_u64(proposal_id, b"start_block");
         let end_block = self.read_proposal_u64(proposal_id, b"end_block");
 
@@ -648,7 +648,7 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompiles::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
@@ -729,7 +729,7 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompiles::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
@@ -739,7 +739,7 @@ impl GovernancePrecompile {
     fn queue(&self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolGovernance::queueCall, _>(calldata, 20_000, |call| {
             let mut gov_store = GovernanceStorage::new(JournalBackend);
-            let block_number = call_precompiles::storage::StorageCtx::block_number();
+            let block_number = call_precompile::storage::StorageCtx::block_number();
             gov_store
                 .queue(call.proposalId, block_number)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -753,7 +753,7 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompiles::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
@@ -778,7 +778,7 @@ impl GovernancePrecompile {
                 ));
             }
 
-            let block_number = call_precompiles::storage::StorageCtx::block_number();
+            let block_number = call_precompile::storage::StorageCtx::block_number();
             gov_store
                 .execute(&mut asset_store, call.proposalId, block_number, caller)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -791,7 +791,7 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompiles::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
@@ -823,7 +823,7 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompiles::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
@@ -854,7 +854,7 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompiles::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
@@ -893,7 +893,7 @@ impl GovernancePrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for GovernancePrecompile {
+impl call_precompile::StatefulPrecompile for GovernancePrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
@@ -928,9 +928,9 @@ impl call_precompiles::StatefulPrecompile for GovernancePrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompiles::storage::HashMapStorageProvider;
-    use call_precompiles::{slot_balance, slot_validator_by_addr, u128_to_u256, u64_to_u256, StatefulPrecompile};
-    use call_precompiles::{ASSET_ADDRESS, VALIDATOR_ADDRESS};
+    use call_precompile::storage::HashMapStorageProvider;
+    use call_precompile::{slot_balance, slot_validator_by_addr, u128_to_u256, u64_to_u256, StatefulPrecompile};
+    use call_precompile::{ASSET_ADDRESS, VALIDATOR_ADDRESS};
 
     #[test]
     fn test_governance_address() {
@@ -945,15 +945,15 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x44);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed sender balance
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(CALL_ASSET_ID, sender),
                 u128_to_u256(100_000),
             );
             // Seed review_period=0 so proposal is active immediately
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 GOVERNANCE_ADDRESS,
                 slot_gov_config(b"review_period"),
                 u64_to_u256(0),
@@ -997,15 +997,15 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x44);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed sender balance
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(CALL_ASSET_ID, sender),
                 u128_to_u256(100_000),
             );
             // Seed review_period=0 so proposal is active immediately
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 GOVERNANCE_ADDRESS,
                 slot_gov_config(b"review_period"),
                 u64_to_u256(0),
@@ -1062,9 +1062,9 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x44);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Seed validator so pause/resume work
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 VALIDATOR_ADDRESS,
                 slot_validator_by_addr(sender),
                 u64_to_u256(1),

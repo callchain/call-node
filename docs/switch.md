@@ -307,8 +307,8 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 | `crates/bridge/src/deposit.rs` | `execute_deposit` — Protocol → EVM (BridgeOp::DepositToEvm) |
 | `crates/bridge/src/withdraw.rs` | `execute_withdraw` — EVM → Protocol (BridgeOp::WithdrawToProtocol) |
 | `crates/consensus/src/block.rs` | `execute_bridge_precompile` — inline execution for user bridge precompile calls |
-| `crates/precompiles/src/bridge.rs` | Bridge precompile functions (`externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit`) |
-| `crates/precompiles/src/switch.rs` | Switch precompile functions (`switchToEvm`, `switchToProtocol`) |
+| `crates/bridge/src/precompile.rs` | Bridge precompile functions (`externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit`) |
+| `crates/switch/src/precompile.rs` | Switch precompile functions (`switchToEvm`, `switchToProtocol`) |
 | `crates/rpc/src/callchain.rs` | `call_bridgeToEvm` and `call_bridgeToProtocol` RPC handlers |
 | `tests/signer.py` | Python signing helpers for EVM bridge transactions |
 | `tests/rpc_client.py` | Python RPC client methods for bridge endpoints |

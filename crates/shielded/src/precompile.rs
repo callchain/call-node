@@ -6,8 +6,9 @@
 
 use alloy_primitives::{address, Address, U256};
 use alloy_sol_types::{sol, SolCall};
-use call_precompiles::{
-    dispatch, journal_backend::JournalBackend, helpers::utils::*, storage::storage_slot,
+use call_precompile::{
+    dispatch, journal_backend::JournalBackend, storage::storage_slot,
+    u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256, ASSET_ADDRESS, slot_balance,
 };
 use call_primitives::Hash;
 use call_protocol::storage_backend::StorageBackend;
@@ -431,7 +432,7 @@ impl ShieldedPrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for ShieldedPrecompile {
+impl call_precompile::StatefulPrecompile for ShieldedPrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
@@ -455,10 +456,10 @@ impl call_precompiles::StatefulPrecompile for ShieldedPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompiles::storage::{HashMapStorageProvider, StorageCtx};
-    use call_precompiles::{slot_balance, u128_to_u256, u256_to_u128};
+    use call_precompile::storage::{HashMapStorageProvider, StorageCtx};
+    use call_precompile::{slot_balance, u128_to_u256, u256_to_u128};
     use call_primitives::Address;
-    use call_precompiles::StatefulPrecompile;
+    use call_precompile::StatefulPrecompile;
 
     #[test]
     fn test_shielded_address() {

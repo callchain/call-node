@@ -324,9 +324,9 @@ The following parameters should be governance-configurable via the Governance pr
 
 | File | Role |
 |------|------|
-| `crates/precompiles/src/bridge.rs` | Bridge precompile implementation (`0x103`) |
-| `crates/precompiles/src/validator.rs` | Validator stake slash mechanism |
-| `crates/precompiles/src/storage.rs` | `StorageCtx`, `EvmStorageProvider`, storage slot helpers |
+| `crates/bridge/src/precompile.rs` | Bridge precompile implementation (`0x103`) |
+| `crates/validator/src/precompile.rs` | Validator stake slash mechanism |
+| `crates/precompile/src/storage.rs` | `StorageCtx`, `EvmStorageProvider`, storage slot helpers |
 
 ---
 

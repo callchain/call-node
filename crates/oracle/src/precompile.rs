@@ -5,7 +5,7 @@
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
 use alloy_sol_types::{sol, SolCall};
-use call_precompiles::{
+use call_precompile::{
     dispatch, journal_backend::JournalBackend, require_caller,
     storage::storage_slot, u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256,
 };
@@ -196,7 +196,7 @@ impl OraclePrecompile {
     fn is_stale(&self, calldata: &[u8]) -> PrecompileResult {
         dispatch::view::<IProtocolOracle::isStaleCall, _, _>(calldata, 1000, |call| {
             let store = OracleStorage::new(JournalBackend);
-            let current_ts = call_precompiles::storage::StorageCtx::timestamp().to::<u64>();
+            let current_ts = call_precompile::storage::StorageCtx::timestamp().to::<u64>();
             Ok(U256::from(if store.is_stale(call.assetId, current_ts) { 1u8 } else { 0u8 }))
         })
     }
@@ -228,7 +228,7 @@ impl OraclePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompiles::storage::StorageCtx::emit_event(ORACLE_ADDRESS, log);
+                let _ = call_precompile::storage::StorageCtx::emit_event(ORACLE_ADDRESS, log);
             }
 
             Ok(())
@@ -256,7 +256,7 @@ impl OraclePrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for OraclePrecompile {
+impl call_precompile::StatefulPrecompile for OraclePrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -278,9 +278,9 @@ impl call_precompiles::StatefulPrecompile for OraclePrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompiles::storage::HashMapStorageProvider;
-    use call_precompiles::{slot_validator_by_addr, u64_to_u256, StatefulPrecompile};
-    use call_precompiles::VALIDATOR_ADDRESS;
+    use call_precompile::storage::HashMapStorageProvider;
+    use call_precompile::{slot_validator_by_addr, u64_to_u256, StatefulPrecompile};
+    use call_precompile::VALIDATOR_ADDRESS;
 
     #[test]
     fn test_oracle_address() {
@@ -295,12 +295,12 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
 
         // submitPrice
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
             let caller = Address::repeat_byte(0xAB);
 
             // Seed caller as a validator
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 VALIDATOR_ADDRESS,
                 slot_validator_by_addr(caller),
                 u64_to_u256(1),
@@ -327,7 +327,7 @@ mod tests {
         );
 
         // getPrice
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
 
             let input = IProtocolOracle::getPriceCall { assetId: 1 }.abi_encode();
@@ -342,11 +342,11 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
 
         // Seed validator and submit two prices
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
             let caller = Address::repeat_byte(0xAB);
 
-            call_precompiles::storage::StorageCtx::sstore(
+            call_precompile::storage::StorageCtx::sstore(
                 VALIDATOR_ADDRESS,
                 slot_validator_by_addr(caller),
                 u64_to_u256(1),
@@ -365,7 +365,7 @@ mod tests {
         });
 
         // getTWAP
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
 
             let input = IProtocolOracle::getTWAPCall { assetId: 1 }.abi_encode();
@@ -377,7 +377,7 @@ mod tests {
 
         // isStale with chain timestamp = 2000 (not stale, threshold = 3600)
         provider.set_timestamp(U256::from(2000));
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
 
             let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
@@ -387,7 +387,7 @@ mod tests {
 
         // isStale with chain timestamp = 5000 (stale, 5000 - 1000 = 4000 > 3600)
         provider.set_timestamp(U256::from(5000));
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
 
             let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
@@ -400,7 +400,7 @@ mod tests {
     fn test_oracle_precompile_non_validator_rejected() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             let mut precompile = OraclePrecompile;
             let caller = Address::repeat_byte(0xCD);
 

@@ -279,7 +279,7 @@ Establish measurable performance baselines before testnet launch. Targets must b
 
 ```bash
 # Hot path benchmarks
-cargo bench -p call-precompiles --bench precompile_execute
+cargo bench -p call-precompile --bench precompile_execute
 cargo bench -p call-consensus --bench block_production
 cargo bench -p call-crypto --bench signature_verify
 cargo bench -p call-storage --bench mdbx_read_write

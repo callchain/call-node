@@ -1,5 +1,5 @@
 [package]
-name = "call-precompiles"
+name = "call-precompile"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

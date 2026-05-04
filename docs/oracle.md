@@ -304,7 +304,7 @@ crates/oracle/
 
 | Crate | Usage |
 |---|---|
-| `call-precompiles` | `OracleManager` for EVM precompile (legacy `asset_id` compat) |
+| `call-precompile` | `OracleManager` for EVM precompile (legacy `asset_id` compat) |
 | `call-protocol` | `OracleManager`, `OracleSubmission` for precompile execution |
 | `call-consensus` | `OracleManager` for block execution, slashing, rewards |
 | `call-rpc` | `OracleSubmission` for RPC endpoint |

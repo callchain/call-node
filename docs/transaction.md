@@ -55,7 +55,7 @@ All transactions are standard **EVM transactions** (`EvmTransaction`, RLP-encode
 
 ### Precompile Operations
 
-All protocol operations are exposed through EVM precompiles (`crates/precompiles/src/`):
+All protocol operations are exposed through EVM precompiles (`crates/precompile/src/`):
 
 | Address | Function | Gas (base) | Authorization |
 |---|---|---|---|
@@ -271,8 +271,8 @@ All components are production-ready with no open gaps.
 | File | Role |
 |------|------|
 | `crates/protocol/src/transaction.rs` | `EvmTransaction` handling, gas calculation, fee model, mempool admission |
-| `crates/precompiles/src/lib.rs` | Precompile registry and dispatch |
-| `crates/precompiles/src/gas.rs` | Per-precompile gas cost table |
+| `crates/precompile/src/lib.rs` | Precompile registry and dispatch |
+| `crates/precompile/src/gas.rs` | Per-precompile gas cost table |
 | `crates/protocol/src/receipts.rs` | `ProtocolReceipt`, `PrecompileEvent`, `LogEntry`, `MemoEntry`, `StateChange` |
 | `crates/protocol/src/sponsor.rs` | `SponsorRegistry`, `GasSponsorAuth`, `GasSponsorPool`, daily usage tracking |
 | `crates/protocol/src/compliance.rs` | `ComplianceEngine`, `CompliancePolicy`, `CustomComplianceHandler`, snapshots |

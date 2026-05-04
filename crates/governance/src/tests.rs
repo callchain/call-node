@@ -1,5 +1,5 @@
 use call_asset::AssetStorage;
-use call_precompiles::{
+use call_precompile::{
     journal_backend::JournalBackend,
     save_bal,
     storage::{HashMapStorageProvider, StorageCtx},

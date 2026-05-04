@@ -2,7 +2,7 @@ pub mod precompile;
 
 pub use precompile::CompliancePrecompile;
 
-use call_precompiles::{
+use call_precompile::{
     storage::storage_slot, u256_to_address, u8_to_u256,
     ASSET_ADDRESS, COMPLIANCE_ADDRESS,
 };

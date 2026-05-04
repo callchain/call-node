@@ -7,7 +7,7 @@
 
 use crate::AssetStorage;
 use alloy_sol_types::{sol, SolCall};
-use call_precompiles::{
+use call_precompile::{
     dispatch, journal_backend::JournalBackend, ok_empty, require_caller, slot_asset_meta,
     write_string32, ASSET_ADDRESS, COMPLIANCE_ADDRESS, slot_compliance,
 };
@@ -36,7 +36,7 @@ pub struct AssetPrecompile;
 impl AssetPrecompile {
     /// Check compliance for an address against the asset's compliance policy.
     fn check_compliance(asset_id: u64, addr: &Address) -> Result<(), PrecompileError> {
-        let policy_id = call_precompiles::storage::StorageCtx::sload(
+        let policy_id = call_precompile::storage::StorageCtx::sload(
             ASSET_ADDRESS,
             slot_asset_meta(asset_id, b"compliance"),
         )
@@ -47,7 +47,7 @@ impl AssetPrecompile {
             return Ok(());
         }
 
-        let status = call_precompiles::storage::StorageCtx::sload(
+        let status = call_precompile::storage::StorageCtx::sload(
             COMPLIANCE_ADDRESS,
             slot_compliance(*addr, policy_id as u8),
         )
@@ -70,7 +70,7 @@ impl AssetPrecompile {
     }
 
     fn get_asset_info(&self, calldata: &[u8]) -> PrecompileResult {
-        call_precompiles::storage::StorageCtx::deduct_gas(1000)
+        call_precompile::storage::StorageCtx::deduct_gas(1000)
             .ok_or(PrecompileError::OutOfGas)?;
         let call = dispatch::decode_call::<IProtocolAsset::getAssetInfoCall>(calldata)?;
         let store = AssetStorage::new(JournalBackend);
@@ -81,11 +81,11 @@ impl AssetPrecompile {
         out[32..64].copy_from_slice(&write_string32(&meta.name).to_be_bytes::<32>());
         out[95] = meta.decimals;
         out[108..128].copy_from_slice(meta.issuer.as_slice());
-        out[128..160].copy_from_slice(&call_precompiles::encode_u128(meta.max_supply));
+        out[128..160].copy_from_slice(&call_precompile::encode_u128(meta.max_supply));
         out[191] = meta.status;
 
         let output = revm_precompile::PrecompileOutput::new(0, out.to_vec().into());
-        Ok(call_precompiles::storage::fill_precompile_output(output))
+        Ok(call_precompile::storage::fill_precompile_output(output))
     }
 
     fn transfer(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -112,7 +112,7 @@ impl AssetPrecompile {
             return Err(PrecompileError::Other("empty batch".into()));
         }
         let total_gas = 5000u64 * call.to.len() as u64;
-        call_precompiles::storage::StorageCtx::deduct_gas(total_gas)
+        call_precompile::storage::StorageCtx::deduct_gas(total_gas)
             .ok_or(PrecompileError::OutOfGas)?;
 
         let from = require_caller(msg_sender)?;
@@ -124,7 +124,7 @@ impl AssetPrecompile {
         let pairs: Vec<(Address, u128)> =
             call.to.into_iter().zip(call.amounts.into_iter()).collect();
         let mut store = AssetStorage::new(JournalBackend);
-        let guard = call_precompiles::storage::StorageCtx::checkpoint();
+        let guard = call_precompile::storage::StorageCtx::checkpoint();
         store
             .batch_transfer(call.assetId, from, &pairs)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -189,7 +189,7 @@ impl AssetPrecompile {
     }
 }
 
-impl call_precompiles::StatefulPrecompile for AssetPrecompile {
+impl call_precompile::StatefulPrecompile for AssetPrecompile {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
@@ -218,8 +218,8 @@ impl call_precompiles::StatefulPrecompile for AssetPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompiles::storage::HashMapStorageProvider;
-    use call_precompiles::{slot_balance, u128_to_u256, StatefulPrecompile};
+    use call_precompile::storage::HashMapStorageProvider;
+    use call_precompile::{slot_balance, u128_to_u256, StatefulPrecompile};
     use call_primitives::Address;
 
     #[test]
@@ -227,8 +227,8 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::repeat_byte(0xAB);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
-            call_precompiles::storage::StorageCtx::sstore(
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(1, addr),
                 u128_to_u256(5000),
@@ -242,7 +242,7 @@ mod tests {
 
             let mut precompile = AssetPrecompile;
             let result = precompile.call(&input, Address::ZERO).unwrap();
-            let balance = call_precompiles::u256_to_u128(
+            let balance = call_precompile::u256_to_u128(
                 alloy_primitives::U256::from_be_bytes::<32>(
                     result.bytes.as_ref().try_into().unwrap(),
                 ),
@@ -257,8 +257,8 @@ mod tests {
         let from = Address::repeat_byte(0xAB);
         let to = Address::repeat_byte(0xCD);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
-            call_precompiles::storage::StorageCtx::sstore(
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(1, from),
                 u128_to_u256(1000),
@@ -287,7 +287,7 @@ mod tests {
         let issuer = Address::repeat_byte(0x11);
         let recipient = Address::repeat_byte(0x22);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
             // Register
             let input = IProtocolAsset::registerCall {
                 symbol: "GOLD".into(),
@@ -353,8 +353,8 @@ mod tests {
         let spender = Address::repeat_byte(0xEF);
         let recipient = Address::repeat_byte(0xCD);
 
-        call_precompiles::storage::StorageCtx::enter(&mut provider, || {
-            call_precompiles::storage::StorageCtx::sstore(
+        call_precompile::storage::StorageCtx::enter(&mut provider, || {
+            call_precompile::storage::StorageCtx::sstore(
                 ASSET_ADDRESS,
                 slot_balance(1, owner),
                 u128_to_u256(1000),
