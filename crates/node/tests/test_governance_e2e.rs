@@ -43,13 +43,13 @@ fn gov_calldata(selector: &[u8; 4], args: &[u8]) -> call_evm::Bytes {
     call_evm::Bytes::from(data)
 }
 
-/// Governance proposal full lifecycle: submit -> vote -> queue -> execute.
+/// Governance proposal full lifecycle: submit -> vote -> queue -> auto-execute.
 /// Uses EVM transactions calling the governance precompile at 0x203.
 #[test]
 fn test_governance_proposal_full_lifecycle() {
     let mut node = TestNode::new();
 
-    let (proposer_secret, proposer) = test_keypair();
+    let (_proposer_secret, proposer) = test_keypair();
     let (_voter_secret, voter_addr) = test_keypair();
 
     // Stake a validator so there is a proposer
@@ -76,23 +76,28 @@ fn test_governance_proposal_full_lifecycle() {
         evm.set_balance(voter_addr, call_primitives::U256::from(100_000_000_000u128));
     }
 
+    let proposal_id = 1u64;
+
     // Step 1: Submit proposal (proposal_id = 1)
+    // Needs ~600k gas: 17 SSTOREs (~22k each) + SLOADs + dispatch overhead.
     let submit_tx = call_evm::EvmTransaction {
         caller: proposer,
         nonce: 0,
-        gas_limit: 300_000,
-        gas_price: 1,
+        gas_limit: 5_000_000,
+        gas_price: 10,
         to: Some(call_primitives::Address::from_slice(
             &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
         )),
         value: call_primitives::U256::ZERO,
         data: gov_calldata(
-            &[0x13, 0x16, 0x9e, 0x1c],
+            &[0x5e, 0xbf, 0x42, 0xee],
             &{
-                let mut args = Vec::with_capacity(96);
+                let mut args = Vec::with_capacity(128);
                 args.extend_from_slice(b"My Proposal_____________________");
                 args.extend_from_slice(b"Double the max block size_______");
                 args.extend_from_slice(&[0xDDu8; 32]);
+                args.extend_from_slice(&[0u8; 31]);
+                args.push(0); // proposalType = 0 (ParameterChange)
                 args
             },
         ),
@@ -102,7 +107,11 @@ fn test_governance_proposal_full_lifecycle() {
     let result = node.produce_block(1_000_000);
     assert!(result.is_some());
 
-    let proposal_id = 1u64;
+    // Proposal starts Pending (review_period = 10 blocks).
+    // Produce empty blocks until it becomes Active.
+    for i in 0..15 {
+        node.produce_block(1_000_001 + i);
+    }
 
     // Verify proposal is Active (status = 1)
     {
@@ -110,7 +119,7 @@ fn test_governance_proposal_full_lifecycle() {
         assert_eq!(
             read_proposal_status(&*evm, proposal_id),
             1,
-            "proposal should be Active after submission"
+            "proposal should be Active after review period"
         );
     }
 
@@ -121,17 +130,17 @@ fn test_governance_proposal_full_lifecycle() {
     let vote_tx = call_evm::EvmTransaction {
         caller: voter_addr,
         nonce: 0,
-        gas_limit: 100_000,
-        gas_price: 1,
+        gas_limit: 500_000,
+        gas_price: 10,
         to: Some(call_primitives::Address::from_slice(
             &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
         )),
         value: call_primitives::U256::ZERO,
-        data: gov_calldata(&[0x02, 0x3d, 0x03, 0x3b], &vote_args),
+        data: gov_calldata(&[0xb0, 0x40, 0xd1, 0x66], &vote_args),
         chain_id: 1,
     };
     node.insert_evm_tx(vote_tx);
-    node.produce_block(1_000_001);
+    node.produce_block(1_000_020);
 
     // Step 3: Queue proposal (one yes vote = 100% quorum)
     let mut queue_args = vec![0u8; 32];
@@ -139,17 +148,17 @@ fn test_governance_proposal_full_lifecycle() {
     let queue_tx = call_evm::EvmTransaction {
         caller: proposer,
         nonce: 1,
-        gas_limit: 100_000,
-        gas_price: 1,
+        gas_limit: 500_000,
+        gas_price: 10,
         to: Some(call_primitives::Address::from_slice(
             &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
         )),
         value: call_primitives::U256::ZERO,
-        data: gov_calldata(&[0xfe, 0x72, 0xd0, 0x10], &queue_args),
+        data: gov_calldata(&[0x92, 0x6c, 0x46, 0xb2], &queue_args),
         chain_id: 1,
     };
     node.insert_evm_tx(queue_tx);
-    node.produce_block(1_000_002);
+    node.produce_block(1_000_021);
 
     // Verify proposal is Queued (status = 2)
     {
@@ -161,28 +170,11 @@ fn test_governance_proposal_full_lifecycle() {
         );
     }
 
-    // Advance past timelock (GOV_TIMELOCK_BLOCKS = 100)
-    for _ in 0..101 {
-        node.produce_block(1_000_003);
+    // Advance past timelock (timelock = 100 blocks).
+    // GovernanceAdvancer auto-executes once execution_block is reached.
+    for i in 0..110 {
+        node.produce_block(1_000_022 + i);
     }
-
-    // Step 4: Execute proposal
-    let mut exec_args = vec![0u8; 32];
-    exec_args[24..32].copy_from_slice(&proposal_id.to_be_bytes());
-    let exec_tx = call_evm::EvmTransaction {
-        caller: proposer,
-        nonce: 2,
-        gas_limit: 100_000,
-        gas_price: 1,
-        to: Some(call_primitives::Address::from_slice(
-            &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
-        )),
-        value: call_primitives::U256::ZERO,
-        data: gov_calldata(&[0x50, 0xf7, 0x01, 0xf4], &exec_args),
-        chain_id: 1,
-    };
-    node.insert_evm_tx(exec_tx);
-    node.produce_block(1_000_004);
 
     // Verify proposal is Executed (status = 3)
     {

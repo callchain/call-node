@@ -35,7 +35,7 @@
             caller: *test_sender(),
             nonce,
             gas_limit: 21_000,
-            gas_price: 1,
+            gas_price: 10,
             to: Some(test_addr(2)),
             value: call_primitives::U256::from(100),
             data: call_evm::Bytes::default(),

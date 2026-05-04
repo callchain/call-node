@@ -7,6 +7,7 @@
 
 use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus};
 use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
+use call_node::governance_advancer::GovernanceAdvancer;
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
 use call_mempool::Mempool;
 use call_rpc::RpcState;
@@ -114,10 +115,16 @@ impl NodeBuilder {
         consensus.refresh_proposer_subset(&evm_state);
 
         let state = Arc::new(RpcState::new(
-            call_evm::EvmState::new(),
+            evm_state,
             mempool.clone(),
             self.chain_id,
         ));
+
+        // Seed governance config (matches real CallNode::new behavior)
+        {
+            let mut evm = state.evm_state.write().unwrap();
+            call_consensus::exec::state_accessors::seed_gov_config(&mut evm);
+        }
 
         for (asset_id, addr, amount) in &self.initial_balances {
             let mut evm = state.evm_state.write().unwrap();
@@ -239,6 +246,12 @@ impl TestNode {
         self.state.finalize_block();
         self.height = new_height;
         self.blocks_produced.push(block.clone());
+
+        // Advance governance proposal state machine
+        {
+            let mut evm_state = self.state.evm_state.write().unwrap();
+            let _events = GovernanceAdvancer.advance(&mut evm_state, new_height);
+        }
 
         // Broadcast if network is available
         if let Some(ref net) = self.network {

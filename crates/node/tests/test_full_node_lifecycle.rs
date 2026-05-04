@@ -21,7 +21,7 @@ fn make_tx(_secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount:
         caller: sender,
         nonce,
         gas_limit: 21_000,
-        gas_price: 1,
+        gas_price: 10,
         to: Some(to),
         value: call_primitives::U256::from(amount),
         data: call_evm::Bytes::default(),
