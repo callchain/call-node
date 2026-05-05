@@ -2,13 +2,11 @@
 //!
 //! Block and BlockHeader types with hash, validation, and execution.
 
-use call_bridge::BridgeConfig;
 use call_crypto::keccak256;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_protocol::gas::FeeParams;
-use call_evm::{EvmExecutor, EvmState, EvmTransaction, BlockGasTracker};
+use call_evm::EvmTransaction;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 use crate::validator::ConsensusError;
 use crate::ForkManager;
@@ -131,50 +129,6 @@ impl BlockHeader {
 /// Deserialized into `EvmTransaction` during execution.
 pub type EvmTx = Vec<u8>;
 
-// ── Execution Parameter Grouping ──────────────────────────────────────
-
-/// Core mutable protocol state passed to every block execution.
-pub struct ExecutionState<'a> {
-    pub evm_state: &'a mut EvmState,
-}
-
-/// Block-level context and configuration.
-pub struct BlockContext<'a> {
-    pub current_block_height: u64,
-    pub fee_params: &'a mut FeeParams,
-    pub bridge_config: Option<&'a BridgeConfig>,
-    pub validators: Option<&'a [Address]>,
-}
-
-/// Optional subsystem extensions. Each field is `None` when the subsystem
-/// is not active for the current execution context.
-pub struct Subsystems<'a> {
-    pub fork_manager: Option<&'a mut ForkManager>,
-}
-
-impl<'a> ExecutionState<'a> {
-    pub fn new(evm_state: &'a mut EvmState) -> Self {
-        Self { evm_state }
-    }
-}
-
-impl<'a> BlockContext<'a> {
-    pub fn new(
-        current_block_height: u64,
-        fee_params: &'a mut FeeParams,
-    ) -> Self {
-        Self { current_block_height, fee_params, bridge_config: None, validators: None }
-    }
-}
-
-impl<'a> Subsystems<'a> {
-    pub fn none() -> Self {
-        Self {
-            fork_manager: None,
-        }
-    }
-}
-
 // ── Block ─────────────────────────────────────────────────────────────
 
 /// Full block structure (per spec §2.4)
@@ -226,140 +180,92 @@ impl Block {
     /// 1. EVM transactions (evm_txs)
     /// 2. System settlement (base-fee update, oracle reward)
     ///
-    /// Returns EVM execution results.
+    /// The execution pipeline is fully MDBX-native:
+    ///   * `provider` is loaded from MDBX by the caller.
+    ///   * EVM transactions run against a [`CacheDB`] backed by the provider.
+    ///   * The revm delta is applied back to the provider.
+    ///   * System settlement mutates the provider directly.
+    ///   * The caller must persist the provider back to MDBX if desired.
     pub fn execute(
         &self,
-        state: &mut ExecutionState,
-        ctx: &mut BlockContext,
-        _subsystems: &mut Subsystems,
+        provider: &mut call_evm::provider::InMemoryStateProvider,
+        fee_params: &mut FeeParams,
+        current_block_height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let mut result = BlockExecutionResult::default();
-        let executor = EvmExecutor::new(1); // chain_id = 1
-        let max_evm_gas = 30_000_000u64; // default block gas limit (~30M for Ethereum-compatible)
-        let mut gas_tracker = BlockGasTracker::new(max_evm_gas);
-        // Track nonces separately: EVM and protocol operate on separate namespaces
-        let mut used_evm_nonces: HashSet<(call_primitives::Address, u64)> = HashSet::new();
-
-        // Step 1: EVM transactions
+        // Pre-bridge Protocol→EVM gas so every tx has sufficient EVM balance.
         for raw_tx in &self.evm_txs {
-            let tx = match decode_evm_tx(raw_tx) {
-                Ok(t) => t,
-                Err(()) => {
-                    tracing::warn!("block: decode_evm_tx failed, skipping tx");
-                    continue;
-                }
-            };
-            let caller = tx.caller;
-            let nonce = tx.nonce;
-
-            // Check for duplicate nonce within this block
-            if !used_evm_nonces.insert((caller, nonce)) {
-                tracing::warn!(?caller, nonce, "block: duplicate evm nonce in same block, skipping");
-                continue;
-            }
-
-            // Validate nonce and balance before execution
-            if let Err(e) = call_evm::validate_evm_tx(&tx, state.evm_state) {
-                let evm_nonce = state.evm_state.get_nonce(&caller);
-                let evm_bal = state.evm_state.get_balance(&caller);
-                tracing::warn!(?caller, tx_nonce = nonce, evm_nonce, ?evm_bal, error = ?e, "block: validate_evm_tx failed, skipping");
-                continue;
-            }
-
-            // Unified gas balance: auto-bridge Protocol→EVM if needed
-            let gas_cost_u256 = call_evm::U256::from(tx.gas_limit)
-                .saturating_mul(call_evm::U256::from(tx.gas_price));
-            let gas_cost_u128: u128 = gas_cost_u256.try_into().unwrap_or(u128::MAX);
-            let evm_balance_u128: u128 =
-                state.evm_state.get_balance(&caller).try_into().unwrap_or(0);
-
-            if evm_balance_u128 < gas_cost_u128 {
-                let needed = gas_cost_u128 - evm_balance_u128;
-                let protocol_balance =
-                    state_accessors::read_balance(state.evm_state, call_protocol::CALL_ASSET_ID, caller);
-                if protocol_balance < needed {
-                    tracing::warn!(?caller, needed, protocol_balance, evm_balance = evm_balance_u128, "block: insufficient unified gas, skipping");
-                    continue;
-                }
-                let new_protocol_bal = protocol_balance
-                    .checked_sub(needed)
-                    .expect("checked above");
-                state_accessors::seed_balance(
-                    state.evm_state,
-                    call_protocol::CALL_ASSET_ID,
-                    caller,
-                    new_protocol_bal,
-                );
-                let new_evm = state.evm_state.get_balance(&caller)
-                    + call_evm::U256::from(needed);
-                state.evm_state.set_balance(caller, new_evm);
-            }
-
-            let tx_to = tx.to;
-            let tx_gas_price = tx.gas_price;
-            match executor.execute_tx(tx, state.evm_state, ctx.current_block_height, ctx.fee_params.base_fee) {
-                Ok(exec_result) => {
-                    let new_evm_nonce = state.evm_state.get_nonce(&caller);
-                    tracing::info!(?caller, tx_nonce = nonce, new_evm_nonce, gas_used = exec_result.gas_used, success = exec_result.success, "block: evm tx executed");
-                    if gas_tracker.add_gas(exec_result.gas_used).is_err() {
-                        tracing::warn!(?caller, gas_used = exec_result.gas_used, "block: block gas limit exceeded, skipping");
-                        continue;
+            if let Ok(tx) = decode_evm_tx(raw_tx) {
+                let gas_cost = call_evm::U256::from(tx.gas_limit)
+                    .saturating_mul(call_evm::U256::from(tx.gas_price));
+                let evm_balance = provider.state().get_balance(&tx.caller);
+                if evm_balance < gas_cost {
+                    let needed: u128 = (gas_cost - evm_balance)
+                        .try_into()
+                        .unwrap_or(u128::MAX);
+                    let protocol_balance = state_accessors::read_balance(
+                        provider.state(),
+                        call_protocol::CALL_ASSET_ID,
+                        tx.caller,
+                    );
+                    if protocol_balance >= needed {
+                        let new_protocol = protocol_balance - needed;
+                        state_accessors::seed_balance(
+                            provider.state_mut(),
+                            call_protocol::CALL_ASSET_ID,
+                            tx.caller,
+                            new_protocol,
+                        );
+                        let new_evm = evm_balance + call_evm::U256::from(needed);
+                        provider.state_mut().set_balance(tx.caller, new_evm);
                     }
-                    result.evm_tx_count += 1;
-                    result.evm_gas_used += exec_result.gas_used;
-
-                    // Compute contract address for CREATE transactions
-                    let contract_address = if tx_to.is_none() {
-                        Some(call_evm::derive_create_address(caller, nonce))
-                    } else {
-                        None
-                    };
-
-                    // Convert revm logs to protocol LogEntry
-                    let logs: Vec<call_protocol::LogEntry> = exec_result
-                        .logs
-                        .iter()
-                        .map(|log| call_protocol::LogEntry {
-                            address: log.address,
-                            topics: log
-                                .data
-                                .topics()
-                                .iter()
-                                .map(|t| call_primitives::Hash::from(t.0))
-                                .collect(),
-                            data: log.data.data.to_vec(),
-                        })
-                        .collect();
-
-                    let tx_hash = keccak256(raw_tx);
-                    result.evm_tx_results.push(EvmTxResult {
-                        tx_hash,
-                        gas_used: exec_result.gas_used,
-                        status: exec_result.success,
-                        caller,
-                        to: tx_to,
-                        contract_address,
-                        logs,
-                        gas_price: tx_gas_price,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(?caller, error = ?e, "block: executor.execute_tx failed, skipping");
                 }
             }
-            // Nonce consumed regardless of execution result (same as Ethereum)
         }
 
-        // Step 2: System settlement (base-fee update, oracle reward pool)
+        let provider_for_exec = provider.clone();
+        let (block_tx_result, revm_delta) =
+            call_evm::block_executor::execute_block_transactions(
+                &self.evm_txs,
+                provider_for_exec,
+                current_block_height,
+                fee_params.base_fee,
+            )
+            .map_err(|e| ConsensusError::InvalidBlock(format!(
+                "evm execution failed: {e}"
+            )))?;
+
+        // Apply revm delta back to the provider.
+        provider.state_mut().apply_from_revm_state(&revm_delta);
+
+        let mut result = BlockExecutionResult {
+            evm_tx_count: block_tx_result.evm_tx_count,
+            evm_gas_used: block_tx_result.evm_gas_used,
+            evm_tx_results: block_tx_result
+                .evm_tx_results
+                .into_iter()
+                .map(|e| EvmTxResult {
+                    tx_hash: e.tx_hash,
+                    gas_used: e.gas_used,
+                    status: e.status,
+                    caller: e.caller,
+                    to: e.to,
+                    contract_address: e.contract_address,
+                    logs: e.logs,
+                    gas_price: e.gas_price,
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        // System settlement
         let total_gas = result.evm_gas_used;
-        update_base_fee_after_block(ctx.fee_params, total_gas);
+        update_base_fee_after_block(fee_params, total_gas);
+        let total_fees = total_gas as u128 * fee_params.base_fee;
+        let oracle_share = total_fees * fee_params.oracle_fee_share_bps as u128 / 10_000;
+        state_accessors::add_oracle_reward(provider.state_mut(), oracle_share);
 
-        let total_fees = total_gas as u128 * ctx.fee_params.base_fee;
-        let oracle_share = total_fees * ctx.fee_params.oracle_fee_share_bps as u128 / 10_000;
-        state_accessors::add_oracle_reward(state.evm_state, oracle_share);
-
-        // Compute state root (EVM-only mode)
-        result.state_root = compute_evm_state_root(state.evm_state);
+        // Compute state root
+        result.state_root = provider.state().compute_state_root();
 
         Ok(result)
     }
@@ -410,11 +316,6 @@ impl BlockExecutionResult {
 /// Update base fee after block execution (delegates to protocol layer)
 pub(crate) fn update_base_fee_after_block(params: &mut FeeParams, gas_used: u64) {
     call_protocol::gas::update_base_fee(params, gas_used);
-}
-
-/// Compute EVM state root from the EVM state trie
-fn compute_evm_state_root(evm_state: &EvmState) -> Hash {
-    evm_state.compute_state_root()
 }
 
 /// Attempt to decode raw EVM transaction bytes into a structured EvmTransaction.

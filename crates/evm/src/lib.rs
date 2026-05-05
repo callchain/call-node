@@ -9,8 +9,10 @@ pub mod db;
 pub mod erc20_bytecode;
 pub mod trie;
 pub mod provider;
+pub mod block_executor;
 
 pub use executor::*;
+pub use reth_db::DatabaseEnv as EvmDatabaseEnv;
 pub use state::*;
 pub use backend::*;
 pub use alloy_primitives::{U256, Bytes};

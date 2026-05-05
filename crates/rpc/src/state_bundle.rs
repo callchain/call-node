@@ -6,15 +6,12 @@
 //! repeated 14+ times across the node crate, and to make it impossible to
 //! forget a subsystem when calling `block.execute()`.
 
-use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 
-use call_bridge::BridgeConfig;
-use call_consensus::{
-    block::{BlockContext, ExecutionState, Subsystems},
-    Block, BlockExecutionResult, ConsensusError, ForkManager,
-};
+use call_consensus::{Block, BlockExecutionResult, ConsensusError, ForkManager};
 use call_evm::EvmState;
 use call_protocol::gas::FeeParams;
+use reth_db::DatabaseEnv;
 
 use crate::handlers::RpcState;
 
@@ -26,6 +23,8 @@ pub struct StateWriteBundle<'a> {
     pub evm: RwLockWriteGuard<'a, EvmState>,
     pub fee_params: RwLockWriteGuard<'a, FeeParams>,
     pub fork_manager: RwLockWriteGuard<'a, ForkManager>,
+    /// Optional MDBX database environment for the P0-2 provider execution path.
+    pub db_env: Option<Arc<DatabaseEnv>>,
 }
 
 /// Holds read guards for every state component in `RpcState`.
@@ -36,6 +35,8 @@ pub struct StateReadBundle<'a> {
     pub evm: RwLockReadGuard<'a, EvmState>,
     pub fee_params: RwLockReadGuard<'a, FeeParams>,
     pub fork_manager: RwLockReadGuard<'a, ForkManager>,
+    /// Optional MDBX database environment for the P0-2 provider execution path.
+    pub db_env: Option<Arc<DatabaseEnv>>,
 }
 
 impl RpcState {
@@ -49,6 +50,7 @@ impl RpcState {
             evm: self.evm_state.write().unwrap(),
             fee_params: self.fee_params.write().unwrap(),
             fork_manager: self.fork_manager.write().unwrap(),
+            db_env: self.db_env.read().unwrap().clone(),
         }
     }
 
@@ -58,6 +60,7 @@ impl RpcState {
             evm: self.evm_state.read().unwrap(),
             fee_params: self.fee_params.read().unwrap(),
             fork_manager: self.fork_manager.read().unwrap(),
+            db_env: self.db_env.read().unwrap().clone(),
         }
     }
 }
@@ -74,22 +77,10 @@ impl<'a> StateWriteBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let bridge_config = BridgeConfig::default();
-        let validators = call_consensus::exec::state_accessors::read_validator_addresses(&self.evm);
-        block.execute(
-            &mut ExecutionState::new(
-                &mut self.evm,
-            ),
-            &mut BlockContext {
-                current_block_height: height,
-                fee_params: &mut self.fee_params,
-                bridge_config: Some(&bridge_config),
-                validators: if validators.is_empty() { None } else { Some(&validators) },
-            },
-            &mut Subsystems {
-                fork_manager: Some(&mut self.fork_manager),
-            },
-        )
+        let mut provider = call_evm::provider::InMemoryStateProvider::new(self.evm.clone());
+        let result = block.execute(&mut provider, &mut self.fee_params, height)?;
+        *self.evm = provider.state().clone();
+        Ok(result)
     }
 
     /// Execute a block with **no** subsystems enabled.
@@ -100,13 +91,8 @@ impl<'a> StateWriteBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        block.execute(
-            &mut ExecutionState::new(
-                &mut self.evm,
-            ),
-            &mut BlockContext::new(height, &mut self.fee_params),
-            &mut Subsystems::none(),
-        )
+        // Subsystems are currently unused in Block::execute; delegate to execute_block.
+        self.execute_block(block, height)
     }
 }
 
@@ -121,25 +107,8 @@ impl<'a> StateReadBundle<'a> {
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut fee_params = self.fee_params.clone();
-        let mut evm = self.evm.clone();
-        let mut fork_manager = self.fork_manager.clone();
-        let bridge_config = BridgeConfig::default();
-        let validators = call_consensus::exec::state_accessors::read_validator_addresses(&self.evm);
-
-        block.execute(
-            &mut ExecutionState::new(
-                &mut evm,
-            ),
-            &mut BlockContext {
-                current_block_height: height,
-                fee_params: &mut fee_params,
-                bridge_config: Some(&bridge_config),
-                validators: if validators.is_empty() { None } else { Some(&validators) },
-            },
-            &mut Subsystems {
-                fork_manager: Some(&mut fork_manager),
-            },
-        )
+        let mut provider = call_evm::provider::InMemoryStateProvider::new(self.evm.clone());
+        block.execute(&mut provider, &mut fee_params, height)
     }
 
     /// Execute a block against cloned state with **no** subsystems.
@@ -148,15 +117,7 @@ impl<'a> StateReadBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let mut fee_params = self.fee_params.clone();
-        let mut evm = self.evm.clone();
-
-        block.execute(
-            &mut ExecutionState::new(
-                &mut evm,
-            ),
-            &mut BlockContext::new(height, &mut fee_params),
-            &mut Subsystems::none(),
-        )
+        // Subsystems are currently unused in Block::execute; delegate to execute_block_cloned.
+        self.execute_block_cloned(block, height)
     }
 }

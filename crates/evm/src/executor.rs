@@ -3,6 +3,7 @@
 //! EVM transaction execution, ERC-20 deployment, gas tracking, validation.
 
 use call_primitives::Address;
+use crate::ProtocolStorage;
 use call_precompile::{
     CallPrecompiles,
     AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
@@ -185,6 +186,116 @@ impl EvmExecutor {
         let (result, revm_state) = self.execute_tx_db(tx, &mut *state, block_number, base_fee)?;
         state.apply_from_revm_state(&revm_state);
         Ok(result)
+    }
+
+    /// Execute an EVM transaction using a reth [`StateProvider`] as the backing database.
+    ///
+    /// This is the preferred execution path for the P0 migration. It reads state
+    /// directly from the provider (e.g. MDBX-backed [`InMemoryStateProvider`]) instead
+    /// of from an in-memory [`EvmState`]. The returned [`revm::state::EvmState`] contains
+    /// only the delta — the caller must commit it to persistent storage.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let provider = InMemoryStateProvider::from_db(&db)?;
+    /// let (result, delta) = executor.execute_tx_provider(tx, provider, height, base_fee)?;
+    /// // Commit delta to MDBX or EvmState
+    /// ```
+    pub fn execute_tx_provider(
+        &self,
+        tx: EvmTransaction,
+        provider: crate::provider::InMemoryStateProvider,
+        block_number: u64,
+        base_fee: u128,
+    ) -> Result<(EvmExecutionResult, revm::state::EvmState), EvmError> {
+        let db = reth_revm::database::StateProviderDatabase::new(provider);
+        self.execute_tx_db(tx, db, block_number, base_fee)
+    }
+
+    /// Execute an EVM transaction with a cached database for block-level execution.
+    ///
+    /// Multiple transactions within the same block should share the same [`CacheDB`]
+    /// so that warm reads (e.g. precompile state, frequently accessed accounts) are
+    /// cached across transactions.
+    pub fn execute_tx_cached<DB: revm::DatabaseRef>(
+        &self,
+        tx: EvmTransaction,
+        cache_db: &mut revm::database::CacheDB<DB>,
+        block_number: u64,
+        base_fee: u128,
+    ) -> Result<(EvmExecutionResult, revm::state::EvmState), EvmError>
+    where
+        DB::Error: core::fmt::Debug,
+    {
+        let tx_env = revm::context::TxEnv::builder()
+            .caller(tx.caller)
+            .gas_limit(tx.gas_limit)
+            .gas_price(tx.gas_price)
+            .kind(tx.to.map(TxKind::Call).unwrap_or(TxKind::Create))
+            .value(tx.value)
+            .data(tx.data.clone())
+            .nonce(tx.nonce)
+            .chain_id(Some(tx.chain_id))
+            .build()
+            .map_err(|_| EvmError::InvalidTx("tx build failed"))?;
+
+        let result = {
+            let ctx = Context::mainnet()
+                .with_db(cache_db)
+                .modify_cfg_chained(|cfg: &mut revm::context::CfgEnv| cfg.set_spec(self.spec_id));
+
+            let precompiles = CallPrecompiles::new(self.spec_id)
+                .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
+                .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+                .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
+                .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+                .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile));
+            let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
+
+            let mut block_env = revm::context::BlockEnv::default();
+            block_env.number = U256::from(block_number);
+            block_env.basefee = base_fee as u64;
+            evm.set_block(block_env);
+
+            evm.transact(tx_env)
+                .map_err(|e| EvmError::ExecutionError(format!("{e:?}")))?
+        };
+
+        let revm_state = result.state;
+
+        let (success, output, gas_used, logs) = match result.result {
+            revm::context_interface::result::ExecutionResult::Success {
+                gas,
+                output,
+                logs,
+                ..
+            } => {
+                let bytes = match output {
+                    revm::context_interface::result::Output::Call(b) => b,
+                    revm::context_interface::result::Output::Create(b, _) => b,
+                };
+                (true, bytes, gas.spent(), logs)
+            }
+            revm::context_interface::result::ExecutionResult::Revert {
+                gas,
+                output,
+                ..
+            } => (false, output, gas.spent(), vec![]),
+            revm::context_interface::result::ExecutionResult::Halt { gas, .. } => {
+                (false, Bytes::default(), gas.spent(), vec![])
+            }
+        };
+
+        Ok((EvmExecutionResult {
+            success,
+            gas_used,
+            output,
+            logs,
+        }, revm_state))
     }
 
     /// Deploy ERC-20 template contract for an asset.
@@ -450,7 +561,7 @@ pub trait CallchainBlockExecutor: Send + Sync + std::fmt::Debug {
     /// Stake a new validator and return its assigned validator ID.
     fn stake_validator(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn ProtocolStorage,
         address: Address,
         pubkey: [u8; 32],
         amount: u128,
@@ -459,7 +570,7 @@ pub trait CallchainBlockExecutor: Send + Sync + std::fmt::Debug {
     /// Distribute block proposer reward to a validator address.
     fn distribute_block_reward(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn ProtocolStorage,
         proposer_addr: Address,
         amount: u128,
     );
@@ -467,7 +578,7 @@ pub trait CallchainBlockExecutor: Send + Sync + std::fmt::Debug {
     /// Slash a validator for double-signing.
     fn slash_double_sign(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     );
@@ -475,7 +586,7 @@ pub trait CallchainBlockExecutor: Send + Sync + std::fmt::Debug {
     /// Slash a validator for being offline.
     fn slash_offline(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     );
@@ -483,7 +594,7 @@ pub trait CallchainBlockExecutor: Send + Sync + std::fmt::Debug {
     /// Slash a validator for oracle outlier submission.
     fn slash_oracle_outlier(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     );
@@ -491,7 +602,7 @@ pub trait CallchainBlockExecutor: Send + Sync + std::fmt::Debug {
     /// Distribute oracle reward to a validator.
     fn distribute_oracle_reward(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     );
@@ -611,5 +722,106 @@ mod tests {
             .evm_call_bridge_mint(caller, test_addr(0xCC), &mut state, test_addr(2), U256::from(500))
             .unwrap();
         assert!(result.success);
+    }
+
+    #[test]
+    fn test_evm_execute_with_provider() {
+        use reth_storage_api::AccountReader;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "call-evm-provider-test-{}",
+            std::process::id()
+        ));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        // Seed MDBX with an account
+        let mut state = EvmState::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+        state.set_balance(caller, U256::from(1_000_000_000i128));
+        state.create_account(caller);
+        state.save_to_db(&db).expect("seed db");
+
+        // Execute via InMemoryStateProvider backed by MDBX
+        let executor = EvmExecutor::new(1);
+        let provider = crate::provider::InMemoryStateProvider::from_db(&db).expect("provider");
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            to: Some(recipient),
+            value: U256::from(100),
+            data: Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, revm_state) = executor
+            .execute_tx_provider(tx, provider, 0, 0)
+            .expect("execute via provider");
+
+        assert!(result.success, "tx failed: gas_used={}", result.gas_used);
+
+        // Commit delta back to MDBX
+        crate::db::apply_revm_state_to_mdbx(&db, &revm_state).expect("apply to mdbx");
+
+        // Verify recipient balance in MDBX via fresh provider
+        let provider2 = crate::provider::InMemoryStateProvider::from_db(&db).expect("provider2");
+        let acc = provider2
+            .basic_account(&recipient)
+            .expect("basic_account")
+            .expect("recipient exists");
+        assert_eq!(acc.balance, U256::from(100));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_evm_execute_cached_block() {
+        use reth_storage_api::AccountReader;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "call-evm-cached-test-{}",
+            std::process::id()
+        ));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        // Seed MDBX
+        let mut state = EvmState::new();
+        let caller = test_addr(1);
+        state.set_balance(caller, U256::from(1_000_000_000i128));
+        state.create_account(caller);
+        state.save_to_db(&db).expect("seed db");
+
+        let executor = EvmExecutor::new(1);
+        let provider = crate::provider::InMemoryStateProvider::from_db(&db).expect("provider");
+        let db_wrapper = reth_revm::database::StateProviderDatabase::new(provider);
+        let mut cache_db = revm::database::CacheDB::new(db_wrapper);
+
+        // Execute a single transaction via CacheDB
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            to: Some(test_addr(2)),
+            value: U256::from(100),
+            data: Bytes::default(),
+            chain_id: 1,
+        };
+        let (result, revm_state) = executor
+            .execute_tx_cached(tx, &mut cache_db, 0, 0)
+            .expect("execute cached");
+        assert!(result.success);
+
+        // Apply delta to MDBX
+        crate::db::apply_revm_state_to_mdbx(&db, &revm_state).expect("apply to mdbx");
+
+        // Verify recipient balance
+        let provider2 = crate::provider::InMemoryStateProvider::from_db(&db).expect("provider2");
+        let acc = provider2.basic_account(&test_addr(2)).expect("basic_account").expect("account exists");
+        assert_eq!(acc.balance, U256::from(100));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

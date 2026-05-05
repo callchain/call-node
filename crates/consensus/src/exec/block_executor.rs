@@ -3,7 +3,7 @@
 //! Delegates all operations to `state_accessors` — the same helpers
 //! previously called directly from `SimplexConsensus`.
 
-use call_evm::{CallchainBlockExecutor, EvmState};
+use call_evm::CallchainBlockExecutor;
 use call_primitives::Address;
 
 /// Default executor: applies consensus mutations via EVM state accessors.
@@ -20,7 +20,7 @@ impl EvmBlockExecutor {
 impl CallchainBlockExecutor for EvmBlockExecutor {
     fn stake_validator(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn call_evm::ProtocolStorage,
         address: Address,
         pubkey: [u8; 32],
         amount: u128,
@@ -30,7 +30,7 @@ impl CallchainBlockExecutor for EvmBlockExecutor {
 
     fn distribute_block_reward(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn call_evm::ProtocolStorage,
         proposer_addr: Address,
         amount: u128,
     ) {
@@ -39,7 +39,7 @@ impl CallchainBlockExecutor for EvmBlockExecutor {
 
     fn slash_double_sign(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn call_evm::ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     ) {
@@ -48,7 +48,7 @@ impl CallchainBlockExecutor for EvmBlockExecutor {
 
     fn slash_offline(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn call_evm::ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     ) {
@@ -57,7 +57,7 @@ impl CallchainBlockExecutor for EvmBlockExecutor {
 
     fn slash_oracle_outlier(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn call_evm::ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     ) {
@@ -66,7 +66,7 @@ impl CallchainBlockExecutor for EvmBlockExecutor {
 
     fn distribute_oracle_reward(
         &mut self,
-        state: &mut EvmState,
+        state: &mut dyn call_evm::ProtocolStorage,
         validator_addr: Address,
         amount: u128,
     ) {

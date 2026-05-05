@@ -118,19 +118,11 @@ fn test_block_execution_order() {
     let mut evm_state = call_evm::EvmState::new();
     evm_state.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
 
+    let mut provider = call_evm::provider::InMemoryStateProvider::new(evm_state);
     let mut fee_params = FeeParams::default();
 
     let result = block
-        .execute(
-            &mut ExecutionState::new(&mut evm_state),
-            &mut BlockContext {
-                current_block_height: 1,
-                fee_params: &mut fee_params,
-                bridge_config: None,
-                validators: None,
-            },
-            &mut Subsystems::none(),
-        )
+        .execute(&mut provider, &mut fee_params, 1)
         .unwrap();
 
     assert_eq!(result.evm_tx_count, 1);
@@ -167,19 +159,11 @@ fn test_system_tx_reward_distribution() {
     );
 
     let mut fee_params = FeeParams::default();
-    let mut evm_state = call_evm::EvmState::new();
+    let evm_state = call_evm::EvmState::new();
+    let mut provider = call_evm::provider::InMemoryStateProvider::new(evm_state);
 
     let result = block
-        .execute(
-            &mut ExecutionState::new(&mut evm_state),
-            &mut BlockContext {
-                current_block_height: 1,
-                fee_params: &mut fee_params,
-                bridge_config: None,
-                validators: None,
-            },
-            &mut Subsystems::none(),
-        )
+        .execute(&mut provider, &mut fee_params, 1)
         .unwrap();
 
     // Validator reward is no longer injected via system_tx; currently no

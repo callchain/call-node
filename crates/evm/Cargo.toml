@@ -40,6 +40,8 @@ alloy-primitives.workspace = true
 alloy-eips.workspace = true
 alloy-trie.workspace = true
 alloy-rlp.workspace = true
+alloy-consensus.workspace = true
+tracing.workspace = true
 reth-primitives-traits.workspace = true
 hex = "0.4"
 

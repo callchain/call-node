@@ -3,14 +3,14 @@
 //! Lightweight wrapper around commonware-consensus providing Callchain-specific
 //! consensus driver with proposer selection, validator management, and block lifecycle.
 
-use crate::block::{Block, BlockExecutionResult, ExecutionState, BlockContext, Subsystems};
+use crate::block::{Block, BlockExecutionResult};
 use crate::fork::ForkManager;
 use crate::proposer::{
     derive_vrf_seed, select_proposer, select_proposer_subset, verify_proposer_in_subset,
     ConsensusParams,
 };
 use crate::validator::ConsensusError;
-use call_evm::CallchainBlockExecutor;
+use call_evm::{CallchainBlockExecutor, ProtocolStorage};
 use call_primitives::{Address, BlockHash, ValidatorId};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -37,7 +37,7 @@ pub struct SimplexConsensus {
 
 impl SimplexConsensus {
     /// Create a new consensus instance from EVM validator storage.
-    pub fn new(params: ConsensusParams, evm_state: &call_evm::EvmState) -> Self {
+    pub fn new(params: ConsensusParams, evm_state: &impl ProtocolStorage) -> Self {
         let active = Self::qualified_validators_internal(evm_state, &params);
         let pubkeys = Self::build_pubkey_map_internal(evm_state);
         let seed = derive_vrf_seed(&BlockHash::ZERO, 0);
@@ -57,7 +57,7 @@ impl SimplexConsensus {
     /// Create a consensus instance with a custom executor (useful for testing).
     pub fn with_executor(
         params: ConsensusParams,
-        evm_state: &call_evm::EvmState,
+        evm_state: &impl ProtocolStorage,
         executor: Box<dyn CallchainBlockExecutor>,
     ) -> Self {
         let active = Self::qualified_validators_internal(evm_state, &params);
@@ -78,7 +78,7 @@ impl SimplexConsensus {
 
     /// Build a map of validator ID → Ed25519 pubkey from EVM storage.
     fn build_pubkey_map_internal(
-        evm_state: &call_evm::EvmState,
+        evm_state: &impl ProtocolStorage,
     ) -> std::collections::HashMap<ValidatorId, call_primitives::Ed25519PublicKey> {
         use crate::exec::state_accessors::{
             read_validator_count, read_validator_addr, read_validator_pubkey,
@@ -96,7 +96,7 @@ impl SimplexConsensus {
     }
 
     /// Recompute the proposer subset using the current VRF seed.
-    fn recompute_proposer_subset(&mut self, evm_state: &call_evm::EvmState) {
+    fn recompute_proposer_subset(&mut self, evm_state: &impl ProtocolStorage) {
         let active = Self::qualified_validators_internal(evm_state, &self.params);
         let pubkeys = Self::build_pubkey_map_internal(evm_state);
         let seed = derive_vrf_seed(&self.last_block_hash, self.current_round);
@@ -112,7 +112,7 @@ impl SimplexConsensus {
     /// Stake a new validator directly into EVM storage.
     pub fn stake_validator(
         &mut self,
-        evm_state: &mut call_evm::EvmState,
+        evm_state: &mut impl ProtocolStorage,
         address: Address,
         pubkey: [u8; 32],
         amount: u128,
@@ -125,7 +125,7 @@ impl SimplexConsensus {
     }
 
     /// Refresh the proposer subset from EVM validator storage.
-    pub fn refresh_proposer_subset(&mut self, evm_state: &call_evm::EvmState) {
+    pub fn refresh_proposer_subset(&mut self, evm_state: &impl ProtocolStorage) {
         self.recompute_proposer_subset(evm_state);
         info!(
             round = self.current_round,
@@ -177,7 +177,7 @@ impl SimplexConsensus {
     /// NOTE: Epoch churn (queued stake/exit processing) is currently a no-op.
     /// In the EVM-only architecture, churn should be handled by system
     /// transactions included at epoch boundaries.
-    pub fn advance_round(&mut self, evm_state: &call_evm::EvmState) {
+    pub fn advance_round(&mut self, evm_state: &impl ProtocolStorage) {
         self.current_round += 1;
 
         // Refresh proposer subset periodically (every N rounds = epoch)
@@ -224,25 +224,6 @@ impl SimplexConsensus {
         Ok(())
     }
 
-    /// Execute a validated block and return the execution result.
-    ///
-    /// This runs the full execution pipeline:
-    /// EVM → Protocol → Bridge → System
-    ///
-    /// The caller is responsible for providing the correct state handles.
-    pub fn execute_block(
-        &mut self,
-        block: &Block,
-        fee_params: &mut call_protocol::gas::FeeParams,
-        evm_state: &mut call_evm::EvmState,
-    ) -> Result<BlockExecutionResult, ConsensusError> {
-        block.execute(
-            &mut ExecutionState::new(evm_state),
-            &mut BlockContext::new(self.current_height, fee_params),
-            &mut Subsystems::none(),
-        )
-    }
-
     /// Commit a block: advance height, distribute rewards, advance round.
     ///
     /// NOTE: Reward distribution writes directly to EVM storage. The caller
@@ -253,7 +234,7 @@ impl SimplexConsensus {
         &mut self,
         block: &Block,
         result: &BlockExecutionResult,
-        evm_state: &mut call_evm::EvmState,
+        evm_state: &mut impl ProtocolStorage,
     ) -> Result<(), ConsensusError> {
         // Replay protection: only commit blocks at the expected height
         if block.header.height != self.current_height {
@@ -297,7 +278,7 @@ impl SimplexConsensus {
     /// Handle double-sign detection: slash the offending validator.
     pub fn handle_double_sign(
         &mut self,
-        evm_state: &mut call_evm::EvmState,
+        evm_state: &mut impl ProtocolStorage,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
         let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
@@ -313,7 +294,7 @@ impl SimplexConsensus {
     /// Handle offline detection: slash proportionally.
     pub fn handle_offline(
         &mut self,
-        evm_state: &mut call_evm::EvmState,
+        evm_state: &mut impl ProtocolStorage,
         validator_id: ValidatorId,
         rounds_offline: u64,
     ) -> Result<u128, ConsensusError> {
@@ -335,7 +316,7 @@ impl SimplexConsensus {
     /// Handle oracle outlier detection: slash the offending validator.
     pub fn handle_oracle_outlier(
         &mut self,
-        evm_state: &mut call_evm::EvmState,
+        evm_state: &mut impl ProtocolStorage,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
         let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
@@ -352,7 +333,7 @@ impl SimplexConsensus {
     /// Distribute an oracle reward to a validator by adding to their EVM stake.
     pub fn distribute_oracle_reward(
         &mut self,
-        evm_state: &mut call_evm::EvmState,
+        evm_state: &mut impl ProtocolStorage,
         validator_id: ValidatorId,
         amount: u128,
     ) -> Result<(), ConsensusError> {
@@ -368,7 +349,7 @@ impl SimplexConsensus {
     }
 
     /// Get active validator IDs from EVM storage.
-    pub fn active_validators(&self, evm_state: &call_evm::EvmState) -> Vec<ValidatorId> {
+    pub fn active_validators(&self, evm_state: &impl ProtocolStorage) -> Vec<ValidatorId> {
         use crate::exec::state_accessors::{
             read_validator_count, read_validator_addr, read_validator_status,
         };
@@ -385,7 +366,7 @@ impl SimplexConsensus {
 
     /// Get qualified validator IDs (stake ≥ MIN_SELF_STAKE, active) from EVM storage.
     fn qualified_validators_internal(
-        evm_state: &call_evm::EvmState,
+        evm_state: &impl ProtocolStorage,
         params: &ConsensusParams,
     ) -> Vec<ValidatorId> {
         use crate::exec::state_accessors::{
@@ -408,7 +389,7 @@ impl SimplexConsensus {
     /// Get qualified validator IDs (stake ≥ MIN_SELF_STAKE, active).
     pub fn qualified_validators(
         &self,
-        evm_state: &call_evm::EvmState,
+        evm_state: &impl ProtocolStorage,
     ) -> Vec<ValidatorId> {
         Self::qualified_validators_internal(evm_state, &self.params)
     }
@@ -441,7 +422,7 @@ impl SimplexConsensus {
     /// Rebuilds the proposer subset from EVM validator storage.
     pub fn restore_from_persisted(
         state: PersistedConsensusState,
-        evm_state: &call_evm::EvmState,
+        evm_state: &impl ProtocolStorage,
     ) -> Self {
         let active = Self::qualified_validators_internal(evm_state, &state.params);
         let pubkeys = Self::build_pubkey_map_internal(evm_state);

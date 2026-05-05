@@ -16,6 +16,7 @@ call-bridge.workspace = true
 call-shielded.workspace = true
 call-evm.workspace = true
 call-governance.workspace = true
+reth-db.workspace = true
 call-crypto.workspace = true
 call-precompile.workspace = true
 call-asset.workspace = true

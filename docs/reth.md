@@ -245,7 +245,40 @@ pub struct EvmState {
 
 ---
 
-## 六、参考资源
+## 六、未完成任务清单（按优先级排序）
+
+### P0 — 执行层与状态存储（阻塞后续所有阶段）
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 1 | `EvmExecutor` 改为 `StateProviderDatabase` 执行路径 | **未完成** | 当前 `execute_tx` 仍走 `apply_from_revm_state`，未使用 `CacheDB<StateProviderDatabase>` |
+| 2 | 删除 `EvmState` 结构（`HashMap<Address, EvmAccount>`） | **未完成** | `EvmState` 仍是唯一状态源，MDBX 只是持久化备份 |
+| 3 | 状态读写全部改为 `StateProvider` / `StateProviderFactory` trait | **未完成** | 共识、执行、RPC 仍直接操作 `EvmState.accounts` |
+| 4 | 共识层不再持有 `EvmState`，改为 `Arc<Database>` | **未完成** | `SimplexConsensus` 方法签名仍接收 `&mut EvmState` |
+| 5 | MDBX 成为主存储，`CacheDB` 仅作热点缓存 | **未完成** | 当前 MDBX 是备份，`EvmState` 是主存储 |
+
+### P1 — 历史状态与 Proof（功能增强）
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 6 | `history_by_block_number` 改为 `AccountHistory`/`StorageHistory` diff 表重建 | **未完成** | 当前是全量快照（`serde_json`），128-block 后丢弃 |
+| 7 | Archive / Pruned 模式配置（`--archive` 参数） | **未完成** | 无配置选项 |
+| 8 | `eth_getProof` 从持久化 `AccountTrie`/`StorageTrie` 节点读取 | **未完成** | 当前从头构建 trie，`TrieUpdates` 未持久化到 MDBX |
+| 9 | `eth_call` / `eth_estimateGas` 改用 `StateProviderBox` 替代 `clone()` | **未完成** | 仍通过 `EvmState::clone()` 实现只读模拟 |
+
+### P2 — BlockExecutor 与共识解耦（架构顶层）
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 10 | 实现 reth `BlockExecutor` trait | **未完成** | 当前是自定义 `CallchainBlockExecutor`，未对接 reth |
+| 11 | 部署 System Contracts（StakingContract、AssetRegistry 等） | **未完成** | 共识仍直接调用 `state_accessors` 读写 |
+| 12 | 协议逻辑转为 EVM system tx（validator staking、reward 等） | **未完成** | 共识直接修改 EVM 存储，未走交易执行路径 |
+| 13 | 共识引擎完全删除 `EvmState` 操作，仅负责 BFT | **未完成** | `commit_block` 仍接收 `&mut EvmState` 直接修改 |
+| 14 | 删除 `EvmState::clone()` 依赖 | **未完成** | 多处仍依赖 clone 进行只读模拟 |
+
+---
+
+## 七、参考资源
 
 - **reth 架构**：`tempo/crates/execution/` — reth MDBX + revm 集成示例
 - **共识解耦**：`arc-node/crates/executor/` — `BlockExecutor` trait 自定义实现

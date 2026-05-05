@@ -61,6 +61,19 @@ impl InMemoryStateProvider {
         self.block_hashes = hashes;
         self
     }
+
+    /// Immutable access to the underlying [`EvmState`].
+    pub fn state(&self) -> &EvmState {
+        &self.state
+    }
+
+    /// Mutable access to the underlying [`EvmState`].
+    ///
+    /// Used by the consensus layer to apply protocol-level pre-execution
+    /// changes (e.g. gas bridging) before creating the revm [`CacheDB`].
+    pub fn state_mut(&mut self) -> &mut EvmState {
+        &mut self.state
+    }
 }
 
 impl BlockHashReader for InMemoryStateProvider {

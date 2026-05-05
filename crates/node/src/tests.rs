@@ -1,6 +1,5 @@
     use super::*;
     use call_consensus::BlockExecutionResult;
-    use call_consensus::block::{ExecutionState, BlockContext, Subsystems};
     use call_consensus::exec::state_accessors;
     use call_network::{InMemoryNetwork, EpochBoundarySignal, BlockAnnouncement, SyncResponse};
     use call_primitives::{Address, Ed25519PublicKey};
@@ -458,12 +457,11 @@
 
             let result = {
                 let mut s = node.state.write_all();
-                block.execute(
-                    &mut ExecutionState::new(&mut s.evm),
-                    &mut BlockContext::new(height, &mut s.fee_params),
-                    &mut Subsystems::none(),
-                )
-                    .expect("execution")
+                let mut provider = call_evm::provider::InMemoryStateProvider::new(s.evm.clone());
+                let result = block.execute(&mut provider, &mut s.fee_params, height)
+                    .expect("execution");
+                *s.evm = provider.state().clone();
+                result
             };
             block.finalize(&result);
 

@@ -1823,6 +1823,7 @@ dependencies = [
  "ed25519-dalek",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "reth-db",
  "revm",
  "revm-precompile",
  "serde",
@@ -1866,6 +1867,7 @@ dependencies = [
 name = "call-evm"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
@@ -1899,6 +1901,7 @@ dependencies = [
  "revm-database",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
