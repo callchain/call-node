@@ -520,6 +520,9 @@ mod tests {
         assert_eq!(result.bytes[31], 0);
     }
 
+    /// Withdraw precompile test without real ZK verification (default / non-real-prover).
+    /// Skips ZK proof verification and tests core precompile logic directly.
+    #[cfg(not(feature = "real-prover"))]
     #[test]
     fn test_shielded_precompile_withdraw() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
@@ -534,7 +537,7 @@ mod tests {
             amount: 500,
             nullifier: [0xBBu8; 32].into(),
             merkleRoot: [0u8; 32].into(),
-            proofData: vec![0u8; 32].into(),
+            proofData: vec![].into(),
         }
         .abi_encode();
 
@@ -554,6 +557,59 @@ mod tests {
             .map(u256_to_u128)
             .unwrap_or(0);
         assert_eq!(bal, 500);
+    }
+
+    /// Withdraw precompile test with real Groth16 proof verification.
+    /// Only runs when `real-prover` feature is enabled (e.g. workspace build).
+    #[cfg(feature = "real-prover")]
+    #[test]
+    fn test_shielded_precompile_withdraw() {
+        use crate::prover::{RealProver, setup_withdraw_circuit};
+
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let target = Address::repeat_byte(0x66);
+
+        let circuit = setup_withdraw_circuit();
+
+        // Set the merkle root in storage so the precompile merkle check passes
+        provider.set(
+            SHIELDED_ADDRESS,
+            slot_shielded_merkle_root(),
+            U256::from_be_slice(&circuit.merkle_root),
+        );
+
+        let prover = RealProver::global();
+        let proof_data = prover.prove_withdraw(&circuit).expect("prove failed");
+
+        let mut precompile = ShieldedPrecompile;
+
+        let input = IProtocolShielded::withdrawCall {
+            assetId: circuit.asset_id,
+            target,
+            amount: circuit.value,
+            nullifier: circuit.nullifier.into(),
+            merkleRoot: circuit.merkle_root.into(),
+            proofData: proof_data.into(),
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "withdraw failed: {:?}", result.err());
+
+        let input = IProtocolShielded::isNullifierSpentCall {
+            nullifier: circuit.nullifier.into(),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 1);
+
+        let target_slot = slot_balance(circuit.asset_id, target);
+        let bal = provider
+            .get(ASSET_ADDRESS, target_slot)
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(bal, circuit.value);
     }
 
     #[test]

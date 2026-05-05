@@ -352,25 +352,25 @@ mod real_prover_impl {
     use crate::merkle_poseidon::PoseidonMerkleTree;
     use crate::ViewingKey;
 
-    fn setup_spending_key(n: u8) -> [u8; 32] {
+    pub(crate) fn setup_spending_key(n: u8) -> [u8; 32] {
         let mut key = [0u8; 32];
         key[0] = n;
         key
     }
 
-    fn setup_hash(n: u8) -> [u8; 32] {
+    pub(crate) fn setup_hash(n: u8) -> [u8; 32] {
         let mut out = [0u8; 32];
         out[0] = n;
         out
     }
 
-    fn setup_value_to_fr_bytes(value: u128) -> [u8; 32] {
+    pub(crate) fn setup_value_to_fr_bytes(value: u128) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes[..16].copy_from_slice(&value.to_le_bytes());
         bytes
     }
 
-    fn setup_domain_tag_to_bytes(tag: &str) -> [u8; 32] {
+    pub(crate) fn setup_domain_tag_to_bytes(tag: &str) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         let tag_bytes = tag.as_bytes();
         let len = tag_bytes.len().min(32);
@@ -378,7 +378,7 @@ mod real_prover_impl {
         bytes
     }
 
-    fn setup_compute_rcm(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
+    pub(crate) fn setup_compute_rcm(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
         // Must match the circuit's D3 constraint: poseidon_hash([rcm_tag, ivk, value, asset, rho])
         let rcm_tag = setup_domain_tag_to_bytes("rcm");
         let rcm_tag_fr = bytes_to_fr(&rcm_tag);
@@ -393,7 +393,7 @@ mod real_prover_impl {
         fr_to_bytes(&rcm_fr)
     }
 
-    fn setup_derive_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
+    pub(crate) fn setup_derive_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
         let domain_bytes = setup_domain_tag_to_bytes(domain::FVK_FROM_IVK);
         let fvk_tag = bytes_to_fr(&domain_bytes);
         let ivk_fr = bytes_to_fr(ivk);
@@ -403,7 +403,7 @@ mod real_prover_impl {
         fr_to_bytes(&nf_fr)
     }
 
-    fn setup_compute_commitment(value: u128, asset_id: u64, rcm: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
+    pub(crate) fn setup_compute_commitment(value: u128, asset_id: u64, rcm: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
         let value_bytes = setup_value_to_fr_bytes(value);
         let value_fr = bytes_to_fr(&value_bytes);
         let mut asset_bytes = [0u8; 32];
@@ -415,7 +415,7 @@ mod real_prover_impl {
         fr_to_bytes(&cm_fr)
     }
 
-    fn setup_deposit_circuit() -> DepositCircuit {
+    pub(crate) fn setup_deposit_circuit() -> DepositCircuit {
         let sk = setup_spending_key(1);
         let vk = ViewingKey::generate(&sk);
         let rho = setup_hash(1);
@@ -429,7 +429,7 @@ mod real_prover_impl {
         DepositCircuit::new(commitment, asset_id, witness)
     }
 
-    fn setup_withdraw_circuit() -> WithdrawCircuit {
+    pub(crate) fn setup_withdraw_circuit() -> WithdrawCircuit {
         let sk = setup_spending_key(1);
         let vk = ViewingKey::generate(&sk);
         let rho = setup_hash(1);
@@ -453,7 +453,7 @@ mod real_prover_impl {
         WithdrawCircuit::new(nullifier, asset_id, value, target_address, merkle_root, witness)
     }
 
-    fn setup_transfer_circuit() -> TransferCircuit {
+    pub(crate) fn setup_transfer_circuit() -> TransferCircuit {
         let asset_id: u64 = 1;
 
         let sk = setup_spending_key(1);
@@ -606,6 +606,12 @@ mod real_prover_impl {
 
 #[cfg(feature = "real-prover")]
 pub use real_prover_impl::RealProver;
+#[cfg(feature = "real-prover")]
+pub(crate) use real_prover_impl::setup_withdraw_circuit;
+#[cfg(feature = "real-prover")]
+pub(crate) use real_prover_impl::setup_deposit_circuit;
+#[cfg(feature = "real-prover")]
+pub(crate) use real_prover_impl::setup_transfer_circuit;
 
 #[cfg(test)]
 mod tests {
