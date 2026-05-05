@@ -230,11 +230,16 @@ impl SimplexConsensus {
     /// must recompute the state root if this block's header has already been
     /// sealed. In the EVM-only architecture, rewards should eventually become
     /// system transactions included during block execution.
+    /// Commit a block to the BFT state machine.
+    ///
+    /// This is a **pure BFT transition**: it only advances height, round, and
+    /// last_block_hash.  All state mutations (EVM tx execution, system
+    /// settlement, validator rewards) are applied by the caller via
+    /// `Block::execute` **before** this method is invoked.
     pub fn commit_block(
         &mut self,
         block: &Block,
         result: &BlockExecutionResult,
-        evm_state: &mut impl ProtocolStorage,
     ) -> Result<(), ConsensusError> {
         // Replay protection: only commit blocks at the expected height
         if block.header.height != self.current_height {
@@ -244,25 +249,11 @@ impl SimplexConsensus {
             )));
         }
 
-        // Distribute validator reward by adding to the proposer's stake in EVM storage
-        if result.total_validator_reward > 0 {
-            let proposer_id = block.header.proposer;
-            let proposer_addr = crate::exec::state_accessors::read_validator_addr(evm_state, proposer_id as u64);
-            if proposer_addr != Address::ZERO {
-                self.executor.distribute_block_reward(
-                    evm_state, proposer_addr, result.total_validator_reward,
-                );
-            } else {
-                warn!(proposer_id, "proposer not found in EVM storage, skipping reward");
-            }
-        }
-
         // Update last block hash for VRF seed derivation
         self.last_block_hash = block.header.hash();
 
-        // Advance state
+        // Advance BFT height (round is advanced by the caller via advance_round)
         self.current_height += 1;
-        self.advance_round(evm_state);
 
         info!(
             height = self.current_height,

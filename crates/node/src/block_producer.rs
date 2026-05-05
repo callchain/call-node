@@ -238,15 +238,15 @@ pub(crate) async fn block_production_loop(
             tracker_guard.clear_tracking();
         }
 
-        // 7. Commit via consensus (BFT engine handles proposal/verification)
+        // 7. Commit via consensus (pure BFT — no state mutation)
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             let mut c = consensus.write().unwrap();
-            if let Err(e) = c.commit_block(&block, &result, provider.state_mut()) {
+            if let Err(e) = c.commit_block(&block, &result) {
                 tracing::warn!(error = ?e, "commit failed");
                 continue;
             }
-            provider.state_mut().save_to_db(&state.db_env).unwrap();
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            c.advance_round(&provider);
         }
         telemetry.record_block_produced();
         telemetry.record_block_committed();

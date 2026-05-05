@@ -240,13 +240,11 @@ pub(crate) fn apply_synced_blocks(
                 }
 
                 if let Ok(mut c) = consensus.write() {
-                    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                    if let Err(e) = c.commit_block(&block, &result, &mut provider) {
+                    if let Err(e) = c.commit_block(&block, &result) {
                         tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
                     }
-                    if let Err(e) = provider.state().save_to_db(&state.db_env) {
-                        tracing::warn!(height = block_height, error = %e, "sync: failed to save EVM state after commit");
-                    }
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                    c.advance_round(&provider);
                 }
                 state.set_current_block(block_height + 1);
                 applied += 1;

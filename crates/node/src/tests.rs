@@ -148,10 +148,10 @@
 
         // Commit
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut provider).expect("commit");
-            provider.state().save_to_db(&node.state.db_env).unwrap();
+            consensus.commit_block(&block, &result).expect("commit");
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&provider);
         }
 
         let height_after = node.consensus.read().unwrap().current_height();
@@ -214,10 +214,10 @@
 
         // Commit
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut provider).expect("commit empty");
-            provider.state().save_to_db(&node.state.db_env).unwrap();
+            consensus.commit_block(&block, &result).expect("commit empty");
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&provider);
         }
 
         assert_eq!(node.consensus.read().unwrap().current_height(), 1);
@@ -301,10 +301,10 @@
 
         // Commit on node1
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node1.state.db_env).unwrap();
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node1.state.db_env).unwrap();
             let mut consensus = node1.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut provider).expect("commit");
-            provider.state().save_to_db(&node1.state.db_env).unwrap();
+            consensus.commit_block(&block, &result).expect("commit");
+            consensus.advance_round(&provider);
         }
         assert_eq!(node1.consensus.read().unwrap().current_height(), 1, "node1 should be at height 1");
 
@@ -396,10 +396,10 @@
         block.finalize(&result);
 
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut provider).expect("commit");
-            provider.state().save_to_db(&node.state.db_env).unwrap();
+            consensus.commit_block(&block, &result).expect("commit");
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&provider);
         }
 
         // Persist block
@@ -481,10 +481,10 @@
             block.finalize(&result);
 
             {
-                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
                 let mut consensus = node.consensus.write().unwrap();
-                consensus.commit_block(&block, &result, &mut provider).expect("commit");
-                provider.state().save_to_db(&node.state.db_env).unwrap();
+                consensus.commit_block(&block, &result).expect("commit");
+                let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                consensus.advance_round(&provider);
             }
 
             // Persist state to reth-db immediately
@@ -612,10 +612,10 @@
 
             block.finalize(&result);
 
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut provider).expect("commit");
-            provider.state().save_to_db(&node.state.db_env).unwrap();
+            consensus.commit_block(&block, &result).expect("commit");
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&provider);
         }
 
         // Verify shared state IS modified after finalize
@@ -764,10 +764,10 @@
 
             block.finalize(&result);
 
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut provider).expect("first commit");
-            provider.state().save_to_db(&node.state.db_env).unwrap();
+            consensus.commit_block(&block, &result).expect("first commit");
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&provider);
         }
 
         // Consensus height should have advanced
@@ -775,9 +775,8 @@
 
         // Attempt to commit the SAME block again should fail due to height mismatch
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            let result = consensus.commit_block(&block, &BlockExecutionResult::default(), &mut provider);
+            let result = consensus.commit_block(&block, &BlockExecutionResult::default());
             assert!(
                 result.is_err(),
                 "double-commit of same block should be rejected"

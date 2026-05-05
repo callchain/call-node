@@ -225,10 +225,10 @@ impl TestNode {
 
         // Commit
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
             let mut consensus = self.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut provider).expect("commit block");
-            provider.state().save_to_db(&self.state.db_env).unwrap();
+            consensus.commit_block(&block, &result).expect("commit block");
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
+            consensus.advance_round(&provider);
         }
         self.last_result = Some(result.clone());
 

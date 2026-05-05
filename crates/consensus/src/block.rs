@@ -270,6 +270,25 @@ impl Block {
         let oracle_share = total_fees * fee_params.oracle_fee_share_bps as u128 / 10_000;
         state_accessors::add_oracle_reward(provider.state_mut(), oracle_share);
 
+        // Validator reward: distribute remaining fees to the proposer validator.
+        // This is applied before state root computation so the state root
+        // captures all consensus-driven state changes.
+        let validator_share = total_fees * fee_params.validator_fee_share_bps as u128 / 10_000;
+        if validator_share > 0 {
+            let proposer_addr = state_accessors::read_validator_addr(
+                provider.state(),
+                self.header.proposer as u64,
+            );
+            if proposer_addr != call_primitives::Address::ZERO {
+                state_accessors::distribute_reward_evm(
+                    provider.state_mut(),
+                    proposer_addr,
+                    validator_share,
+                );
+                result.total_validator_reward = validator_share;
+            }
+        }
+
         // Compute state root and collect trie updates for persistence
         let (root, updates) = provider.state().compute_state_root_with_updates();
         result.state_root = root;

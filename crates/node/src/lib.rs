@@ -1074,10 +1074,10 @@ impl CallNode {
                                 }
 
                                 if let Ok(mut c) = consensus.write() {
-                                    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
+                                    let _ = c.commit_block(&block, &result);
+                                    let provider = call_evm::provider::InMemoryStateProvider::from_db(
                                         &state.db_env).unwrap();
-                                    let _ = c.commit_block(&block, &result, &mut provider);
-                                    let _ = provider.state().save_to_db(&state.db_env);
+                                    c.advance_round(&provider);
                                 }
 
                                 let _ = light_client.sync_incremental(&block.header, &signatures);

@@ -500,15 +500,16 @@ pub(crate) async fn bft_event_loop(
                         oracle_tracker.write().unwrap().clear_tracking();
                     }
 
-                    // Commit via consensus
+                    // Commit via consensus (pure BFT — no state mutation)
                     {
-                        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                         let mut c = consensus.write().unwrap();
-                        if let Err(e) = c.commit_block(&block, &result, &mut provider) {
+                        if let Err(e) = c.commit_block(&block, &result) {
                             tracing::warn!(error = ?e, height, "BFT finalize: commit failed");
                             continue;
                         }
-                        provider.state().save_to_db(&state.db_env).unwrap();
+                        // Advance round and refresh proposer subset (read-only)
+                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        c.advance_round(&provider);
                     }
                     telemetry.record_block_committed();
 

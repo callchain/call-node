@@ -23,6 +23,8 @@ pub struct FeeParams {
     pub initial_base_fee: u128,
     /// Percentage of block fees allocated to oracle rewards (basis points, 100 = 1%)
     pub oracle_fee_share_bps: u16,
+    /// Percentage of block fees allocated to proposer validator rewards (basis points)
+    pub validator_fee_share_bps: u16,
 }
 
 impl Default for FeeParams {
@@ -36,6 +38,7 @@ impl Default for FeeParams {
             max_base_fee: 1_000_000_000, // 1B wei
             initial_base_fee: 10,        // 10 wei
             oracle_fee_share_bps: 100,   // 1% of block fees to oracle rewards
+            validator_fee_share_bps: 0,  // 0% to validator rewards by default
         }
     }
 }
