@@ -21,7 +21,7 @@ import statistics
 import threading
 
 from rpc_client import CallchainNode, CallchainCluster
-from signer import sign_payment, sign_evm_precompile_transfer
+from signer import sign_evm_precompile_transfer
 from nonce_tracker import (
     _next_nonce,
     _next_evm_nonce,

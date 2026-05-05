@@ -17,6 +17,7 @@ import os
 import sys
 import time
 
+from eth_account import Account
 from rpc_client import CallchainNode, CallchainCluster
 from nonce_tracker import _next_nonce, _next_evm_nonce, set_default_node, sync_nonce, sync_evm_nonce
 
@@ -34,7 +35,7 @@ from signer import (
 )
 
 # System escrow address for staked CALL (matches Rust STAKING_ESCROW)
-STAKING_ESCROW = "0x" + "00" * 20
+STAKING_ESCROW = "0x0000000000000000000000000000000000000ACE"
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -119,8 +120,9 @@ def test_precompile_batch_transfer(cluster, accounts):
     amount1 = 10**15 + 1
     amount2 = 10**15 + 2
 
-    # Query EVM nonce
-    evm_nonce = cluster.nodes[0].get_evm_transaction_count(sender["address"])
+    # Use nonce tracker to stay in sync with other tests
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
 
     # Build batchTransfer call data
     data = build_evm_batch_transfer_data(
@@ -136,7 +138,7 @@ def test_precompile_batch_transfer(cluster, accounts):
         to="0x0000000000000000000000000000000000000201",
         data=data,
         gas=200_000,
-        gas_price=1,
+        gas_price=1000,
         chain_id=1,
     )
 
@@ -461,20 +463,48 @@ def test_bridge_withdraw_error_handling(cluster, accounts):
 
 
 def test_validator_join(cluster, accounts):
-    """Validator joins via Validator precompile (0x204) — verify registration and escrow."""
-    sender = accounts[3]
-    sync_evm_nonce(sender["address"], cluster.nodes[0])
-    evm_nonce = _next_evm_nonce(sender["address"])
+    """Validator joins via Validator precompile (0x204) — verify registration and escrow.
+
+    All genesis accounts are already validators, so we generate a fresh
+    account, fund it from an existing account, and then stake.
+    """
+    funder = accounts[0]
+    new_account = Account.create()
+    new_addr = new_account.address
+    new_key = "0x" + new_account.key.hex()
+    # Use a distinct pubkey to avoid collision with genesis validators
     ed25519_pubkey_hex = "0x" + "aa" * 32
     self_stake = 1_000_000 * 10**18
+    fund_amount = self_stake + 10**18  # extra for gas
 
     initial_validators = cluster.nodes[0].validator_list()
-    sender_bal_before = get_balance_int(cluster.nodes[0], 1, sender["address"])
     escrow_bal_before = get_balance_int(cluster.nodes[0], 1, STAKING_ESCROW)
-    print(f"  pre: validators={len(initial_validators)}, sender_bal={sender_bal_before}, escrow={escrow_bal_before}")
+    print(f"  pre: validators={len(initial_validators)}, escrow={escrow_bal_before}")
+
+    # 1. Fund the new account
+    sync_evm_nonce(funder["address"], cluster.nodes[0])
+    fund_nonce = _next_evm_nonce(funder["address"])
+    fund_tx = sign_evm_precompile_transfer(
+        private_key=funder["private_key"],
+        evm_nonce=fund_nonce,
+        asset_id=1,
+        to=new_addr,
+        amount=fund_amount,
+    )
+    fund_hash = cluster.nodes[0].send_raw_transaction(fund_tx)
+    assert_true(fund_hash and fund_hash.startswith("0x"), f"fund tx failed: {fund_hash}")
+    print(f"  funded new account {new_addr}: {fund_hash}")
+
+    fund_receipt = wait_for_tx(cluster, fund_hash, timeout=30)
+    assert_true(fund_receipt is not None, "fund tx not found in any block within 30s")
+    assert_true(fund_receipt.get("status") == "0x1", "fund tx reverted")
+
+    # 2. Stake from the new account
+    sync_evm_nonce(new_addr, cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(new_addr)
 
     raw_tx = sign_evm_precompile_stake(
-        private_key=sender["private_key"],
+        private_key=new_key,
         evm_nonce=evm_nonce,
         ed25519_pubkey_hex=ed25519_pubkey_hex,
         self_stake=self_stake,
@@ -511,11 +541,11 @@ def test_validator_join(cluster, accounts):
     assert_true(escrow_bal >= escrow_bal_before + self_stake,
                 f"escrow balance {escrow_bal} < before {escrow_bal_before} + stake {self_stake}")
 
-    # Verify sender balance decreased
-    sender_bal_after = get_balance_int(cluster.nodes[0], 1, sender["address"])
-    assert_true(sender_bal_after < sender_bal_before,
-                f"sender balance did not decrease: {sender_bal_before} -> {sender_bal_after}")
-    print(f"  [OK] validator joined — escrow={escrow_bal}, sender {sender_bal_before} -> {sender_bal_after}")
+    # Verify new account balance decreased
+    sender_bal_after = get_balance_int(cluster.nodes[0], 1, new_addr)
+    assert_true(sender_bal_after < fund_amount,
+                f"new account balance did not decrease: {fund_amount} -> {sender_bal_after}")
+    print(f"  [OK] validator joined — escrow={escrow_bal}, new account {fund_amount} -> {sender_bal_after}")
 
 
 def test_validator_leave(cluster, accounts):
@@ -523,7 +553,7 @@ def test_validator_leave(cluster, accounts):
     sender = accounts[0]
     sync_evm_nonce(sender["address"], cluster.nodes[0])
     evm_nonce = _next_evm_nonce(sender["address"])
-    validator_id = 0
+    validator_id = 1
 
     # Verify the validator exists before leaving
     initial_validators = cluster.nodes[0].validator_list()

@@ -612,17 +612,34 @@ impl RpcState {
             }
         }
 
-        // Compute tx hash
-        let tx_hash = TxHash::from_slice(&call_crypto::keccak256(raw_tx).0);
-
-        // Extract to and value from envelope
-        let (to_addr, value) = match &envelope {
-            TxEnvelope::Legacy(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
-            TxEnvelope::Eip1559(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
-            TxEnvelope::Eip2930(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
-            TxEnvelope::Eip7702(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
-            TxEnvelope::Eip4844(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value()),
+        // Extract to, value, and input (calldata) from envelope
+        let (to_addr, value, input) = match &envelope {
+            TxEnvelope::Legacy(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
+            TxEnvelope::Eip1559(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
+            TxEnvelope::Eip2930(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
+            TxEnvelope::Eip7702(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
+            TxEnvelope::Eip4844(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
         };
+
+        // Build EvmTransaction for mempool insertion
+        let evm_tx = call_evm::EvmTransaction {
+            caller,
+            nonce,
+            gas_limit,
+            gas_price,
+            to: to_addr,
+            value,
+            data: input,
+            chain_id: self.chain_id,
+        };
+
+        // Compute JSON hash (used by mempool and block execution for receipt storage)
+        let json_bytes = serde_json::to_vec(&evm_tx)
+            .map_err(|e| format!("json serialize: {e}"))?;
+        let json_hash = TxHash::from_slice(&call_crypto::keccak256(&json_bytes).0);
+
+        // Compute RLP hash (used by mempool defense for raw-tx replay protection)
+        let rlp_hash = TxHash::from_slice(&call_crypto::keccak256(raw_tx).0);
 
         // Mempool defense: rate limit, replay protection, address saturation
         {
@@ -631,27 +648,17 @@ impl RpcState {
                 .unwrap()
                 .as_millis() as u64;
             let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
-            defense.validate_tx_submission(caller, tx_hash, now_ms)
+            defense.validate_tx_submission(caller, rlp_hash, now_ms)
                 .map_err(|e| format!("mempool defense: {e}"))?;
         }
 
         // Insert into mempool (for tracking/dedup)
         {
             let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
-            let evm_tx = call_evm::EvmTransaction {
-                caller,
-                nonce,
-                gas_limit,
-                gas_price,
-                to: to_addr,
-                value,
-                data: alloy_primitives::Bytes::from(raw_tx.to_vec()),
-                chain_id: self.chain_id,
-            };
             if let Err(e) = mempool.insert_evm_tx(evm_tx) {
                 // Rollback defense state so the tx can be re-submitted later
                 let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
-                defense.rollback_submission(caller, tx_hash);
+                defense.rollback_submission(caller, rlp_hash);
                 return Err(format!("mempool insertion failed: {e}"));
             }
         }
@@ -661,9 +668,9 @@ impl RpcState {
         // consensus layer includes this tx in a block.
 
         // Broadcast pending tx for eth_subscribe("newPendingTransactions")
-        self.subscriptions.broadcast_eth_pending_tx(format!("0x{}", hex::encode(tx_hash.as_slice())));
+        self.subscriptions.broadcast_eth_pending_tx(format!("0x{}", hex::encode(json_hash.as_slice())));
 
-        Ok(tx_hash)
+        Ok(json_hash)
     }
 
     // ── Protocol transaction submission (EVM-only mempool) ───────────

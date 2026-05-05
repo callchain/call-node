@@ -11,7 +11,7 @@ from typing import List
 
 def build_evm_transfer_data(asset_id: int, to: str, amount: int) -> str:
     """Build ABI-encoded call data for transfer(uint64,address,uint128) on 0x201."""
-    selector = bytes.fromhex("d15dcd62")
+    selector = bytes.fromhex("996e62b5")
     encoded = encode(
         ["uint64", "address", "uint128"],
         [asset_id, to, amount],
@@ -21,7 +21,7 @@ def build_evm_transfer_data(asset_id: int, to: str, amount: int) -> str:
 
 def build_evm_batch_transfer_data(asset_id: int, recipients: List[str], amounts: List[int]) -> str:
     """Build ABI-encoded call data for batchTransfer(uint64,address[],uint128[]) on 0x201."""
-    selector = bytes.fromhex("5f9161bb")
+    selector = bytes.fromhex("d5b6e817")
     encoded = encode(
         ["uint64", "address[]", "uint128[]"],
         [asset_id, recipients, amounts],
@@ -30,43 +30,43 @@ def build_evm_batch_transfer_data(asset_id: int, recipients: List[str], amounts:
 
 
 def build_evm_stake_data(ed25519_pubkey_hex: str, self_stake: int) -> str:
-    """Build ABI-encoded call data for stake(bytes32,uint256) on 0x204."""
-    selector = bytes.fromhex("8caa5230")
+    """Build ABI-encoded call data for stake(bytes32,uint128) on 0x204."""
+    selector = bytes.fromhex("48720640")
     pubkey_bytes = bytes.fromhex(ed25519_pubkey_hex.removeprefix("0x"))
     if len(pubkey_bytes) != 32:
         raise ValueError(f"ed25519 pubkey must be 32 bytes, got {len(pubkey_bytes)}")
     encoded = encode(
-        ["bytes32", "uint256"],
+        ["bytes32", "uint128"],
         [pubkey_bytes, self_stake],
     )
     return "0x" + (selector + encoded).hex()
 
 
 def build_evm_unstake_data(validator_id: int) -> str:
-    """Build ABI-encoded call data for unstake(uint32) on 0x204."""
-    selector = bytes.fromhex("809ee57d")
+    """Build ABI-encoded call data for unstake(uint64) on 0x204."""
+    selector = bytes.fromhex("d29ab87a")
     encoded = encode(
-        ["uint32"],
+        ["uint64"],
         [validator_id],
     )
     return "0x" + (selector + encoded).hex()
 
 
 def build_evm_claim_unbonded_data(validator_id: int) -> str:
-    """Build ABI-encoded call data for claimUnbonded(uint32) on 0x204."""
-    selector = bytes.fromhex("e8f59072")
+    """Build ABI-encoded call data for claimUnbonded(uint64) on 0x204."""
+    selector = bytes.fromhex("6ab76049")
     encoded = encode(
-        ["uint32"],
+        ["uint64"],
         [validator_id],
     )
     return "0x" + (selector + encoded).hex()
 
 
 def build_evm_register_asset_data(symbol: str, name: str, decimals: int, max_supply: int) -> str:
-    """Build ABI-encoded call data for register(string,string,uint8,uint256) on 0x201."""
-    selector = bytes.fromhex("484a573d")
+    """Build ABI-encoded call data for register(string,string,uint8,uint128) on 0x201."""
+    selector = bytes.fromhex("65716710")
     encoded = encode(
-        ["string", "string", "uint8", "uint256"],
+        ["string", "string", "uint8", "uint128"],
         [symbol, name, decimals, max_supply],
     )
     return "0x" + (selector + encoded).hex()
@@ -109,7 +109,7 @@ def sign_evm_transaction(
     to: str,
     data: str,
     gas: int = 200_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     value: int = 0,
     chain_id: int = 1,
 ) -> str:
@@ -142,7 +142,7 @@ def sign_evm_precompile_transfer(
     to: str,
     amount: int,
     gas: int = 100_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling transfer() on Asset precompile (0x201)."""
@@ -160,7 +160,7 @@ def sign_evm_precompile_stake(
     ed25519_pubkey_hex: str,
     self_stake: int,
     gas: int = 200_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling stake() on Validator precompile (0x204)."""
@@ -177,7 +177,7 @@ def sign_evm_precompile_unstake(
     evm_nonce: int,
     validator_id: int,
     gas: int = 150_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling unstake() on Validator precompile (0x204)."""
@@ -194,7 +194,7 @@ def sign_evm_precompile_claim_unbonded(
     evm_nonce: int,
     validator_id: int,
     gas: int = 150_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling claimUnbonded() on Validator precompile (0x204)."""
@@ -214,7 +214,7 @@ def sign_evm_precompile_register_asset(
     decimals: int,
     max_supply: int,
     gas: int = 200_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling register() on Asset precompile (0x201)."""
@@ -233,7 +233,7 @@ def sign_evm_precompile_register_agent(
     name: str,
     url: str,
     gas: int = 200_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling register() on Agent precompile (0x209)."""
@@ -253,7 +253,7 @@ def sign_evm_precompile_submit_proposal(
     description: str,
     execution_data: bytes = b"",
     gas: int = 200_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling submitProposal() on Governance precompile (0x203)."""
@@ -271,7 +271,7 @@ def sign_evm_precompile_vote(
     proposal_id: int,
     vote: int,
     gas: int = 100_000,
-    gas_price: int = 1,
+    gas_price: int = 1000,
     chain_id: int = 1,
 ) -> str:
     """Sign an EVM transaction calling vote() on Governance precompile (0x203)."""

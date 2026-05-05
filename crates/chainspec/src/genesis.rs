@@ -276,6 +276,10 @@ impl GenesisExecutor {
 
                 // Seed EVM asset storage so get_balance reads from EVM state root
                 state_accessors::seed_balance(evm_state, asset.asset_id, addr, *amount);
+
+                // Seed native EVM balance for gas payment
+                evm_state.set_balance(addr, U256::from(*amount));
+                evm_state.create_account(addr);
             }
 
             // Seed EVM asset metadata

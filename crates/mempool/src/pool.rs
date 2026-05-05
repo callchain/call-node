@@ -115,11 +115,12 @@ impl Mempool {
             return Err(MempoolError::Duplicate(hash));
         }
 
-        // Validate gas price
-        if tx.gas_price < self.config.min_gas_price {
+        // Validate gas price against both minimum config and current base fee
+        let min_gas_price = self.config.min_gas_price.max(self.base_fee);
+        if tx.gas_price < min_gas_price {
             return Err(MempoolError::FeeTooLow {
                 fee: tx.gas_price,
-                min: self.config.min_gas_price,
+                min: min_gas_price,
             });
         }
 

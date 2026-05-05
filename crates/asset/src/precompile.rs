@@ -12,7 +12,8 @@ use call_precompile::{
     write_string32, ASSET_ADDRESS, COMPLIANCE_ADDRESS, slot_compliance,
 };
 use call_precompile::storage::StorageProvider;
-use call_primitives::Address;
+use call_primitives::{Address, U256};
+use call_protocol::CALL_ASSET_ID;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
 sol! {
@@ -103,6 +104,13 @@ impl AssetPrecompile {
             store
                 .transfer(call.assetId, from, call.to, call.amount)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+            // Bridge CALL transfers to native EVM balance
+            if call.assetId == CALL_ASSET_ID {
+                storage.balance_sub(from, U256::from(call.amount))
+                    .map_err(|e| PrecompileError::Other(format!("native balance sub: {e}").into()))?;
+                storage.balance_add(call.to, U256::from(call.amount))
+                    .map_err(|e| PrecompileError::Other(format!("native balance add: {e}").into()))?;
+            }
             Ok(())
         })
     }
@@ -133,6 +141,16 @@ impl AssetPrecompile {
         store
             .batch_transfer(call.assetId, from, &pairs)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+        // Bridge CALL transfers to native EVM balance
+        if call.assetId == CALL_ASSET_ID {
+            let total: u128 = pairs.iter().map(|(_, amt)| *amt).sum();
+            storage.balance_sub(from, U256::from(total))
+                .map_err(|e| PrecompileError::Other(format!("native balance sub: {e}").into()))?;
+            for (to, amount) in &pairs {
+                storage.balance_add(*to, U256::from(*amount))
+                    .map_err(|e| PrecompileError::Other(format!("native balance add: {e}").into()))?;
+            }
+        }
         storage.checkpoint_commit(cp);
 
         ok_empty(storage)
@@ -156,6 +174,13 @@ impl AssetPrecompile {
             store
                 .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+            // Bridge CALL transfers to native EVM balance
+            if call.assetId == CALL_ASSET_ID {
+                storage.balance_sub(call.from, U256::from(call.amount))
+                    .map_err(|e| PrecompileError::Other(format!("native balance sub: {e}").into()))?;
+                storage.balance_add(call.to, U256::from(call.amount))
+                    .map_err(|e| PrecompileError::Other(format!("native balance add: {e}").into()))?;
+            }
             Ok(())
         })
     }

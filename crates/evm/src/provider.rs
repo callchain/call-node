@@ -218,7 +218,9 @@ impl InMemoryStateProvider {
                 account.code = code.original_bytes();
             }
             for (key, storage_slot) in &revm_account.storage {
-                if !storage_slot.present_value.is_zero() {
+                if storage_slot.present_value.is_zero() {
+                    account.storage.remove(key);
+                } else {
                     account.storage.insert(*key, storage_slot.present_value);
                 }
             }
