@@ -5,10 +5,10 @@ __pycache__/
 tests/.nonce_state.json
 
 # Local devnet runtime state — never commit
-devnet/local/data/
+devnet/local/data*/
 devnet/local/logs/
 devnet/local/run/
-devnet/single/data/
+devnet/single/data*/
 devnet/single/logs/
 devnet/single/run/
 ~/
