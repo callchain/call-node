@@ -16,8 +16,8 @@
 | **历史状态** | 归档节点（全量 MDBX） | 可配置 pruning/archive | ✅ `AccountHistory`/`StorageHistory` diff 表 + 128-block 快照 | 128-block 剪枝归档或全归档 |
 | **Proof 支持** | `eth_getProof` 真 Merkle Proof | `eth_getProof` 真 Merkle Proof | ✅ `eth_getProof` 从持久化 trie 节点读取 | `eth_getProof` 真 Merkle Proof |
 | **共识耦合** | Commonware (外部) | Malachite (外部) | ✅ `Block::execute` 包含所有状态变更，`commit_block` 纯 BFT | 自研共识通过 BlockExecutor |
-| **Precompile 状态访问** | revm JournalTr | revm JournalTr | ⚠️ `StorageCtx` TLS (`scoped_thread_local!`) 仍保留 | revm JournalTr |
-| **Gas 管理** | revm 自动 | revm 自动 | ⚠️ 手动 `add_gas()` 仍保留 | revm 自动 |
+| **Precompile 状态访问** | revm JournalTr | revm JournalTr | ✅ `EvmStorageProvider` 直接访问 `JournalTr` | revm JournalTr |
+| **Gas 管理** | revm 自动 | revm 自动 | ⚠️ precompile 手动追踪 gas（正确但非自动） | revm 自动 |
 
 **关键结论**：P0（执行层+状态存储）、P1（历史状态+Proof）和 P2（BlockExecutor 与共识解耦）均已完成。
 
@@ -90,34 +90,31 @@ call-node 当前使用自定义 `CallchainBlockExecutor` trait（`crates/evm/src
 
 ---
 
-## 四、剩余根本障碍（P2 之后）
+## 四、Future Features（远期，非阻塞）
 
-### 障碍 1：StorageCtx TLS vs revm JournalTr
+### Feature 1：Precompile Gas 自动计费
 
-**状态**：⚠️ 仍保留。precompile 通过 `scoped_thread_local!` 全局访问状态。
+**状态**：⚠️ 当前 precompile 通过 `StorageProvider::deduct_gas()` 手动追踪 gas。
 
-**影响**：revm 无法追踪 precompile 的存储访问用于 gas 计费；revert 时无法回滚 precompile 的存储变更。
+**背景**：`EvmStorageProvider` 已直接调用 `journal.sload()`/`journal.sstore()`，revm 正确记录存储访问并可 revert。但 gas 计费是手动的（warm/cold SLOAD/SSTORE 定价），而非由 revm 解释器自动扣除。
+
+**原因**：revm 的 precompile 接口是黑盒（input + gas_limit → output + gas_used），解释器无法在 precompile 执行期间自动计费内部存储访问。这与 tempo、arc-node 的做法一致。
+
+**何时需要**：当 precompile gas 计费需要与 EVM 解释器完全统一时（例如支持 EIP-2929 动态 warm/cold 定价的自动传播）。
+
+### Feature 2：System Contracts
+
+**状态**：❌ 未开始。validator staking、asset registry、bridge logic 仍通过 Rust `state_accessors` 直接读写 EVM 存储。
+
+**背景**：当前协议逻辑（staking、slashing、asset registry、bridge settlement）以 Rust 预编译代码形式嵌入，通过 `StorageProvider` 访问 EVM storage slot。这工作正常，但与纯 EVM 生态的 system contract 模式不同。
 
 **迁移策略**：
-1. precompile 直接通过 `revm::JournalTr::sload`/`sstore` 访问状态
-2. 协议状态访问变成普通 EVM storage slot 读写
-3. 删除 `scoped_thread_local!` 和 `with_storage()`
+1. 将协议逻辑编写为 Solidity system contracts
+2. 部署到固定地址（如 `0x0000...0001`）
+3. 在 `Block::execute` 中作为 system transaction 调用
+4. 删除对应的 Rust precompile，保留只读查询接口
 
-### 障碍 2：手动 Gas 追踪 vs revm 自动 Gas
-
-**状态**：⚠️ 仍保留。precompile 手动调用 `add_gas()`。
-
-**影响**：与 revm 的 warm/cold gas 计算是两套独立系统。
-
-**迁移策略**：
-1. 协议存储映射为 EVM storage slot 读写
-2. 由 revm 自动计费，删除所有 `add_gas()`
-
-### 障碍 3：System Contracts（远期）
-
-**状态**：❌ 未开始。validator staking、asset registry、bridge logic 仍通过 `state_accessors` 直接读写 EVM 存储。
-
-**决策**：短期内保留 `state_accessors`（已整合进 `Block::execute`），长期逐步迁移为 system contract。这不是 P2 的阻塞项。
+**何时需要**：当 call-node 需要完全兼容 EVM 工具链（explorer 可直接解码 system contract ABI）或社区治理需要升级协议逻辑时。
 
 ---
 
@@ -152,13 +149,13 @@ call-node 当前使用自定义 `CallchainBlockExecutor` trait（`crates/evm/src
 | 13 | 共识引擎完全删除状态修改，仅负责 BFT | ✅ | `stake_validator`/`slash_*` 仍通过 executor trait 修改状态，但不在 `commit_block` 中 |
 | 14 | 删除 `EvmState::clone()` 依赖 | ✅ | `EvmState` 已不存在于生产代码 |
 
-### P3 — Precompile 重构（远期，非阻塞）
+### P3 — Future Features（远期，非阻塞）
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| 15 | StorageCtx TLS → revm JournalTr | ❌ | `scoped_thread_local!` 仍保留 |
-| 16 | 手动 `add_gas()` → revm 自动计费 | ❌ | precompile 仍手动追踪 gas |
-| 17 | System Contract 部署 | ❌ | validator staking、asset registry 等仍走 `state_accessors` |
+| 15 | StorageCtx TLS → revm JournalTr | ✅ | 所有 precompile 通过 `EvmStorageProvider` 直接访问 revm `JournalTr` |
+| 16 | precompile gas 自动计费 | 🔮 Future | 当前手动 `deduct_gas()` 正确工作；需 revm 架构支持才能完全自动 |
+| 17 | System Contract 部署 | 🔮 Future | 长期将协议逻辑从 Rust precompile 迁移为 Solidity system contract |
 
 ---
 
