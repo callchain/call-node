@@ -407,6 +407,7 @@ mod tests {
             alloy_primitives::Bytes::default(),
             21_000,
             10,
+            None,
         );
         assert!(result.is_ok());
         let result = result.unwrap();

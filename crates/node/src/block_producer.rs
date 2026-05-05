@@ -502,7 +502,19 @@ pub(crate) async fn block_production_loop(
             }
         }
 
-        // 16. Broadcast to WebSocket subscribers
+        // 16. Update current proposer address for eth_coinbase
+        {
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            let proposer_addr = call_consensus::exec::state_accessors::read_validator_addr(
+                provider.state(),
+                proposer as u64,
+            );
+            if let Ok(mut addr) = state.current_proposer_addr.write() {
+                *addr = proposer_addr;
+            }
+        }
+
+        // 17. Broadcast to WebSocket subscribers
 
         tracing::info!(height = new_height, tx_count = result.total_tx_count(), "committed block");
 

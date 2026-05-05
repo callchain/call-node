@@ -37,7 +37,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_call
     module
         .register_async_method("eth_call", |params, state, _ctx| async move {
-            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let (call_obj, block_tag): (serde_json::Value, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let from = call_obj.get("from")
                 .and_then(|v| v.as_str())
                 .map(|s| s.parse::<alloy_primitives::Address>())
@@ -78,7 +78,10 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let caller = from;
             let to_addr = to;
 
-            match state.execute_evm_call(caller, to_addr, value, data, gas, gas_price) {
+            let current = state.get_current_block();
+            let at_block = block_tag.as_deref().map(|t| parse_block_tag(t, current));
+
+            match state.execute_evm_call(caller, to_addr, value, data, gas, gas_price, at_block) {
                 Ok(result) => {
                     if result.success {
                         Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(&result.output)))
@@ -667,7 +670,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_estimateGas
     module
         .register_async_method("eth_estimateGas", |params, state, _ctx| async move {
-            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let (call_obj, block_tag): (serde_json::Value, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let from = call_obj.get("from")
                 .and_then(|v| v.as_str())
                 .map(|s| s.parse::<alloy_primitives::Address>())
@@ -705,7 +708,10 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or(10);
 
-            match state.execute_evm_call(from, to, value, data, gas, gas_price) {
+            let current = state.get_current_block();
+            let at_block = block_tag.as_deref().map(|t| parse_block_tag(t, current));
+
+            match state.execute_evm_call(from, to, value, data, gas, gas_price, at_block) {
                 Ok(result) => {
                     if result.success {
                         Ok::<_, ErrorObjectOwned>(format!("0x{:x}", result.gas_used))
@@ -942,8 +948,9 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
     // eth_coinbase
     module
-        .register_async_method("eth_coinbase", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode([0u8; 20])))
+        .register_async_method("eth_coinbase", |_params, state, _ctx| async move {
+            let addr = state.current_proposer_addr.read().map(|a| *a).unwrap_or(Address::ZERO);
+            Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(addr.as_slice())))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 

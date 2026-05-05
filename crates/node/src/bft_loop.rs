@@ -755,6 +755,18 @@ pub(crate) async fn bft_event_loop(
 
                     tracing::info!(height = new_height, tx_count = result.total_tx_count(), "BFT finalized block");
 
+                    // Update current proposer address for eth_coinbase
+                    {
+                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        let proposer_addr = call_consensus::exec::state_accessors::read_validator_addr(
+                            &provider,
+                            block.header.proposer as u64,
+                        );
+                        if let Ok(mut addr) = state.current_proposer_addr.write() {
+                            *addr = proposer_addr;
+                        }
+                    }
+
                     // Broadcast to WebSocket subscribers
                     let tx_count = result.total_tx_count();
                     subscriptions.broadcast_block(height, format!("{:?}", block.header.hash()), block.header.proposer, tx_count);

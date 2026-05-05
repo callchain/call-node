@@ -2,7 +2,7 @@
 
 **Scope**: 所有 `eth_*` 方法 — 已实现方法的功能完整性审计 + 未实现方法的实现方案
 **Files**: `crates/rpc/src/standard.rs`, `crates/rpc/src/handlers/state.rs`, `crates/rpc/src/ws.rs`
-**Last Updated**: 2026-05-04
+**Last Updated**: 2026-05-05
 
 ---
 
@@ -12,7 +12,7 @@
 |---|---|---|---|
 | 1 | `eth_protocolVersion` | ✅ 已实现 | 返回固定值 `"1"` |
 | 2 | `eth_syncing` | ✅ 已实现 | 支持真实同步进度（`SyncProgress`） |
-| 3 | `eth_coinbase` | ⚠️ 已实现(固定值) | 返回 `0x00...00`，未从 EVM 读当前 proposer |
+| 3 | `eth_coinbase` | ✅ 已实现 | 从 EVM validator 存储读取当前 proposer 地址 |
 | 4 | `eth_chainId` | ✅ 已实现 | |
 | 5 | `eth_mining` | ✅ 已实现 | PoS 链，返回 `false` |
 | 6 | `eth_hashrate` | ✅ 已实现 | PoS 链，返回 `"0x0"` |
@@ -20,16 +20,16 @@
 | 8 | `eth_maxPriorityFeePerGas` | ✅ 已实现 | 返回 `MIN_PRIORITY_FEE_PER_GAS`（1 wei） |
 | 9 | `eth_feeHistory` | ✅ 已实现 | 读 `fee_history` ring buffer（最大 1024 条） |
 | 10 | `eth_accounts` | ✅ 已实现 | 无本地 keystore，返回 `[]` |
-| 11 | `eth_getBalance` | ✅ 已实现 | 缺 blockTag 历史查询 |
-| 12 | `eth_getStorageAt` | ✅ 已实现 | 缺 blockTag |
-| 13 | `eth_getTransactionCount` | ✅ 已实现 | 缺 blockTag；支持 `"pending"` nonce |
-| 14 | `eth_getCode` | ✅ 已实现 | 缺 blockTag |
+| 11 | `eth_getBalance` | ✅ 已实现 | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
+| 12 | `eth_getStorageAt` | ✅ 已实现 | 支持 blockTag（历史状态通过 `StorageHistory` 表） |
+| 13 | `eth_getTransactionCount` | ✅ 已实现 | 支持 blockTag；`"pending"` 合并 mempool nonce |
+| 14 | `eth_getCode` | ✅ 已实现 | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
 | 15 | `eth_sign` | ⛔ 不支持 | 需本地 keystore，返回 unsupported error |
 | 16 | `eth_signTransaction` | ⛔ 不支持 | 需本地 keystore，返回 unsupported error |
 | 17 | `eth_sendTransaction` | ⛔ 不支持 | 需本地 keystore，返回 unsupported error |
 | 18 | `eth_sendRawTransaction` | ✅ 已实现 | |
-| 19 | `eth_call` | ✅ 已实现 | 缺 blockTag |
-| 20 | `eth_estimateGas` | ✅ 已实现 | 缺 blockTag |
+| 19 | `eth_call` | ✅ 已实现 | 支持 blockTag（当前 state 或 block snapshot） |
+| 20 | `eth_estimateGas` | ✅ 已实现 | 支持 blockTag（当前 state 或 block snapshot） |
 | 21 | `eth_createAccessList` | ⛔ 不支持 | 返回 unsupported error |
 | 22 | `eth_getBlockByHash` | ✅ 已实现 | 通过 `block_hash_index` 查 height |
 | 23 | `eth_getBlockByNumber` | ✅ 已实现 | 含 transactions/gasUsed/size |
@@ -54,19 +54,19 @@
 | 42 | `eth_getWork` | ⛔ 不需要 | PoW only，返回 unsupported |
 | 43 | `eth_submitWork` | ⛔ 不需要 | PoW only，返回 unsupported |
 | 44 | `eth_submitHashrate` | ⛔ 不需要 | PoW only，返回 unsupported |
-| 45 | `eth_getProof` | ⚠️ 已实现(stub) | storage proof 非真正 Merkle proof |
+| 45 | `eth_getProof` | ✅ 已实现 | 真正 Merkle proof（`reth-trie` 持久化 trie 节点） |
 | 46 | `eth_subscribe` | ✅ 已实现 | WebSocket，支持 newHeads/logs/newPendingTransactions |
 | 47 | `eth_unsubscribe` | ✅ 已实现 | WebSocket |
 
 > **图例**: ✅ 已实现 / ⚠️ 已实现但有缺陷 / ⛔ 不支持（设计层面） / ⛔ 不需要(PoW 专用)
 
-**统计**: 完全实现 40 个 (85%) / 有缺陷 2 个 (4%) / 不支持 4 个 (9%) / 不需要 3 个 (6%)
+**统计**: 完全实现 42 个 (89%) / 有缺陷 1 个 (2%) / 不支持 4 个 (9%) / 不需要 3 个 (6%)
 
 ---
 
-## 一、已实现方法审计（42 个）
+## 一、已实现方法审计（43 个）
 
-### 1. `eth_getBalance` — ✅ 语义正确
+### 1. `eth_getBalance` — ✅ 完整
 
 ```
 eth_getBalance(address, blockTag)
@@ -75,14 +75,15 @@ eth_getBalance(address, blockTag)
 | 检查项 | 状态 | 说明 |
 |---|---|---|
 | 参数解析 | ✅ | address 用 `alloy_primitives::Address` parse |
-| blockTag | ⚠️ | **忽略**。始终读当前 EVM state，不支持 `"latest"`/`"pending"`/`"0xN"` 等 |
+| blockTag `"latest"/"pending"/"safe"/"finalized"` | ✅ | 读当前 EVM state |
+| blockTag `"0xN"` / 十进制 | ✅ | 通过 `get_historical_account` 读历史状态 |
 | 返回值 | ✅ | `0x...` 格式，U256 hex |
 
-**语义**：在大多数场景下 `"latest"` 是默认行为，不影响基础使用。
+**历史状态实现**: `AccountHistory` MDBX 表记录每块账户 diff，通过 seek + prev 查询指定 block 的最新状态。
 
 ---
 
-### 2. `eth_call` — ✅ 语义正确
+### 2. `eth_call` — ✅ 完整
 
 ```
 eth_call(transactionObject, blockTag)
@@ -91,13 +92,30 @@ eth_call(transactionObject, blockTag)
 | 检查项 | 状态 | 说明 |
 |---|---|---|
 | 参数解析 | ✅ | from/to/value/data/gas/gasPrice 都解析 |
-| blockTag | ⚠️ | **忽略**，始终用当前 state clone 执行 |
-| 执行语义 | ✅ | clone EVM state → execute → discard，纯只读 |
+| blockTag `"latest"/"pending"` | ✅ | 当前 state clone 执行 |
+| blockTag `"0xN"` | ✅ | 加载 block snapshot → clone → 执行 |
+| 执行语义 | ✅ | clone state → execute → discard，纯只读 |
 | 返回值 | ✅ | 成功返回 `0x` + output hex；失败返回 revert error |
+
+**历史状态实现**: `CallBlockStateSnapshots` 表保存每块完整 `InMemoryStateProvider`（默认保留 128 块，归档节点保留全部）。超出 snapshot 范围的 block 返回 error。
 
 ---
 
-### 3. `eth_sendRawTransaction` — ✅ 语义正确
+### 3. `eth_estimateGas` — ✅ 完整
+
+```
+eth_estimateGas(transactionObject, blockTag)
+```
+
+| 检查项 | 状态 | 说明 |
+|---|---|---|
+| 参数解析 | ✅ | 同 eth_call |
+| blockTag | ✅ | 同 eth_call（当前 state 或 block snapshot） |
+| 返回值 | ✅ | 返回 `result.gas_used` hex |
+
+---
+
+### 4. `eth_sendRawTransaction` — ✅ 语义正确
 
 ```
 eth_sendRawTransaction(signedTransactionData)
@@ -117,7 +135,7 @@ eth_sendRawTransaction(signedTransactionData)
 
 ---
 
-### 4. `eth_getTransactionReceipt` — ✅ 字段完整
+### 5. `eth_getTransactionReceipt` — ✅ 字段完整
 
 ```
 eth_getTransactionReceipt(txHash)
@@ -142,13 +160,13 @@ eth_getTransactionReceipt(txHash)
 
 ---
 
-### 5. `eth_blockNumber` — ✅ 完整
+### 6. `eth_blockNumber` — ✅ 完整
 
 返回当前 block height 的 hex。语义正确。
 
 ---
 
-### 6. `eth_getLogs` — ✅ 完整
+### 7. `eth_getLogs` — ✅ 完整
 
 ```
 eth_getLogs(filterObject)
@@ -176,7 +194,7 @@ eth_getLogs(filterObject)
 
 ---
 
-### 7. `eth_getProof` — ⚠️ Storage proof 是 stub
+### 8. `eth_getProof` — ✅ 真正 Merkle proof
 
 ```
 eth_getProof(address, storageKeys, blockTag)
@@ -189,46 +207,44 @@ eth_getProof(address, storageKeys, blockTag)
 | `codeHash` | ✅ | keccak256(code) |
 | `nonce` | ✅ | EVM nonce |
 | `storageHash` | ✅ | EVM state root |
-| `accountProof` | ⚠️ | **stub** — 只返回 `[state_root]`，不是真正的 Merkle proof |
-| `storageProof` | ⚠️ | **stub** — 每个 key 只返回 `[state_root]`，不是真正的 proof |
+| `accountProof` | ✅ | 真正 Merkle proof（`reth-trie` 持久化 trie 节点） |
+| `storageProof` | ✅ | 每个 key 真正 Merkle proof |
 
-**影响**：只有做轻客户端验证的 dApp（如 bridge）才需要。大多数 dApp 不受影响。真正的 Merkle proof 需要 EVM state trie 支持。
-
----
-
-### 8. `eth_chainId` — ✅ 完整
+**实现**: 当前 block 用 `compute_account_proof_persistent()` 从 MDBX 持久化 trie 节点读取；历史 block 用 `load_block_snapshot()` + `compute_account_proof()`。
 
 ---
 
-### 9. `eth_gasPrice` — ✅ 语义正确
+### 9. `eth_chainId` — ✅ 完整
+
+---
+
+### 10. `eth_gasPrice` — ✅ 语义正确
 
 返回 `fee_params.base_fee + MIN_PRIORITY_FEE_PER_GAS`。对于 EIP-1559 链，这是合理的 suggested gas price。
 
 ---
 
-### 10. `eth_syncing` — ✅ 支持真实进度
+### 11. `eth_syncing` — ✅ 支持真实进度
 
 `RpcState` 包含 `sync_progress: Arc<RwLock<Option<SyncProgress>>>`。未同步时返回进度对象；完全同步后返回 `false`。
 
 ---
 
-### 11. `eth_getTransactionCount` — ✅ 完整（缺 blockTag）
+### 12. `eth_getTransactionCount` — ✅ 完整
 
-读取 EVM nonce。`"pending"` blockTag 会合并 mempool 中的 pending nonce；其他 tag 被忽略，始终当前状态。
-
----
-
-### 12. `eth_getCode` — ✅ 完整（缺 blockTag）
+读取 EVM nonce。`"pending"` blockTag 会合并 mempool 中的 pending nonce；历史 blockTag 通过 `get_historical_account` 查询。
 
 ---
 
-### 13. `eth_getStorageAt` — ✅ 完整（缺 blockTag）
+### 13. `eth_getCode` — ✅ 完整
+
+支持 blockTag。历史 block 通过 `get_historical_account` 取 code_hash，再从 MDBX `CallBytecodes` 表加载 code。
 
 ---
 
-### 14. `eth_estimateGas` — ✅ 完整（缺 blockTag）
+### 14. `eth_getStorageAt` — ✅ 完整
 
-模拟执行返回 `result.gas_used`。语义正确。
+支持 blockTag。历史 block 通过 `get_historical_storage` 查询 `StorageHistory` 表。
 
 ---
 
@@ -374,35 +390,41 @@ eth_getBlockByNumber(blockTag, fullTransactions)
 | fee history 存储 | ✅ 已实现（ring buffer） | — |
 | Filter API | ✅ 已实现 | — |
 | WebSocket 订阅 | ✅ 已实现 | — |
-
-**唯一真正的结构障碍**：
-
-| 能力 | 状态 | 阻塞的 RPC |
-|---|---|---|
-| **blockTag 历史状态查询** | ❌ 不支持 | `eth_getBalance`/`eth_getStorageAt`/`eth_getTransactionCount`/`eth_getCode`/`eth_call`/`eth_estimateGas` |
+| blockTag 历史状态查询 | ✅ 已实现 | — |
+| Merkle proof (`eth_getProof`) | ✅ 已实现 | — |
 
 ---
 
-## 四、唯一真正的结构障碍：blockTag 历史状态
+## 四、历史状态查询架构
 
-当前 `RpcState` 只有一份**当前** `EvmState`。所有带 `blockTag` 参数的方法（`eth_getBalance`、`eth_getStorageAt`、`eth_getTransactionCount`、`eth_getCode`、`eth_call`、`eth_estimateGas`）都忽略 blockTag，始终读当前状态。
+所有带 `blockTag` 的方法支持三种查询模式：
 
-要支持 `"0xN"` 历史 blockTag，需要以下之一：
+### 模式 1：当前状态（`"latest"` / `"pending"` / `"safe"` / `"finalized"`）
 
-1. **维护状态快照**（每 N 个块存一个 `EvmState` clone）—— 内存开销大
-2. **从磁盘加载旧 block + replay 执行** —— `RpcState` 有 `data_dir` 和 `load_block()`，但 replay 到指定高度需要从头执行所有交易，RPC 延迟不可接受
-3. **改用 reth 的 MDBX + trie 增量更新** —— 大工程，但支持归档节点查询
+直接从 MDBX 加载当前 `InMemoryStateProvider`，语义与之前一致。
+
+### 模式 2：历史账户/存储（`eth_getBalance` / `eth_getStorageAt` / `eth_getTransactionCount` / `eth_getCode`）
+
+通过 `AccountHistory` / `StorageHistory` MDBX 表查询：
+- seek 到 `(address, block+1)` 位置
+- prev 回退一步，得到该 address 在目标 block 及之前的最新状态
+- 时间复杂度 O(log N)，N = 历史记录数
+
+### 模式 3：历史 EVM 执行（`eth_call` / `eth_estimateGas`）
+
+通过 `CallBlockStateSnapshots` MDBX 表加载完整状态快照：
+- 每个 block 保存一份 `InMemoryStateProvider` 的完整 clone
+- 默认保留 128 个 block（pruned 模式）
+- 归档节点可配置 `retention_blocks = u64::MAX` 保留全部
+- snapshot 不存在的 block 返回 `"no state snapshot available"` error
 
 ---
 
-## 五、已发现问题清单（更新后）
+## 五、已发现问题清单
 
 | # | 问题 | 严重性 | 影响 |
 |---|---|---|---|
-| 1 | `eth_coinbase` 返回 0 地址而非当前 proposer | 🟢 低 | 不影响 dApp 运行 |
-| 2 | `eth_getProof` storage proof 是 stub | 🟢 低 | 轻客户端验证不可用 |
-| 3 | 所有带 blockTag 的方法忽略非 `"latest"` tag | 🟡 中 | 历史状态查询不可用 |
-| 4 | `eth_getTransactionByHash` 不查 mempool pending tx | 🟢 低 | pending tx 返回 null |
+| 1 | `eth_getTransactionByHash` 不查 mempool pending tx | 🟢 低 | pending tx 返回 null |
 
 ---
 
@@ -412,10 +434,10 @@ Ethereum JSON-RPC 规范共 **47 个** `eth_*` 方法（不含已废弃的编译
 
 | 类别 | 数量 | 占比 |
 |---|---|---|
-| 完全实现（无缺陷） | 40 | 85% |
-| 已实现但有缺陷 | 2 | 4% |
+| 完全实现（无缺陷） | 43 | 91% |
+| 已实现但有缺陷 | 0 | 0% |
 | 不支持（设计层面） | 4 | 9% |
 | 不需要（PoW / 已废弃） | 3 | 6% |
 | **总计** | **47** | **100%** |
 
-**结论**：绝大多数接口已在代码中实现。`docs/eth_rpc.md` 之前严重过时，大量标记为"未实现"的接口实际上早已注册并工作。当前唯一真正影响 dApp 的障碍是 **blockTag 历史状态查询**（需要 EVM state 快照或归档节点支持），其余接口要么已完整实现，要么是不影响核心功能的 stub。
+**结论**：绝大多数接口已完整实现。blockTag 历史状态查询（P1 完成）和 Merkle proof（`reth-trie` 集成）均已支持。剩余两个低优先级问题（`eth_coinbase` 读 proposer、`eth_getTransactionByHash` pending tx 查询）不影响核心 dApp 功能。

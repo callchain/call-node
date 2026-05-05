@@ -164,6 +164,8 @@ pub struct RpcState {
     pub sync_progress: Arc<RwLock<Option<SyncProgress>>>,
     /// MDBX database environment — the single source of truth for all state.
     pub db_env: Arc<DatabaseEnv>,
+    /// Current block proposer address (updated after each block commit).
+    pub current_proposer_addr: RwLock<Address>,
 }
 
 impl RpcState {
@@ -208,6 +210,7 @@ impl RpcState {
             filter_manager: FilterManager::new(),
             sync_progress: Arc::new(RwLock::new(None)),
             db_env,
+            current_proposer_addr: RwLock::new(Address::ZERO),
         }
     }
 
@@ -502,7 +505,10 @@ impl RpcState {
 
     // ── EVM execution ──────────────────────────────────────────────────
 
-    /// Execute an EVM call (read-only, state changes are rolled back)
+    /// Execute an EVM call (read-only, state changes are rolled back).
+    ///
+    /// When `at_block` is `Some(n)` and `n` is not the current block, loads the
+    /// state snapshot for that block (requires the snapshot to exist in MDBX).
     pub fn execute_evm_call(
         &self,
         caller: Address,
@@ -511,9 +517,25 @@ impl RpcState {
         data: Bytes,
         gas_limit: u64,
         gas_price: u128,
+        at_block: Option<u64>,
     ) -> Result<EvmExecutionResult, String> {
         let executor = EvmExecutor::new(self.chain_id);
-        let state = self.load_provider()?;
+
+        let current = *self.current_block.read().map_err(|_| "lock poisoned".to_string())?;
+        let block_num = at_block.unwrap_or(current);
+
+        let state = if block_num == current {
+            self.load_provider()?
+        } else {
+            match call_evm::db::load_block_snapshot(&self.db_env, block_num) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => return Err(format!(
+                    "no state snapshot available for block {block_num} (retention may have expired)"
+                )),
+                Err(e) => return Err(format!("failed to load block snapshot: {e}")),
+            }
+        };
+
         let nonce = state.state().get_nonce(&caller);
 
         let tx = EvmTransaction {
@@ -528,7 +550,7 @@ impl RpcState {
         };
         let base_fee = self.fee_params.read().map_err(|_| "lock poisoned".to_string())?.base_fee;
 
-        let (result, _delta) = executor.execute_tx_provider(tx, state, 0, base_fee).map_err(|e| format!("{e}"))?;
+        let (result, _delta) = executor.execute_tx_provider(tx, state, block_num, base_fee).map_err(|e| format!("{e}"))?;
         Ok(result)
     }
 
