@@ -534,7 +534,7 @@ mod tests {
             amount: 500,
             nullifier: [0xBBu8; 32].into(),
             merkleRoot: [0u8; 32].into(),
-            proofData: vec![0u8; 32].into(),
+            proofData: vec![].into(),
         }
         .abi_encode();
 
