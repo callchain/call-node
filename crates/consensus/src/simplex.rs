@@ -436,7 +436,7 @@ impl SimplexConsensus {
 mod tests {
     use super::*;
     use call_primitives::{Address, Ed25519PublicKey};
-    use call_evm::state::EvmState;
+    use call_evm::provider::InMemoryStateProvider;
     use crate::exec::state_accessors::seed_validator;
 
     fn test_addr(n: u8) -> Address {
@@ -453,8 +453,8 @@ mod tests {
         1_000_000 * 10u128.pow(18)
     }
 
-    fn make_test_evm_state(n: u32) -> EvmState {
-        let mut evm = EvmState::new();
+    fn make_test_provider(n: u32) -> InMemoryStateProvider {
+        let mut evm = InMemoryStateProvider::new();
         for i in 0..n {
             seed_validator(
                 &mut evm,
@@ -468,8 +468,8 @@ mod tests {
         evm
     }
 
-    fn make_test_consensus(n: u32) -> (SimplexConsensus, EvmState) {
-        let evm = make_test_evm_state(n);
+    fn make_test_consensus(n: u32) -> (SimplexConsensus, InMemoryStateProvider) {
+        let evm = make_test_provider(n);
         let consensus = SimplexConsensus::new(ConsensusParams::default(), &evm);
         (consensus, evm)
     }

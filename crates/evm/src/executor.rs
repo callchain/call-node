@@ -85,8 +85,8 @@ impl EvmExecutor {
     ///
     /// Returns the execution result **and** the raw revm state changes.
     /// The caller is responsible for persisting `revm_state` (e.g. to
-    /// [`EvmState`] via [`EvmState::apply_from_revm_state`], or to MDBX
-    /// via [`crate::db::apply_revm_state_to_mdbx`]).
+    /// [`InMemoryStateProvider`] via [`InMemoryStateProvider::apply_from_revm_state`],
+    /// or to MDBX via [`crate::db::apply_revm_state_to_mdbx`]).
     ///
     /// Custom precompiles at 0x101 (Oracle), 0x102 (Balance), and 0x103 (Bridge)
     /// are executed via revm's normal call-frame mechanism with proper gas
@@ -178,14 +178,15 @@ impl EvmExecutor {
     ///
     /// This is the preferred execution path for the P0 migration. It reads state
     /// directly from the provider (e.g. MDBX-backed [`InMemoryStateProvider`]) instead
-    /// of from an in-memory [`EvmState`]. The returned [`revm::state::EvmState`] contains
-    /// only the delta — the caller must commit it to persistent storage.
+    /// directly from the provider (e.g. MDBX-backed [`InMemoryStateProvider`]).
+    /// The returned [`revm::state::EvmState`] contains only the delta — the caller
+    /// must commit it to persistent storage.
     ///
     /// # Example
     /// ```ignore
     /// let provider = InMemoryStateProvider::from_db(&db)?;
     /// let (result, delta) = executor.execute_tx_provider(tx, provider, height, base_fee)?;
-    /// // Commit delta to MDBX or EvmState
+    /// // Commit delta to MDBX
     /// ```
     pub fn execute_tx_provider(
         &self,

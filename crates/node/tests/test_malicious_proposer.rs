@@ -146,24 +146,24 @@ async fn test_double_nonce_rejected() {
 /// Offline penalty accumulates with repeated offenses.
 #[tokio::test]
 async fn test_cumulative_offline_penalty() {
-    let mut evm_state = call_evm::state::EvmState::new();
+    let mut provider = call_evm::provider::InMemoryStateProvider::new();
     let mut consensus = SimplexConsensus::new(
         ConsensusParams::default(),
-        &evm_state,
+        &provider,
     );
 
     let val_addr = test_addr(1);
     let stake = one_million_call() * 2;
-    let val_id: ValidatorId = consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], stake).unwrap() as u32;
+    let val_id: ValidatorId = consensus.stake_validator(&mut provider, val_addr, [1u8; 32], stake).unwrap() as u32;
 
     // First offense: 10 rounds
-    let slash1 = consensus.handle_offline(&mut evm_state, val_id, 10).unwrap();
+    let slash1 = consensus.handle_offline(&mut provider, val_id, 10).unwrap();
     // Second offense: another 10 rounds
-    let slash2 = consensus.handle_offline(&mut evm_state, val_id, 10).unwrap();
+    let slash2 = consensus.handle_offline(&mut provider, val_id, 10).unwrap();
 
     // Total slashed
     let total_slashed = slash1 + slash2;
-    let stake_after = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, val_addr);
+    let stake_after = call_consensus::exec::state_accessors::read_validator_stake(&provider, val_addr);
     assert!(total_slashed > 0);
     assert!(stake_after < stake);
 }

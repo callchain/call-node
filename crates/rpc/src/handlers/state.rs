@@ -119,7 +119,7 @@ pub struct SyncProgress {
 /// Shared RPC state — all handlers read from this.
 ///
 /// State is backed by MDBX (`db_env`).  There is no long-lived in-memory
-/// `EvmState`; it is loaded on demand for each operation.
+/// overlay; state is loaded on demand for each operation.
 pub struct RpcState {
     pub receipts: RwLock<HashMap<TxHash, ProtocolReceipt>>,
     pub current_block: RwLock<u64>,

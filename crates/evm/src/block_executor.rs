@@ -49,8 +49,7 @@ pub struct BlockTxEntry {
 /// 3. Decode, validate, and execute each tx on the `CacheDB`.
 /// 4. Return the collected results **and** the raw revm `EvmState` delta.
 ///
-/// The caller must commit the delta to persistent storage (MDBX) and/or an
-/// in-memory `EvmState` overlay.
+/// The caller must commit the delta to persistent storage (MDBX).
 pub fn execute_block_transactions(
     evm_txs: &[Vec<u8>],
     provider: InMemoryStateProvider,

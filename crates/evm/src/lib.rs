@@ -13,6 +13,5 @@ pub mod block_executor;
 
 pub use executor::*;
 pub use reth_db::DatabaseEnv as EvmDatabaseEnv;
-pub use state::EvmAccount;
 pub use backend::*;
 pub use alloy_primitives::{U256, Bytes};
