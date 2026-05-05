@@ -30,7 +30,7 @@ fn gov_slot(proposal_id: u64, suffix: &[u8]) -> U256 {
 
 /// Read a proposal status byte from EVM storage.
 /// Status values: 0=None, 1=Active, 2=Queued, 3=Executed.
-fn read_proposal_status(evm: &call_evm::EvmState, proposal_id: u64) -> u8 {
+fn read_proposal_status<S: call_evm::backend::ProtocolStorage>(evm: &S, proposal_id: u64) -> u8 {
     let slot = gov_slot(proposal_id, b"status");
     evm.get_storage(&GOVERNANCE_ADDRESS, slot).to_be_bytes::<32>()[31]
 }
@@ -54,26 +54,28 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Stake a validator so there is a proposer
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let _ = consensus
-            .stake_validator(&mut evm_state, voter_addr, [1u8; 32], one_million_call())
+            .stake_validator(provider.state_mut(), voter_addr, [1u8; 32], one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Seed EVM storage for proposer fees + deposit (10_000 CALL)
     // Also seed native EVM balance for gas payment
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, proposer, one_million_call() * 3,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, proposer, one_million_call() * 3,
         );
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, voter_addr, one_million_call(),
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, voter_addr, one_million_call(),
         );
-        evm.set_balance(proposer, call_primitives::U256::from(100_000_000_000u128));
-        evm.set_balance(voter_addr, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(proposer, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(voter_addr, call_primitives::U256::from(100_000_000_000u128));
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let proposal_id = 1u64;
@@ -115,9 +117,9 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Verify proposal is Active (status = 1)
     {
-        let evm = node.state.evm_state.read().unwrap();
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         assert_eq!(
-            read_proposal_status(&*evm, proposal_id),
+            read_proposal_status(provider.state(), proposal_id),
             1,
             "proposal should be Active after review period"
         );
@@ -162,9 +164,9 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Verify proposal is Queued (status = 2)
     {
-        let evm = node.state.evm_state.read().unwrap();
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         assert_eq!(
-            read_proposal_status(&*evm, proposal_id),
+            read_proposal_status(provider.state(), proposal_id),
             2,
             "proposal should be Queued"
         );
@@ -178,9 +180,9 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Verify proposal is Executed (status = 3)
     {
-        let evm = node.state.evm_state.read().unwrap();
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         assert_eq!(
-            read_proposal_status(&*evm, proposal_id),
+            read_proposal_status(provider.state(), proposal_id),
             3,
             "proposal should be Executed after full lifecycle"
         );

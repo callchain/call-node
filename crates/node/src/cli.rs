@@ -125,6 +125,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub db_cache_size: Option<u64>,
 
+    /// Archive mode: keep all historical state snapshots (disables pruning)
+    #[arg(long, default_value_t = false)]
+    pub archive: bool,
+
     // ── Metrics ───────────────────────────────────────────────────────
 
     /// Prometheus metrics listen address

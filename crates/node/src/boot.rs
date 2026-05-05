@@ -123,6 +123,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     // Step 2: Create node (opens DB, initializes state)
     info!("step 2: initializing node");
     let mut node = CallNode::new_with_chain_id(config.storage.data_dir.clone(), genesis_chain_id)?;
+    node.snapshot_retention_blocks = config.storage.snapshot_retention_blocks;
 
     // Wire governance auth config
     node.state.set_governance_auth(config.governance.require_auth);
@@ -155,12 +156,13 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             let signer_guard = node.state.signer.read().map_err(|_| "lock poisoned")?;
             if let Some(ref s) = *signer_guard {
                 let validator_addr = s.address();
-                let mut evm_state = node.state.evm_state.write().map_err(|_| "lock poisoned")?;
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
                 let validator_id = call_consensus::exec::state_accessors::read_validator_id_by_addr(
-                    &evm_state, validator_addr);
+                    provider.state(), validator_addr);
                 if validator_id != 0 {
                     call_consensus::exec::state_accessors::set_validator_bls_pubkey(
-                        &mut evm_state, validator_addr, bls_public_key_bytes(&bls_pubkey));
+                        provider.state_mut(), validator_addr, bls_public_key_bytes(&bls_pubkey));
+                    provider.state().save_to_db(&node.state.db_env).unwrap();
                     info!(validator_id = validator_id, "registered BLS pubkey for validator in EVM storage");
                 }
             }
@@ -184,7 +186,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             // Build consensus before moving genesis EVM state into RpcState
             let new_consensus = SimplexConsensus::new(genesis.consensus_params.clone(), &genesis_state.evm_state);
             // Inject genesis state into RpcState
-            *node.state.evm_state.write().map_err(|_| "lock poisoned")? = genesis_state.evm_state;
+            genesis_state.evm_state.save_to_db(&node.state.db_env).unwrap();
 
             *node.consensus.write().map_err(|_| "lock poisoned")? = new_consensus;
 
@@ -196,8 +198,9 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
 
             // Seed governance config defaults into EVM
             {
-                let mut evm = node.state.evm_state.write().map_err(|_| "lock poisoned")?;
-                call_consensus::exec::state_accessors::seed_gov_config(&mut evm);
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                call_consensus::exec::state_accessors::seed_gov_config(provider.state_mut());
+                provider.state().save_to_db(&node.state.db_env).unwrap();
             }
 
             info!("genesis applied successfully");
@@ -279,14 +282,14 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 // the consensus network try to dial nodes that aren't running a
                 // BFT engine at all.
                 let validator_pubkeys: std::collections::HashSet<Vec<u8>> = {
-                    let evm_state = node.state.evm_state.read().map_err(|_| "evm_state poisoned")?;
-                    let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                    let count = call_consensus::exec::state_accessors::read_validator_count(provider.state());
                     let mut set = std::collections::HashSet::new();
                     for id in 1..=count {
-                        let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, id);
+                        let addr = call_consensus::exec::state_accessors::read_validator_addr(provider.state(), id);
                         if addr != call_primitives::Address::ZERO {
                             let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
-                                &evm_state, addr);
+                                provider.state(), addr);
                             set.insert(pk.to_vec());
                         }
                     }

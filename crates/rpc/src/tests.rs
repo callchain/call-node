@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use call_primitives::{Address, AssetId};
-    use call_evm::EvmState;
+    use call_evm::provider::InMemoryStateProvider;
     use call_consensus::exec::state_accessors;
     use call_mempool::Mempool;
     use crate::handlers::RpcState;
@@ -26,13 +26,38 @@ mod tests {
             .0
     }
 
+    fn make_test_db() -> (std::path::PathBuf, Arc<reth_db::DatabaseEnv>) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let tmp = std::env::temp_dir().join(format!(
+            "call-rpc-test-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, Ordering::SeqCst),
+        ));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init test db");
+        let evm = InMemoryStateProvider::new();
+        evm.save_to_db(&db).expect("seed test db");
+        (tmp, db)
+    }
+
     fn make_test_state() -> RpcState {
+        let (_tmp, db) = make_test_db();
         let mempool = Arc::new(RwLock::new(Mempool::new()));
-        RpcState::new(
-            EvmState::new(),
-            mempool,
-            1,
-        )
+        RpcState::new(db, mempool, 1)
+    }
+
+    /// Helper: load provider, apply mutation, save back to MDBX.
+    fn with_test_state<F>(state: &RpcState, f: F)
+    where
+        F: FnOnce(&mut InMemoryStateProvider),
+    {
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+        f(&mut provider);
+        provider.save_to_db(&state.db_env).unwrap();
     }
 
     #[test]
@@ -40,7 +65,9 @@ mod tests {
         let state = make_test_state();
         let addr = test_addr(1);
         // Set EVM balance
-        state.evm_state.write().unwrap().set_balance(addr, alloy_primitives::U256::from(1000));
+        with_test_state(&state, |evm| {
+            evm.set_balance(addr, alloy_primitives::U256::from(1000));
+        });
         let balance = state.get_evm_balance(&addr);
         assert_eq!(balance, alloy_primitives::U256::from(1000));
         // Zero for unknown address
@@ -51,11 +78,9 @@ mod tests {
     fn test_rpc_call_asset_info() {
         let state = make_test_state();
         let issuer = test_addr(1);
-        {
-            let mut evm = state.evm_state.write().unwrap();
-            state_accessors::seed_asset(&mut *evm, 1, "TEST", "Test Token", 18, issuer, 0, 8_000, 0,
-            );
-        }
+        with_test_state(&state, |evm| {
+            state_accessors::seed_asset(evm, 1, "TEST", "Test Token", 18, issuer, 0, 8_000, 0);
+        });
 
         let info = state.get_asset_info(1).expect("asset info");
         assert_eq!(info.symbol, "TEST");
@@ -76,12 +101,11 @@ mod tests {
     fn test_rpc_call_asset_info_capped() {
         let state = make_test_state();
         let issuer = test_addr(1);
-        {
-            let mut evm = state.evm_state.write().unwrap();
+        with_test_state(&state, |evm| {
             state_accessors::seed_asset(
-                &mut *evm, 1, "CAPPED", "Capped Token", 18, issuer, 10_000, 0, 1,
+                evm, 1, "CAPPED", "Capped Token", 18, issuer, 10_000, 0, 1,
             );
-        }
+        });
 
         let info = state.get_asset_info(1).expect("asset info");
         assert_eq!(info.max_supply, 10_000);
@@ -96,10 +120,9 @@ mod tests {
         let asset_id: AssetId = 1;
 
         // Set balance in EVM storage
-        {
-            let mut evm = state.evm_state.write().unwrap();
-            state_accessors::seed_balance(&mut *evm, asset_id, addr, 5000);
-        }
+        with_test_state(&state, |evm| {
+            state_accessors::seed_balance(evm, asset_id, addr, 5000);
+        });
 
         let balance = state.get_balance(asset_id, &addr);
         assert_eq!(balance, 5000);
@@ -113,12 +136,11 @@ mod tests {
         let state = make_test_state();
         let asset_id: AssetId = 1;
 
-        {
-            let mut evm = state.evm_state.write().unwrap();
+        with_test_state(&state, |evm| {
             state_accessors::seed_asset(
-                &mut *evm, asset_id, "CALL", "Call Token", 18, Address::ZERO, 0, 6_000, 0,
+                evm, asset_id, "CALL", "Call Token", 18, Address::ZERO, 0, 6_000, 0,
             );
-        }
+        });
 
         let total = state.get_total_balance(asset_id);
         assert_eq!(total, 6000);
@@ -129,12 +151,11 @@ mod tests {
         let state = make_test_state();
         let owner = test_addr(1);
 
-        {
-            let mut evm = state.evm_state.write().unwrap();
+        with_test_state(&state, |evm| {
             state_accessors::seed_agent(
-                &mut *evm, 0, owner, "test-agent", "https://agent.example.com", 0,
+                evm, 0, owner, "test-agent", "https://agent.example.com", 0,
             );
-        }
+        });
 
         let info = state.get_agent_info(0).expect("agent info");
         assert_eq!(info.agent_id, 0);
@@ -152,26 +173,21 @@ mod tests {
         let state = make_test_state();
         let owner = test_addr(1);
 
-        {
-            let mut evm = state.evm_state.write().unwrap();
-            state_accessors::seed_balance(&mut *evm, 1, owner, 50_000,
-            );
+        with_test_state(&state, |evm| {
+            state_accessors::seed_balance(evm, 1, owner, 50_000);
             state_accessors::seed_agent(
-                &mut *evm, 0, owner, "balance-agent", "https://a.com", 0,
+                evm, 0, owner, "balance-agent", "https://a.com", 0,
             );
-            state_accessors::agent_set_balance(&mut *evm, 0, 1, 10_000,
-            );
-        }
+            state_accessors::agent_set_balance(evm, 0, 1, 10_000);
+        });
 
         let balance = state.get_agent_total_balance(0);
         assert_eq!(balance, 10000);
 
         // Revoke
-        {
-            let mut evm = state.evm_state.write().unwrap();
-            state_accessors::agent_set_balance(&mut *evm, 0, 1, 0,
-            );
-        }
+        with_test_state(&state, |evm| {
+            state_accessors::agent_set_balance(evm, 0, 1, 0);
+        });
         let balance = state.get_agent_total_balance(0);
         assert_eq!(balance, 0);
     }
@@ -377,9 +393,11 @@ mod tests {
         let to = test_addr(2);
 
         // Set up EVM state with balance
-        state.evm_state.write().unwrap().set_balance(caller, alloy_primitives::U256::from(1_000_000_000i128));
-        state.evm_state.write().unwrap().create_account(caller);
-        state.evm_state.write().unwrap().create_account(to);
+        with_test_state(&state, |evm| {
+            evm.set_balance(caller, alloy_primitives::U256::from(1_000_000_000i128));
+            evm.create_account(caller);
+            evm.create_account(to);
+        });
 
         // Execute a simple call (no data, just reading state)
         let result = state.execute_evm_call(
@@ -403,10 +421,9 @@ mod tests {
         let asset_id: AssetId = 1;
 
         // Set up balance in EVM storage
-        {
-            let mut evm = state.evm_state.write().unwrap();
-            state_accessors::seed_balance(&mut *evm, asset_id, sender, 10_000);
-        }
+        with_test_state(&state, |evm| {
+            state_accessors::seed_balance(evm, asset_id, sender, 10_000);
+        });
 
         // Protocol transactions are rejected in EVM-only mempool mode
         let result = state.submit_payment(
@@ -443,9 +460,11 @@ mod tests {
             alloy_primitives::address!("0x2c7536E3605D9C16a7a3D7b1898e529396a65c23");
 
         // Set up EVM state with balance
-        state.evm_state.write().unwrap().set_balance(signer_address, alloy_primitives::U256::from(1_000_000_000_000i128));
-        state.evm_state.write().unwrap().create_account(signer_address);
-        state.evm_state.write().unwrap().create_account(test_addr(2));
+        with_test_state(&state, |evm| {
+            evm.set_balance(signer_address, alloy_primitives::U256::from(1_000_000_000_000i128));
+            evm.create_account(signer_address);
+            evm.create_account(test_addr(2));
+        });
 
         // Build transaction
         let tx = TxLegacy {
@@ -479,7 +498,7 @@ mod tests {
 
         // EVM state unchanged — balance not transferred yet
         assert_eq!(
-            state.evm_state.read().unwrap().get_balance(&signer_address),
+            state.get_evm_balance(&signer_address),
             alloy_primitives::U256::from(1_000_000_000_000i128)
         );
 

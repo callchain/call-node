@@ -37,21 +37,21 @@ async fn test_double_sign_slash() {
     let node = TestNode::new();
 
     let val_addr = test_addr(1);
-    let mut evm_state = node.state.evm_state.write().unwrap();
+    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
     let mut consensus = node.consensus.write().unwrap();
-    let val_id: ValidatorId = consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], one_million_call()).unwrap() as u32;
-    consensus.refresh_proposer_subset(&evm_state);
+    let val_id: ValidatorId = consensus.stake_validator(&mut provider, val_addr, [1u8; 32], one_million_call()).unwrap() as u32;
+    consensus.refresh_proposer_subset(&provider);
 
     // Get stake before slash
-    let stake_before = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, val_addr);
+    let stake_before = call_consensus::exec::state_accessors::read_validator_stake(&provider, val_addr);
     assert_eq!(stake_before, one_million_call());
 
     // Simulate double-sign detection
-    let slashed = consensus.handle_double_sign(&mut evm_state, val_id).unwrap();
+    let slashed = consensus.handle_double_sign(&mut provider, val_id).unwrap();
     assert_eq!(slashed, one_million_call());
 
     // Validator should be removed after double-sign slash
-    let status = call_consensus::exec::state_accessors::read_validator_status(&evm_state, val_addr);
+    let status = call_consensus::exec::state_accessors::read_validator_status(&provider, val_addr);
     assert_eq!(status, 0, "validator should be removed after double-sign");
 }
 
@@ -61,21 +61,21 @@ async fn test_offline_penalty() {
     let node = TestNode::new();
 
     let val_addr = test_addr(1);
-    let mut evm_state = node.state.evm_state.write().unwrap();
+    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
     let mut consensus = node.consensus.write().unwrap();
     let stake = one_million_call() * 2;
-    let val_id: ValidatorId = consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], stake).unwrap() as u32;
-    consensus.refresh_proposer_subset(&evm_state);
+    let val_id: ValidatorId = consensus.stake_validator(&mut provider, val_addr, [1u8; 32], stake).unwrap() as u32;
+    consensus.refresh_proposer_subset(&provider);
 
     // Simulate 5 rounds offline
-    let slashed = consensus.handle_offline(&mut evm_state, val_id, 5).unwrap();
+    let slashed = consensus.handle_offline(&mut provider, val_id, 5).unwrap();
 
     // 5 rounds * 0.10% = 0.5% of stake
     let expected = (stake * 5 * 10) / 10_000;
     assert_eq!(slashed, expected);
 
     // Stake reduced but validator still active (above min_self_stake)
-    let stake_after = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, val_addr);
+    let stake_after = call_consensus::exec::state_accessors::read_validator_stake(&provider, val_addr);
     assert!(stake_after > 0);
     assert!(stake_after < stake);
 }
@@ -91,17 +91,19 @@ async fn test_invalid_tx_causes_block_failure() {
     let mut node = TestNode::new();
     let (_secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(&mut provider, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&provider);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     // Seed EVM storage with CALL balance for fees
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+            &mut provider, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Valid EVM tx should work
@@ -118,17 +120,19 @@ async fn test_double_nonce_rejected() {
 
     let (_secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(&mut provider, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&provider);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     // Seed EVM storage with CALL balance for fees
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 20_000,
+            &mut provider, call_protocol::CALL_ASSET_ID, sender, 20_000,
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Two EVM txs with same nonce but different content
@@ -142,7 +146,7 @@ async fn test_double_nonce_rejected() {
 /// Offline penalty accumulates with repeated offenses.
 #[tokio::test]
 async fn test_cumulative_offline_penalty() {
-    let mut evm_state = call_evm::EvmState::new();
+    let mut evm_state = call_evm::state::EvmState::new();
     let mut consensus = SimplexConsensus::new(
         ConsensusParams::default(),
         &evm_state,
@@ -171,10 +175,11 @@ async fn test_invalid_proposer_rejected() {
 
     let sender = test_addr(1);
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(&mut provider, sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(&provider);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Try to validate a block from an invalid proposer (not in subset)

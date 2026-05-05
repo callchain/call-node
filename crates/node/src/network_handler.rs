@@ -151,15 +151,15 @@ pub(crate) fn handle_network_message(
                 let peer_id_owned = peer_id.to_string();
                 tokio::spawn(async move {
                     let is_validator = {
-                        let evm_state = state_clone.evm_state.read().unwrap();
-                        let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
+                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
+                        let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
                         let mut active = 0;
                         for id in 1..=count {
                             let addr = call_consensus::exec::state_accessors::read_validator_addr(
-                                &evm_state, id);
+                                &provider, id);
                             if addr != call_primitives::Address::ZERO {
                                 let status = call_consensus::exec::state_accessors::read_validator_status(
-                                    &evm_state, addr);
+                                    &provider, addr);
                                 if status != 0 {
                                     active += 1;
                                 }
@@ -179,8 +179,8 @@ pub(crate) fn handle_network_message(
                         for pair in &request.pairs {
                             // Read last known price from EVM storage
                             let price = {
-                                let evm = state_clone.evm_state.read().unwrap();
-                                call_consensus::exec::state_accessors::read_oracle_price(&evm, pair.base)
+                                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
+                                call_consensus::exec::state_accessors::read_oracle_price(&provider, pair.base)
                             };
                             if price != 0 {
                                 // Send back as an oracle price submission
@@ -219,15 +219,15 @@ pub(crate) fn handle_network_message(
                     let mut tracker_guard = tracker_clone.write().unwrap();
                     // Build validator set and config from EVM state
                     let (config, validators) = {
-                        let evm = state_clone.evm_state.read().unwrap();
+                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
                         let config = OracleConfig::default();
-                        let count = call_consensus::exec::state_accessors::read_validator_count(&evm);
+                        let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
                         let mut validators = std::collections::HashMap::new();
                         for id in 1..=count {
-                            let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm, id);
+                            let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
                             if addr == call_primitives::Address::ZERO { continue; }
-                            let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm, addr);
-                            let status = call_consensus::exec::state_accessors::read_validator_status(&evm, addr);
+                            let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
+                            let status = call_consensus::exec::state_accessors::read_validator_status(&provider, addr);
                             validators.insert(id as u32, OracleValidatorInfo {
                                 validator_id: id as u32,
                                 address: addr,
@@ -243,9 +243,9 @@ pub(crate) fn handle_network_message(
                     match tracker_guard.submit_price(oracle_submission, &config, &validators) {
                         Ok(Some(aggregated)) => {
                             // Quorum reached — write aggregated price to EVM storage
-                            let mut evm = state_clone.evm_state.write().unwrap();
+                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
                             call_consensus::exec::state_accessors::seed_oracle_price(
-                                &mut evm,
+                                &mut provider,
                                 aggregated.pair.base,
                                 aggregated.median_price,
                                 aggregated.median_price, // simplified TWAP (no history in transient tracker)
@@ -253,6 +253,7 @@ pub(crate) fn handle_network_message(
                                 aggregated.block_number,
                                 aggregated.submission_count as u64,
                             );
+                            provider.state().save_to_db(&state_clone.db_env).unwrap();
                             tracing::info!(
                                 asset_id = aggregated.pair.base,
                                 price = aggregated.median_price,

@@ -23,12 +23,12 @@ fn one_million_call() -> u128 {
 /// Register asset 1 and deploy its wrapped ERC-20 contract.
 fn setup_bridge_env(node: &mut TestNode, sender: Address) {
     let executor = call_evm::EvmExecutor::new(1);
-    let mut evm_state = node.state.evm_state.write().unwrap();
+    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
     let bridge = alloy_primitives::Address::repeat_byte(0xFF);
     let (contract_addr, result) = executor
         .deploy_erc20_template(
             sender,
-            &mut evm_state,
+            provider.state_mut(),
             "TEST",
             "TST",
             18,
@@ -42,7 +42,7 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
 
     // Seed EVM storage for bridge ops
     state_accessors::seed_asset(
-        &mut evm_state,
+        provider.state_mut(),
         1,
         "TEST",
         "TestToken",
@@ -52,8 +52,10 @@ fn setup_bridge_env(node: &mut TestNode, sender: Address) {
         0,
         0, // active
     );
-    state_accessors::seed_bridge_contract(&mut evm_state, 1, contract_addr);
-    state_accessors::seed_asset_contract_address(&mut evm_state, 1, contract_addr);
+    state_accessors::seed_bridge_contract(provider.state_mut(), 1, contract_addr);
+    state_accessors::seed_asset_contract_address(provider.state_mut(), 1, contract_addr);
+
+    provider.state().save_to_db(&node.state.db_env).unwrap();
 }
 
 /// Bridge environment setup and empty block production.
@@ -66,21 +68,23 @@ fn test_bridge_deposit_evm_credits() {
 
     // Stake a validator so there is a proposer
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus
-            .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Fund sender with EVM storage balance for the deposit
     {
-        let mut evm = node.state.evm_state.write().unwrap();
-        state_accessors::seed_balance(&mut evm, 1, sender, 10_000);
-        evm.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
-        evm.create_account(sender);
-        evm.create_account(recipient);
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        state_accessors::seed_balance(provider.state_mut(), 1, sender, 10_000);
+        provider.state_mut().set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().create_account(sender);
+        provider.state_mut().create_account(recipient);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     setup_bridge_env(&mut node, sender);
@@ -90,9 +94,9 @@ fn test_bridge_deposit_evm_credits() {
     assert!(block.is_some(), "block should be produced");
 
     // Verify the EVM storage seeding is intact
-    let evm = node.state.evm_state.read().unwrap();
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
     assert_eq!(
-        state_accessors::read_balance(&*evm, 1, sender),
+        state_accessors::read_balance(provider.state(), 1, sender),
         10_000,
         "sender should have 10_000 balance"
     );
@@ -107,20 +111,22 @@ fn test_bridge_withdraw_records_outflow() {
 
     // Stake a validator
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         consensus
-            .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Fund sender with EVM storage balance
     {
-        let mut evm = node.state.evm_state.write().unwrap();
-        state_accessors::seed_balance(&mut evm, 1, sender, 10_000);
-        evm.set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
-        evm.create_account(sender);
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        state_accessors::seed_balance(provider.state_mut(), 1, sender, 10_000);
+        provider.state_mut().set_balance(sender, alloy_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().create_account(sender);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     setup_bridge_env(&mut node, sender);
@@ -133,9 +139,9 @@ fn test_bridge_withdraw_records_outflow() {
     assert!(block.is_some(), "withdraw block should be produced");
 
     // Verify EVM storage balance is intact
-    let evm = node.state.evm_state.read().unwrap();
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
     assert_eq!(
-        state_accessors::read_balance(&*evm, 1, sender),
+        state_accessors::read_balance(provider.state(), 1, sender),
         10_000,
         "sender should still have 10_000 balance"
     );
@@ -150,19 +156,21 @@ fn test_bridge_external_deposit_insufficient_sigs_rejected() {
 
     // Seed EVM storage with CALL balance for fees
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 1_000_000_000);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Stake sender as validator in EVM storage
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let _val_id = consensus
-            .stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call())
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
             .unwrap() as u32;
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Produce an empty block (EVM-only mempool, no protocol txs)

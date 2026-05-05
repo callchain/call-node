@@ -103,7 +103,7 @@ impl NodeBuilder {
 
         let mempool = Arc::new(RwLock::new(Mempool::new()));
 
-        let mut evm_state = call_evm::EvmState::new();
+        let mut evm_state = call_evm::provider::InMemoryStateProvider::new();
         let mut consensus = SimplexConsensus::new(
             ConsensusParams::default(),
             &evm_state,
@@ -114,24 +114,24 @@ impl NodeBuilder {
         }
         consensus.refresh_proposer_subset(&evm_state);
 
+        // Seed governance config (matches real CallNode::new behavior)
+        call_consensus::exec::state_accessors::seed_gov_config(&mut evm_state);
+
+        for (asset_id, addr, amount) in &self.initial_balances {
+            call_consensus::exec::state_accessors::seed_balance(
+                &mut evm_state, *asset_id, *addr, *amount,
+            );
+        }
+
+        // Persist initial state to MDBX
+        let db_env = call_storage::reth_db::init_call_db(&data_dir).expect("init test db");
+        evm_state.save_to_db(&db_env).expect("seed test db");
+
         let state = Arc::new(RpcState::new(
-            evm_state,
+            db_env,
             mempool.clone(),
             self.chain_id,
         ));
-
-        // Seed governance config (matches real CallNode::new behavior)
-        {
-            let mut evm = state.evm_state.write().unwrap();
-            call_consensus::exec::state_accessors::seed_gov_config(&mut evm);
-        }
-
-        for (asset_id, addr, amount) in &self.initial_balances {
-            let mut evm = state.evm_state.write().unwrap();
-            call_consensus::exec::state_accessors::seed_balance(
-                &mut *evm, *asset_id, *addr, *amount,
-            );
-        }
 
         TestNode {
             state,
@@ -225,9 +225,10 @@ impl TestNode {
 
         // Commit
         {
-            let mut evm_state = self.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
             let mut consensus = self.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("commit block");
+            consensus.commit_block(&block, &result, &mut provider).expect("commit block");
+            provider.state().save_to_db(&self.state.db_env).unwrap();
         }
         self.last_result = Some(result.clone());
 
@@ -249,8 +250,10 @@ impl TestNode {
 
         // Advance governance proposal state machine
         {
-            let mut evm_state = self.state.evm_state.write().unwrap();
-            let _events = GovernanceAdvancer.advance(&mut evm_state, new_height);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
+                &self.state.db_env).unwrap();
+            let _events = GovernanceAdvancer.advance(provider.state_mut(), new_height);
+            provider.state().save_to_db(&self.state.db_env).unwrap();
         }
 
         // Broadcast if network is available
@@ -298,8 +301,9 @@ impl TestNode {
     /// Get a balance for an address.
     pub fn balance(&self, asset_id: u64, addr: &Address) -> u128 {
         use call_consensus::exec::state_accessors;
-        let evm = self.state.evm_state.read().unwrap();
-        state_accessors::read_balance(&*evm, asset_id, *addr)
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(
+            &self.state.db_env).unwrap();
+        state_accessors::read_balance(provider.state(), asset_id, *addr)
     }
 
     /// Get mempool size (EVM txs).

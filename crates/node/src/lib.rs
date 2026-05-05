@@ -55,7 +55,6 @@ use crate::state_persist::{
     load_consensus_state_inner, save_consensus_state_inner,
 };
 use call_mempool::Mempool;
-use call_evm::EvmState;
 use jsonrpsee::server::ServerHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -116,6 +115,8 @@ pub struct CallNode {
     pub oracle_tracker: Arc<RwLock<OracleTracker>>,
     /// Stateless governance proposal advancer (all state lives in EVM)
     pub governance_advancer: governance_advancer::GovernanceAdvancer,
+    /// Snapshot retention in blocks. `u64::MAX` means archive mode (no pruning).
+    pub snapshot_retention_blocks: u64,
 }
 
 impl CallNode {
@@ -150,7 +151,6 @@ impl CallNode {
         // Load persisted state from reth-db (skip if recovery needed)
         let loaded = if recovery_needed {
             state_persist::LoadedState {
-                evm_state: EvmState::new(),
                 fee_params: FeeParams::default(),
             }
         } else {
@@ -177,16 +177,18 @@ impl CallNode {
             match load_fork_state(db_env) {
                 Ok(Some(fm)) => fm,
                 Ok(None) => {
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        call_consensus::exec::state_accessors::read_validator_count(&loaded.evm_state) as u32,
+                        call_consensus::exec::state_accessors::read_validator_count(&provider) as u32,
                     )
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load fork state");
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        call_consensus::exec::state_accessors::read_validator_count(&loaded.evm_state) as u32,
+                        call_consensus::exec::state_accessors::read_validator_count(&provider) as u32,
                     )
                 }
             }
@@ -195,9 +197,10 @@ impl CallNode {
 
         // Try to load persisted consensus state; fall back to genesis
         let consensus = if recovery_needed {
-            SimplexConsensus::new(ConsensusParams::default(), &loaded.evm_state)
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
+            SimplexConsensus::new(ConsensusParams::default(), &provider)
         } else {
-            match load_consensus_state_inner(db_env, &loaded.evm_state) {
+            match load_consensus_state_inner(db_env) {
                 Ok(consensus) => {
                     tracing::info!(
                         height = consensus.current_height(),
@@ -208,19 +211,19 @@ impl CallNode {
                 }
                 Err(e) => {
                     tracing::info!(error = %e, "no persisted consensus state, starting from genesis");
-                    SimplexConsensus::new(ConsensusParams::default(), &loaded.evm_state)
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
+                    SimplexConsensus::new(ConsensusParams::default(), &provider)
                 }
             }
         };
 
         let state = Arc::new(RpcState::new(
-            loaded.evm_state,
+            Arc::clone(db_env),
             mempool.clone(),
             chain_id.unwrap_or(CALLCHAIN_CHAIN_ID),
         ));
 
         state.set_data_dir(data_dir.clone());
-        state.set_db_env(Arc::clone(db_env));
 
         // Rebuild log_index from loaded receipts so eth_getLogs queries work correctly after restart
         for (tx_hash, receipt) in &receipts {
@@ -242,8 +245,13 @@ impl CallNode {
 
         // Seed governance config defaults into EVM on fresh start
         if fresh_start {
-            let mut evm = state.evm_state.write().unwrap();
-            call_consensus::exec::state_accessors::seed_gov_config(&mut evm);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| format!("db load: {e}"))?;
+            call_consensus::exec::state_accessors::seed_gov_config(&mut provider);
+            provider
+                .state()
+                .save_to_db(&state.db_env)
+                .map_err(|e| format!("db save: {e}"))?;
         }
 
         let governance_advancer = governance_advancer::GovernanceAdvancer;
@@ -284,6 +292,7 @@ impl CallNode {
             fresh_start,
             oracle_tracker,
             governance_advancer,
+            snapshot_retention_blocks: 128,
         })
     }
 
@@ -496,6 +505,7 @@ impl CallNode {
         let subscriptions = self.state.subscriptions.clone();
         let oracle_tracker = Arc::clone(&self.oracle_tracker);
         let governance_advancer = self.governance_advancer;
+        let snapshot_retention_blocks = self.snapshot_retention_blocks;
 
         tokio::spawn(block_production_loop(
             state,
@@ -510,6 +520,7 @@ impl CallNode {
             audit_log,
             oracle_tracker,
             governance_advancer,
+            snapshot_retention_blocks,
         ))
     }
 
@@ -537,6 +548,7 @@ impl CallNode {
         let audit_log = Arc::clone(&self.audit_log);
         let oracle_tracker = Arc::clone(&self.oracle_tracker);
         let governance_advancer = self.governance_advancer;
+        let snapshot_retention_blocks = self.snapshot_retention_blocks;
 
         std::thread::spawn(move || {
             let bft_data_dir = data_dir.join("bft_journal");
@@ -615,17 +627,23 @@ impl CallNode {
                         let seed = derive_vrf_seed(&ph, epoch_number);
 
                         let (qualified, pubkeys) = {
-                            let evm_state = state.evm_state.read().unwrap();
+                            let provider = call_evm::provider::InMemoryStateProvider::from_db(
+                                &state.db_env).unwrap();
                             let params = state.consensus_params.read().unwrap();
-                            let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
+                            let count = call_consensus::exec::state_accessors::read_validator_count(
+                                &provider);
                             let mut qualified = Vec::new();
                             let mut pubkeys = std::collections::HashMap::new();
                             for id in 1..=count {
-                                let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, id);
+                                let addr = call_consensus::exec::state_accessors::read_validator_addr(
+                                    &provider, id);
                                 if addr == call_primitives::Address::ZERO { continue; }
-                                let stake = call_consensus::exec::state_accessors::read_validator_stake(&evm_state, addr);
-                                let status = call_consensus::exec::state_accessors::read_validator_status(&evm_state, addr);
-                                let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm_state, addr);
+                                let stake = call_consensus::exec::state_accessors::read_validator_stake(
+                                    &provider, addr);
+                                let status = call_consensus::exec::state_accessors::read_validator_status(
+                                    &provider, addr);
+                                let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
+                                    &provider, addr);
                                 if status != 0 && stake >= params.min_self_stake {
                                     qualified.push(id as u32);
                                 }
@@ -667,11 +685,12 @@ impl CallNode {
 
                         let mut keys: Vec<ed25519::PublicKey> = Vec::new();
                         {
-                            let evm_state = state.evm_state.read().unwrap();
+                            let provider = call_evm::provider::InMemoryStateProvider::from_db(
+                                &state.db_env).unwrap();
                             for id in &subset {
-                                let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, *id as u64);
+                                let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, *id as u64);
                                 if addr != call_primitives::Address::ZERO {
-                                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm_state, addr);
+                                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
                                     if let Ok(pk) = ed25519::PublicKey::decode(&pk[..]) {
                                         keys.push(pk);
                                     }
@@ -771,6 +790,7 @@ impl CallNode {
                             },
                             oracle_tracker.clone(),
                             governance_advancer,
+                            snapshot_retention_blocks,
                         ));
 
                         let reason = exit_rx.await;
@@ -861,15 +881,15 @@ impl CallNode {
 
             // Build light client from current validator set once at the start
             let (trusted_validators, total_validators, bls_pubkeys) = {
-                let evm_state = state.evm_state.read().unwrap();
-                let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
+                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
                 let mut ed25519_map = std::collections::HashMap::new();
                 let mut bls_map = std::collections::HashMap::new();
                 for id in 1..=count {
-                    let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, id);
+                    let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
                     if addr == call_primitives::Address::ZERO { continue; }
-                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm_state, addr);
-                    let bls_pk = call_consensus::exec::state_accessors::read_validator_bls_pubkey(&evm_state, addr);
+                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
+                    let bls_pk = call_consensus::exec::state_accessors::read_validator_bls_pubkey(&provider, addr);
                     ed25519_map.insert(id as u32, pk);
                     if bls_pk != [0u8; 48] {
                         bls_map.insert(id as u32, bls_pk);
@@ -1054,8 +1074,10 @@ impl CallNode {
                                 }
 
                                 if let Ok(mut c) = consensus.write() {
-                                    let mut evm_state = state.evm_state.write().unwrap();
-                                    let _ = c.commit_block(&block, &result, &mut evm_state);
+                                    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
+                                        &state.db_env).unwrap();
+                                    let _ = c.commit_block(&block, &result, &mut provider);
+                                    let _ = provider.state().save_to_db(&state.db_env);
                                 }
 
                                 let _ = light_client.sync_incremental(&block.header, &signatures);

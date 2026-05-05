@@ -136,6 +136,7 @@ pub(crate) async fn bft_event_loop(
     my_pubkey: [u8; 32],
     oracle_tracker: Arc<RwLock<OracleTracker>>,
     governance_advancer: crate::governance_advancer::GovernanceAdvancer,
+    snapshot_retention_blocks: u64,
 ) {
     let mut execution_results: std::collections::HashMap<
         ConsensusDigest,
@@ -145,13 +146,13 @@ pub(crate) async fn bft_event_loop(
 
     // Build a mapping from ed25519 pubkey -> validator id for propose lookups
     let pubkey_to_id = {
-        let evm_state = state.evm_state.read().unwrap();
-        let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+        let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
         let mut map = std::collections::HashMap::new();
         for id in 1..=count {
-            let addr = call_consensus::exec::state_accessors::read_validator_addr(&evm_state, id);
+            let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
             if addr != Address::ZERO {
-                let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&evm_state, addr);
+                let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
                 if let Ok(pk) = commonware_cryptography::ed25519::PublicKey::decode(&pk[..]) {
                     map.insert(pk, id as u32);
                 }
@@ -250,11 +251,11 @@ pub(crate) async fn bft_event_loop(
                 if is_oracle_boundary {
                     if let Some(ref net) = network {
                         let tracked = {
-                            let evm = state.evm_state.read().unwrap();
-                            let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(&evm);
+                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(&provider);
                             let mut pairs = Vec::new();
                             for i in 0..count {
-                                let asset_id = call_consensus::exec::state_accessors::read_oracle_tracked_asset(&evm, i);
+                                let asset_id = call_consensus::exec::state_accessors::read_oracle_tracked_asset(&provider, i);
                                 pairs.push(call_primitives::PricePair::new(asset_id, 0));
                             }
                             pairs
@@ -461,36 +462,39 @@ pub(crate) async fn bft_event_loop(
                         let outliers: Vec<u32> = tracker_guard.last_outliers().to_vec();
                         drop(tracker_guard);
                         if !outliers.is_empty() {
-                            let mut evm_state = state.evm_state.write().unwrap();
+                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                             let mut c = consensus.write().unwrap();
                             for vid in &outliers {
-                                if let Err(e) = c.handle_oracle_outlier(&mut evm_state, *vid) {
+                                if let Err(e) = c.handle_oracle_outlier(&mut provider, *vid) {
                                     tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
                                 }
                             }
+                            provider.state().save_to_db(&state.db_env).unwrap();
                             tracing::info!(outliers = ?outliers, "slashed oracle outliers");
                         }
                         let contributions = {
                             let mut tracker_guard = oracle_tracker.write().unwrap();
                             let reward_pool = {
-                                let evm = state.evm_state.read().unwrap();
-                                call_consensus::exec::state_accessors::read_oracle_reward_pool(&evm)
+                                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                                call_consensus::exec::state_accessors::read_oracle_reward_pool(&provider)
                             };
                             let rewards = tracker_guard.distribute_rewards(reward_pool);
                             if !rewards.is_empty() {
-                                let mut evm = state.evm_state.write().unwrap();
-                                call_consensus::exec::state_accessors::zero_oracle_reward_pool(&mut evm);
+                                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                                call_consensus::exec::state_accessors::zero_oracle_reward_pool(&mut provider);
+                                provider.state().save_to_db(&state.db_env).unwrap();
                             }
                             rewards
                         };
                         if !contributions.is_empty() {
-                            let mut evm_state = state.evm_state.write().unwrap();
+                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                             let mut c = consensus.write().unwrap();
                             for (vid, amount) in &contributions {
-                                if let Err(e) = c.distribute_oracle_reward(&mut evm_state, *vid, *amount) {
+                                if let Err(e) = c.distribute_oracle_reward(&mut provider, *vid, *amount) {
                                     tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
                                 }
                             }
+                            provider.state().save_to_db(&state.db_env).unwrap();
                             tracing::info!(count = contributions.len(), "distributed oracle rewards");
                         }
                         oracle_tracker.write().unwrap().clear_tracking();
@@ -498,12 +502,13 @@ pub(crate) async fn bft_event_loop(
 
                     // Commit via consensus
                     {
-                        let mut evm_state = state.evm_state.write().unwrap();
+                        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                         let mut c = consensus.write().unwrap();
-                        if let Err(e) = c.commit_block(&block, &result, &mut evm_state) {
+                        if let Err(e) = c.commit_block(&block, &result, &mut provider) {
                             tracing::warn!(error = ?e, height, "BFT finalize: commit failed");
                             continue;
                         }
+                        provider.state().save_to_db(&state.db_env).unwrap();
                     }
                     telemetry.record_block_committed();
 
@@ -549,9 +554,9 @@ pub(crate) async fn bft_event_loop(
 
                     // Advance governance
                     {
-                        let mut evm_state = state.evm_state.write().unwrap();
-                        let events = governance_advancer.advance(&mut evm_state, new_height);
-                        drop(evm_state);
+                        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        let events = governance_advancer.advance(provider.state_mut(), new_height);
+                        provider.state().save_to_db(&state.db_env).unwrap();
                         for event in events {
                             let (event_str, proposal_id) = match &event {
                                 call_governance::GovernanceEvent::ProposalAdvanced { id, from, to } => {
@@ -667,6 +672,12 @@ pub(crate) async fn bft_event_loop(
                     ) {
                         tracing::warn!(error = %e, "BFT finalize: prune check failed");
                     }
+                    // Prune historical diff tables (account / storage history)
+                    let history_cutoff = new_height.saturating_sub(prune_config.keep_recent);
+                    let _ = call_evm::db::prune_account_history(&db.db, history_cutoff);
+                    let _ = call_evm::db::prune_storage_history(&db.db, history_cutoff);
+                    // Prune full block snapshots (replaced by diff tables)
+                    let _ = call_evm::db::prune_block_snapshots(&db.db, new_height, prune_config.keep_recent);
                     telemetry.record_storage_prune(
                         prune_state.traces_pruned,
                         prune_state.receipts_pruned,
@@ -677,27 +688,27 @@ pub(crate) async fn bft_event_loop(
                     // Produce state snapshot at snapshot interval boundaries
                     if new_height % prune_config.snapshot_interval == 0 {
                         let evm_root = {
-                            let evm_state = state.evm_state.read().unwrap();
-                            let root = evm_state.compute_state_root();
+                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            let root = provider.state().compute_state_root();
                             Hash::from(root.0)
                         };
 
                         let shielded_root = {
-                            let evm_state = state.evm_state.read().unwrap();
-                            call_consensus::exec::state_accessors::read_shielded_merkle_root(&evm_state)
+                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            call_consensus::exec::state_accessors::read_shielded_merkle_root(&provider)
                         };
 
                         let agent_root = {
-                            let evm_state = state.evm_state.read().unwrap();
-                            let count = call_consensus::exec::state_accessors::read_agent_count(&evm_state);
+                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            let count = call_consensus::exec::state_accessors::read_agent_count(&provider);
                             let mut agents = std::collections::HashMap::new();
                             for id in 0..count {
-                                let owner = call_consensus::exec::state_accessors::agent_get_owner(&evm_state, id);
+                                let owner = call_consensus::exec::state_accessors::agent_get_owner(&provider, id);
                                 if owner == call_primitives::Address::ZERO {
                                     continue;
                                 }
-                                let name = call_consensus::exec::state_accessors::agent_get_name(&evm_state, id);
-                                let registered_at = call_consensus::exec::state_accessors::agent_get_registered_at(&evm_state, id);
+                                let name = call_consensus::exec::state_accessors::agent_get_name(&provider, id);
+                                let registered_at = call_consensus::exec::state_accessors::agent_get_registered_at(&provider, id);
                                 agents.insert(id, (owner, name, registered_at));
                             }
                             call_storage::compute_agent_root(&agents)
@@ -723,13 +734,13 @@ pub(crate) async fn bft_event_loop(
 
                     // Save block state snapshot for historical queries
                     {
-                        let evm_state = state.evm_state.read().unwrap();
-                        if let Err(e) = save_block_snapshot(db_env, new_height, &evm_state) {
+                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        if let Err(e) = save_block_snapshot(db_env, new_height, provider.state()) {
                             tracing::warn!(error = %e, height = new_height, "BFT finalize: failed to save block snapshot");
                         }
                     }
-                    // Prune snapshots older than 128 blocks
-                    if let Err(e) = prune_block_snapshots(db_env, new_height, 128) {
+                    // Prune snapshots older than retention window
+                    if let Err(e) = prune_block_snapshots(db_env, new_height, snapshot_retention_blocks) {
                         tracing::warn!(error = %e, "BFT finalize: failed to prune old snapshots");
                     }
 

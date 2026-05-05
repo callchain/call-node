@@ -1,12 +1,14 @@
 //! reth `StateProvider` / `StateProviderFactory` implementation backed by MDBX.
 //!
-//! This is an incremental migration step: the provider loads the full `EvmState`
-//! from MDBX into memory and delegates all reads to it. Future phases will
-//! replace the in-memory delegation with direct MDBX cursor access.
+//! `InMemoryStateProvider` is the canonical production state container.
+//! It loads full state from MDBX into memory and answers all queries without
+//! further disk access. Future phases will replace the in-memory delegation
+//! with direct MDBX cursor access.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use alloy_primitives::{Address, BlockNumber, StorageKey, StorageValue, B256};
+use alloy_primitives::{Address, BlockNumber, StorageKey, StorageValue, B256, U256, Bytes};
 use reth_db::DatabaseEnv;
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
@@ -15,7 +17,7 @@ use reth_trie::{
     HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
     StorageProof, TrieInput,
 };
-use reth_trie_common::{AccountProof, Nibbles};
+use reth_trie_common::AccountProof;
 use revm_database::BundleState;
 
 use reth_storage_api::{
@@ -24,55 +26,225 @@ use reth_storage_api::{
     StateProviderFactory, StateRootProvider, StorageRootProvider,
 };
 
-use crate::state::{EvmAccount, EvmState};
-use crate::trie::{compute_state_root_with_updates, to_reth_account};
+use crate::state::EvmAccount;
+use crate::trie::{
+    compute_state_root_reth, compute_state_root_with_updates,
+    compute_account_proof, compute_state_multiproof, to_reth_account,
+};
 use crate::db::load_block_snapshot;
 
-// ── In-memory StateProvider (delegates to loaded EvmState) ────────────
+// ── In-memory StateProvider (production state container) ──────────────
 
-/// A [`StateProvider`] that reads from an in-memory [`EvmState`] snapshot.
+/// The canonical production state container.
 ///
-/// This is used as the `latest()` provider: load full state from MDBX once,
-/// then answer all queries from memory without further disk access.
-#[derive(Debug, Clone)]
+/// Loads full state from MDBX into memory and implements both reth's
+/// `StateProvider` traits and the protocol-level `ProtocolStorage` trait.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct InMemoryStateProvider {
-    state: EvmState,
-    block_hashes: std::collections::HashMap<BlockNumber, B256>,
+    pub(crate) accounts: HashMap<Address, EvmAccount>,
+    block_hashes: HashMap<BlockNumber, B256>,
 }
 
 impl InMemoryStateProvider {
-    /// Create a provider from a loaded [`EvmState`].
-    pub fn new(state: EvmState) -> Self {
+    /// Create an empty provider.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a provider from an existing account map.
+    pub fn from_accounts(accounts: HashMap<Address, EvmAccount>) -> Self {
         Self {
-            state,
-            block_hashes: std::collections::HashMap::new(),
+            accounts,
+            block_hashes: HashMap::new(),
         }
     }
 
-    /// Create a provider from MDBX by loading the full `EvmState`.
+    /// Load full state from MDBX.
     pub fn from_db(db: &DatabaseEnv) -> ProviderResult<Self> {
-        let state = EvmState::load_from_db(db)
-            .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(e.to_string())))?;
-        Ok(Self::new(state))
+        let account_data = call_storage::reth_db::db_iter_all::<
+            call_storage::reth_db::CallEvmAccounts,
+        >(db)
+        .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(e.to_string())))?;
+        let storage_data = call_storage::reth_db::db_iter_all::<
+            call_storage::reth_db::CallEvmStorage,
+        >(db)
+        .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(e.to_string())))?;
+
+        let mut accounts = HashMap::new();
+
+        for (key, value) in account_data {
+            if key.len() != 20 {
+                continue;
+            }
+            let addr = Address::from_slice(&key);
+            let account: EvmAccount = serde_json::from_slice(&value)
+                .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("deserialize account: {e}"))))?;
+            accounts.insert(addr, account);
+        }
+
+        for (key, value) in storage_data {
+            if key.len() != 52 {
+                continue;
+            }
+            let addr = Address::from_slice(&key[..20]);
+            let slot_bytes: [u8; 32] = key[20..52].try_into()
+                .map_err(|_| ProviderError::Database(reth_db::DatabaseError::Other("invalid storage key".into())))?;
+            let slot = U256::from_be_bytes(slot_bytes);
+            let slot_value: U256 = serde_json::from_slice(&value)
+                .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("deserialize storage: {e}"))))?;
+
+            if let Some(acc) = accounts.get_mut(&addr) {
+                acc.storage.insert(slot, slot_value);
+            }
+        }
+
+        Ok(Self::from_accounts(accounts))
+    }
+
+    /// Persist full state to MDBX.
+    pub fn save_to_db(&self, db: &DatabaseEnv) -> Result<(), revm::database_interface::ErasedError> {
+        use call_storage::reth_db::{db_clear, db_batch_put, CallEvmAccounts, CallEvmStorage};
+
+        db_clear::<CallEvmAccounts>(db).map_err(revm::database_interface::ErasedError::new)?;
+        db_clear::<CallEvmStorage>(db).map_err(revm::database_interface::ErasedError::new)?;
+
+        let account_entries: Vec<(Vec<u8>, Vec<u8>)> = self
+            .accounts
+            .iter()
+            .map(|(addr, acc)| {
+                let key = addr.as_slice().to_vec();
+                let value = serde_json::to_vec(acc).unwrap_or_default();
+                (key, value)
+            })
+            .collect();
+        if !account_entries.is_empty() {
+            db_batch_put::<CallEvmAccounts>(db, account_entries)
+                .map_err(revm::database_interface::ErasedError::new)?;
+        }
+
+        let mut storage_entries = Vec::new();
+        for (addr, acc) in &self.accounts {
+            for (slot, value) in &acc.storage {
+                let mut key = Vec::with_capacity(52);
+                key.extend_from_slice(addr.as_slice());
+                key.extend_from_slice(&slot.to_be_bytes::<32>());
+                let value_bytes = serde_json::to_vec(value).unwrap_or_default();
+                storage_entries.push((key, value_bytes));
+            }
+        }
+        if !storage_entries.is_empty() {
+            db_batch_put::<CallEvmStorage>(db, storage_entries)
+                .map_err(revm::database_interface::ErasedError::new)?;
+        }
+
+        Ok(())
     }
 
     /// Attach block hashes for `BlockHashReader`.
-    pub fn with_block_hashes(mut self, hashes: std::collections::HashMap<BlockNumber, B256>) -> Self {
+    pub fn with_block_hashes(mut self, hashes: HashMap<BlockNumber, B256>) -> Self {
         self.block_hashes = hashes;
         self
     }
 
-    /// Immutable access to the underlying [`EvmState`].
-    pub fn state(&self) -> &EvmState {
-        &self.state
+    // ── Account accessors ─────────────────────────────────────────────
+
+    pub fn get_account(&self, address: &Address) -> Option<&EvmAccount> {
+        self.accounts.get(address)
     }
 
-    /// Mutable access to the underlying [`EvmState`].
-    ///
-    /// Used by the consensus layer to apply protocol-level pre-execution
-    /// changes (e.g. gas bridging) before creating the revm [`CacheDB`].
-    pub fn state_mut(&mut self) -> &mut EvmState {
-        &mut self.state
+    pub fn get_account_mut(&mut self, address: &Address) -> &mut EvmAccount {
+        self.accounts.entry(*address).or_default()
+    }
+
+    pub fn create_account(&mut self, address: Address) -> &mut EvmAccount {
+        self.accounts.entry(address).or_default()
+    }
+
+    pub fn get_balance(&self, address: &Address) -> U256 {
+        self.accounts.get(address).map(|a| a.balance).unwrap_or(U256::ZERO)
+    }
+
+    pub fn set_balance(&mut self, address: Address, balance: U256) {
+        self.accounts.entry(address).or_default().balance = balance;
+    }
+
+    pub fn get_nonce(&self, address: &Address) -> u64 {
+        self.accounts.get(address).map(|a| a.nonce).unwrap_or(0)
+    }
+
+    pub fn increment_nonce(&mut self, address: Address) {
+        self.accounts.entry(address).or_default().nonce += 1;
+    }
+
+    pub fn get_storage(&self, address: &Address, key: U256) -> U256 {
+        self.accounts
+            .get(address)
+            .and_then(|a| a.storage.get(&key))
+            .copied()
+            .unwrap_or(U256::ZERO)
+    }
+
+    pub fn set_storage(&mut self, address: Address, key: U256, value: U256) {
+        self.accounts.entry(address).or_default().storage.insert(key, value);
+    }
+
+    pub fn set_code(&mut self, address: Address, code: Bytes) {
+        self.accounts.entry(address).or_default().code = code;
+    }
+
+    pub fn get_code(&self, address: &Address) -> Bytes {
+        self.accounts
+            .get(address)
+            .map(|a| a.code.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn get_all_accounts(&self) -> &HashMap<Address, EvmAccount> {
+        &self.accounts
+    }
+
+    pub fn into_accounts(self) -> HashMap<Address, EvmAccount> {
+        self.accounts
+    }
+
+    /// Apply revm state changes.
+    pub fn apply_from_revm_state(&mut self, revm_state: &revm::state::EvmState) {
+        for (addr, revm_account) in revm_state {
+            let account = self.accounts.entry(*addr).or_default();
+            let info = &revm_account.info;
+            account.balance = info.balance;
+            account.nonce = info.nonce;
+            if let Some(code) = &info.code {
+                account.code = code.original_bytes();
+            }
+            for (key, storage_slot) in &revm_account.storage {
+                if !storage_slot.present_value.is_zero() {
+                    account.storage.insert(*key, storage_slot.present_value);
+                }
+            }
+        }
+    }
+
+    /// Compute the Ethereum state trie root.
+    pub fn compute_state_root(&self) -> B256 {
+        compute_state_root_reth(self)
+            .expect("reth-trie state root computation should not fail")
+    }
+
+    /// Compute state root and collect trie updates.
+    pub fn compute_state_root_with_updates(&self) -> (B256, TrieUpdates) {
+        compute_state_root_with_updates(self)
+            .expect("reth-trie state root computation should not fail")
+    }
+
+    /// Self-reference for backward-compatible call-sites.
+    pub fn state(&self) -> &Self {
+        self
+    }
+
+    /// Mutable self-reference for backward-compatible call-sites.
+    pub fn state_mut(&mut self) -> &mut Self {
+        self
     }
 }
 
@@ -88,7 +260,6 @@ impl BlockHashReader for InMemoryStateProvider {
         _start: BlockNumber,
         _end: BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
-        // Not needed for basic operation; return empty.
         Ok(Vec::new())
     }
 }
@@ -97,7 +268,7 @@ impl AccountReader for InMemoryStateProvider {
     fn basic_account(&self,
         address: &Address,
     ) -> ProviderResult<Option<Account>> {
-        Ok(self.state.get_account(address).map(|acc| to_reth_account(acc)))
+        Ok(self.accounts.get(address).map(|acc| to_reth_account(acc)))
     }
 }
 
@@ -106,8 +277,7 @@ impl BytecodeReader for InMemoryStateProvider {
         &self,
         code_hash: &B256,
     ) -> ProviderResult<Option<Bytecode>> {
-        // Scan all accounts to find matching code hash.
-        for acc in self.state.accounts.values() {
+        for acc in self.accounts.values() {
             let hash = if acc.code.is_empty() {
                 revm::primitives::KECCAK_EMPTY
             } else {
@@ -123,7 +293,7 @@ impl BytecodeReader for InMemoryStateProvider {
 
 impl StateRootProvider for InMemoryStateProvider {
     fn state_root(&self, _hashed_state: HashedPostState) -> ProviderResult<B256> {
-        compute_state_root_with_updates(&self.state)
+        compute_state_root_with_updates(self)
             .map(|(root, _)| root)
             .map_err(|e| {
                 ProviderError::Database(reth_db::DatabaseError::Other(format!(
@@ -142,7 +312,7 @@ impl StateRootProvider for InMemoryStateProvider {
         &self,
         _hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        compute_state_root_with_updates(&self.state)
+        compute_state_root_with_updates(self)
             .map_err(|e| {
                 ProviderError::Database(reth_db::DatabaseError::Other(format!(
                     "state root error: {e:?}"
@@ -164,7 +334,7 @@ impl StorageRootProvider for InMemoryStateProvider {
         address: Address,
         _hashed_storage: HashedStorage,
     ) -> ProviderResult<B256> {
-        let account = self.state.get_account(&address);
+        let account = self.accounts.get(&address);
         Ok(account.map(|a| a.storage_root()).unwrap_or_else(|| {
             // Ethereum empty trie root
             B256::new([
@@ -181,7 +351,6 @@ impl StorageRootProvider for InMemoryStateProvider {
         _slot: B256,
         _hashed_storage: HashedStorage,
     ) -> ProviderResult<StorageProof> {
-        // Phase 3: implement real storage proof generation
         Ok(StorageProof::default())
     }
 
@@ -191,7 +360,6 @@ impl StorageRootProvider for InMemoryStateProvider {
         _slots: &[B256],
         _hashed_storage: HashedStorage,
     ) -> ProviderResult<StorageMultiProof> {
-        // Phase 3: implement real storage multiproof
         Ok(StorageMultiProof::empty())
     }
 }
@@ -203,7 +371,7 @@ impl StateProofProvider for InMemoryStateProvider {
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
-        crate::trie::compute_account_proof(&self.state, address, slots)
+        compute_account_proof(self, address, slots)
             .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("proof error: {e:?}"))))
     }
 
@@ -212,7 +380,7 @@ impl StateProofProvider for InMemoryStateProvider {
         _input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
-        crate::trie::compute_state_multiproof(&self.state, targets)
+        compute_state_multiproof(self, targets)
             .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("multiproof error: {e:?}"))))
     }
 
@@ -239,24 +407,66 @@ impl StateProvider for InMemoryStateProvider {
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
-        let value = self.state.get_storage(&account, storage_key.into());
+        let value = self.get_storage(&account, storage_key.into());
         Ok(Some(value))
+    }
+}
+
+impl revm::database_interface::Database for &mut InMemoryStateProvider {
+    type Error = std::convert::Infallible;
+
+    fn basic(&mut self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        Ok(self.accounts.get(&address).map(|account| {
+            let code = if account.code.is_empty() {
+                None
+            } else {
+                Some(revm::bytecode::Bytecode::new_raw(account.code.clone()))
+            };
+            revm::state::AccountInfo {
+                balance: account.balance,
+                nonce: account.nonce,
+                code_hash: code
+                    .as_ref()
+                    .map(|c| c.hash_slow())
+                    .unwrap_or(revm::primitives::KECCAK_EMPTY),
+                code,
+                account_id: None,
+            }
+        }))
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<revm::bytecode::Bytecode, Self::Error> {
+        for account in self.accounts.values() {
+            let hash = if account.code.is_empty() {
+                revm::primitives::KECCAK_EMPTY
+            } else {
+                alloy_primitives::keccak256(&account.code)
+            };
+            if hash == code_hash {
+                return Ok(revm::bytecode::Bytecode::new_raw(account.code.clone()));
+            }
+        }
+        Ok(revm::bytecode::Bytecode::default())
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        Ok(self.get_storage(&address, index))
+    }
+
+    fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
+        Ok(B256::ZERO)
     }
 }
 
 // ── StateProviderFactory ──────────────────────────────────────────────
 
 /// Factory for creating [`StateProvider`] instances at different block heights.
-///
-/// Currently only supports `latest()` (loads full state from MDBX).
-/// `history_by_block_number` will be implemented in Phase 3 (historical queries).
 #[derive(Debug, Clone)]
 pub struct CallchainStateProviderFactory {
     db: Arc<DatabaseEnv>,
 }
 
 impl CallchainStateProviderFactory {
-    /// Create a new factory backed by the given MDBX environment.
     pub fn new(db: Arc<DatabaseEnv>) -> Self {
         Self { db }
     }
@@ -326,17 +536,12 @@ impl StateProviderFactory for CallchainStateProviderFactory {
         &self,
         block_number: BlockNumber,
     ) -> ProviderResult<StateProviderBox> {
-        // Try to load a full state snapshot for the requested block.
         match load_block_snapshot(&self.db, block_number) {
-            Ok(Some(state)) => {
-                let mut provider = InMemoryStateProvider::new(state);
-                // Attach empty block hashes — historical queries rarely need them.
-                provider = provider.with_block_hashes(std::collections::HashMap::new());
+            Ok(Some(provider)) => {
+                let provider = provider.with_block_hashes(HashMap::new());
                 Ok(Box::new(provider))
             }
             Ok(None) => {
-                // No snapshot available — fall back to latest.
-                // This happens for pruned blocks or blocks before snapshotting began.
                 self.latest()
             }
             Err(e) => Err(ProviderError::Database(reth_db::DatabaseError::Other(
@@ -386,7 +591,7 @@ impl StateProviderFactory for CallchainStateProviderFactory {
     }
 }
 
-// ── EvmAccount storage root helper (reused from state.rs) ─────────────
+// ── EvmAccount storage root helper ────────────────────────────────────
 
 trait StorageRoot {
     fn storage_root(&self) -> B256;
@@ -409,7 +614,7 @@ impl StorageRoot for EvmAccount {
             .collect();
         slots.sort_by_key(|(hash, _)| *hash);
         for (hash, value) in slots {
-            let path = Nibbles::unpack(hash);
+            let path = reth_trie_common::Nibbles::unpack(hash);
             let mut value_rlp = Vec::new();
             alloy_rlp::Encodable::encode(value, &mut value_rlp);
             hb.add_leaf(path, &value_rlp);
@@ -421,7 +626,7 @@ impl StorageRoot for EvmAccount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, U256};
+    use alloy_primitives::Address;
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -429,34 +634,28 @@ mod tests {
 
     #[test]
     fn test_in_memory_provider_reads() {
-        let mut state = EvmState::new();
-        state.set_balance(test_addr(1), U256::from(1000));
-        state.create_account(test_addr(1));
-        state.increment_nonce(test_addr(1));
-        state.set_storage(test_addr(1), U256::from(42), U256::from(123));
+        let mut provider = InMemoryStateProvider::new();
+        provider.set_balance(test_addr(1), U256::from(1000));
+        provider.create_account(test_addr(1));
+        provider.increment_nonce(test_addr(1));
+        provider.set_storage(test_addr(1), U256::from(42), U256::from(123));
 
-        let provider = InMemoryStateProvider::new(state);
-
-        // AccountReader
         let acc = provider.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(acc.balance, U256::from(1000));
         assert_eq!(acc.nonce, 1);
 
-        // StateProvider::storage
         let storage = provider.storage(test_addr(1), U256::from(42).into()).unwrap();
         assert_eq!(storage, Some(U256::from(123)));
 
-        // Missing account
         assert!(provider.basic_account(&test_addr(0xFF)).unwrap().is_none());
     }
 
     #[test]
     fn test_state_root_provider() {
-        let mut state = EvmState::new();
-        state.set_balance(test_addr(1), U256::from(100));
-        state.create_account(test_addr(1));
+        let mut provider = InMemoryStateProvider::new();
+        provider.set_balance(test_addr(1), U256::from(100));
+        provider.create_account(test_addr(1));
 
-        let provider = InMemoryStateProvider::new(state);
         let root = provider.state_root(HashedPostState::default()).unwrap();
         assert!(!root.is_zero());
     }
@@ -469,11 +668,10 @@ mod tests {
         ));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
-        // Seed MDBX
-        let mut state = EvmState::new();
-        state.set_balance(test_addr(1), U256::from(5000));
-        state.create_account(test_addr(1));
-        state.save_to_db(&db).expect("seed");
+        let mut provider = InMemoryStateProvider::new();
+        provider.set_balance(test_addr(1), U256::from(5000));
+        provider.create_account(test_addr(1));
+        provider.save_to_db(&db).expect("seed");
 
         let factory = CallchainStateProviderFactory::new(db);
         let provider = factory.latest().expect("latest provider");
@@ -492,31 +690,26 @@ mod tests {
         ));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
-        // Save a snapshot for block 5
-        let mut state = EvmState::new();
-        state.set_balance(test_addr(1), U256::from(7777));
-        state.create_account(test_addr(1));
-        crate::db::save_block_snapshot(&db, 5, &state).expect("save snapshot");
+        let mut snapshot = InMemoryStateProvider::new();
+        snapshot.set_balance(test_addr(1), U256::from(7777));
+        snapshot.create_account(test_addr(1));
+        crate::db::save_block_snapshot(&db, 5, &snapshot).expect("save snapshot");
 
-        // Also seed current state with different balance
-        let mut current = EvmState::new();
+        let mut current = InMemoryStateProvider::new();
         current.set_balance(test_addr(1), U256::from(1111));
         current.create_account(test_addr(1));
         current.save_to_db(&db).expect("seed current");
 
         let factory = CallchainStateProviderFactory::new(db);
 
-        // latest() should return current state (balance 1111)
         let latest = factory.latest().expect("latest provider");
         let latest_acc = latest.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(latest_acc.balance, U256::from(1111));
 
-        // history_by_block_number(5) should return snapshot state (balance 7777)
         let hist = factory.history_by_block_number(5).expect("historical provider");
         let hist_acc = hist.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(hist_acc.balance, U256::from(7777));
 
-        // history_by_block_number(99) with no snapshot should fall back to latest
         let missing = factory.history_by_block_number(99).expect("fallback provider");
         let missing_acc = missing.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(missing_acc.balance, U256::from(1111));

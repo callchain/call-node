@@ -24,7 +24,7 @@ use revm::{
     primitives::{hardfork::SpecId, TxKind, Log},
     Context, ExecuteEvm, MainBuilder, MainContext,
 };
-use crate::state::EvmState;
+use crate::provider::InMemoryStateProvider;
 
 /// EVM execution error
 #[derive(Debug)]
@@ -174,20 +174,6 @@ impl EvmExecutor {
         }, revm_state))
     }
 
-    /// Backward-compatible wrapper: execute against an in-memory [`EvmState`]
-    /// and automatically apply revm state changes back to it.
-    pub fn execute_tx(
-        &self,
-        tx: EvmTransaction,
-        state: &mut EvmState,
-        block_number: u64,
-        base_fee: u128,
-    ) -> Result<EvmExecutionResult, EvmError> {
-        let (result, revm_state) = self.execute_tx_db(tx, &mut *state, block_number, base_fee)?;
-        state.apply_from_revm_state(&revm_state);
-        Ok(result)
-    }
-
     /// Execute an EVM transaction using a reth [`StateProvider`] as the backing database.
     ///
     /// This is the preferred execution path for the P0 migration. It reads state
@@ -305,7 +291,7 @@ impl EvmExecutor {
     pub fn deploy_erc20_template(
         &self,
         deployer: Address,
-        state: &mut EvmState,
+        state: &mut InMemoryStateProvider,
         name: &str,
         symbol: &str,
         decimals: u8,
@@ -333,7 +319,8 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        let result = self.execute_tx(tx, state, 0, 0)?;
+        let (result, revm_state) = self.execute_tx_db(tx, &mut *state, 0, 0)?;
+        state.apply_from_revm_state(&revm_state);
 
         // Revm already sets the deployed code via apply_from_revm_state,
         // but we keep this as a safety net for CREATE output.
@@ -349,7 +336,7 @@ impl EvmExecutor {
         &self,
         caller: Address,
         contract: Address,
-        state: &mut EvmState,
+        state: &mut InMemoryStateProvider,
         to: Address,
         amount: U256,
     ) -> Result<EvmExecutionResult, EvmError> {
@@ -377,7 +364,9 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        self.execute_tx(tx, state, 0, 0)
+        let (result, revm_state) = self.execute_tx_db(tx, &mut *state, 0, 0)?;
+        state.apply_from_revm_state(&revm_state);
+        Ok(result)
     }
 
     /// Helper: EVM call for bridge burn operations
@@ -385,7 +374,7 @@ impl EvmExecutor {
         &self,
         caller: Address,
         contract: Address,
-        state: &mut EvmState,
+        state: &mut InMemoryStateProvider,
         amount: U256,
     ) -> Result<EvmExecutionResult, EvmError> {
         // keccak256("bridgeBurn(uint256)")[:4]
@@ -408,7 +397,9 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        self.execute_tx(tx, state, 0, 0)
+        let (result, revm_state) = self.execute_tx_db(tx, &mut *state, 0, 0)?;
+        state.apply_from_revm_state(&revm_state);
+        Ok(result)
     }
 
     /// Helper: EVM call for issuer mint operations on WrappedToken
@@ -416,7 +407,7 @@ impl EvmExecutor {
         &self,
         caller: Address,
         contract: Address,
-        state: &mut EvmState,
+        state: &mut InMemoryStateProvider,
         to: Address,
         amount: U256,
     ) -> Result<EvmExecutionResult, EvmError> {
@@ -444,7 +435,9 @@ impl EvmExecutor {
             chain_id: self.chain_id,
         };
 
-        self.execute_tx(tx, state, 0, 0)
+        let (result, revm_state) = self.execute_tx_db(tx, &mut *state, 0, 0)?;
+        state.apply_from_revm_state(&revm_state);
+        Ok(result)
     }
 }
 
@@ -453,7 +446,7 @@ impl EvmExecutor {
 /// Validate an EVM transaction before execution
 pub fn validate_evm_tx(
     tx: &EvmTransaction,
-    state: &EvmState,
+    state: &InMemoryStateProvider,
 ) -> Result<(), &'static str> {
     let expected_nonce = state.get_nonce(&tx.caller);
     if tx.nonce != expected_nonce {
@@ -618,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_evm_nonce_validation() {
-        let mut state = EvmState::new();
+        let mut state = InMemoryStateProvider::new();
         let addr = test_addr(1);
         state.create_account(addr);
         state.set_balance(addr, U256::from(1_000_000_000i128));
@@ -639,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_evm_insufficient_balance() {
-        let mut state = EvmState::new();
+        let mut state = InMemoryStateProvider::new();
         let addr = test_addr(1);
         state.create_account(addr);
 
@@ -670,7 +663,7 @@ mod tests {
     #[test]
     fn test_evm_execute_transfer() {
         let executor = EvmExecutor::new(1);
-        let mut state = EvmState::new();
+        let mut state = InMemoryStateProvider::new();
 
         let caller = test_addr(1);
         state.set_balance(caller, U256::from(1_000_000_000i128));
@@ -687,14 +680,14 @@ mod tests {
             chain_id: 1,
         };
 
-        let result = executor.execute_tx(tx, &mut state, 0, 0);
+        let result = executor.execute_tx_db(tx, &mut state, 0, 0).map(|(r, _)| r);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_evm_deploy_erc20_template() {
         let executor = EvmExecutor::new(1);
-        let mut state = EvmState::new();
+        let mut state = InMemoryStateProvider::new();
         let deployer = test_addr(1);
         state.set_balance(deployer, U256::from(100_000_000_000i128));
         state.create_account(deployer);
@@ -713,7 +706,7 @@ mod tests {
     #[test]
     fn test_evm_call_bridge_mint() {
         let executor = EvmExecutor::new(1);
-        let mut state = EvmState::new();
+        let mut state = InMemoryStateProvider::new();
         let caller = test_addr(1);
         state.set_balance(caller, U256::from(10_000_000_000i128));
         state.create_account(caller);
@@ -735,7 +728,7 @@ mod tests {
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         // Seed MDBX with an account
-        let mut state = EvmState::new();
+        let mut state = InMemoryStateProvider::new();
         let caller = test_addr(1);
         let recipient = test_addr(2);
         state.set_balance(caller, U256::from(1_000_000_000i128));
@@ -787,7 +780,7 @@ mod tests {
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         // Seed MDBX
-        let mut state = EvmState::new();
+        let mut state = InMemoryStateProvider::new();
         let caller = test_addr(1);
         state.set_balance(caller, U256::from(1_000_000_000i128));
         state.create_account(caller);

@@ -7,7 +7,6 @@ pub mod bft;
 pub mod block;
 pub mod block_cache;
 pub mod digest;
-pub mod evm_storage_provider;
 pub mod exec;
 pub mod fork;
 pub mod proposer;

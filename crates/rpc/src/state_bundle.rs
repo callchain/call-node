@@ -1,42 +1,40 @@
 //! Unified state access bundles for `RpcState`.
 //!
-//! `StateWriteBundle` and `StateReadBundle` acquire all state locks in a
-//! deterministic order (matching the field declaration order in `RpcState`)
-//! to eliminate the repetitive ~12-line lock-acquisition pattern that was
-//! repeated 14+ times across the node crate, and to make it impossible to
-//! forget a subsystem when calling `block.execute()`.
+//! `StateWriteBundle` and `StateReadBundle` acquire all non-database locks in a
+//! deterministic order to eliminate the repetitive lock-acquisition pattern.
+//! State itself is no longer held in-memory; it is loaded fresh from MDBX on
+//! every block execution.
 
 use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 
 use call_consensus::{Block, BlockExecutionResult, ConsensusError, ForkManager};
-use call_evm::EvmState;
 use call_protocol::gas::FeeParams;
 use reth_db::DatabaseEnv;
 
 use crate::handlers::RpcState;
 
-/// Holds write guards for every state component in `RpcState`.
+/// Holds write guards for fee_params and fork_manager.
 ///
 /// Locks are acquired in the same deterministic order every time to avoid
 /// deadlocks.  Always acquire through [`RpcState::write_all`].
+///
+/// State is loaded from MDBX on demand inside `execute_block`.
 pub struct StateWriteBundle<'a> {
-    pub evm: RwLockWriteGuard<'a, EvmState>,
     pub fee_params: RwLockWriteGuard<'a, FeeParams>,
     pub fork_manager: RwLockWriteGuard<'a, ForkManager>,
-    /// Optional MDBX database environment for the P0-2 provider execution path.
-    pub db_env: Option<Arc<DatabaseEnv>>,
+    /// MDBX database environment — the single source of truth for state.
+    pub db_env: Arc<DatabaseEnv>,
 }
 
-/// Holds read guards for every state component in `RpcState`.
+/// Holds read guards for fee_params and fork_manager.
 ///
 /// Useful for lightweight read-only operations or for cloning state before
 /// the `propose` / `verify` phases of BFT consensus.
 pub struct StateReadBundle<'a> {
-    pub evm: RwLockReadGuard<'a, EvmState>,
     pub fee_params: RwLockReadGuard<'a, FeeParams>,
     pub fork_manager: RwLockReadGuard<'a, ForkManager>,
-    /// Optional MDBX database environment for the P0-2 provider execution path.
-    pub db_env: Option<Arc<DatabaseEnv>>,
+    /// MDBX database environment — the single source of truth for state.
+    pub db_env: Arc<DatabaseEnv>,
 }
 
 impl RpcState {
@@ -47,27 +45,24 @@ impl RpcState {
     /// the lock).  In practice this should never happen in normal node operation.
     pub fn write_all(&self) -> StateWriteBundle<'_> {
         StateWriteBundle {
-            evm: self.evm_state.write().unwrap(),
             fee_params: self.fee_params.write().unwrap(),
             fork_manager: self.fork_manager.write().unwrap(),
-            db_env: self.db_env.read().unwrap().clone(),
+            db_env: Arc::clone(&self.db_env),
         }
     }
 
     /// Acquire read locks on **all** state components in deterministic order.
     pub fn read_all(&self) -> StateReadBundle<'_> {
         StateReadBundle {
-            evm: self.evm_state.read().unwrap(),
             fee_params: self.fee_params.read().unwrap(),
             fork_manager: self.fork_manager.read().unwrap(),
-            db_env: self.db_env.read().unwrap().clone(),
+            db_env: Arc::clone(&self.db_env),
         }
     }
 }
 
 impl<'a> StateWriteBundle<'a> {
-    /// Execute a block against the state held in this bundle, passing **all**
-    /// available subsystems (oracle, governance, validator, agents, forks).
+    /// Execute a block against the state loaded from MDBX.
     ///
     /// This is the canonical execution path for production code paths such as
     /// `apply_synced_blocks`, `bft_event_loop` finalize, and
@@ -77,9 +72,13 @@ impl<'a> StateWriteBundle<'a> {
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let mut provider = call_evm::provider::InMemoryStateProvider::new(self.evm.clone());
-        let result = block.execute(&mut provider, &mut self.fee_params, height)?;
-        *self.evm = provider.state().clone();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&self.db_env)
+            .map_err(|e| ConsensusError::InvalidBlock(format!("db load: {e}")))?;
+        let result = block.execute(&mut provider, &mut self.fee_params, height, Some(&self.db_env))?;
+        provider
+            .state()
+            .save_to_db(&self.db_env)
+            .map_err(|e| ConsensusError::InvalidBlock(format!("db save: {e}")))?;
         Ok(result)
     }
 
@@ -100,15 +99,16 @@ impl<'a> StateReadBundle<'a> {
     /// Execute a block against **cloned** copies of the read state.
     ///
     /// This is used in the BFT `propose` and `verify` phases where state must
-    /// not be mutated.  Each component is `.clone()`'d before execution.
+    /// not be mutated.  State is loaded fresh from MDBX and discarded after.
     pub fn execute_block_cloned(
         &self,
         block: &Block,
         height: u64,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut fee_params = self.fee_params.clone();
-        let mut provider = call_evm::provider::InMemoryStateProvider::new(self.evm.clone());
-        block.execute(&mut provider, &mut fee_params, height)
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&self.db_env)
+            .map_err(|e| ConsensusError::InvalidBlock(format!("db load: {e}")))?;
+        block.execute(&mut provider, &mut fee_params, height, None)
     }
 
     /// Execute a block against cloned state with **no** subsystems.

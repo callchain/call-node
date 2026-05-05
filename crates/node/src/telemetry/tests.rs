@@ -195,7 +195,7 @@ fn dummy_health() -> HealthState {
             .as_nanos()
     ));
     let db = call_storage::open_db(tmp).unwrap();
-    let evm = call_evm::EvmState::new();
+    let evm = call_evm::provider::InMemoryStateProvider::new();
     HealthState {
         db: db.db,
         network: None,

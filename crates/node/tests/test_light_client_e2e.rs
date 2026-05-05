@@ -25,26 +25,28 @@ async fn test_light_verify_block_header_valid() {
 
     // Stake validator in consensus with the Ed25519 pubkey
     let val_id: ValidatorId = {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(&mut evm_state, validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(provider.state_mut(), validator_addr, ed25519_pubkey, one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
         id as u32
     };
 
     // Seed validator into EVM storage (RPC reads from EVM, not legacy validator_state)
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_validator(
-            &mut *evm,
+            provider.state_mut(),
             val_id as u64,
             validator_addr,
             ed25519_pubkey,
             one_million_call(),
             1, // active
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Produce a block
@@ -96,25 +98,27 @@ async fn test_light_verify_block_header_bad_parent() {
     let validator_addr = test_addr(1);
 
     let val_id: ValidatorId = {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(&mut evm_state, validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(provider.state_mut(), validator_addr, ed25519_pubkey, one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
         id as u32
     };
 
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_validator(
-            &mut *evm,
+            provider.state_mut(),
             val_id as u64,
             validator_addr,
             ed25519_pubkey,
             one_million_call(),
             1,
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Produce first block
@@ -169,10 +173,11 @@ async fn test_light_get_balance_proof() {
 
     // Set balance in EVM storage
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, asset_id, addr, balance,
+            provider.state_mut(), asset_id, addr, balance,
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state))
@@ -234,25 +239,27 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
     let validator_addr = test_addr(1);
 
     let val_id: ValidatorId = {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(&mut evm_state, validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(provider.state_mut(), validator_addr, ed25519_pubkey, one_million_call())
             .unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
         id as u32
     };
 
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_validator(
-            &mut *evm,
+            provider.state_mut(),
             val_id as u64,
             validator_addr,
             ed25519_pubkey,
             one_million_call(),
             1,
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Produce a block and tamper with timestamp

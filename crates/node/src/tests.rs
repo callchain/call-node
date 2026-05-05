@@ -98,16 +98,18 @@
 
         // Stake a validator so proposer selection works
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Fund sender balance in EVM storage
         {
-            let mut evm = node.state.evm_state.write().unwrap();
-            evm.set_balance(*test_sender(), call_primitives::U256::from(10_000_000_000_000u128));
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            provider.state_mut().set_balance(*test_sender(), call_primitives::U256::from(10_000_000_000_000u128));
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Insert an EVM tx into mempool
@@ -146,9 +148,10 @@
 
         // Commit
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
+            consensus.commit_block(&block, &result, &mut provider).expect("commit");
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         let height_after = node.consensus.read().unwrap().current_height();
@@ -177,10 +180,11 @@
 
         // Stake a validator
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Select and build with empty mempool
@@ -210,9 +214,10 @@
 
         // Commit
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("commit empty");
+            consensus.commit_block(&block, &result, &mut provider).expect("commit empty");
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         assert_eq!(node.consensus.read().unwrap().current_height(), 1);
@@ -244,16 +249,18 @@
 
         // Stake validators on node1 so it can produce blocks
         {
-            let mut evm_state = node1.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node1.state.db_env).unwrap();
             let mut consensus = node1.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node1.state.db_env).unwrap();
         }
 
         // Fund sender balance on node1 (EVM)
         {
-            let mut evm = node1.state.evm_state.write().unwrap();
-            state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node1.state.db_env).unwrap();
+            state_accessors::seed_balance(provider.state_mut(), call_protocol::CALL_ASSET_ID, *test_sender(), 10_000);
+            provider.state().save_to_db(&node1.state.db_env).unwrap();
         }
 
         // Verify initial state
@@ -294,9 +301,10 @@
 
         // Commit on node1
         {
-            let mut evm_state = node1.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node1.state.db_env).unwrap();
             let mut consensus = node1.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
+            consensus.commit_block(&block, &result, &mut provider).expect("commit");
+            provider.state().save_to_db(&node1.state.db_env).unwrap();
         }
         assert_eq!(node1.consensus.read().unwrap().current_height(), 1, "node1 should be at height 1");
 
@@ -343,16 +351,18 @@
 
         // Stake validator
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Fund sender in EVM storage
         {
-            let mut evm = node.state.evm_state.write().unwrap();
-            evm.set_balance(*test_sender(), call_primitives::U256::from(10_000_000_000_000u128));
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            provider.state_mut().set_balance(*test_sender(), call_primitives::U256::from(10_000_000_000_000u128));
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Insert EVM tx
@@ -386,9 +396,10 @@
         block.finalize(&result);
 
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
+            consensus.commit_block(&block, &result, &mut provider).expect("commit");
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Persist block
@@ -422,19 +433,23 @@
 
             // Stake validator
             {
-                let mut evm_state = node.state.evm_state.write().unwrap();
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
                 let mut consensus = node.consensus.write().unwrap();
-                consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-                consensus.refresh_proposer_subset(&evm_state);
+                consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+                consensus.refresh_proposer_subset(&provider);
+                provider.state().save_to_db(&node.state.db_env).unwrap();
             }
 
             // Fund sender balance in EVM storage
             {
-                let mut evm = node.state.evm_state.write().unwrap();
-                state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), initial_balance);
-                state_accessors::seed_asset(&mut *evm, 1, "CALL", "Callchain", 18, *test_sender(), 0, initial_balance, 0);
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                state_accessors::seed_balance(
+                    provider.state_mut(), call_protocol::CALL_ASSET_ID, *test_sender(), initial_balance);
+                state_accessors::seed_asset(
+                    provider.state_mut(), 1, "CALL", "Callchain", 18, *test_sender(), 0, initial_balance, 0);
                 // Set native EVM balance for gas payment
-                evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
+                provider.state_mut().set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
+                provider.state().save_to_db(&node.state.db_env).unwrap();
             }
 
             // Insert an EVM tx
@@ -457,18 +472,19 @@
 
             let result = {
                 let mut s = node.state.write_all();
-                let mut provider = call_evm::provider::InMemoryStateProvider::new(s.evm.clone());
-                let result = block.execute(&mut provider, &mut s.fee_params, height)
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                let result = block.execute(&mut provider, &mut s.fee_params, height, Some(&node.state.db_env))
                     .expect("execution");
-                *s.evm = provider.state().clone();
+                provider.state().save_to_db(&node.state.db_env).unwrap();
                 result
             };
             block.finalize(&result);
 
             {
-                let mut evm_state = node.state.evm_state.write().unwrap();
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
                 let mut consensus = node.consensus.write().unwrap();
-                consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
+                consensus.commit_block(&block, &result, &mut provider).expect("commit");
+                provider.state().save_to_db(&node.state.db_env).unwrap();
             }
 
             // Persist state to reth-db immediately
@@ -488,8 +504,8 @@
 
             // Verify native EVM balance was recovered
             let sender_balance = {
-                let evm = node2.state.evm_state.read().unwrap();
-                evm.get_balance(test_sender())
+                let provider = call_evm::provider::InMemoryStateProvider::from_db(&node2.state.db_env).unwrap();
+                provider.state().get_balance(test_sender())
             };
 
             // Native balance should be less than what was seeded (gas deducted)
@@ -515,18 +531,20 @@
 
         // Stake validator
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Fund sender with ample balance for fees + transfer (EVM)
         {
-            let mut evm = node.state.evm_state.write().unwrap();
-            state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            state_accessors::seed_balance(provider.state_mut(), call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
             // Set native EVM balance for gas payment
-            evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
+            provider.state_mut().set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Insert tx into mempool
@@ -558,8 +576,8 @@
 
         // Capture shared state BEFORE propose-phase execution
         let balance_before = {
-            let evm = node.state.evm_state.read().unwrap();
-            evm.get_balance(test_sender())
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            provider.state().get_balance(test_sender())
         };
 
         // Simulate PROPOSE phase: execute on CLONED state
@@ -574,8 +592,8 @@
 
         // Verify shared state is UNCHANGED after propose
         let balance_after_propose = {
-            let evm = node.state.evm_state.read().unwrap();
-            evm.get_balance(test_sender())
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            provider.state().get_balance(test_sender())
         };
         assert_eq!(
             balance_after_propose, balance_before,
@@ -594,16 +612,16 @@
 
             block.finalize(&result);
 
-            let mut evm_state = node.state.evm_state.write().unwrap();
-
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
+            consensus.commit_block(&block, &result, &mut provider).expect("commit");
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Verify shared state IS modified after finalize
         let balance_after_finalize = {
-            let evm = node.state.evm_state.read().unwrap();
-            evm.get_balance(test_sender())
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            provider.state().get_balance(test_sender())
         };
         assert!(
             balance_after_finalize < balance_before,
@@ -624,17 +642,19 @@
 
         // Stake validator
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Fund sender with ample balance for fees + transfer (EVM)
         {
-            let mut evm = node.state.evm_state.write().unwrap();
-            state_accessors::seed_balance(&mut *evm, call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
-            evm.set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            state_accessors::seed_balance(provider.state_mut(), call_protocol::CALL_ASSET_ID, *test_sender(), 10_000_000);
+            provider.state_mut().set_balance(*test_sender(), call_primitives::U256::from(100_000_000_000u128));
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         let tx = make_evm_tx(0);
@@ -715,10 +735,11 @@
 
         // Stake validator
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         let height = node.consensus.read().unwrap().current_height();
@@ -743,10 +764,10 @@
 
             block.finalize(&result);
 
-            let mut evm_state = node.state.evm_state.write().unwrap();
-
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("first commit");
+            consensus.commit_block(&block, &result, &mut provider).expect("first commit");
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Consensus height should have advanced
@@ -754,9 +775,9 @@
 
         // Attempt to commit the SAME block again should fail due to height mismatch
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            let result = consensus.commit_block(&block, &BlockExecutionResult::default(), &mut evm_state);
+            let result = consensus.commit_block(&block, &BlockExecutionResult::default(), &mut provider);
             assert!(
                 result.is_err(),
                 "double-commit of same block should be rejected"
@@ -849,10 +870,11 @@
 
         // Stake validator so proposer selection works
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Use small epoch length so we cross boundary quickly
@@ -926,10 +948,11 @@
 
         // Stake validator
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.stake_validator(&mut evm_state, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
-            consensus.refresh_proposer_subset(&evm_state);
+            consensus.stake_validator(&mut provider, test_addr(1), test_pubkey(1), one_million_call()).expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         // Large epoch length — sync won't cross boundary

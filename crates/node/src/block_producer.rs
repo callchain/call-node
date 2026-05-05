@@ -31,6 +31,7 @@ pub(crate) async fn block_production_loop(
     _audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     oracle_tracker: Arc<RwLock<OracleTracker>>,
     governance_advancer: GovernanceAdvancer,
+    snapshot_retention_blocks: u64,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -107,10 +108,10 @@ pub(crate) async fn block_production_loop(
 
         // 3c. Finalize bridge deposits whose challenge period has expired
         {
-            let mut evm_state = state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             let config = BridgeConfig::default();
             let finalized = call_consensus::exec::state_accessors::finalize_pending_external_deposits_evm(
-                &mut evm_state,
+                provider.state_mut(),
                 height,
                 config.challenge_period_blocks,
             );
@@ -120,6 +121,7 @@ pub(crate) async fn block_production_loop(
                     "bridge: deposits finalized and credited"
                 );
             }
+            provider.state_mut().save_to_db(&state.db_env).unwrap();
         }
 
         // 3b. Sign the block (if validator with signing key)
@@ -144,11 +146,11 @@ pub(crate) async fn block_production_loop(
         if is_oracle_boundary {
             if let Some(ref net) = network {
                 let tracked = {
-                    let evm = state.evm_state.read().unwrap();
-                    let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(&evm);
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                    let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(provider.state());
                     let mut pairs = Vec::new();
                     for i in 0..count {
-                        let asset_id = call_consensus::exec::state_accessors::read_oracle_tracked_asset(&evm, i);
+                        let asset_id = call_consensus::exec::state_accessors::read_oracle_tracked_asset(provider.state(), i);
                         pairs.push(call_primitives::PricePair::new(asset_id, 0));
                     }
                     pairs
@@ -184,14 +186,18 @@ pub(crate) async fn block_production_loop(
             let tracker_guard = oracle_tracker.read().unwrap();
             let outliers: Vec<u32> = tracker_guard.last_outliers().to_vec();
             if !outliers.is_empty() {
-                let mut evm_state = state.evm_state.write().unwrap();
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
+                    &state.db_env,
+                )
+                .unwrap();
                 let mut c = consensus.write().unwrap();
                 for vid in &outliers {
-                    if let Err(e) = c.handle_oracle_outlier(&mut evm_state, *vid) {
+                    if let Err(e) = c.handle_oracle_outlier(provider.state_mut(), *vid) {
                         tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
                     }
                 }
                 tracing::info!(outliers = ?outliers, "slashed oracle outliers");
+                provider.state_mut().save_to_db(&state.db_env).unwrap();
             }
             drop(tracker_guard);
 
@@ -199,25 +205,32 @@ pub(crate) async fn block_production_loop(
             let contributions = {
                 let mut tracker_guard = oracle_tracker.write().unwrap();
                 let reward_pool = {
-                    let evm = state.evm_state.read().unwrap();
-                    call_consensus::exec::state_accessors::read_oracle_reward_pool(&evm)
+                    let provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                    call_consensus::exec::state_accessors::read_oracle_reward_pool(provider.state())
                 };
                 let rewards = tracker_guard.distribute_rewards(reward_pool);
                 if !rewards.is_empty() {
-                    let mut evm = state.evm_state.write().unwrap();
-                    call_consensus::exec::state_accessors::zero_oracle_reward_pool(&mut evm);
+                    let mut provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                    call_consensus::exec::state_accessors::zero_oracle_reward_pool(provider.state_mut());
+                    provider.state_mut().save_to_db(&state.db_env).unwrap();
                 }
                 rewards
             };
             if !contributions.is_empty() {
-                let mut evm_state = state.evm_state.write().unwrap();
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
+                    &state.db_env,
+                )
+                .unwrap();
                 let mut c = consensus.write().unwrap();
                 for (vid, amount) in &contributions {
-                    if let Err(e) = c.distribute_oracle_reward(&mut evm_state, *vid, *amount) {
+                    if let Err(e) = c.distribute_oracle_reward(provider.state_mut(), *vid, *amount) {
                         tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
                     }
                 }
                 tracing::info!(count = contributions.len(), "distributed oracle rewards");
+                provider.state_mut().save_to_db(&state.db_env).unwrap();
             }
 
             // Clear tracking after slashing and reward distribution
@@ -227,12 +240,13 @@ pub(crate) async fn block_production_loop(
 
         // 7. Commit via consensus (BFT engine handles proposal/verification)
         {
-            let mut evm_state = state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             let mut c = consensus.write().unwrap();
-            if let Err(e) = c.commit_block(&block, &result, &mut evm_state) {
+            if let Err(e) = c.commit_block(&block, &result, provider.state_mut()) {
                 tracing::warn!(error = ?e, "commit failed");
                 continue;
             }
+            provider.state_mut().save_to_db(&state.db_env).unwrap();
         }
         telemetry.record_block_produced();
         telemetry.record_block_committed();
@@ -289,9 +303,10 @@ pub(crate) async fn block_production_loop(
 
         // 10b. Advance governance proposal state machine
         {
-            let mut evm_state = state.evm_state.write().unwrap();
-            let events = governance_advancer.advance(&mut evm_state, new_height);
-            drop(evm_state);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            let events = governance_advancer.advance(provider.state_mut(), new_height);
+            provider.state_mut().save_to_db(&state.db_env).unwrap();
+            drop(provider);
             for event in events {
                 let (event_str, proposal_id) = match &event {
                     call_governance::GovernanceEvent::ProposalAdvanced { id, from, to } => {
@@ -407,6 +422,12 @@ pub(crate) async fn block_production_loop(
         if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config, Some(&db.db)) {
             tracing::warn!(error = %e, "prune check failed");
         }
+        // Prune historical diff tables (account / storage history)
+        let history_cutoff = new_height.saturating_sub(prune_config.keep_recent);
+        let _ = call_evm::db::prune_account_history(&db.db, history_cutoff);
+        let _ = call_evm::db::prune_storage_history(&db.db, history_cutoff);
+        // Prune full block snapshots (replaced by diff tables)
+        let _ = call_evm::db::prune_block_snapshots(&db.db, new_height, prune_config.keep_recent);
         telemetry.record_storage_prune(
             prune_state.traces_pruned,
             prune_state.receipts_pruned,
@@ -417,27 +438,27 @@ pub(crate) async fn block_production_loop(
         // 13a. Produce state snapshot at snapshot interval boundaries
         if new_height % prune_config.snapshot_interval == 0 {
             let evm_root = {
-                let evm_state = state.evm_state.read().unwrap();
-                let root = evm_state.compute_state_root();
+                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let root = provider.state().compute_state_root();
                 call_primitives::Hash::from(root.0)
             };
 
             let shielded_root = {
-                let evm_state = state.evm_state.read().unwrap();
-                call_consensus::exec::state_accessors::read_shielded_merkle_root(&evm_state)
+                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                call_consensus::exec::state_accessors::read_shielded_merkle_root(provider.state())
             };
 
             let agent_root = {
-                let evm_state = state.evm_state.read().unwrap();
-                let count = call_consensus::exec::state_accessors::read_agent_count(&evm_state);
+                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let count = call_consensus::exec::state_accessors::read_agent_count(provider.state());
                 let mut agents = std::collections::HashMap::new();
                 for id in 0..count {
-                    let owner = call_consensus::exec::state_accessors::agent_get_owner(&evm_state, id);
+                    let owner = call_consensus::exec::state_accessors::agent_get_owner(provider.state(), id);
                     if owner == call_primitives::Address::ZERO {
                         continue;
                     }
-                    let name = call_consensus::exec::state_accessors::agent_get_name(&evm_state, id);
-                    let registered_at = call_consensus::exec::state_accessors::agent_get_registered_at(&evm_state, id);
+                    let name = call_consensus::exec::state_accessors::agent_get_name(provider.state(), id);
+                    let registered_at = call_consensus::exec::state_accessors::agent_get_registered_at(provider.state(), id);
                     agents.insert(id, (owner, name, registered_at));
                 }
                 call_storage::compute_agent_root(&agents)
@@ -463,13 +484,13 @@ pub(crate) async fn block_production_loop(
 
         // 14a. Save block state snapshot for historical queries
         {
-            let evm_state = state.evm_state.read().unwrap();
-            if let Err(ref e) = save_block_snapshot(db_env, new_height, &evm_state) {
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            if let Err(ref e) = save_block_snapshot(db_env, new_height, provider.state()) {
                 tracing::warn!(error = %e, height = new_height, "failed to save block snapshot");
             }
         }
-        // 14b. Prune snapshots older than 128 blocks
-        if let Err(ref e) = prune_block_snapshots(db_env, new_height, 128) {
+        // 14b. Prune snapshots older than retention window
+        if let Err(ref e) = prune_block_snapshots(db_env, new_height, snapshot_retention_blocks) {
             tracing::warn!(error = %e, "failed to prune old snapshots");
         }
 

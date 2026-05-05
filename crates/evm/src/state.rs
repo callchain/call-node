@@ -185,25 +185,6 @@ impl EvmState {
         }
     }
 
-    /// Compute the Ethereum state trie root (Merkle Patricia Trie).
-    ///
-    /// Delegates to reth-trie's `StateRoot` for correctness and to enable
-    /// incremental updates in the future.  The legacy `HashBuilder` path is
-    /// kept as `compute_state_root_legacy` for test comparison.
-    pub fn compute_state_root(&self) -> B256 {
-        crate::trie::compute_state_root_reth(self)
-            .expect("reth-trie state root computation should not fail")
-    }
-
-    /// Compute the Ethereum state trie root **and** collect trie updates.
-    ///
-    /// The returned [`reth_trie::updates::TrieUpdates`] can be persisted to
-    /// MDBX and used for incremental state root computation on the next block.
-    pub fn compute_state_root_with_updates(&self) -> (B256, reth_trie::updates::TrieUpdates) {
-        crate::trie::compute_state_root_with_updates(self)
-            .expect("reth-trie state root computation should not fail")
-    }
-
     /// Legacy O(n) state root computation using `HashBuilder` full aggregation.
     ///
     /// Kept for regression testing against the reth-trie path.

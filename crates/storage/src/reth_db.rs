@@ -148,6 +148,62 @@ impl Table for CallTrieUpdates {
     type Value = Vec<u8>;
 }
 
+/// Account history: serialized (address, block_number) -> serialized EvmAccount
+///
+/// Stores the state of an account at a specific block height.
+/// Key layout: [address: 20 bytes][block_number: 8 bytes BE].
+/// Enables historical account queries (eth_getBalance, eth_getCode, eth_getNonce).
+#[derive(Debug)]
+pub struct CallAccountHistory;
+impl Table for CallAccountHistory {
+    const NAME: &'static str = "call_account_history";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Storage history: serialized (address, slot, block_number) -> serialized U256
+///
+/// Stores the value of a storage slot at a specific block height.
+/// Key layout: [address: 20 bytes][slot: 32 bytes][block_number: 8 bytes BE].
+/// Enables historical storage queries (eth_getStorageAt).
+#[derive(Debug)]
+pub struct CallStorageHistory;
+impl Table for CallStorageHistory {
+    const NAME: &'static str = "call_storage_history";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Account trie nodes: serialized nibbles path -> serialized BranchNodeCompact
+///
+/// Stores the intermediate branch nodes of the account Merkle Patricia Trie.
+/// Enables `eth_getProof` to generate proofs without recomputing the trie
+/// from scratch.
+#[derive(Debug)]
+pub struct CallAccountTrie;
+impl Table for CallAccountTrie {
+    const NAME: &'static str = "call_account_trie";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Storage trie nodes: hashed_address + serialized nibbles -> serialized BranchNodeCompact
+///
+/// Stores the intermediate branch nodes of per-account storage Merkle Patricia Tries.
+/// Key layout: [hashed_address: 32 bytes][nibbles_bytes...].
+/// Enables `eth_getProof` storage proofs without recomputing from scratch.
+#[derive(Debug)]
+pub struct CallStorageTrie;
+impl Table for CallStorageTrie {
+    const NAME: &'static str = "call_storage_trie";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// Block state snapshots: serialized block_number -> serialized EvmState
 ///
 /// Stores a full copy of the EVM state at a specific block height.
@@ -184,7 +240,11 @@ impl TableSet for CallTables {
                 box_info::<CallForkState>,
                 box_info::<CallCheckpoint>,
                 box_info::<CallTrieUpdates>,
+                box_info::<CallAccountHistory>,
+                box_info::<CallStorageHistory>,
                 box_info::<CallBlockStateSnapshots>,
+                box_info::<CallAccountTrie>,
+                box_info::<CallStorageTrie>,
             ]
             .into_iter()
             .map(|f| f()),

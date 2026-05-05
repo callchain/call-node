@@ -5,7 +5,8 @@
 
 use call_consensus::proposer::ConsensusParams;
 use call_crypto::keccak256;
-use call_evm::{EvmExecutor, EvmState};
+use call_evm::EvmExecutor;
+use call_evm::provider::InMemoryStateProvider;
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
 use call_protocol::gas::FeeParams;
 use alloy_primitives::U256;
@@ -169,7 +170,7 @@ pub struct GenesisState {
     /// Unified state root
     pub state_root: Hash,
     /// EVM state
-    pub evm_state: EvmState,
+    pub evm_state: InMemoryStateProvider,
     /// Registered fee currency asset IDs
     pub fee_currencies: Vec<AssetId>,
 }
@@ -202,7 +203,7 @@ impl GenesisExecutor {
         self.validate()?;
 
         // Step 2: Initialize state tables
-        let mut evm_state = EvmState::new();
+        let mut evm_state = InMemoryStateProvider::new();
 
         // Step 3: Register assets and distribute initial balances (EVM only)
         self.register_assets(&mut evm_state)?;
@@ -262,7 +263,7 @@ impl GenesisExecutor {
     /// Register assets and distribute initial balances (EVM only)
     fn register_assets(
         &self,
-        evm_state: &mut EvmState,
+        evm_state: &mut InMemoryStateProvider,
     ) -> Result<(), GenesisError> {
         for asset in &self.genesis.initial_assets {
             // Distribute initial balances (EVM only)
@@ -296,7 +297,7 @@ impl GenesisExecutor {
     /// Register genesis validators (EVM + legacy)
     fn register_validators(
         &self,
-        evm_state: &mut EvmState,
+        evm_state: &mut InMemoryStateProvider,
     ) -> Result<(), GenesisError> {
         use call_precompile::{address_to_u256, u128_to_u256, u64_to_u256, VALIDATOR_ADDRESS};
         use call_precompile::storage::storage_slot;
@@ -348,7 +349,7 @@ impl GenesisExecutor {
     /// Register fee currencies
     fn register_fee_currencies(
         &self,
-        _evm_state: &EvmState,
+        _evm_state: &InMemoryStateProvider,
     ) -> Result<Vec<AssetId>, GenesisError> {
         let mut ids = Vec::new();
         for currency in &self.genesis.initial_fee_currencies {
@@ -362,7 +363,7 @@ impl GenesisExecutor {
     /// require a WrappedToken contract.
     fn deploy_evm_templates(
         &self,
-        evm_state: &mut EvmState,
+        evm_state: &mut InMemoryStateProvider,
     ) -> Result<(), GenesisError> {
         let executor = EvmExecutor::new(self.genesis.chain_id);
 
@@ -406,7 +407,7 @@ impl GenesisExecutor {
 // ── State Root Computation ────────────────────────────────────────────
 
 /// Compute EVM state root
-pub fn compute_evm_state_root(evm_state: &EvmState) -> Hash {
+pub fn compute_evm_state_root(evm_state: &InMemoryStateProvider) -> Hash {
     let mut data = Vec::new();
     let mut entries: Vec<_> = evm_state.get_all_accounts().iter().collect();
     entries.sort_by_key(|(addr, _)| **addr);

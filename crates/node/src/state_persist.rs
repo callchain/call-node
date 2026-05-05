@@ -6,13 +6,11 @@ use call_consensus::{SimplexConsensus, ForkManager, PersistedConsensusState};
 use call_protocol::{
     FeeParams, ProtocolReceipt,
 };
-use call_evm::EvmState;
 use call_primitives::TxHash;
 use call_rpc::RpcState;
 use call_storage::{
     StorageError,
     db_put, db_batch_put, db_clear, db_iter_all, db_get, db_del,
-    CallEvmAccounts,
     CallConsensusState,
     CallReceipts, CallReceiptsByBlock, CallForkState, CallCheckpoint,
     CallFeeParams,
@@ -24,21 +22,11 @@ use reth_db::DatabaseEnv;
 /// All on-chain state loaded from reth-db in one struct.
 /// Replaces the previous 13-element tuple so callers use named fields.
 pub(crate) struct LoadedState {
-    pub evm_state: EvmState,
     pub fee_params: FeeParams,
 }
 
 /// Load all state types from the reth-db database.
 pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
-    // Load EVM accounts
-    let evm_state = match load_evm_accounts_inner(db_env) {
-        Ok(state) => state,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load evm accounts");
-            EvmState::new()
-        }
-    };
-
     // Load fee params
     let fee_params = match load_fee_params(db_env) {
         Ok(p) => p,
@@ -49,7 +37,6 @@ pub(crate) fn load_state_from_db(db_env: &Arc<DatabaseEnv>) -> LoadedState {
     };
 
     LoadedState {
-        evm_state,
         fee_params,
     }
 }
@@ -68,13 +55,6 @@ pub(crate) fn persist_state_to_db(
     };
     write_checkpoint_pending(db_env, checkpoint_hash)
         .map_err(|e| format!("write checkpoint: {e}"))?;
-
-    // Persist EVM state
-    {
-        let evm = state.evm_state.read().unwrap();
-        save_evm_accounts_inner(db_env, &evm)
-            .map_err(|e| format!("save evm: {e}"))?;
-    }
 
     // Persist fee params
     {
@@ -108,31 +88,6 @@ pub(crate) fn persist_state_to_db(
     clear_checkpoint(db_env)
         .map_err(|e| format!("clear checkpoint: {e}"))?;
 
-    Ok(())
-}
-
-/// Load EVM accounts from DB
-pub(crate) fn load_evm_accounts_inner(db: &DatabaseEnv) -> Result<EvmState, String> {
-    let data = db_iter_all::<CallEvmAccounts>(db).map_err(|e: StorageError| e.to_string())?;
-    let mut state = EvmState::new();
-    for (k, v) in data {
-        let addr: alloy_primitives::Address = serde_json::from_slice(&k).map_err(|e: serde_json::Error| e.to_string())?;
-        let account: call_evm::EvmAccount = serde_json::from_slice(&v).map_err(|e: serde_json::Error| e.to_string())?;
-        let existing = state.get_account_mut(&addr);
-        *existing = account;
-    }
-    Ok(state)
-}
-
-/// Save EVM accounts to DB
-pub(crate) fn save_evm_accounts_inner(db: &DatabaseEnv, state: &EvmState) -> Result<(), String> {
-    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
-        .get_all_accounts()
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    db_clear::<CallEvmAccounts>(db).map_err(|e: StorageError| e.to_string())?;
-    db_batch_put::<CallEvmAccounts>(db, entries).map_err(|e: StorageError| e.to_string())?;
     Ok(())
 }
 
@@ -235,12 +190,14 @@ pub(crate) fn save_consensus_state_inner(db: &DatabaseEnv, consensus: &SimplexCo
 }
 
 /// Load consensus state from the database.
-pub(crate) fn load_consensus_state_inner(db: &DatabaseEnv, evm_state: &EvmState) -> Result<SimplexConsensus, String> {
-    match db_get::<CallConsensusState>(db, &[0]).map_err(|e: StorageError| e.to_string())? {
+pub(crate) fn load_consensus_state_inner(db_env: &Arc<DatabaseEnv>) -> Result<SimplexConsensus, String> {
+    match db_get::<CallConsensusState>(db_env, &[0]).map_err(|e: StorageError| e.to_string())? {
         Some(data) => {
             let state: PersistedConsensusState = serde_json::from_slice(&data)
                 .map_err(|e| format!("deserialize consensus: {e}"))?;
-            Ok(SimplexConsensus::restore_from_persisted(state, evm_state))
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env)
+                .map_err(|e| format!("load provider for consensus restore: {e}"))?;
+            Ok(SimplexConsensus::restore_from_persisted(state, &provider))
         }
         None => Err("no consensus state in db".to_string()),
     }
@@ -260,12 +217,6 @@ pub(crate) fn persist_state_incremental(
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
 ) -> Result<(), String> {
-    // Persist EVM state (overwrite existing entries, no clear)
-    {
-        let evm = state.evm_state.read().map_err(|_| "evm lock poisoned".to_string())?;
-        save_evm_accounts_no_clear(db_env, &evm)?;
-    }
-
     // Persist consensus state
     {
         let c = consensus.read().map_err(|_| "consensus lock poisoned".to_string())?;
@@ -290,16 +241,4 @@ pub(crate) fn persist_state_incremental(
     Ok(())
 }
 
-/// Save EVM accounts without clearing the table first.
-pub(crate) fn save_evm_accounts_no_clear(db: &DatabaseEnv, state: &EvmState) -> Result<(), String> {
-    let entries: Vec<(Vec<u8>, Vec<u8>)> = state
-        .get_all_accounts()
-        .iter()
-        .map(|(k, v)| (serde_json::to_vec(k).unwrap(), serde_json::to_vec(v).unwrap()))
-        .collect();
-    for (k, v) in entries {
-        db_put::<CallEvmAccounts>(db, k, v).map_err(|e: StorageError| e.to_string())?;
-    }
-    Ok(())
-}
 

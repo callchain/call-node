@@ -5,7 +5,7 @@
 //! events for broadcasting.
 
 use call_consensus::exec::state_accessors as sa;
-use call_evm::EvmState;
+use call_evm::provider::InMemoryStateProvider;
 use call_governance::{GovernanceEvent, ProposalState};
 use call_precompile::u64_to_u256;
 use call_primitives::{Address, U256};
@@ -20,7 +20,7 @@ pub struct GovernanceAdvancer;
 impl GovernanceAdvancer {
     /// Advance the governance state machine for the current block.
     /// Reads from EVM, writes back, returns events.
-    pub fn advance(&self, evm_state: &mut EvmState, current_block: u64) -> Vec<GovernanceEvent> {
+    pub fn advance(&self, evm_state: &mut InMemoryStateProvider, current_block: u64) -> Vec<GovernanceEvent> {
         let mut events = Vec::new();
 
         let count = sa::read_gov_proposal_count(evm_state);
@@ -230,7 +230,7 @@ impl GovernanceAdvancer {
     }
 
     /// Apply on-chain side effects for an executed proposal.
-    fn apply_side_effects(evm_state: &mut EvmState, _proposal_id: u64, proposal_type: u8) {
+    fn apply_side_effects(evm_state: &mut InMemoryStateProvider, _proposal_id: u64, proposal_type: u8) {
         match proposal_type {
             5 => {
                 // EmergencyPause: set paused flag
@@ -256,7 +256,7 @@ impl GovernanceAdvancer {
 mod tests {
     use super::*;
     use call_consensus::exec::state_accessors as sa;
-    use call_evm::EvmState;
+    use call_evm::provider::InMemoryStateProvider;
     use call_precompile::{u64_to_u256, GOVERNANCE_ADDRESS};
     use call_primitives::{Address, U256};
 
@@ -265,7 +265,7 @@ mod tests {
     }
 
     fn setup_proposal(
-        evm: &mut EvmState,
+        evm: &mut InMemoryStateProvider,
         proposal_id: u64,
         proposal_type: u8,
         status: u8,
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_pending_to_active() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_active_to_queued() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_active_to_defeated() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_queued_to_executed() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_queued_to_expired() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_queued_execute_before_expire() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_emergency_pause_execute_sets_paused() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_multiple_proposals_advance() {
-        let mut evm = EvmState::new();
+        let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 

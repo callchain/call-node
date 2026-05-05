@@ -183,9 +183,9 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 incoming_view_key: ivk,
                 full_view_key: fvk,
             };
-            let evm = state.evm_state.read()
-                .map_err(|_| internal_error("lock poisoned".into()))?;
-            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let merkle_root = state_accessors::read_shielded_merkle_root(&provider);
             // Note balances require the full note registry (not in EVM storage).
             // Return merkle root only; use a local shielded node for balance queries.
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -359,25 +359,25 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let sigs_array = sigs_json.get("signatures")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| invalid_params("missing signatures array".into()))?;
-            let evm = state.evm_state.read()
-                .map_err(|_| internal_error("lock poisoned".into()))?;
-            let validators = state_accessors::read_validator_addresses(&*evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let validators = state_accessors::read_validator_addresses(&provider);
             let total = validators.len() as u32;
             let quorum = (2 * total as usize).div_ceil(3).max(1);
             let block_hash_bytes = block_hash.as_slice();
             let mut valid_count = 0;
             for entry in sigs_array {
                 if let Some(validator_id) = entry.get(0).and_then(|v| v.as_u64()) {
-                    let addr = state_accessors::read_validator_addr(&*evm, validator_id);
+                    let addr = state_accessors::read_validator_addr(&provider, validator_id);
                     if addr != Address::ZERO {
-                        let status = state_accessors::read_validator_status(&*evm, addr);
+                        let status = state_accessors::read_validator_status(&provider, addr);
                         if status != 0 {
                             if let Some(sig_hex) = entry.get(2).and_then(|v| v.as_str()) {
                                 if let Ok(sig_bytes) = hex::decode(sig_hex.trim_start_matches("0x")) {
                                     if sig_bytes.len() == 64 {
                                         let mut sig = [0u8; 64];
                                         sig.copy_from_slice(&sig_bytes);
-                                        let pk = state_accessors::read_validator_pubkey(&*evm, addr);
+                                        let pk = state_accessors::read_validator_pubkey(&provider, addr);
                                         if call_crypto::ed25519_verify(
                                             &pk,
                                             &sig,
@@ -409,10 +409,10 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let (asset_id, address_str): (u64, String) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let address = address_str.parse::<Address>().map_err(|e| invalid_params(e.to_string()))?;
             let balance = state.get_balance(asset_id, &address);
-            let evm = state.evm_state.read()
-                .map_err(|_| internal_error("lock poisoned".into()))?;
-            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
-            let leaf_count = state_accessors::read_shielded_commitment_count(&evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let merkle_root = state_accessors::read_shielded_merkle_root(&provider);
+            let leaf_count = state_accessors::read_shielded_commitment_count(&provider);
             // Full note proofs require the Merkle tree structure (not in EVM storage).
             let state_leaf = call_crypto::keccak256(format!("{asset_id}:{address:?}:{balance}").as_bytes());
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -462,19 +462,19 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
                 .unwrap_or_default();
-            let evm = state.evm_state.read()
-                .map_err(|_| internal_error("lock poisoned".into()))?;
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
             let mut spent = Vec::new();
             for nf_hex in &nullifiers {
                 if let Ok(bytes) = hex::decode(nf_hex.trim_start_matches("0x")) {
                     let nf = call_shielded::Nullifier(call_primitives::Hash::from_slice(&bytes));
-                    if state_accessors::read_shielded_nullifier_spent(&evm, &nf) {
+                    if state_accessors::read_shielded_nullifier_spent(&provider, &nf) {
                         spent.push(nf_hex.clone());
                     }
                 }
             }
-            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
-            let leaf_count = state_accessors::read_shielded_commitment_count(&evm);
+            let merkle_root = state_accessors::read_shielded_merkle_root(&provider);
+            let leaf_count = state_accessors::read_shielded_commitment_count(&provider);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "valid": spent.is_empty(),
                 "nullifierCount": nullifiers.len(),
@@ -495,10 +495,10 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
                 .ok_or_else(|| invalid_params("missing 'viewingKey' field".into()))?;
             let _vk_bytes = hex::decode(viewing_key_hex.trim_start_matches("0x"))
                 .map_err(|e| invalid_params(format!("invalid viewing key: {e}")))?;
-            let evm = state.evm_state.read()
-                .map_err(|_| internal_error("lock poisoned".into()))?;
-            let leaf_count = state_accessors::read_shielded_commitment_count(&evm);
-            let merkle_root = state_accessors::read_shielded_merkle_root(&evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let leaf_count = state_accessors::read_shielded_commitment_count(&provider);
+            let merkle_root = state_accessors::read_shielded_merkle_root(&provider);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "noteCount": leaf_count,
                 "spentNullifiers": 0, // not countable from EVM without iteration
@@ -513,18 +513,19 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_governanceGetProposal", |params, state, _ctx| async move {
             let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let count = state_accessors::read_gov_proposal_count(&evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let count = state_accessors::read_gov_proposal_count(&provider);
             if proposal_id == 0 || proposal_id > count {
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
-            let status = state_accessors::read_gov_proposal_status(&evm, proposal_id);
-            let proposer = state_accessors::read_gov_proposal_proposer(&evm, proposal_id);
-            let title_bytes = state_accessors::read_gov_proposal_title(&evm, proposal_id);
-            let desc_bytes = state_accessors::read_gov_proposal_description(&evm, proposal_id);
-            let (yes, no, abstain) = state_accessors::read_gov_proposal_votes(&evm, proposal_id);
-            let deposit = state_accessors::read_gov_proposal_deposit(&evm, proposal_id);
-            let queued_at = state_accessors::read_gov_proposal_queued_at(&evm, proposal_id);
+            let status = state_accessors::read_gov_proposal_status(&provider, proposal_id);
+            let proposer = state_accessors::read_gov_proposal_proposer(&provider, proposal_id);
+            let title_bytes = state_accessors::read_gov_proposal_title(&provider, proposal_id);
+            let desc_bytes = state_accessors::read_gov_proposal_description(&provider, proposal_id);
+            let (yes, no, abstain) = state_accessors::read_gov_proposal_votes(&provider, proposal_id);
+            let deposit = state_accessors::read_gov_proposal_deposit(&provider, proposal_id);
+            let queued_at = state_accessors::read_gov_proposal_queued_at(&provider, proposal_id);
             let title = String::from_utf8_lossy(&title_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
             let description = String::from_utf8_lossy(&desc_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -545,14 +546,15 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_governanceGetAllProposals
     module
         .register_async_method("call_governanceGetAllProposals", |_params, state, _ctx| async move {
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let count = state_accessors::read_gov_proposal_count(&evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let count = state_accessors::read_gov_proposal_count(&provider);
             let mut proposals = Vec::with_capacity(count as usize);
             for id in 1..=count {
-                let status = state_accessors::read_gov_proposal_status(&evm, id);
-                let proposer = state_accessors::read_gov_proposal_proposer(&evm, id);
-                let title_bytes = state_accessors::read_gov_proposal_title(&evm, id);
-                let (yes, no, _abstain) = state_accessors::read_gov_proposal_votes(&evm, id);
+                let status = state_accessors::read_gov_proposal_status(&provider, id);
+                let proposer = state_accessors::read_gov_proposal_proposer(&provider, id);
+                let title_bytes = state_accessors::read_gov_proposal_title(&provider, id);
+                let (yes, no, _abstain) = state_accessors::read_gov_proposal_votes(&provider, id);
                 let title = String::from_utf8_lossy(&title_bytes).trim_end_matches(|c| c == '\0' || c == '_').to_string();
                 proposals.push(serde_json::json!({
                     "id": id,
@@ -570,8 +572,9 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_governanceIsPaused
     module
         .register_async_method("call_governanceIsPaused", |_params, state, _ctx| async move {
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let paused = state_accessors::read_gov_paused(&evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let paused = state_accessors::read_gov_paused(&provider);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({ "isPaused": paused }))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -582,14 +585,15 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_oracleGetPrice", |params, state, _ctx| async move {
             let asset_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let price = call_consensus::exec::state_accessors::read_oracle_price(&evm, asset_id);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let price = call_consensus::exec::state_accessors::read_oracle_price(&provider, asset_id);
             if price == 0 {
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
-            let timestamp = call_consensus::exec::state_accessors::read_oracle_timestamp(&evm, asset_id);
-            let block_number = call_consensus::exec::state_accessors::read_oracle_block(&evm, asset_id);
-            let count = call_consensus::exec::state_accessors::read_oracle_count(&evm, asset_id);
+            let timestamp = call_consensus::exec::state_accessors::read_oracle_timestamp(&provider, asset_id);
+            let block_number = call_consensus::exec::state_accessors::read_oracle_block(&provider, asset_id);
+            let count = call_consensus::exec::state_accessors::read_oracle_count(&provider, asset_id);
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
             let is_stale = now.saturating_sub(timestamp) > 3600; // 1 hour staleness
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -609,8 +613,10 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_oracleGetTwap", |params, state, _ctx| async move {
             let (asset_id,): (u64,) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let twap = call_consensus::exec::state_accessors::read_oracle_twap(&evm, asset_id);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let twap = call_consensus::exec::state_accessors::read_oracle_twap(
+                &provider, asset_id);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": asset_id,
                 "twap": twap.to_string(),
@@ -623,14 +629,15 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     module
         .register_async_method("call_oracleGetValidatorInfo", |params, state, _ctx| async move {
             let validator_id: u32 = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
             let addr = call_consensus::exec::state_accessors::read_validator_addr(
-                &evm, validator_id as u64);
+                &provider, validator_id as u64);
             if addr == call_primitives::Address::ZERO {
                 return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
             }
-            let stake = call_consensus::exec::state_accessors::read_validator_stake(&evm, addr);
-            let status = call_consensus::exec::state_accessors::read_validator_status(&evm, addr);
+            let stake = call_consensus::exec::state_accessors::read_validator_stake(&provider, addr);
+            let status = call_consensus::exec::state_accessors::read_validator_status(&provider, addr);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "validatorId": validator_id,
                 "address": format!("{:?}", addr),
@@ -658,14 +665,15 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
             let mut tx_hash_arr = [0u8; 32];
             tx_hash_arr.copy_from_slice(&tx_hash_bytes);
             let _tx_hash = alloy_primitives::B256::from(tx_hash_arr);
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let pending_status = state_accessors::read_bridge_pending_status(&*evm, tx_hash_arr);
-            let is_processed = state_accessors::read_bridge_processed(&*evm, tx_hash_arr);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let pending_status = state_accessors::read_bridge_pending_status(&provider, tx_hash_arr);
+            let is_processed = state_accessors::read_bridge_processed(&provider, tx_hash_arr);
             let status = if pending_status == 1 {
-                let recipient = state_accessors::read_bridge_pending_recipient(&*evm, tx_hash_arr);
-                let asset_id = state_accessors::read_bridge_pending_asset(&*evm, tx_hash_arr);
-                let amount = state_accessors::read_bridge_pending_amount(&*evm, tx_hash_arr);
-                let submitted_at_block = state_accessors::read_bridge_pending_block(&*evm, tx_hash_arr);
+                let recipient = state_accessors::read_bridge_pending_recipient(&provider, tx_hash_arr);
+                let asset_id = state_accessors::read_bridge_pending_asset(&provider, tx_hash_arr);
+                let amount = state_accessors::read_bridge_pending_amount(&provider, tx_hash_arr);
+                let submitted_at_block = state_accessors::read_bridge_pending_block(&provider, tx_hash_arr);
                 serde_json::json!({
                     "status": "pending",
                     "stage": "challenge_period",
@@ -713,24 +721,25 @@ pub fn register_callchain_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(
     // call_validatorList
     module
         .register_async_method("call_validatorList", |_params, state, _ctx| async move {
-            let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let count = state_accessors::read_validator_count(&*evm);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                .map_err(|e| internal_error(format!("db error: {e}")))?;
+            let count = state_accessors::read_validator_count(&provider);
             let mut validators = Vec::new();
             for i in 1..=count {
-                let addr = state_accessors::read_validator_addr(&*evm, i);
+                let addr = state_accessors::read_validator_addr(&provider, i);
                 if addr == Address::ZERO {
                     continue;
                 }
-                let status = state_accessors::read_validator_status(&*evm, addr);
+                let status = state_accessors::read_validator_status(&provider, addr);
                 if status == 0 {
                     continue;
                 }
                 validators.push(serde_json::json!({
                     "validatorId": i,
                     "address": format!("0x{}", hex::encode(addr.as_slice())),
-                    "ed25519Pubkey": format!("0x{}", hex::encode(state_accessors::read_validator_pubkey(&*evm, addr))),
-                    "selfStake": state_accessors::read_validator_stake(&*evm, addr).to_string(),
-                    "stakedCall": state_accessors::read_validator_stake(&*evm, addr).to_string(),
+                    "ed25519Pubkey": format!("0x{}", hex::encode(state_accessors::read_validator_pubkey(&provider, addr))),
+                    "selfStake": state_accessors::read_validator_stake(&provider, addr).to_string(),
+                    "stakedCall": state_accessors::read_validator_stake(&provider, addr).to_string(),
                     "delegatedCall": "0",
                     "rewards": "0",
                     "isUnbonding": status == 2,

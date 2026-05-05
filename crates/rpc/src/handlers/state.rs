@@ -2,7 +2,7 @@
 
 use call_protocol::{ProtocolReceipt, FeeParams};
 use call_protocol::security::MempoolDefense;
-use call_evm::{EvmState, EvmExecutor, EvmTransaction, EvmExecutionResult};
+use call_evm::{EvmExecutor, EvmTransaction, EvmExecutionResult};
 use call_consensus::{ForkManager, RollbackPlan, ConsensusParams};
 use call_consensus::exec::state_accessors;
 use call_primitives::{Address, AssetId, Balance, TxHash, Hash};
@@ -117,8 +117,10 @@ pub struct SyncProgress {
 }
 
 /// Shared RPC state — all handlers read from this.
+///
+/// State is backed by MDBX (`db_env`).  There is no long-lived in-memory
+/// `EvmState`; it is loaded on demand for each operation.
 pub struct RpcState {
-    pub evm_state: RwLock<EvmState>,
     pub receipts: RwLock<HashMap<TxHash, ProtocolReceipt>>,
     pub current_block: RwLock<u64>,
     pub fee_params: RwLock<FeeParams>,
@@ -160,22 +162,24 @@ pub struct RpcState {
     pub filter_manager: FilterManager,
     /// Sync progress for eth_syncing. None when fully synced.
     pub sync_progress: Arc<RwLock<Option<SyncProgress>>>,
-    /// MDBX database environment for historical state queries.
-    pub db_env: Arc<RwLock<Option<Arc<DatabaseEnv>>>>,
+    /// MDBX database environment — the single source of truth for all state.
+    pub db_env: Arc<DatabaseEnv>,
 }
 
 impl RpcState {
     pub fn new(
-        evm_state: EvmState,
+        db_env: Arc<DatabaseEnv>,
         mempool: Arc<RwLock<Mempool>>,
         chain_id: u64,
     ) -> Self {
         let total_validators = {
-            let count = call_consensus::exec::state_accessors::read_validator_count(&evm_state);
+            let provider = call_evm::provider::InMemoryStateProvider::from_db(&db_env).ok();
+            let count = provider
+                .map(|p| call_consensus::exec::state_accessors::read_validator_count(&p))
+                .unwrap_or(0);
             count as u32
         };
         Self {
-            evm_state: RwLock::new(evm_state),
             receipts: RwLock::new(HashMap::new()),
             current_block: RwLock::new(0),
             fee_params: RwLock::new(FeeParams::default()),
@@ -203,63 +207,82 @@ impl RpcState {
             block_hash_index: RwLock::new(HashMap::new()),
             filter_manager: FilterManager::new(),
             sync_progress: Arc::new(RwLock::new(None)),
-            db_env: Arc::new(RwLock::new(None)),
+            db_env,
         }
     }
 
-    /// Set the MDBX database environment for historical state queries.
-    pub fn set_db_env(&self, db_env: Arc<DatabaseEnv>) {
-        if let Ok(mut d) = self.db_env.write() {
-            *d = Some(db_env);
-        }
+    // ── Internal helpers ───────────────────────────────────────────────
+
+    /// Load an [`InMemoryStateProvider`] from MDBX.
+    fn load_provider(&self) -> Result<call_evm::provider::InMemoryStateProvider, String> {
+        call_evm::provider::InMemoryStateProvider::from_db(&self.db_env)
+            .map_err(|e| format!("db load error: {e}"))
+    }
+
+    /// Load provider, apply a mutation, and save back to MDBX.
+    fn with_provider_mut<F, T>(&self, mut f: F) -> Result<T, String>
+    where
+        F: FnMut(&mut call_evm::provider::InMemoryStateProvider) -> T,
+    {
+        let mut provider = self.load_provider()?;
+        let result = f(&mut provider);
+        provider
+            .state()
+            .save_to_db(&self.db_env)
+            .map_err(|e| format!("db save error: {e}"))?;
+        Ok(result)
     }
 
     pub fn get_balance(&self, asset_id: AssetId, address: &Address) -> Balance {
-        self.evm_state.read().map(|s| state_accessors::read_balance(&s, asset_id, *address)).unwrap_or(0)
+        self.load_provider()
+            .map(|p| state_accessors::read_balance(&p, asset_id, *address))
+            .unwrap_or(0)
     }
 
     pub fn get_nonce(&self, address: &Address) -> u64 {
-        self.evm_state.read().map(|s| s.get_nonce(address)).unwrap_or(0)
+        self.load_provider()
+            .map(|p| p.state().get_nonce(address))
+            .unwrap_or(0)
     }
 
     pub fn get_total_balance(&self, asset_id: AssetId) -> Balance {
-        self.evm_state
-            .read()
-            .map(|s| state_accessors::read_asset_supply(&s, asset_id))
+        self.load_provider()
+            .map(|p| state_accessors::read_asset_supply(&p, asset_id))
             .unwrap_or(0)
     }
 
     pub fn get_asset_info(&self, asset_id: AssetId) -> Option<AssetInfoResponse> {
-        self.evm_state.read().ok().and_then(|evm| {
-            let symbol = state_accessors::read_asset_symbol(&evm, asset_id);
-            if symbol.is_empty() {
-                return None;
-            }
-            let supply = state_accessors::read_asset_supply(&evm, asset_id);
-            Some(AssetInfoResponse {
-                id: asset_id,
-                symbol,
-                name: state_accessors::read_asset_name(&evm, asset_id),
-                decimals: state_accessors::read_asset_decimals(&evm, asset_id),
-                issuer: state_accessors::read_asset_issuer(&evm, asset_id),
-                protocol_supply: supply,
-                evm_supply: supply,
-                all_supply: supply,
-                max_supply: state_accessors::read_asset_max_supply(&evm, asset_id),
-                status: match state_accessors::read_asset_status(&evm, asset_id) {
-                    0 => "Active".to_string(),
-                    1 => "Frozen".to_string(),
-                    2 => "Delisted".to_string(),
-                    _ => "Unknown".to_string(),
-                },
-                compliance_policy: state_accessors::read_asset_compliance(&evm, asset_id),
-                registered_at: state_accessors::read_asset_registered_at(&evm, asset_id),
-            })
+        let provider = self.load_provider().ok()?;
+        let symbol = state_accessors::read_asset_symbol(&provider, asset_id);
+        if symbol.is_empty() {
+            return None;
+        }
+        let supply = state_accessors::read_asset_supply(&provider, asset_id);
+        Some(AssetInfoResponse {
+            id: asset_id,
+            symbol,
+            name: state_accessors::read_asset_name(&provider, asset_id),
+            decimals: state_accessors::read_asset_decimals(&provider, asset_id),
+            issuer: state_accessors::read_asset_issuer(&provider, asset_id),
+            protocol_supply: supply,
+            evm_supply: supply,
+            all_supply: supply,
+            max_supply: state_accessors::read_asset_max_supply(&provider, asset_id),
+            status: match state_accessors::read_asset_status(&provider, asset_id) {
+                0 => "Active".to_string(),
+                1 => "Frozen".to_string(),
+                2 => "Delisted".to_string(),
+                _ => "Unknown".to_string(),
+            },
+            compliance_policy: state_accessors::read_asset_compliance(&provider, asset_id),
+            registered_at: state_accessors::read_asset_registered_at(&provider, asset_id),
         })
     }
 
     pub fn get_evm_balance(&self, address: &Address) -> alloy_primitives::U256 {
-        self.evm_state.read().map(|s| s.get_balance(address)).unwrap_or(alloy_primitives::U256::ZERO)
+        self.load_provider()
+            .map(|p| p.state().get_balance(address))
+            .unwrap_or(alloy_primitives::U256::ZERO)
     }
 
     pub fn get_receipt(&self, tx_hash: &TxHash) -> Option<ProtocolReceipt> {
@@ -391,87 +414,90 @@ impl RpcState {
         _metadata_hash: [u8; 32],
     ) -> Result<u64, String> {
         let current_block = self.get_current_block();
-        let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let count = call_consensus::exec::state_accessors::read_agent_count(&evm);
-        call_consensus::exec::state_accessors::seed_agent(&mut evm, count, owner, &name, &url, current_block);
-        // Store first 32 bytes of pubkey as pubkey hash
-        let pubkey_hash: [u8; 32] = if pubkey.len() >= 32 {
-            pubkey[..32].try_into().unwrap()
-        } else {
-            let mut buf = [0u8; 32];
-            buf[..pubkey.len()].copy_from_slice(&pubkey);
-            buf
-        };
-        call_consensus::exec::state_accessors::agent_set_pubkey(&mut evm, count, &pubkey_hash);
-        Ok(count)
+        self.with_provider_mut(|provider| {
+            let count = call_consensus::exec::state_accessors::read_agent_count(provider);
+            call_consensus::exec::state_accessors::seed_agent(
+                provider, count, owner, &name, &url, current_block,
+            );
+            let pubkey_hash: [u8; 32] = if pubkey.len() >= 32 {
+                pubkey[..32].try_into().unwrap()
+            } else {
+                let mut buf = [0u8; 32];
+                buf[..pubkey.len()].copy_from_slice(&pubkey);
+                buf
+            };
+            call_consensus::exec::state_accessors::agent_set_pubkey(provider, count, &pubkey_hash);
+            count
+        })
     }
 
     pub fn get_agent_info(&self, agent_id: u64) -> Option<AgentInfoResponse> {
-        self.evm_state.read().ok().and_then(|evm| {
-            if !state_accessors::agent_exists(&evm, agent_id) {
-                return None;
-            }
-            Some(AgentInfoResponse {
-                agent_id,
-                owner: state_accessors::agent_get_owner(&evm, agent_id),
-                name: state_accessors::agent_get_name(&evm, agent_id),
-                url: state_accessors::agent_get_url(&evm, agent_id),
-                domain_verified: false,
-                registered_at: state_accessors::agent_get_registered_at(&evm, agent_id),
-            })
+        let provider = self.load_provider().ok()?;
+        if !state_accessors::agent_exists(&provider, agent_id) {
+            return None;
+        }
+        Some(AgentInfoResponse {
+            agent_id,
+            owner: state_accessors::agent_get_owner(&provider, agent_id),
+            name: state_accessors::agent_get_name(&provider, agent_id),
+            url: state_accessors::agent_get_url(&provider, agent_id),
+            domain_verified: false,
+            registered_at: state_accessors::agent_get_registered_at(&provider, agent_id),
         })
     }
 
     pub fn get_agent_total_balance(&self, agent_id: u64) -> Balance {
-        self.evm_state
-            .read()
-            .map(|s| state_accessors::agent_get_balance(&s, agent_id, call_protocol::CALL_ASSET_ID))
+        self.load_provider()
+            .map(|p| state_accessors::agent_get_balance(&p, agent_id, call_protocol::CALL_ASSET_ID))
             .unwrap_or(0)
     }
 
     pub fn grant_agent_balance(&self, agent_id: u64, asset_id: AssetId, amount: Balance) -> Result<(), String> {
-        let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let owner = call_consensus::exec::state_accessors::agent_get_owner(&evm, agent_id);
-        if owner == call_primitives::Address::ZERO {
-            return Err("agent not found".into());
-        }
-        let owner_balance = call_consensus::exec::state_accessors::read_balance(&evm, asset_id, owner);
-        if owner_balance < amount {
-            return Err("insufficient owner balance for grant".into());
-        }
-        call_consensus::exec::state_accessors::seed_balance(&mut evm, asset_id, owner, owner_balance - amount);
-        let agent_balance = call_consensus::exec::state_accessors::agent_get_balance(&evm, agent_id, asset_id);
-        call_consensus::exec::state_accessors::agent_set_balance(&mut evm, agent_id, asset_id, agent_balance + amount);
-        Ok(())
+        self.with_provider_mut(|provider| {
+            let owner = call_consensus::exec::state_accessors::agent_get_owner(provider, agent_id);
+            if owner == call_primitives::Address::ZERO {
+                return Err("agent not found".into());
+            }
+            let owner_balance = call_consensus::exec::state_accessors::read_balance(provider, asset_id, owner);
+            if owner_balance < amount {
+                return Err("insufficient owner balance for grant".into());
+            }
+            call_consensus::exec::state_accessors::seed_balance(provider, asset_id, owner, owner_balance - amount);
+            let agent_balance = call_consensus::exec::state_accessors::agent_get_balance(provider, agent_id, asset_id);
+            call_consensus::exec::state_accessors::agent_set_balance(provider, agent_id, asset_id, agent_balance + amount);
+            Ok(())
+        })?
     }
 
     pub fn revoke_agent_balance(&self, agent_id: u64, asset_id: AssetId) -> Result<(), String> {
-        let mut evm = self.evm_state.write().map_err(|_| "lock poisoned".to_string())?;
-        let owner = call_consensus::exec::state_accessors::agent_get_owner(&evm, agent_id);
-        if owner == call_primitives::Address::ZERO {
-            return Err("agent not found".into());
-        }
-        call_consensus::exec::state_accessors::agent_set_balance(&mut evm, agent_id, asset_id, 0);
-        Ok(())
+        self.with_provider_mut(|provider| {
+            let owner = call_consensus::exec::state_accessors::agent_get_owner(provider, agent_id);
+            if owner == call_primitives::Address::ZERO {
+                return Err("agent not found".into());
+            }
+            call_consensus::exec::state_accessors::agent_set_balance(provider, agent_id, asset_id, 0);
+            Ok(())
+        })?
     }
 
     pub fn get_compliance_policy(&self, asset_id: AssetId) -> u8 {
-        self.evm_state
-            .read()
-            .map(|s| state_accessors::read_asset_compliance(&s, asset_id))
+        self.load_provider()
+            .map(|p| state_accessors::read_asset_compliance(&p, asset_id))
             .unwrap_or(0)
     }
 
     pub fn get_shielded_tree_state(&self) -> ShieldedTreeStateResponse {
-        self.evm_state.read().map(|evm| ShieldedTreeStateResponse {
-            merkle_root: call_consensus::exec::state_accessors::read_shielded_merkle_root(&evm),
-            leaf_count: call_consensus::exec::state_accessors::read_shielded_commitment_count(&evm),
-            nullifier_count: 0, // Nullifiers are not countable from EVM without iteration
-        }).unwrap_or(ShieldedTreeStateResponse {
-            merkle_root: Hash::ZERO,
-            leaf_count: 0,
-            nullifier_count: 0,
-        })
+        self.load_provider()
+            .map(|p| ShieldedTreeStateResponse {
+                merkle_root: call_consensus::exec::state_accessors::read_shielded_merkle_root(&p),
+                leaf_count: call_consensus::exec::state_accessors::read_shielded_commitment_count(&p),
+                nullifier_count: 0,
+            })
+            .unwrap_or(ShieldedTreeStateResponse {
+                merkle_root: Hash::ZERO,
+                leaf_count: 0,
+                nullifier_count: 0,
+            })
     }
 
     // ── EVM execution ──────────────────────────────────────────────────
@@ -487,8 +513,8 @@ impl RpcState {
         gas_price: u128,
     ) -> Result<EvmExecutionResult, String> {
         let executor = EvmExecutor::new(self.chain_id);
-        let mut state = self.evm_state.read().map_err(|_| "lock poisoned".to_string())?.clone();
-        let nonce = state.get_nonce(&caller);
+        let state = self.load_provider()?;
+        let nonce = state.state().get_nonce(&caller);
 
         let tx = EvmTransaction {
             caller,
@@ -502,7 +528,8 @@ impl RpcState {
         };
         let base_fee = self.fee_params.read().map_err(|_| "lock poisoned".to_string())?.base_fee;
 
-        executor.execute_tx(tx, &mut state, 0, base_fee).map_err(|e| format!("{e}"))
+        let (result, _delta) = executor.execute_tx_provider(tx, state, 0, base_fee).map_err(|e| format!("{e}"))?;
+        Ok(result)
     }
 
     // ── EVM submission (inserts into mempool + executes) ──────────────
@@ -547,8 +574,8 @@ impl RpcState {
 
         // Validate nonce and balance
         {
-            let state = self.evm_state.read().map_err(|_| "lock poisoned".to_string())?;
-            let committed_nonce = state.get_nonce(&caller);
+            let provider = self.load_provider().map_err(|e| e.to_string())?;
+            let committed_nonce = provider.state().get_nonce(&caller);
             let expected_nonce = {
                 let mempool = self.mempool.read().map_err(|_| "lock poisoned".to_string())?;
                 mempool.get_expected_evm_nonce(caller, committed_nonce)
@@ -556,7 +583,7 @@ impl RpcState {
             if nonce != expected_nonce {
                 return Err(format!("invalid nonce: expected {expected_nonce}, got {nonce}"));
             }
-            let balance = state.get_balance(&caller);
+            let balance = provider.state().get_balance(&caller);
             let max_cost = gas_price.saturating_mul(gas_limit as u128);
             if balance < alloy_primitives::U256::from(max_cost) {
                 return Err("insufficient balance for gas".into());

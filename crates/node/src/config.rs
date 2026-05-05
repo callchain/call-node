@@ -173,6 +173,10 @@ pub struct StorageConfig {
     pub data_dir: PathBuf,
     #[serde(default = "StorageConfig::default_cache_size")]
     pub db_cache_size: u64,
+    /// Number of recent blocks for which full state snapshots are kept.
+    /// `u64::MAX` means archive mode — keep all snapshots forever.
+    #[serde(default = "StorageConfig::default_snapshot_retention")]
+    pub snapshot_retention_blocks: u64,
 }
 
 impl Default for StorageConfig {
@@ -180,6 +184,7 @@ impl Default for StorageConfig {
         Self {
             data_dir: Self::default_data_dir(),
             db_cache_size: Self::default_cache_size(),
+            snapshot_retention_blocks: Self::default_snapshot_retention(),
         }
     }
 }
@@ -191,6 +196,7 @@ impl StorageConfig {
             .unwrap_or_else(|| PathBuf::from(".callchain"))
     }
     fn default_cache_size() -> u64 { 1024 }
+    fn default_snapshot_retention() -> u64 { 128 }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -327,17 +333,14 @@ impl NodeConfig {
         }
 
         // Storage
-        // Only override the loaded TOML value when the user actually passed
-        // `--data-dir` on the command line. The previous logic compared the
-        // CLI string `~/.callchain` against the home-expanded default and
-        // therefore *always* clobbered the per-config data_dir, which made
-        // every node in a multi-node devnet collide on a single database
-        // directory.
         if let Some(ref dir) = args.data_dir {
             self.storage.data_dir.clone_from(dir);
         }
         if let Some(cache) = args.db_cache_size {
             self.storage.db_cache_size = cache;
+        }
+        if args.archive || self.mode == NodeMode::Archive {
+            self.storage.snapshot_retention_blocks = u64::MAX;
         }
 
         // Metrics

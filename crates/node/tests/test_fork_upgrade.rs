@@ -37,16 +37,18 @@ async fn test_height_activated_upgrade() {
 
     let (_secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 100_000,
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let upgrade_height = 50u64;
@@ -102,9 +104,10 @@ async fn test_height_activated_upgrade() {
         block.finalize(&result);
 
         {
-            let mut evm_state = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let mut consensus = node.consensus.write().unwrap();
-            consensus.commit_block(&block, &result, &mut evm_state).expect("commit");
+            consensus.commit_block(&block, &result, provider.state_mut()).expect("commit");
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
 
         node.state.set_current_block(height + 1);
@@ -168,16 +171,18 @@ async fn test_governance_triggered_upgrade() {
     let (_secret, sender) = test_keypair();
     let val_addr = sender;
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, val_addr, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), val_addr, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 100_000,
         );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let upgrade_height = 5u64;

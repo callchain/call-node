@@ -2139,6 +2139,7 @@ dependencies = [
  "call-primitives",
  "call-protocol",
  "call-shielded",
+ "call-storage",
  "dashmap",
  "hex",
  "jsonrpsee",

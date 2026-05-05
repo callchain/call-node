@@ -37,7 +37,8 @@ fn make_tx(_secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount:
 
 /// Read native EVM balance for an address.
 fn native_balance(node: &TestNode, addr: &Address) -> u128 {
-    node.state.evm_state.read().unwrap().get_balance(addr).try_into().unwrap_or(0)
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+    provider.state().get_balance(addr).try_into().unwrap_or(0)
 }
 
 /// High throughput: inject many transactions and produce blocks.
@@ -47,19 +48,21 @@ async fn test_high_throughput_many_transactions() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Fund sender with enough for 1000 transfers
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
-        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Inject 1000 transactions
@@ -88,10 +91,11 @@ fn test_mempool_capacity_under_pressure() {
 
     let sender = test_addr(1);
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Use multiple senders to exceed per-address limit (256)
@@ -100,11 +104,12 @@ fn test_mempool_capacity_under_pressure() {
     for _ in 0..num_senders {
         let kp = test_keypair();
         {
-            let mut evm = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             call_consensus::exec::state_accessors::seed_balance(
-                &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 10_000_000,
+                provider.state_mut(), call_protocol::CALL_ASSET_ID, kp.1, 10_000_000,
             );
-            evm.set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
+            provider.state_mut().set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
         sender_keys.push(kp);
     }
@@ -145,18 +150,20 @@ async fn test_base_fee_under_sustained_load() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 100_000_000,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 100_000_000,
         );
-        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let initial_fee = node.base_fee();
@@ -180,18 +187,20 @@ async fn test_no_double_spend_concurrent_nonce() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 10_000_000,
         );
-        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Two txs with same nonce - second should be rejected during execution
@@ -216,19 +225,21 @@ async fn test_final_state_consistency_after_load() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let initial_balance = 200_000_000u128;
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, initial_balance,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, initial_balance,
         );
-        evm.set_balance(sender, call_primitives::U256::from(initial_balance));
+        provider.state_mut().set_balance(sender, call_primitives::U256::from(initial_balance));
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let num_txs = 100;
@@ -263,10 +274,11 @@ async fn test_multi_sender_stress() {
 
     let sender = test_addr(1);
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Fund 20 senders
@@ -274,11 +286,12 @@ async fn test_multi_sender_stress() {
     for _ in 0..20 {
         let kp = test_keypair();
         {
-            let mut evm = node.state.evm_state.write().unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             call_consensus::exec::state_accessors::seed_balance(
-                &mut *evm, call_protocol::CALL_ASSET_ID, kp.1, 20_000_000,
+                provider.state_mut(), call_protocol::CALL_ASSET_ID, kp.1, 20_000_000,
             );
-            evm.set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
+            provider.state_mut().set_balance(kp.1, call_primitives::U256::from(100_000_000_000u128));
+            provider.state().save_to_db(&node.state.db_env).unwrap();
         }
         sender_keys.push(kp);
     }
@@ -307,19 +320,21 @@ async fn test_high_volume_block_production() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Enough CALL for gas + transfers (200 txs * ~110k gas each + 200 * 10 transfer)
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 50_000_000,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 50_000_000,
         );
-        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Inject many transactions (capped by per-address mempool limit of 256)
@@ -353,18 +368,20 @@ async fn test_rapid_block_production() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut evm_state = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(&mut evm_state, sender, [1u8; 32], one_million_call()).unwrap();
-        consensus.refresh_proposer_subset(&evm_state);
+        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus.refresh_proposer_subset(provider.state());
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     {
-        let mut evm = node.state.evm_state.write().unwrap();
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            &mut *evm, call_protocol::CALL_ASSET_ID, sender, 600_000_000,
+            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 600_000_000,
         );
-        evm.set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Produce 500 blocks rapidly (no real delay)

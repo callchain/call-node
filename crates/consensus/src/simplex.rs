@@ -445,7 +445,7 @@ impl SimplexConsensus {
 mod tests {
     use super::*;
     use call_primitives::{Address, Ed25519PublicKey};
-    use call_evm::EvmState;
+    use call_evm::state::EvmState;
     use crate::exec::state_accessors::seed_validator;
 
     fn test_addr(n: u8) -> Address {

@@ -24,13 +24,9 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 Some(tag) => {
                     let current = state.get_current_block();
                     let block_num = parse_block_tag(tag, current);
-                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                    match db_guard.as_ref() {
-                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
-                            Ok(Some(snapshot)) => snapshot.get_balance(&cp_address),
-                            _ => alloy_primitives::U256::ZERO,
-                        },
-                        None => alloy_primitives::U256::ZERO,
+                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num) {
+                        Ok(Some(account)) => account.balance,
+                        _ => alloy_primitives::U256::ZERO,
                     }
                 }
             };
@@ -412,21 +408,6 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let current = state.get_current_block();
             let block_num = block_tag.as_deref().map(|t| parse_block_tag(t, current)).unwrap_or(current);
 
-            // Load state for the requested block
-            let state_for_proof = {
-                let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                match db_guard.as_ref() {
-                    Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
-                        Ok(Some(snapshot)) => snapshot,
-                        _ => {
-                            // Fall back to current in-memory state if no snapshot
-                            state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.clone()
-                        }
-                    },
-                    None => state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.clone(),
-                }
-            };
-
             // Parse storage slots
             let mut slots = Vec::with_capacity(storage_keys.len());
             for key_hex in &storage_keys {
@@ -443,13 +424,29 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 slots.push(slot);
             }
 
-            // Compute real Merkle proof
-            let proof = match call_evm::trie::compute_account_proof(&state_for_proof,
-                address,
-                &slots,
-            ) {
-                Ok(p) => p,
-                Err(e) => return Err(internal_error(format!("proof computation failed: {:?}", e))),
+            // Compute Merkle proof
+            let proof = if block_num == current {
+                // Latest block: use persistent trie nodes from MDBX (avoids rebuilding trie from scratch)
+                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                match call_evm::trie::compute_account_proof_persistent(&state.db_env, &provider, address, &slots) {
+                    Ok(p) => p,
+                    Err(e) => return Err(internal_error(format!("proof computation failed: {:?}", e))),
+                }
+            } else {
+                // Historical block: fall back to block snapshot
+                let state_for_proof = match call_evm::db::load_block_snapshot(&state.db_env, block_num) {
+                    Ok(Some(snapshot)) => snapshot,
+                    _ => {
+                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                            .map_err(|e| internal_error(format!("db error: {e}")))?;
+                        provider.state().clone()
+                    }
+                };
+                match call_evm::trie::compute_account_proof(&state_for_proof, address, &slots) {
+                    Ok(p) => p,
+                    Err(e) => return Err(internal_error(format!("proof computation failed: {:?}", e))),
+                }
             };
 
             let balance = proof.info.as_ref().map(|i| i.balance).unwrap_or_default();
@@ -587,23 +584,23 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
             let nonce = match block_tag.as_deref() {
                 Some("pending") => {
-                    let committed_nonce = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_nonce(&cp_address);
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                        .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    let committed_nonce = provider.state().get_nonce(&cp_address);
                     let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
                     committed_nonce.max(mempool.evm_pool.get_address_nonce(&cp_address))
                 }
                 Some("latest") | Some("safe") | Some("finalized") | None => {
-                    state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_nonce(&cp_address)
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                        .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    provider.state().get_nonce(&cp_address)
                 }
                 Some(tag) => {
                     let current = state.get_current_block();
                     let block_num = parse_block_tag(tag, current);
-                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                    match db_guard.as_ref() {
-                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
-                            Ok(Some(snapshot)) => snapshot.get_nonce(&cp_address),
-                            _ => 0,
-                        },
-                        None => 0,
+                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num) {
+                        Ok(Some(account)) => account.nonce,
+                        _ => 0,
                     }
                 }
             };
@@ -621,18 +618,16 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
             let code = match block_tag.as_deref() {
                 Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
-                    state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_code(&cp_address)
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                        .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    provider.state().get_code(&cp_address)
                 }
                 Some(tag) => {
                     let current = state.get_current_block();
                     let block_num = parse_block_tag(tag, current);
-                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                    match db_guard.as_ref() {
-                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
-                            Ok(Some(snapshot)) => snapshot.get_code(&cp_address),
-                            _ => alloy_primitives::Bytes::default(),
-                        },
-                        None => alloy_primitives::Bytes::default(),
+                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num) {
+                        Ok(Some(account)) => account.code,
+                        _ => alloy_primitives::Bytes::default(),
                     }
                 }
             };
@@ -652,18 +647,16 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
             let value = match block_tag.as_deref() {
                 Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
-                    state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_storage(&cp_address, key)
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                        .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    provider.state().get_storage(&cp_address, key)
                 }
                 Some(tag) => {
                     let current = state.get_current_block();
                     let block_num = parse_block_tag(tag, current);
-                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                    match db_guard.as_ref() {
-                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
-                            Ok(Some(snapshot)) => snapshot.get_storage(&cp_address, key),
-                            _ => alloy_primitives::U256::ZERO,
-                        },
-                        None => alloy_primitives::U256::ZERO,
+                    match call_evm::db::get_historical_storage(&state.db_env, cp_address, key, block_num) {
+                        Ok(value) => value,
+                        _ => alloy_primitives::U256::ZERO,
                     }
                 }
             };

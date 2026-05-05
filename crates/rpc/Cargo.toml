@@ -37,5 +37,8 @@ rustls-pemfile.workspace = true
 reth-db.workspace = true
 call-light-client = { workspace = true, optional = true }
 
+[dev-dependencies]
+call-storage.workspace = true
+
 [features]
 light-client-bridge = ["call-light-client", "call-bridge/light-client-bridge"]

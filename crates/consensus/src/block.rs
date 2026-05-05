@@ -191,6 +191,7 @@ impl Block {
         provider: &mut call_evm::provider::InMemoryStateProvider,
         fee_params: &mut FeeParams,
         current_block_height: u64,
+        db_env: Option<&reth_db::DatabaseEnv>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
         // Pre-bridge Protocol→EVM gas so every tx has sufficient EVM balance.
         for raw_tx in &self.evm_txs {
@@ -237,6 +238,11 @@ impl Block {
         // Apply revm delta back to the provider.
         provider.state_mut().apply_from_revm_state(&revm_delta);
 
+        // Record historical state diffs for eth_getBalance(blockTag) / eth_getStorageAt(blockTag)
+        if let Some(db) = db_env {
+            let _ = call_evm::db::record_revm_delta_history(db, current_block_height, &revm_delta);
+        }
+
         let mut result = BlockExecutionResult {
             evm_tx_count: block_tx_result.evm_tx_count,
             evm_gas_used: block_tx_result.evm_gas_used,
@@ -264,8 +270,14 @@ impl Block {
         let oracle_share = total_fees * fee_params.oracle_fee_share_bps as u128 / 10_000;
         state_accessors::add_oracle_reward(provider.state_mut(), oracle_share);
 
-        // Compute state root
-        result.state_root = provider.state().compute_state_root();
+        // Compute state root and collect trie updates for persistence
+        let (root, updates) = provider.state().compute_state_root_with_updates();
+        result.state_root = root;
+
+        // Persist trie nodes to MDBX for eth_getProof
+        if let Some(db) = db_env {
+            let _ = call_evm::db::apply_trie_updates_to_mdbx(db, &updates);
+        }
 
         Ok(result)
     }

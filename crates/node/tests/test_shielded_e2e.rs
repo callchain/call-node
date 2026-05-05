@@ -35,8 +35,8 @@ fn test_e2e_shielded_deposit_flow() {
     assert_eq!(block.evm_txs.len(), 0);
 
     // Shielded state starts empty
-    let evm = node.state.evm_state.read().unwrap();
-    let leaf_count = call_consensus::exec::state_accessors::read_shielded_commitment_count(&*evm);
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+    let leaf_count = call_consensus::exec::state_accessors::read_shielded_commitment_count(provider.state());
     assert_eq!(leaf_count, 0);
 }
 
@@ -54,8 +54,8 @@ fn test_e2e_shielded_withdraw_flow() {
     let _block = node.produce_block(1_000).expect("block produced");
 
     // EVM storage balance is seeded by NodeBuilder
-    let evm = node.state.evm_state.read().unwrap();
-    let sender_bal = call_consensus::exec::state_accessors::read_balance(&*evm, 0, sender);
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+    let sender_bal = call_consensus::exec::state_accessors::read_balance(provider.state(), 0, sender);
     assert_eq!(sender_bal, 1_000_000_000);
 }
 
@@ -120,8 +120,8 @@ async fn test_e2e_shielded_multi_node_consensus() {
     {
         let node0_ref = runtime.simulator.node(0);
         let node0 = node0_ref.read().unwrap();
-        let evm = node0.state.evm_state.read().unwrap();
-        let leaf_count = call_consensus::exec::state_accessors::read_shielded_commitment_count(&*evm);
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node0.state.db_env).unwrap();
+        let leaf_count = call_consensus::exec::state_accessors::read_shielded_commitment_count(provider.state());
         assert_eq!(leaf_count, 0);
     }
 }
@@ -143,8 +143,8 @@ fn test_e2e_shielded_lifecycle() {
 
     // Verify EVM storage balances are intact
     {
-        let evm = node.state.evm_state.read().unwrap();
-        let sender_bal = call_consensus::exec::state_accessors::read_balance(&*evm, 1, sender);
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let sender_bal = call_consensus::exec::state_accessors::read_balance(provider.state(), 1, sender);
         assert_eq!(sender_bal, 1_000_000_000);
     }
 }
