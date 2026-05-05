@@ -104,6 +104,8 @@ reth-codecs-derive = "0.1.0"
 reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-db-api = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-engine-local = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
+reth-execution-errors = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
+reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-engine-tree = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-errors = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
@@ -118,6 +120,7 @@ reth-node-core = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" 
 reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-node-metrics = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
+reth-primitives-traits = { version = "0.1.1", features = ["serde"] }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
@@ -128,7 +131,7 @@ reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 reth-trie = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
-reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a", features = ["serde"] }
 reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 
 # Alloy ecosystem
@@ -140,10 +143,11 @@ alloy-rlp = { version = "0.3.13", default-features = false }
 alloy-rpc-types-eth = { version = "1.8.2" }
 alloy-serde = { version = "1.8.2", default-features = false }
 alloy-sol-types = { version = "1.5.7", default-features = false }
-alloy-trie = "0.9"
+alloy-trie = { version = "0.9", features = ["serde"] }
 
 # ReVM
 revm = { version = "36.0.0", default-features = false }
+revm-database = { version = "12.0.0", default-features = false }
 revm-precompile = { version = "32.1.0", default-features = false }
 revm-inspectors = "0.36.0"
 

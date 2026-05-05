@@ -25,11 +25,22 @@ call-switch.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 revm = { workspace = true, features = ["std"] }
+revm-database.workspace = true
 reth-db.workspace = true
 reth-db-api.workspace = true
+reth-revm.workspace = true
+reth-provider.workspace = true
+reth-chainspec.workspace = true
+reth-trie.workspace = true
+reth-trie-common.workspace = true
+reth-execution-errors.workspace = true
+reth-storage-errors.workspace = true
+reth-storage-api.workspace = true
 alloy-primitives.workspace = true
+alloy-eips.workspace = true
 alloy-trie.workspace = true
 alloy-rlp.workspace = true
+reth-primitives-traits.workspace = true
 hex = "0.4"
 
 [dev-dependencies]

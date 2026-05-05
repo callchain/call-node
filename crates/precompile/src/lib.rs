@@ -53,7 +53,7 @@ use revm::context_interface::local::LocalContextTr;
 use revm_precompile::PrecompileSpecId;
 use std::collections::HashMap;
 
-use crate::storage::{EvmStorageProvider, StorageCtx};
+use crate::storage::EvmStorageProvider;
 
 // ── StatefulPrecompile trait ──────────────────────────────────────────
 
@@ -63,7 +63,13 @@ pub trait StatefulPrecompile {
     ///
     /// `calldata` is ABI-encoded (4-byte selector + args).
     /// `msg_sender` is the EVM caller.
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult;
+    /// `storage` provides access to EVM state (sload/sstore/gas/checkpoint).
+    fn call(
+        &mut self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn crate::storage::StorageProvider,
+    ) -> PrecompileResult;
 }
 
 // ── Precompile addresses ──────────────────────────────────────────────
@@ -183,9 +189,7 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
                 beneficiary,
             );
 
-            let exec_result = StorageCtx::enter(&mut provider, || {
-                precompile.call(&input_bytes, inputs.caller)
-            });
+            let exec_result = precompile.call(&input_bytes, inputs.caller, &mut provider);
 
             match exec_result {
                 Ok(output) => {

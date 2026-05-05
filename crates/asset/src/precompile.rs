@@ -11,6 +11,7 @@ use call_precompile::{
     dispatch, journal_backend::JournalBackend, ok_empty, require_caller, slot_asset_meta,
     write_string32, ASSET_ADDRESS, COMPLIANCE_ADDRESS, slot_compliance,
 };
+use call_precompile::storage::StorageProvider;
 use call_primitives::Address;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
@@ -35,24 +36,30 @@ pub struct AssetPrecompile;
 
 impl AssetPrecompile {
     /// Check compliance for an address against the asset's compliance policy.
-    fn check_compliance(asset_id: u64, addr: &Address) -> Result<(), PrecompileError> {
-        let policy_id = call_precompile::storage::StorageCtx::sload(
-            ASSET_ADDRESS,
-            slot_asset_meta(asset_id, b"compliance"),
-        )
-        .map(|v| v.to_be_bytes::<32>()[31] as u64)
-        .unwrap_or(0);
+    fn check_compliance(
+        asset_id: u64,
+        addr: &Address,
+        storage: &mut dyn StorageProvider,
+    ) -> Result<(), PrecompileError> {
+        let policy_id = storage
+            .sload(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"compliance"),
+            )
+            .map(|v| v.to_be_bytes::<32>()[31] as u64)
+            .unwrap_or(0);
 
         if policy_id == 0 {
             return Ok(());
         }
 
-        let status = call_precompile::storage::StorageCtx::sload(
-            COMPLIANCE_ADDRESS,
-            slot_compliance(*addr, policy_id as u8),
-        )
-        .map(|v| v.to_be_bytes::<32>()[31])
-        .unwrap_or(0);
+        let status = storage
+            .sload(
+                COMPLIANCE_ADDRESS,
+                slot_compliance(*addr, policy_id as u8),
+            )
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
 
         if status == 0 {
             Ok(())
@@ -61,19 +68,18 @@ impl AssetPrecompile {
         }
     }
 
-    fn get_balance(&self, calldata: &[u8]) -> PrecompileResult {
-        dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(calldata, 800, |call| {
-            let store = AssetStorage::new(JournalBackend);
+    fn get_balance(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(calldata, 800, storage, |call, storage| {
+            let store = AssetStorage::new(JournalBackend::new(storage));
             let balance = store.read_balance(call.assetId, call.account);
             Ok(balance)
         })
     }
 
-    fn get_asset_info(&self, calldata: &[u8]) -> PrecompileResult {
-        call_precompile::storage::StorageCtx::deduct_gas(1000)
-            .ok_or(PrecompileError::OutOfGas)?;
+    fn get_asset_info(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+        storage.deduct_gas(1000)?;
         let call = dispatch::decode_call::<IProtocolAsset::getAssetInfoCall>(calldata)?;
-        let store = AssetStorage::new(JournalBackend);
+        let store = AssetStorage::new(JournalBackend::new(storage));
         let meta = store.read_meta(call.assetId);
 
         let mut out = [0u8; 192];
@@ -85,15 +91,15 @@ impl AssetPrecompile {
         out[191] = meta.status;
 
         let output = revm_precompile::PrecompileOutput::new(0, out.to_vec().into());
-        Ok(call_precompile::storage::fill_precompile_output(output))
+        Ok(call_precompile::storage::fill_precompile_output(output, storage))
     }
 
-    fn transfer(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::transferCall, _>(calldata, 5000, |call| {
+    fn transfer(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::transferCall, _>(calldata, 5000, storage, |call, storage| {
             let from = require_caller(msg_sender)?;
-            Self::check_compliance(call.assetId, &from)?;
-            Self::check_compliance(call.assetId, &call.to)?;
-            let mut store = AssetStorage::new(JournalBackend);
+            Self::check_compliance(call.assetId, &from, storage)?;
+            Self::check_compliance(call.assetId, &call.to, storage)?;
+            let mut store = AssetStorage::new(JournalBackend::new(storage));
             store
                 .transfer(call.assetId, from, call.to, call.amount)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -101,7 +107,7 @@ impl AssetPrecompile {
         })
     }
 
-    fn batch_transfer(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+    fn batch_transfer(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
         let call = dispatch::decode_call::<IProtocolAsset::batchTransferCall>(calldata)?;
         if call.to.len() != call.amounts.len() {
             return Err(PrecompileError::Other(
@@ -112,42 +118,41 @@ impl AssetPrecompile {
             return Err(PrecompileError::Other("empty batch".into()));
         }
         let total_gas = 5000u64 * call.to.len() as u64;
-        call_precompile::storage::StorageCtx::deduct_gas(total_gas)
-            .ok_or(PrecompileError::OutOfGas)?;
+        storage.deduct_gas(total_gas)?;
 
         let from = require_caller(msg_sender)?;
-        Self::check_compliance(call.assetId, &from)?;
+        Self::check_compliance(call.assetId, &from, storage)?;
         for to in &call.to {
-            Self::check_compliance(call.assetId, to)?;
+            Self::check_compliance(call.assetId, to, storage)?;
         }
 
         let pairs: Vec<(Address, u128)> =
             call.to.into_iter().zip(call.amounts.into_iter()).collect();
-        let mut store = AssetStorage::new(JournalBackend);
-        let guard = call_precompile::storage::StorageCtx::checkpoint();
+        let mut store = AssetStorage::new(JournalBackend::new(storage));
+        let cp = storage.checkpoint();
         store
             .batch_transfer(call.assetId, from, &pairs)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-        guard.commit();
+        storage.checkpoint_commit(cp);
 
-        ok_empty()
+        ok_empty(storage)
     }
 
-    fn approve(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::approveCall, _>(calldata, 3000, |call| {
+    fn approve(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::approveCall, _>(calldata, 3000, storage, |call, storage| {
             let owner = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend);
+            let mut store = AssetStorage::new(JournalBackend::new(storage));
             store.approve(call.assetId, owner, call.spender, call.amount);
             Ok(())
         })
     }
 
-    fn transfer_from(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::transferFromCall, _>(calldata, 6000, |call| {
+    fn transfer_from(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::transferFromCall, _>(calldata, 6000, storage, |call, storage| {
             let spender = require_caller(msg_sender)?;
-            Self::check_compliance(call.assetId, &call.from)?;
-            Self::check_compliance(call.assetId, &call.to)?;
-            let mut store = AssetStorage::new(JournalBackend);
+            Self::check_compliance(call.assetId, &call.from, storage)?;
+            Self::check_compliance(call.assetId, &call.to, storage)?;
+            let mut store = AssetStorage::new(JournalBackend::new(storage));
             store
                 .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -155,10 +160,10 @@ impl AssetPrecompile {
         })
     }
 
-    fn mint(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::mintCall, _>(calldata, 10000, |call| {
+    fn mint(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::mintCall, _>(calldata, 10000, storage, |call, storage| {
             let caller = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend);
+            let mut store = AssetStorage::new(JournalBackend::new(storage));
             store
                 .mint(call.assetId, caller, call.to, call.amount)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -166,10 +171,10 @@ impl AssetPrecompile {
         })
     }
 
-    fn burn(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::burnCall, _>(calldata, 8000, |call| {
+    fn burn(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::burnCall, _>(calldata, 8000, storage, |call, storage| {
             let caller = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend);
+            let mut store = AssetStorage::new(JournalBackend::new(storage));
             store
                 .burn(call.assetId, caller, call.from, call.amount)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -177,10 +182,10 @@ impl AssetPrecompile {
         })
     }
 
-    fn register(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate::<IProtocolAsset::registerCall, _, _>(calldata, 50000, |call| {
+    fn register(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate::<IProtocolAsset::registerCall, _, _>(calldata, 50000, storage, |call, storage| {
             let caller = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend);
+            let mut store = AssetStorage::new(JournalBackend::new(storage));
             let asset_id = store
                 .register(&call.symbol, &call.name, call.decimals, call.maxSupply, caller)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -190,26 +195,31 @@ impl AssetPrecompile {
 }
 
 impl call_precompile::StatefulPrecompile for AssetPrecompile {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+    fn call(
+        &mut self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
         match selector {
-            IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata),
-            IProtocolAsset::getAssetInfoCall::SELECTOR => self.get_asset_info(calldata),
-            IProtocolAsset::transferCall::SELECTOR => self.transfer(calldata, msg_sender),
+            IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata, storage),
+            IProtocolAsset::getAssetInfoCall::SELECTOR => self.get_asset_info(calldata, storage),
+            IProtocolAsset::transferCall::SELECTOR => self.transfer(calldata, msg_sender, storage),
             IProtocolAsset::batchTransferCall::SELECTOR => {
-                self.batch_transfer(calldata, msg_sender)
+                self.batch_transfer(calldata, msg_sender, storage)
             }
-            IProtocolAsset::approveCall::SELECTOR => self.approve(calldata, msg_sender),
+            IProtocolAsset::approveCall::SELECTOR => self.approve(calldata, msg_sender, storage),
             IProtocolAsset::transferFromCall::SELECTOR => {
-                self.transfer_from(calldata, msg_sender)
+                self.transfer_from(calldata, msg_sender, storage)
             }
-            IProtocolAsset::mintCall::SELECTOR => self.mint(calldata, msg_sender),
-            IProtocolAsset::issuerMintCall::SELECTOR => self.mint(calldata, msg_sender),
-            IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender),
-            IProtocolAsset::registerCall::SELECTOR => self.register(calldata, msg_sender),
+            IProtocolAsset::mintCall::SELECTOR => self.mint(calldata, msg_sender, storage),
+            IProtocolAsset::issuerMintCall::SELECTOR => self.mint(calldata, msg_sender, storage),
+            IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender, storage),
+            IProtocolAsset::registerCall::SELECTOR => self.register(calldata, msg_sender, storage),
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }
@@ -227,28 +237,26 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::repeat_byte(0xAB);
 
-        call_precompile::storage::StorageCtx::enter(&mut provider, || {
-            call_precompile::storage::StorageCtx::sstore(
-                ASSET_ADDRESS,
-                slot_balance(1, addr),
-                u128_to_u256(5000),
-            );
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_balance(1, addr),
+            u128_to_u256(5000),
+        );
 
-            let input = IProtocolAsset::getBalanceCall {
-                assetId: 1,
-                account: addr,
-            }
-            .abi_encode();
+        let input = IProtocolAsset::getBalanceCall {
+            assetId: 1,
+            account: addr,
+        }
+        .abi_encode();
 
-            let mut precompile = AssetPrecompile;
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let balance = call_precompile::u256_to_u128(
-                alloy_primitives::U256::from_be_bytes::<32>(
-                    result.bytes.as_ref().try_into().unwrap(),
-                ),
-            );
-            assert_eq!(balance, 5000);
-        });
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let balance = call_precompile::u256_to_u128(
+            alloy_primitives::U256::from_be_bytes::<32>(
+                result.bytes.as_ref().try_into().unwrap(),
+            ),
+        );
+        assert_eq!(balance, 5000);
     }
 
     #[test]
@@ -257,28 +265,26 @@ mod tests {
         let from = Address::repeat_byte(0xAB);
         let to = Address::repeat_byte(0xCD);
 
-        call_precompile::storage::StorageCtx::enter(&mut provider, || {
-            call_precompile::storage::StorageCtx::sstore(
-                ASSET_ADDRESS,
-                slot_balance(1, from),
-                u128_to_u256(1000),
-            );
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_balance(1, from),
+            u128_to_u256(1000),
+        );
 
-            let input = IProtocolAsset::transferCall {
-                assetId: 1,
-                to,
-                amount: 500,
-            }
-            .abi_encode();
+        let input = IProtocolAsset::transferCall {
+            assetId: 1,
+            to,
+            amount: 500,
+        }
+        .abi_encode();
 
-            let mut precompile = AssetPrecompile;
-            let result = precompile.call(&input, from);
-            assert!(result.is_ok(), "transfer failed: {:?}", result.err());
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(result.is_ok(), "transfer failed: {:?}", result.err());
 
-            let store = AssetStorage::new(JournalBackend);
-            assert_eq!(store.read_balance(1, from), 500);
-            assert_eq!(store.read_balance(1, to), 500);
-        });
+        let store = AssetStorage::new(JournalBackend::new(&mut provider));
+        assert_eq!(store.read_balance(1, from), 500);
+        assert_eq!(store.read_balance(1, to), 500);
     }
 
     #[test]
@@ -287,63 +293,61 @@ mod tests {
         let issuer = Address::repeat_byte(0x11);
         let recipient = Address::repeat_byte(0x22);
 
-        call_precompile::storage::StorageCtx::enter(&mut provider, || {
-            // Register
-            let input = IProtocolAsset::registerCall {
-                symbol: "GOLD".into(),
-                name: "Gold".into(),
-                decimals: 18,
-                maxSupply: 10000,
-            }
-            .abi_encode();
+        // Register
+        let input = IProtocolAsset::registerCall {
+            symbol: "GOLD".into(),
+            name: "Gold".into(),
+            decimals: 18,
+            maxSupply: 10000,
+        }
+        .abi_encode();
 
-            let mut precompile = AssetPrecompile;
-            let result = precompile.call(&input, issuer).unwrap();
-            let asset_id = u64::from_be_bytes([
-                result.bytes[24], result.bytes[25], result.bytes[26], result.bytes[27],
-                result.bytes[28], result.bytes[29], result.bytes[30], result.bytes[31],
-            ]);
-            assert_eq!(asset_id, 1);
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, issuer, &mut provider).unwrap();
+        let asset_id = u64::from_be_bytes([
+            result.bytes[24], result.bytes[25], result.bytes[26], result.bytes[27],
+            result.bytes[28], result.bytes[29], result.bytes[30], result.bytes[31],
+        ]);
+        assert_eq!(asset_id, 1);
 
-            // Mint
-            let input = IProtocolAsset::mintCall {
-                assetId: 1,
-                to: recipient,
-                amount: 500,
-            }
-            .abi_encode();
+        // Mint
+        let input = IProtocolAsset::mintCall {
+            assetId: 1,
+            to: recipient,
+            amount: 500,
+        }
+        .abi_encode();
 
-            let result = precompile.call(&input, issuer);
-            assert!(result.is_ok(), "mint failed: {:?}", result.err());
+        let result = precompile.call(&input, issuer, &mut provider);
+        assert!(result.is_ok(), "mint failed: {:?}", result.err());
 
-            let store = AssetStorage::new(JournalBackend);
-            assert_eq!(store.read_balance(1, recipient), 500);
-            assert_eq!(store.read_meta(1).supply, 500);
+        let store = AssetStorage::new(JournalBackend::new(&mut provider));
+        assert_eq!(store.read_balance(1, recipient), 500);
+        assert_eq!(store.read_meta(1).supply, 500);
 
-            // Mint to issuer
-            let input = IProtocolAsset::mintCall {
-                assetId: 1,
-                to: issuer,
-                amount: 400,
-            }
-            .abi_encode();
-            let result = precompile.call(&input, issuer);
-            assert!(result.is_ok());
+        // Mint to issuer
+        let input = IProtocolAsset::mintCall {
+            assetId: 1,
+            to: issuer,
+            amount: 400,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, issuer, &mut provider);
+        assert!(result.is_ok());
 
-            // Burn from issuer
-            let input = IProtocolAsset::burnCall {
-                assetId: 1,
-                from: issuer,
-                amount: 200,
-            }
-            .abi_encode();
+        // Burn from issuer
+        let input = IProtocolAsset::burnCall {
+            assetId: 1,
+            from: issuer,
+            amount: 200,
+        }
+        .abi_encode();
 
-            let result = precompile.call(&input, issuer);
-            assert!(result.is_ok(), "burn failed: {:?}", result.err());
+        let result = precompile.call(&input, issuer, &mut provider);
+        assert!(result.is_ok(), "burn failed: {:?}", result.err());
 
-            assert_eq!(store.read_balance(1, issuer), 200);
-            assert_eq!(store.read_meta(1).supply, 700);
-        });
+        assert_eq!(store.read_balance(1, issuer), 200);
+        assert_eq!(store.read_meta(1).supply, 700);
     }
 
     #[test]
@@ -353,42 +357,40 @@ mod tests {
         let spender = Address::repeat_byte(0xEF);
         let recipient = Address::repeat_byte(0xCD);
 
-        call_precompile::storage::StorageCtx::enter(&mut provider, || {
-            call_precompile::storage::StorageCtx::sstore(
-                ASSET_ADDRESS,
-                slot_balance(1, owner),
-                u128_to_u256(1000),
-            );
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_balance(1, owner),
+            u128_to_u256(1000),
+        );
 
-            let mut precompile = AssetPrecompile;
+        let mut precompile = AssetPrecompile;
 
-            // Approve
-            let input = IProtocolAsset::approveCall {
-                assetId: 1,
-                spender,
-                amount: 100,
-            }
-            .abi_encode();
+        // Approve
+        let input = IProtocolAsset::approveCall {
+            assetId: 1,
+            spender,
+            amount: 100,
+        }
+        .abi_encode();
 
-            let result = precompile.call(&input, owner);
-            assert!(result.is_ok(), "approve failed: {:?}", result.err());
+        let result = precompile.call(&input, owner, &mut provider);
+        assert!(result.is_ok(), "approve failed: {:?}", result.err());
 
-            // TransferFrom
-            let input = IProtocolAsset::transferFromCall {
-                assetId: 1,
-                from: owner,
-                to: recipient,
-                amount: 50,
-            }
-            .abi_encode();
+        // TransferFrom
+        let input = IProtocolAsset::transferFromCall {
+            assetId: 1,
+            from: owner,
+            to: recipient,
+            amount: 50,
+        }
+        .abi_encode();
 
-            let result = precompile.call(&input, spender);
-            assert!(result.is_ok(), "transfer_from failed: {:?}", result.err());
+        let result = precompile.call(&input, spender, &mut provider);
+        assert!(result.is_ok(), "transfer_from failed: {:?}", result.err());
 
-            let store = AssetStorage::new(JournalBackend);
-            assert_eq!(store.read_balance(1, owner), 950);
-            assert_eq!(store.read_balance(1, recipient), 50);
-            assert_eq!(store.read_allowance(1, owner, spender), 50);
-        });
+        let store = AssetStorage::new(JournalBackend::new(&mut provider));
+        assert_eq!(store.read_balance(1, owner), 950);
+        assert_eq!(store.read_balance(1, recipient), 50);
+        assert_eq!(store.read_allowance(1, owner, spender), 50);
     }
 }

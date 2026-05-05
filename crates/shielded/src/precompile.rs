@@ -10,6 +10,7 @@ use call_precompile::{
     dispatch, journal_backend::JournalBackend, storage::storage_slot,
     u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256, ASSET_ADDRESS, slot_balance,
 };
+use call_precompile::storage::StorageProvider;
 use call_primitives::Hash;
 use call_protocol::storage_backend::StorageBackend;
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -336,12 +337,13 @@ sol! {
 pub struct ShieldedPrecompile;
 
 impl ShieldedPrecompile {
-    fn deposit(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+    fn deposit(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolShielded::depositCall, _>(
             calldata,
             50000,
-            |call| {
-                let mut store = ShieldedStorage::new(JournalBackend);
+            storage,
+            |call, storage| {
+                let mut store = ShieldedStorage::new(JournalBackend::new(storage));
                 store
                     .deposit(call.assetId, call.amount, call.commitment.into(), msg_sender)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -350,12 +352,13 @@ impl ShieldedPrecompile {
         )
     }
 
-    fn withdraw(&self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
+    fn withdraw(&self, calldata: &[u8], _msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolShielded::withdrawCall, _>(
             calldata,
             50000,
-            |call| {
-                let mut store = ShieldedStorage::new(JournalBackend);
+            storage,
+            |call, storage| {
+                let mut store = ShieldedStorage::new(JournalBackend::new(storage));
                 store
                     .withdraw(
                         call.assetId,
@@ -371,12 +374,13 @@ impl ShieldedPrecompile {
         )
     }
 
-    fn transfer(&self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
+    fn transfer(&self, calldata: &[u8], _msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolShielded::transferCall, _>(
             calldata,
             50000,
-            |call| {
-                let mut store = ShieldedStorage::new(JournalBackend);
+            storage,
+            |call, storage| {
+                let mut store = ShieldedStorage::new(JournalBackend::new(storage));
                 let nullifiers: Vec<[u8; 32]> =
                     call.nullifiers.iter().map(|n| (*n).into()).collect();
                 let commitments: Vec<[u8; 32]> =
@@ -389,45 +393,49 @@ impl ShieldedPrecompile {
         )
     }
 
-    fn get_merkle_root(&self, calldata: &[u8]) -> PrecompileResult {
+    fn get_merkle_root(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::getMerkleRootCall, _, _>(
             calldata,
             1000,
-            |_call| {
-                let store = ShieldedStorage::new(JournalBackend);
+            storage,
+            |_call, storage| {
+                let store = ShieldedStorage::new(JournalBackend::new(storage));
                 Ok(store.get_merkle_root())
             },
         )
     }
 
-    fn get_commitment_count(&self, calldata: &[u8]) -> PrecompileResult {
+    fn get_commitment_count(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::getCommitmentCountCall, _, _>(
             calldata,
             1000,
-            |_call| {
-                let store = ShieldedStorage::new(JournalBackend);
+            storage,
+            |_call, storage| {
+                let store = ShieldedStorage::new(JournalBackend::new(storage));
                 Ok(store.get_commitment_count())
             },
         )
     }
 
-    fn get_commitment(&self, calldata: &[u8]) -> PrecompileResult {
+    fn get_commitment(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::getCommitmentCall, _, _>(
             calldata,
             2000,
-            |call| {
-                let store = ShieldedStorage::new(JournalBackend);
+            storage,
+            |call, storage| {
+                let store = ShieldedStorage::new(JournalBackend::new(storage));
                 Ok(store.get_commitment(call.index))
             },
         )
     }
 
-    fn is_nullifier_spent(&self, calldata: &[u8]) -> PrecompileResult {
+    fn is_nullifier_spent(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::isNullifierSpentCall, _, _>(
             calldata,
             2000,
-            |call| {
-                let store = ShieldedStorage::new(JournalBackend);
+            storage,
+            |call, storage| {
+                let store = ShieldedStorage::new(JournalBackend::new(storage));
                 Ok(store.is_nullifier_spent(call.nullifier.into()))
             },
         )
@@ -435,21 +443,21 @@ impl ShieldedPrecompile {
 }
 
 impl call_precompile::StatefulPrecompile for ShieldedPrecompile {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+    fn call(&mut self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
         match selector {
-            IProtocolShielded::depositCall::SELECTOR => self.deposit(calldata, msg_sender),
-            IProtocolShielded::withdrawCall::SELECTOR => self.withdraw(calldata, msg_sender),
-            IProtocolShielded::transferCall::SELECTOR => self.transfer(calldata, msg_sender),
-            IProtocolShielded::getMerkleRootCall::SELECTOR => self.get_merkle_root(calldata),
+            IProtocolShielded::depositCall::SELECTOR => self.deposit(calldata, msg_sender, storage),
+            IProtocolShielded::withdrawCall::SELECTOR => self.withdraw(calldata, msg_sender, storage),
+            IProtocolShielded::transferCall::SELECTOR => self.transfer(calldata, msg_sender, storage),
+            IProtocolShielded::getMerkleRootCall::SELECTOR => self.get_merkle_root(calldata, storage),
             IProtocolShielded::getCommitmentCountCall::SELECTOR => {
-                self.get_commitment_count(calldata)
+                self.get_commitment_count(calldata, storage)
             }
-            IProtocolShielded::getCommitmentCall::SELECTOR => self.get_commitment(calldata),
-            IProtocolShielded::isNullifierSpentCall::SELECTOR => self.is_nullifier_spent(calldata),
+            IProtocolShielded::getCommitmentCall::SELECTOR => self.get_commitment(calldata, storage),
+            IProtocolShielded::isNullifierSpentCall::SELECTOR => self.is_nullifier_spent(calldata, storage),
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }
@@ -458,7 +466,7 @@ impl call_precompile::StatefulPrecompile for ShieldedPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompile::storage::{HashMapStorageProvider, StorageCtx};
+    use call_precompile::storage::HashMapStorageProvider;
     use call_precompile::{slot_balance, u128_to_u256, u256_to_u128};
     use call_primitives::Address;
     use call_precompile::StatefulPrecompile;
@@ -476,42 +484,40 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(5_000_000);
         let sender = Address::repeat_byte(0x55);
 
-        StorageCtx::enter(&mut provider, || {
-            let sender_slot = slot_balance(1, sender);
-            StorageCtx::sstore(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
 
-            let mut precompile = ShieldedPrecompile;
+        let mut precompile = ShieldedPrecompile;
 
-            let input = IProtocolShielded::depositCall {
-                assetId: 1,
-                amount: 1_000,
-                commitment: test_commitment(1).into(),
-            }
-            .abi_encode();
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1_000,
+            commitment: test_commitment(1).into(),
+        }
+        .abi_encode();
 
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "deposit failed: {:?}", result.err());
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "deposit failed: {:?}", result.err());
 
-            let input = IProtocolShielded::getCommitmentCountCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let count = u64::from_be_bytes({
-                let mut buf = [0u8; 8];
-                buf.copy_from_slice(&result.bytes[24..32]);
-                buf
-            });
-            assert_eq!(count, 1);
-
-            let input = IProtocolShielded::getCommitmentCall { index: 0 }.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(&result.bytes[..], &test_commitment(1));
-
-            let input = IProtocolShielded::isNullifierSpentCall {
-                nullifier: test_commitment(1).into(),
-            }
-            .abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 0);
+        let input = IProtocolShielded::getCommitmentCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let count = u64::from_be_bytes({
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&result.bytes[24..32]);
+            buf
         });
+        assert_eq!(count, 1);
+
+        let input = IProtocolShielded::getCommitmentCall { index: 0 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(&result.bytes[..], &test_commitment(1));
+
+        let input = IProtocolShielded::isNullifierSpentCall {
+            nullifier: test_commitment(1).into(),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 0);
     }
 
     #[test]
@@ -520,35 +526,34 @@ mod tests {
         let sender = Address::repeat_byte(0x55);
         let target = Address::repeat_byte(0x66);
 
-        StorageCtx::enter(&mut provider, || {
-            let mut precompile = ShieldedPrecompile;
+        let mut precompile = ShieldedPrecompile;
 
-            let input = IProtocolShielded::withdrawCall {
-                assetId: 0,
-                target,
-                amount: 500,
-                nullifier: [0xBBu8; 32].into(),
-                merkleRoot: [0u8; 32].into(),
-                proofData: vec![0u8; 32].into(),
-            }
-            .abi_encode();
+        let input = IProtocolShielded::withdrawCall {
+            assetId: 0,
+            target,
+            amount: 500,
+            nullifier: [0xBBu8; 32].into(),
+            merkleRoot: [0u8; 32].into(),
+            proofData: vec![0u8; 32].into(),
+        }
+        .abi_encode();
 
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "withdraw failed: {:?}", result.err());
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "withdraw failed: {:?}", result.err());
 
-            let input = IProtocolShielded::isNullifierSpentCall {
-                nullifier: [0xBBu8; 32].into(),
-            }
-            .abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 1);
+        let input = IProtocolShielded::isNullifierSpentCall {
+            nullifier: [0xBBu8; 32].into(),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 1);
 
-            let target_slot = slot_balance(0, target);
-            let bal = StorageCtx::sload(ASSET_ADDRESS, target_slot)
-                .map(u256_to_u128)
-                .unwrap_or(0);
-            assert_eq!(bal, 500);
-        });
+        let target_slot = slot_balance(0, target);
+        let bal = provider
+            .get(ASSET_ADDRESS, target_slot)
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(bal, 500);
     }
 
     #[test]
@@ -556,39 +561,37 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(5_000_000);
         let sender = Address::repeat_byte(0x55);
 
-        StorageCtx::enter(&mut provider, || {
-            let mut precompile = ShieldedPrecompile;
+        let mut precompile = ShieldedPrecompile;
 
-            let nullifiers = vec![[0xCCu8; 32].into()];
-            let commitments = vec![test_commitment(3).into(), test_commitment(4).into()];
+        let nullifiers = vec![[0xCCu8; 32].into()];
+        let commitments = vec![test_commitment(3).into(), test_commitment(4).into()];
 
-            let input = IProtocolShielded::transferCall {
-                assetId: 1,
-                proof: vec![].into(),
-                nullifiers,
-                commitments,
-            }
-            .abi_encode();
+        let input = IProtocolShielded::transferCall {
+            assetId: 1,
+            proof: vec![].into(),
+            nullifiers,
+            commitments,
+        }
+        .abi_encode();
 
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "transfer failed: {:?}", result.err());
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "transfer failed: {:?}", result.err());
 
-            let input = IProtocolShielded::getCommitmentCountCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let count = u64::from_be_bytes({
-                let mut buf = [0u8; 8];
-                buf.copy_from_slice(&result.bytes[24..32]);
-                buf
-            });
-            assert_eq!(count, 2);
-
-            let input = IProtocolShielded::isNullifierSpentCall {
-                nullifier: [0xCCu8; 32].into(),
-            }
-            .abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 1);
+        let input = IProtocolShielded::getCommitmentCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let count = u64::from_be_bytes({
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&result.bytes[24..32]);
+            buf
         });
+        assert_eq!(count, 2);
+
+        let input = IProtocolShielded::isNullifierSpentCall {
+            nullifier: [0xCCu8; 32].into(),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 1);
     }
 
     fn test_commitment(n: u8) -> [u8; 32] {
@@ -602,50 +605,48 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(5_000_000);
         let sender = Address::repeat_byte(0x55);
 
-        StorageCtx::enter(&mut provider, || {
-            let sender_slot = slot_balance(1, sender);
-            StorageCtx::sstore(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
 
-            let mut precompile = ShieldedPrecompile;
-            let commitment = test_commitment(1);
+        let mut precompile = ShieldedPrecompile;
+        let commitment = test_commitment(1);
 
-            let input = IProtocolShielded::depositCall {
-                assetId: 1,
-                amount: 1_000,
-                commitment: commitment.into(),
-            }
-            .abi_encode();
-            precompile.call(&input, sender).unwrap();
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1_000,
+            commitment: commitment.into(),
+        }
+        .abi_encode();
+        precompile.call(&input, sender, &mut provider).unwrap();
 
-            let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let root1: [u8; 32] = result.bytes[..32].try_into().unwrap();
-            assert_ne!(root1, [0u8; 32], "merkle root should not be zero after deposit");
+        let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let root1: [u8; 32] = result.bytes[..32].try_into().unwrap();
+        assert_ne!(root1, [0u8; 32], "merkle root should not be zero after deposit");
 
-            let mut tree = crate::PoseidonMerkleTree::new(32);
-            let tree_root = tree.insert(&commitment);
-            assert_eq!(root1, tree_root, "merkle root should match local computation");
+        let mut tree = crate::PoseidonMerkleTree::new(32);
+        let tree_root = tree.insert(&commitment);
+        assert_eq!(root1, tree_root, "merkle root should match local computation");
 
-            let commitment2 = test_commitment(2);
-            let input = IProtocolShielded::depositCall {
-                assetId: 1,
-                amount: 2_000,
-                commitment: commitment2.into(),
-            }
-            .abi_encode();
-            precompile.call(&input, sender).unwrap();
+        let commitment2 = test_commitment(2);
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 2_000,
+            commitment: commitment2.into(),
+        }
+        .abi_encode();
+        precompile.call(&input, sender, &mut provider).unwrap();
 
-            let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let root2: [u8; 32] = result.bytes[..32].try_into().unwrap();
-            assert_ne!(root1, root2, "merkle root should change after second deposit");
+        let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let root2: [u8; 32] = result.bytes[..32].try_into().unwrap();
+        assert_ne!(root1, root2, "merkle root should change after second deposit");
 
-            let mut tree = crate::PoseidonMerkleTree::new(32);
-            tree.insert(&commitment);
-            tree.insert(&commitment2);
-            let expected_root2 = tree.root();
-            assert_eq!(root2, expected_root2);
-        });
+        let mut tree = crate::PoseidonMerkleTree::new(32);
+        tree.insert(&commitment);
+        tree.insert(&commitment2);
+        let expected_root2 = tree.root();
+        assert_eq!(root2, expected_root2);
     }
 
     #[test]
@@ -653,30 +654,28 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(5_000_000);
         let sender = Address::repeat_byte(0x55);
 
-        StorageCtx::enter(&mut provider, || {
-            let mut precompile = ShieldedPrecompile;
+        let mut precompile = ShieldedPrecompile;
 
-            let nullifiers = vec![[0xCCu8; 32].into()];
-            let commitments = vec![test_commitment(3).into()];
+        let nullifiers = vec![[0xCCu8; 32].into()];
+        let commitments = vec![test_commitment(3).into()];
 
-            let input = IProtocolShielded::transferCall {
-                assetId: 1,
-                proof: vec![].into(),
-                nullifiers,
-                commitments,
-            }
-            .abi_encode();
+        let input = IProtocolShielded::transferCall {
+            assetId: 1,
+            proof: vec![].into(),
+            nullifiers,
+            commitments,
+        }
+        .abi_encode();
 
-            precompile.call(&input, sender).unwrap();
+        precompile.call(&input, sender, &mut provider).unwrap();
 
-            let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let root: [u8; 32] = result.bytes[..32].try_into().unwrap();
-            assert_ne!(root, [0u8; 32], "merkle root should not be zero after transfer");
+        let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let root: [u8; 32] = result.bytes[..32].try_into().unwrap();
+        assert_ne!(root, [0u8; 32], "merkle root should not be zero after transfer");
 
-            let mut tree = crate::PoseidonMerkleTree::new(32);
-            tree.insert(&test_commitment(3));
-            assert_eq!(root, tree.root());
-        });
+        let mut tree = crate::PoseidonMerkleTree::new(32);
+        tree.insert(&test_commitment(3));
+        assert_eq!(root, tree.root());
     }
 }

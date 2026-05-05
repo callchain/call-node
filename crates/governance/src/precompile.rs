@@ -8,8 +8,8 @@ use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
     address_to_u256, dispatch, journal_backend::JournalBackend, require_caller,
-    storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
-    u64_to_u256,
+    storage::{storage_slot, StorageProvider},
+    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -191,9 +191,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         data_hash: [u8; 32],
         proposal_type: u8,
         proposer: Address,
+        current_block: u64,
     ) -> Result<u64, PrecompileError> {
-        let current_block = call_precompile::storage::StorageCtx::block_number();
-
         // Rate limiting
         let cooldown = self.read_config_u64(b"proposal_cooldown");
         let cooldown = if cooldown == 0 {
@@ -325,6 +324,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         vote_val: u8,
         voter: Address,
         voting_power: u128,
+        current_block: u64,
     ) -> Result<(), PrecompileError> {
         if vote_val < 1 || vote_val > 3 {
             return Err(PrecompileError::Other(
@@ -333,7 +333,6 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         }
 
         let status = self.read_proposal_status(proposal_id);
-        let current_block = call_precompile::storage::StorageCtx::block_number();
         let start_block = self.read_proposal_u64(proposal_id, b"start_block");
         let end_block = self.read_proposal_u64(proposal_id, b"end_block");
 
@@ -619,15 +618,18 @@ sol! {
 pub struct GovernancePrecompile;
 
 impl GovernancePrecompile {
-    fn submit_proposal(&self,
+    fn submit_proposal(
+        &self,
         calldata: &[u8],
         msg_sender: Address,
+        storage: &mut dyn StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::submitProposalCall, _>(calldata, 200_000, |call| {
+        dispatch::mutate_void::<IProtocolGovernance::submitProposalCall, _>(calldata, 200_000, storage, |call, storage| {
             let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend;
+            let backend = JournalBackend::new(storage);
             let mut gov_store = GovernanceStorage::new(backend);
             let mut asset_store = AssetStorage::new(backend);
+            let block_number = storage.block_number();
             let proposal_id = gov_store
                 .submit_proposal(
                     &mut asset_store,
@@ -636,6 +638,7 @@ impl GovernancePrecompile {
                     call.dataHash.into(),
                     call.proposalType,
                     caller,
+                    block_number,
                 )
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
@@ -648,17 +651,17 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
         })
     }
 
-    fn vote(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::voteCall, _>(calldata, 10_000, |call| {
+    fn vote(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::voteCall, _>(calldata, 10_000, storage, |call, storage| {
             let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend;
+            let backend = JournalBackend::new(storage);
             let mut gov_store = GovernanceStorage::new(backend);
 
             // Compute voting power based on proposal type
@@ -714,8 +717,9 @@ impl GovernancePrecompile {
                 }
             }
 
+            let block_number = storage.block_number();
             gov_store
-                .vote(call.proposalId, call.vote, caller, voting_power)
+                .vote(call.proposalId, call.vote, caller, voting_power, block_number)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
             // Emit VoteCast(proposalId, voter, vote, power)
@@ -729,17 +733,17 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
         })
     }
 
-    fn queue(&self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::queueCall, _>(calldata, 20_000, |call| {
-            let mut gov_store = GovernanceStorage::new(JournalBackend);
-            let block_number = call_precompile::storage::StorageCtx::block_number();
+    fn queue(&self, calldata: &[u8], _msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::queueCall, _>(calldata, 20_000, storage, |call, storage| {
+            let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
+            let block_number = storage.block_number();
             gov_store
                 .queue(call.proposalId, block_number)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -753,17 +757,17 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
         })
     }
 
-    fn execute(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::executeCall, _>(calldata, 20_000, |call| {
+    fn execute(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::executeCall, _>(calldata, 20_000, storage, |call, storage| {
             let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend;
+            let backend = JournalBackend::new(storage);
             let mut gov_store = GovernanceStorage::new(backend);
             let mut asset_store = AssetStorage::new(backend);
 
@@ -778,7 +782,7 @@ impl GovernancePrecompile {
                 ));
             }
 
-            let block_number = call_precompile::storage::StorageCtx::block_number();
+            let block_number = storage.block_number();
             gov_store
                 .execute(&mut asset_store, call.proposalId, block_number, caller)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -791,19 +795,19 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
         })
     }
 
-    fn emergency_pause(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::emergencyPauseCall, _>(calldata, 30_000, |call| {
+    fn emergency_pause(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::emergencyPauseCall, _>(calldata, 30_000, storage, |call, storage| {
             let caller = require_caller(msg_sender)?;
 
             // Verify caller is a registered validator
-            let validator_store = ValidatorStorage::new(JournalBackend);
+            let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
             let validator_id = validator_store.read_validator_id(caller);
             if validator_id == 0 {
                 return Err(PrecompileError::Other(
@@ -811,7 +815,7 @@ impl GovernancePrecompile {
                 ));
             }
 
-            let mut gov_store = GovernanceStorage::new(JournalBackend);
+            let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
             gov_store.emergency_pause(call.reason.into(), caller);
 
             // Emit EmergencyPaused(pauser, reason)
@@ -823,19 +827,19 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
         })
     }
 
-    fn emergency_resume(&self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::emergencyResumeCall, _>(calldata, 20_000, |_call| {
+    fn emergency_resume(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::emergencyResumeCall, _>(calldata, 20_000, storage, |_call, storage| {
             let caller = require_caller(msg_sender)?;
 
             // Verify caller is a registered validator
-            let validator_store = ValidatorStorage::new(JournalBackend);
+            let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
             let validator_id = validator_store.read_validator_id(caller);
             if validator_id == 0 {
                 return Err(PrecompileError::Other(
@@ -843,7 +847,7 @@ impl GovernancePrecompile {
                 ));
             }
 
-            let mut gov_store = GovernanceStorage::new(JournalBackend);
+            let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
             gov_store.emergency_resume();
 
             // Emit EmergencyResumed(resumer)
@@ -854,23 +858,23 @@ impl GovernancePrecompile {
                 vec![topic0],
                 alloy_primitives::Bytes::from(event_data),
             ) {
-                let _ = call_precompile::storage::StorageCtx::emit_event(GOVERNANCE_ADDRESS, log);
+                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
             }
 
             Ok(())
         })
     }
 
-    fn get_proposal_status(&self, calldata: &[u8]) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::getProposalStatusCall, _, _>(calldata, 2000, |call| {
-            let store = GovernanceStorage::new(JournalBackend);
+    fn get_proposal_status(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::view::<IProtocolGovernance::getProposalStatusCall, _, _>(calldata, 2000, storage, |call, storage| {
+            let store = GovernanceStorage::new(JournalBackend::new(storage));
             Ok(U256::from(store.read_proposal_status(call.proposalId)))
         })
     }
 
-    fn get_proposal_votes(&self, calldata: &[u8]) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::getProposalVotesCall, _, _>(calldata, 2000, |call| {
-            let store = GovernanceStorage::new(JournalBackend);
+    fn get_proposal_votes(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::view::<IProtocolGovernance::getProposalVotesCall, _, _>(calldata, 2000, storage, |call, storage| {
+            let store = GovernanceStorage::new(JournalBackend::new(storage));
             let votes_for = store.read_vote_tally(call.proposalId, b"votes_for");
             let votes_against = store.read_vote_tally(call.proposalId, b"votes_against");
             let votes_abstain = store.read_vote_tally(call.proposalId, b"votes_abstain");
@@ -878,45 +882,45 @@ impl GovernancePrecompile {
         })
     }
 
-    fn is_paused(&self, calldata: &[u8]) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::isPausedCall, _, _>(calldata, 1000, |_call| {
-            let store = GovernanceStorage::new(JournalBackend);
+    fn is_paused(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::view::<IProtocolGovernance::isPausedCall, _, _>(calldata, 1000, storage, |_call, storage| {
+            let store = GovernanceStorage::new(JournalBackend::new(storage));
             Ok(U256::from(if store.is_paused() { 1u8 } else { 0u8 }))
         })
     }
 
-    fn get_proposal_count(&self, calldata: &[u8]) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::getProposalCountCall, _, _>(calldata, 1000, |_call| {
-            let store = GovernanceStorage::new(JournalBackend);
+    fn get_proposal_count(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+        dispatch::view::<IProtocolGovernance::getProposalCountCall, _, _>(calldata, 1000, storage, |_call, storage| {
+            let store = GovernanceStorage::new(JournalBackend::new(storage));
             Ok(store.read_proposal_count())
         })
     }
 }
 
 impl call_precompile::StatefulPrecompile for GovernancePrecompile {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+    fn call(&mut self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
         match selector {
             IProtocolGovernance::submitProposalCall::SELECTOR => {
-                self.submit_proposal(calldata, msg_sender)
+                self.submit_proposal(calldata, msg_sender, storage)
             }
-            IProtocolGovernance::voteCall::SELECTOR => self.vote(calldata, msg_sender),
-            IProtocolGovernance::queueCall::SELECTOR => self.queue(calldata, msg_sender),
-            IProtocolGovernance::executeCall::SELECTOR => self.execute(calldata, msg_sender),
+            IProtocolGovernance::voteCall::SELECTOR => self.vote(calldata, msg_sender, storage),
+            IProtocolGovernance::queueCall::SELECTOR => self.queue(calldata, msg_sender, storage),
+            IProtocolGovernance::executeCall::SELECTOR => self.execute(calldata, msg_sender, storage),
             IProtocolGovernance::emergencyPauseCall::SELECTOR => {
-                self.emergency_pause(calldata, msg_sender)
+                self.emergency_pause(calldata, msg_sender, storage)
             }
             IProtocolGovernance::emergencyResumeCall::SELECTOR => {
-                self.emergency_resume(calldata, msg_sender)
+                self.emergency_resume(calldata, msg_sender, storage)
             }
-            IProtocolGovernance::getProposalStatusCall::SELECTOR => self.get_proposal_status(calldata),
-            IProtocolGovernance::getProposalVotesCall::SELECTOR => self.get_proposal_votes(calldata),
-            IProtocolGovernance::isPausedCall::SELECTOR => self.is_paused(calldata),
+            IProtocolGovernance::getProposalStatusCall::SELECTOR => self.get_proposal_status(calldata, storage),
+            IProtocolGovernance::getProposalVotesCall::SELECTOR => self.get_proposal_votes(calldata, storage),
+            IProtocolGovernance::isPausedCall::SELECTOR => self.is_paused(calldata, storage),
             IProtocolGovernance::getProposalCountCall::SELECTOR => {
-                self.get_proposal_count(calldata)
+                self.get_proposal_count(calldata, storage)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
@@ -945,51 +949,49 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x44);
 
-        call_precompile::storage::StorageCtx::enter(&mut provider, || {
-            // Seed sender balance
-            call_precompile::storage::StorageCtx::sstore(
-                ASSET_ADDRESS,
-                slot_balance(CALL_ASSET_ID, sender),
-                u128_to_u256(100_000),
-            );
-            // Seed review_period=0 so proposal is active immediately
-            call_precompile::storage::StorageCtx::sstore(
-                GOVERNANCE_ADDRESS,
-                slot_gov_config(b"review_period"),
-                u64_to_u256(0),
-            );
+        // Seed sender balance
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_balance(CALL_ASSET_ID, sender),
+            u128_to_u256(100_000),
+        ).unwrap();
+        // Seed review_period=0 so proposal is active immediately
+        provider.sstore(
+            GOVERNANCE_ADDRESS,
+            slot_gov_config(b"review_period"),
+            u64_to_u256(0),
+        ).unwrap();
 
-            let mut precompile = GovernancePrecompile;
+        let mut precompile = GovernancePrecompile;
 
-            // submitProposal (type 0 = ParameterChange)
-            let input = IProtocolGovernance::submitProposalCall {
-                title: alloy_primitives::FixedBytes::<32>::from_slice(b"My Proposal_____________________"),
-                description: alloy_primitives::FixedBytes::<32>::from_slice(b"Description_____________________"),
-                dataHash: alloy_primitives::FixedBytes::<32>::from_slice(&[0xDDu8; 32]),
-                proposalType: 0,
-            }
-            .abi_encode();
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "submit failed: {:?}", result.err());
+        // submitProposal (type 0 = ParameterChange)
+        let input = IProtocolGovernance::submitProposalCall {
+            title: alloy_primitives::FixedBytes::<32>::from_slice(b"My Proposal_____________________"),
+            description: alloy_primitives::FixedBytes::<32>::from_slice(b"Description_____________________"),
+            dataHash: alloy_primitives::FixedBytes::<32>::from_slice(&[0xDDu8; 32]),
+            proposalType: 0,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "submit failed: {:?}", result.err());
 
-            // getProposalCount
-            let input = IProtocolGovernance::getProposalCountCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let count = u256_to_u64(U256::from_be_bytes::<32>(result.bytes.as_ref().try_into().unwrap()));
-            assert_eq!(count, 1);
+        // getProposalCount
+        let input = IProtocolGovernance::getProposalCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let count = u256_to_u64(U256::from_be_bytes::<32>(result.bytes.as_ref().try_into().unwrap()));
+        assert_eq!(count, 1);
 
-            // getProposalStatus(1)
-            let input = IProtocolGovernance::getProposalStatusCall { proposalId: 1 }.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 1); // active
+        // getProposalStatus(1)
+        let input = IProtocolGovernance::getProposalStatusCall { proposalId: 1 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 1); // active
 
-            // getProposalVotes(1)
-            let input = IProtocolGovernance::getProposalVotesCall { proposalId: 1 }.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(&result.bytes[16..32], &[0u8; 16]); // votes_for = 0
-            assert_eq!(&result.bytes[48..64], &[0u8; 16]); // votes_against = 0
-            assert_eq!(&result.bytes[80..96], &[0u8; 16]); // votes_abstain = 0
-        });
+        // getProposalVotes(1)
+        let input = IProtocolGovernance::getProposalVotesCall { proposalId: 1 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(&result.bytes[16..32], &[0u8; 16]); // votes_for = 0
+        assert_eq!(&result.bytes[48..64], &[0u8; 16]); // votes_against = 0
+        assert_eq!(&result.bytes[80..96], &[0u8; 16]); // votes_abstain = 0
     }
 
     #[test]
@@ -997,64 +999,62 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x44);
 
-        call_precompile::storage::StorageCtx::enter(&mut provider, || {
-            // Seed sender balance
-            call_precompile::storage::StorageCtx::sstore(
-                ASSET_ADDRESS,
-                slot_balance(CALL_ASSET_ID, sender),
-                u128_to_u256(100_000),
-            );
-            // Seed review_period=0 so proposal is active immediately
-            call_precompile::storage::StorageCtx::sstore(
-                GOVERNANCE_ADDRESS,
-                slot_gov_config(b"review_period"),
-                u64_to_u256(0),
-            );
+        // Seed sender balance
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_balance(CALL_ASSET_ID, sender),
+            u128_to_u256(100_000),
+        ).unwrap();
+        // Seed review_period=0 so proposal is active immediately
+        provider.sstore(
+            GOVERNANCE_ADDRESS,
+            slot_gov_config(b"review_period"),
+            u64_to_u256(0),
+        ).unwrap();
 
-            let mut precompile = GovernancePrecompile;
+        let mut precompile = GovernancePrecompile;
 
-            // submitProposal (type 0 = ParameterChange)
-            let input = IProtocolGovernance::submitProposalCall {
-                title: alloy_primitives::FixedBytes::<32>::from_slice(b"Proposal________________________"),
-                description: alloy_primitives::FixedBytes::<32>::from_slice(b"Desc____________________________"),
-                dataHash: alloy_primitives::FixedBytes::<32>::from_slice(&[0xEEu8; 32]),
-                proposalType: 0,
-            }
-            .abi_encode();
-            precompile.call(&input, sender).unwrap();
+        // submitProposal (type 0 = ParameterChange)
+        let input = IProtocolGovernance::submitProposalCall {
+            title: alloy_primitives::FixedBytes::<32>::from_slice(b"Proposal________________________"),
+            description: alloy_primitives::FixedBytes::<32>::from_slice(b"Desc____________________________"),
+            dataHash: alloy_primitives::FixedBytes::<32>::from_slice(&[0xEEu8; 32]),
+            proposalType: 0,
+        }
+        .abi_encode();
+        precompile.call(&input, sender, &mut provider).unwrap();
 
-            // vote(proposalId=1, vote=1=Yes)
-            // With type 0 (ParameterChange), voting power = max(1 if validator, call_balance)
-            // Sender had 100_000 CALL balance but 10_000 was deducted as deposit,
-            // so voting power = 90_000
-            let input = IProtocolGovernance::voteCall {
-                proposalId: 1,
-                vote: 1,
-            }
-            .abi_encode();
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "vote failed: {:?}", result.err());
+        // vote(proposalId=1, vote=1=Yes)
+        // With type 0 (ParameterChange), voting power = max(1 if validator, call_balance)
+        // Sender had 100_000 CALL balance but 10_000 was deducted as deposit,
+        // so voting power = 90_000
+        let input = IProtocolGovernance::voteCall {
+            proposalId: 1,
+            vote: 1,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "vote failed: {:?}", result.err());
 
-            // getProposalVotes(1)
-            let input = IProtocolGovernance::getProposalVotesCall { proposalId: 1 }.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            let votes_for = u128::from_be_bytes({
-                let mut buf = [0u8; 16];
-                buf.copy_from_slice(&result.bytes[16..32]);
-                buf
-            });
-            assert_eq!(votes_for, 90_000);
-
-            // queue(1)
-            let input = IProtocolGovernance::queueCall { proposalId: 1 }.abi_encode();
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "queue failed: {:?}", result.err());
-
-            // getProposalStatus(1) should be 2 (queued)
-            let input = IProtocolGovernance::getProposalStatusCall { proposalId: 1 }.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 2);
+        // getProposalVotes(1)
+        let input = IProtocolGovernance::getProposalVotesCall { proposalId: 1 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let votes_for = u128::from_be_bytes({
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&result.bytes[16..32]);
+            buf
         });
+        assert_eq!(votes_for, 90_000);
+
+        // queue(1)
+        let input = IProtocolGovernance::queueCall { proposalId: 1 }.abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "queue failed: {:?}", result.err());
+
+        // getProposalStatus(1) should be 2 (queued)
+        let input = IProtocolGovernance::getProposalStatusCall { proposalId: 1 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 2);
     }
 
     #[test]
@@ -1062,43 +1062,41 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x44);
 
-        call_precompile::storage::StorageCtx::enter(&mut provider, || {
-            // Seed validator so pause/resume work
-            call_precompile::storage::StorageCtx::sstore(
-                VALIDATOR_ADDRESS,
-                slot_validator_by_addr(sender),
-                u64_to_u256(1),
-            );
+        // Seed validator so pause/resume work
+        provider.sstore(
+            VALIDATOR_ADDRESS,
+            slot_validator_by_addr(sender),
+            u64_to_u256(1),
+        ).unwrap();
 
-            let mut precompile = GovernancePrecompile;
+        let mut precompile = GovernancePrecompile;
 
-            // isPaused() -> false
-            let input = IProtocolGovernance::isPausedCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 0);
+        // isPaused() -> false
+        let input = IProtocolGovernance::isPausedCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 0);
 
-            // emergencyPause(reason)
-            let input = IProtocolGovernance::emergencyPauseCall {
-                reason: alloy_primitives::FixedBytes::<32>::from_slice(b"Emergency reason________________"),
-            }
-            .abi_encode();
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "pause failed: {:?}", result.err());
+        // emergencyPause(reason)
+        let input = IProtocolGovernance::emergencyPauseCall {
+            reason: alloy_primitives::FixedBytes::<32>::from_slice(b"Emergency reason________________"),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "pause failed: {:?}", result.err());
 
-            // isPaused() -> true
-            let input = IProtocolGovernance::isPausedCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 1);
+        // isPaused() -> true
+        let input = IProtocolGovernance::isPausedCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 1);
 
-            // emergencyResume()
-            let input = IProtocolGovernance::emergencyResumeCall {}.abi_encode();
-            let result = precompile.call(&input, sender);
-            assert!(result.is_ok(), "resume failed: {:?}", result.err());
+        // emergencyResume()
+        let input = IProtocolGovernance::emergencyResumeCall {}.abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "resume failed: {:?}", result.err());
 
-            // isPaused() -> false
-            let input = IProtocolGovernance::isPausedCall {}.abi_encode();
-            let result = precompile.call(&input, Address::ZERO).unwrap();
-            assert_eq!(result.bytes[31], 0);
-        });
+        // isPaused() -> false
+        let input = IProtocolGovernance::isPausedCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 0);
     }
 }

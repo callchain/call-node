@@ -1,11 +1,10 @@
 //! EVM storage abstraction for stateful precompiles.
 //!
-//! Follows the tempo pattern: precompile business logic accesses EVM storage
-//! through [`StorageCtx`] without carrying provider references.
+//! Precompile business logic accesses EVM storage through the [`StorageProvider`]
+//! trait, which is passed explicitly via the [`StatefulPrecompile::call`] method.
 //!
 //! - [`StorageProvider`] trait abstracts EVM storage access.
 //! - [`EvmStorageProvider`] is the production impl backed by revm's live [`JournalTr`].
-//! - [`StorageCtx`] is a thread-local singleton accessed by precompile code.
 //! - [`HashMapStorageProvider`] is a test double.
 
 use alloy_primitives::{Address, LogData, U256};
@@ -15,8 +14,6 @@ use revm::context_interface::JournalTr;
 use revm::database_interface::Database;
 use revm::primitives::Log;
 use revm_precompile::{PrecompileError, PrecompileOutput};
-use scoped_tls::scoped_thread_local;
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 // ── Trait ─────────────────────────────────────────────────────────────
@@ -132,8 +129,6 @@ where
 {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
         // Ensure account is loaded into journal before accessing storage.
-        // Precompiles may read/write arbitrary addresses (e.g. ASSET_ADDRESS)
-        // that are not the call target and thus not warmed by revm's frame setup.
         let _ = self.journal.load_account(address)
             .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
 
@@ -156,7 +151,6 @@ where
         if self.is_static {
             return Err(PrecompileError::Other("static call cannot mutate state".into()));
         }
-        // Ensure account is loaded into journal before accessing storage.
         let _ = self.journal.load_account(address)
             .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
 
@@ -173,10 +167,8 @@ where
         // Refunds (Cancun rules, simplified)
         let s = &result.data;
         if s.original_value == value && s.present_value != value {
-            // Reset to original value
             self.refund_gas(4800);
         } else if s.present_value != U256::ZERO && value == U256::ZERO {
-            // Clearing a slot
             self.refund_gas(4800);
         }
         Ok(())
@@ -315,151 +307,6 @@ where
     }
 }
 
-// ── Thread-Local Context ──────────────────────────────────────────────
-
-scoped_thread_local!(
-    static TL_STORAGE: RefCell<&mut (dyn StorageProvider + 'static)>
-);
-
-/// Thread-local storage accessor for precompiles.
-///
-/// All storage operations must happen within a [`StorageCtx::enter`] closure.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct StorageCtx;
-
-impl StorageCtx {
-    #[allow(unsafe_code)]
-    /// Enter a storage context. `provider` must outlive the closure.
-    pub fn enter<R>(provider: &mut dyn StorageProvider, f: impl FnOnce() -> R) -> R {
-        // SAFETY: The transmuted reference is only stored in a scoped-tls cell that
-        // is destroyed before this function returns. The reference never escapes
-        // the closure scope, so the actual lifetime is respected.
-        let provider_static: &mut (dyn StorageProvider + 'static) =
-            unsafe { std::mem::transmute(provider) };
-        let cell = RefCell::new(provider_static);
-        TL_STORAGE.set(&cell, f)
-    }
-
-    // Read operations (do not require mutable access to StorageCtx)
-
-    pub fn sload(address: Address, key: U256) -> Option<U256> {
-        Self::with_storage(|s| s.sload(address, key).ok())
-    }
-
-    pub fn tload(address: Address, key: U256) -> Option<U256> {
-        Self::with_storage(|s| s.tload(address, key).ok())
-    }
-
-    pub fn is_static() -> bool {
-        Self::with_storage(|s| s.is_static())
-    }
-
-    pub fn gas_used() -> u64 {
-        Self::with_storage(|s| s.gas_used())
-    }
-
-    pub fn gas_refunded() -> i64 {
-        Self::with_storage(|s| s.gas_refunded())
-    }
-
-    pub fn chain_id() -> u64 {
-        Self::with_storage(|s| s.chain_id())
-    }
-
-    pub fn timestamp() -> U256 {
-        Self::with_storage(|s| s.timestamp())
-    }
-
-    pub fn block_number() -> u64 {
-        Self::with_storage(|s| s.block_number())
-    }
-
-    pub fn beneficiary() -> Address {
-        Self::with_storage(|s| s.beneficiary())
-    }
-
-    pub fn balance_add(address: Address, amount: U256) -> Option<()> {
-        Self::with_storage(|s| s.balance_add(address, amount).ok())
-    }
-
-    pub fn balance_sub(address: Address, amount: U256) -> Option<()> {
-        Self::with_storage(|s| s.balance_sub(address, amount).ok())
-    }
-
-    pub fn balance_get(address: Address) -> Option<U256> {
-        Self::with_storage(|s| s.balance_get(address).ok())
-    }
-
-    // Write operations
-
-    pub fn sstore(address: Address, key: U256, value: U256) -> Option<()> {
-        Self::with_storage(|s| s.sstore(address, key, value).ok())
-    }
-
-    pub fn tstore(address: Address, key: U256, value: U256) -> Option<()> {
-        Self::with_storage(|s| s.tstore(address, key, value).ok())
-    }
-
-    pub fn emit_event(address: Address, event: LogData) -> Option<()> {
-        Self::with_storage(|s| s.emit_event(address, event).ok())
-    }
-
-    pub fn checkpoint() -> CheckpointGuard {
-        CheckpointGuard {
-            checkpoint: Some(Self::with_storage(|s| s.checkpoint())),
-        }
-    }
-
-    pub fn deduct_gas(gas: u64) -> Option<()> {
-        Self::with_storage(|s| s.deduct_gas(gas).ok())
-    }
-
-    pub fn refund_gas(gas: i64) {
-        Self::with_storage(|s| s.refund_gas(gas))
-    }
-
-    fn with_storage<F, R>(f: F) -> R
-    where
-        F: FnOnce(&mut dyn StorageProvider) -> R,
-    {
-        assert!(
-            TL_STORAGE.is_set(),
-            "No storage context. StorageCtx::enter must be called first"
-        );
-        TL_STORAGE.with(|cell| {
-            let mut guard = cell.borrow_mut();
-            f(&mut **guard)
-        })
-    }
-}
-
-// ── Checkpoint Guard ──────────────────────────────────────────────────
-
-/// RAII guard for atomic state mutation batching.
-///
-/// On drop, automatically reverts all state changes made since the checkpoint
-/// unless [`commit`](Self::commit) was called.
-pub struct CheckpointGuard {
-    checkpoint: Option<JournalCheckpoint>,
-}
-
-impl CheckpointGuard {
-    /// Commits all state changes since the checkpoint.
-    pub fn commit(mut self) {
-        if let Some(cp) = self.checkpoint.take() {
-            StorageCtx::with_storage(|s| s.checkpoint_commit(cp));
-        }
-    }
-}
-
-impl Drop for CheckpointGuard {
-    fn drop(&mut self) {
-        if let Some(cp) = self.checkpoint.take() {
-            StorageCtx::with_storage(|s| s.checkpoint_revert(cp));
-        }
-    }
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────
 
 /// Gas cost for decoding calldata (per 32-byte word).
@@ -479,11 +326,14 @@ pub fn storage_slot(parts: &[&[u8]]) -> U256 {
     U256::from_be_slice(hasher.finalize().as_slice())
 }
 
-/// Fill gas accounting on a [`PrecompileOutput`] from the current [`StorageCtx`].
-pub fn fill_precompile_output(mut output: PrecompileOutput) -> PrecompileOutput {
-    output.gas_used = StorageCtx::gas_used();
+/// Fill gas accounting on a [`PrecompileOutput`] from a [`StorageProvider`].
+pub fn fill_precompile_output(
+    mut output: PrecompileOutput,
+    storage: &dyn StorageProvider,
+) -> PrecompileOutput {
+    output.gas_used = storage.gas_used();
     if !output.reverted {
-        output.gas_refunded = StorageCtx::gas_refunded();
+        output.gas_refunded = storage.gas_refunded();
     }
     output
 }
@@ -504,9 +354,7 @@ pub struct HashMapStorageProvider {
     timestamp: U256,
     block_number: u64,
     beneficiary: Address,
-    // Access tracking for warm/cold gas accounting
     accessed_slots: HashMap<(Address, U256), U256>,
-    // Checkpoint stack for revert semantics
     checkpoints: Vec<(
         HashMap<(Address, U256), U256>,
         HashMap<(Address, U256), U256>,
@@ -537,15 +385,12 @@ impl HashMapStorageProvider {
         }
     }
 
-    /// True if this slot has been accessed (read or written) in the current call.
     fn is_warm(&self, address: Address, key: U256) -> bool {
         self.accessed_slots.contains_key(&(address, key))
     }
 
-    /// Mark a slot as accessed (warm).
     fn warm_slot(&mut self, address: Address, key: U256) {
         if !self.accessed_slots.contains_key(&(address, key)) {
-            // Store original value for SSTORE refund calculation
             let original = self.persistent.get(&(address, key)).copied().unwrap_or_default();
             self.accessed_slots.insert((address, key), original);
         }
@@ -599,16 +444,12 @@ impl StorageProvider for HashMapStorageProvider {
         let dynamic_gas = if is_warm { 0 } else { 2100 };
         self.deduct_gas(static_gas + dynamic_gas)?;
 
-        // Track original value for refund calculation
         let present = self.persistent.get(&(address, key)).copied().unwrap_or_default();
         let original = self.accessed_slots.get(&(address, key)).copied().unwrap_or_default();
 
-        // Cancun refund rules (simplified)
         if original == value && present != value {
-            // Reset to original value
             self.refund_gas(4800);
         } else if present != U256::ZERO && value == U256::ZERO {
-            // Clearing a slot
             self.refund_gas(4800);
         }
 
@@ -767,43 +608,35 @@ mod tests {
         let addr = Address::repeat_byte(0x01);
         let key = U256::from(42);
 
-        StorageCtx::enter(&mut provider, || {
-            StorageCtx::sstore(addr, key, U256::from(100));
-            let val = StorageCtx::sload(addr, key).unwrap();
-            assert_eq!(val, U256::from(100));
-        });
+        provider.sstore(addr, key, U256::from(100)).unwrap();
+        let val = provider.sload(addr, key).unwrap();
+        assert_eq!(val, U256::from(100));
     }
 
     #[test]
-    fn test_checkpoint_guard_commit() {
+    fn test_checkpoint_commit() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::ZERO;
         let key = U256::from(1);
 
-        StorageCtx::enter(&mut provider, || {
-            StorageCtx::sstore(addr, key, U256::from(42));
-            let guard = StorageCtx::checkpoint();
-            StorageCtx::sstore(addr, key, U256::from(99));
-            guard.commit();
-            assert_eq!(StorageCtx::sload(addr, key).unwrap(), U256::from(99));
-        });
+        provider.sstore(addr, key, U256::from(42)).unwrap();
+        let cp = provider.checkpoint();
+        provider.sstore(addr, key, U256::from(99)).unwrap();
+        provider.checkpoint_commit(cp);
+        assert_eq!(provider.sload(addr, key).unwrap(), U256::from(99));
     }
 
     #[test]
-    fn test_checkpoint_guard_revert() {
+    fn test_checkpoint_revert() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::ZERO;
         let key = U256::from(1);
 
-        StorageCtx::enter(&mut provider, || {
-            StorageCtx::sstore(addr, key, U256::from(42));
-            {
-                let _guard = StorageCtx::checkpoint();
-                StorageCtx::sstore(addr, key, U256::from(99));
-            }
-            // reverted
-            assert_eq!(StorageCtx::sload(addr, key).unwrap(), U256::from(42));
-        });
+        provider.sstore(addr, key, U256::from(42)).unwrap();
+        let cp = provider.checkpoint();
+        provider.sstore(addr, key, U256::from(99)).unwrap();
+        provider.checkpoint_revert(cp);
+        assert_eq!(provider.sload(addr, key).unwrap(), U256::from(42));
     }
 
     #[test]
@@ -811,13 +644,11 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::repeat_byte(0x01);
 
-        StorageCtx::enter(&mut provider, || {
-            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(0)));
-            StorageCtx::balance_add(addr, U256::from(500)).unwrap();
-            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(500)));
-            StorageCtx::balance_sub(addr, U256::from(200)).unwrap();
-            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(300)));
-        });
+        assert_eq!(provider.balance_get(addr).unwrap(), U256::from(0));
+        provider.balance_add(addr, U256::from(500)).unwrap();
+        assert_eq!(provider.balance_get(addr).unwrap(), U256::from(500));
+        provider.balance_sub(addr, U256::from(200)).unwrap();
+        assert_eq!(provider.balance_get(addr).unwrap(), U256::from(300));
     }
 
     #[test]
@@ -825,15 +656,12 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::repeat_byte(0x01);
 
-        StorageCtx::enter(&mut provider, || {
-            StorageCtx::balance_add(addr, U256::from(100)).unwrap();
-            {
-                let _guard = StorageCtx::checkpoint();
-                StorageCtx::balance_add(addr, U256::from(50)).unwrap();
-                assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(150)));
-            }
-            assert_eq!(StorageCtx::balance_get(addr), Some(U256::from(100)));
-        });
+        provider.balance_add(addr, U256::from(100)).unwrap();
+        let cp = provider.checkpoint();
+        provider.balance_add(addr, U256::from(50)).unwrap();
+        assert_eq!(provider.balance_get(addr).unwrap(), U256::from(150));
+        provider.checkpoint_revert(cp);
+        assert_eq!(provider.balance_get(addr).unwrap(), U256::from(100));
     }
 
     #[test]
