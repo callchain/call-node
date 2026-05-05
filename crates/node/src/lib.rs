@@ -220,6 +220,7 @@ impl CallNode {
         ));
 
         state.set_data_dir(data_dir.clone());
+        state.set_db_env(Arc::clone(db_env));
 
         // Rebuild log_index from loaded receipts so eth_getLogs queries work correctly after restart
         for (tx_hash, receipt) in &receipts {

@@ -5,9 +5,9 @@ use alloy_primitives::{U256, Bytes, keccak256, B256};
 use alloy_trie::{HashBuilder, Nibbles};
 use alloy_rlp::Encodable;
 use revm::{
-    database::InMemoryDB,
     state::AccountInfo,
     bytecode::Bytecode,
+    database_interface::Database,
 };
 use std::collections::HashMap;
 
@@ -167,30 +167,6 @@ impl EvmState {
         self.accounts
     }
 
-    /// Sync EvmState into a revm InMemoryDB
-    pub fn sync_to_revm_db(&self, db: &mut InMemoryDB) {
-        for (addr, account) in &self.accounts {
-            let code = if !account.code.is_empty() {
-                Some(Bytecode::new_raw(account.code.clone()))
-            } else {
-                None
-            };
-            let info = AccountInfo {
-                balance: account.balance,
-                nonce: account.nonce,
-                code_hash: code.as_ref().map(|c| c.hash_slow()).unwrap_or(revm::primitives::KECCAK_EMPTY),
-                account_id: None,
-                code,
-            };
-            db.insert_account_info(*addr, info);
-
-            // Insert storage slots
-            for (key, value) in &account.storage {
-                let _ = db.insert_account_storage(*addr, *key, *value);
-            }
-        }
-    }
-
     /// Apply revm state changes back to EvmState
     pub fn apply_from_revm_state(&mut self, revm_state: &revm::state::EvmState) {
         for (addr, revm_account) in revm_state {
@@ -211,10 +187,27 @@ impl EvmState {
 
     /// Compute the Ethereum state trie root (Merkle Patricia Trie).
     ///
-    /// Each account is RLP-encoded as `[nonce, balance, storage_root, code_hash]`
-    /// and inserted into the trie at path `keccak256(address)`. The storage root
-    /// for each account is itself a Merkle Patricia Trie of its storage slots.
+    /// Delegates to reth-trie's `StateRoot` for correctness and to enable
+    /// incremental updates in the future.  The legacy `HashBuilder` path is
+    /// kept as `compute_state_root_legacy` for test comparison.
     pub fn compute_state_root(&self) -> B256 {
+        crate::trie::compute_state_root_reth(self)
+            .expect("reth-trie state root computation should not fail")
+    }
+
+    /// Compute the Ethereum state trie root **and** collect trie updates.
+    ///
+    /// The returned [`reth_trie::updates::TrieUpdates`] can be persisted to
+    /// MDBX and used for incremental state root computation on the next block.
+    pub fn compute_state_root_with_updates(&self) -> (B256, reth_trie::updates::TrieUpdates) {
+        crate::trie::compute_state_root_with_updates(self)
+            .expect("reth-trie state root computation should not fail")
+    }
+
+    /// Legacy O(n) state root computation using `HashBuilder` full aggregation.
+    ///
+    /// Kept for regression testing against the reth-trie path.
+    pub fn compute_state_root_legacy(&self) -> B256 {
         let mut hb = HashBuilder::default();
         let mut accounts: Vec<_> = self
             .accounts
@@ -232,6 +225,52 @@ impl EvmState {
         }
 
         hb.root()
+    }
+}
+
+impl Database for &mut EvmState {
+    type Error = std::convert::Infallible;
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        Ok(self.accounts.get(&address).map(|account| {
+            let code = if account.code.is_empty() {
+                None
+            } else {
+                Some(Bytecode::new_raw(account.code.clone()))
+            };
+            AccountInfo {
+                balance: account.balance,
+                nonce: account.nonce,
+                code_hash: code
+                    .as_ref()
+                    .map(|c| c.hash_slow())
+                    .unwrap_or(revm::primitives::KECCAK_EMPTY),
+                code,
+                account_id: None,
+            }
+        }))
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        for account in self.accounts.values() {
+            let hash = if account.code.is_empty() {
+                revm::primitives::KECCAK_EMPTY
+            } else {
+                keccak256(&account.code)
+            };
+            if hash == code_hash {
+                return Ok(Bytecode::new_raw(account.code.clone()));
+            }
+        }
+        Ok(Bytecode::default())
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        Ok(self.get_storage(&address, index))
+    }
+
+    fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
+        Ok(B256::ZERO)
     }
 }
 

@@ -11,11 +11,29 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getBalance
     module
         .register_async_method("eth_getBalance", |params, state, _ctx| async move {
-            let address: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let (address, block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let addr = address
                 .parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
-            let balance = state.get_evm_balance(&addr);
+            let cp_address = Address::from_slice(addr.as_slice());
+
+            let balance = match block_tag.as_deref() {
+                Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
+                    state.get_evm_balance(&cp_address)
+                }
+                Some(tag) => {
+                    let current = state.get_current_block();
+                    let block_num = parse_block_tag(tag, current);
+                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                    match db_guard.as_ref() {
+                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
+                            Ok(Some(snapshot)) => snapshot.get_balance(&cp_address),
+                            _ => alloy_primitives::U256::ZERO,
+                        },
+                        None => alloy_primitives::U256::ZERO,
+                    }
+                }
+            };
             Ok::<_, ErrorObjectOwned>(format!("0x{:x}", balance))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -387,46 +405,78 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
                 .unwrap_or_default();
 
-            // Read account state
-            let cp_address: Address = Address::from_slice(address.as_slice());
-            let balance = state.get_evm_balance(&cp_address);
-            let (nonce, code_hash) = {
-                let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                let nonce = evm.get_nonce(&cp_address);
-                let code = evm.get_code(&cp_address);
-                let code_hash = call_crypto::keccak256(&code);
-                (nonce, code_hash)
-            };
-            let state_root = {
-                let evm = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                evm.compute_state_root()
+            let block_tag = call_obj.get("blockNumber")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let current = state.get_current_block();
+            let block_num = block_tag.as_deref().map(|t| parse_block_tag(t, current)).unwrap_or(current);
+
+            // Load state for the requested block
+            let state_for_proof = {
+                let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                match db_guard.as_ref() {
+                    Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
+                        Ok(Some(snapshot)) => snapshot,
+                        _ => {
+                            // Fall back to current in-memory state if no snapshot
+                            state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.clone()
+                        }
+                    },
+                    None => state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.clone(),
+                }
             };
 
-            // Build storage proof entries
-            let storage_proof: Vec<serde_json::Value> = storage_keys
-                .iter()
-                .filter_map(|key_hex| {
-                    key_hex.strip_prefix("0x")
-                        .and_then(|k| alloy_primitives::U256::from_str_radix(k, 16).ok())
-                        .map(|key| {
-                            let value = state.evm_state.read().ok().map(|s| s.get_storage(&cp_address, key)).unwrap_or_default();
-                            serde_json::json!({
-                                "key": key_hex,
-                                "value": format!("0x{:x}", value),
-                                "proof": [format!("0x{}", hex::encode(state_root))],
-                            })
-                        })
-                })
+            // Parse storage slots
+            let mut slots = Vec::with_capacity(storage_keys.len());
+            for key_hex in &storage_keys {
+                let slot = key_hex.strip_prefix("0x")
+                    .and_then(|k| {
+                        let bytes = hex::decode(k).ok()?;
+                        Some(alloy_primitives::B256::from_slice(&bytes))
+                    })
+                    .unwrap_or_else(|| {
+                        alloy_primitives::B256::from(
+                            alloy_primitives::U256::from_str_radix(key_hex.trim_start_matches("0x"), 16).unwrap_or_default().to_be_bytes::<32>()
+                        )
+                    });
+                slots.push(slot);
+            }
+
+            // Compute real Merkle proof
+            let proof = match call_evm::trie::compute_account_proof(&state_for_proof,
+                address,
+                &slots,
+            ) {
+                Ok(p) => p,
+                Err(e) => return Err(internal_error(format!("proof computation failed: {:?}", e))),
+            };
+
+            let balance = proof.info.as_ref().map(|i| i.balance).unwrap_or_default();
+            let nonce = proof.info.as_ref().map(|i| i.nonce).unwrap_or_default();
+            let code_hash = proof.info.as_ref().and_then(|i| i.bytecode_hash)
+                .unwrap_or(alloy_consensus::constants::KECCAK_EMPTY);
+
+            let account_proof: Vec<String> = proof.proof.iter()
+                .map(|b| format!("0x{}", hex::encode(b)))
                 .collect();
 
-            let account_proof = vec![format!("0x{}", hex::encode(state_root))];
+            let storage_proof: Vec<serde_json::Value> = proof.storage_proofs.iter().zip(storage_keys.iter())
+                .map(|(sp, key_hex)| {
+                    serde_json::json!({
+                        "key": key_hex,
+                        "value": format!("0x{:x}", sp.value),
+                        "proof": sp.proof.iter().map(|b| format!("0x{}", hex::encode(b))).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
 
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "address": address_str,
                 "balance": format!("0x{:x}", balance),
-                "codeHash": format!("{code_hash:?}"),
-                "nonce": format!("0x{nonce:x}"),
-                "stateRoot": format!("0x{}", hex::encode(state_root)),
+                "codeHash": format!("{:?}", code_hash),
+                "nonce": format!("0x{:x}", nonce),
+                "storageHash": format!("{:?}", proof.storage_root),
                 "accountProof": account_proof,
                 "storageProof": storage_proof,
             }))
@@ -534,12 +584,28 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let addr = address.parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
             let cp_address = Address::from_slice(addr.as_slice());
-            let committed_nonce = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_nonce(&cp_address);
-            let nonce = if block_tag.as_deref() == Some("pending") {
-                let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                committed_nonce.max(mempool.evm_pool.get_address_nonce(&cp_address))
-            } else {
-                committed_nonce
+
+            let nonce = match block_tag.as_deref() {
+                Some("pending") => {
+                    let committed_nonce = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_nonce(&cp_address);
+                    let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                    committed_nonce.max(mempool.evm_pool.get_address_nonce(&cp_address))
+                }
+                Some("latest") | Some("safe") | Some("finalized") | None => {
+                    state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_nonce(&cp_address)
+                }
+                Some(tag) => {
+                    let current = state.get_current_block();
+                    let block_num = parse_block_tag(tag, current);
+                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                    match db_guard.as_ref() {
+                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
+                            Ok(Some(snapshot)) => snapshot.get_nonce(&cp_address),
+                            _ => 0,
+                        },
+                        None => 0,
+                    }
+                }
             };
             Ok::<_, ErrorObjectOwned>(format!("0x{nonce:x}"))
         })
@@ -548,11 +614,28 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getCode
     module
         .register_async_method("eth_getCode", |params, state, _ctx| async move {
-            let (address, _block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let (address, block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let addr = address.parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
             let cp_address = Address::from_slice(addr.as_slice());
-            let code = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_code(&cp_address);
+
+            let code = match block_tag.as_deref() {
+                Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
+                    state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_code(&cp_address)
+                }
+                Some(tag) => {
+                    let current = state.get_current_block();
+                    let block_num = parse_block_tag(tag, current);
+                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                    match db_guard.as_ref() {
+                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
+                            Ok(Some(snapshot)) => snapshot.get_code(&cp_address),
+                            _ => alloy_primitives::Bytes::default(),
+                        },
+                        None => alloy_primitives::Bytes::default(),
+                    }
+                }
+            };
             Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(&code)))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -560,13 +643,30 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getStorageAt
     module
         .register_async_method("eth_getStorageAt", |params, state, _ctx| async move {
-            let (address, key_hex, _block_tag): (String, String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let (address, key_hex, block_tag): (String, String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let addr = address.parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
             let key = alloy_primitives::U256::from_str_radix(key_hex.trim_start_matches("0x"), 16)
                 .map_err(|e| invalid_params(e.to_string()))?;
             let cp_address = Address::from_slice(addr.as_slice());
-            let value = state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_storage(&cp_address, key);
+
+            let value = match block_tag.as_deref() {
+                Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
+                    state.evm_state.read().map_err(|_| internal_error("lock poisoned".into()))?.get_storage(&cp_address, key)
+                }
+                Some(tag) => {
+                    let current = state.get_current_block();
+                    let block_num = parse_block_tag(tag, current);
+                    let db_guard = state.db_env.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                    match db_guard.as_ref() {
+                        Some(db) => match call_evm::db::load_block_snapshot(db, block_num) {
+                            Ok(Some(snapshot)) => snapshot.get_storage(&cp_address, key),
+                            _ => alloy_primitives::U256::ZERO,
+                        },
+                        None => alloy_primitives::U256::ZERO,
+                    }
+                }
+            };
             Ok::<_, ErrorObjectOwned>(format!("0x{:064x}", value))
         })
         .map_err(|e| internal_error(e.to_string()))?;

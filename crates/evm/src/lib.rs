@@ -7,6 +7,8 @@ mod state;
 pub mod backend;
 pub mod db;
 pub mod erc20_bytecode;
+pub mod trie;
+pub mod provider;
 
 pub use executor::*;
 pub use state::*;

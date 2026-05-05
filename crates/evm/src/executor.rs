@@ -20,7 +20,6 @@ use call_oracle::precompile::OraclePrecompile;
 use call_governance::precompile::GovernancePrecompile;
 use alloy_primitives::{U256, Bytes, keccak256, FixedBytes};
 use revm::{
-    database::InMemoryDB,
     primitives::{hardfork::SpecId, TxKind, Log},
     Context, ExecuteEvm, MainBuilder, MainContext,
 };
@@ -81,22 +80,26 @@ impl EvmExecutor {
         }
     }
 
-    /// Execute an EVM transaction through revm with Callchain custom precompiles.
+    /// Execute an EVM transaction through revm with any Database.
+    ///
+    /// Returns the execution result **and** the raw revm state changes.
+    /// The caller is responsible for persisting `revm_state` (e.g. to
+    /// [`EvmState`] via [`EvmState::apply_from_revm_state`], or to MDBX
+    /// via [`crate::db::apply_revm_state_to_mdbx`]).
     ///
     /// Custom precompiles at 0x101 (Oracle), 0x102 (Balance), and 0x103 (Bridge)
     /// are executed via revm's normal call-frame mechanism with proper gas
     /// accounting, state isolation, and call depth tracking.
-    pub fn execute_tx(
+    pub fn execute_tx_db<DB: revm::database_interface::Database>(
         &self,
         tx: EvmTransaction,
-        state: &mut EvmState,
+        db: DB,
         block_number: u64,
         base_fee: u128,
-    ) -> Result<EvmExecutionResult, EvmError> {
-        // Build revm InMemoryDB and sync our state into it
-        let mut db = InMemoryDB::default();
-        state.sync_to_revm_db(&mut db);
-
+    ) -> Result<(EvmExecutionResult, revm::state::EvmState), EvmError>
+    where
+        DB::Error: core::fmt::Debug,
+    {
         let tx_env = revm::context::TxEnv::builder()
             .caller(tx.caller)
             .gas_limit(tx.gas_limit)
@@ -109,34 +112,35 @@ impl EvmExecutor {
             .build()
             .map_err(|_| EvmError::InvalidTx("tx build failed"))?;
 
-        let ctx = Context::mainnet()
-            .with_db(db)
-            .modify_cfg_chained(|cfg| cfg.set_spec(self.spec_id));
+        // Scope the EVM so its borrow on db is dropped before we return.
+        let result = {
+            let ctx = Context::mainnet()
+                .with_db(db)
+                .modify_cfg_chained(|cfg| cfg.set_spec(self.spec_id));
 
-        // Build EVM with Callchain custom precompiles
-        let precompiles = CallPrecompiles::new(self.spec_id)
-            .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
-            .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
-            .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
-            .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
-            .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
-            .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
-            .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
-            .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
-            .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile));
-        let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
+            // Build EVM with Callchain custom precompiles
+            let precompiles = CallPrecompiles::new(self.spec_id)
+                .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
+                .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+                .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
+                .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+                .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile));
+            let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
 
-        let mut block_env = revm::context::BlockEnv::default();
-        block_env.number = U256::from(block_number);
-        block_env.basefee = base_fee as u64;
-        evm.set_block(block_env);
+            let mut block_env = revm::context::BlockEnv::default();
+            block_env.number = U256::from(block_number);
+            block_env.basefee = base_fee as u64;
+            evm.set_block(block_env);
 
-        let result = evm
-            .transact(tx_env)
-            .map_err(|e| EvmError::ExecutionError(format!("{e:?}")))?;
+            evm.transact(tx_env)
+                .map_err(|e| EvmError::ExecutionError(format!("{e:?}")))?
+        };
 
-        // Apply revm state changes back to our EvmState
-        state.apply_from_revm_state(&result.state);
+        let revm_state = result.state;
 
         let (success, output, gas_used, logs) = match result.result {
             revm::context_interface::result::ExecutionResult::Success {
@@ -161,12 +165,26 @@ impl EvmExecutor {
             }
         };
 
-        Ok(EvmExecutionResult {
+        Ok((EvmExecutionResult {
             success,
             gas_used,
             output,
             logs,
-        })
+        }, revm_state))
+    }
+
+    /// Backward-compatible wrapper: execute against an in-memory [`EvmState`]
+    /// and automatically apply revm state changes back to it.
+    pub fn execute_tx(
+        &self,
+        tx: EvmTransaction,
+        state: &mut EvmState,
+        block_number: u64,
+        base_fee: u128,
+    ) -> Result<EvmExecutionResult, EvmError> {
+        let (result, revm_state) = self.execute_tx_db(tx, &mut *state, block_number, base_fee)?;
+        state.apply_from_revm_state(&revm_state);
+        Ok(result)
     }
 
     /// Deploy ERC-20 template contract for an asset.
@@ -419,6 +437,64 @@ impl BlockGasTracker {
     pub fn remaining(&self) -> u64 {
         self.gas_limit - self.gas_used
     }
+}
+
+// ── CallchainBlockExecutor Trait ──────────────────────────────────────
+
+/// Trait for executing consensus-driven state mutations.
+///
+/// Decouples the consensus engine from direct EVM state access.
+/// All methods represent "system transactions" that modify validator
+/// stakes, distribute rewards, or apply slashing penalties.
+pub trait CallchainBlockExecutor: Send + Sync + std::fmt::Debug {
+    /// Stake a new validator and return its assigned validator ID.
+    fn stake_validator(
+        &mut self,
+        state: &mut EvmState,
+        address: Address,
+        pubkey: [u8; 32],
+        amount: u128,
+    ) -> u64;
+
+    /// Distribute block proposer reward to a validator address.
+    fn distribute_block_reward(
+        &mut self,
+        state: &mut EvmState,
+        proposer_addr: Address,
+        amount: u128,
+    );
+
+    /// Slash a validator for double-signing.
+    fn slash_double_sign(
+        &mut self,
+        state: &mut EvmState,
+        validator_addr: Address,
+        amount: u128,
+    );
+
+    /// Slash a validator for being offline.
+    fn slash_offline(
+        &mut self,
+        state: &mut EvmState,
+        validator_addr: Address,
+        amount: u128,
+    );
+
+    /// Slash a validator for oracle outlier submission.
+    fn slash_oracle_outlier(
+        &mut self,
+        state: &mut EvmState,
+        validator_addr: Address,
+        amount: u128,
+    );
+
+    /// Distribute oracle reward to a validator.
+    fn distribute_oracle_reward(
+        &mut self,
+        state: &mut EvmState,
+        validator_addr: Address,
+        amount: u128,
+    );
 }
 
 #[cfg(test)]

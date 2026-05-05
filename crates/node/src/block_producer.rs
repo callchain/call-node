@@ -14,6 +14,7 @@ use call_rpc::{RpcState, SubscriptionManager};
 use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
 use call_mempool::Mempool;
 use crate::{persist_block, persist_state_incremental, persist_state_to_db};
+use call_evm::db::{save_block_snapshot, prune_block_snapshots};
 use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL};
 use crate::governance_advancer::GovernanceAdvancer;
 
@@ -458,6 +459,18 @@ pub(crate) async fn block_production_loop(
         let db_env = &db.db;
         if let Err(ref e) = persist_state_incremental(db_env, &state, &consensus) {
             tracing::warn!(error = %e, "failed to incrementally persist state");
+        }
+
+        // 14a. Save block state snapshot for historical queries
+        {
+            let evm_state = state.evm_state.read().unwrap();
+            if let Err(ref e) = save_block_snapshot(db_env, new_height, &evm_state) {
+                tracing::warn!(error = %e, height = new_height, "failed to save block snapshot");
+            }
+        }
+        // 14b. Prune snapshots older than 128 blocks
+        if let Err(ref e) = prune_block_snapshots(db_env, new_height, 128) {
+            tracing::warn!(error = %e, "failed to prune old snapshots");
         }
 
         // 15. Full table rebuild every 1000 blocks as safety net

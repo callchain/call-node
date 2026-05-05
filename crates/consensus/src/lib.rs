@@ -22,6 +22,7 @@ pub use bft::*;
 pub use block::*;
 pub use block_cache::*;
 pub use digest::*;
+pub use exec::block_executor::EvmBlockExecutor;
 pub use fork::*;
 pub use proposer::*;
 pub use simplex::*;

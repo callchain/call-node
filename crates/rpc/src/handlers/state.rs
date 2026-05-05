@@ -18,6 +18,7 @@ use std::collections::{HashMap, VecDeque, HashSet};
 use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use reth_db::DatabaseEnv;
 
 /// Per-block fee data for eth_feeHistory queries.
 #[derive(Debug, Clone)]
@@ -159,6 +160,8 @@ pub struct RpcState {
     pub filter_manager: FilterManager,
     /// Sync progress for eth_syncing. None when fully synced.
     pub sync_progress: Arc<RwLock<Option<SyncProgress>>>,
+    /// MDBX database environment for historical state queries.
+    pub db_env: Arc<RwLock<Option<Arc<DatabaseEnv>>>>,
 }
 
 impl RpcState {
@@ -200,6 +203,14 @@ impl RpcState {
             block_hash_index: RwLock::new(HashMap::new()),
             filter_manager: FilterManager::new(),
             sync_progress: Arc::new(RwLock::new(None)),
+            db_env: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Set the MDBX database environment for historical state queries.
+    pub fn set_db_env(&self, db_env: Arc<DatabaseEnv>) {
+        if let Ok(mut d) = self.db_env.write() {
+            *d = Some(db_env);
         }
     }
 

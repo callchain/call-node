@@ -34,6 +34,7 @@ dashmap.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
+reth-db.workspace = true
 call-light-client = { workspace = true, optional = true }
 
 [features]

@@ -133,6 +133,36 @@ impl Table for CallCheckpoint {
     type Value = Vec<u8>;
 }
 
+/// Trie updates: single entry block_number -> serialized TrieUpdates
+///
+/// Stores the incremental trie updates produced by reth-trie's
+/// `StateRoot::root_with_updates()`. These updates are applied as an
+/// overlay on top of the existing trie for the next block's incremental
+/// state root computation.
+#[derive(Debug)]
+pub struct CallTrieUpdates;
+impl Table for CallTrieUpdates {
+    const NAME: &'static str = "call_trie_updates";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// Block state snapshots: serialized block_number -> serialized EvmState
+///
+/// Stores a full copy of the EVM state at a specific block height.
+/// Used to serve historical queries (`eth_getBalance(blockTag)`,
+/// `eth_getProof`) without replaying blocks. Pruned after 128 blocks
+/// by default.
+#[derive(Debug)]
+pub struct CallBlockStateSnapshots;
+impl Table for CallBlockStateSnapshots {
+    const NAME: &'static str = "call_block_state_snapshots";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// All Callchain tables
 pub struct CallTables;
 impl TableSet for CallTables {
@@ -153,6 +183,8 @@ impl TableSet for CallTables {
                 box_info::<CallFeeParams>,
                 box_info::<CallForkState>,
                 box_info::<CallCheckpoint>,
+                box_info::<CallTrieUpdates>,
+                box_info::<CallBlockStateSnapshots>,
             ]
             .into_iter()
             .map(|f| f()),

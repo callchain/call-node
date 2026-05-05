@@ -10,6 +10,7 @@ use crate::proposer::{
     ConsensusParams,
 };
 use crate::validator::ConsensusError;
+use call_evm::CallchainBlockExecutor;
 use call_primitives::{Address, BlockHash, ValidatorId};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -21,6 +22,7 @@ use tracing::{info, warn};
 /// - Block proposal and validation
 /// - Commit/rollback of blocks
 /// - Validator state management (staking, slashing, rewards)
+#[derive(Debug)]
 pub struct SimplexConsensus {
     params: ConsensusParams,
     current_round: u64,
@@ -29,6 +31,8 @@ pub struct SimplexConsensus {
     proposer_subset: Vec<ValidatorId>,
     /// Hash of the last committed block, used as VRF seed input
     last_block_hash: BlockHash,
+    /// Executor for consensus-driven state mutations (rewards, slashing, staking).
+    executor: Box<dyn CallchainBlockExecutor>,
 }
 
 impl SimplexConsensus {
@@ -46,6 +50,29 @@ impl SimplexConsensus {
             current_height: 0,
             proposer_subset,
             last_block_hash: BlockHash::ZERO,
+            executor: Box::new(crate::exec::block_executor::EvmBlockExecutor::new()),
+        }
+    }
+
+    /// Create a consensus instance with a custom executor (useful for testing).
+    pub fn with_executor(
+        params: ConsensusParams,
+        evm_state: &call_evm::EvmState,
+        executor: Box<dyn CallchainBlockExecutor>,
+    ) -> Self {
+        let active = Self::qualified_validators_internal(evm_state, &params);
+        let pubkeys = Self::build_pubkey_map_internal(evm_state);
+        let seed = derive_vrf_seed(&BlockHash::ZERO, 0);
+        let proposer_subset =
+            select_proposer_subset(&active, &pubkeys, &seed, params.subset_size);
+
+        Self {
+            params,
+            current_round: 0,
+            current_height: 0,
+            proposer_subset,
+            last_block_hash: BlockHash::ZERO,
+            executor,
         }
     }
 
@@ -93,9 +120,7 @@ impl SimplexConsensus {
         if amount < self.params.min_self_stake {
             return Err(ConsensusError::InsufficientStake);
         }
-        let id = crate::exec::state_accessors::stake_validator_evm(
-            evm_state, address, pubkey, amount,
-        );
+        let id = self.executor.stake_validator(evm_state, address, pubkey, amount);
         Ok(id)
     }
 
@@ -243,7 +268,7 @@ impl SimplexConsensus {
             let proposer_id = block.header.proposer;
             let proposer_addr = crate::exec::state_accessors::read_validator_addr(evm_state, proposer_id as u64);
             if proposer_addr != Address::ZERO {
-                crate::exec::state_accessors::distribute_reward_evm(
+                self.executor.distribute_block_reward(
                     evm_state, proposer_addr, result.total_validator_reward,
                 );
             } else {
@@ -280,7 +305,7 @@ impl SimplexConsensus {
             return Err(ConsensusError::ValidatorNotFound(validator_id));
         }
         let slashed = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
-        crate::exec::state_accessors::slash_validator_evm(evm_state, addr, slashed);
+        self.executor.slash_double_sign(evm_state, addr, slashed);
         warn!(validator_id, slashed, "slashed validator for double sign");
         Ok(slashed)
     }
@@ -299,7 +324,7 @@ impl SimplexConsensus {
         let self_stake = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
         let rate_total = self.params.offline_slash_rate_bps * rounds_offline as u128;
         let slashed = (self_stake * rate_total) / 10_000;
-        crate::exec::state_accessors::slash_validator_evm(evm_state, addr, slashed);
+        self.executor.slash_offline(evm_state, addr, slashed);
         warn!(
             validator_id,
             rounds_offline, slashed, "slashed validator for being offline"
@@ -319,7 +344,7 @@ impl SimplexConsensus {
         }
         let self_stake = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
         let slashed = (self_stake * 10) / 10_000; // 0.1%
-        crate::exec::state_accessors::slash_validator_evm(evm_state, addr, slashed);
+        self.executor.slash_oracle_outlier(evm_state, addr, slashed);
         warn!(validator_id, slashed, "slashed validator for oracle outlier");
         Ok(slashed)
     }
@@ -337,7 +362,7 @@ impl SimplexConsensus {
                 warn!(validator_id, "validator not found, skipping oracle reward");
                 return Ok(());
             }
-            crate::exec::state_accessors::distribute_reward_evm(evm_state, addr, amount);
+            self.executor.distribute_oracle_reward(evm_state, addr, amount);
         }
         Ok(())
     }
@@ -430,6 +455,7 @@ impl SimplexConsensus {
             current_height: state.current_height,
             proposer_subset,
             last_block_hash: state.last_block_hash,
+            executor: Box::new(crate::exec::block_executor::EvmBlockExecutor::new()),
         }
     }
 }
