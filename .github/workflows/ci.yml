@@ -59,6 +59,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af || true
+          df -h
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install mold linker
@@ -77,9 +87,9 @@ jobs:
       - name: Run tests
         env:
           CARGO_BUILD_JOBS: 2
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --release
       - name: Run doctests
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --doc --release
 
   build:
     name: Build
@@ -100,6 +110,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af || true
+          df -h
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
