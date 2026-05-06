@@ -6,8 +6,10 @@
 //! meaning no single party knows the toxic waste.
 //!
 //! Usage in the node:
-//! ```rust
-//! let vk_set = ProductionKeys::load("/var/lib/callchain/shielded_keys")?;
+//! ```rust,no_run
+//! use call_shielded::ceremony::ProductionKeys;
+//! use call_shielded::prover::RealProver;
+//! let vk_set = ProductionKeys::load("/var/lib/callchain/shielded_keys").unwrap();
 //! let prover = RealProver::from_production_keys(vk_set);
 //! ```
 
