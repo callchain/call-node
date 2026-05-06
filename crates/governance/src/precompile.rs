@@ -10,6 +10,7 @@ use call_precompile::{
     address_to_u256, dispatch, journal_backend::JournalBackend, require_caller,
     storage::{storage_slot, StorageProvider},
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
+    COMPLIANCE_ADDRESS, VALIDATOR_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -672,8 +673,75 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                     );
                 }
             }
-            // ProtocolUpgrade(1), ValidatorSlash(3), ComplianceUpdate(4), FeeCurrencyCap(8):
-            // Mark executed with no additional on-chain side effects for now.
+            1 => {
+                // ProtocolUpgrade: execution_data = ABI-encoded (bytes32 newVersionHash)
+                if execution_data.len() >= 32 {
+                    let mut version_buf = [0u8; 32];
+                    version_buf.copy_from_slice(&execution_data[0..32]);
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"protocol_upgrade"]),
+                        U256::from_be_slice(&version_buf),
+                    );
+                }
+            }
+            3 => {
+                // ValidatorSlash: execution_data = ABI-encoded (address validator, uint128 amount)
+                if execution_data.len() >= 64 {
+                    let mut addr_buf = [0u8; 20];
+                    addr_buf.copy_from_slice(&execution_data[12..32]);
+                    let validator = Address::from_slice(&addr_buf);
+                    let mut amount_buf = [0u8; 16];
+                    amount_buf.copy_from_slice(&execution_data[48..64]);
+                    let amount = u128::from_be_bytes(amount_buf);
+                    // Read current stake and slash
+                    let stake_slot = storage_slot(&[validator.as_slice(), b"stake"]);
+                    let current_stake = u256_to_u128(
+                        self.backend.load(VALIDATOR_ADDRESS, stake_slot),
+                    );
+                    let new_stake = current_stake.saturating_sub(amount);
+                    self.backend.store(
+                        VALIDATOR_ADDRESS,
+                        stake_slot,
+                        u128_to_u256(new_stake),
+                    );
+                    if new_stake == 0 {
+                        let status_slot = storage_slot(&[validator.as_slice(), b"status"]);
+                        self.backend.store(VALIDATOR_ADDRESS, status_slot, U256::ZERO);
+                    }
+                }
+            }
+            4 => {
+                // ComplianceUpdate: execution_data = ABI-encoded (address target, uint8 policyId, uint8 status)
+                if execution_data.len() >= 96 {
+                    let mut addr_buf = [0u8; 20];
+                    addr_buf.copy_from_slice(&execution_data[12..32]);
+                    let target = Address::from_slice(&addr_buf);
+                    let policy_id = execution_data[63];
+                    let status = execution_data[95];
+                    self.backend.store(
+                        COMPLIANCE_ADDRESS,
+                        storage_slot(&[target.as_slice(), &[policy_id]]),
+                        U256::from(status),
+                    );
+                }
+            }
+            8 => {
+                // FeeCurrencyCap: execution_data = ABI-encoded (uint64 assetId, uint128 cap)
+                if execution_data.len() >= 64 {
+                    let mut asset_buf = [0u8; 8];
+                    asset_buf.copy_from_slice(&execution_data[24..32]);
+                    let asset_id = u64::from_be_bytes(asset_buf);
+                    let mut cap_buf = [0u8; 16];
+                    cap_buf.copy_from_slice(&execution_data[48..64]);
+                    let cap = u128::from_be_bytes(cap_buf);
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"fee_currency_cap", &asset_id.to_be_bytes()[..]]),
+                        u128_to_u256(cap),
+                    );
+                }
+            }
             _ => {}
         }
 

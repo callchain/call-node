@@ -7,7 +7,7 @@
 use call_consensus::exec::state_accessors as sa;
 use call_evm::provider::InMemoryStateProvider;
 use call_governance::{GovernanceEvent, ProposalState};
-use call_precompile::{storage::storage_slot, u64_to_u256};
+use call_precompile::{storage::storage_slot, u128_to_u256, u64_to_u256, COMPLIANCE_ADDRESS};
 use call_primitives::{Address, U256};
 use call_protocol::CALL_ASSET_ID;
 
@@ -307,8 +307,61 @@ impl GovernanceAdvancer {
                     );
                 }
             }
-            // ProtocolUpgrade(1), ValidatorSlash(3), ComplianceUpdate(4), FeeCurrencyCap(8):
-            // No additional on-chain side effects (matching precompile behavior).
+            1 => {
+                // ProtocolUpgrade: execution_data = ABI-encoded (bytes32 newVersionHash)
+                if execution_data.len() >= 32 {
+                    let mut version_buf = [0u8; 32];
+                    version_buf.copy_from_slice(&execution_data[0..32]);
+                    evm_state.set_storage(
+                        call_governance::precompile::GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"protocol_upgrade"]),
+                        U256::from_be_slice(&version_buf),
+                    );
+                }
+            }
+            3 => {
+                // ValidatorSlash: execution_data = ABI-encoded (address validator, uint128 amount)
+                if execution_data.len() >= 64 {
+                    let mut addr_buf = [0u8; 20];
+                    addr_buf.copy_from_slice(&execution_data[12..32]);
+                    let validator = Address::from_slice(&addr_buf);
+                    let mut amount_buf = [0u8; 16];
+                    amount_buf.copy_from_slice(&execution_data[48..64]);
+                    let amount = u128::from_be_bytes(amount_buf);
+                    sa::slash_validator_evm(evm_state, validator, amount);
+                }
+            }
+            4 => {
+                // ComplianceUpdate: execution_data = ABI-encoded (address target, uint8 policyId, uint8 status)
+                if execution_data.len() >= 96 {
+                    let mut addr_buf = [0u8; 20];
+                    addr_buf.copy_from_slice(&execution_data[12..32]);
+                    let target = Address::from_slice(&addr_buf);
+                    let policy_id = execution_data[63];
+                    let status = execution_data[95];
+                    evm_state.set_storage(
+                        COMPLIANCE_ADDRESS,
+                        storage_slot(&[target.as_slice(), &[policy_id]]),
+                        U256::from(status),
+                    );
+                }
+            }
+            8 => {
+                // FeeCurrencyCap: execution_data = ABI-encoded (uint64 assetId, uint128 cap)
+                if execution_data.len() >= 64 {
+                    let mut asset_buf = [0u8; 8];
+                    asset_buf.copy_from_slice(&execution_data[24..32]);
+                    let asset_id = u64::from_be_bytes(asset_buf);
+                    let mut cap_buf = [0u8; 16];
+                    cap_buf.copy_from_slice(&execution_data[48..64]);
+                    let cap = u128::from_be_bytes(cap_buf);
+                    evm_state.set_storage(
+                        call_governance::precompile::GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"fee_currency_cap", &asset_id.to_be_bytes()[..]]),
+                        u128_to_u256(cap),
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -778,5 +831,122 @@ mod tests {
         let rotation_slot = storage_slot(&[b"key_rotation", &7u64.to_be_bytes()[..]]);
         let val = evm.get_storage(&GOVERNANCE_ADDRESS, rotation_slot).to_be_bytes::<32>()[31];
         assert_eq!(val, 1);
+    }
+
+    #[test]
+    fn test_protocol_upgrade_side_effect() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+
+        setup_proposal(&mut evm, 1, 1, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // ProtocolUpgrade execution_data: bytes 0-32 = version hash
+        let version_hash = [0xAAu8; 32];
+        let mut exec_data = vec![0u8; 32];
+        exec_data.copy_from_slice(&version_hash);
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        let upgrade_slot = storage_slot(&[b"protocol_upgrade"]);
+        let val = evm.get_storage(&GOVERNANCE_ADDRESS, upgrade_slot).to_be_bytes::<32>();
+        assert_eq!(val, version_hash);
+    }
+
+    #[test]
+    fn test_validator_slash_side_effect() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        let validator_addr = test_addr(0xAB);
+        sa::seed_validator(&mut evm, 1, validator_addr, [1u8; 32], 50_000, 1);
+
+        setup_proposal(&mut evm, 1, 3, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // ValidatorSlash execution_data: bytes 12-32 = address, bytes 48-64 = amount
+        let mut exec_data = vec![0u8; 64];
+        exec_data[12..32].copy_from_slice(validator_addr.as_slice());
+        exec_data[48..64].copy_from_slice(&10_000u128.to_be_bytes());
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        let stake = sa::read_validator_stake(&evm, validator_addr);
+        assert_eq!(stake, 40_000);
+    }
+
+    #[test]
+    fn test_compliance_update_side_effect() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+
+        let target = test_addr(0xCD);
+        setup_proposal(&mut evm, 1, 4, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // ComplianceUpdate execution_data: bytes 12-32 = address, byte 63 = policyId, byte 95 = status
+        let mut exec_data = vec![0u8; 96];
+        exec_data[12..32].copy_from_slice(target.as_slice());
+        exec_data[63] = 2; // policy_id
+        exec_data[95] = 1; // status = sanctioned
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        let status = sa::read_compliance_status(&evm, target, 2);
+        assert_eq!(status, 1);
+    }
+
+    #[test]
+    fn test_fee_currency_cap_side_effect() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+
+        setup_proposal(&mut evm, 1, 8, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // FeeCurrencyCap execution_data: bytes 24-32 = assetId, bytes 48-64 = cap
+        let mut exec_data = vec![0u8; 64];
+        exec_data[24..32].copy_from_slice(&99u64.to_be_bytes());
+        exec_data[48..64].copy_from_slice(&500_000u128.to_be_bytes());
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        let cap_slot = storage_slot(&[b"fee_currency_cap", &99u64.to_be_bytes()[..]]);
+        let cap = u256_to_u128(evm.get_storage(&GOVERNANCE_ADDRESS, cap_slot));
+        assert_eq!(cap, 500_000);
     }
 }
