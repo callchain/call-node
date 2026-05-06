@@ -40,6 +40,21 @@ impl ProtocolStorage for crate::provider::InMemoryStateProvider {
     }
 }
 
+impl ProtocolStorage for crate::provider::LazyStateProvider {
+    fn get_storage(&self, address: &Address, key: U256) -> U256 {
+        self.get_storage(address, key)
+    }
+    fn set_storage(&mut self, address: Address, key: U256, value: U256) {
+        crate::provider::LazyStateProvider::set_storage(self, address, key, value);
+    }
+    fn get_balance(&self, address: &Address) -> U256 {
+        self.get_balance(address)
+    }
+    fn set_balance(&mut self, address: Address, balance: U256) {
+        crate::provider::LazyStateProvider::set_balance(self, address, balance);
+    }
+}
+
 // Blanket impls so that `&S` and `&mut S` also implement ProtocolStorage,
 // allowing callers to pass `&RwLockReadGuard<S>` or `&MutexGuard<S>`
 // without manual dereferencing.

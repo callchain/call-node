@@ -174,11 +174,11 @@ impl EvmExecutor {
         }, revm_state))
     }
 
-    /// Execute an EVM transaction using a reth [`StateProvider`] as the backing database.
+    /// Execute an EVM transaction using any [`EvmStateProvider`] as the backing database.
     ///
     /// This is the preferred execution path for the P0 migration. It reads state
-    /// directly from the provider (e.g. MDBX-backed [`InMemoryStateProvider`]) instead
-    /// directly from the provider (e.g. MDBX-backed [`InMemoryStateProvider`]).
+    /// directly from the provider (e.g. MDBX-backed [`InMemoryStateProvider`] or
+    /// on-demand [`LazyStateProvider`]).
     /// The returned [`revm::state::EvmState`] contains only the delta — the caller
     /// must commit it to persistent storage.
     ///
@@ -188,10 +188,10 @@ impl EvmExecutor {
     /// let (result, delta) = executor.execute_tx_provider(tx, provider, height, base_fee)?;
     /// // Commit delta to MDBX
     /// ```
-    pub fn execute_tx_provider(
+    pub fn execute_tx_provider<P: reth_revm::database::EvmStateProvider>(
         &self,
         tx: EvmTransaction,
-        provider: crate::provider::InMemoryStateProvider,
+        provider: P,
         block_number: u64,
         base_fee: u128,
     ) -> Result<(EvmExecutionResult, revm::state::EvmState), EvmError> {

@@ -250,6 +250,295 @@ impl InMemoryStateProvider {
     }
 }
 
+// ── Lazy StateProvider (on-demand MDBX loading) ──────────────────────
+
+/// A state provider that loads accounts and storage from MDBX on demand.
+///
+/// Unlike [`InMemoryStateProvider`], this does not perform a full table scan
+/// at construction. Instead, individual accounts and storage slots are fetched
+/// from `CallEvmAccounts` / `CallEvmStorage` as they are accessed, and cached
+/// in memory for the lifetime of the provider.
+///
+/// This is the preferred provider for read-heavy RPC and consensus paths
+/// where only a small subset of state is touched.
+pub struct LazyStateProvider {
+    db: Arc<DatabaseEnv>,
+    cache: std::sync::RwLock<HashMap<Address, EvmAccount>>,
+    code_cache: std::sync::RwLock<HashMap<B256, Bytes>>,
+    block_hashes: std::sync::RwLock<HashMap<BlockNumber, B256>>,
+}
+
+impl core::fmt::Debug for LazyStateProvider {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LazyStateProvider")
+            .field("db", &"<DatabaseEnv>")
+            .field("cached_accounts", &self.cache.read().map(|c| c.len()).unwrap_or(0))
+            .field("cached_code_entries", &self.code_cache.read().map(|c| c.len()).unwrap_or(0))
+            .field("block_hashes", &self.block_hashes.read().map(|h| h.len()).unwrap_or(0))
+            .finish()
+    }
+}
+
+impl LazyStateProvider {
+    /// Create a new lazy provider backed by the given MDBX environment.
+    pub fn new(db: Arc<DatabaseEnv>) -> Self {
+        Self {
+            db,
+            cache: std::sync::RwLock::new(HashMap::new()),
+            code_cache: std::sync::RwLock::new(HashMap::new()),
+            block_hashes: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Load a single account from MDBX into the cache.
+    fn load_account(&self, address: &Address) -> ProviderResult<Option<EvmAccount>> {
+        // Check cache first
+        {
+            let cache = self.cache.read().map_err(|_| {
+                ProviderError::Database(reth_db::DatabaseError::Other("cache poisoned".into()))
+            })?;
+            if let Some(acc) = cache.get(address) {
+                return Ok(Some(acc.clone()));
+            }
+        }
+
+        // Load from MDBX
+        let key = address.as_slice().to_vec();
+        let account: Option<EvmAccount> =
+            match call_storage::reth_db::db_get::<call_storage::reth_db::CallEvmAccounts>(
+                &self.db,
+                &key,
+            )
+            .map_err(|e| {
+                ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
+            })? {
+                Some(bytes) => Some(
+                    serde_json::from_slice(&bytes).map_err(|e| {
+                        ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                            "deserialize account: {e}"
+                        )))
+                    })?,
+                ),
+                None => None,
+            };
+
+        if let Some(ref acc) = account {
+            let mut cache = self.cache.write().map_err(|_| {
+                ProviderError::Database(reth_db::DatabaseError::Other("cache poisoned".into()))
+            })?;
+            cache.insert(*address, acc.clone());
+
+            // Also populate code cache
+            if !acc.code.is_empty() {
+                let code_hash = alloy_primitives::keccak256(&acc.code);
+                let mut code_cache = self.code_cache.write().map_err(|_| {
+                    ProviderError::Database(reth_db::DatabaseError::Other(
+                        "code cache poisoned".into(),
+                    ))
+                })?;
+                code_cache.insert(code_hash, acc.code.clone());
+            }
+        }
+
+        Ok(account)
+    }
+
+    /// Load a single storage slot from MDBX, caching the account if needed.
+    fn load_storage(&self, address: &Address, slot: U256) -> ProviderResult<U256> {
+        // Ensure account is in cache (so we can write back for mutable ops)
+        self.load_account(address)?;
+
+        let mut key = Vec::with_capacity(52);
+        key.extend_from_slice(address.as_slice());
+        key.extend_from_slice(&slot.to_be_bytes::<32>());
+
+        let value: U256 = match call_storage::reth_db::db_get::<
+            call_storage::reth_db::CallEvmStorage,
+        >(&self.db, &key)
+        .map_err(|e| {
+            ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
+        })? {
+            Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+                ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                    "deserialize storage: {e}"
+                )))
+            })?,
+            None => U256::ZERO,
+        };
+
+        // Update cache
+        {
+            let mut cache = self.cache.write().map_err(|_| {
+                ProviderError::Database(reth_db::DatabaseError::Other("cache poisoned".into()))
+            })?;
+            cache
+                .entry(*address)
+                .or_default()
+                .storage
+                .insert(slot, value);
+        }
+
+        Ok(value)
+    }
+
+    // ── Protocol-level accessors (read-only) ─────────────────────────
+
+    /// Read an account's EVM balance.
+    pub fn get_balance(&self, address: &Address) -> U256 {
+        self.load_account(address)
+            .ok()
+            .flatten()
+            .map(|a| a.balance)
+            .unwrap_or(U256::ZERO)
+    }
+
+    /// Read an account's nonce.
+    pub fn get_nonce(&self, address: &Address) -> u64 {
+        self.load_account(address)
+            .ok()
+            .flatten()
+            .map(|a| a.nonce)
+            .unwrap_or(0)
+    }
+
+    /// Read a storage slot.
+    pub fn get_storage(&self, address: &Address, key: U256) -> U256 {
+        // First check the account cache
+        {
+            if let Ok(cache) = self.cache.read() {
+                if let Some(acc) = cache.get(address) {
+                    if let Some(&val) = acc.storage.get(&key) {
+                        return val;
+                    }
+                }
+            }
+        }
+        // Fall back to MDBX
+        self.load_storage(address, key).unwrap_or(U256::ZERO)
+    }
+
+    /// Read an account's code.
+    pub fn get_code(&self, address: &Address) -> Bytes {
+        self.load_account(address)
+            .ok()
+            .flatten()
+            .map(|a| a.code)
+            .unwrap_or_default()
+    }
+
+    /// Set balance (writes to cache only).
+    pub fn set_balance(&self, address: Address, balance: U256) {
+        let _ = self.load_account(&address);
+        if let Ok(mut cache) = self.cache.write() {
+            cache.entry(address).or_default().balance = balance;
+        }
+    }
+
+    /// Set storage (writes to cache only).
+    pub fn set_storage(&self, address: Address, key: U256, value: U256) {
+        let _ = self.load_account(&address);
+        if let Ok(mut cache) = self.cache.write() {
+            cache.entry(address).or_default().storage.insert(key, value);
+        }
+    }
+
+    /// Increment nonce (writes to cache only).
+    pub fn increment_nonce(&self, address: Address) {
+        let _ = self.load_account(&address);
+        if let Ok(mut cache) = self.cache.write() {
+            cache.entry(address).or_default().nonce += 1;
+        }
+    }
+
+    /// Set code (writes to cache only).
+    pub fn set_code(&self, address: Address, code: Bytes) {
+        let _ = self.load_account(&address);
+        if let Ok(mut cache) = self.cache.write() {
+            cache.entry(address).or_default().code = code.clone();
+        }
+        if !code.is_empty() {
+            let hash = alloy_primitives::keccak256(&code);
+            if let Ok(mut code_cache) = self.code_cache.write() {
+                code_cache.insert(hash, code);
+            }
+        }
+    }
+
+    /// Get a reference to the cached accounts.
+    pub fn get_cached_accounts(&self) -> HashMap<Address, EvmAccount> {
+        self.cache.read().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Convert into an [`InMemoryStateProvider`] containing all cached state.
+    pub fn into_in_memory(self) -> InMemoryStateProvider {
+        let accounts = self.cache.read().map(|c| c.clone()).unwrap_or_default();
+        let block_hashes = self
+            .block_hashes
+            .read()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+        InMemoryStateProvider::from_accounts(accounts).with_block_hashes(block_hashes)
+    }
+
+    /// Self-reference for backward-compatible call-sites.
+    pub fn state(&self) -> &Self {
+        self
+    }
+
+    /// Attach block hashes for `BlockHashReader`.
+    pub fn with_block_hashes(self, hashes: HashMap<BlockNumber, B256>) -> Self {
+        if let Ok(mut bh) = self.block_hashes.write() {
+            *bh = hashes;
+        }
+        self
+    }
+}
+
+impl reth_revm::database::EvmStateProvider for LazyStateProvider {
+    fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
+        Ok(self.load_account(address)?.map(|acc| to_reth_account(&acc)))
+    }
+
+    fn block_hash(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
+        Ok(self
+            .block_hashes
+            .read()
+            .map_err(|_| {
+                ProviderError::Database(reth_db::DatabaseError::Other(
+                    "block hash cache poisoned".into(),
+                ))
+            })?
+            .get(&number)
+            .copied())
+    }
+
+    fn bytecode_by_hash(
+        &self,
+        code_hash: &B256,
+    ) -> ProviderResult<Option<reth_primitives_traits::Bytecode>> {
+        let code = self
+            .code_cache
+            .read()
+            .map_err(|_| {
+                ProviderError::Database(reth_db::DatabaseError::Other(
+                    "code cache poisoned".into(),
+                ))
+            })?
+            .get(code_hash)
+            .cloned();
+        Ok(code.map(Bytecode::new_raw))
+    }
+
+    fn storage(
+        &self,
+        account: Address,
+        storage_key: StorageKey,
+    ) -> ProviderResult<Option<StorageValue>> {
+        let value = self.get_storage(&account, storage_key.into());
+        Ok(Some(value))
+    }
+}
+
 impl BlockHashReader for InMemoryStateProvider {
     fn block_hash(&self,
         number: BlockNumber,
@@ -715,6 +1004,102 @@ mod tests {
         let missing = factory.history_by_block_number(99).expect("fallback provider");
         let missing_acc = missing.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(missing_acc.balance, U256::from(1111));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_lazy_provider_reads_from_db() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-lazy-provider-test-{}",
+            std::process::id()
+        ));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        // Seed MDBX with state via InMemoryStateProvider
+        let mut seed = InMemoryStateProvider::new();
+        seed.set_balance(test_addr(1), U256::from(5000));
+        seed.create_account(test_addr(1));
+        seed.increment_nonce(test_addr(1));
+        seed.set_storage(test_addr(1), U256::from(42), U256::from(123));
+        seed.set_code(test_addr(2), Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0x55]));
+        seed.save_to_db(&db).expect("seed");
+
+        // Create lazy provider — should NOT load full state
+        let lazy = LazyStateProvider::new(db);
+
+        // On-demand reads
+        assert_eq!(lazy.get_balance(&test_addr(1)), U256::from(5000));
+        assert_eq!(lazy.get_nonce(&test_addr(1)), 1);
+        assert_eq!(lazy.get_storage(&test_addr(1), U256::from(42)), U256::from(123));
+        assert_eq!(
+            lazy.get_code(&test_addr(2)),
+            Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0x55])
+        );
+
+        // Missing account
+        assert_eq!(lazy.get_balance(&test_addr(0xFF)), U256::ZERO);
+        assert_eq!(lazy.get_nonce(&test_addr(0xFF)), 0);
+
+        // Cache should contain the touched accounts
+        let cached = lazy.get_cached_accounts();
+        assert!(cached.contains_key(&test_addr(1)));
+        assert!(cached.contains_key(&test_addr(2)));
+        assert!(!cached.contains_key(&test_addr(0xFF)));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_lazy_provider_evm_state_provider() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-lazy-evm-provider-test-{}",
+            std::process::id()
+        ));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        let mut seed = InMemoryStateProvider::new();
+        seed.set_balance(test_addr(1), U256::from(1000));
+        seed.create_account(test_addr(1));
+        seed.save_to_db(&db).expect("seed");
+
+        let lazy = LazyStateProvider::new(db);
+
+        // Test EvmStateProvider trait methods
+        let acc = reth_revm::database::EvmStateProvider::basic_account(
+            &lazy, &test_addr(1),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(acc.balance, U256::from(1000));
+
+        let storage = reth_revm::database::EvmStateProvider::storage(
+            &lazy, test_addr(1), B256::ZERO,
+        )
+        .unwrap();
+        assert_eq!(storage, Some(U256::ZERO));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_lazy_provider_writes_to_cache() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-lazy-cache-write-test-{}",
+            std::process::id()
+        ));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        let lazy = LazyStateProvider::new(db);
+
+        // Write to cache
+        lazy.set_balance(test_addr(1), U256::from(999));
+        lazy.set_storage(test_addr(1), U256::from(7), U256::from(77));
+        lazy.increment_nonce(test_addr(1));
+
+        assert_eq!(lazy.get_balance(&test_addr(1)), U256::from(999));
+        assert_eq!(lazy.get_storage(&test_addr(1), U256::from(7)), U256::from(77));
+        assert_eq!(lazy.get_nonce(&test_addr(1)), 1);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

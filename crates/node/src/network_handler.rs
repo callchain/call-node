@@ -52,10 +52,19 @@ pub(crate) fn handle_network_message(
         TX_CHANNEL => {
             if let Ok(tx_msg) = serde_json::from_slice::<TransactionMessage>(data) {
                 if tx_msg.verify_checksum() {
-                    if let Ok(mut pool) = mempool.write() {
-                        // EVM-only mempool
-                        if let Ok(evm_tx) = serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data) {
-                            let _ = pool.insert_evm_tx(evm_tx);
+                    if let Ok(evm_tx) = serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data) {
+                        let caller = evm_tx.caller;
+                        // Validate nonce and balance against chain state before insertion
+                        let mut pool = match mempool.write() {
+                            Ok(p) => p,
+                            Err(_) => return,
+                        };
+                        let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(&state.db_env));
+                        let committed_nonce = provider.get_nonce(&caller);
+                        let balance = provider.get_balance(&caller);
+                        let result = pool.insert_evm_tx_with_state(evm_tx, committed_nonce, balance);
+                        if let Err(e) = result {
+                            tracing::debug!(error = %e, caller = ?caller, "P2P tx rejected");
                         }
                     }
                 }
@@ -151,7 +160,7 @@ pub(crate) fn handle_network_message(
                 let peer_id_owned = peer_id.to_string();
                 tokio::spawn(async move {
                     let is_validator = {
-                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
+                        let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(&state_clone.db_env));
                         let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
                         let mut active = 0;
                         for id in 1..=count {
@@ -179,8 +188,10 @@ pub(crate) fn handle_network_message(
                         for pair in &request.pairs {
                             // Read last known price from EVM storage
                             let price = {
-                                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
-                                call_consensus::exec::state_accessors::read_oracle_price(&provider, pair.base)
+                                let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
+                                    &state_clone.db_env));
+                                call_consensus::exec::state_accessors::read_oracle_price(
+                                    &provider, pair.base)
                             };
                             if price != 0 {
                                 // Send back as an oracle price submission
@@ -219,7 +230,8 @@ pub(crate) fn handle_network_message(
                     let mut tracker_guard = tracker_clone.write().unwrap();
                     // Build validator set and config from EVM state
                     let (config, validators) = {
-                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
+                        let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
+                            &state_clone.db_env));
                         let config = OracleConfig::default();
                         let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
                         let mut validators = std::collections::HashMap::new();

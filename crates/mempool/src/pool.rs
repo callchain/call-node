@@ -2,7 +2,7 @@
 //!
 //! EVM-only mempool with capacity limits, eviction, and anti-spam.
 
-use call_primitives::{Address, TxHash};
+use call_primitives::{Address, TxHash, U256};
 use call_crypto::keccak256;
 use call_evm::EvmTransaction;
 use std::collections::{HashMap, HashSet};
@@ -49,6 +49,8 @@ pub enum MempoolError {
     GasLimitExceeded { gas: u64, max: u64 },
     #[error("invalid nonce: expected {expected}, got {got}")]
     InvalidNonce { expected: u64, got: u64 },
+    #[error("insufficient balance: required {required}, got {got}")]
+    InsufficientBalance { required: u128, got: U256 },
     #[error("transaction not found: {0}")]
     NotFound(TxHash),
     #[error("mempool error: {0}")]
@@ -157,6 +159,38 @@ impl Mempool {
         self.known_txs.insert(hash);
 
         Ok(hash)
+    }
+
+    /// Insert an EVM transaction with state validation (nonce + balance).
+    ///
+    /// Validates that the transaction nonce matches the expected next nonce
+    /// (max of committed nonce and highest pending nonce + 1) and that the
+    /// sender has sufficient balance to cover the maximum gas cost.
+    pub fn insert_evm_tx_with_state(
+        &mut self,
+        tx: EvmTransaction,
+        committed_nonce: u64,
+        balance: U256,
+    ) -> Result<TxHash, MempoolError> {
+        // Expected nonce = max(committed_nonce, highest_pending_nonce + 1)
+        let expected_nonce = self.get_expected_evm_nonce(tx.caller, committed_nonce);
+        if tx.nonce != expected_nonce {
+            return Err(MempoolError::InvalidNonce {
+                expected: expected_nonce,
+                got: tx.nonce,
+            });
+        }
+
+        // Balance must cover gas_price * gas_limit
+        let max_gas_cost = tx.gas_price.saturating_mul(tx.gas_limit as u128);
+        if balance < U256::from(max_gas_cost) {
+            return Err(MempoolError::InsufficientBalance {
+                required: max_gas_cost,
+                got: balance,
+            });
+        }
+
+        self.insert_evm_tx(tx)
     }
 
     // ── Transaction Selection (for block building) ─────────────────
@@ -393,5 +427,55 @@ mod tests {
         let stats = mempool.pool_stats();
         assert_eq!(stats.evm_count, 2);
         assert_eq!(stats.known_tx_count, 2);
+    }
+
+    #[test]
+    fn test_mempool_insert_with_state_valid() {
+        let mut mempool = Mempool::new();
+        let tx = make_evm_tx(0, 100);
+        let balance = U256::from(10_000_000u128); // plenty
+
+        let hash = mempool.insert_evm_tx_with_state(tx, 0, balance);
+        assert!(hash.is_ok());
+        assert_eq!(mempool.total_pending(), 1);
+    }
+
+    #[test]
+    fn test_mempool_insert_with_state_invalid_nonce() {
+        let mut mempool = Mempool::new();
+        let tx = make_evm_tx(1, 100); // nonce 1, but committed is 0
+        let balance = U256::from(10_000_000u128);
+
+        let result = mempool.insert_evm_tx_with_state(tx, 0, balance);
+        assert!(matches!(result, Err(MempoolError::InvalidNonce { expected: 0, got: 1 })));
+    }
+
+    #[test]
+    fn test_mempool_insert_with_state_insufficient_balance() {
+        let mut mempool = Mempool::new();
+        let tx = make_evm_tx(0, 100);
+        let balance = U256::from(0u128); // not enough for gas
+
+        let result = mempool.insert_evm_tx_with_state(tx, 0, balance);
+        assert!(matches!(result, Err(MempoolError::InsufficientBalance { .. })));
+    }
+
+    #[test]
+    fn test_mempool_insert_with_state_pending_nonce() {
+        let mut mempool = Mempool::new();
+        let balance = U256::from(10_000_000u128);
+
+        // First tx with nonce 0
+        let tx0 = make_evm_tx(0, 100);
+        mempool.insert_evm_tx_with_state(tx0, 0, balance).unwrap();
+
+        // Second tx should need nonce 1 (committed=0, pending=1)
+        let tx1 = make_evm_tx(1, 100);
+        mempool.insert_evm_tx_with_state(tx1, 0, balance).unwrap();
+
+        // Third tx with nonce 0 should fail (duplicate nonce)
+        let tx0_dup = make_evm_tx(0, 100);
+        let result = mempool.insert_evm_tx_with_state(tx0_dup, 0, balance);
+        assert!(matches!(result, Err(MempoolError::InvalidNonce { expected: 2, got: 0 })));
     }
 }
