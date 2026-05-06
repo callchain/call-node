@@ -644,12 +644,8 @@ mod real_prover_impl {
 
 #[cfg(feature = "real-prover")]
 pub use real_prover_impl::RealProver;
-#[cfg(feature = "real-prover")]
+#[cfg(all(feature = "real-prover", test))]
 pub(crate) use real_prover_impl::setup_withdraw_circuit;
-#[cfg(feature = "real-prover")]
-pub(crate) use real_prover_impl::setup_deposit_circuit;
-#[cfg(feature = "real-prover")]
-pub(crate) use real_prover_impl::setup_transfer_circuit;
 
 #[cfg(test)]
 mod tests {
