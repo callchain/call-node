@@ -1311,6 +1311,91 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_challenge_true_proof_bond_rewarded() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let challenger = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        // Setup state and externalDeposit + initiateChallenge at block 10
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            ASSET_ADDRESS,
+            slot_balance(CALL_ASSET_ID, challenger),
+            u128_to_u256(5000),
+        );
+        provider.set(
+            ASSET_ADDRESS,
+            slot_balance(CALL_ASSET_ID, validator),
+            u128_to_u256(100),
+        );
+        provider.set(
+            ASSET_ADDRESS,
+            slot_balance(1, recipient),
+            u128_to_u256(0),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        // externalDeposit
+        let input = IProtocolBridge::externalDepositCall {
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 1000,
+        }
+        .abi_encode();
+        precompile.call(&input, validator, &mut provider).unwrap();
+
+        // initiateChallenge with a 32-byte proof (passes structural validation)
+        let input = IProtocolBridge::initiateChallengeCall {
+            sourceTxHash: source_tx_hash.into(),
+            proof: alloy_primitives::Bytes::from_static(&[0xABu8; 32]),
+        }
+        .abi_encode();
+        precompile.call(&input, challenger, &mut provider).unwrap();
+
+        // resolveChallenge at block 120 (deadline = 10 + 100 = 110)
+        provider.set_block_number(120);
+
+        let input = IProtocolBridge::resolveChallengeCall {
+            sourceTxHash: source_tx_hash.into(),
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_ok(), "resolve_challenge failed: {:?}", result.err());
+
+        // Status should be Successful (2)
+        let status = provider
+            .get(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
+        assert_eq!(status, 2);
+
+        // Challenger should have received bond + 10% reward
+        let challenger_bal = u256_to_u128(
+            provider
+                .get(ASSET_ADDRESS, slot_balance(CALL_ASSET_ID, challenger))
+                .unwrap_or(U256::ZERO),
+        );
+        assert_eq!(challenger_bal, 4000 + 1000 + 100); // 5000 - 1000 + 1100
+
+        // Recipient balance should have been reversed (1000 deducted)
+        let recipient_bal = u256_to_u128(
+            provider
+                .get(ASSET_ADDRESS, slot_balance(1, recipient))
+                .unwrap_or(U256::ZERO),
+        );
+        assert_eq!(recipient_bal, 0);
+    }
+
+    #[test]
     fn test_get_challenge_status() {
         let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
         let validator = Address::repeat_byte(0x11);
