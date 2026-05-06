@@ -3,6 +3,7 @@
 A high-performance Layer 1 blockchain node with dual execution domains: Protocol Payment Layer and EVM Contract Layer.
 
 [![CI](https://github.com/callchain/call-node/actions/workflows/ci.yml/badge.svg)](https://github.com/callchain/call-node/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/callchain/call-node/branch/main/graph/badge.svg)](https://codecov.io/gh/callchain/call-node)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Quick Start
