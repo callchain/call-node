@@ -222,6 +222,7 @@ mod shielded_flow {
 
     /// Build a real Groth16 transfer proof with properly derived notes.
     /// Returns the ShieldedTransfer and the input note's commitment.
+    #[allow(dead_code)]
     fn make_real_transfer_zkproof(
         input_value: u128,
         output_value: u128,
