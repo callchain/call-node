@@ -645,4 +645,110 @@ mod tests {
         let result = precompile.call(&input, sender, &mut provider);
         assert!(result.is_err(), "should fail when EVM contract not registered");
     }
+
+    // ── Lib-layer SwitchStorage tests ─────────────────────────────────
+
+    #[test]
+    fn test_switch_storage_protocol_bal_add_sub() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let addr = addr(0x33);
+        let asset_id = 7u64;
+
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_balance(asset_id, addr),
+            u128_to_u256(1000),
+        ).unwrap();
+
+        let mut store = SwitchStorage::new(JournalBackend::new(&mut provider));
+
+        store.sub_protocol_bal(asset_id, addr, 300).unwrap();
+        assert_eq!(store.load_protocol_bal(asset_id, addr), 700);
+
+        store.add_protocol_bal(asset_id, addr, 200).unwrap();
+        assert_eq!(store.load_protocol_bal(asset_id, addr), 900);
+    }
+
+    #[test]
+    fn test_switch_storage_erc20_mint_burn() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let contract = addr(0xAA);
+        let holder = addr(0xBB);
+        let asset_id = 2u64;
+
+        // Default totalSupply slot = 3, balanceOf base = 4
+        let mut store = SwitchStorage::new(JournalBackend::new(&mut provider));
+
+        store.erc20_mint(asset_id, contract, holder, 500).unwrap();
+
+        let ts = provider.sload(contract, U256::from(3))
+            .map(u256_to_u128).unwrap_or(0);
+        assert_eq!(ts, 500);
+
+        let mut padded = [0u8; 32];
+        padded[12..32].copy_from_slice(holder.as_slice());
+        let bal = provider.sload(contract, mapping_slot(&padded, 4))
+            .map(u256_to_u128).unwrap_or(0);
+        assert_eq!(bal, 500);
+
+        store.erc20_burn(asset_id, contract, holder, 200).unwrap();
+
+        let ts2 = provider.sload(contract, U256::from(3))
+            .map(u256_to_u128).unwrap_or(0);
+        assert_eq!(ts2, 300);
+    }
+
+    #[test]
+    fn test_switch_storage_check_asset_active() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let asset_id = 5u64;
+
+        // status = 0 means active
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_asset_meta(asset_id, b"status"),
+            U256::from(0),
+        ).unwrap();
+
+        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        assert!(store.check_asset_active(asset_id).is_ok());
+
+        // status != 0 means inactive
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_asset_meta(asset_id, b"status"),
+            U256::from(1),
+        ).unwrap();
+        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        assert!(matches!(store.check_asset_active(asset_id), Err(SwitchError::AssetNotActive)));
+    }
+
+    #[test]
+    fn test_switch_storage_read_evm_contract() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let contract = addr(0xAA);
+        let asset_id = 3u64;
+
+        provider.sstore(
+            ASSET_ADDRESS,
+            slot_evm_contract(asset_id),
+            address_to_u256(contract),
+        ).unwrap();
+
+        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        assert_eq!(store.read_evm_contract(asset_id).unwrap(), contract);
+    }
+
+    #[test]
+    fn test_switch_storage_read_evm_contract_not_registered() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let asset_id = 3u64;
+
+        // evm_contract NOT set (remains zero)
+        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        assert!(matches!(
+            store.read_evm_contract(asset_id),
+            Err(SwitchError::EvmContractNotRegistered)
+        ));
+    }
 }

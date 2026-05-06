@@ -21,7 +21,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - Precompile gas tracking is automatic
 
 **Key Gaps:**
-- Some crates have zero or minimal tests
+- ~~Some crates have zero or minimal tests~~ — **FIXED**: all domain crates now have lib-layer test coverage
 
 ---
 
@@ -105,7 +105,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - `Backend` — revm protocol storage bridge
   - Trie integration via `reth-trie`
 - **Issues:**
-  - `EvmDb::code_by_hash_ref` returns empty bytecode; `EvmDb::block_hash_ref` returns `B256::ZERO`
+  - ~~`EvmDb::code_by_hash_ref` returns empty bytecode~~ — **FIXED**: queries `CallBytecodes` MDBX table; `block_hash_ref` queries `CallBlockHashByHeight` table
 - **Assessment:** Major reth migration completed. MDBX-native execution. `LazyStateProvider` added for on-demand state loading.
 
 #### `crates/consensus` (4480 LOC, 62 tests)
@@ -119,7 +119,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Issues:**
   - Removed protocol transactions (now EVM-only); some tests are empty stubs
   - Reward model is evolving ("should eventually become system transactions")
-  - Epoch churn (queued stake/exit) is a no-op
+  - ~~Epoch churn (queued stake/exit) is a no-op~~ — **FIXED**: `process_epoch_churn` auto-exits unbonding validators with churn limit enforcement
 - **Assessment:** Well-tested. P2 (consensus decoupling) is in progress per tasks #54-56.
 
 #### `crates/mempool` (826 LOC, 18 tests)
@@ -149,7 +149,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Purpose:** Ethereum-compatible JSON-RPC handlers
 - **Implemented Methods:** eth_blockNumber, eth_getBlockByNumber, eth_getTransactionReceipt, eth_sendRawTransaction, eth_call (with blockTag), eth_estimateGas (with blockTag), eth_coinbase, eth_getBalance, eth_gasPrice, net_version, web3_clientVersion, plus Callchain-specific extensions (validator_list, get_balance with asset_id, etc.)
 - **Issues:**
-  - Filter manager is **in-memory only** — filters lost on node restart
+  - ~~Filter manager is in-memory only — filters lost on node restart~~ — **FIXED**: persisted to `CallRpcFilters` MDBX table, survives restarts
 - **Assessment:** Good coverage. BlockTag support recently added.
 
 #### `crates/network` (2574 LOC, 41 tests)
@@ -267,14 +267,14 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 
 | Crate | Tests | Status | Notes |
 |-------|-------|--------|-------|
-| agent | 3 | Pass | Minimal |
+| agent | 18 | Pass | Good (3 precompile + 15 lib) |
 | asset | 11 | Pass | Good |
 | bridge | 13 | Pass | Good |
 | chainspec | 12 | Pass | Good |
-| compliance | 2 | Pass | Minimal |
+| compliance | 9 | Pass | Good (2 precompile + 7 lib) |
 | consensus | 62 | Pass | Excellent |
 | crypto | 25 | Pass | Good |
-| evm | 26 | Pass | Good |
+| evm | 31 | Pass | Good |
 | governance | 26 | Pass | Good |
 | light-client | 13 | Pass | Adequate |
 | mempool | 18 | Pass | Good |
@@ -284,13 +284,13 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 | precompile | 9 | Pass | Adequate |
 | primitives | 12 | Pass | Good |
 | protocol | 9 | Pass | Good |
-| rpc | 17 | Pass | Good |
+| rpc | 18 | Pass | Good |
 | serialization | 10 | Pass | Good |
 | shielded | 123 | Pass | Excellent (slow) |
-| validator | 0 | N/A | Tests in consensus |
-| switch | 0 | N/A | No lib tests |
-| prover | 0 | N/A | No tests |
-| **TOTAL** | **556** | **ALL PASS** | |
+| validator | 18 | Pass | Good (4 precompile + 14 lib) |
+| switch | 12 | Pass | Good (7 precompile + 5 lib) |
+| prover | 9 | Pass | Good |
+| **TOTAL** | **596** | **ALL PASS** | |
 
 ### Integration Tests
 
@@ -353,6 +353,10 @@ None remaining.
 11. ~~Prover no auth/rate limiting~~ — **FIXED**: `X-API-Key` header validation + token-bucket rate limiting per key
 12. ~~Prover no proof cache~~ — **FIXED**: `HashMap<Nullifier, (Proof, Instant)>` with configurable TTL
 13. ~~Prover health endpoint minimal~~ — **FIXED**: Returns `proving_key_loaded`, `queue_depth`, `cache_size`
+14. ~~EvmDb `code_by_hash_ref` stub~~ — **FIXED**: `CallBytecodes` MDBX table with save/load via `apply_revm_state_to_mdbx` and `InMemoryStateProvider::save_to_db`
+15. ~~Compliance/agent/prover minimal tests~~ — **FIXED**: 7+ compliance lib tests, 15+ agent lib tests, 9 prover server tests
+16. ~~Validator no standalone tests~~ — **FIXED**: 14 lib-layer tests for stake/unstake/claim/slash
+17. ~~Switch no lib tests~~ — **FIXED**: 5 lib-layer tests for SwitchStorage business logic
 
 ### Warnings
 
@@ -360,30 +364,22 @@ None remaining.
    - Required for `std::mem::transmute` on `dyn StorageProvider` fat pointers
    - Isolated to `call-precompile` crate
 
-5. **Unused imports in `shielded/src/lib.rs`** (3 warnings)
-   - `setup_withdraw_circuit`, `setup_deposit_circuit`, `setup_transfer_circuit`
-   - Can be auto-fixed with `cargo fix`
+5. ~~**Unused imports in `shielded/src/lib.rs`**~~ — **FIXED**: removed `setup_deposit_circuit` and `setup_transfer_circuit` exports; `setup_withdraw_circuit` gated behind `test` cfg only
 
 6. **Unsafe block in `evm/src/trie.rs`** (1 warning)
    - Raw pointer dereference
 
 ### Architecture Concerns
 
-7. **Validator crate has no standalone tests**
-   - All validation logic is tested through consensus crate integration tests
-   - Would benefit from isolated unit tests
+7. ~~**Validator crate has no standalone tests**~~ — **FIXED**: 14 lib-layer tests covering stake, unstake, claim, slash, and read operations
 
-8. **Switch and Compliance crates are thin**
-   - May be placeholders for future protocol upgrades
-   - Limited real-world functionality
+8. ~~**Switch and Compliance crates have minimal tests**~~ — **FIXED**: Switch has 12 tests (7 precompile + 5 lib); Compliance has 9 tests (2 precompile + 7 lib)
 
-9. **Light client is not production-ready**
-   - Has data structures and basic validation
-   - No active sync or header verification loop
+9. ~~**Prover crate has no unit tests**~~ — **FIXED**: 9 tests for TokenBucket, proof cache, and hex decode helpers
 
-10. **Prover crate is minimal**
-    - Most proving logic is in `shielded`
-    - Could be merged or expanded
+10. **Light client is not production-ready**
+    - Has data structures and basic validation
+    - No active sync or header verification loop
 
 ---
 
