@@ -248,11 +248,13 @@ mod tests {
         let sender = Address::repeat_byte(0x11);
 
         // Seed sender balance
-        provider.sstore(
-            call_precompile::ASSET_ADDRESS,
-            slot_balance(CALL_ASSET_ID, sender),
-            u128_to_u256(10_000_000),
-        );
+        provider
+            .sstore(
+                call_precompile::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, sender),
+                u128_to_u256(10_000_000),
+            )
+            .unwrap();
 
         let mut precompile = ValidatorPrecompile;
 
@@ -292,11 +294,13 @@ mod tests {
         let sender = Address::repeat_byte(0x11);
 
         // Seed sender balance
-        provider.sstore(
-            call_precompile::ASSET_ADDRESS,
-            slot_balance(CALL_ASSET_ID, sender),
-            u128_to_u256(10_000_000),
-        );
+        provider
+            .sstore(
+                call_precompile::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, sender),
+                u128_to_u256(10_000_000),
+            )
+            .unwrap();
 
         let mut precompile = ValidatorPrecompile;
 
@@ -332,11 +336,13 @@ mod tests {
         let sender = Address::repeat_byte(0x11);
 
         // Seed sender balance
-        provider.sstore(
-            call_precompile::ASSET_ADDRESS,
-            slot_balance(CALL_ASSET_ID, sender),
-            u128_to_u256(10_000_000),
-        );
+        provider
+            .sstore(
+                call_precompile::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, sender),
+                u128_to_u256(10_000_000),
+            )
+            .unwrap();
 
         let mut precompile = ValidatorPrecompile;
 

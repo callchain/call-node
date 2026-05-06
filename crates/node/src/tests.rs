@@ -576,7 +576,7 @@ async fn test_e2e_state_persistence_restart() {
 
         // Verify native EVM balance was recovered
         let sender_balance = {
-            let mut provider =
+            let provider =
                 call_evm::provider::InMemoryStateProvider::from_db(&node2.state.db_env).unwrap();
             provider.state().get_balance(test_sender())
         };
@@ -657,7 +657,7 @@ async fn test_state_isolation_propose_does_not_modify_shared_state() {
 
     // Capture shared state BEFORE propose-phase execution
     let balance_before = {
-        let mut provider =
+        let provider =
             call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         provider.state().get_balance(test_sender())
     };
@@ -675,7 +675,7 @@ async fn test_state_isolation_propose_does_not_modify_shared_state() {
 
     // Verify shared state is UNCHANGED after propose
     let balance_after_propose = {
-        let mut provider =
+        let provider =
             call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         provider.state().get_balance(test_sender())
     };
@@ -709,7 +709,7 @@ async fn test_state_isolation_propose_does_not_modify_shared_state() {
 
     // Verify shared state IS modified after finalize
     let balance_after_finalize = {
-        let mut provider =
+        let provider =
             call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         provider.state().get_balance(test_sender())
     };

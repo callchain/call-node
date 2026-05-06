@@ -354,7 +354,9 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::repeat_byte(0xAB);
 
-        provider.sstore(ASSET_ADDRESS, slot_balance(1, addr), u128_to_u256(5000));
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, addr), u128_to_u256(5000))
+            .unwrap();
 
         let input = IProtocolAsset::getBalanceCall {
             assetId: 1,
@@ -378,7 +380,9 @@ mod tests {
         let from = Address::repeat_byte(0xAB);
         let to = Address::repeat_byte(0xCD);
 
-        provider.sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000));
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
+            .unwrap();
         // Seed native EVM balance for CALL (asset_id=1) bridging
         provider.balance_add(from, U256::from(1000)).unwrap();
 
@@ -474,7 +478,9 @@ mod tests {
         let spender = Address::repeat_byte(0xEF);
         let recipient = Address::repeat_byte(0xCD);
 
-        provider.sstore(ASSET_ADDRESS, slot_balance(1, owner), u128_to_u256(1000));
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, owner), u128_to_u256(1000))
+            .unwrap();
         // Seed native EVM balance for CALL (asset_id=1) bridging
         provider.balance_add(owner, U256::from(1000)).unwrap();
 

@@ -430,7 +430,7 @@ mod tests {
     use call_asset::AssetStorage;
     use call_precompile::storage::{HashMapStorageProvider, StorageProvider};
     use call_precompile::{
-        journal_backend::JournalBackend, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
+        journal_backend::JournalBackend, slot_balance, u128_to_u256, ASSET_ADDRESS,
     };
     use call_primitives::Address;
 
@@ -564,7 +564,7 @@ mod tests {
         let caller = test_addr(0x11);
 
         let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
+        let _asset_store = AssetStorage::new(backend);
         let mut validator_store = ValidatorStorage::new(backend);
 
         let result = validator_store.unstake(1, caller, 100);
