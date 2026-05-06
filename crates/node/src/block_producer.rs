@@ -245,8 +245,11 @@ pub(crate) async fn block_production_loop(
                 tracing::warn!(error = ?e, "commit failed");
                 continue;
             }
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-            c.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            c.advance_round(&mut provider);
+            if let Err(e) = provider.save_to_db(&state.db_env) {
+                tracing::warn!(error = ?e, "failed to save provider after epoch churn");
+            }
         }
         telemetry.record_block_produced();
         telemetry.record_block_committed();

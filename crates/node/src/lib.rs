@@ -1078,9 +1078,10 @@ impl CallNode {
 
                                 if let Ok(mut c) = consensus.write() {
                                     let _ = c.commit_block(&block, &result);
-                                    let provider = call_evm::provider::InMemoryStateProvider::from_db(
+                                    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
                                         &state.db_env).unwrap();
-                                    c.advance_round(&provider);
+                                    c.advance_round(&mut provider);
+                                    let _ = provider.save_to_db(&state.db_env);
                                 }
 
                                 let _ = light_client.sync_incremental(&block.header, &signatures);
@@ -1206,6 +1207,9 @@ pub(crate) fn persist_block(db_env: &Arc<DatabaseEnv>, height: u64, block: &Bloc
     let hash_value = height.to_be_bytes().to_vec();
     call_storage::reth_db::db_put::<call_storage::reth_db::CallBlockHashIndex>(db_env, hash_key, hash_value)
         .map_err(|e| format!("failed to write hash index for block {height}: {e}"))?;
+
+    call_storage::reth_db::save_block_hash_by_height(db_env, height, &block.header.hash())
+        .map_err(|e| format!("failed to write height->hash for block {height}: {e}"))?;
     Ok(())
 }
 

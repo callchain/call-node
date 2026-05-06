@@ -509,9 +509,12 @@ pub(crate) async fn bft_event_loop(
                             tracing::warn!(error = ?e, height, "BFT finalize: commit failed");
                             continue;
                         }
-                        // Advance round and refresh proposer subset (read-only)
-                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                        c.advance_round(&provider);
+                        // Advance round and refresh proposer subset (may mutate for epoch churn)
+                        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        c.advance_round(&mut provider);
+                        if let Err(e) = provider.save_to_db(&state.db_env) {
+                            tracing::warn!(error = ?e, "failed to save provider after epoch churn");
+                        }
                     }
                     telemetry.record_block_committed();
 

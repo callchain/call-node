@@ -227,8 +227,8 @@ impl TestNode {
         {
             let mut consensus = self.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit block");
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
-            consensus.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
         }
         self.last_result = Some(result.clone());
 
@@ -301,7 +301,7 @@ impl TestNode {
     /// Get a balance for an address.
     pub fn balance(&self, asset_id: u64, addr: &Address) -> u128 {
         use call_consensus::exec::state_accessors;
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(
+        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
             &self.state.db_env).unwrap();
         state_accessors::read_balance(provider.state(), asset_id, *addr)
     }

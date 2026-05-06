@@ -242,8 +242,11 @@ pub(crate) fn apply_synced_blocks(
                     if let Err(e) = c.commit_block(&block, &result) {
                         tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
                     }
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                    c.advance_round(&provider);
+                    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                    c.advance_round(&mut provider);
+                    if let Err(e) = provider.save_to_db(&state.db_env) {
+                        tracing::warn!(error = ?e, "sync: failed to save provider after epoch churn");
+                    }
                 }
                 state.set_current_block(block_height + 1);
                 applied += 1;

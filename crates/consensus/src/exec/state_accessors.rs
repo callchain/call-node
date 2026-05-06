@@ -62,8 +62,7 @@ fn slot_validator_status(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"status"])
 }
 
-#[allow(dead_code)]
-fn _slot_validator_unbond_height(addr: Address) -> U256 {
+fn slot_validator_unbond_height(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"unbond_at"])
 }
 
@@ -714,6 +713,11 @@ pub fn read_validator_status(evm_state: &dyn ProtocolStorage, addr: Address) -> 
     evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_status(addr)).to_be_bytes::<32>()[31]
 }
 
+/// Read validator unbond height from EVM storage.
+pub fn read_validator_unbond_height(evm_state: &dyn ProtocolStorage, addr: Address) -> u64 {
+    u256_to_u64(evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_unbond_height(addr)))
+}
+
 /// Read validator BLS pubkey from EVM storage.
 pub fn read_validator_bls_pubkey(evm_state: &dyn ProtocolStorage, addr: Address) -> [u8; 48] {
     let hi = evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_bls_pubkey(addr));
@@ -722,6 +726,15 @@ pub fn read_validator_bls_pubkey(evm_state: &dyn ProtocolStorage, addr: Address)
     pk[0..32].copy_from_slice(&hi.to_be_bytes::<32>());
     pk[32..48].copy_from_slice(&lo.to_be_bytes::<32>()[0..16]);
     pk
+}
+
+/// Set validator unbond height in EVM storage.
+pub fn set_validator_unbond_height(evm_state: &mut dyn ProtocolStorage, addr: Address, height: u64) {
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_unbond_height(addr),
+        u64_to_u256(height),
+    );
 }
 
 /// Set validator BLS pubkey in EVM storage.

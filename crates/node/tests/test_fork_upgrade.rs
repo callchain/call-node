@@ -106,8 +106,8 @@ async fn test_height_activated_upgrade() {
         {
             let mut consensus = node.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit");
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-            consensus.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
         }
 
         node.state.set_current_block(height + 1);

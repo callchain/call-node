@@ -150,8 +150,8 @@
         {
             let mut consensus = node.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit");
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-            consensus.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
         }
 
         let height_after = node.consensus.read().unwrap().current_height();
@@ -216,8 +216,8 @@
         {
             let mut consensus = node.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit empty");
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-            consensus.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
         }
 
         assert_eq!(node.consensus.read().unwrap().current_height(), 1);
@@ -301,10 +301,10 @@
 
         // Commit on node1
         {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node1.state.db_env).unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node1.state.db_env).unwrap();
             let mut consensus = node1.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit");
-            consensus.advance_round(&provider);
+            consensus.advance_round(&mut provider);
         }
         assert_eq!(node1.consensus.read().unwrap().current_height(), 1, "node1 should be at height 1");
 
@@ -398,8 +398,8 @@
         {
             let mut consensus = node.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit");
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-            consensus.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
         }
 
         // Persist block
@@ -478,8 +478,8 @@
             {
                 let mut consensus = node.consensus.write().unwrap();
                 consensus.commit_block(&block, &result).expect("commit");
-                let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-                consensus.advance_round(&provider);
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                consensus.advance_round(&mut provider);
             }
 
             // Persist state to reth-db immediately
@@ -499,7 +499,7 @@
 
             // Verify native EVM balance was recovered
             let sender_balance = {
-                let provider = call_evm::provider::InMemoryStateProvider::from_db(&node2.state.db_env).unwrap();
+                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node2.state.db_env).unwrap();
                 provider.state().get_balance(test_sender())
             };
 
@@ -571,7 +571,7 @@
 
         // Capture shared state BEFORE propose-phase execution
         let balance_before = {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             provider.state().get_balance(test_sender())
         };
 
@@ -587,7 +587,7 @@
 
         // Verify shared state is UNCHANGED after propose
         let balance_after_propose = {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             provider.state().get_balance(test_sender())
         };
         assert_eq!(
@@ -609,13 +609,13 @@
 
             let mut consensus = node.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit");
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-            consensus.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
         }
 
         // Verify shared state IS modified after finalize
         let balance_after_finalize = {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             provider.state().get_balance(test_sender())
         };
         assert!(
@@ -761,8 +761,8 @@
 
             let mut consensus = node.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("first commit");
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-            consensus.advance_round(&provider);
+            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
         }
 
         // Consensus height should have advanced

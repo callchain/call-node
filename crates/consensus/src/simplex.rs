@@ -174,21 +174,77 @@ impl SimplexConsensus {
     /// Per spec §2.3: proposer subset changes per epoch (round),
     /// while the proposer rotates within the subset each block.
     ///
-    /// NOTE: Epoch churn (queued stake/exit processing) is currently a no-op.
-    /// In the EVM-only architecture, churn should be handled by system
-    /// transactions included at epoch boundaries.
-    pub fn advance_round(&mut self, evm_state: &impl ProtocolStorage) {
+    /// At epoch boundaries, processes validator churn: validators whose
+    /// unbonding period has elapsed are automatically removed from the
+    /// active set, subject to the churn limit.
+    pub fn advance_round(&mut self, evm_state: &mut impl ProtocolStorage) {
         self.current_round += 1;
 
         // Refresh proposer subset periodically (every N rounds = epoch)
         let epoch_length = self.params.epoch_length;
         if self.current_round.is_multiple_of(epoch_length) {
+            self.process_epoch_churn(evm_state);
             self.recompute_proposer_subset(evm_state);
             info!(
                 round = self.current_round,
                 subset_size = self.proposer_subset.len(),
                 "refreshed proposer subset"
             );
+        }
+    }
+
+    /// Process epoch churn: auto-exit validators whose unbonding period has elapsed.
+    ///
+    /// Scans all validators and removes those with status == 2 (unbonding) where
+    /// `current_block >= unbond_height + unbonding_period_blocks`. The number of
+    /// validators processed per epoch is capped by `churn_limit`.
+    fn process_epoch_churn(&self, evm_state: &mut impl ProtocolStorage) {
+        use crate::exec::state_accessors::{
+            read_validator_count, read_validator_addr, read_validator_status,
+            read_validator_unbond_height, remove_validator_evm,
+        };
+
+        let current_block = self.current_height.saturating_sub(1);
+        let count = read_validator_count(evm_state);
+        let churn_limit = self.params.churn_limit(count);
+        let mut processed = 0u64;
+
+        for id in 1..=count {
+            if processed >= churn_limit {
+                break;
+            }
+            let addr = read_validator_addr(evm_state, id);
+            if addr == Address::ZERO {
+                continue;
+            }
+            let status = read_validator_status(evm_state, addr);
+            if status != 2 {
+                // Also auto-exit validators whose stake dropped below minimum
+                let stake = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
+                if status == 1 && stake < self.params.min_self_stake {
+                    remove_validator_evm(evm_state, addr);
+                    processed += 1;
+                    info!(validator_id = id, addr = ?addr, "validator auto-exited: below minimum stake");
+                }
+                continue;
+            }
+
+            let unbond_height = read_validator_unbond_height(evm_state, addr);
+            if current_block >= unbond_height.saturating_add(self.params.unbonding_period_blocks) {
+                remove_validator_evm(evm_state, addr);
+                processed += 1;
+                info!(
+                    validator_id = id,
+                    addr = ?addr,
+                    unbond_height,
+                    current_block,
+                    "validator auto-exited: unbonding period elapsed"
+                );
+            }
+        }
+
+        if processed > 0 {
+            info!(processed, churn_limit, "epoch churn complete");
         }
     }
 
@@ -485,13 +541,13 @@ mod tests {
 
     #[test]
     fn test_consensus_advance_round() {
-        let (mut consensus, evm) = make_test_consensus(100);
+        let (mut consensus, mut evm) = make_test_consensus(100);
         let old_height = consensus.current_height();
         let old_round = consensus.current_round();
 
         // Simulate committing a block
         consensus.current_height += 1;
-        consensus.advance_round(&evm);
+        consensus.advance_round(&mut evm);
 
         assert_eq!(consensus.current_height(), old_height + 1);
         assert_eq!(consensus.current_round(), old_round + 1);
@@ -544,10 +600,10 @@ mod tests {
 
     #[test]
     fn test_consensus_subset_refresh_on_epoch() {
-        let (mut consensus, evm) = make_test_consensus(100);
+        let (mut consensus, mut evm) = make_test_consensus(100);
         // Advance 100 rounds (epoch boundary)
         for _ in 0..100 {
-            consensus.advance_round(&evm);
+            consensus.advance_round(&mut evm);
         }
 
         let subset_after = consensus.proposer_subset();
@@ -583,6 +639,95 @@ mod tests {
         assert_eq!(restored.current_height(), 42);
         assert_eq!(restored.current_round(), 7);
         assert_eq!(restored.last_block_hash(), BlockHash::repeat_byte(0xAB));
+    }
+
+    #[test]
+    fn test_epoch_churn_auto_exits_unbonding_validators() {
+        use crate::exec::state_accessors::{
+            read_validator_status, read_validator_stake, seed_validator, set_validator_unbond_height,
+        };
+
+        let mut evm = InMemoryStateProvider::new();
+        // Seed 5 validators
+        for i in 1..=5 {
+            seed_validator(
+                &mut evm,
+                i,
+                test_addr(i as u8),
+                test_pubkey(i as u8),
+                one_million_call(),
+                1, // active
+            );
+        }
+
+        // Set validator 3 to unbonding (status=2) with unbond height at block 0
+        let addr3 = test_addr(3);
+        evm.set_storage(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::storage::storage_slot(&[addr3.as_slice(), b"status"]),
+            alloy_primitives::U256::from(2u8),
+        );
+        set_validator_unbond_height(&mut evm, addr3, 0);
+
+        let mut consensus = SimplexConsensus::new(ConsensusParams::default(), &evm);
+        // Set height so current_block = height - 1 >= unbonding_period_blocks
+        consensus.current_height = ConsensusParams::default().unbonding_period_blocks + 1;
+
+        // Advance to epoch boundary
+        for _ in 0..consensus.params().epoch_length {
+            consensus.advance_round(&mut evm);
+        }
+
+        // Validator 3 should have been auto-exited (stake=0, status=0)
+        assert_eq!(read_validator_stake(&evm, addr3), 0);
+        assert_eq!(read_validator_status(&evm, addr3), 0);
+
+        // Other validators should still be active
+        for i in [1, 2, 4, 5] {
+            let addr = test_addr(i as u8);
+            assert_eq!(read_validator_status(&evm, addr), 1, "validator {i} should still be active");
+            assert!(read_validator_stake(&evm, addr) > 0);
+        }
+    }
+
+    #[test]
+    fn test_epoch_churn_respects_churn_limit() {
+        use crate::exec::state_accessors::{
+            read_validator_status, seed_validator, set_validator_unbond_height,
+        };
+
+        let mut evm = InMemoryStateProvider::new();
+        // Seed 10 validators, all unbonding
+        for i in 1..=10 {
+            seed_validator(
+                &mut evm,
+                i,
+                test_addr(i as u8),
+                test_pubkey(i as u8),
+                one_million_call(),
+                2, // unbonding
+            );
+            set_validator_unbond_height(&mut evm, test_addr(i as u8), 0);
+        }
+
+        let mut consensus = SimplexConsensus::new(ConsensusParams::default(), &evm);
+        consensus.current_height = ConsensusParams::default().unbonding_period_blocks + 1;
+
+        // Advance to epoch boundary
+        for _ in 0..consensus.params().epoch_length {
+            consensus.advance_round(&mut evm);
+        }
+
+        let churn_limit = consensus.params().churn_limit(10);
+        let mut exited = 0;
+        for i in 1..=10 {
+            if read_validator_status(&evm, test_addr(i as u8)) == 0 {
+                exited += 1;
+            }
+        }
+
+        // Should not exceed churn limit
+        assert_eq!(exited, churn_limit, "epoch churn should respect churn limit");
     }
 
 }
