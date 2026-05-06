@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-06
 **Branch:** main
-**Commits ahead of origin:** 2
+**Commits ahead of origin:** 6
 **Total Rust LOC:** ~53,000
 **Total unit tests:** 556 test functions
 **Workspace test status:** ALL PASSING
@@ -22,12 +22,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 
 **Key Gaps:**
 - Governance advancer side effects only implement EmergencyPause
-- No cryptographic fraud proof verification (bridge)
-- Light client lacks BLS verification and persistent storage
-- Prover service has no auth/rate-limiting and blocks async runtime
-- `InMemoryStateProvider` loads full state into memory (scalability)
-- Mempool does not validate balances/nonces against chain state
-- Block storage as individual JSON files will not scale
+- Prover service has no auth/rate-limiting
 - Some crates have zero or minimal tests
 
 ---
@@ -112,9 +107,8 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - `Backend` — revm protocol storage bridge
   - Trie integration via `reth-trie`
 - **Issues:**
-  - `InMemoryStateProvider` loads **full state into memory** — not scalable for large states
   - `EvmDb::code_by_hash_ref` returns empty bytecode; `EvmDb::block_hash_ref` returns `B256::ZERO`
-- **Assessment:** Major reth migration completed. MDBX-native execution.
+- **Assessment:** Major reth migration completed. MDBX-native execution. `LazyStateProvider` added for on-demand state loading.
 
 #### `crates/consensus` (4480 LOC, 62 tests)
 - **Status:** Mature
@@ -133,9 +127,8 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 #### `crates/mempool` (826 LOC, 18 tests)
 - **Status:** Mature
 - **Purpose:** Transaction pool with priority queue, capacity limits, anti-spam
-- **Issues:**
-  - Does **not validate balances or nonces against chain state** — invalid txs can enter the pool and only fail during block execution
-- **Assessment:** EVM-only mempool. Fee validation, per-address limits, lifetime expiry all implemented and tested.
+- **Issues:** None significant
+- **Assessment:** EVM-only mempool. Fee validation, per-address limits, lifetime expiry all implemented and tested. P2P path validates nonce and balance against chain state via `insert_evm_tx_with_state`.
 
 ### 3.3 Node & RPC
 
@@ -152,8 +145,6 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - `light_client.rs` — light client verification (minimal)
 - **Issues:**
   - `governance_advancer.rs:243` — TODO: only EmergencyPause side effects implemented in advancer. Other proposal types need data parsing.
-  - Block storage as individual JSON files (`{height:012}.json`) — will not scale to high throughput
-  - Heavy use of `RwLock`/`Mutex` across `Arc` pointers — potential deadlock risk if lock ordering is inconsistent
 - **Integration Tests:** 14 e2e test files covering full node lifecycle, bridge, governance, consensus, EVM compatibility, forks, light client, shielded, stress, malicious proposer, multi-node network.
 
 #### `crates/rpc` (4125 LOC, 17 tests)
@@ -161,15 +152,13 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Purpose:** Ethereum-compatible JSON-RPC handlers
 - **Implemented Methods:** eth_blockNumber, eth_getBlockByNumber, eth_getTransactionReceipt, eth_sendRawTransaction, eth_call (with blockTag), eth_estimateGas (with blockTag), eth_coinbase, eth_getBalance, eth_gasPrice, net_version, web3_clientVersion, plus Callchain-specific extensions (validator_list, get_balance with asset_id, etc.)
 - **Issues:**
-  - Filter manager is **in-memory only** — filters lost on node restart, no automatic pruning
-  - `StateBundle` acquires multiple write locks simultaneously — potential deadlock
+  - Filter manager is **in-memory only** — filters lost on node restart
 - **Assessment:** Good coverage. BlockTag support recently added.
 
 #### `crates/network` (2574 LOC, 41 tests)
 - **Status:** Mature
 - **Purpose:** P2P networking via commonware-p2p
 - **Issues:**
-  - No backpressure on broadcast — `Network::broadcast()` sends to all peers without checking buffer fullness
   - Peer exchange (PEX) accepts addresses from any peer without verification
 - **Assessment:** Well-tested. Handles peer discovery, block/tx gossip.
 
@@ -239,8 +228,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Assessment:**
   - Deposit/withdrawal flows complete
   - Challenge mechanism with bond/period/reward complete
-  - `verify_fraud_proof()` now has structural validation (proof >= 32 bytes)
-  - **Gap:** No cryptographic verification of fraud proofs against source chain state
+  - `verify_fraud_proof()` has full cryptographic MPT verification (TxNonExistence + ReceiptConflict paths) under `light-client-bridge` feature
 
 #### `crates/agent` (882 LOC, 3 tests)
 - **Address:** 0x209
@@ -260,17 +248,14 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Status:** Scaffolding
 - **Purpose:** Light client for verifying headers without full state
 - **Issues:**
-  - No BLS signature verification (documented trade-off)
-  - No persistent storage — verified headers stored in memory only
-  - Incomplete reorg handling — detects reorgs but does not rewind verified headers
-- **Assessment:** Has types and basic validation, but the light client sync loop in `node/src/light_client.rs` is minimal. Not a production-ready light client.
+  - No BLS signature verification in EthLightClient (documented trade-off; protocol LightClient has BLS aggregate verification)
+- **Assessment:** Protocol light client in `node/src/light_client.rs` has persistent MDBX storage (`CallLightClientHeaders`), reorg rewinding, and BLS aggregate signature verification.
 
 #### `crates/prover` (543 LOC, 0 tests)
 - **Status:** Minimal
 - **Purpose:** HTTP service for generating Groth16 proofs for shielded transactions
 - **Issues:**
   - No authentication or rate limiting on proof requests
-  - CPU-intensive proof generation runs directly in async Axum handler — stalls runtime under load
   - Panics on malformed hex input instead of returning 400
   - Global static prover — no key rotation without restart
 - **Assessment:** Very small. Most proving logic lives in `shielded` crate. Not production-hardened.
@@ -361,7 +346,14 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 ### Resolved in Recent Commits
 
 2. ~~Governance `execute()` only implemented EmergencyPause~~ — **FIXED** in commit 566583d
-3. ~~Bridge `verify_fraud_proof()` always returned false~~ — **FIXED** in commit 566583d (now validates proof length >= 32)
+3. ~~Bridge `verify_fraud_proof()` always returned false~~ — **FIXED** in commit 566583d
+4. ~~Block storage as JSON files~~ — **FIXED**: fully migrated to MDBX `CallConsensusBlocks`/`CallBlockHashIndex` tables
+5. ~~Mempool missing state validation~~ — **FIXED**: P2P path validates nonce and balance via `insert_evm_tx_with_state`
+6. ~~`InMemoryStateProvider` full table scan~~ — **FIXED**: `LazyStateProvider` loads accounts/storage on demand from MDBX
+7. ~~Bridge fraud proof crypto~~ — **FIXED**: full MPT non-existence and receipt conflict verification under `light-client-bridge` feature
+8. ~~Light client no persistent storage~~ — **FIXED**: `CallLightClientHeaders` MDBX table with save/load/delete; `new_with_db` constructor
+9. ~~Network no backpressure~~ — **FIXED**: `try_broadcast` returns `Result` on all `Network` implementations
+10. ~~ZK proving blocks async runtime~~ — **FIXED**: Groth16 proof generation runs in `tokio::task::spawn_blocking`
 
 ### Warnings
 
@@ -424,9 +416,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 
 4. **Expand switch/compliance tests** — These crates have minimal coverage. Add edge case tests.
 
-5. **Light client hardening** — Either implement a real sync loop or clearly mark as experimental.
-
-6. **Bridge fraud proof crypto** — The structural validation is a good first step, but real cryptographic verification (Merkle proofs against source chain) is needed for production.
+5. **Light client hardening** — Protocol light client is functional; EthLightClient BLS verification deferred (requires Ethereum consensus layer integration).
 
 ### Low Priority
 
@@ -445,7 +435,5 @@ Callchain is a well-architected, modular blockchain codebase with strong test co
 The main gaps are:
 - Governance advancer needs to catch up to precompile-level side effect implementation
 - A few crates (switch, compliance, prover) are thin/minimal
-- Light client is not production-ready
-- Bridge fraud proofs need cryptographic verification
 
 The codebase is in good shape for continued development. All tests pass, the architecture is sound, and the documentation is comprehensive.
