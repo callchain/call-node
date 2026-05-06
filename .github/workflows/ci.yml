@@ -38,6 +38,8 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
       - name: Run clippy
+        env:
+          RUSTFLAGS: ""
         run: cargo clippy --workspace --all-features
 
   deny:
