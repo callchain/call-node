@@ -16,6 +16,11 @@ use call_protocol::storage_backend::StorageBackend;
 use call_validator::ValidatorStorage;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
+#[cfg(feature = "light-client-bridge")]
+use call_light_client::{parse_bridge_event_from_logs, parse_receipt_logs, rlp_encode_u64, verify_mpt_proof};
+#[cfg(feature = "light-client-bridge")]
+use crate::external::types::{FraudProof, FraudProofType};
+
 pub const BRIDGE_ADDRESS: Address =
     alloy_primitives::address!("0000000000000000000000000000000000000103");
 
@@ -146,6 +151,10 @@ fn slot_challenge_period() -> U256 {
 
 fn slot_challenge_bond_amount() -> U256 {
     storage_slot(&[b"challenge_bond"])
+}
+
+fn slot_bridge_challenge_proof_chunk(tx_hash: [u8; 32], chunk_index: u64) -> U256 {
+    storage_slot(&[b"challenge_proof", &tx_hash, &chunk_index.to_be_bytes()])
 }
 
 // ── Challenge status ──────────────────────────────────────────────────
@@ -480,6 +489,17 @@ impl<B: StorageBackend> BridgeStorage<B> {
             u64_to_u256(proof.len() as u64),
         );
 
+        // Store proof bytes in 32-byte chunks so they can be loaded back during resolution.
+        for (i, chunk) in proof.chunks(32).enumerate() {
+            let mut bytes = [0u8; 32];
+            bytes[..chunk.len()].copy_from_slice(chunk);
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_proof_chunk(source_tx_hash, i as u64),
+                U256::from_be_bytes(bytes),
+            );
+        }
+
         Ok(())
     }
 
@@ -616,14 +636,113 @@ impl<B: StorageBackend> BridgeStorage<B> {
         if proof_hash == U256::ZERO {
             return false;
         }
-        // Structural validation: a credible fraud proof must be at least 32 bytes
-        // (e.g. a minimal merkle path). Real verification would cryptographically
-        // check the proof against source chain state; this is a basic sanity filter.
         let proof_len = u256_to_u64(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_challenge_proof_len(source_tx_hash)),
         );
-        proof_len >= 32
+        if proof_len < 32 {
+            return false;
+        }
+
+        // Load proof bytes from 32-byte storage chunks.
+        let proof_len = proof_len as usize;
+        let mut proof_bytes = Vec::with_capacity(proof_len);
+        let num_chunks = (proof_len + 31) / 32;
+        for i in 0..num_chunks {
+            let chunk = self.backend.load(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_proof_chunk(source_tx_hash, i as u64),
+            );
+            let chunk_bytes = chunk.to_be_bytes::<32>();
+            let take = std::cmp::min(32, proof_len - proof_bytes.len());
+            proof_bytes.extend_from_slice(&chunk_bytes[..take]);
+        }
+
+        // Verify the loaded proof matches the commitment hash.
+        let computed_hash = alloy_primitives::keccak256(&proof_bytes);
+        if U256::from_be_slice(computed_hash.as_slice()) != proof_hash {
+            return false;
+        }
+
+        #[cfg(feature = "light-client-bridge")]
+        {
+            return self.verify_fraud_proof_cryptographic(source_tx_hash, &proof_bytes);
+        }
+        #[cfg(not(feature = "light-client-bridge"))]
+        {
+            // Without light-client support, fall back to structural validation only.
+            proof_len >= 32
+        }
+    }
+
+    /// Cryptographic fraud-proof verification using MPT proofs.
+    #[cfg(feature = "light-client-bridge")]
+    fn verify_fraud_proof_cryptographic(
+        &self,
+        source_tx_hash: [u8; 32],
+        proof_bytes: &[u8],
+    ) -> bool {
+        let fraud_proof: FraudProof = match bincode::deserialize(proof_bytes) {
+            Ok(fp) => fp,
+            Err(_) => return false,
+        };
+
+        // Verify the header hash matches its RLP bytes (self-consistency).
+        let computed_hash = alloy_primitives::keccak256(&fraud_proof.header.rlp_bytes);
+        if computed_hash != fraud_proof.header.block_hash {
+            return false;
+        }
+
+        match fraud_proof.proof_type {
+            FraudProofType::TxNonExistence => {
+                let tx_root = match fraud_proof.header.transactions_root() {
+                    Some(root) => root,
+                    None => return false,
+                };
+                let result = verify_mpt_proof(
+                    tx_root,
+                    &source_tx_hash,
+                    &fraud_proof.mpt_nodes,
+                );
+                matches!(result, Ok(None))
+            }
+            FraudProofType::ReceiptConflict { receipt_index } => {
+                let receipts_root = match fraud_proof.header.receipts_root() {
+                    Some(root) => root,
+                    None => return false,
+                };
+                let index_key = rlp_encode_u64(receipt_index);
+                let result = verify_mpt_proof(
+                    receipts_root,
+                    &index_key,
+                    &fraud_proof.mpt_nodes,
+                );
+                let receipt_rlp = match result {
+                    Ok(Some(rlp)) => rlp,
+                    _ => return false,
+                };
+
+                // Parse receipt logs and extract bridge event.
+                let logs = match parse_receipt_logs(&receipt_rlp) {
+                    Ok(logs) => logs,
+                    Err(_) => return false,
+                };
+                let event = match parse_bridge_event_from_logs(&logs) {
+                    Some(ev) => ev,
+                    None => return false,
+                };
+
+                // Load the deposit metadata recorded by the bridge.
+                let stored_asset_id = self.read_deposit_asset_id(source_tx_hash);
+                let stored_recipient = self.read_deposit_recipient(source_tx_hash);
+                let stored_amount = self.read_deposit_amount(source_tx_hash);
+
+                // Fraud is proven if the receipt event contradicts the recorded deposit.
+                event.asset_id != stored_asset_id
+                    || event.recipient != stored_recipient
+                    || event.amount != stored_amount
+            }
+        }
     }
 }
 
@@ -1352,10 +1471,61 @@ mod tests {
         .abi_encode();
         precompile.call(&input, validator, &mut provider).unwrap();
 
-        // initiateChallenge with a 32-byte proof (passes structural validation)
+        // Build a valid TxNonExistence fraud proof.
+        // The MPT has a leaf at key [0,0,0,0] which does NOT match source_tx_hash's
+        // nibbles [A,B,A,B,...], so verify_mpt_proof returns None (non-existence).
+        let _compact_key = vec![0x20, 0x00, 0x00]; // even leaf, 4 zero nibbles
+        let compact_rlp = vec![0x83, 0x20, 0x00, 0x00];
+        let value_rlp = vec![0x85, b'd', b'u', b'm', b'm', b'y'];
+        let mut leaf_rlp = vec![0xCA]; // short list, payload = 10
+        leaf_rlp.extend_from_slice(&compact_rlp);
+        leaf_rlp.extend_from_slice(&value_rlp);
+        let tx_root = alloy_primitives::keccak256(&leaf_rlp);
+
+        // Build minimal Ethereum header RLP with tx_root set.
+        let mut fields: Vec<Vec<u8>> = Vec::new();
+        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // parent_hash
+        fields.push(vec![0x80]); // sha3_uncles
+        fields.push(vec![0x80]); // miner
+        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // state_root
+        fields.push({ let mut v = vec![0xa0]; v.extend_from_slice(&tx_root.0); v }); // tx_root
+        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // receipt_root
+        fields.push(vec![0x80]); // logs_bloom
+        fields.push(vec![0x01]); // difficulty
+        fields.push(vec![0x01]); // block_number
+        fields.push(vec![0x01]); // gas_limit
+        fields.push(vec![0x80]); // gas_used
+        fields.push(vec![0x01]); // timestamp
+        fields.push(vec![0x80]); // extra_data
+        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // mix_hash
+        fields.push({ let mut v = vec![0x88]; v.extend([0u8; 8]); v }); // nonce
+        fields.push(vec![0x80]); // base_fee
+        let payload_len: usize = fields.iter().map(|f| f.len()).sum();
+        let mut header_rlp = Vec::new();
+        if payload_len < 56 {
+            header_rlp.push(0xC0 + payload_len as u8);
+        } else {
+            let len_bytes = payload_len.to_be_bytes();
+            let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+            header_rlp.push(0xF7 + (len_bytes.len() - skip) as u8);
+            header_rlp.extend_from_slice(&len_bytes[skip..]);
+        }
+        for f in fields {
+            header_rlp.extend_from_slice(&f);
+        }
+        let header = call_light_client::EthHeader::from_rlp(header_rlp);
+
+        let fraud_proof = crate::external::types::FraudProof {
+            header,
+            proof_type: crate::external::types::FraudProofType::TxNonExistence,
+            mpt_nodes: vec![leaf_rlp],
+        };
+        let proof_bytes = bincode::serialize(&fraud_proof).unwrap();
+
+        // initiateChallenge with the cryptographically valid proof
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(&[0xABu8; 32]),
+            proof: alloy_primitives::Bytes::from(proof_bytes),
         }
         .abi_encode();
         precompile.call(&input, challenger, &mut provider).unwrap();

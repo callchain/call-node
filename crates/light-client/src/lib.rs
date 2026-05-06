@@ -29,6 +29,7 @@ mod types;
 mod verifier;
 
 pub use ethereum::EthLightClient;
+pub use ethereum::proof::{parse_bridge_event_from_logs, parse_receipt_logs, rlp_encode_u64};
 pub use types::*;
 pub use verifier::{bytes_to_nibbles, verify_mpt_proof};
 

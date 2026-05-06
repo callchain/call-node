@@ -14,7 +14,7 @@ pub(crate) const BRIDGE_DEPOSIT_EVENT_SIG: B256 = B256::new([
 ]);
 
 /// RLP-encode a u64 (big-endian, no leading zeros).
-pub(crate) fn rlp_encode_u64(value: u64) -> Vec<u8> {
+pub fn rlp_encode_u64(value: u64) -> Vec<u8> {
     if value == 0 {
         return vec![0x80];
     }
@@ -41,7 +41,7 @@ pub(crate) fn rlp_encode_u64(value: u64) -> Vec<u8> {
 ///
 /// We handle all typed receipts by stripping the type byte (0x00–0x7f)
 /// and parsing the remaining RLP list.
-pub(crate) fn parse_receipt_logs(receipt_rlp: &[u8]) -> Result<Vec<ReceiptLog>, String> {
+pub fn parse_receipt_logs(receipt_rlp: &[u8]) -> Result<Vec<ReceiptLog>, String> {
     if receipt_rlp.is_empty() {
         return Err("empty receipt".into());
     }
@@ -209,7 +209,7 @@ pub(crate) fn parse_logs_rlp(logs_rlp: &[u8]) -> Result<Vec<ReceiptLog>, String>
 /// For this implementation, we use a simplified encoding where:
 /// - The event signature is NOT checked (any log with the right structure is accepted)
 /// - Data is RLP-encoded: [source_chain, source_block, sender_bytes, asset_id, amount]
-pub(crate) fn parse_bridge_event_from_logs(logs: &[ReceiptLog]) -> Option<BridgeEvent> {
+pub fn parse_bridge_event_from_logs(logs: &[ReceiptLog]) -> Option<BridgeEvent> {
     for log in logs {
         // Try to parse each log as a bridge event
         if let Some(event) = try_parse_bridge_log(log) {

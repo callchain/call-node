@@ -71,6 +71,32 @@ pub struct BridgeDepositProof {
     pub signatures: Vec<(u32, Vec<u8>)>,
 }
 
+/// Type of cryptographic fraud proof submitted during a bridge challenge.
+#[cfg(feature = "light-client-bridge")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum FraudProofType {
+    /// Prove the source transaction does not exist in the source block's tx trie.
+    TxNonExistence,
+    /// Prove the receipt for the source transaction contradicts the bridge's recorded deposit.
+    ReceiptConflict { receipt_index: u64 },
+}
+
+/// Cryptographic fraud proof for bridge deposit challenges.
+///
+/// The challenger provides a source block header and an MPT proof that
+/// either shows the tx does not exist or that the receipt contradicts
+/// the deposit metadata recorded by the bridge.
+#[cfg(feature = "light-client-bridge")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FraudProof {
+    /// RLP-encoded block header from the source chain.
+    pub header: call_light_client::EthHeader,
+    /// MPT proof type and parameters.
+    pub proof_type: FraudProofType,
+    /// RLP-encoded MPT proof nodes (root → leaf).
+    pub mpt_nodes: Vec<Vec<u8>>,
+}
+
 /// Bridge contract registry: authorized Ethereum-side bridge contracts per chain.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeContractRegistry {

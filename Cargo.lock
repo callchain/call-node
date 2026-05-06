@@ -1753,6 +1753,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "bincode",
  "call-asset",
  "call-crypto",
  "call-light-client",
