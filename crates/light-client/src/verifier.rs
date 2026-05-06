@@ -31,7 +31,7 @@ pub fn bytes_to_nibbles(bytes: &[u8]) -> Vec<u8> {
 /// `is_leaf`: true for leaf nodes, false for extension nodes.
 /// Returns the compact-encoded key as bytes (including the prefix byte).
 #[cfg(test)]
-pub fn compact_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
+fn compact_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
     let has_odd = nibbles.len() % 2 != 0;
     let first_byte = if has_odd {
         // Odd: type in low nibble (1=ext, 3=leaf), first nibble in high nibble
