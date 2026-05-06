@@ -420,3 +420,347 @@ impl<B: StorageBackend> AgentStorage<B> {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use call_asset::AssetStorage;
+    use call_primitives::Address;
+    use call_protocol::storage_backend::StorageBackend;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct TestBackend {
+        storage: Rc<RefCell<HashMap<(Address, U256), U256>>>,
+    }
+
+    impl TestBackend {
+        fn new() -> Self {
+            Self {
+                storage: Rc::new(RefCell::new(HashMap::new())),
+            }
+        }
+    }
+
+    impl StorageBackend for TestBackend {
+        fn load(&self, address: Address, slot: U256) -> U256 {
+            self.storage
+                .borrow()
+                .get(&(address, slot))
+                .copied()
+                .unwrap_or_default()
+        }
+        fn store(&mut self, address: Address, slot: U256, value: U256) {
+            self.storage.borrow_mut().insert((address, slot), value);
+        }
+    }
+
+    #[test]
+    fn test_register_and_read_agent() {
+        let backend = TestBackend::new();
+        let mut store = AgentStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        store
+            .register_agent("TestAgent", "http://test.com", [0xBBu8; 32], caller, 100)
+            .unwrap();
+
+        assert_eq!(store.read_count(), 1);
+        assert_eq!(store.read_owner(0), caller);
+        assert_eq!(&store.read_name(0)[0..9], b"TestAgent");
+        assert_eq!(&store.read_url(0)[0..15], b"http://test.com");
+        assert_eq!(store.read_pubkey(0), [0xBBu8; 32]);
+        assert_eq!(store.read_registered_at(0), 100);
+        assert!(store.agent_exists(0));
+    }
+
+    #[test]
+    fn test_check_owner() {
+        let backend = TestBackend::new();
+        let mut store = AgentStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+
+        assert!(store.check_owner(0, caller).is_ok());
+        assert!(matches!(
+            store.check_owner(0, Address::repeat_byte(0x99)),
+            Err(AgentError::NotOwner)
+        ));
+    }
+
+    #[test]
+    fn test_require_perms_expired() {
+        let backend = TestBackend::new();
+        let mut store = AgentStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+        // Override perms: expires_at=50
+        store.backend.store(
+            AGENT_ADDRESS,
+            slot_agent_perms(0),
+            pack_agent_perms(1000, 50, 1),
+        );
+
+        assert!(matches!(
+            store.require_perms(0, CALL_ASSET_ID, 100),
+            Err(AgentError::PermissionsExpired)
+        ));
+    }
+
+    #[test]
+    fn test_require_perms_asset_not_allowed() {
+        let backend = TestBackend::new();
+        let mut store = AgentStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+        // Override perms: flags=0 (bit 0 clear = asset 1 not allowed)
+        store.backend.store(
+            AGENT_ADDRESS,
+            slot_agent_perms(0),
+            pack_agent_perms(1000, 0, 0),
+        );
+        assert!(matches!(
+            store.require_perms(0, 2, 1),
+            Err(AgentError::AssetNotAllowed)
+        ));
+    }
+
+    #[test]
+    fn test_grant_pay_withdraw_revoke_balance() {
+        let backend = TestBackend::new();
+        let mut agent_store = AgentStorage::new(backend.clone());
+        let mut asset_store = AssetStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+        let recipient = Address::repeat_byte(0x33);
+
+        agent_store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
+        asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
+
+        // Grant
+        agent_store
+            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, caller)
+            .unwrap();
+        assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 5_000);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 5_000);
+
+        // Pay
+        agent_store
+            .pay(
+                &mut asset_store,
+                0,
+                CALL_ASSET_ID,
+                recipient,
+                1_000,
+                caller,
+                1,
+            )
+            .unwrap();
+        assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 4_000);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient), 1_000);
+
+        // Withdraw
+        agent_store
+            .withdraw_balance(0, CALL_ASSET_ID, 500, caller, 1)
+            .unwrap();
+        assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 3_500);
+
+        // Revoke balance
+        agent_store
+            .revoke_balance(0, CALL_ASSET_ID, caller)
+            .unwrap();
+        assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 0);
+    }
+
+    #[test]
+    fn test_batch_pay() {
+        let backend = TestBackend::new();
+        let mut agent_store = AgentStorage::new(backend.clone());
+        let mut asset_store = AssetStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+        let r1 = Address::repeat_byte(0x33);
+        let r2 = Address::repeat_byte(0x44);
+
+        agent_store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
+        asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
+        agent_store
+            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, caller)
+            .unwrap();
+
+        agent_store
+            .batch_pay(
+                &mut asset_store,
+                0,
+                CALL_ASSET_ID,
+                &[r1, r2],
+                &[500, 800],
+                caller,
+                1,
+            )
+            .unwrap();
+        assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 3_700);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, r1), 500);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, r2), 800);
+    }
+
+    #[test]
+    fn test_batch_pay_array_mismatch() {
+        let backend = TestBackend::new();
+        let mut agent_store = AgentStorage::new(backend.clone());
+        let mut asset_store = AssetStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        agent_store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
+        asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
+        agent_store
+            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, caller)
+            .unwrap();
+
+        assert!(matches!(
+            agent_store.batch_pay(
+                &mut asset_store,
+                0,
+                CALL_ASSET_ID,
+                &[Address::repeat_byte(0x33)],
+                &[1_000, 2_000],
+                caller,
+                1,
+            ),
+            Err(AgentError::ArrayLengthMismatch)
+        ));
+    }
+
+    #[test]
+    fn test_batch_pay_empty() {
+        let backend = TestBackend::new();
+        let mut agent_store = AgentStorage::new(backend.clone());
+        let mut asset_store = AssetStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        agent_store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
+        asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
+        agent_store
+            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, caller)
+            .unwrap();
+
+        assert!(matches!(
+            agent_store.batch_pay(
+                &mut asset_store,
+                0,
+                CALL_ASSET_ID,
+                &[],
+                &[],
+                caller,
+                1,
+            ),
+            Err(AgentError::EmptyBatch)
+        ));
+    }
+
+    #[test]
+    fn test_pay_amount_exceeds_limit() {
+        let backend = TestBackend::new();
+        let mut agent_store = AgentStorage::new(backend.clone());
+        let mut asset_store = AssetStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        agent_store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
+        asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
+        agent_store
+            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, caller)
+            .unwrap();
+
+        // Default per_tx_limit is 1_000
+        assert!(matches!(
+            agent_store.pay(
+                &mut asset_store,
+                0,
+                CALL_ASSET_ID,
+                Address::repeat_byte(0x33),
+                2_000,
+                caller,
+                1,
+            ),
+            Err(AgentError::AmountExceedsLimit)
+        ));
+    }
+
+    #[test]
+    fn test_revoke_agent() {
+        let backend = TestBackend::new();
+        let mut store = AgentStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+        assert!(store.agent_exists(0));
+
+        store.revoke_agent(0, caller).unwrap();
+        assert!(!store.agent_exists(0));
+        assert_eq!(store.read_owner(0), Address::ZERO);
+    }
+
+    #[test]
+    fn test_not_found_errors() {
+        let backend = TestBackend::new();
+        let mut agent_store = AgentStorage::new(backend.clone());
+        let mut asset_store = AssetStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        assert!(matches!(
+            agent_store.grant_balance(&mut asset_store, 0, 1, 100, caller),
+            Err(AgentError::NotFound)
+        ));
+        assert!(matches!(
+            agent_store.revoke_balance(0, 1, caller),
+            Err(AgentError::NotFound)
+        ));
+        assert!(matches!(
+            agent_store.pay(
+                &mut asset_store,
+                0,
+                1,
+                Address::ZERO,
+                100,
+                caller,
+                1,
+            ),
+            Err(AgentError::NotFound)
+        ));
+        assert!(matches!(
+            agent_store.withdraw_balance(0, 1, 100, caller, 1),
+            Err(AgentError::NotFound)
+        ));
+        assert!(matches!(
+            agent_store.revoke_agent(0, caller),
+            Err(AgentError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_pack_unpack_perms() {
+        let per_tx_limit = 12345u128;
+        let expires_at = 67890u64;
+        let flags = 0b101u8;
+
+        let packed = pack_agent_perms(per_tx_limit, expires_at, flags);
+        let (limit, expiry, f) = unpack_agent_perms(packed);
+
+        assert_eq!(limit, per_tx_limit);
+        assert_eq!(expiry, expires_at);
+        assert_eq!(f, flags);
+    }
+}

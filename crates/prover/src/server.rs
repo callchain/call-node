@@ -688,3 +688,102 @@ fn domain_tag_to_fr_bytes(tag: &str) -> [u8; 32] {
     bytes[..len].copy_from_slice(&tag_bytes[..len]);
     bytes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_token_bucket_allows_within_capacity() {
+        let mut bucket = TokenBucket::new(10.0);
+        // Burst capacity = 20, so 20 requests should succeed immediately
+        for _ in 0..20 {
+            assert!(bucket.try_consume());
+        }
+        // 21st should fail
+        assert!(!bucket.try_consume());
+    }
+
+    #[test]
+    fn test_token_bucket_refills_over_time() {
+        let mut bucket = TokenBucket::new(10.0);
+        // Consume all tokens
+        for _ in 0..20 {
+            assert!(bucket.try_consume());
+        }
+        assert!(!bucket.try_consume());
+
+        // Manually wind back last_update to simulate time passing
+        bucket.last_update = Instant::now() - Duration::from_secs_f64(0.15);
+        // 0.15s * 10 qps = 1.5 tokens replenished, so 1 request should succeed
+        assert!(bucket.try_consume());
+        assert!(!bucket.try_consume());
+    }
+
+    #[test]
+    fn test_cache_hit_and_miss() {
+        let mut cache: HashMap<[u8; 32], (Vec<u8>, Instant)> = HashMap::new();
+        let key = [1u8; 32];
+        let proof = vec![0xAB, 0xCD];
+
+        // Miss before insert
+        assert!(cache_get(&mut cache, &key, 300).is_none());
+
+        // Insert
+        cache_insert(&mut cache, key, proof.clone());
+
+        // Hit after insert
+        assert_eq!(cache_get(&mut cache, &key, 300), Some(proof));
+    }
+
+    #[test]
+    fn test_cache_expires_after_ttl() {
+        let mut cache: HashMap<[u8; 32], (Vec<u8>, Instant)> = HashMap::new();
+        let key = [1u8; 32];
+
+        cache.insert(key, (vec![0xAB], Instant::now() - Duration::from_secs(400)));
+
+        // TTL = 300s, entry is 400s old => expired
+        assert!(cache_get(&mut cache, &key, 300).is_none());
+    }
+
+    #[test]
+    fn test_decode_hex_32_valid() {
+        let result = decode_hex_32("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "test");
+        assert!(result.is_ok());
+        let arr = result.unwrap();
+        assert_eq!(arr[0], 0x12);
+        assert_eq!(arr[31], 0xef);
+    }
+
+    #[test]
+    fn test_decode_hex_32_wrong_length() {
+        let result = decode_hex_32("0x1234", "test");
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_decode_hex_32_invalid_hex() {
+        let result = decode_hex_32("not-hex", "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_hex_20_valid() {
+        let result = decode_hex_20("0x1234567890abcdef1234567890abcdef12345678", "test");
+        assert!(result.is_ok());
+        let arr = result.unwrap();
+        assert_eq!(arr.len(), 20);
+        assert_eq!(arr[0], 0x12);
+        assert_eq!(arr[19], 0x78);
+    }
+
+    #[test]
+    fn test_decode_hex_20_wrong_length() {
+        let result = decode_hex_20("0x1234", "test");
+        assert!(result.is_err());
+    }
+}

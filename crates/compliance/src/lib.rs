@@ -96,3 +96,136 @@ impl<B: StorageBackend> ComplianceStorage<B> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use call_precompile::storage::storage_slot;
+    use call_precompile::u8_to_u256;
+    use call_primitives::Address;
+    use call_protocol::storage_backend::StorageBackend;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct TestBackend {
+        storage: Rc<RefCell<HashMap<(Address, U256), U256>>>,
+    }
+
+    impl TestBackend {
+        fn new() -> Self {
+            Self {
+                storage: Rc::new(RefCell::new(HashMap::new())),
+            }
+        }
+    }
+
+    impl StorageBackend for TestBackend {
+        fn load(&self, address: Address, slot: U256) -> U256 {
+            self.storage
+                .borrow()
+                .get(&(address, slot))
+                .copied()
+                .unwrap_or_default()
+        }
+        fn store(&mut self, address: Address, slot: U256, value: U256) {
+            self.storage.borrow_mut().insert((address, slot), value);
+        }
+    }
+
+    fn address_to_u256_word(addr: Address) -> U256 {
+        let mut bytes = [0u8; 32];
+        bytes[12..32].copy_from_slice(addr.as_slice());
+        U256::from_be_bytes::<32>(bytes)
+    }
+
+    #[test]
+    fn test_check_compliance_no_policy() {
+        let backend = TestBackend::new();
+        let store = ComplianceStorage::new(backend);
+        // No policy registered for asset_id=999 => always compliant
+        assert!(store.check_compliance(999, Address::repeat_byte(0x22)));
+    }
+
+    #[test]
+    fn test_check_compliance_clear_and_restricted() {
+        let mut backend = TestBackend::new();
+        let issuer = Address::repeat_byte(0x11);
+        let target = Address::repeat_byte(0x22);
+
+        // Seed asset with issuer and policy_id=1
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            address_to_u256_word(issuer),
+        );
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
+            u8_to_u256(1),
+        );
+
+        let store = ComplianceStorage::new(backend.clone());
+
+        // Default status = 0 (clear) => compliant
+        assert!(store.check_compliance(1, target));
+
+        // Update status to restricted (3)
+        let mut store = ComplianceStorage::new(backend.clone());
+        store.update_compliance(1, target, 3, issuer).unwrap();
+
+        let store = ComplianceStorage::new(backend);
+        assert!(!store.check_compliance(1, target));
+    }
+
+    #[test]
+    fn test_update_compliance_not_issuer() {
+        let mut backend = TestBackend::new();
+        let issuer = Address::repeat_byte(0x11);
+
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            address_to_u256_word(issuer),
+        );
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
+            u8_to_u256(1),
+        );
+
+        let mut store = ComplianceStorage::new(backend);
+        let result = store.update_compliance(1, Address::repeat_byte(0x22), 3, Address::repeat_byte(0x99));
+        assert!(matches!(result, Err(ComplianceError::NotIssuer)));
+    }
+
+    #[test]
+    fn test_read_asset_issuer() {
+        let mut backend = TestBackend::new();
+        let issuer = Address::repeat_byte(0x11);
+
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&42u64.to_be_bytes()[..], b"issuer"]),
+            address_to_u256_word(issuer),
+        );
+
+        let store = ComplianceStorage::new(backend);
+        assert_eq!(store.read_asset_issuer(42), issuer);
+    }
+
+    #[test]
+    fn test_read_asset_policy_id() {
+        let mut backend = TestBackend::new();
+
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&42u64.to_be_bytes()[..], b"compliance"]),
+            u8_to_u256(7),
+        );
+
+        let store = ComplianceStorage::new(backend);
+        assert_eq!(store.read_asset_policy_id(42), 7);
+    }
+}
