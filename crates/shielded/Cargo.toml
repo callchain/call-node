@@ -39,6 +39,7 @@ ark-crypto-primitives = { version = "0.4", features = ["crh", "merkle_tree", "sp
 
 # Ceremony key loading — SHA-256 for verifying key hash verification
 sha2 = { version = "0.10", optional = true }
+tokio = { workspace = true, optional = true }
 
 [features]
 default = ["poseidon"]
@@ -54,6 +55,7 @@ real-prover = [
     "ark-serialize",
     "ark-snark",
     "ark-crypto-primitives",
+    "tokio",
 ]
 production-keys = ["real-prover", "sha2"]
 

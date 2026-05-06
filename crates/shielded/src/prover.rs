@@ -82,7 +82,7 @@ mod real_prover_impl {
     /// Holds proving and verifying keys for all three shielded circuit types:
     /// Deposit, Withdraw, and Transfer. Keys are generated via circuit-specific
     /// trusted setup (suitable for dev/test; production uses a universal CRS).
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct RealProver {
         transfer_pk: ProvingKey<Bn254>,
         transfer_vk: VerifyingKey<Bn254>,
@@ -313,6 +313,44 @@ mod real_prover_impl {
                     ark_bn254::Fr::from_le_bytes_mod_order(&buf)
                 })
                 .collect()
+        }
+
+        // ------------------------------------------------------------------
+        // Async wrappers (non-blocking) — use tokio::task::spawn_blocking
+        // so CPU-intensive proof generation does not block the async runtime.
+        // ------------------------------------------------------------------
+
+        /// Async wrapper for `prove_deposit`.
+        pub async fn prove_deposit_async(
+            &self,
+            circuit: DepositCircuit,
+        ) -> Result<Vec<u8>, ProverError> {
+            let prover = self.clone();
+            tokio::task::spawn_blocking(move || prover.prove_deposit(&circuit))
+                .await
+                .map_err(|e| ProverError::ProofGeneration(format!("task panicked: {e}")))?
+        }
+
+        /// Async wrapper for `prove_withdraw`.
+        pub async fn prove_withdraw_async(
+            &self,
+            circuit: WithdrawCircuit,
+        ) -> Result<Vec<u8>, ProverError> {
+            let prover = self.clone();
+            tokio::task::spawn_blocking(move || prover.prove_withdraw(&circuit))
+                .await
+                .map_err(|e| ProverError::ProofGeneration(format!("task panicked: {e}")))?
+        }
+
+        /// Async wrapper for `prove_transfer`.
+        pub async fn prove_transfer_async(
+            &self,
+            circuit: TransferCircuit,
+        ) -> Result<Vec<u8>, ProverError> {
+            let prover = self.clone();
+            tokio::task::spawn_blocking(move || prover.prove_transfer(&circuit))
+                .await
+                .map_err(|e| ProverError::ProofGeneration(format!("task panicked: {e}")))?
         }
 
         /// Create a minimal empty proving key for validator-only nodes.

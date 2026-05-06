@@ -54,10 +54,17 @@ pub enum Filter {
     },
 }
 
+/// Filter entry with metadata for TTL-based pruning.
+#[derive(Debug, Clone)]
+struct FilterEntry {
+    filter: Filter,
+    last_polled_at: u64,
+}
+
 /// In-memory filter manager for eth_newFilter / eth_getFilterChanges etc.
 pub struct FilterManager {
     next_id: AtomicU64,
-    filters: RwLock<HashMap<u64, Filter>>,
+    filters: RwLock<HashMap<u64, FilterEntry>>,
 }
 
 impl FilterManager {
@@ -70,14 +77,18 @@ impl FilterManager {
 
     pub fn create_filter(&self, filter: Filter) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         if let Ok(mut f) = self.filters.write() {
-            f.insert(id, filter);
+            f.insert(id, FilterEntry { filter, last_polled_at: now });
         }
         id
     }
 
     pub fn get_filter(&self, id: u64) -> Option<Filter> {
-        self.filters.read().ok().and_then(|f| f.get(&id).cloned())
+        self.filters.read().ok().and_then(|f| f.get(&id).map(|e| e.filter.clone()))
     }
 
     pub fn remove_filter(&self, id: u64) -> bool {
@@ -90,20 +101,27 @@ impl FilterManager {
 
     pub fn update_filter(&self, id: u64, filter: Filter) {
         if let Ok(mut f) = self.filters.write() {
-            f.insert(id, filter);
+            if let Some(entry) = f.get_mut(&id) {
+                entry.filter = filter;
+                entry.last_polled_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+            }
         }
     }
 
-    /// Remove filters older than `max_age_seconds`.
+    /// Remove filters older than `max_age_seconds` since last poll.
     pub fn prune_old_filters(&self, max_age_seconds: u64) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         if let Ok(mut f) = self.filters.write() {
-            // Note: Filter doesn't store creation time, so we skip time-based pruning.
-            // In a production system, wrap Filter with (created_at, filter).
-            let _ = (now, max_age_seconds, &mut *f);
+            f.retain(|_id, entry| {
+                let age = now.saturating_sub(entry.last_polled_at);
+                age < max_age_seconds
+            });
         }
     }
 }
@@ -385,20 +403,23 @@ impl RpcState {
         }
     }
 
-    /// Load a block from disk by height. Returns None if the file is missing
-    /// or cannot be deserialized.
-    pub fn load_block(&self,
-        height: u64,
-    ) -> Option<call_consensus::Block> {
-        let dir = self.data_dir.read().ok()?.clone()?;
-        let path = dir.join("blocks").join(format!("{height:012}.json"));
-        let data = std::fs::read(&path).ok()?;
-        serde_json::from_slice(&data).ok()
+    /// Load a block from MDBX by height.
+    pub fn load_block(&self, height: u64) -> Option<call_consensus::Block> {
+        let key = height.to_be_bytes().to_vec();
+        match call_storage::reth_db::db_get::<call_storage::reth_db::CallConsensusBlocks>(&self.db_env, &key) {
+            Ok(Some(data)) => serde_json::from_slice(&data).ok(),
+            _ => None,
+        }
     }
 
-    /// Load a block from disk by hash. Uses the in-memory hash index.
+    /// Load a block from MDBX by hash (using the on-disk hash index).
     pub fn load_block_by_hash(&self, hash: &Hash) -> Option<call_consensus::Block> {
-        let height = self.block_hash_index.read().ok().and_then(|idx| idx.get(hash).copied())?;
+        let hash_key = hash.as_slice().to_vec();
+        let height_bytes = call_storage::reth_db::db_get::<call_storage::reth_db::CallBlockHashIndex>(&self.db_env, &hash_key).ok().flatten()?;
+        if height_bytes.len() != 8 {
+            return None;
+        }
+        let height = u64::from_be_bytes(height_bytes.try_into().unwrap());
         self.load_block(height)
     }
 

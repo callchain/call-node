@@ -48,6 +48,7 @@ use call_storage::{CallDb, open_db, PruneState};
 use call_storage::reth_db::{
     save_prune_state as db_save_prune,
 };
+use reth_db::DatabaseEnv;
 use crate::state_persist::{
     load_state_from_db, persist_state_to_db, persist_state_incremental,
     load_receipts, load_fork_state,
@@ -56,7 +57,7 @@ use crate::state_persist::{
 };
 use call_mempool::Mempool;
 use jsonrpsee::server::ServerHandle;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
@@ -104,7 +105,7 @@ pub struct CallNode {
     pub parent_hash: BlockHash,
     /// Shared block cache for BFT digest → block mapping.
     /// Populated by propose, received blocks from P2P relay, and consumed by verify/finalize.
-    pub block_cache: Arc<std::sync::Mutex<BlockCache>>,
+    pub block_cache: Arc<tokio::sync::Mutex<BlockCache>>,
     /// Telemetry registry for metrics, alerts, and latency histograms
     pub telemetry: Arc<crate::telemetry::TelemetryRegistry>,
     /// Append-only audit log for compliance and tamper evidence
@@ -286,7 +287,7 @@ impl CallNode {
             server_handle: None,
             ws_server_handle: None,
             parent_hash,
-            block_cache: Arc::new(std::sync::Mutex::new(BlockCache::new(1000))),
+            block_cache: Arc::new(tokio::sync::Mutex::new(BlockCache::new(1000))),
             telemetry,
             audit_log,
             fresh_start,
@@ -345,12 +346,13 @@ impl CallNode {
         let mempool = Arc::clone(&self.mempool);
         let state = Arc::clone(&self.state);
         let consensus = Arc::clone(&self.consensus);
-        let data_dir = self.db.data_dir.clone();
+        let _data_dir = self.db.data_dir.clone();
+        let db_env = Arc::clone(&self.db.db);
         let block_cache = Arc::clone(&self.block_cache);
         let net_clone = Arc::clone(&network);
         let telemetry = Arc::clone(&self.telemetry);
         let oracle_tracker = Arc::clone(&self.oracle_tracker);
-        let p2p_defense = std::sync::Mutex::new(P2PDefense::new(10000, 1000, 10 * 1024 * 1024));
+        let p2p_defense = tokio::sync::Mutex::new(P2PDefense::new(10000, 1000, 10 * 1024 * 1024));
         // Tracks SyncRequests we've sent recently. Both the announcement
         // handler (BLOCK_CHANNEL) and the response handler (SYNC_CHANNEL)
         // share this map so an in-flight request for a given peer suppresses
@@ -360,7 +362,7 @@ impl CallNode {
         // an equal number of redundant SyncRequests, each pulling a fresh
         // SyncResponse and tripping the per-peer P2PDefense rate limit.
         let sync_inflight: SyncInflight =
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         tokio::spawn(async move {
             while let Ok((peer_id, channel, data)) = net_clone.receive().await {
                 // P2P defense: rate limiting + max message size
@@ -368,7 +370,7 @@ impl CallNode {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                if let Err(e) = p2p_defense.lock().unwrap().validate_message(peer_id.clone(), data.len(), now_ms) {
+                if let Err(e) = p2p_defense.lock().await.validate_message(peer_id.clone(), data.len(), now_ms) {
                     tracing::warn!(peer_id, error = %e, size = data.len(), "p2p: message rejected by defense");
                     continue;
                 }
@@ -385,11 +387,11 @@ impl CallNode {
                         // SyncRequest can stall *all* incoming traffic
                         // (including the SyncResponses we ourselves are
                         // waiting on) for hundreds of milliseconds.
-                        let data_dir_owned = data_dir.clone();
+                        let db_env_owned = Arc::clone(&db_env);
                         let net_for_resp = Arc::clone(&net_clone);
                         let peer_for_resp = peer_id.clone();
                         tokio::spawn(async move {
-                            if let Some(response) = handle_sync_request(&data_dir_owned, &request) {
+                            if let Some(response) = handle_sync_request(&db_env_owned, &request) {
                                 let resp_data = bincode::serialize(&NetworkMessage::SyncResponse(response))
                                     .expect("serialize sync response");
                                 net_for_resp.send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data).await;
@@ -400,14 +402,14 @@ impl CallNode {
                         // free the in-flight slot for this peer so the next
                         // BlockAnnouncement (or our own catch-up below) can
                         // immediately drive another request.
-                        sync_inflight.lock().unwrap().remove(&peer_id);
+                        sync_inflight.lock().await.remove(&peer_id);
 
                         // Apply blocks delivered by a peer in response to a SyncRequest.
                         // This is the path full / archive nodes use to follow the
                         // canonical chain finalized by the validators (a peer's
                         // BlockAnnouncement triggers a SyncRequest in the
                         // BLOCK_CHANNEL handler, the response lands here).
-                        let applied = apply_synced_blocks(&response, &state, &consensus, &data_dir);
+                        let applied = apply_synced_blocks(&response, &state, &consensus);
                         let new_local = state.get_current_block();
                         if applied > 0 {
                             tracing::info!(
@@ -432,7 +434,7 @@ impl CallNode {
                                     .unwrap_or(0);
                                 let mut should_request = false;
                                 {
-                                    let mut inflight = sync_inflight.lock().unwrap();
+                                    let mut inflight = sync_inflight.lock().await;
                                     if !inflight.contains_key(&peer_id) {
                                         inflight.insert(peer_id.clone(), now_ms2);
                                         should_request = true;
@@ -468,12 +470,12 @@ impl CallNode {
                     if let Ok(NetworkMessage::BlockAnnouncement(_)) =
                         bincode::deserialize::<NetworkMessage>(&data)
                     {
-                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker);
+                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker).await;
                     } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
                         let cache_size = {
-                            let mut cache = block_cache.lock().unwrap();
+                            let mut cache = block_cache.lock().await;
                             cache.insert(digest, block);
                             cache.len()
                         };
@@ -482,7 +484,7 @@ impl CallNode {
                         tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
                 } else {
-                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker);
+                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker).await;
                 }
             }
         });
@@ -846,7 +848,7 @@ impl CallNode {
     /// Start P2P sync: compare local height with peer height and catch up if behind.
     /// Returns a handle that performs sync then exits.
     pub fn start_sync(&self, network: Arc<dyn Network>) -> tokio::task::JoinHandle<()> {
-        let data_dir = self.db.data_dir.clone();
+        let _data_dir = self.db.data_dir.clone();
         let state = Arc::clone(&self.state);
         let consensus = Arc::clone(&self.consensus);
         let db_env = self.db.db.clone();
@@ -857,7 +859,7 @@ impl CallNode {
 
             // Start from persisted consensus height (more accurate than scanning blocks dir)
             let consensus_height = consensus.read().unwrap().current_height();
-            let disk_height = find_latest_height(&data_dir);
+            let disk_height = find_latest_height(&db_env);
             let mut local_height = consensus_height.max(disk_height);
             tracing::info!(local_height, consensus_height, disk_height, "sync: checking local state");
 
@@ -1038,7 +1040,7 @@ impl CallNode {
 
                             if let Ok(result) = execute_result {
                                 block.finalize(&result);
-                                let _ = persist_block(&data_dir, height, &block);
+                                let _ = persist_block(&db_env, height, &block);
 
                                 // Push fee history entry for light-client sync path
                                 {
@@ -1192,44 +1194,45 @@ fn current_timestamp_millis() -> u64 {
         .unwrap_or(1)
 }
 
-pub(crate) fn persist_block(data_dir: &Path, height: u64, block: &Block) -> Result<(), String> {
-    let dir = data_dir.join("blocks");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create blocks dir: {e}"))?;
-    let path = dir.join(format!("{height:012}.json"));
-    let data = serde_json::to_vec(block)
-        .map_err(|e| format!("failed to serialize block: {e}"))?;
-    std::fs::write(&path, data)
+/// Persist a block to MDBX (height → serialized block + hash index).
+pub(crate) fn persist_block(db_env: &Arc<DatabaseEnv>, height: u64, block: &Block) -> Result<(), String> {
+    let key = height.to_be_bytes().to_vec();
+    let value = serde_json::to_vec(block)
+        .map_err(|e| format!("failed to serialize block {height}: {e}"))?;
+    call_storage::reth_db::db_put::<call_storage::reth_db::CallConsensusBlocks>(db_env, key, value)
         .map_err(|e| format!("failed to write block {height}: {e}"))?;
+
+    let hash_key = block.header.hash().0.to_vec();
+    let hash_value = height.to_be_bytes().to_vec();
+    call_storage::reth_db::db_put::<call_storage::reth_db::CallBlockHashIndex>(db_env, hash_key, hash_value)
+        .map_err(|e| format!("failed to write hash index for block {height}: {e}"))?;
     Ok(())
 }
 
-/// Load a single block from disk by height.
-fn load_block(data_dir: &Path, height: u64) -> Option<Block> {
-    let path = data_dir.join("blocks").join(format!("{height:012}.json"));
-    let data = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&data).ok()
+/// Load a single block from MDBX by height.
+fn load_block(db_env: &Arc<DatabaseEnv>, height: u64) -> Option<Block> {
+    let key = height.to_be_bytes().to_vec();
+    match call_storage::reth_db::db_get::<call_storage::reth_db::CallConsensusBlocks>(db_env, &key) {
+        Ok(Some(data)) => serde_json::from_slice(&data).ok(),
+        _ => None,
+    }
 }
 
-/// Find the highest block height on disk by scanning the blocks directory.
-fn find_latest_height(data_dir: &Path) -> u64 {
-    let dir = data_dir.join("blocks");
-    if !dir.exists() {
-        return 0;
-    }
-    let mut max_height = 0u64;
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(h) = name.strip_suffix(".json").unwrap_or(name).parse::<u64>() {
-                    if h > max_height {
-                        max_height = h;
-                    }
+/// Find the highest block height stored in MDBX.
+fn find_latest_height(db_env: &Arc<DatabaseEnv>) -> u64 {
+    match call_storage::reth_db::db_iter_all::<call_storage::reth_db::CallConsensusBlocks>(db_env) {
+        Ok(entries) => {
+            let mut max = 0u64;
+            for (key, _) in entries {
+                if key.len() == 8 {
+                    let h = u64::from_be_bytes(key.try_into().unwrap_or([0; 8]));
+                    if h > max { max = h; }
                 }
             }
+            max
         }
+        Err(_) => 0,
     }
-    max_height
 }
 
 impl Default for CallNode {

@@ -28,11 +28,11 @@ use call_evm::db::{save_block_snapshot, prune_block_snapshots};
 use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, SYNC_CHANNEL};
 use crate::state_persist::save_fork_state;
 
-fn apply_rollback_plan(
+async fn apply_rollback_plan(
     plan: &call_consensus::RollbackPlan,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
-    block_cache: &Arc<std::sync::Mutex<BlockCache>>,
+    block_cache: &Arc<tokio::sync::Mutex<BlockCache>>,
     parent_hash: &mut BlockHash,
     prune_state: &mut PruneState,
     data_dir: &std::path::Path,
@@ -59,7 +59,7 @@ fn apply_rollback_plan(
 
     // 3. Clear block cache
     {
-        let mut cache = block_cache.lock().unwrap();
+        let mut cache = block_cache.lock().await;
         cache.clear();
     }
 
@@ -94,7 +94,7 @@ fn apply_rollback_plan(
     }
 
     // 9. Load parent hash of the target block (or genesis if unavailable)
-    *parent_hash = load_block(data_dir, plan.target_height)
+    *parent_hash = load_block(db_env, plan.target_height)
         .map(|b| b.header.hash())
         .unwrap_or_else(|| BlockHash::ZERO);
 
@@ -121,7 +121,7 @@ pub(crate) async fn bft_event_loop(
     state: Arc<RpcState>,
     mempool: Arc<RwLock<Mempool>>,
     consensus: Arc<RwLock<SimplexConsensus>>,
-    block_cache: Arc<std::sync::Mutex<BlockCache>>,
+    block_cache: Arc<tokio::sync::Mutex<BlockCache>>,
     db: CallDb,
     mut prune_state: PruneState,
     subscriptions: SubscriptionManager,
@@ -172,8 +172,9 @@ pub(crate) async fn bft_event_loop(
 
     loop {
         // Check for pending emergency rollback and apply if present
-        if let Some(plan) = state.pending_rollback.write().unwrap().take() {
-            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle_tracker);
+        let rollback_plan = state.pending_rollback.write().unwrap().take();
+        if let Some(plan) = rollback_plan {
+            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle_tracker).await;
         }
 
         // === Epoch boundary quorum check ===
@@ -301,7 +302,7 @@ pub(crate) async fn bft_event_loop(
                         let digest = ConsensusDigest::from(block.header.hash());
 
                         // Cache block and execution result for verify/finalize
-                        block_cache.lock().unwrap().insert(digest, block);
+                        block_cache.lock().await.insert(digest, block);
                         execution_results.insert(digest, result);
 
                         let _ = reply_tx.send(digest);
@@ -318,21 +319,21 @@ pub(crate) async fn bft_event_loop(
                 // Another validator proposed this block; verify it.
                 // Retry briefly to allow P2P relay delivery.
                 let mut block = {
-                    let cache = block_cache.lock().unwrap();
+                    let cache = block_cache.lock().await;
                     cache.get(&digest).cloned()
                 };
 
                 if block.is_none() {
                     for attempt in 1..=30 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
-                        let cache = block_cache.lock().unwrap();
+                        let cache = block_cache.lock().await;
                         if let Some(b) = cache.get(&digest) {
                             block = Some(b.clone());
                             break;
                         }
                         drop(cache);
                         if attempt == 30 {
-                            let cache_size = block_cache.lock().unwrap().len();
+                            let cache_size = block_cache.lock().await.len();
                             tracing::warn!(digest = %digest, cache_size, "BFT verify: block not in cache after waiting 3s");
                         }
                     }
@@ -378,7 +379,7 @@ pub(crate) async fn bft_event_loop(
             Some(info) = finalize_rx.recv() => {
                 // Block has been finalized by BFT consensus.
                 let mut block = {
-                    let mut cache = block_cache.lock().unwrap();
+                    let mut cache = block_cache.lock().await;
                     cache.remove(&info.digest)
                 };
 
@@ -388,7 +389,8 @@ pub(crate) async fn bft_event_loop(
                         let c = consensus.read().unwrap();
                         c.current_height()
                     };
-                    if let Some(b) = load_block(&data_dir, height) {
+                    let db_env = Arc::clone(&db.db);
+                    if let Some(b) = load_block(&db_env, height) {
                         tracing::info!(digest = %info.digest, height, "BFT finalize: block recovered from disk");
                         block = Some(b);
                     } else {
@@ -656,8 +658,9 @@ pub(crate) async fn bft_event_loop(
                         }
                     }
 
-                    // Persist block to disk
-                    if let Err(e) = persist_block(&data_dir, height, &block) {
+                    // Persist block to MDBX
+                    let db_env = Arc::clone(&db.db);
+                    if let Err(e) = persist_block(&db_env, height, &block) {
                         tracing::warn!(error = %e, height, "BFT finalize: persist block failed");
                     }
 

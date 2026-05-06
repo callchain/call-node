@@ -35,6 +35,7 @@ tokio-rustls.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 reth-db.workspace = true
+call-storage.workspace = true
 call-light-client = { workspace = true, optional = true }
 
 [dev-dependencies]

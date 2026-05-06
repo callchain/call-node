@@ -7,32 +7,31 @@
 
 use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 
-use call_consensus::{Block, BlockExecutionResult, ConsensusError, ForkManager};
+use call_consensus::{Block, BlockExecutionResult, ConsensusError};
 use call_protocol::gas::FeeParams;
 use reth_db::DatabaseEnv;
 
 use crate::handlers::RpcState;
 
-/// Holds write guards for fee_params and fork_manager.
+/// Holds a write guard for fee_params.
 ///
-/// Locks are acquired in the same deterministic order every time to avoid
-/// deadlocks.  Always acquire through [`RpcState::write_all`].
+/// Only acquires the lock actually touched by block execution, keeping the
+/// critical section as small as possible.  Always acquire through
+/// [`RpcState::write_all`].
 ///
 /// State is loaded from MDBX on demand inside `execute_block`.
 pub struct StateWriteBundle<'a> {
     pub fee_params: RwLockWriteGuard<'a, FeeParams>,
-    pub fork_manager: RwLockWriteGuard<'a, ForkManager>,
     /// MDBX database environment — the single source of truth for state.
     pub db_env: Arc<DatabaseEnv>,
 }
 
-/// Holds read guards for fee_params and fork_manager.
+/// Holds a read guard for fee_params.
 ///
 /// Useful for lightweight read-only operations or for cloning state before
 /// the `propose` / `verify` phases of BFT consensus.
 pub struct StateReadBundle<'a> {
     pub fee_params: RwLockReadGuard<'a, FeeParams>,
-    pub fork_manager: RwLockReadGuard<'a, ForkManager>,
     /// MDBX database environment — the single source of truth for state.
     pub db_env: Arc<DatabaseEnv>,
 }
@@ -43,19 +42,21 @@ impl RpcState {
     /// # Panics
     /// Panics if any lock is poisoned (a previous holder panicked while holding
     /// the lock).  In practice this should never happen in normal node operation.
+    /// Acquire the write lock on `fee_params` only.
+    ///
+    /// `fork_manager` is **not** locked here — callers that need to mutate it
+    /// should acquire that lock separately and for as short a time as possible.
     pub fn write_all(&self) -> StateWriteBundle<'_> {
         StateWriteBundle {
             fee_params: self.fee_params.write().unwrap(),
-            fork_manager: self.fork_manager.write().unwrap(),
             db_env: Arc::clone(&self.db_env),
         }
     }
 
-    /// Acquire read locks on **all** state components in deterministic order.
+    /// Acquire the read lock on `fee_params` only.
     pub fn read_all(&self) -> StateReadBundle<'_> {
         StateReadBundle {
             fee_params: self.fee_params.read().unwrap(),
-            fork_manager: self.fork_manager.read().unwrap(),
             db_env: Arc::clone(&self.db_env),
         }
     }

@@ -286,6 +286,16 @@ pub fn slot_evm_contract(asset_id: u64) -> U256 {
     slot_asset_meta(asset_id, b"evm_contract")
 }
 
+/// Compute the EVM storage slot for the ERC-20 `balanceOf` mapping base slot of an asset.
+pub fn slot_erc20_balance_of_base(asset_id: u64) -> U256 {
+    slot_asset_meta(asset_id, b"erc20_balance_of_slot")
+}
+
+/// Compute the EVM storage slot for the ERC-20 `totalSupply` slot of an asset.
+pub fn slot_erc20_total_supply(asset_id: u64) -> U256 {
+    slot_asset_meta(asset_id, b"erc20_total_supply_slot")
+}
+
 /// Compute the EVM storage slot for an allowance.
 pub fn slot_allowance(asset_id: u64, owner: Address, spender: Address) -> U256 {
     storage_slot(&[

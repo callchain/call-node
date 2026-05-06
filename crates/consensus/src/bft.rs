@@ -15,7 +15,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digest;
 use commonware_cryptography::ed25519;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 /// Information sent from the `Reporter` when a block is finalized.
@@ -109,14 +109,14 @@ impl CertifiableAutomaton for CallAutomaton {}
 /// Relay implementation that forwards block broadcasts to tokio.
 #[derive(Clone)]
 pub struct CallRelay {
-    block_cache: Arc<Mutex<BlockCache>>,
+    block_cache: Arc<tokio::sync::Mutex<BlockCache>>,
     broadcast_tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl CallRelay {
     /// Create a new relay with the given block cache and broadcast channel.
     pub fn new(
-        block_cache: Arc<Mutex<BlockCache>>,
+        block_cache: Arc<tokio::sync::Mutex<BlockCache>>,
         broadcast_tx: mpsc::Sender<Vec<u8>>,
     ) -> Self {
         Self {
@@ -133,7 +133,7 @@ impl Relay for CallRelay {
 
     async fn broadcast(&mut self, payload: Self::Digest, _plan: Self::Plan) {
         let block = {
-            let cache = self.block_cache.lock().unwrap();
+            let cache = self.block_cache.lock().await;
             cache.get(&payload).cloned()
         };
         if let Some(block) = block {

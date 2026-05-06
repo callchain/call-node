@@ -385,10 +385,18 @@ impl CommonwareNetwork {
 #[async_trait::async_trait]
 impl Network for CommonwareNetwork {
     async fn broadcast(&self, channel: u64, message: Vec<u8>) {
+        let _ = self.try_broadcast(channel, message).await;
+    }
+
+    async fn try_broadcast(&self, channel: u64, message: Vec<u8>) -> Result<(), NetworkError> {
         let mut sender = self.sender.lock().await;
         let data = encode_with_channel(channel, &message);
         let buf = IoBuf::copy_from_slice(&data);
-        let _ = sender.send(Recipients::All, buf, false).await;
+        sender
+            .send(Recipients::All, buf, false)
+            .await
+            .map(|_| ())
+            .map_err(|e| NetworkError::NetworkError(format!("broadcast failed: {e}")))
     }
 
     async fn send_to(&self, channel: u64, peers: Vec<String>, message: Vec<u8>) {

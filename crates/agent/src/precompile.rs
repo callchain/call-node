@@ -21,7 +21,7 @@ sol! {
         function revokeBalance(uint64 agentId, uint64 assetId) external;
         function pay(uint64 agentId, uint64 assetId, address to, uint128 amount) external;
         function batchPay(uint64 agentId, uint64 assetId, address[] to, uint128[] amounts) external;
-        function bridgeDeposit(uint64 agentId, uint64 assetId, uint128 amount, uint64 targetChain, bytes targetAddress) external;
+        function withdrawBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
         function revokeAgent(uint64 agentId) external;
         function getAgentOwner(uint64 agentId) external view returns (address);
         function getAgentBalance(uint64 agentId, uint64 assetId) external view returns (uint128);
@@ -169,13 +169,13 @@ impl AgentPrecompile {
         )
     }
 
-    fn bridge_deposit(
+    fn withdraw_balance(
         &self,
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAgent::bridgeDepositCall, _>(
+        dispatch::mutate_void::<IProtocolAgent::withdrawBalanceCall, _>(
             calldata,
             50000,
             storage,
@@ -184,7 +184,7 @@ impl AgentPrecompile {
                 let mut store = AgentStorage::new(JournalBackend::new(storage));
                 let block_number = storage.block_number();
                 store
-                    .bridge_deposit(
+                    .withdraw_balance(
                         call.agentId,
                         call.assetId,
                         call.amount,
@@ -296,7 +296,7 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
             IProtocolAgent::revokeBalanceCall::SELECTOR => self.revoke_balance(calldata, msg_sender, storage),
             IProtocolAgent::payCall::SELECTOR => self.pay(calldata, msg_sender, storage),
             IProtocolAgent::batchPayCall::SELECTOR => self.batch_pay(calldata, msg_sender, storage),
-            IProtocolAgent::bridgeDepositCall::SELECTOR => self.bridge_deposit(calldata, msg_sender, storage),
+            IProtocolAgent::withdrawBalanceCall::SELECTOR => self.withdraw_balance(calldata, msg_sender, storage),
             IProtocolAgent::revokeAgentCall::SELECTOR => self.revoke_agent(calldata, msg_sender, storage),
             IProtocolAgent::getAgentOwnerCall::SELECTOR => self.get_agent_owner(calldata, storage),
             IProtocolAgent::getAgentBalanceCall::SELECTOR => self.get_agent_balance(calldata, storage),

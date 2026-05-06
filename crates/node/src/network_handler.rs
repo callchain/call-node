@@ -36,9 +36,9 @@ pub(crate) const SYNC_REQUEST_INFLIGHT_TIMEOUT_MS: u64 = 5_000;
 /// Tracks the most recent `SyncRequest` we sent to each peer so the
 /// announcement-driven request path doesn't spawn a fresh request on every
 /// `BlockAnnouncement`. Maps peer_id → unix-millis of the last request.
-pub(crate) type SyncInflight = Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>;
+pub(crate) type SyncInflight = Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>;
 
-pub(crate) fn handle_network_message(
+pub(crate) async fn handle_network_message(
     peer_id: &str,
     channel: u64,
     data: &[u8],
@@ -112,7 +112,7 @@ pub(crate) fn handle_network_message(
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             {
-                let mut inflight = sync_inflight.lock().unwrap();
+                let mut inflight = sync_inflight.lock().await;
                 match inflight.get(peer_id) {
                     Some(&ts) if now_ms.saturating_sub(ts) < SYNC_REQUEST_INFLIGHT_TIMEOUT_MS => {
                         tracing::debug!(

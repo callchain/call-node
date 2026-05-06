@@ -219,6 +219,18 @@ impl Table for CallBlockStateSnapshots {
     type Value = Vec<u8>;
 }
 
+/// Block hash index: serialized BlockHash -> serialized height (u64 BE)
+///
+/// Enables O(1) eth_getBlockByHash lookups without scanning all blocks.
+#[derive(Debug)]
+pub struct CallBlockHashIndex;
+impl Table for CallBlockHashIndex {
+    const NAME: &'static str = "call_block_hash_index";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// Light client verified headers: serialized block_height -> serialized BlockHeader
 ///
 /// Stores block headers verified by the protocol light client so they
@@ -260,6 +272,7 @@ impl TableSet for CallTables {
                 box_info::<CallAccountTrie>,
                 box_info::<CallStorageTrie>,
                 box_info::<CallLightClientHeaders>,
+                box_info::<CallBlockHashIndex>,
             ]
             .into_iter()
             .map(|f| f()),

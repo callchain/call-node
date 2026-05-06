@@ -11,6 +11,10 @@ pub trait Network: Send + Sync + 'static {
     /// Send a message to all connected peers
     async fn broadcast(&self, channel: u64, message: Vec<u8>);
 
+    /// Try to broadcast a message, returning an error if the send fails
+    /// instead of silently dropping it.
+    async fn try_broadcast(&self, channel: u64, message: Vec<u8>) -> Result<(), NetworkError>;
+
     /// Send a message to specific peers on the given channel.
     ///
     /// Like `broadcast`, the channel byte is prepended to the payload so the

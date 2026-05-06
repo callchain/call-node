@@ -329,6 +329,9 @@ impl<B: StorageBackend> AssetStorage<B> {
         self.store_meta_u256(asset_id, b"status", U256::from(0));
         self.store_meta_u256(asset_id, b"compliance", U256::from(0));
         self.store_meta_u256(asset_id, b"registered_at", U256::from(0));
+        // Default ERC-20 storage layout slots (OpenZeppelin-style: balanceOf mapping base = 4, totalSupply = 3)
+        self.store_meta_u256(asset_id, b"erc20_balance_of_slot", U256::from(4));
+        self.store_meta_u256(asset_id, b"erc20_total_supply_slot", U256::from(3));
 
         Ok(asset_id)
     }

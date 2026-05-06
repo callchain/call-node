@@ -37,9 +37,13 @@ impl Default for InMemoryNetwork {
 #[async_trait::async_trait]
 impl Network for InMemoryNetwork {
     async fn broadcast(&self, channel: u64, message: Vec<u8>) {
-        if let Ok(mut buffer) = self.message_buffer.lock() {
-            buffer.push(("broadcast".into(), channel, message));
-        }
+        let _ = self.try_broadcast(channel, message).await;
+    }
+
+    async fn try_broadcast(&self, channel: u64, message: Vec<u8>) -> Result<(), NetworkError> {
+        let mut buffer = self.message_buffer.lock().map_err(|_| NetworkError::NetworkError("lock poisoned".into()))?;
+        buffer.push(("broadcast".into(), channel, message));
+        Ok(())
     }
 
     async fn send_to(&self, channel: u64, peers: Vec<String>, message: Vec<u8>) {

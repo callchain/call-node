@@ -406,8 +406,8 @@ pub(crate) async fn block_production_loop(
             }
         }
 
-        // 12. Persist block to disk
-        if let Err(ref e) = persist_block(&db.data_dir, height, &block) {
+        // 12. Persist block to MDBX
+        if let Err(ref e) = persist_block(&db.db, height, &block) {
             tracing::warn!(error = %e, "failed to persist block");
         }
 

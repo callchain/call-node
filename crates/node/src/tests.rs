@@ -159,12 +159,12 @@
         assert_ne!(block.header.state_root, call_primitives::Hash::ZERO);
 
         // Persist
-        persist_block(&tmp, height, &block).expect("persist block");
+        persist_block(&node.state.db_env, height, &block).expect("persist block");
 
-        // Verify persisted block can be read back
-        let dir = tmp.join("blocks");
-        let path = dir.join(format!("{height:012}.json"));
-        assert!(path.exists(), "block file should exist");
+        // Verify persisted block can be read back from MDBX
+        let loaded = load_block(&node.state.db_env, height);
+        assert!(loaded.is_some(), "block should be persisted in MDBX");
+        assert_eq!(loaded.unwrap().header.hash(), block.header.hash());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -403,15 +403,10 @@
         }
 
         // Persist block
-        persist_block(&tmp, height, &block).expect("persist block");
+        persist_block(&node.state.db_env, height, &block).expect("persist block");
 
-        // Verify block file exists and can be read back
-        let dir = tmp.join("blocks");
-        let path = dir.join(format!("{height:012}.json"));
-        assert!(path.exists(), "block file should exist");
-
-        let data = std::fs::read(&path).expect("read block file");
-        let restored: Block = serde_json::from_slice(&data).expect("deserialize block");
+        // Verify block can be read back from MDBX
+        let restored = load_block(&node.state.db_env, height).expect("block should exist in MDBX");
         assert_eq!(restored.header.height, height);
         assert_eq!(restored.header.hash(), block.header.hash());
 
@@ -834,7 +829,7 @@
             .expect("serialize signal");
 
         let network: Arc<dyn Network> = Arc::new(InMemoryNetwork::new());
-        let sync_inflight: SyncInflight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let sync_inflight: SyncInflight = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
         // Send signal via handle_network_message on BLOCK_CHANNEL
         handle_network_message(
@@ -846,7 +841,7 @@
             &network,
             &sync_inflight,
             &node.oracle_tracker,
-        );
+        ).await;
 
         // Verify peer_heights was updated
         let peer_heights = node.state.peer_heights.read().unwrap();
@@ -922,7 +917,7 @@
         };
 
         // Apply synced blocks
-        let applied = apply_synced_blocks(&response, &node.state, &node.consensus, &tmp);
+        let applied = apply_synced_blocks(&response, &node.state, &node.consensus);
         assert_eq!(applied, 1, "should apply exactly 1 block");
 
         // Height should now be 2
@@ -994,7 +989,7 @@
         };
 
         // Apply synced blocks
-        let applied = apply_synced_blocks(&response, &node.state, &node.consensus, &tmp);
+        let applied = apply_synced_blocks(&response, &node.state, &node.consensus);
         assert_eq!(applied, 1, "should apply exactly 1 block");
 
         // Height should now be 6

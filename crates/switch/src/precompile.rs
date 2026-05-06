@@ -12,8 +12,10 @@
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
     dispatch, journal_backend::JournalBackend, require_caller,
-    slot_asset_meta, slot_balance, slot_evm_contract, storage::StorageProvider, u128_to_u256,
-    u256_to_u128, u256_to_address, ASSET_ADDRESS,
+    slot_asset_meta, slot_balance, slot_evm_contract,
+    slot_erc20_balance_of_base, slot_erc20_total_supply,
+    storage::StorageProvider, u128_to_u256,
+    u256_to_u128, u256_to_u64, u256_to_address, ASSET_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -72,16 +74,6 @@ fn mapping_slot(key_bytes: &[u8; 32], base_slot: u64) -> U256 {
     hasher.update(base);
     U256::from_be_slice(hasher.finalize().as_slice())
 }
-
-/// Storage slot for `balanceOf[holder]` in WrappedToken (mapping base slot = 4).
-fn erc20_balance_of_slot(holder: Address) -> U256 {
-    let mut padded = [0u8; 32];
-    padded[12..32].copy_from_slice(holder.as_slice());
-    mapping_slot(&padded, 4)
-}
-
-/// Storage slot for `totalSupply` in WrappedToken (slot 3).
-const ERC20_TOTAL_SUPPLY_SLOT: U256 = U256::from_limbs([3, 0, 0, 0]);
 
 // ── SwitchStorage ─────────────────────────────────────────────────────
 
@@ -155,17 +147,44 @@ impl SwitchStorage {
         Ok(())
     }
 
+    // ── ERC-20 storage layout (read from asset metadata, with defaults) ─
+
+    /// Read the ERC-20 `balanceOf` mapping base slot for an asset from ASSET_ADDRESS metadata.
+    /// Falls back to default 4 if not set.
+    fn erc20_balance_of_base(&self, asset_id: u64) -> u64 {
+        let slot = self.backend.load(ASSET_ADDRESS, slot_erc20_balance_of_base(asset_id));
+        let val = u256_to_u64(slot);
+        if val == 0 { 4 } else { val }
+    }
+
+    /// Read the ERC-20 `totalSupply` slot for an asset from ASSET_ADDRESS metadata.
+    /// Falls back to default 3 if not set.
+    fn erc20_total_supply_slot(&self, asset_id: u64) -> U256 {
+        let slot = self.backend.load(ASSET_ADDRESS, slot_erc20_total_supply(asset_id));
+        let val = u256_to_u64(slot);
+        if val == 0 { U256::from(3) } else { slot }
+    }
+
+    /// Compute the storage slot for `balanceOf[holder]` using the asset's registered base slot.
+    fn erc20_balance_of_slot(&self, asset_id: u64, holder: Address) -> U256 {
+        let base = self.erc20_balance_of_base(asset_id);
+        let mut padded = [0u8; 32];
+        padded[12..32].copy_from_slice(holder.as_slice());
+        mapping_slot(&padded, base)
+    }
+
     // ── ERC-20 mint/burn helpers ────────────────────────────────────
 
-    fn erc20_mint(&mut self, contract: Address, to: Address, amount: u128) -> Result<(), SwitchError> {
-        let total_supply = u256_to_u128(self.backend.load(contract, ERC20_TOTAL_SUPPLY_SLOT));
+    fn erc20_mint(&mut self, asset_id: u64, contract: Address, to: Address, amount: u128) -> Result<(), SwitchError> {
+        let ts_slot = self.erc20_total_supply_slot(asset_id);
+        let total_supply = u256_to_u128(self.backend.load(contract, ts_slot));
         let total_supply = total_supply
             .checked_add(amount)
             .ok_or(SwitchError::Erc20TotalSupplyOverflow)?;
         self.backend
-            .store(contract, ERC20_TOTAL_SUPPLY_SLOT, u128_to_u256(total_supply));
+            .store(contract, ts_slot, u128_to_u256(total_supply));
 
-        let balance_slot = erc20_balance_of_slot(to);
+        let balance_slot = self.erc20_balance_of_slot(asset_id, to);
         let to_balance = u256_to_u128(self.backend.load(contract, balance_slot));
         let to_balance = to_balance
             .checked_add(amount)
@@ -175,15 +194,16 @@ impl SwitchStorage {
         Ok(())
     }
 
-    fn erc20_burn(&mut self, contract: Address, from: Address, amount: u128) -> Result<(), SwitchError> {
-        let total_supply = u256_to_u128(self.backend.load(contract, ERC20_TOTAL_SUPPLY_SLOT));
+    fn erc20_burn(&mut self, asset_id: u64, contract: Address, from: Address, amount: u128) -> Result<(), SwitchError> {
+        let ts_slot = self.erc20_total_supply_slot(asset_id);
+        let total_supply = u256_to_u128(self.backend.load(contract, ts_slot));
         let total_supply = total_supply
             .checked_sub(amount)
             .ok_or(SwitchError::Erc20TotalSupplyUnderflow)?;
         self.backend
-            .store(contract, ERC20_TOTAL_SUPPLY_SLOT, u128_to_u256(total_supply));
+            .store(contract, ts_slot, u128_to_u256(total_supply));
 
-        let balance_slot = erc20_balance_of_slot(from);
+        let balance_slot = self.erc20_balance_of_slot(asset_id, from);
         let from_balance = u256_to_u128(self.backend.load(contract, balance_slot));
         let from_balance = from_balance
             .checked_sub(amount)
@@ -222,7 +242,7 @@ impl SwitchStorage {
         } else {
             // ERC-20: mint (increase totalSupply and balanceOf[to])
             let contract = self.read_evm_contract(asset_id)?;
-            self.erc20_mint(contract, to, amount)?;
+            self.erc20_mint(asset_id, contract, to, amount)?;
         }
 
         // 3. Update protocol-side supply tracking for non-CALL assets
@@ -261,7 +281,7 @@ impl SwitchStorage {
         } else {
             // ERC-20: burn (decrease totalSupply and balanceOf[sender])
             let contract = self.read_evm_contract(asset_id)?;
-            self.erc20_burn(contract, sender, amount)?;
+            self.erc20_burn(asset_id, contract, sender, amount)?;
         }
 
         // 2. Credit protocol balance to `to`
@@ -469,14 +489,16 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(sender_bal, 600);
 
-        // ERC-20 totalSupply increased
-        let total_supply = provider.sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
+        // ERC-20 totalSupply increased (default slot 3)
+        let total_supply = provider.sload(contract, U256::from(3))
             .map(u256_to_u128)
             .unwrap_or(0);
         assert_eq!(total_supply, 400);
 
-        // ERC-20 balanceOf recipient increased
-        let recipient_bal = provider.sload(contract, erc20_balance_of_slot(recipient))
+        // ERC-20 balanceOf recipient increased (default base slot 4)
+        let mut padded = [0u8; 32];
+        padded[12..32].copy_from_slice(recipient.as_slice());
+        let recipient_bal = provider.sload(contract, mapping_slot(&padded, 4))
             .map(u256_to_u128)
             .unwrap_or(0);
         assert_eq!(recipient_bal, 400);
@@ -508,16 +530,18 @@ mod tests {
             slot_evm_contract(asset_id),
             address_to_u256(contract),
         ).unwrap();
-        // Seed ERC-20 totalSupply
+        // Seed ERC-20 totalSupply (default slot 3)
         provider.sstore(
             contract,
-            ERC20_TOTAL_SUPPLY_SLOT,
+            U256::from(3),
             u128_to_u256(500),
         ).unwrap();
-        // Seed ERC-20 balance for sender
+        // Seed ERC-20 balance for sender (default base slot 4)
+        let mut padded = [0u8; 32];
+        padded[12..32].copy_from_slice(sender.as_slice());
         provider.sstore(
             contract,
-            erc20_balance_of_slot(sender),
+            mapping_slot(&padded, 4),
             u128_to_u256(500),
         ).unwrap();
         // Seed protocol supply tracking
@@ -537,14 +561,16 @@ mod tests {
         let result = precompile.call(&input, sender, &mut provider);
         assert!(result.is_ok(), "switchToProtocol ERC-20 failed: {:?}", result.err());
 
-        // ERC-20 totalSupply decreased
-        let total_supply = provider.sload(contract, ERC20_TOTAL_SUPPLY_SLOT)
+        // ERC-20 totalSupply decreased (default slot 3)
+        let total_supply = provider.sload(contract, U256::from(3))
             .map(u256_to_u128)
             .unwrap_or(0);
         assert_eq!(total_supply, 300);
 
-        // ERC-20 balanceOf sender decreased
-        let sender_bal = provider.sload(contract, erc20_balance_of_slot(sender))
+        // ERC-20 balanceOf sender decreased (default base slot 4)
+        let mut padded = [0u8; 32];
+        padded[12..32].copy_from_slice(sender.as_slice());
+        let sender_bal = provider.sload(contract, mapping_slot(&padded, 4))
             .map(u256_to_u128)
             .unwrap_or(0);
         assert_eq!(sender_bal, 300);

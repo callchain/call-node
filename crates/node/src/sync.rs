@@ -1,7 +1,6 @@
 //! Sync protocol — handle incoming sync requests and apply synced blocks.
 
 use std::sync::{Arc, RwLock};
-use std::path::Path;
 
 use call_consensus::{Block, SimplexConsensus};
 use call_primitives::BlockHash;
@@ -9,13 +8,14 @@ use call_network::SyncResponse;
 use call_primitives::FeeCurrency;
 use call_protocol::ProtocolReceipt;
 use call_rpc::RpcState;
+use reth_db::DatabaseEnv;
 use crate::persist_block;
 
-pub(crate) fn handle_sync_request(data_dir: &Path, request: &call_network::SyncRequest) -> Option<SyncResponse> {
+pub(crate) fn handle_sync_request(db_env: &Arc<DatabaseEnv>, request: &call_network::SyncRequest) -> Option<SyncResponse> {
     let mut blocks = Vec::new();
     let end = request.start_height.saturating_add(request.count);
     for h in request.start_height..end {
-        if let Some(block) = crate::load_block(data_dir, h) {
+        if let Some(block) = crate::load_block(db_env, h) {
             // NOTE: Blocks are serialized as JSON for the SyncResponse payload
             // because the receiving side (`apply_synced_blocks` and the legacy
             // `start_sync` path) deserializes them with `serde_json::from_slice`.
@@ -55,7 +55,6 @@ pub(crate) fn apply_synced_blocks(
     response: &SyncResponse,
     state: &Arc<RpcState>,
     consensus: &Arc<RwLock<SimplexConsensus>>,
-    data_dir: &Path,
 ) -> usize {
     let mut applied = 0usize;
     let initial_height = state.get_current_block();
@@ -122,7 +121,7 @@ pub(crate) fn apply_synced_blocks(
         match execute_result {
             Ok(result) => {
                 block.finalize(&result);
-                if let Err(e) = persist_block(data_dir, block_height, &block) {
+                if let Err(e) = persist_block(&state.db_env, block_height, &block) {
                     tracing::warn!(height = block_height, error = %e, "sync: failed to persist block to disk");
                 }
 

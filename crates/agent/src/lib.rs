@@ -362,7 +362,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
-    pub fn bridge_deposit(
+    pub fn withdraw_balance(
         &mut self,
         agent_id: u64,
         asset_id: u64,

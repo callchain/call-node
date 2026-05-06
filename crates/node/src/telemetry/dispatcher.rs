@@ -1,7 +1,7 @@
 //! Alert dispatcher and background alert task.
 
 use std::collections::HashSet;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 use std::time::Duration;
 
 use super::alert::{Alert, AlertSeverity, evaluate_alerts, default_alert_rules};
@@ -84,14 +84,14 @@ pub fn start_alert_task(
         loop {
             interval.tick().await;
             let alerts = evaluate_alerts(&registry, &rules);
-            let last_names = dispatcher.last_alert_names.read().unwrap().clone();
+            let last_names = dispatcher.last_alert_names.read().await.clone();
             for alert in &alerts {
                 if !last_names.contains(&alert.name) {
                     tracing::warn!(alert = %alert.name, severity = ?alert.severity, "ALERT triggered");
                     dispatcher.dispatch(alert).await;
                 }
             }
-            let mut names = dispatcher.last_alert_names.write().unwrap();
+            let mut names = dispatcher.last_alert_names.write().await;
             names.clear();
             names.extend(alerts.iter().map(|a| a.name.clone()));
         }
