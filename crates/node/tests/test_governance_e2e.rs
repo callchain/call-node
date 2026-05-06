@@ -11,7 +11,9 @@ mod e2e;
 use e2e::harness::*;
 
 use alloy_primitives::U256;
+use alloy_sol_types::SolCall;
 use call_crypto::keccak256;
+use call_governance::precompile::IProtocolGovernance;
 use call_precompile::GOVERNANCE_ADDRESS;
 
 fn one_million_call() -> u128 {
@@ -82,6 +84,13 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Step 1: Submit proposal (proposal_id = 1)
     // Needs ~600k gas: 17 SSTOREs (~22k each) + SLOADs + dispatch overhead.
+    let submit_data = IProtocolGovernance::submitProposalCall {
+        proposalType: 0, // ParameterChange
+        title: "My Proposal".into(),
+        description: "Double the max block size".into(),
+        executionData: alloy_primitives::Bytes::from_static(b""),
+    }
+    .abi_encode();
     let submit_tx = call_evm::EvmTransaction {
         caller: proposer,
         nonce: 0,
@@ -91,18 +100,7 @@ fn test_governance_proposal_full_lifecycle() {
             &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
         )),
         value: call_primitives::U256::ZERO,
-        data: gov_calldata(
-            &[0x5e, 0xbf, 0x42, 0xee],
-            &{
-                let mut args = Vec::with_capacity(128);
-                args.extend_from_slice(b"My Proposal_____________________");
-                args.extend_from_slice(b"Double the max block size_______");
-                args.extend_from_slice(&[0xDDu8; 32]);
-                args.extend_from_slice(&[0u8; 31]);
-                args.push(0); // proposalType = 0 (ParameterChange)
-                args
-            },
-        ),
+        data: call_evm::Bytes::from(submit_data),
         chain_id: 1,
     };
     node.insert_evm_tx(submit_tx);

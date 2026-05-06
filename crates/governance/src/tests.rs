@@ -45,10 +45,10 @@ fn test_submit_proposal_success() {
         let id = gov
             .submit_proposal(
                 &mut asset,
-                [1u8; 32],
-                [2u8; 32],
-                [3u8; 32],
                 0, // ParameterChange
+                "title".into(),
+                "desc".into(),
+                vec![],
                 proposer,
                 0,
             )
@@ -78,10 +78,10 @@ fn test_submit_proposal_insufficient_balance() {
 
         let result = gov.submit_proposal(
             &mut asset,
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
             0,
+            "title".into(),
+            "desc".into(),
+            vec![],
             proposer,
             0,
         );
@@ -105,10 +105,10 @@ fn test_rate_limiting() {
         let id = gov
             .submit_proposal(
                 &mut asset,
-                [1u8; 32],
-                [2u8; 32],
-                [3u8; 32],
                 0,
+                "title".into(),
+                "desc".into(),
+                vec![],
                 proposer,
                 100,
             )
@@ -118,10 +118,10 @@ fn test_rate_limiting() {
         // Same block (100): rate limited
         let result = gov.submit_proposal(
             &mut asset,
-            [1u8; 32],
-            [2u8; 32],
-            [3u8; 32],
             0,
+            "title".into(),
+            "desc".into(),
+            vec![],
             proposer,
             100,
         );
@@ -144,7 +144,7 @@ fn test_rate_limiting_expires_after_cooldown() {
         gov.write_config_u64(b"voting_period", 100);
         gov.write_config_u64(b"proposal_cooldown", 50);
 
-        gov.submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+        gov.submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
     }
 
@@ -163,7 +163,7 @@ fn test_rate_limiting_expires_after_cooldown() {
         gov.write_config_u64(b"proposal_cooldown", 50);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 51)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 51)
             .unwrap();
         assert_eq!(id, 2);
     }
@@ -186,7 +186,7 @@ fn test_vote_yes_and_tally() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         gov.vote(id, 1, voter, 500_000, 0).unwrap();
@@ -213,7 +213,7 @@ fn test_vote_before_start_rejected() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         // Block 0 < start_block 10: voting not started
@@ -237,7 +237,7 @@ fn test_vote_after_end_rejected() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
         id
     };
@@ -271,7 +271,7 @@ fn test_duplicate_vote_rejected() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         gov.vote(id, 1, voter, 500_000, 0).unwrap();
@@ -301,7 +301,7 @@ fn test_vote_no_and_abstain() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         gov.vote(id, 1, voter_a, 100_000, 0).unwrap(); // Yes
@@ -329,7 +329,7 @@ fn test_queue_with_quorum() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         // Cast votes exceeding quorum
@@ -356,7 +356,7 @@ fn test_queue_without_quorum_defeated() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         // No votes cast
@@ -382,7 +382,7 @@ fn test_queue_more_against_than_for_defeated() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         gov.vote(id, 2, test_addr(2), 500_000, 0).unwrap(); // No
@@ -409,10 +409,10 @@ fn test_queue_emergency_pause_skips_timelock() {
         let id = gov
             .submit_proposal(
                 &mut asset,
-                [1u8; 32],
-                [2u8; 32],
-                [3u8; 32],
                 5, // EmergencyPause
+                "title".into(),
+                "desc".into(),
+                vec![],
                 proposer,
                 0,
             )
@@ -445,7 +445,7 @@ fn test_execute_after_timelock() {
         gov.write_config_u64(b"timelock", 50);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
@@ -482,7 +482,7 @@ fn test_execute_deposit_refunded() {
         gov.write_config_u64(b"timelock", 1);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
@@ -511,10 +511,10 @@ fn test_execute_emergency_pause_sets_paused() {
         let id = gov
             .submit_proposal(
                 &mut asset,
-                [1u8; 32],
-                [2u8; 32],
-                [3u8; 32],
                 5, // EmergencyPause
+                "title".into(),
+                "desc".into(),
+                vec![],
                 proposer,
                 0,
             )
@@ -565,10 +565,10 @@ fn test_proposal_types_stored_correctly() {
             let id = gov
                 .submit_proposal(
                     &mut asset,
-                    [proposal_type; 32],
-                    [2u8; 32],
-                    [3u8; 32],
                     proposal_type,
+                    "title".into(),
+                    "desc".into(),
+                    vec![],
                     proposer,
                     0,
                 )
@@ -594,7 +594,7 @@ fn test_custom_review_and_voting_periods() {
         gov.write_config_u64(b"voting_period", 75);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         assert_eq!(gov.read_proposal_status(id), 0); // Pending
@@ -620,7 +620,7 @@ fn test_deposit_confiscated_on_defeat() {
         gov.write_config_u64(b"voting_period", 100);
 
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
 
         assert_eq!(gov.read_proposal_u128(id, b"deposit"), PROPOSAL_DEPOSIT);
@@ -649,7 +649,7 @@ fn test_full_lifecycle_submit_vote_queue_execute() {
 
         // Submit
         let id = gov
-            .submit_proposal(&mut asset, [1u8; 32], [2u8; 32], [3u8; 32], 0, proposer, 0)
+            .submit_proposal(&mut asset, 0, "title".into(), "desc".into(), vec![], proposer, 0)
             .unwrap();
         assert_eq!(gov.read_proposal_status(id), 1); // Active
 

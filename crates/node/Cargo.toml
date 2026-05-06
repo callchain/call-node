@@ -64,3 +64,6 @@ alloy-primitives.workspace = true
 reth-db.workspace = true
 k256 = { version = "0.13", features = ["ecdsa"] }
 rand.workspace = true
+
+[dev-dependencies]
+alloy-sol-types.workspace = true

@@ -295,6 +295,8 @@ mod tests {
             slot_balance(1, from),
             u128_to_u256(1000),
         );
+        // Seed native EVM balance for CALL (asset_id=1) bridging
+        provider.balance_add(from, U256::from(1000)).unwrap();
 
         let input = IProtocolAsset::transferCall {
             assetId: 1,
@@ -387,6 +389,8 @@ mod tests {
             slot_balance(1, owner),
             u128_to_u256(1000),
         );
+        // Seed native EVM balance for CALL (asset_id=1) bridging
+        provider.balance_add(owner, U256::from(1000)).unwrap();
 
         let mut precompile = AssetPrecompile;
 

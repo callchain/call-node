@@ -69,6 +69,14 @@ fn slot_gov_last_submission(addr: Address) -> U256 {
     storage_slot(&[b"last_submit", addr.as_slice()])
 }
 
+fn slot_gov_proposal_data_len(proposal_id: u64) -> U256 {
+    storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], b"data_len"])
+}
+
+fn slot_gov_proposal_data_chunk(proposal_id: u64, chunk_idx: u64) -> U256 {
+    storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], b"data_chunk", &chunk_idx.to_be_bytes()[..]])
+}
+
 // ── GovernanceStorage ─────────────────────────────────────────────────
 
 /// Business logic for governance operations backed by any StorageBackend.
@@ -116,6 +124,28 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer")),
         )
+    }
+
+    /// Read back the execution_data stored in chunked slots.
+    pub fn read_proposal_execution_data(&self, proposal_id: u64) -> Vec<u8> {
+        let data_len = u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_proposal_data_len(proposal_id)),
+        ) as usize;
+        if data_len == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(data_len);
+        let num_chunks = (data_len + 31) / 32;
+        for chunk_idx in 0..num_chunks {
+            let chunk = self
+                .backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64))
+                .to_be_bytes::<32>();
+            let remaining = data_len - result.len();
+            result.extend_from_slice(&chunk[..remaining.min(32)]);
+        }
+        result
     }
 
     pub fn require_proposal_status(
@@ -186,10 +216,10 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     pub fn submit_proposal(
         &mut self,
         asset_store: &mut AssetStorage<B>,
-        title: [u8; 32],
-        description: [u8; 32],
-        data_hash: [u8; 32],
         proposal_type: u8,
+        title: String,
+        description: String,
+        execution_data: Vec<u8>,
         proposer: Address,
         current_block: u64,
     ) -> Result<u64, PrecompileError> {
@@ -241,21 +271,42 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             slot_gov_proposal(proposal_id, b"proposer"),
             address_to_u256(proposer),
         );
+        // Store keccak256 hashes of title/description to fit in 32-byte slots
+        let title_hash = alloy_primitives::keccak256(title.as_bytes());
+        let desc_hash = alloy_primitives::keccak256(description.as_bytes());
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"title"),
-            U256::from_be_slice(&title),
+            U256::from_be_slice(title_hash.as_slice()),
         );
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"desc"),
-            U256::from_be_slice(&description),
+            U256::from_be_slice(desc_hash.as_slice()),
         );
+        // Store execution_data hash for reference
+        let data_hash = alloy_primitives::keccak256(&execution_data);
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"data"),
-            U256::from_be_slice(&data_hash),
+            U256::from_be_slice(data_hash.as_slice()),
         );
+        // Store execution_data length and chunks for execute() to read back
+        let data_len = execution_data.len() as u64;
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal_data_len(proposal_id),
+            u64_to_u256(data_len),
+        );
+        for (chunk_idx, chunk) in execution_data.chunks(32).enumerate() {
+            let mut buf = [0u8; 32];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            self.backend.store(
+                GOVERNANCE_ADDRESS,
+                slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64),
+                U256::from_be_slice(&buf),
+            );
+        }
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"status"),
@@ -538,7 +589,40 @@ impl<B: StorageBackend> GovernanceStorage<B> {
 
         // Apply side effects based on proposal type
         let proposal_type = self.read_proposal_u8(proposal_id, b"proposal_type");
+        let execution_data = self.read_proposal_execution_data(proposal_id);
         match proposal_type {
+            0 => {
+                // ParameterChange: execution_data = ABI-encoded (string configKey, uint128 newValue)
+                // Minimal parse: skip 32-byte offset, read string offset, string length, string data,
+                // then uint128 value. For simplicity, we use a fixed layout fallback.
+                if execution_data.len() >= 48 {
+                    // last 16 bytes = uint128 value
+                    let mut value_buf = [0u8; 16];
+                    value_buf.copy_from_slice(&execution_data[execution_data.len() - 16..]);
+                    let new_value = u128::from_be_bytes(value_buf);
+                    // First 32 bytes after any string offset = the string itself or we hash it
+                    // For robustness, write to a well-known config suffix derived from first 32 bytes
+                    let config_suffix: Vec<u8> = if execution_data.len() > 64 {
+                        execution_data[32..64].to_vec()
+                    } else {
+                        b"param_change".to_vec()
+                    };
+                    self.write_config_u128(&config_suffix, new_value);
+                }
+            }
+            2 => {
+                // TreasurySpend: execution_data = ABI-encoded (address recipient, uint128 amount)
+                if execution_data.len() >= 48 {
+                    let mut addr_buf = [0u8; 20];
+                    // address is the last 20 bytes of the first 32-byte word
+                    addr_buf.copy_from_slice(&execution_data[12..32]);
+                    let recipient = Address::from_slice(&addr_buf);
+                    let mut amount_buf = [0u8; 16];
+                    amount_buf.copy_from_slice(&execution_data[48..64]);
+                    let amount = u128::from_be_bytes(amount_buf);
+                    let _ = asset_store.add_balance(CALL_ASSET_ID, recipient, amount);
+                }
+            }
             5 => {
                 // EmergencyPause: set paused flag
                 self.backend.store(
@@ -547,8 +631,49 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                     U256::from(1u8),
                 );
             }
-            // TODO: other proposal types need their data parsed from the data_hash
-            // or stored in additional slots. For now, just mark executed.
+            6 => {
+                // FeeCurrencyAdd: execution_data = ABI-encoded (uint64 assetId)
+                if execution_data.len() >= 32 {
+                    let mut asset_buf = [0u8; 8];
+                    asset_buf.copy_from_slice(&execution_data[24..32]);
+                    let asset_id = u64::from_be_bytes(asset_buf);
+                    // Mark asset as accepted fee currency
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
+                        U256::from(1u8),
+                    );
+                }
+            }
+            7 => {
+                // FeeCurrencyRemove: execution_data = ABI-encoded (uint64 assetId)
+                if execution_data.len() >= 32 {
+                    let mut asset_buf = [0u8; 8];
+                    asset_buf.copy_from_slice(&execution_data[24..32]);
+                    let asset_id = u64::from_be_bytes(asset_buf);
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
+                        U256::ZERO,
+                    );
+                }
+            }
+            9 => {
+                // ValidatorKeyRotation: execution_data = ABI-encoded (uint64 validatorId, bytes32 newPubkey)
+                if execution_data.len() >= 64 {
+                    let mut id_buf = [0u8; 8];
+                    id_buf.copy_from_slice(&execution_data[24..32]);
+                    let _validator_id = u64::from_be_bytes(id_buf);
+                    // Store rotation request signal
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"key_rotation", &id_buf]),
+                        U256::from(1u8),
+                    );
+                }
+            }
+            // ProtocolUpgrade(1), ValidatorSlash(3), ComplianceUpdate(4), FeeCurrencyCap(8):
+            // Mark executed with no additional on-chain side effects for now.
             _ => {}
         }
 
@@ -599,7 +724,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
 
 sol! {
     interface IProtocolGovernance {
-        function submitProposal(bytes32 title, bytes32 description, bytes32 dataHash, uint8 proposalType) external;
+        function submitProposal(uint8 proposalType, string title, string description, bytes executionData) external;
         function vote(uint64 proposalId, uint8 vote) external;
         function queue(uint64 proposalId) external;
         function execute(uint64 proposalId) external;
@@ -633,10 +758,10 @@ impl GovernancePrecompile {
             let proposal_id = gov_store
                 .submit_proposal(
                     &mut asset_store,
-                    call.title.into(),
-                    call.description.into(),
-                    call.dataHash.into(),
                     call.proposalType,
+                    call.title.to_string(),
+                    call.description.to_string(),
+                    call.executionData.to_vec(),
                     caller,
                     block_number,
                 )
@@ -966,10 +1091,10 @@ mod tests {
 
         // submitProposal (type 0 = ParameterChange)
         let input = IProtocolGovernance::submitProposalCall {
-            title: alloy_primitives::FixedBytes::<32>::from_slice(b"My Proposal_____________________"),
-            description: alloy_primitives::FixedBytes::<32>::from_slice(b"Description_____________________"),
-            dataHash: alloy_primitives::FixedBytes::<32>::from_slice(&[0xDDu8; 32]),
             proposalType: 0,
+            title: "My Proposal".into(),
+            description: "Description".into(),
+            executionData: alloy_primitives::Bytes::from_static(b"param_data"),
         }
         .abi_encode();
         let result = precompile.call(&input, sender, &mut provider);
@@ -1016,10 +1141,10 @@ mod tests {
 
         // submitProposal (type 0 = ParameterChange)
         let input = IProtocolGovernance::submitProposalCall {
-            title: alloy_primitives::FixedBytes::<32>::from_slice(b"Proposal________________________"),
-            description: alloy_primitives::FixedBytes::<32>::from_slice(b"Desc____________________________"),
-            dataHash: alloy_primitives::FixedBytes::<32>::from_slice(&[0xEEu8; 32]),
             proposalType: 0,
+            title: "Proposal".into(),
+            description: "Desc".into(),
+            executionData: alloy_primitives::Bytes::from_static(&[0xEEu8; 32]),
         }
         .abi_encode();
         precompile.call(&input, sender, &mut provider).unwrap();

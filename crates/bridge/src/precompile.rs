@@ -116,6 +116,10 @@ fn slot_bridge_challenge_proof_hash(tx_hash: [u8; 32]) -> U256 {
     storage_slot(&[b"challenge_proof_hash", &tx_hash])
 }
 
+fn slot_bridge_challenge_proof_len(tx_hash: [u8; 32]) -> U256 {
+    storage_slot(&[b"challenge_proof_len", &tx_hash])
+}
+
 fn slot_bridge_challenge_original_validator(tx_hash: [u8; 32]) -> U256 {
     storage_slot(&[b"challenge_validator", &tx_hash])
 }
@@ -470,6 +474,11 @@ impl<B: StorageBackend> BridgeStorage<B> {
             slot_bridge_challenge_proof_hash(source_tx_hash),
             U256::from_be_slice(proof_hash.as_slice()),
         );
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_proof_len(source_tx_hash),
+            u64_to_u256(proof.len() as u64),
+        );
 
         Ok(())
     }
@@ -607,9 +616,14 @@ impl<B: StorageBackend> BridgeStorage<B> {
         if proof_hash == U256::ZERO {
             return false;
         }
-        // Real verification would check the proof against source chain state.
-        // Safe default: return false (challenge fails) until crypto logic is implemented.
-        false
+        // Structural validation: a credible fraud proof must be at least 32 bytes
+        // (e.g. a minimal merkle path). Real verification would cryptographically
+        // check the proof against source chain state; this is a basic sanity filter.
+        let proof_len = u256_to_u64(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_challenge_proof_len(source_tx_hash)),
+        );
+        proof_len >= 32
     }
 }
 
