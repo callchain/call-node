@@ -421,7 +421,9 @@ impl call_precompile::StatefulPrecompile for SwitchPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
+        let selector: [u8; 4] = calldata[..4]
+            .try_into()
+            .expect("slice length checked above");
         match selector {
             IProtocolSwitch::switchToEvmCall::SELECTOR => {
                 self.switch_to_evm(calldata, msg_sender, storage)

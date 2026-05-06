@@ -455,8 +455,7 @@ impl StorageProvider for HashMapStorageProvider {
             .copied()
             .unwrap_or_default();
 
-        if (original == value && present != value)
-            || (present != U256::ZERO && value == U256::ZERO)
+        if (original == value && present != value) || (present != U256::ZERO && value == U256::ZERO)
         {
             self.refund_gas(4800);
         }

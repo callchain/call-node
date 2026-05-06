@@ -73,7 +73,9 @@ impl call_precompile::StatefulPrecompile for CompliancePrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
+        let selector: [u8; 4] = calldata[..4]
+            .try_into()
+            .expect("slice length checked above");
         match selector {
             IProtocolCompliance::updateComplianceCall::SELECTOR => {
                 self.update_compliance(calldata, msg_sender, storage)

@@ -23,7 +23,7 @@
     clippy::print_stderr,
     clippy::print_stdout,
     unused_imports,
-    dead_code,
+    dead_code
 )]
 
 mod circuit;

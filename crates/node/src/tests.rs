@@ -1,4 +1,3 @@
-
 use super::*;
 use call_consensus::exec::state_accessors;
 use call_consensus::BlockExecutionResult;

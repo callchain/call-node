@@ -314,7 +314,9 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
+        let selector: [u8; 4] = calldata[..4]
+            .try_into()
+            .expect("slice length checked above");
         match selector {
             IProtocolAgent::registerAgentCall::SELECTOR => {
                 self.register_agent(calldata, msg_sender, storage)

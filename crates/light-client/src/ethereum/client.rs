@@ -444,8 +444,7 @@ impl EthLightClient {
         let receipt_rlp = result.ok_or(LightClientError::ReceiptNotFound)?;
 
         // Parse the receipt RLP to extract logs
-        let logs =
-            parse_receipt_logs(&receipt_rlp).map_err(LightClientError::LogParseError)?;
+        let logs = parse_receipt_logs(&receipt_rlp).map_err(LightClientError::LogParseError)?;
 
         // Find the bridge deposit event
         let bridge_event =

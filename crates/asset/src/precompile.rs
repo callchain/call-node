@@ -319,7 +319,9 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
+        let selector: [u8; 4] = calldata[..4]
+            .try_into()
+            .expect("slice length checked above");
         match selector {
             IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata, storage),
             IProtocolAsset::getAssetInfoCall::SELECTOR => self.get_asset_info(calldata, storage),
