@@ -407,3 +407,350 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         Ok(stake)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use call_asset::AssetStorage;
+    use call_precompile::{
+        journal_backend::JournalBackend, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
+    };
+    use call_precompile::storage::{HashMapStorageProvider, StorageProvider};
+    use call_primitives::Address;
+
+    fn test_addr(n: u8) -> Address {
+        Address::repeat_byte(n)
+    }
+
+    fn seed_balance(provider: &mut HashMapStorageProvider, addr: Address, amount: u128) {
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(CALL_ASSET_ID, addr), u128_to_u256(amount))
+            .unwrap();
+    }
+
+    // ── Stake tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stake_success() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        let result = validator_store.stake(
+            &mut asset_store,
+            [0xAAu8; 32],
+            5_000_000,
+            caller,
+        );
+        assert!(result.is_ok(), "stake failed: {:?}", result.err());
+
+        assert_eq!(validator_store.read_stake(caller), 5_000_000);
+        assert_eq!(validator_store.read_status(caller), 1);
+        assert_eq!(validator_store.read_validator_id(caller), 1);
+        assert_eq!(validator_store.read_validator_count(), 1);
+        assert_eq!(validator_store.read_validator_by_index(1), caller);
+        assert_eq!(validator_store.read_pubkey(caller), [0xAAu8; 32]);
+    }
+
+    #[test]
+    fn test_stake_below_minimum() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        let result = validator_store.stake(
+            &mut asset_store,
+            [0xAAu8; 32],
+            500, // below MIN_SELF_STAKE
+            caller,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::BelowMinimumStake)),
+            "expected BelowMinimumStake, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_stake_already_staked() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+
+        let result = validator_store.stake(
+            &mut asset_store,
+            [0xBBu8; 32],
+            5_000_000,
+            caller,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::AlreadyStaked)),
+            "expected AlreadyStaked, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_stake_insufficient_balance() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 500); // less than MIN_SELF_STAKE
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        let result = validator_store.stake(
+            &mut asset_store,
+            [0xAAu8; 32],
+            5_000_000,
+            caller,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::InsufficientBalance)),
+            "expected InsufficientBalance, got {:?}",
+            result
+        );
+    }
+
+    // ── Unstake tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_unstake_success() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+
+        let result = validator_store.unstake(1, caller, 100);
+        assert!(result.is_ok(), "unstake failed: {:?}", result.err());
+
+        assert_eq!(validator_store.read_status(caller), 2); // unbonding
+        assert_eq!(validator_store.read_unbond_height(caller), 100);
+        assert_eq!(validator_store.read_unbonding_count(), 1);
+    }
+
+    #[test]
+    fn test_unstake_not_validator() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        let result = validator_store.unstake(1, caller, 100);
+        assert!(
+            matches!(result, Err(ValidatorError::NotAValidator)),
+            "expected NotAValidator, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_unstake_already_unbonding() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        let result = validator_store.unstake(1, caller, 200);
+        assert!(
+            matches!(result, Err(ValidatorError::AlreadyUnbonding)),
+            "expected AlreadyUnbonding, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_unstake_id_mismatch() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+
+        let result = validator_store.unstake(99, caller, 100);
+        assert!(
+            matches!(result, Err(ValidatorError::IdMismatch)),
+            "expected IdMismatch, got {:?}",
+            result
+        );
+    }
+
+    // ── Claim tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_claim_unbonded_success() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        let result = validator_store.claim_unbonded(
+            &mut asset_store,
+            1,
+            caller,
+            100 + UNBONDING_PERIOD_BLOCKS,
+        );
+        assert!(result.is_ok(), "claim failed: {:?}", result.err());
+
+        // State cleared
+        assert_eq!(validator_store.read_stake(caller), 0);
+        assert_eq!(validator_store.read_status(caller), 0);
+        assert_eq!(validator_store.read_validator_id(caller), 0);
+        assert_eq!(validator_store.read_unbonding_count(), 0);
+        // Balance restored
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 10_000_000);
+    }
+
+    #[test]
+    fn test_claim_unbonded_too_early() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        let result = validator_store.claim_unbonded(
+            &mut asset_store,
+            1,
+            caller,
+            100 + UNBONDING_PERIOD_BLOCKS - 1,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::UnbondingPeriodNotElapsed)),
+            "expected UnbondingPeriodNotElapsed, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_claim_unbonded_not_unbonding() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+
+        let result = validator_store.claim_unbonded(
+            &mut asset_store,
+            1,
+            caller,
+            100 + UNBONDING_PERIOD_BLOCKS,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::NotUnbonding)),
+            "expected NotUnbonding, got {:?}",
+            result
+        );
+    }
+
+    // ── Slash tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_slash_stake_success() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+
+        let result = validator_store.slash_stake(&mut asset_store, caller);
+        assert_eq!(result.unwrap(), 5_000_000);
+
+        // State cleared
+        assert_eq!(validator_store.read_stake(caller), 0);
+        assert_eq!(validator_store.read_status(caller), 0);
+        assert_eq!(validator_store.read_validator_id(caller), 0);
+    }
+
+    #[test]
+    fn test_slash_non_validator() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        let result = validator_store.slash_stake(&mut asset_store, caller);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    // ── Read tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_read_validator_by_index_out_of_range() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let validator_store = ValidatorStorage::new(backend);
+
+        assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
+    }
+}

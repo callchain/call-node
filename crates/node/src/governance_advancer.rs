@@ -7,8 +7,9 @@
 use call_consensus::exec::state_accessors as sa;
 use call_evm::provider::InMemoryStateProvider;
 use call_governance::{GovernanceEvent, ProposalState};
-use call_precompile::u64_to_u256;
+use call_precompile::{storage::storage_slot, u64_to_u256};
 use call_primitives::{Address, U256};
+use call_protocol::CALL_ASSET_ID;
 
 /// Total supply: 1B CALL * 10^18 (18 decimals)
 const TOTAL_SUPPLY: u128 = 1_000_000_000_000_000_000_000_000_000u128;
@@ -230,8 +231,36 @@ impl GovernanceAdvancer {
     }
 
     /// Apply on-chain side effects for an executed proposal.
-    fn apply_side_effects(evm_state: &mut InMemoryStateProvider, _proposal_id: u64, proposal_type: u8) {
+    /// Mirrors GovernanceStorage::execute() in crates/governance/src/precompile.rs.
+    fn apply_side_effects(evm_state: &mut InMemoryStateProvider, proposal_id: u64, proposal_type: u8) {
+        let execution_data = sa::read_gov_proposal_execution_data(evm_state, proposal_id);
         match proposal_type {
+            0 => {
+                // ParameterChange: execution_data = ABI-encoded (string configKey, uint128 newValue)
+                if execution_data.len() >= 48 {
+                    let mut value_buf = [0u8; 16];
+                    value_buf.copy_from_slice(&execution_data[execution_data.len() - 16..]);
+                    let new_value = u128::from_be_bytes(value_buf);
+                    let config_suffix: Vec<u8> = if execution_data.len() > 64 {
+                        execution_data[32..64].to_vec()
+                    } else {
+                        b"param_change".to_vec()
+                    };
+                    sa::write_gov_config_u128(evm_state, &config_suffix, new_value);
+                }
+            }
+            2 => {
+                // TreasurySpend: execution_data = ABI-encoded (address recipient, uint128 amount)
+                if execution_data.len() >= 48 {
+                    let mut addr_buf = [0u8; 20];
+                    addr_buf.copy_from_slice(&execution_data[12..32]);
+                    let recipient = Address::from_slice(&addr_buf);
+                    let mut amount_buf = [0u8; 16];
+                    amount_buf.copy_from_slice(&execution_data[48..64]);
+                    let amount = u128::from_be_bytes(amount_buf);
+                    sa::add_balance_evm(evm_state, CALL_ASSET_ID, recipient, amount);
+                }
+            }
             5 => {
                 // EmergencyPause: set paused flag
                 evm_state.set_storage(
@@ -240,13 +269,46 @@ impl GovernanceAdvancer {
                     U256::from(1u8),
                 );
             }
-            // TODO: other proposal types need additional data parsing.
-            // ParameterChange(0), ProtocolUpgrade(1), TreasurySpend(2),
-            // ValidatorSlash(3), ComplianceUpdate(4), FeeCurrency*(6,7,8),
-            // ValidatorKeyRotation(9) — all need proposal data which is currently
-            // stored as a 32-byte hash. Full side effects require either:
-            //   a) storing proposal params in additional EVM slots at submit time, or
-            //   b) having the node layer apply effects via an external executor.
+            6 => {
+                // FeeCurrencyAdd: execution_data = ABI-encoded (uint64 assetId)
+                if execution_data.len() >= 32 {
+                    let mut asset_buf = [0u8; 8];
+                    asset_buf.copy_from_slice(&execution_data[24..32]);
+                    let asset_id = u64::from_be_bytes(asset_buf);
+                    evm_state.set_storage(
+                        call_governance::precompile::GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
+                        U256::from(1u8),
+                    );
+                }
+            }
+            7 => {
+                // FeeCurrencyRemove: execution_data = ABI-encoded (uint64 assetId)
+                if execution_data.len() >= 32 {
+                    let mut asset_buf = [0u8; 8];
+                    asset_buf.copy_from_slice(&execution_data[24..32]);
+                    let asset_id = u64::from_be_bytes(asset_buf);
+                    evm_state.set_storage(
+                        call_governance::precompile::GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
+                        U256::ZERO,
+                    );
+                }
+            }
+            9 => {
+                // ValidatorKeyRotation: execution_data = ABI-encoded (uint64 validatorId, bytes32 newPubkey)
+                if execution_data.len() >= 64 {
+                    let mut id_buf = [0u8; 8];
+                    id_buf.copy_from_slice(&execution_data[24..32]);
+                    evm_state.set_storage(
+                        call_governance::precompile::GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"key_rotation", &id_buf]),
+                        U256::from(1u8),
+                    );
+                }
+            }
+            // ProtocolUpgrade(1), ValidatorSlash(3), ComplianceUpdate(4), FeeCurrencyCap(8):
+            // No additional on-chain side effects (matching precompile behavior).
             _ => {}
         }
     }
@@ -257,7 +319,7 @@ mod tests {
     use super::*;
     use call_consensus::exec::state_accessors as sa;
     use call_evm::provider::InMemoryStateProvider;
-    use call_precompile::{u64_to_u256, GOVERNANCE_ADDRESS};
+    use call_precompile::{u256_to_u128, u64_to_u256, GOVERNANCE_ADDRESS};
     use call_primitives::{Address, U256};
 
     fn test_addr(n: u8) -> Address {
@@ -561,5 +623,160 @@ mod tests {
         assert_eq!(sa::read_gov_proposal_status(&evm, 1), 1); // Active
         assert_eq!(sa::read_gov_proposal_status(&evm, 2), 2); // Queued
         assert_eq!(events.len(), 2);
+    }
+
+    // ── Side-effect tests ───────────────────────────────────────────────
+
+    fn store_execution_data(evm: &mut InMemoryStateProvider, proposal_id: u64, data: &[u8]) {
+        let data_len = data.len() as u64;
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal_data_len(proposal_id),
+            u64_to_u256(data_len),
+        );
+        for (chunk_idx, chunk) in data.chunks(32).enumerate() {
+            let mut buf = [0u8; 32];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            evm.set_storage(
+                GOVERNANCE_ADDRESS,
+                sa::slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64),
+                U256::from_be_slice(&buf),
+            );
+        }
+    }
+
+    #[test]
+    fn test_parameter_change_side_effect() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+
+        setup_proposal(&mut evm, 1, 0, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // ParameterChange execution_data: last 16 bytes = uint128 value (5000)
+        let mut exec_data = vec![0u8; 64];
+        exec_data[48..64].copy_from_slice(&5000u128.to_be_bytes());
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        // Config value should be written
+        let config_val = u256_to_u128(evm.get_storage(&GOVERNANCE_ADDRESS, sa::slot_gov_config(b"param_change")));
+        assert_eq!(config_val, 5000);
+    }
+
+    #[test]
+    fn test_treasury_spend_side_effect() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+
+        let recipient = test_addr(0xAB);
+        setup_proposal(&mut evm, 1, 2, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // TreasurySpend execution_data: bytes 12-32 = address, bytes 48-64 = amount
+        let mut exec_data = vec![0u8; 64];
+        exec_data[12..32].copy_from_slice(recipient.as_slice());
+        exec_data[48..64].copy_from_slice(&7500u128.to_be_bytes());
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        let balance = sa::read_balance(&evm, CALL_ASSET_ID, recipient);
+        assert_eq!(balance, 7500);
+    }
+
+    #[test]
+    fn test_fee_currency_add_remove_side_effects() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+
+        // FeeCurrencyAdd proposal (type 6) for asset_id = 42
+        setup_proposal(&mut evm, 1, 6, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // FeeCurrencyAdd execution_data: bytes 24-32 = uint64 assetId
+        let mut exec_data = vec![0u8; 32];
+        exec_data[24..32].copy_from_slice(&42u64.to_be_bytes());
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        let fee_slot = storage_slot(&[b"fee_currency", &42u64.to_be_bytes()[..]]);
+        let val = evm.get_storage(&GOVERNANCE_ADDRESS, fee_slot).to_be_bytes::<32>()[31];
+        assert_eq!(val, 1);
+
+        // FeeCurrencyRemove proposal (type 7) for same asset
+        setup_proposal(&mut evm, 2, 7, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 2, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(2, b"execution_block"),
+            u64_to_u256(50),
+        );
+        store_execution_data(&mut evm, 2, &exec_data);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            U256::ZERO,
+            u64_to_u256(2),
+        );
+
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 2), 3);
+        let val = evm.get_storage(&GOVERNANCE_ADDRESS, fee_slot).to_be_bytes::<32>()[31];
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn test_key_rotation_side_effect() {
+        let mut evm = InMemoryStateProvider::new();
+        sa::seed_gov_config(&mut evm);
+        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+
+        setup_proposal(&mut evm, 1, 9, 2, 0, 100, 0, 1_000_000, 0, 0);
+        sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
+        evm.set_storage(
+            GOVERNANCE_ADDRESS,
+            sa::slot_gov_proposal(1, b"execution_block"),
+            u64_to_u256(50),
+        );
+
+        // ValidatorKeyRotation execution_data: bytes 24-32 = uint64 validatorId
+        let mut exec_data = vec![0u8; 64];
+        exec_data[24..32].copy_from_slice(&7u64.to_be_bytes());
+        store_execution_data(&mut evm, 1, &exec_data);
+
+        let advancer = GovernanceAdvancer;
+        advancer.advance(&mut evm, 55);
+
+        assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
+        let rotation_slot = storage_slot(&[b"key_rotation", &7u64.to_be_bytes()[..]]);
+        let val = evm.get_storage(&GOVERNANCE_ADDRESS, rotation_slot).to_be_bytes::<32>()[31];
+        assert_eq!(val, 1);
     }
 }

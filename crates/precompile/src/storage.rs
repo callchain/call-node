@@ -595,6 +595,16 @@ impl StorageProvider for HashMapStorageProvider {
     }
 }
 
+impl call_protocol::storage_backend::StorageBackend for HashMapStorageProvider {
+    fn load(&self, address: Address, slot: U256) -> U256 {
+        self.persistent.get(&(address, slot)).copied().unwrap_or_default()
+    }
+
+    fn store(&mut self, address: Address, slot: U256, value: U256) {
+        self.persistent.insert((address, slot), value);
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]

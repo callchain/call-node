@@ -97,6 +97,14 @@ pub fn slot_gov_proposal(proposal_id: u64, suffix: &[u8]) -> U256 {
     storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], suffix])
 }
 
+pub fn slot_gov_proposal_data_len(proposal_id: u64) -> U256 {
+    storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], b"data_len"])
+}
+
+pub fn slot_gov_proposal_data_chunk(proposal_id: u64, chunk_idx: u64) -> U256 {
+    storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], b"data_chunk", &chunk_idx.to_be_bytes()[..]])
+}
+
 fn slot_gov_voter(proposal_id: u64, voter: Address) -> U256 {
     storage_slot(&[b"vote", &proposal_id.to_be_bytes()[..], voter.as_slice()])
 }
@@ -801,6 +809,25 @@ pub fn read_gov_proposal_data_hash(evm_state: &dyn ProtocolStorage, proposal_id:
     evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"data")).to_be_bytes::<32>()
 }
 
+/// Read governance proposal execution data from chunked EVM storage.
+/// Mirrors GovernanceStorage::read_proposal_execution_data in the precompile.
+pub fn read_gov_proposal_execution_data(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> Vec<u8> {
+    let data_len = u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal_data_len(proposal_id))) as usize;
+    if data_len == 0 {
+        return Vec::new();
+    }
+    let mut result = Vec::with_capacity(data_len);
+    let num_chunks = (data_len + 31) / 32;
+    for chunk_idx in 0..num_chunks {
+        let chunk = evm_state
+            .get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64))
+            .to_be_bytes::<32>();
+        let remaining = data_len - result.len();
+        result.extend_from_slice(&chunk[..remaining.min(32)]);
+    }
+    result
+}
+
 /// Read governance proposal votes from EVM storage.
 pub fn read_gov_proposal_votes(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> (u128, u128, u128) {
     let for_votes = u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_for")));
@@ -942,6 +969,11 @@ pub fn read_gov_config_proposal_cooldown(evm_state: &dyn ProtocolStorage) -> u64
 /// Write governance proposal status to EVM storage.
 pub fn write_gov_proposal_status(evm_state: &mut dyn ProtocolStorage, proposal_id: u64, status: u8) {
     evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"), U256::from(status));
+}
+
+/// Write a governance config value (u128) to EVM storage.
+pub fn write_gov_config_u128(evm_state: &mut dyn ProtocolStorage, suffix: &[u8], value: u128) {
+    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(suffix), u128_to_u256(value));
 }
 
 /// Seed governance config defaults into EVM storage.
