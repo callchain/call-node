@@ -16,7 +16,7 @@ use call_storage::reth_db::{
     db_get, db_put, db_del, db_iter_all,
     CallEvmAccounts, CallEvmStorage, CallTrieUpdates, CallBlockStateSnapshots,
     CallAccountHistory, CallStorageHistory,
-    CallAccountTrie, CallStorageTrie,
+    CallAccountTrie, CallStorageTrie, CallBlockHashByHeight,
 };
 use crate::state::EvmAccount;
 
@@ -93,9 +93,13 @@ impl DatabaseRef for EvmDb {
         Ok(Bytecode::default())
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        // Block hash is not stored in the EVM DB; return zero.
-        Ok(B256::ZERO)
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        match db_get::<CallBlockHashByHeight>(&self.db, &number.to_be_bytes())
+            .map_err(ErasedError::new)?
+        {
+            Some(bytes) if bytes.len() == 32 => Ok(B256::from_slice(&bytes)),
+            _ => Ok(B256::ZERO),
+        }
     }
 }
 
@@ -608,6 +612,27 @@ mod tests {
 
         let missing = evm_db.storage_ref(test_addr(3), U256::from(8)).expect("storage_ref missing");
         assert_eq!(missing, U256::ZERO);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_evm_db_block_hash_ref() {
+        let tmp = std::env::temp_dir().join(format!("call-evm-db-hash-test-{}", std::process::id()));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        // Save a block hash for height 42
+        let expected_hash = B256::from([0xABu8; 32]);
+        call_storage::reth_db::save_block_hash_by_height(&db, 42, &expected_hash)
+            .expect("save block hash");
+
+        let evm_db = EvmDb::new(db);
+        let hash = evm_db.block_hash_ref(42).expect("block_hash_ref");
+        assert_eq!(hash, expected_hash);
+
+        // Missing block returns zero
+        let missing = evm_db.block_hash_ref(99).expect("block_hash_ref missing");
+        assert_eq!(missing, B256::ZERO);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

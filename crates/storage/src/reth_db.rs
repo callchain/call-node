@@ -231,6 +231,18 @@ impl Table for CallBlockHashIndex {
     type Value = Vec<u8>;
 }
 
+/// Block hash by height: serialized height (u64 BE) -> serialized BlockHash
+///
+/// Enables O(1) BLOCKHASH opcode lookups without deserializing full blocks.
+#[derive(Debug)]
+pub struct CallBlockHashByHeight;
+impl Table for CallBlockHashByHeight {
+    const NAME: &'static str = "call_block_hash_by_height";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// Light client verified headers: serialized block_height -> serialized BlockHeader
 ///
 /// Stores block headers verified by the protocol light client so they
@@ -240,6 +252,19 @@ impl Table for CallBlockHashIndex {
 pub struct CallLightClientHeaders;
 impl Table for CallLightClientHeaders {
     const NAME: &'static str = "call_light_client_headers";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
+/// RPC filters: single entry b"filters" -> serialized FilterManagerState
+///
+/// Persists active eth_newFilter / eth_newBlockFilter entries across
+/// node restarts so RPC clients do not lose subscriptions.
+#[derive(Debug)]
+pub struct CallRpcFilters;
+impl Table for CallRpcFilters {
+    const NAME: &'static str = "call_rpc_filters";
     const DUPSORT: bool = false;
     type Key = Vec<u8>;
     type Value = Vec<u8>;
@@ -273,6 +298,8 @@ impl TableSet for CallTables {
                 box_info::<CallStorageTrie>,
                 box_info::<CallLightClientHeaders>,
                 box_info::<CallBlockHashIndex>,
+                box_info::<CallBlockHashByHeight>,
+                box_info::<CallRpcFilters>,
             ]
             .into_iter()
             .map(|f| f()),
@@ -446,6 +473,27 @@ pub fn load_all_light_client_headers(db: &DatabaseEnv) -> Result<std::collection
 pub fn delete_light_client_header(db: &DatabaseEnv, height: u64) -> Result<(), StorageError> {
     let key = height.to_be_bytes().to_vec();
     db_del::<CallLightClientHeaders>(db, &key)
+}
+
+/// Save a block hash by height for fast BLOCKHASH opcode lookups.
+pub fn save_block_hash_by_height(db: &DatabaseEnv, height: u64, block_hash: &call_primitives::BlockHash) -> Result<(), StorageError> {
+    let key = height.to_be_bytes().to_vec();
+    db_put::<CallBlockHashByHeight>(db, key, block_hash.0.to_vec())
+}
+
+/// Load a block hash by height for BLOCKHASH opcode lookups.
+pub fn load_block_hash_by_height(db: &DatabaseEnv, height: u64) -> Result<Option<call_primitives::BlockHash>, StorageError> {
+    let key = height.to_be_bytes().to_vec();
+    match db_get::<CallBlockHashByHeight>(db, &key)? {
+        Some(data) if data.len() == 32 => Ok(Some(call_primitives::BlockHash::from_slice(&data))),
+        _ => Ok(None),
+    }
+}
+
+/// Delete a block hash by height (used during pruning).
+pub fn delete_block_hash_by_height(db: &DatabaseEnv, height: u64) -> Result<(), StorageError> {
+    let key = height.to_be_bytes().to_vec();
+    db_del::<CallBlockHashByHeight>(db, &key)
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 
 use crate::prune::config::{snapshot_message_hash, NodeMode, PruneConfig, StateSnapshot, StateRoots};
 use crate::prune::state::PruneState;
-use crate::reth_db::{compact_db, db_del, CallConsensusBlocks, CallConsensusState, CallReceipts};
+use crate::reth_db::{compact_db, db_del, CallBlockHashByHeight, CallConsensusBlocks, CallConsensusState, CallReceipts};
 use crate::StorageError;
 use reth_db::DatabaseEnv;
 use std::path::Path;
@@ -27,6 +27,7 @@ pub fn prune_execution_traces(
     if let Some(db_env) = db {
         for h in &to_prune {
             let _ = db_del::<CallConsensusBlocks>(db_env, &height_key(*h));
+            let _ = db_del::<CallBlockHashByHeight>(db_env, &height_key(*h));
         }
     }
     let pruned = before.saturating_sub(state.trace_count());
@@ -67,6 +68,7 @@ pub fn prune_block_bodies(
     if let Some(db_env) = db {
         for h in &to_prune {
             let _ = db_del::<CallConsensusBlocks>(db_env, &height_key(*h));
+            let _ = db_del::<CallBlockHashByHeight>(db_env, &height_key(*h));
         }
     }
     let pruned = before.saturating_sub(state.body_count());
