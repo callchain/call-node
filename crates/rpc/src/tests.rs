@@ -507,4 +507,48 @@ mod tests {
         let mempool_evm_count = state.mempool.read().unwrap().evm_pool.len();
         assert_eq!(mempool_evm_count, 1);
     }
+
+    #[test]
+    fn test_filter_manager_persistence() {
+        let (tmp, db) = make_test_db();
+
+        // Create a filter manager and add a block filter
+        let fm1 = crate::handlers::state::FilterManager::new(Arc::clone(&db));
+        let id = fm1.create_filter(crate::handlers::state::Filter::Block { last_height: 42 });
+        assert_eq!(id, 1);
+
+        // Verify filter exists
+        let filter = fm1.get_filter(id).expect("filter should exist");
+        match filter {
+            crate::handlers::state::Filter::Block { last_height } => {
+                assert_eq!(last_height, 42);
+            }
+            _ => panic!("expected Block filter"),
+        }
+
+        // Drop the first manager and create a new one — should load persisted state
+        drop(fm1);
+        let fm2 = crate::handlers::state::FilterManager::new(Arc::clone(&db));
+        let loaded = fm2.get_filter(id).expect("filter should survive restart");
+        match loaded {
+            crate::handlers::state::Filter::Block { last_height } => {
+                assert_eq!(last_height, 42);
+            }
+            _ => panic!("expected Block filter after reload"),
+        }
+
+        // next_id should continue from where it left off
+        let id2 = fm2.create_filter(crate::handlers::state::Filter::Block { last_height: 100 });
+        assert_eq!(id2, 2);
+
+        // Remove filter and verify persistence
+        assert!(fm2.remove_filter(id));
+        drop(fm2);
+
+        let fm3 = crate::handlers::state::FilterManager::new(Arc::clone(&db));
+        assert!(fm3.get_filter(id).is_none(), "removed filter should not persist");
+        assert!(fm3.get_filter(id2).is_some(), "other filter should still exist");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

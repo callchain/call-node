@@ -13,7 +13,7 @@ use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
 use crate::ws::SubscriptionManager;
 use crate::handlers::helpers::{AssetInfoResponse, AgentInfoResponse, ShieldedTreeStateResponse};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::{HashMap, VecDeque, HashSet};
 use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ pub struct BlockFeeEntry {
 // ── Filter API ───────────────────────────────────────────────────────
 
 /// Filter variant for Ethereum-compatible filter API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Filter {
     /// Log filter (eth_newFilter)
     Log {
@@ -55,59 +55,106 @@ pub enum Filter {
 }
 
 /// Filter entry with metadata for TTL-based pruning.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct FilterEntry {
     filter: Filter,
     last_polled_at: u64,
 }
 
-/// In-memory filter manager for eth_newFilter / eth_getFilterChanges etc.
+/// Persistent state snapshot of the filter manager.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FilterManagerState {
+    next_id: u64,
+    filters: HashMap<u64, FilterEntry>,
+}
+
+/// Filter manager for eth_newFilter / eth_getFilterChanges etc.
+///
+/// Persists active filters to MDBX so they survive node restarts.
 pub struct FilterManager {
-    next_id: AtomicU64,
-    filters: RwLock<HashMap<u64, FilterEntry>>,
+    db_env: Arc<DatabaseEnv>,
+    state: RwLock<FilterManagerState>,
 }
 
 impl FilterManager {
-    pub fn new() -> Self {
-        Self {
-            next_id: AtomicU64::new(1),
-            filters: RwLock::new(HashMap::new()),
+    pub fn new(db_env: Arc<DatabaseEnv>) -> Self {
+        let state = Self::load_state(&db_env).unwrap_or(FilterManagerState {
+            next_id: 1,
+            filters: HashMap::new(),
+        });
+        Self { db_env, state: RwLock::new(state) }
+    }
+
+    fn load_state(db_env: &DatabaseEnv) -> Option<FilterManagerState> {
+        let bytes = call_storage::reth_db::db_get::<
+            call_storage::reth_db::CallRpcFilters,
+        >(db_env, b"filters")
+            .ok()
+            .flatten()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn save_state(&self) {
+        if let Ok(state) = self.state.read() {
+            let _ = (|| -> Result<(), Box<dyn std::error::Error>> {
+                let bytes = serde_json::to_vec(&*state)?;
+                call_storage::reth_db::db_put::<
+                    call_storage::reth_db::CallRpcFilters,
+                >(&self.db_env, b"filters".to_vec(), bytes)?;
+                Ok(())
+            })();
         }
     }
 
     pub fn create_filter(&self, filter: Filter) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if let Ok(mut f) = self.filters.write() {
-            f.insert(id, FilterEntry { filter, last_polled_at: now });
-        }
+        let id = {
+            let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            let id = state.next_id;
+            state.next_id = state.next_id.wrapping_add(1).max(1);
+            state.filters.insert(id, FilterEntry { filter, last_polled_at: now });
+            id
+        };
+        self.save_state();
         id
     }
 
     pub fn get_filter(&self, id: u64) -> Option<Filter> {
-        self.filters.read().ok().and_then(|f| f.get(&id).map(|e| e.filter.clone()))
+        self.state.read()
+            .ok()
+            .and_then(|s| s.filters.get(&id).map(|e| e.filter.clone()))
     }
 
     pub fn remove_filter(&self, id: u64) -> bool {
-        if let Ok(mut f) = self.filters.write() {
-            f.remove(&id).is_some()
-        } else {
-            false
+        let removed = {
+            let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            state.filters.remove(&id).is_some()
+        };
+        if removed {
+            self.save_state();
         }
+        removed
     }
 
     pub fn update_filter(&self, id: u64, filter: Filter) {
-        if let Ok(mut f) = self.filters.write() {
-            if let Some(entry) = f.get_mut(&id) {
+        let updated = {
+            let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = state.filters.get_mut(&id) {
                 entry.filter = filter;
                 entry.last_polled_at = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                true
+            } else {
+                false
             }
+        };
+        if updated {
+            self.save_state();
         }
     }
 
@@ -117,11 +164,17 @@ impl FilterManager {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if let Ok(mut f) = self.filters.write() {
-            f.retain(|_id, entry| {
+        let pruned = {
+            let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            let before = state.filters.len();
+            state.filters.retain(|_id, entry| {
                 let age = now.saturating_sub(entry.last_polled_at);
                 age < max_age_seconds
             });
+            before > state.filters.len()
+        };
+        if pruned {
+            self.save_state();
         }
     }
 }
@@ -225,7 +278,7 @@ impl RpcState {
             network: Arc::new(RwLock::new(None)),
             fee_history: RwLock::new(VecDeque::new()),
             block_hash_index: RwLock::new(HashMap::new()),
-            filter_manager: FilterManager::new(),
+            filter_manager: FilterManager::new(Arc::clone(&db_env)),
             sync_progress: Arc::new(RwLock::new(None)),
             db_env,
             current_proposer_addr: RwLock::new(Address::ZERO),
