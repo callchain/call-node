@@ -11,16 +11,13 @@
 
 mod server;
 
-use server::{ProverMode, ProverState, build_router};
 use call_shielded::prover::RealProver;
 use clap::Parser;
+use server::{build_router, ProverMode, ProverState};
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
-    sync::{
-        Arc, Mutex,
-        atomic::AtomicUsize,
-    },
+    sync::{atomic::AtomicUsize, Arc, Mutex},
 };
 use tracing::info;
 

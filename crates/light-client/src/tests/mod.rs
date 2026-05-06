@@ -1,7 +1,7 @@
 //! Integration tests for the light client crate.
 
 use crate::ethereum::proof::BRIDGE_DEPOSIT_EVENT_SIG;
-use crate::verifier::{make_leaf_node_rlp, verify_mpt_proof, MptError, rlp_encode_short_bytes};
+use crate::verifier::{make_leaf_node_rlp, rlp_encode_short_bytes, verify_mpt_proof, MptError};
 use crate::*;
 use alloy_primitives::{keccak256, B256};
 
@@ -12,7 +12,10 @@ fn encode_rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
         out.push(0xC0 + total as u8);
     } else {
         let len_bytes = total.to_be_bytes();
-        let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+        let skip = len_bytes
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(len_bytes.len());
         let num_len_bytes = len_bytes.len() - skip;
         out.push(0xF7 + num_len_bytes as u8);
         out.extend_from_slice(&len_bytes[skip..]);
@@ -189,7 +192,7 @@ fn test_bridge_event_parsing_from_receipt() {
     let mut topics = Vec::new();
     topics.push(rlp_encode_short_bytes(&BRIDGE_DEPOSIT_EVENT_SIG.0)); // event signature
     topics.push(rlp_encode_short_bytes(&source_tx_hash.0)); // source_tx_hash
-    // Recipient: Address padded to 32 bytes
+                                                            // Recipient: Address padded to 32 bytes
     let mut recipient_padded = [0u8; 32];
     recipient_padded[12..].copy_from_slice(recipient.as_slice());
     topics.push(rlp_encode_short_bytes(&recipient_padded));
@@ -214,18 +217,14 @@ fn test_bridge_event_parsing_from_receipt() {
 
     // Log entry: [address, topics, data]
     let address = vec![0xC0u8; 20]; // some contract address
-    let log = encode_rlp_list(&[
-        rlp_encode_short_bytes(&address),
-        topics_rlp,
-        data_rlp,
-    ]);
+    let log = encode_rlp_list(&[rlp_encode_short_bytes(&address), topics_rlp, data_rlp]);
     let logs_rlp = encode_rlp_list(&[log]);
 
     // Receipt: [status, gas_used, bloom, logs]
     let receipt_rlp = encode_rlp_list(&[
-        rlp_encode_short_bytes(&[0x01]), // status
+        rlp_encode_short_bytes(&[0x01]),       // status
         rlp_encode_short_bytes(&[0x52, 0x08]), // gas_used = 21000
-        vec![0x80], // bloom (empty)
+        vec![0x80],                            // bloom (empty)
         logs_rlp,
     ]);
 

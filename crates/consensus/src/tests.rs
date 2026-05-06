@@ -1,7 +1,7 @@
-use crate::*;
 use crate::ForkManager;
-use call_primitives::{Address, BlockHash, Hash, ProtocolVersion};
+use crate::*;
 use call_evm::EvmTransaction;
+use call_primitives::{Address, BlockHash, Hash, ProtocolVersion};
 use call_protocol::gas::FeeParams;
 
 fn test_addr(n: u8) -> Address {
@@ -31,14 +31,7 @@ fn make_test_evm_tx() -> EvmTransaction {
 fn test_block_structure_serialization() {
     let evm_tx = make_test_evm_tx();
     let evm_bytes = serde_json::to_vec(&evm_tx).unwrap();
-    let block = Block::new(
-        1,
-        BlockHash::ZERO,
-        1000,
-        1,
-        TEST_VERSION,
-        vec![evm_bytes],
-    );
+    let block = Block::new(1, BlockHash::ZERO, 1000, 1, TEST_VERSION, vec![evm_bytes]);
 
     assert_eq!(block.header.height, 1);
     assert_eq!(block.header.proposer, 1);
@@ -88,14 +81,7 @@ fn test_block_header_validate() {
 
 #[test]
 fn test_block_validate() {
-    let block = Block::new(
-        1,
-        BlockHash::repeat_byte(1),
-        1000,
-        1,
-        TEST_VERSION,
-        vec![],
-    );
+    let block = Block::new(1, BlockHash::repeat_byte(1), 1000, 1, TEST_VERSION, vec![]);
     let fm = test_fork_manager();
 
     assert!(block.validate(BlockHash::repeat_byte(1), &fm).is_ok());
@@ -106,17 +92,13 @@ fn test_block_validate() {
 fn test_block_execution_order() {
     let evm_tx = make_test_evm_tx();
     let evm_bytes = serde_json::to_vec(&evm_tx).unwrap();
-    let mut block = Block::new(
-        1,
-        BlockHash::ZERO,
-        1000,
-        1,
-        TEST_VERSION,
-        vec![evm_bytes],
-    );
+    let mut block = Block::new(1, BlockHash::ZERO, 1000, 1, TEST_VERSION, vec![evm_bytes]);
 
     let mut provider = call_evm::provider::InMemoryStateProvider::new();
-    provider.set_balance(test_addr(1), call_primitives::U256::from(100_000_000_000_000u128));
+    provider.set_balance(
+        test_addr(1),
+        call_primitives::U256::from(100_000_000_000_000u128),
+    );
     let mut fee_params = FeeParams::default();
 
     let result = block
@@ -147,14 +129,7 @@ fn test_base_fee_update_after_block() {
 
 #[test]
 fn test_system_tx_reward_distribution() {
-    let block = Block::new(
-        1,
-        BlockHash::ZERO,
-        1000,
-        1,
-        TEST_VERSION,
-        vec![],
-    );
+    let block = Block::new(1, BlockHash::ZERO, 1000, 1, TEST_VERSION, vec![]);
 
     let mut fee_params = FeeParams::default();
     let mut provider = call_evm::provider::InMemoryStateProvider::new();

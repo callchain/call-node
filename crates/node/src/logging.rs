@@ -3,19 +3,19 @@
 //! Structured logging, append-only audit log, Merkle-ized audit root,
 //! compliance report export, log rotation and retention.
 
-pub mod entry;
 pub mod audit;
-pub mod config;
 pub mod compliance;
-pub mod rotation;
+pub mod config;
+pub mod entry;
 pub mod helpers;
+pub mod rotation;
 
-pub use entry::*;
 pub use audit::*;
-pub use config::*;
 pub use compliance::*;
-pub use rotation::*;
+pub use config::*;
+pub use entry::*;
 pub use helpers::*;
+pub use rotation::*;
 
 #[cfg(test)]
 mod tests {
@@ -157,7 +157,11 @@ mod tests {
         // Timestamps should be derived from block height, not epoch zero
         // block 1 -> 1_700_000_000 + 1*2 = 1_700_000_002
         // block 2 -> 1_700_000_000 + 2*2 = 1_700_000_004
-        assert!(report[0].timestamp.contains("2023"), "timestamp should be in 2023, got {}", report[0].timestamp);
+        assert!(
+            report[0].timestamp.contains("2023"),
+            "timestamp should be in 2023, got {}",
+            report[0].timestamp
+        );
 
         // Check CSV output
         let csv = report_to_csv(&report);
@@ -177,7 +181,12 @@ mod tests {
 
         // Rotate
         rotate_log(&path).unwrap();
-        assert!(!path.exists() || std::fs::read_to_string(&path).unwrap_or_default().is_empty());
+        assert!(
+            !path.exists()
+                || std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .is_empty()
+        );
 
         let rotated = dir.join("test.1");
         assert!(rotated.exists());
@@ -256,22 +265,20 @@ mod tests {
 
     #[test]
     fn test_report_to_csv() {
-        let entries = vec![
-            ComplianceReportEntry {
-                timestamp: "2024-01-01T00:00:00Z".into(),
-                block_height: 1,
-                tx_hash: "0x01".into(),
-                tx_type: "Transfer".into(),
-                asset_id: 1,
-                asset_symbol: "CALL".into(),
-                from_address: "addr1".into(),
-                to_address: "addr2".into(),
-                amount: "100".into(),
-                fee: "1".into(),
-                agent_id: None,
-                compliance_status: "verified".into(),
-            },
-        ];
+        let entries = vec![ComplianceReportEntry {
+            timestamp: "2024-01-01T00:00:00Z".into(),
+            block_height: 1,
+            tx_hash: "0x01".into(),
+            tx_type: "Transfer".into(),
+            asset_id: 1,
+            asset_symbol: "CALL".into(),
+            from_address: "addr1".into(),
+            to_address: "addr2".into(),
+            amount: "100".into(),
+            fee: "1".into(),
+            agent_id: None,
+            compliance_status: "verified".into(),
+        }];
 
         let csv = report_to_csv(&entries);
         let lines: Vec<&str> = csv.lines().collect();

@@ -11,10 +11,10 @@
 //! - `0x207` Switch: switchToEvm, switchToProtocol
 //! - `0x209` Agent: register, grant, revoke
 
+pub mod dispatch;
+pub mod journal_backend;
 pub mod storage;
 pub mod utils;
-pub mod journal_backend;
-pub mod dispatch;
 
 pub use utils::*;
 
@@ -43,8 +43,8 @@ pub const SWITCH_ADDRESS: Address = address!("0000000000000000000000000000000000
 pub const AGENT_ADDRESS: Address = address!("0000000000000000000000000000000000000209");
 
 // Re-export types needed by external precompile implementations
-pub use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 pub use alloy_primitives::Bytes;
+pub use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 
 use alloy_primitives::{address, Address};
 use revm::context::Block;
@@ -211,7 +211,9 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
                         revm::interpreter::InstructionResult::PrecompileError
                     };
                     if !e.is_oog() {
-                        context.local_mut().set_precompile_error_context(e.to_string());
+                        context
+                            .local_mut()
+                            .set_precompile_error_context(e.to_string());
                     }
                 }
             }
@@ -255,7 +257,9 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
                         revm::interpreter::InstructionResult::PrecompileError
                     };
                     if !e.is_oog() {
-                        context.local_mut().set_precompile_error_context(e.to_string());
+                        context
+                            .local_mut()
+                            .set_precompile_error_context(e.to_string());
                     }
                 }
             }
@@ -283,6 +287,11 @@ impl CallPrecompiles {
     /// Total number of precompiles (standard + custom).
     pub fn len(&self) -> usize {
         self.standard.len() + self.custom.len()
+    }
+
+    /// Whether there are no precompiles registered.
+    pub fn is_empty(&self) -> bool {
+        self.standard.is_empty() && self.custom.is_empty()
     }
 
     /// Whether this address is a known precompile (standard or custom).

@@ -15,8 +15,7 @@ use revm::database::CacheDB;
 use revm::database_interface::{DatabaseCommit, DatabaseRef};
 
 use crate::{
-    provider::InMemoryStateProvider,
-    BlockGasTracker, EvmError, EvmTransaction, EvmExecutor,
+    provider::InMemoryStateProvider, BlockGasTracker, EvmError, EvmExecutor, EvmTransaction,
 };
 
 /// Result of executing all EVM transactions in a block.
@@ -80,7 +79,11 @@ pub fn execute_block_transactions(
 
         // Duplicate-nonce guard (block-scoped)
         if !used_evm_nonces.insert((caller, nonce)) {
-            tracing::warn!(?caller, nonce, "block_executor: duplicate evm nonce in same block, skipping");
+            tracing::warn!(
+                ?caller,
+                nonce,
+                "block_executor: duplicate evm nonce in same block, skipping"
+            );
             continue;
         }
 
@@ -95,9 +98,19 @@ pub fn execute_block_transactions(
 
         match executor.execute_tx_cached(tx, &mut cache_db, block_number, base_fee) {
             Ok((exec_result, tx_delta)) => {
-                tracing::info!(?caller, nonce, gas_used = exec_result.gas_used, success = exec_result.success, "block_executor: evm tx executed");
+                tracing::info!(
+                    ?caller,
+                    nonce,
+                    gas_used = exec_result.gas_used,
+                    success = exec_result.success,
+                    "block_executor: evm tx executed"
+                );
                 if gas_tracker.add_gas(exec_result.gas_used).is_err() {
-                    tracing::warn!(?caller, gas_used = exec_result.gas_used, "block_executor: block gas limit exceeded, skipping");
+                    tracing::warn!(
+                        ?caller,
+                        gas_used = exec_result.gas_used,
+                        "block_executor: block gas limit exceeded, skipping"
+                    );
                     continue;
                 }
                 result.evm_tx_count += 1;

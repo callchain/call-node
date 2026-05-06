@@ -6,10 +6,10 @@
 #![allow(dead_code, unreachable_pub)]
 
 use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus};
-use call_network::{InMemoryNetwork, Network, NetworkMessage, BlockAnnouncement};
+use call_mempool::Mempool;
+use call_network::{BlockAnnouncement, InMemoryNetwork, Network, NetworkMessage};
 use call_node::governance_advancer::GovernanceAdvancer;
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
-use call_mempool::Mempool;
 use call_rpc::RpcState;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -94,23 +94,18 @@ impl NodeBuilder {
 
     pub fn build(self) -> TestNode {
         let data_dir = self.data_dir.unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "call-e2e-{}-{}",
-                std::process::id(),
-                rand_id()
-            ))
+            std::env::temp_dir().join(format!("call-e2e-{}-{}", std::process::id(), rand_id()))
         });
 
         let mempool = Arc::new(RwLock::new(Mempool::new()));
 
         let mut evm_state = call_evm::provider::InMemoryStateProvider::new();
-        let mut consensus = SimplexConsensus::new(
-            ConsensusParams::default(),
-            &evm_state,
-        );
+        let mut consensus = SimplexConsensus::new(ConsensusParams::default(), &evm_state);
 
         for (addr, pubkey, stake) in &self.validator_stakes {
-            consensus.stake_validator(&mut evm_state, *addr, *pubkey, *stake).expect("stake validator");
+            consensus
+                .stake_validator(&mut evm_state, *addr, *pubkey, *stake)
+                .expect("stake validator");
         }
         consensus.refresh_proposer_subset(&evm_state);
 
@@ -119,7 +114,10 @@ impl NodeBuilder {
 
         for (asset_id, addr, amount) in &self.initial_balances {
             call_consensus::exec::state_accessors::seed_balance(
-                &mut evm_state, *asset_id, *addr, *amount,
+                &mut evm_state,
+                *asset_id,
+                *addr,
+                *amount,
             );
         }
 
@@ -127,11 +125,7 @@ impl NodeBuilder {
         let db_env = call_storage::reth_db::init_call_db(&data_dir).expect("init test db");
         evm_state.save_to_db(&db_env).expect("seed test db");
 
-        let state = Arc::new(RpcState::new(
-            db_env,
-            mempool.clone(),
-            self.chain_id,
-        ));
+        let state = Arc::new(RpcState::new(db_env, mempool.clone(), self.chain_id));
 
         TestNode {
             state,
@@ -218,25 +212,25 @@ impl TestNode {
         // Execute
         let result = {
             let mut s = self.state.write_all();
-            s.execute_block(&block, height)
-                .expect("block execution")
+            s.execute_block(&block, height).expect("block execution")
         };
         block.finalize(&result);
 
         // Commit
         {
             let mut consensus = self.consensus.write().unwrap();
-            consensus.commit_block(&block, &result).expect("commit block");
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
+            consensus
+                .commit_block(&block, &result)
+                .expect("commit block");
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
             consensus.advance_round(&mut provider);
         }
         self.last_result = Some(result.clone());
 
         // Remove confirmed transactions from mempool (only executed txs)
         {
-            let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
-                .map(|r| r.tx_hash)
-                .collect();
+            let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter().map(|r| r.tx_hash).collect();
             let mut mp = self.mempool.write().unwrap();
             mp.confirm_transactions(&evm_hashes);
         }
@@ -250,8 +244,8 @@ impl TestNode {
 
         // Advance governance proposal state machine
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-                &self.state.db_env).unwrap();
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
             let _events = GovernanceAdvancer.advance(provider.state_mut(), new_height);
             provider.state().save_to_db(&self.state.db_env).unwrap();
         }
@@ -301,8 +295,8 @@ impl TestNode {
     /// Get a balance for an address.
     pub fn balance(&self, asset_id: u64, addr: &Address) -> u128 {
         use call_consensus::exec::state_accessors;
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &self.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&self.state.db_env).unwrap();
         state_accessors::read_balance(provider.state(), asset_id, *addr)
     }
 
@@ -413,30 +407,16 @@ impl DeterministicRuntime {
     }
 
     /// Add a fresh node with optional validator stake.
-    pub fn add_validator_node(
-        &mut self,
-        validator_id: u8,
-        stake: u128,
-    ) -> Arc<RwLock<TestNode>> {
+    pub fn add_validator_node(&mut self, validator_id: u8, stake: u128) -> Arc<RwLock<TestNode>> {
         let node = NodeBuilder::new()
-            .validator(
-                test_addr(validator_id),
-                test_pubkey(validator_id),
-                stake,
-            )
+            .validator(test_addr(validator_id), test_pubkey(validator_id), stake)
             .build();
         self.simulator.add_node(node)
     }
 
     /// Add a node with initial balances.
-    pub fn add_node_with_balance(
-        &mut self,
-        addr: Address,
-        amount: u128,
-    ) -> Arc<RwLock<TestNode>> {
-        let node = NodeBuilder::new()
-            .balance(0, addr, amount)
-            .build();
+    pub fn add_node_with_balance(&mut self, addr: Address, amount: u128) -> Arc<RwLock<TestNode>> {
+        let node = NodeBuilder::new().balance(0, addr, amount).build();
         self.simulator.add_node(node)
     }
 
@@ -509,9 +489,7 @@ impl SharedTxCorpus {
     ) -> Vec<call_evm::EvmTransaction> {
         transfers
             .into_iter()
-            .map(|(receiver, _asset_id, amount)| {
-                self.make_transfer(sender, receiver, 0, amount)
-            })
+            .map(|(receiver, _asset_id, amount)| self.make_transfer(sender, receiver, 0, amount))
             .collect()
     }
 

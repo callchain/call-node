@@ -127,8 +127,7 @@ pub fn load_or_generate_identity_key(
     let hex_key = hex::encode(seed);
     // Write atomically: write to tmp, then rename
     let tmp_path = key_path.with_extension("key.tmp");
-    std::fs::write(&tmp_path, &hex_key)
-        .map_err(|e| format!("failed to write node.key: {e}"))?;
+    std::fs::write(&tmp_path, &hex_key).map_err(|e| format!("failed to write node.key: {e}"))?;
     std::fs::rename(&tmp_path, &key_path)
         .map_err(|e| format!("failed to persist node.key: {e}"))?;
     tracing::info!(peer_id = %hex::encode(key.public_key().as_ref()), path = ?key_path, "generated and persisted new identity key");

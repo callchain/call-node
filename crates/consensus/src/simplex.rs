@@ -41,8 +41,7 @@ impl SimplexConsensus {
         let active = Self::qualified_validators_internal(evm_state, &params);
         let pubkeys = Self::build_pubkey_map_internal(evm_state);
         let seed = derive_vrf_seed(&BlockHash::ZERO, 0);
-        let proposer_subset =
-            select_proposer_subset(&active, &pubkeys, &seed, params.subset_size);
+        let proposer_subset = select_proposer_subset(&active, &pubkeys, &seed, params.subset_size);
 
         Self {
             params,
@@ -63,8 +62,7 @@ impl SimplexConsensus {
         let active = Self::qualified_validators_internal(evm_state, &params);
         let pubkeys = Self::build_pubkey_map_internal(evm_state);
         let seed = derive_vrf_seed(&BlockHash::ZERO, 0);
-        let proposer_subset =
-            select_proposer_subset(&active, &pubkeys, &seed, params.subset_size);
+        let proposer_subset = select_proposer_subset(&active, &pubkeys, &seed, params.subset_size);
 
         Self {
             params,
@@ -81,7 +79,7 @@ impl SimplexConsensus {
         evm_state: &impl ProtocolStorage,
     ) -> std::collections::HashMap<ValidatorId, call_primitives::Ed25519PublicKey> {
         use crate::exec::state_accessors::{
-            read_validator_count, read_validator_addr, read_validator_pubkey,
+            read_validator_addr, read_validator_count, read_validator_pubkey,
         };
         let count = read_validator_count(evm_state);
         let mut map = std::collections::HashMap::new();
@@ -120,7 +118,9 @@ impl SimplexConsensus {
         if amount < self.params.min_self_stake {
             return Err(ConsensusError::InsufficientStake);
         }
-        let id = self.executor.stake_validator(evm_state, address, pubkey, amount);
+        let id = self
+            .executor
+            .stake_validator(evm_state, address, pubkey, amount);
         Ok(id)
     }
 
@@ -200,7 +200,7 @@ impl SimplexConsensus {
     /// validators processed per epoch is capped by `churn_limit`.
     fn process_epoch_churn(&self, evm_state: &mut impl ProtocolStorage) {
         use crate::exec::state_accessors::{
-            read_validator_count, read_validator_addr, read_validator_status,
+            read_validator_addr, read_validator_count, read_validator_status,
             read_validator_unbond_height, remove_validator_evm,
         };
 
@@ -328,7 +328,8 @@ impl SimplexConsensus {
         evm_state: &mut impl ProtocolStorage,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
-        let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
+        let addr =
+            crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
         if addr == Address::ZERO {
             return Err(ConsensusError::ValidatorNotFound(validator_id));
         }
@@ -345,7 +346,8 @@ impl SimplexConsensus {
         validator_id: ValidatorId,
         rounds_offline: u64,
     ) -> Result<u128, ConsensusError> {
-        let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
+        let addr =
+            crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
         if addr == Address::ZERO {
             return Err(ConsensusError::ValidatorNotFound(validator_id));
         }
@@ -366,14 +368,18 @@ impl SimplexConsensus {
         evm_state: &mut impl ProtocolStorage,
         validator_id: ValidatorId,
     ) -> Result<u128, ConsensusError> {
-        let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
+        let addr =
+            crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
         if addr == Address::ZERO {
             return Err(ConsensusError::ValidatorNotFound(validator_id));
         }
         let self_stake = crate::exec::state_accessors::read_validator_stake(evm_state, addr);
         let slashed = (self_stake * 10) / 10_000; // 0.1%
         self.executor.slash_oracle_outlier(evm_state, addr, slashed);
-        warn!(validator_id, slashed, "slashed validator for oracle outlier");
+        warn!(
+            validator_id,
+            slashed, "slashed validator for oracle outlier"
+        );
         Ok(slashed)
     }
 
@@ -385,12 +391,14 @@ impl SimplexConsensus {
         amount: u128,
     ) -> Result<(), ConsensusError> {
         if amount > 0 {
-            let addr = crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
+            let addr =
+                crate::exec::state_accessors::read_validator_addr(evm_state, validator_id as u64);
             if addr == Address::ZERO {
                 warn!(validator_id, "validator not found, skipping oracle reward");
                 return Ok(());
             }
-            self.executor.distribute_oracle_reward(evm_state, addr, amount);
+            self.executor
+                .distribute_oracle_reward(evm_state, addr, amount);
         }
         Ok(())
     }
@@ -398,7 +406,7 @@ impl SimplexConsensus {
     /// Get active validator IDs from EVM storage.
     pub fn active_validators(&self, evm_state: &impl ProtocolStorage) -> Vec<ValidatorId> {
         use crate::exec::state_accessors::{
-            read_validator_count, read_validator_addr, read_validator_status,
+            read_validator_addr, read_validator_count, read_validator_status,
         };
         let count = read_validator_count(evm_state);
         let mut active = Vec::new();
@@ -417,7 +425,7 @@ impl SimplexConsensus {
         params: &ConsensusParams,
     ) -> Vec<ValidatorId> {
         use crate::exec::state_accessors::{
-            read_validator_count, read_validator_addr, read_validator_stake, read_validator_status,
+            read_validator_addr, read_validator_count, read_validator_stake, read_validator_status,
         };
         let count = read_validator_count(evm_state);
         let mut qualified = Vec::new();
@@ -434,10 +442,7 @@ impl SimplexConsensus {
     }
 
     /// Get qualified validator IDs (stake ≥ MIN_SELF_STAKE, active).
-    pub fn qualified_validators(
-        &self,
-        evm_state: &impl ProtocolStorage,
-    ) -> Vec<ValidatorId> {
+    pub fn qualified_validators(&self, evm_state: &impl ProtocolStorage) -> Vec<ValidatorId> {
         Self::qualified_validators_internal(evm_state, &self.params)
     }
 }
@@ -491,9 +496,9 @@ impl SimplexConsensus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_primitives::{Address, Ed25519PublicKey};
-    use call_evm::provider::InMemoryStateProvider;
     use crate::exec::state_accessors::seed_validator;
+    use call_evm::provider::InMemoryStateProvider;
+    use call_primitives::{Address, Ed25519PublicKey};
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -571,7 +576,9 @@ mod tests {
         let (mut consensus, mut evm) = make_test_consensus(100);
         let validator_id = 1; // IDs are 1-based in EVM storage
 
-        let slashed = consensus.handle_double_sign(&mut evm, validator_id).unwrap();
+        let slashed = consensus
+            .handle_double_sign(&mut evm, validator_id)
+            .unwrap();
         assert_eq!(slashed, one_million_call());
 
         // Validator should be removed from the active set after double-sign slash
@@ -644,7 +651,8 @@ mod tests {
     #[test]
     fn test_epoch_churn_auto_exits_unbonding_validators() {
         use crate::exec::state_accessors::{
-            read_validator_status, read_validator_stake, seed_validator, set_validator_unbond_height,
+            read_validator_stake, read_validator_status, seed_validator,
+            set_validator_unbond_height,
         };
 
         let mut evm = InMemoryStateProvider::new();
@@ -685,7 +693,11 @@ mod tests {
         // Other validators should still be active
         for i in [1, 2, 4, 5] {
             let addr = test_addr(i as u8);
-            assert_eq!(read_validator_status(&evm, addr), 1, "validator {i} should still be active");
+            assert_eq!(
+                read_validator_status(&evm, addr),
+                1,
+                "validator {i} should still be active"
+            );
             assert!(read_validator_stake(&evm, addr) > 0);
         }
     }
@@ -727,7 +739,9 @@ mod tests {
         }
 
         // Should not exceed churn limit
-        assert_eq!(exited, churn_limit, "epoch churn should respect churn limit");
+        assert_eq!(
+            exited, churn_limit,
+            "epoch churn should respect churn limit"
+        );
     }
-
 }

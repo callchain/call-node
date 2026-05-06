@@ -9,7 +9,9 @@ use crate::p2p::wire::{decode_with_channel, encode_with_channel};
 use commonware_codec::extensions::DecodeExt;
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
-use commonware_p2p::{Address, AddressableManager, Blocker, PeerSetUpdate, Provider, Receiver, Recipients, Sender};
+use commonware_p2p::{
+    Address, AddressableManager, Blocker, PeerSetUpdate, Provider, Receiver, Recipients, Sender,
+};
 use commonware_runtime::{IoBuf, Metrics, Quota, Runner, Spawner};
 use commonware_utils::ordered::Map;
 use std::net::SocketAddr;
@@ -34,7 +36,9 @@ use std::time::Duration;
 /// ```
 pub struct CommonwareNetwork {
     /// Sender for outgoing messages
-    sender: tokio::sync::Mutex<p2p_lookup::Sender<ed25519::PublicKey, commonware_runtime::tokio::Context>>,
+    sender: tokio::sync::Mutex<
+        p2p_lookup::Sender<ed25519::PublicKey, commonware_runtime::tokio::Context>,
+    >,
     /// Receiver for incoming messages (wrapped in async mutex)
     receiver: tokio::sync::Mutex<p2p_lookup::Receiver<ed25519::PublicKey>>,
     /// Oracle for peer management
@@ -59,7 +63,8 @@ pub struct CommonwareNetwork {
     /// Known peers address book: hex(peer_id) -> SocketAddr (includes bootstrap + discovered)
     known_peers: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, SocketAddr>>>,
     /// Last PEX received timestamp per peer (rate limiting)
-    pex_last_received: Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    pex_last_received:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// PEX configuration fields
     enable_peer_exchange: bool,
     auto_connect_discovered: bool,
@@ -93,7 +98,11 @@ impl CommonwareNetwork {
         let listen_addr = config.listen_addr;
         let bootstrap_peers = Arc::new(tokio::sync::RwLock::new(config.bootstrap_peers.clone()));
         let known_peers = Arc::new(tokio::sync::RwLock::new(
-            config.bootstrap_peers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>()
+            config
+                .bootstrap_peers
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeMap<_, _>>(),
         ));
 
         // Channels for returning initialized components and shutdown signal
@@ -111,16 +120,24 @@ impl CommonwareNetwork {
 
                 // Build P2P config with the provided signer
                 let p2p_cfg = if cfg.allow_private_ips {
-                    P2PConfig::local(signer, &cfg.namespace, cfg.listen_addr, cfg.max_message_size)
+                    P2PConfig::local(
+                        signer,
+                        &cfg.namespace,
+                        cfg.listen_addr,
+                        cfg.max_message_size,
+                    )
                 } else {
-                    P2PConfig::recommended(signer, &cfg.namespace, cfg.listen_addr, cfg.max_message_size)
+                    P2PConfig::recommended(
+                        signer,
+                        &cfg.namespace,
+                        cfg.listen_addr,
+                        cfg.max_message_size,
+                    )
                 };
 
                 // Create network
-                let (mut network, mut oracle) = p2p_lookup::Network::new(
-                    context.with_label("network"),
-                    p2p_cfg,
-                );
+                let (mut network, mut oracle) =
+                    p2p_lookup::Network::new(context.with_label("network"), p2p_cfg);
 
                 // Register bootstrap peers using commonware_utils::ordered::Map
                 if !cfg.bootstrap_peers.is_empty() {
@@ -148,12 +165,17 @@ impl CommonwareNetwork {
 
                 // Collect initial peer info
                 let peers = Arc::new(tokio::sync::RwLock::new(
-                    cfg.bootstrap_peers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
+                    cfg.bootstrap_peers
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
                 ));
 
                 // Subscribe to peer set changes — use actual addresses from the update
                 let peers_clone = peers.clone();
-                let mut subscription: tokio::sync::mpsc::UnboundedReceiver<PeerSetUpdate<ed25519::PublicKey>> = oracle.subscribe().await;
+                let mut subscription: tokio::sync::mpsc::UnboundedReceiver<
+                    PeerSetUpdate<ed25519::PublicKey>,
+                > = oracle.subscribe().await;
                 let _subscribe_handle = context.clone().spawn(move |_ctx| async move {
                     while let Some(update) = subscription.recv().await {
                         let mut peers_guard = peers_clone.write().await;
@@ -162,7 +184,9 @@ impl CommonwareNetwork {
                         for pk in all.into_iter() {
                             // Find the peer's address from the tracked bootstrap config
                             let pk_hex = hex::encode(pk.as_ref());
-                            let addr = cfg.bootstrap_peers.iter()
+                            let addr = cfg
+                                .bootstrap_peers
+                                .iter()
                                 .find(|(id, _)| *id == pk_hex)
                                 .map(|(_, a)| *a)
                                 .unwrap_or(listen_addr);
@@ -189,7 +213,10 @@ impl CommonwareNetwork {
                                 if let Ok(pk_bytes) = hex::decode(peer_id) {
                                     if let Ok(pk) = ed25519::PublicKey::decode(&*pk_bytes) {
                                         let peer_map: Map<ed25519::PublicKey, Address> =
-                                            Map::from_iter_dedup(vec![(pk, Address::Symmetric(*addr))]);
+                                            Map::from_iter_dedup(vec![(
+                                                pk,
+                                                Address::Symmetric(*addr),
+                                            )]);
                                         oracle_clone.track(0, peer_map).await;
                                     }
                                 }
@@ -435,16 +462,16 @@ impl Network for CommonwareNetwork {
     async fn receive(&self) -> Result<(String, u64, Vec<u8>), NetworkError> {
         loop {
             let mut receiver = self.receiver.lock().await;
-            let (public_key, io_buf) = receiver.recv().await.map_err(|e| {
-                NetworkError::NetworkError(format!("receive failed: {e}"))
-            })?;
+            let (public_key, io_buf) = receiver
+                .recv()
+                .await
+                .map_err(|e| NetworkError::NetworkError(format!("receive failed: {e}")))?;
 
             let peer_id = hex::encode(public_key.as_ref());
             let data: &[u8] = io_buf.as_ref();
 
-            let (channel, payload) = decode_with_channel(data).ok_or_else(|| {
-                NetworkError::NetworkError("empty message received".into())
-            })?;
+            let (channel, payload) = decode_with_channel(data)
+                .ok_or_else(|| NetworkError::NetworkError("empty message received".into()))?;
 
             // Apply gossip rate limiting per peer only to transaction propagation
             // (channel 1). Exempt block announcements, sync, oracle, and upgrade
@@ -512,18 +539,18 @@ impl Network for CommonwareNetwork {
             if let Some((pid, _)) = found {
                 (pid, addr)
             } else {
-                return Err(NetworkError::NetworkError(
-                    format!("address '{address}' not in bootstrap peers — use 'peer_id@host:port' format"),
-                ));
+                return Err(NetworkError::NetworkError(format!(
+                    "address '{address}' not in bootstrap peers — use 'peer_id@host:port' format"
+                )));
             }
         };
 
-        let pk_bytes = hex::decode(&peer_id_hex).map_err(|e| {
-            NetworkError::NetworkError(format!("invalid peer_id: {e}"))
-        })?;
-        let public_key = ed25519::PublicKey::decode(&*pk_bytes).map_err(|_| {
-            NetworkError::PeerNotFound { peer_id: peer_id_hex.clone() }
-        })?;
+        let pk_bytes = hex::decode(&peer_id_hex)
+            .map_err(|e| NetworkError::NetworkError(format!("invalid peer_id: {e}")))?;
+        let public_key =
+            ed25519::PublicKey::decode(&*pk_bytes).map_err(|_| NetworkError::PeerNotFound {
+                peer_id: peer_id_hex.clone(),
+            })?;
 
         let peer_map: Map<ed25519::PublicKey, Address> =
             Map::from_iter_dedup(vec![(public_key, Address::Symmetric(addr))]);
@@ -533,7 +560,10 @@ impl Network for CommonwareNetwork {
         self.peers.write().await.insert(peer_id_hex.clone(), addr);
 
         // Also add to known_peers address book
-        self.known_peers.write().await.insert(peer_id_hex.clone(), addr);
+        self.known_peers
+            .write()
+            .await
+            .insert(peer_id_hex.clone(), addr);
 
         // Register peer with gossip manager for rate limiting
         let _ = self.gossip.lock().await.add_peer(peer_id_hex);
@@ -545,12 +575,12 @@ impl Network for CommonwareNetwork {
         let mut oracle = self.oracle.lock().await;
 
         // Decode peer_id as public key and block
-        let pk_bytes = hex::decode(peer_id).map_err(|e| {
-            NetworkError::NetworkError(format!("invalid peer_id: {e}"))
-        })?;
-        let public_key = ed25519::PublicKey::decode(&*pk_bytes).map_err(|_| {
-            NetworkError::PeerNotFound { peer_id: peer_id.to_string() }
-        })?;
+        let pk_bytes = hex::decode(peer_id)
+            .map_err(|e| NetworkError::NetworkError(format!("invalid peer_id: {e}")))?;
+        let public_key =
+            ed25519::PublicKey::decode(&*pk_bytes).map_err(|_| NetworkError::PeerNotFound {
+                peer_id: peer_id.to_string(),
+            })?;
 
         oracle.block(public_key).await;
         self.peers.write().await.remove(peer_id);

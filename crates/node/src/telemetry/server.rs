@@ -12,8 +12,8 @@ use axum::{
 };
 use tokio::net::TcpListener;
 
-use super::alert::HealthState;
 use super::alert::db_heartbeat;
+use super::alert::HealthState;
 use super::registry::TelemetryRegistry;
 
 /// Start the Prometheus /metrics HTTP server on the configured address.
@@ -44,20 +44,19 @@ pub async fn start_metrics_server(
     Ok(bound)
 }
 
-async fn metrics_handler(
-    State(registry): State<Arc<TelemetryRegistry>>,
-) -> impl IntoResponse {
+async fn metrics_handler(State(registry): State<Arc<TelemetryRegistry>>) -> impl IntoResponse {
     let body = registry.prometheus_output();
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
         .into_response()
 }
 
-async fn health_handler(
-    State(state): State<HealthState>,
-) -> impl IntoResponse {
+async fn health_handler(State(state): State<HealthState>) -> impl IntoResponse {
     use axum::Json;
     let mut checks: HashMap<&str, String> = HashMap::new();
     let mut healthy = true;

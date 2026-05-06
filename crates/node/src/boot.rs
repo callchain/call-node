@@ -3,14 +3,16 @@
 //! parse config → init logging → open DB → load genesis → init P2P →
 //! connect seeds → init consensus → start RPC → sync/participate
 
-use crate::config::{NodeConfig, NodeMode, parse_bootstrap_peers};
+use crate::config::{parse_bootstrap_peers, NodeConfig, NodeMode};
 use crate::CallNode;
 use call_consensus::SimplexConsensus;
-use call_network::{CommonwareConfig, NetworkLimits, load_or_generate_identity_key};
+use call_crypto::{
+    bls_generate, bls_public_key_bytes, load_key as load_keystore_key, LocalSigner, SignerRef,
+};
+use call_network::{load_or_generate_identity_key, CommonwareConfig, NetworkLimits};
 use call_rpc::RpcConfig;
-use call_crypto::{LocalSigner, SignerRef, load_key as load_keystore_key, bls_generate, bls_public_key_bytes};
-use commonware_cryptography::ed25519;
 use commonware_codec::extensions::DecodeExt;
+use commonware_cryptography::ed25519;
 use rand::rngs::OsRng;
 use std::sync::Arc;
 use tracing::info;
@@ -62,14 +64,15 @@ async fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<Signe
             .map_err(|e| format!("invalid validator key: {e}"))?;
         Ok(Arc::new(signer))
     } else if let Some(ref hex_key) = keys.validator_key {
-        let signer = LocalSigner::from_hex(hex_key)
-            .map_err(|e| format!("invalid validator key: {e}"))?;
+        let signer =
+            LocalSigner::from_hex(hex_key).map_err(|e| format!("invalid validator key: {e}"))?;
         info!("WARNING: using plaintext validator key — use --validator-keystore for production");
         Ok(Arc::new(signer))
     } else if let Some(ref key_id) = keys.aws_kms_key_id {
         #[cfg(feature = "aws-kms")]
         {
-            let signer = call_crypto::AwsKmsSigner::new(key_id.clone()).await
+            let signer = call_crypto::AwsKmsSigner::new(key_id.clone())
+                .await
                 .map_err(|e| format!("failed to create AWS KMS signer: {e}"))?;
             Ok(Arc::new(signer))
         }
@@ -81,11 +84,13 @@ async fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<Signe
     } else if let Some(ref vault_addr) = keys.vault_addr {
         #[cfg(feature = "hashi-vault")]
         {
-            let token = keys.vault_token.clone()
-                .ok_or("--vault-token required")?;
-            let key_name = keys.vault_key_name.clone()
+            let token = keys.vault_token.clone().ok_or("--vault-token required")?;
+            let key_name = keys
+                .vault_key_name
+                .clone()
                 .ok_or("--vault-key-name required")?;
-            let signer = call_crypto::HashiVaultSigner::new(vault_addr.clone(), token, key_name).await
+            let signer = call_crypto::HashiVaultSigner::new(vault_addr.clone(), token, key_name)
+                .await
                 .map_err(|e| format!("failed to create Vault signer: {e}"))?;
             Ok(Arc::new(signer))
         }
@@ -113,8 +118,10 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     // Pre-load genesis to extract chain_id before node creation
     let preloaded_genesis = if let Some(ref genesis_path) = config.genesis.path {
         info!(path = ?genesis_path, "pre-loading genesis for chain_id");
-        Some(call_chainspec::Genesis::load_from_file(genesis_path)
-            .map_err(|e| format!("failed to load genesis: {e}"))?)
+        Some(
+            call_chainspec::Genesis::load_from_file(genesis_path)
+                .map_err(|e| format!("failed to load genesis: {e}"))?,
+        )
     } else {
         None
     };
@@ -126,7 +133,8 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     node.snapshot_retention_blocks = config.storage.snapshot_retention_blocks;
 
     // Wire governance auth config
-    node.state.set_governance_auth(config.governance.require_auth);
+    node.state
+        .set_governance_auth(config.governance.require_auth);
 
     // Step 2b: Initialize shielded ZK prover (production keys if compiled with production-keys feature)
     #[cfg(feature = "production-keys")]
@@ -147,23 +155,36 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         *node.state.signer.write().map_err(|_| "lock poisoned")? = Some(signer);
 
         // Generate BLS12-381 keypair for aggregated vote signing
-        let (bls_secret, bls_pubkey) = bls_generate()
-            .map_err(|e| format!("failed to generate BLS keypair: {e}"))?;
-        *node.state.bls_secret_key.write().map_err(|_| "lock poisoned")? = Some(bls_secret);
+        let (bls_secret, bls_pubkey) =
+            bls_generate().map_err(|e| format!("failed to generate BLS keypair: {e}"))?;
+        *node
+            .state
+            .bls_secret_key
+            .write()
+            .map_err(|_| "lock poisoned")? = Some(bls_secret);
 
         // Register BLS pubkey with the validator state in EVM storage if this validator is known
         {
             let signer_guard = node.state.signer.read().map_err(|_| "lock poisoned")?;
             if let Some(ref s) = *signer_guard {
                 let validator_addr = s.address();
-                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                let mut provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
                 let validator_id = call_consensus::exec::state_accessors::read_validator_id_by_addr(
-                    provider.state(), validator_addr);
+                    provider.state(),
+                    validator_addr,
+                );
                 if validator_id != 0 {
                     call_consensus::exec::state_accessors::set_validator_bls_pubkey(
-                        provider.state_mut(), validator_addr, bls_public_key_bytes(&bls_pubkey));
+                        provider.state_mut(),
+                        validator_addr,
+                        bls_public_key_bytes(&bls_pubkey),
+                    );
                     provider.state().save_to_db(&node.state.db_env).unwrap();
-                    info!(validator_id = validator_id, "registered BLS pubkey for validator in EVM storage");
+                    info!(
+                        validator_id = validator_id,
+                        "registered BLS pubkey for validator in EVM storage"
+                    );
                 }
             }
         }
@@ -180,25 +201,35 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             );
 
             let executor = call_chainspec::GenesisExecutor::new(genesis.clone());
-            let genesis_state = executor.execute()
+            let genesis_state = executor
+                .execute()
                 .map_err(|e| format!("failed to execute genesis: {e}"))?;
 
             // Build consensus before moving genesis EVM state into RpcState
-            let new_consensus = SimplexConsensus::new(genesis.consensus_params.clone(), &genesis_state.evm_state);
+            let new_consensus =
+                SimplexConsensus::new(genesis.consensus_params.clone(), &genesis_state.evm_state);
             // Inject genesis state into RpcState
-            genesis_state.evm_state.save_to_db(&node.state.db_env).unwrap();
+            genesis_state
+                .evm_state
+                .save_to_db(&node.state.db_env)
+                .unwrap();
 
             *node.consensus.write().map_err(|_| "lock poisoned")? = new_consensus;
 
             // Sync consensus params into RpcState
             {
                 let consensus = node.consensus.read().map_err(|_| "lock poisoned")?;
-                *node.state.consensus_params.write().map_err(|_| "lock poisoned")? = *consensus.params();
+                *node
+                    .state
+                    .consensus_params
+                    .write()
+                    .map_err(|_| "lock poisoned")? = *consensus.params();
             }
 
             // Seed governance config defaults into EVM
             {
-                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+                let mut provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
                 call_consensus::exec::state_accessors::seed_gov_config(provider.state_mut());
                 provider.state().save_to_db(&node.state.db_env).unwrap();
             }
@@ -213,7 +244,10 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
 
     // Step 4: Init P2P and connect seeds
     info!(listen = %config.p2p.listen_addr, "step 4: initializing P2P");
-    let identity_key = load_or_generate_identity_key(&config.storage.data_dir, config.keys.identity_key.as_deref())?;
+    let identity_key = load_or_generate_identity_key(
+        &config.storage.data_dir,
+        config.keys.identity_key.as_deref(),
+    )?;
     let bootstrap = parse_bootstrap_peers(&config.p2p.bootstrap_peers);
     // Default: validators reject private IPs (production semantics); full/archive nodes accept them.
     // Operators can override via `[p2p] allow_private_ips = true` (required for local devnets where
@@ -228,7 +262,11 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         max_message_size: 10 * 1024 * 1024,
         allow_private_ips,
         namespace: b"callchain".to_vec(),
-        min_healthy_peers: if config.mode == NodeMode::Validator { 1 } else { 0 },
+        min_healthy_peers: if config.mode == NodeMode::Validator {
+            1
+        } else {
+            0
+        },
         limits: NetworkLimits::default(),
         ..Default::default()
     };
@@ -282,14 +320,23 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 // the consensus network try to dial nodes that aren't running a
                 // BFT engine at all.
                 let validator_pubkeys: std::collections::HashSet<Vec<u8>> = {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-                    let count = call_consensus::exec::state_accessors::read_validator_count(provider.state());
+                    let provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env)
+                            .unwrap();
+                    let count = call_consensus::exec::state_accessors::read_validator_count(
+                        provider.state(),
+                    );
                     let mut set = std::collections::HashSet::new();
                     for id in 1..=count {
-                        let addr = call_consensus::exec::state_accessors::read_validator_addr(provider.state(), id);
+                        let addr = call_consensus::exec::state_accessors::read_validator_addr(
+                            provider.state(),
+                            id,
+                        );
                         if addr != call_primitives::Address::ZERO {
                             let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
-                                provider.state(), addr);
+                                provider.state(),
+                                addr,
+                            );
                             set.insert(pk.to_vec());
                         }
                     }
@@ -333,11 +380,11 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                     .collect();
                 info!(
                     bft_peers = bft_bootstrap_peers.len(),
-                    consensus_p2p_port,
-                    "BFT consensus P2P bootstrap peers configured"
+                    consensus_p2p_port, "BFT consensus P2P bootstrap peers configured"
                 );
 
-                let _handle = node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers);
+                let _handle =
+                    node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers);
             }
         }
         NodeMode::Full | NodeMode::Archive => {

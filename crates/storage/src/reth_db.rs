@@ -10,14 +10,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use reth_db::cursor::DbCursorRW;
 use reth_db::mdbx::{init_db_for, DatabaseArguments};
 use reth_db::DatabaseEnv;
-use reth_db_api::table::{Table, TableInfo};
-use reth_db_api::{TableSet, DatabaseError};
-use reth_db_api::database::Database;
-use reth_db_api::transaction::{DbTx, DbTxMut};
-use reth_db::cursor::DbCursorRW;
 use reth_db_api::cursor::DbCursorRO;
+use reth_db_api::database::Database;
+use reth_db_api::table::{Table, TableInfo};
+use reth_db_api::transaction::{DbTx, DbTxMut};
+use reth_db_api::{DatabaseError, TableSet};
 
 use crate::StorageError;
 
@@ -364,7 +364,10 @@ pub fn db_put<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
 }
 
 /// Read a value from a table by key within a transaction.
-pub fn db_get<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+pub fn db_get<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
+    db: &DatabaseEnv,
+    key: &[u8],
+) -> Result<Option<Vec<u8>>, StorageError> {
     let tx = db.tx().map_err(db_err)?;
     let mut cursor = tx.cursor_read::<T>().map_err(db_err)?;
     let value = cursor.seek_exact(key.to_vec()).map_err(db_err)?;
@@ -372,7 +375,10 @@ pub fn db_get<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv, key: &
 }
 
 /// Delete a key from a table within a transaction.
-pub fn db_del<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv, key: &[u8]) -> Result<(), StorageError> {
+pub fn db_del<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
+    db: &DatabaseEnv,
+    key: &[u8],
+) -> Result<(), StorageError> {
     let tx = db.tx_mut().map_err(db_err)?;
     let mut cursor = tx.cursor_write::<T>().map_err(db_err)?;
     if cursor.seek_exact(key.to_vec()).map_err(db_err)?.is_some() {
@@ -383,7 +389,10 @@ pub fn db_del<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv, key: &
 }
 
 /// Iterate all key-value pairs in a table, collecting them.
-pub fn db_iter_all<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+#[allow(clippy::type_complexity)]
+pub fn db_iter_all<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
+    db: &DatabaseEnv,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
     let tx = db.tx().map_err(db_err)?;
     let mut cursor = tx.cursor_read::<T>().map_err(db_err)?;
     let mut results = Vec::new();
@@ -430,7 +439,9 @@ pub fn db_batch_put<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
 }
 
 /// Clear all entries in a table (used before full state reload).
-pub fn db_clear<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv) -> Result<(), StorageError> {
+pub fn db_clear<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
+    db: &DatabaseEnv,
+) -> Result<(), StorageError> {
     let tx = db.tx_mut().map_err(db_err)?;
     let mut cursor = tx.cursor_write::<T>().map_err(db_err)?;
     while cursor.first().map_err(db_err)?.is_some() {
@@ -443,7 +454,10 @@ pub fn db_clear<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(db: &DatabaseEnv) -> R
 // ── Convenience Methods for Each Table ────────────────────────────────
 
 /// Save prune state to the database.
-pub fn save_prune_state(db: &DatabaseEnv, state: &crate::prune::PruneState) -> Result<(), StorageError> {
+pub fn save_prune_state(
+    db: &DatabaseEnv,
+    state: &crate::prune::PruneState,
+) -> Result<(), StorageError> {
     let data = serde_json::to_vec(state).map_err(|e| StorageError::Serialization(e.to_string()))?;
     db_put::<CallPruneState>(db, vec![0], data)
 }
@@ -451,19 +465,28 @@ pub fn save_prune_state(db: &DatabaseEnv, state: &crate::prune::PruneState) -> R
 /// Load prune state from the database.
 pub fn load_prune_state(db: &DatabaseEnv) -> Result<crate::prune::PruneState, StorageError> {
     match db_get::<CallPruneState>(db, &[0])? {
-        Some(data) => serde_json::from_slice(&data).map_err(|e| StorageError::Serialization(e.to_string())),
+        Some(data) => {
+            serde_json::from_slice(&data).map_err(|e| StorageError::Serialization(e.to_string()))
+        }
         None => Ok(crate::prune::PruneState::new()),
     }
 }
 
 /// Save a verified light-client header hash to the database.
-pub fn save_light_client_header(db: &DatabaseEnv, height: u64, block_hash: &call_primitives::BlockHash) -> Result<(), StorageError> {
+pub fn save_light_client_header(
+    db: &DatabaseEnv,
+    height: u64,
+    block_hash: &call_primitives::BlockHash,
+) -> Result<(), StorageError> {
     let key = height.to_be_bytes().to_vec();
     db_put::<CallLightClientHeaders>(db, key, block_hash.0.to_vec())
 }
 
 /// Load a verified light-client header hash from the database by height.
-pub fn load_light_client_header(db: &DatabaseEnv, height: u64) -> Result<Option<call_primitives::BlockHash>, StorageError> {
+pub fn load_light_client_header(
+    db: &DatabaseEnv,
+    height: u64,
+) -> Result<Option<call_primitives::BlockHash>, StorageError> {
     let key = height.to_be_bytes().to_vec();
     match db_get::<CallLightClientHeaders>(db, &key)? {
         Some(data) if data.len() == 32 => Ok(Some(call_primitives::BlockHash::from_slice(&data))),
@@ -472,11 +495,15 @@ pub fn load_light_client_header(db: &DatabaseEnv, height: u64) -> Result<Option<
 }
 
 /// Load all verified light-client header hashes from the database.
-pub fn load_all_light_client_headers(db: &DatabaseEnv) -> Result<std::collections::HashMap<u64, call_primitives::BlockHash>, StorageError> {
+pub fn load_all_light_client_headers(
+    db: &DatabaseEnv,
+) -> Result<std::collections::HashMap<u64, call_primitives::BlockHash>, StorageError> {
     let mut headers = std::collections::HashMap::new();
     for (key, value) in db_iter_all::<CallLightClientHeaders>(db)? {
         if key.len() == 8 && value.len() == 32 {
-            let height = u64::from_be_bytes(key.try_into().unwrap());
+            let height = u64::from_be_bytes(key.try_into().map_err(|_| {
+                StorageError::Decoding("invalid light client header key length".into())
+            })?);
             headers.insert(height, call_primitives::BlockHash::from_slice(&value));
         }
     }
@@ -490,13 +517,20 @@ pub fn delete_light_client_header(db: &DatabaseEnv, height: u64) -> Result<(), S
 }
 
 /// Save a block hash by height for fast BLOCKHASH opcode lookups.
-pub fn save_block_hash_by_height(db: &DatabaseEnv, height: u64, block_hash: &call_primitives::BlockHash) -> Result<(), StorageError> {
+pub fn save_block_hash_by_height(
+    db: &DatabaseEnv,
+    height: u64,
+    block_hash: &call_primitives::BlockHash,
+) -> Result<(), StorageError> {
     let key = height.to_be_bytes().to_vec();
     db_put::<CallBlockHashByHeight>(db, key, block_hash.0.to_vec())
 }
 
 /// Load a block hash by height for BLOCKHASH opcode lookups.
-pub fn load_block_hash_by_height(db: &DatabaseEnv, height: u64) -> Result<Option<call_primitives::BlockHash>, StorageError> {
+pub fn load_block_hash_by_height(
+    db: &DatabaseEnv,
+    height: u64,
+) -> Result<Option<call_primitives::BlockHash>, StorageError> {
     let key = height.to_be_bytes().to_vec();
     match db_get::<CallBlockHashByHeight>(db, &key)? {
         Some(data) if data.len() == 32 => Ok(Some(call_primitives::BlockHash::from_slice(&data))),
@@ -511,24 +545,34 @@ pub fn delete_block_hash_by_height(db: &DatabaseEnv, height: u64) -> Result<(), 
 }
 
 /// Save raw bytecode keyed by its keccak256 hash.
-pub fn save_bytecode(db: &DatabaseEnv, code_hash: &call_primitives::BlockHash, code: &[u8]) -> Result<(), StorageError> {
+pub fn save_bytecode(
+    db: &DatabaseEnv,
+    code_hash: &call_primitives::BlockHash,
+    code: &[u8],
+) -> Result<(), StorageError> {
     db_put::<CallBytecodes>(db, code_hash.as_slice().to_vec(), code.to_vec())
 }
 
 /// Load raw bytecode by its keccak256 hash.
-pub fn load_bytecode(db: &DatabaseEnv, code_hash: &call_primitives::BlockHash) -> Result<Option<Vec<u8>>, StorageError> {
+pub fn load_bytecode(
+    db: &DatabaseEnv,
+    code_hash: &call_primitives::BlockHash,
+) -> Result<Option<Vec<u8>>, StorageError> {
     db_get::<CallBytecodes>(db, code_hash.as_slice())
 }
 
 /// Delete bytecode by hash (used during pruning).
-pub fn delete_bytecode(db: &DatabaseEnv, code_hash: &call_primitives::BlockHash) -> Result<(), StorageError> {
+pub fn delete_bytecode(
+    db: &DatabaseEnv,
+    code_hash: &call_primitives::BlockHash,
+) -> Result<(), StorageError> {
     db_del::<CallBytecodes>(db, code_hash.as_slice())
 }
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::db::{CallDb, open_db};
+    use crate::db::{open_db, CallDb};
     use std::sync::Arc;
     use std::thread;
 
@@ -536,7 +580,10 @@ mod integration_tests {
         let path = std::env::temp_dir().join(format!(
             "call-mdbx-test-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         open_db(path).expect("failed to open temp db")
     }
@@ -586,10 +633,16 @@ mod integration_tests {
         let db = temp_db();
 
         write_checkpoint(&db.db, [0xDEu8; 32]).unwrap();
-        assert!(check_recovery(&db.db).unwrap(), "should detect pending checkpoint");
+        assert!(
+            check_recovery(&db.db).unwrap(),
+            "should detect pending checkpoint"
+        );
 
         clear_checkpoint(&db.db).unwrap();
-        assert!(!check_recovery(&db.db).unwrap(), "checkpoint should be cleared");
+        assert!(
+            !check_recovery(&db.db).unwrap(),
+            "checkpoint should be cleared"
+        );
     }
 
     #[test]
@@ -600,7 +653,10 @@ mod integration_tests {
         compact_db(&db.db).unwrap();
 
         let loaded = load_prune_state(&db.db).unwrap();
-        assert_eq!(serde_json::to_string(&state).unwrap(), serde_json::to_string(&loaded).unwrap());
+        assert_eq!(
+            serde_json::to_string(&state).unwrap(),
+            serde_json::to_string(&loaded).unwrap()
+        );
     }
 
     #[test]
@@ -609,7 +665,10 @@ mod integration_tests {
         let state = crate::prune::PruneState::new();
         save_prune_state(&db.db, &state).unwrap();
         let loaded = load_prune_state(&db.db).unwrap();
-        assert_eq!(serde_json::to_string(&state).unwrap(), serde_json::to_string(&loaded).unwrap());
+        assert_eq!(
+            serde_json::to_string(&state).unwrap(),
+            serde_json::to_string(&loaded).unwrap()
+        );
     }
 
     #[test]
@@ -618,13 +677,21 @@ mod integration_tests {
         db_put::<CallMetadataChainId>(&db.db, b"key1".to_vec(), b"value1".to_vec()).unwrap();
         db_put::<CallMetadataChainId>(&db.db, b"key2".to_vec(), b"value2".to_vec()).unwrap();
 
-        assert!(db_get::<CallMetadataChainId>(&db.db, b"key1").unwrap().is_some());
-        assert!(db_get::<CallMetadataChainId>(&db.db, b"key2").unwrap().is_some());
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key1")
+            .unwrap()
+            .is_some());
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key2")
+            .unwrap()
+            .is_some());
 
         db_clear::<CallMetadataChainId>(&db.db).unwrap();
 
-        assert!(db_get::<CallMetadataChainId>(&db.db, b"key1").unwrap().is_none());
-        assert!(db_get::<CallMetadataChainId>(&db.db, b"key2").unwrap().is_none());
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key1")
+            .unwrap()
+            .is_none());
+        assert!(db_get::<CallMetadataChainId>(&db.db, b"key2")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -21,7 +21,11 @@ pub struct GovernanceAdvancer;
 impl GovernanceAdvancer {
     /// Advance the governance state machine for the current block.
     /// Reads from EVM, writes back, returns events.
-    pub fn advance(&self, evm_state: &mut InMemoryStateProvider, current_block: u64) -> Vec<GovernanceEvent> {
+    pub fn advance(
+        &self,
+        evm_state: &mut InMemoryStateProvider,
+        current_block: u64,
+    ) -> Vec<GovernanceEvent> {
         let mut events = Vec::new();
 
         let count = sa::read_gov_proposal_count(evm_state);
@@ -32,17 +36,37 @@ impl GovernanceAdvancer {
         let timelock = sa::read_gov_config_timelock(evm_state);
         let timelock = if timelock == 0 { 100 } else { timelock };
         let exec_timeout = sa::read_gov_config_execution_timeout(evm_state);
-        let exec_timeout = if exec_timeout == 0 { 1000 } else { exec_timeout };
+        let exec_timeout = if exec_timeout == 0 {
+            1000
+        } else {
+            exec_timeout
+        };
 
         // Config for per-type quorum
         let validator_quorum_bps = sa::read_gov_config_validator_quorum_bps(evm_state);
-        let validator_quorum_bps = if validator_quorum_bps == 0 { 6667 } else { validator_quorum_bps };
+        let validator_quorum_bps = if validator_quorum_bps == 0 {
+            6667
+        } else {
+            validator_quorum_bps
+        };
         let supply_quorum_bps = sa::read_gov_config_supply_quorum_bps(evm_state);
-        let supply_quorum_bps = if supply_quorum_bps == 0 { 2000 } else { supply_quorum_bps };
+        let supply_quorum_bps = if supply_quorum_bps == 0 {
+            2000
+        } else {
+            supply_quorum_bps
+        };
         let treasury_quorum_bps = sa::read_gov_config_treasury_quorum_bps(evm_state);
-        let treasury_quorum_bps = if treasury_quorum_bps == 0 { 2000 } else { treasury_quorum_bps };
+        let treasury_quorum_bps = if treasury_quorum_bps == 0 {
+            2000
+        } else {
+            treasury_quorum_bps
+        };
         let simple_majority_bps = sa::read_gov_config_simple_majority_bps(evm_state);
-        let simple_majority_bps = if simple_majority_bps == 0 { 5001 } else { simple_majority_bps };
+        let simple_majority_bps = if simple_majority_bps == 0 {
+            5001
+        } else {
+            simple_majority_bps
+        };
         let emergency_pause_bps = sa::read_gov_config_validator_quorum_bps(evm_state); // reuses validator quorum
 
         let total_validators = sa::read_validator_count(evm_state);
@@ -92,7 +116,8 @@ impl GovernanceAdvancer {
                             sa::read_gov_proposal_votes(evm_state, proposal_id);
                         let total_votes = votes_for + votes_against;
 
-                        let quorum_required = sa::read_gov_proposal_quorum_required(evm_state, proposal_id);
+                        let quorum_required =
+                            sa::read_gov_proposal_quorum_required(evm_state, proposal_id);
                         let proposal_type = sa::read_gov_proposal_type(evm_state, proposal_id);
 
                         // For validator-weighted proposals, quorum is validator count;
@@ -145,8 +170,7 @@ impl GovernanceAdvancer {
                 }
                 // Queued: check if ready to execute or expired
                 2 => {
-                    let exec_block =
-                        sa::read_gov_proposal_execution_block(evm_state, proposal_id);
+                    let exec_block = sa::read_gov_proposal_execution_block(evm_state, proposal_id);
 
                     // Expire check comes first (if past timeout)
                     if current_block > exec_block.saturating_add(exec_timeout) {
@@ -219,20 +243,24 @@ impl GovernanceAdvancer {
         let treasury_quorum = (TOTAL_SUPPLY * treasury_quorum_bps as u128) / 10_000;
 
         match proposal_type {
-            0 => validator_quorum,               // ParameterChange
+            0 => validator_quorum,                    // ParameterChange
             1 => validator_quorum.max(supply_quorum), // ProtocolUpgrade
-            2 => treasury_quorum,                // TreasurySpend
-            3 => validator_quorum,               // ValidatorSlash
-            4 => simple_majority,                // ComplianceUpdate
-            5 => emergency_threshold,            // EmergencyPause
-            6 | 7 | 8 | 9 => simple_majority,    // FeeCurrencyAdd/Remove/Cap, KeyRotation
+            2 => treasury_quorum,                     // TreasurySpend
+            3 => validator_quorum,                    // ValidatorSlash
+            4 => simple_majority,                     // ComplianceUpdate
+            5 => emergency_threshold,                 // EmergencyPause
+            6 | 7 | 8 | 9 => simple_majority,         // FeeCurrencyAdd/Remove/Cap, KeyRotation
             _ => simple_majority,
         }
     }
 
     /// Apply on-chain side effects for an executed proposal.
     /// Mirrors GovernanceStorage::execute() in crates/governance/src/precompile.rs.
-    fn apply_side_effects(evm_state: &mut InMemoryStateProvider, proposal_id: u64, proposal_type: u8) {
+    fn apply_side_effects(
+        evm_state: &mut InMemoryStateProvider,
+        proposal_id: u64,
+        proposal_type: u8,
+    ) {
         let execution_data = sa::read_gov_proposal_execution_data(evm_state, proposal_id);
         match proposal_type {
             0 => {
@@ -454,8 +482,7 @@ mod tests {
         sa::seed_gov_config(&mut evm);
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
-        setup_proposal(&mut evm, 1, 0, 0, 10, 110, 10, 0, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 0, 0, 10, 110, 10, 0, 0, 0);
 
         let advancer = GovernanceAdvancer;
 
@@ -487,8 +514,7 @@ mod tests {
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
         // Active proposal with votes passing quorum
-        setup_proposal(&mut evm, 1, 0, 1, 0, 100, 0, 1_000_000, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 0, 1, 0, 100, 0, 1_000_000, 0, 0);
         // Set quorum low enough
         sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
 
@@ -515,8 +541,7 @@ mod tests {
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
         // Active proposal with no votes
-        setup_proposal(&mut evm, 1, 0, 1, 0, 100, 0, 0, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 0, 1, 0, 100, 0, 0, 0, 0);
 
         let advancer = GovernanceAdvancer;
         let events = advancer.advance(&mut evm, 101);
@@ -538,8 +563,7 @@ mod tests {
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
         // Queued proposal ready to execute
-        setup_proposal(&mut evm, 1, 0, 2, 0, 100, 0, 1_000_000, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 0, 2, 0, 100, 0, 1_000_000, 0, 0);
         sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
         evm.set_storage(
             GOVERNANCE_ADDRESS,
@@ -570,8 +594,7 @@ mod tests {
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
         // Queued proposal past execution timeout
-        setup_proposal(&mut evm, 1, 0, 2, 0, 100, 0, 1_000_000, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 0, 2, 0, 100, 0, 1_000_000, 0, 0);
         sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
         evm.set_storage(
             GOVERNANCE_ADDRESS,
@@ -601,8 +624,7 @@ mod tests {
 
         // Queued proposal: execution block reached, but also past timeout
         // Expire check should come FIRST
-        setup_proposal(&mut evm, 1, 0, 2, 0, 100, 0, 1_000_000, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 0, 2, 0, 100, 0, 1_000_000, 0, 0);
         sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
         evm.set_storage(
             GOVERNANCE_ADDRESS,
@@ -630,9 +652,7 @@ mod tests {
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
         // EmergencyPause proposal (type 5) queued and ready
-        setup_proposal(
-            &mut evm, 1, 5, 2, 0, 100, 0, 1_000_000, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 5, 2, 0, 100, 0, 1_000_000, 0, 0);
         sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
         evm.set_storage(
             GOVERNANCE_ADDRESS,
@@ -656,12 +676,9 @@ mod tests {
         sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
 
         // Proposal 1: Pending -> Active
-        setup_proposal(&mut evm, 1, 0, 0, 10, 110, 10, 0, 0, 0,
-        );
+        setup_proposal(&mut evm, 1, 0, 0, 10, 110, 10, 0, 0, 0);
         // Proposal 2: Active -> Queued
-        setup_proposal(
-            &mut evm, 2, 0, 1, 0, 50, 0, 1_000_000, 0, 0,
-        );
+        setup_proposal(&mut evm, 2, 0, 1, 0, 50, 0, 1_000_000, 0, 0);
         sa::write_gov_proposal_quorum_required(&mut evm, 2, 1);
 
         evm.set_storage(
@@ -722,7 +739,9 @@ mod tests {
 
         assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
         // Config value should be written
-        let config_val = u256_to_u128(evm.get_storage(&GOVERNANCE_ADDRESS, sa::slot_gov_config(b"param_change")));
+        let config_val = u256_to_u128(
+            evm.get_storage(&GOVERNANCE_ADDRESS, sa::slot_gov_config(b"param_change")),
+        );
         assert_eq!(config_val, 5000);
     }
 
@@ -780,7 +799,9 @@ mod tests {
 
         assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
         let fee_slot = storage_slot(&[b"fee_currency", &42u64.to_be_bytes()[..]]);
-        let val = evm.get_storage(&GOVERNANCE_ADDRESS, fee_slot).to_be_bytes::<32>()[31];
+        let val = evm
+            .get_storage(&GOVERNANCE_ADDRESS, fee_slot)
+            .to_be_bytes::<32>()[31];
         assert_eq!(val, 1);
 
         // FeeCurrencyRemove proposal (type 7) for same asset
@@ -792,16 +813,14 @@ mod tests {
             u64_to_u256(50),
         );
         store_execution_data(&mut evm, 2, &exec_data);
-        evm.set_storage(
-            GOVERNANCE_ADDRESS,
-            U256::ZERO,
-            u64_to_u256(2),
-        );
+        evm.set_storage(GOVERNANCE_ADDRESS, U256::ZERO, u64_to_u256(2));
 
         advancer.advance(&mut evm, 55);
 
         assert_eq!(sa::read_gov_proposal_status(&evm, 2), 3);
-        let val = evm.get_storage(&GOVERNANCE_ADDRESS, fee_slot).to_be_bytes::<32>()[31];
+        let val = evm
+            .get_storage(&GOVERNANCE_ADDRESS, fee_slot)
+            .to_be_bytes::<32>()[31];
         assert_eq!(val, 0);
     }
 
@@ -829,7 +848,9 @@ mod tests {
 
         assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
         let rotation_slot = storage_slot(&[b"key_rotation", &7u64.to_be_bytes()[..]]);
-        let val = evm.get_storage(&GOVERNANCE_ADDRESS, rotation_slot).to_be_bytes::<32>()[31];
+        let val = evm
+            .get_storage(&GOVERNANCE_ADDRESS, rotation_slot)
+            .to_be_bytes::<32>()[31];
         assert_eq!(val, 1);
     }
 
@@ -858,7 +879,9 @@ mod tests {
 
         assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
         let upgrade_slot = storage_slot(&[b"protocol_upgrade"]);
-        let val = evm.get_storage(&GOVERNANCE_ADDRESS, upgrade_slot).to_be_bytes::<32>();
+        let val = evm
+            .get_storage(&GOVERNANCE_ADDRESS, upgrade_slot)
+            .to_be_bytes::<32>();
         assert_eq!(val, version_hash);
     }
 

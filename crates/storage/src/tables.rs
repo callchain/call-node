@@ -86,51 +86,153 @@ pub struct TableDef {
 pub fn all_tables() -> &'static [TableDef] {
     &[
         // Protocol layer
-        TableDef { name: "protocol_assets", description: "Asset metadata" },
-        TableDef { name: "protocol_balances", description: "Protocol balance entries" },
-        TableDef { name: "protocol_allowances", description: "Allowance entries" },
+        TableDef {
+            name: "protocol_assets",
+            description: "Asset metadata",
+        },
+        TableDef {
+            name: "protocol_balances",
+            description: "Protocol balance entries",
+        },
+        TableDef {
+            name: "protocol_allowances",
+            description: "Allowance entries",
+        },
         // Shielded pool
-        TableDef { name: "shielded_merkle_tree", description: "Merkle tree nodes" },
-        TableDef { name: "shielded_nullifiers", description: "Spent nullifiers (never pruned)" },
-        TableDef { name: "shielded_commitments", description: "Encrypted note commitments" },
-        TableDef { name: "shielded_viewing_keys", description: "User viewing key mappings" },
+        TableDef {
+            name: "shielded_merkle_tree",
+            description: "Merkle tree nodes",
+        },
+        TableDef {
+            name: "shielded_nullifiers",
+            description: "Spent nullifiers (never pruned)",
+        },
+        TableDef {
+            name: "shielded_commitments",
+            description: "Encrypted note commitments",
+        },
+        TableDef {
+            name: "shielded_viewing_keys",
+            description: "User viewing key mappings",
+        },
         // Agent layer
-        TableDef { name: "agent_registrations", description: "Agent identity records" },
-        TableDef { name: "agent_balances", description: "Agent sub-account balances" },
-        TableDef { name: "agent_nonces", description: "Agent sequence numbers" },
+        TableDef {
+            name: "agent_registrations",
+            description: "Agent identity records",
+        },
+        TableDef {
+            name: "agent_balances",
+            description: "Agent sub-account balances",
+        },
+        TableDef {
+            name: "agent_nonces",
+            description: "Agent sequence numbers",
+        },
         // EVM layer
-        TableDef { name: "evm_accounts", description: "EVM account metadata" },
-        TableDef { name: "evm_contracts", description: "Contract bytecode" },
-        TableDef { name: "evm_storage", description: "Contract storage slots" },
+        TableDef {
+            name: "evm_accounts",
+            description: "EVM account metadata",
+        },
+        TableDef {
+            name: "evm_contracts",
+            description: "Contract bytecode",
+        },
+        TableDef {
+            name: "evm_storage",
+            description: "Contract storage slots",
+        },
         // Bridge
-        TableDef { name: "bridge_pending_ops", description: "Pending bridge operations" },
+        TableDef {
+            name: "bridge_pending_ops",
+            description: "Pending bridge operations",
+        },
         // Consensus
-        TableDef { name: "consensus_blocks", description: "Block data by height" },
-        TableDef { name: "consensus_state", description: "State snapshots by height" },
+        TableDef {
+            name: "consensus_blocks",
+            description: "Block data by height",
+        },
+        TableDef {
+            name: "consensus_state",
+            description: "State snapshots by height",
+        },
         // Metadata
-        TableDef { name: "metadata_chain_id", description: "Chain identifier" },
-        TableDef { name: "metadata_validators", description: "Validator set" },
-        TableDef { name: "metadata_compliance", description: "Compliance policy registry" },
-        TableDef { name: "metadata_agents", description: "Agent status index" },
+        TableDef {
+            name: "metadata_chain_id",
+            description: "Chain identifier",
+        },
+        TableDef {
+            name: "metadata_validators",
+            description: "Validator set",
+        },
+        TableDef {
+            name: "metadata_compliance",
+            description: "Compliance policy registry",
+        },
+        TableDef {
+            name: "metadata_agents",
+            description: "Agent status index",
+        },
         // Receipts and logs
-        TableDef { name: "receipts", description: "Transaction receipts" },
-        TableDef { name: "logs", description: "Event logs" },
-        TableDef { name: "memos", description: "Transaction memos" },
+        TableDef {
+            name: "receipts",
+            description: "Transaction receipts",
+        },
+        TableDef {
+            name: "logs",
+            description: "Event logs",
+        },
+        TableDef {
+            name: "memos",
+            description: "Transaction memos",
+        },
         // Fee and oracle
-        TableDef { name: "fee_currency_registry", description: "Fee currency metadata" },
-        TableDef { name: "oracle_prices", description: "Oracle price feeds" },
-        TableDef { name: "oracle_validator_info", description: "Oracle validator status" },
+        TableDef {
+            name: "fee_currency_registry",
+            description: "Fee currency metadata",
+        },
+        TableDef {
+            name: "oracle_prices",
+            description: "Oracle price feeds",
+        },
+        TableDef {
+            name: "oracle_validator_info",
+            description: "Oracle validator status",
+        },
         // Governance
-        TableDef { name: "governance_proposals", description: "Governance proposals" },
-        TableDef { name: "vote_delegations", description: "Vote delegation records" },
+        TableDef {
+            name: "governance_proposals",
+            description: "Governance proposals",
+        },
+        TableDef {
+            name: "vote_delegations",
+            description: "Vote delegation records",
+        },
         // Sponsorship
-        TableDef { name: "sponsor_auths", description: "Fee sponsor authorizations" },
-        TableDef { name: "sponsor_pools", description: "Fee sponsor pools" },
-        TableDef { name: "sponsor_daily_usage", description: "Daily sponsor usage" },
+        TableDef {
+            name: "sponsor_auths",
+            description: "Fee sponsor authorizations",
+        },
+        TableDef {
+            name: "sponsor_pools",
+            description: "Fee sponsor pools",
+        },
+        TableDef {
+            name: "sponsor_daily_usage",
+            description: "Daily sponsor usage",
+        },
         // Security
-        TableDef { name: "session_keys", description: "Session key mappings" },
-        TableDef { name: "multi_sig_configs", description: "Multi-sig configurations" },
-        TableDef { name: "social_recovery_configs", description: "Social recovery guardians" },
+        TableDef {
+            name: "session_keys",
+            description: "Session key mappings",
+        },
+        TableDef {
+            name: "multi_sig_configs",
+            description: "Multi-sig configurations",
+        },
+        TableDef {
+            name: "social_recovery_configs",
+            description: "Social recovery guardians",
+        },
     ]
 }
 

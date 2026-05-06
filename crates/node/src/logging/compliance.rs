@@ -48,10 +48,7 @@ pub fn export_compliance_report(
 
         // Filter by address if specified
         if let Some(addr) = address_filter {
-            let from_match = audit
-                .fee_payer
-                .map(|a| a == addr)
-                .unwrap_or(false);
+            let from_match = audit.fee_payer.map(|a| a == addr).unwrap_or(false);
             if !from_match {
                 continue;
             }

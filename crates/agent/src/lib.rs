@@ -7,8 +7,8 @@ use call_precompile::{
     address_to_u256, storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128,
     u256_to_u64, u64_to_u256, write_string32, AGENT_ADDRESS,
 };
-use call_protocol::storage_backend::StorageBackend;
 use call_primitives::{Address, U256};
+use call_protocol::storage_backend::StorageBackend;
 
 /// Error type for agent operations.
 #[derive(Debug)]
@@ -97,6 +97,7 @@ pub fn pack_agent_perms(per_tx_limit: u128, expires_at: u64, flags: u8) -> U256 
     U256::from_be_slice(&packed)
 }
 
+#[allow(clippy::unwrap_used)]
 pub fn unpack_agent_perms(perms: U256) -> (u128, u64, u8) {
     let bytes = perms.to_be_bytes::<32>();
     let per_tx_limit = u128::from_be_bytes(bytes[0..16].try_into().unwrap());
@@ -222,11 +223,8 @@ impl<B: StorageBackend> AgentStorage<B> {
             slot_agent_name(agent_id),
             write_string32(name),
         );
-        self.backend.store(
-            AGENT_ADDRESS,
-            slot_agent_url(agent_id),
-            write_string32(url),
-        );
+        self.backend
+            .store(AGENT_ADDRESS, slot_agent_url(agent_id), write_string32(url));
         // Default perms: per_tx_limit=1_000, expires_at=0, flags=1 (allow asset 1)
         self.backend.store(
             AGENT_ADDRESS,
@@ -285,6 +283,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn pay(
         &mut self,
         asset_store: &mut AssetStorage<B>,
@@ -317,6 +316,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn batch_pay(
         &mut self,
         asset_store: &mut AssetStorage<B>,
@@ -385,11 +385,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
-    pub fn revoke_agent(
-        &mut self,
-        agent_id: u64,
-        caller: Address,
-    ) -> Result<(), AgentError> {
+    pub fn revoke_agent(&mut self, agent_id: u64, caller: Address) -> Result<(), AgentError> {
         if !self.agent_exists(agent_id) {
             return Err(AgentError::NotFound);
         }
@@ -405,8 +401,11 @@ impl<B: StorageBackend> AgentStorage<B> {
             .store(AGENT_ADDRESS, slot_agent_url(agent_id), U256::ZERO);
         self.backend
             .store(AGENT_ADDRESS, slot_agent_perms(agent_id), U256::ZERO);
-        self.backend
-            .store(AGENT_ADDRESS, slot_agent_registered_at(agent_id), U256::ZERO);
+        self.backend.store(
+            AGENT_ADDRESS,
+            slot_agent_registered_at(agent_id),
+            U256::ZERO,
+        );
         Ok(())
     }
 
@@ -482,7 +481,9 @@ mod tests {
         let mut store = AgentStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
 
-        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+        store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
 
         assert!(store.check_owner(0, caller).is_ok());
         assert!(matches!(
@@ -497,7 +498,9 @@ mod tests {
         let mut store = AgentStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
 
-        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+        store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
         // Override perms: expires_at=50
         store.backend.store(
             AGENT_ADDRESS,
@@ -517,7 +520,9 @@ mod tests {
         let mut store = AgentStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
 
-        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+        store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
         // Override perms: flags=0 (bit 0 clear = asset 1 not allowed)
         store.backend.store(
             AGENT_ADDRESS,
@@ -656,15 +661,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            agent_store.batch_pay(
-                &mut asset_store,
-                0,
-                CALL_ASSET_ID,
-                &[],
-                &[],
-                caller,
-                1,
-            ),
+            agent_store.batch_pay(&mut asset_store, 0, CALL_ASSET_ID, &[], &[], caller, 1,),
             Err(AgentError::EmptyBatch)
         ));
     }
@@ -705,7 +702,9 @@ mod tests {
         let mut store = AgentStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
 
-        store.register_agent("A", "url", [0u8; 32], caller, 1).unwrap();
+        store
+            .register_agent("A", "url", [0u8; 32], caller, 1)
+            .unwrap();
         assert!(store.agent_exists(0));
 
         store.revoke_agent(0, caller).unwrap();
@@ -729,15 +728,7 @@ mod tests {
             Err(AgentError::NotFound)
         ));
         assert!(matches!(
-            agent_store.pay(
-                &mut asset_store,
-                0,
-                1,
-                Address::ZERO,
-                100,
-                caller,
-                1,
-            ),
+            agent_store.pay(&mut asset_store, 0, 1, Address::ZERO, 100, caller, 1,),
             Err(AgentError::NotFound)
         ));
         assert!(matches!(

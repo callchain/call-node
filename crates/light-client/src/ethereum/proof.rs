@@ -7,10 +7,8 @@ use alloy_primitives::{Address, B256};
 /// This is keccak256("BridgeDeposit(bytes32,address,uint256,uint256,bytes,uint256,uint256)")
 /// and must match the event emitted by the Call bridge contract on Ethereum.
 pub(crate) const BRIDGE_DEPOSIT_EVENT_SIG: B256 = B256::new([
-    0x3a, 0x95, 0x7f, 0x16, 0x8e, 0x13, 0xa0, 0x27,
-    0xb5, 0x3e, 0x7f, 0x6f, 0xe9, 0x58, 0xa0, 0xbc,
-    0xa9, 0x0d, 0x51, 0x5b, 0x66, 0xbf, 0x4b, 0x5a,
-    0x6c, 0x61, 0x60, 0x84, 0x79, 0x13, 0x54, 0x06,
+    0x3a, 0x95, 0x7f, 0x16, 0x8e, 0x13, 0xa0, 0x27, 0xb5, 0x3e, 0x7f, 0x6f, 0xe9, 0x58, 0xa0, 0xbc,
+    0xa9, 0x0d, 0x51, 0x5b, 0x66, 0xbf, 0x4b, 0x5a, 0x6c, 0x61, 0x60, 0x84, 0x79, 0x13, 0x54, 0x06,
 ]);
 
 /// RLP-encode a u64 (big-endian, no leading zeros).
@@ -57,10 +55,7 @@ pub fn parse_receipt_logs(receipt_rlp: &[u8]) -> Result<Vec<ReceiptLog>, String>
 
     // Receipts have at least 4 fields; logs are in field index 3
     if items.len() < 4 {
-        return Err(format!(
-            "receipt has {} fields, expected >= 4",
-            items.len()
-        ));
+        return Err(format!("receipt has {} fields, expected >= 4", items.len()));
     }
 
     let logs_rlp = items[3];
@@ -73,7 +68,7 @@ pub(crate) fn parse_rlp_list_items(data: &[u8]) -> Result<Vec<&[u8]>, String> {
         return Err("empty data".into());
     }
     let first = data[0];
-    let payload_start = if first >= 0xC0 && first < 0xF8 {
+    let payload_start = if (0xC0..0xF8).contains(&first) {
         // Short list
         let list_len = (first - 0xC0) as usize;
         if list_len == 0 || 1 + list_len != data.len() {

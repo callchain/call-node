@@ -2,16 +2,16 @@
 //!
 //! EVM executor, state management, ERC-20 deployment, gas tracking.
 
-mod executor;
-pub mod state;
 pub mod backend;
+pub mod block_executor;
 pub mod db;
 pub mod erc20_bytecode;
-pub mod trie;
+mod executor;
 pub mod provider;
-pub mod block_executor;
+pub mod state;
+pub mod trie;
 
+pub use alloy_primitives::{Bytes, U256};
+pub use backend::*;
 pub use executor::*;
 pub use reth_db::DatabaseEnv as EvmDatabaseEnv;
-pub use backend::*;
-pub use alloy_primitives::{U256, Bytes};

@@ -28,18 +28,25 @@ fn test_evm_state_isolation_from_protocol() {
 
     let sender = test_addr(1);
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Asset balance lives in EVM storage
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 7_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            sender,
+            7_000,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
@@ -49,13 +56,20 @@ fn test_evm_state_isolation_from_protocol() {
 
     // Native EVM balance is independent of asset balance
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-        provider.state_mut().set_balance(sender, U256::from(10_000u128));
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        provider
+            .state_mut()
+            .set_balance(sender, U256::from(10_000u128));
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-        assert_eq!(provider.state().get_balance(&sender), U256::from(10_000u128));
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        assert_eq!(
+            provider.state().get_balance(&sender),
+            U256::from(10_000u128)
+        );
     }
 }
 
@@ -66,19 +80,23 @@ async fn test_evm_state_persists_across_blocks() {
 
     let sender = test_addr(1);
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Set EVM balance before block production
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &node.state.db_env).unwrap();
-        provider.state_mut().set_balance(sender, U256::from(10_000u128));
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        provider
+            .state_mut()
+            .set_balance(sender, U256::from(10_000u128));
         provider.state_mut().create_account(sender);
         for _ in 0..5 {
             provider.state_mut().increment_nonce(sender);
@@ -91,9 +109,12 @@ async fn test_evm_state_persists_across_blocks() {
 
     // EVM state should persist
     {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &node.state.db_env).unwrap();
-        assert_eq!(provider.state().get_balance(&sender), U256::from(10_000u128));
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        assert_eq!(
+            provider.state().get_balance(&sender),
+            U256::from(10_000u128)
+        );
         assert_eq!(provider.state().get_nonce(&sender), 5);
     }
 }
@@ -105,37 +126,46 @@ fn test_protocol_and_evm_same_address() {
 
     let sender = test_addr(1);
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Asset balance lives in EVM storage slots
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 5_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            sender,
+            5_000,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Native EVM balance is stored separately in the account
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &node.state.db_env).unwrap();
-        provider.state_mut().set_balance(sender, U256::from(99_999u128));
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        provider
+            .state_mut()
+            .set_balance(sender, U256::from(99_999u128));
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     assert_eq!(node.balance(1, &sender), 5_000);
     {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(
-            &node.state.db_env).unwrap();
-        assert_eq!(provider.state().get_balance(&sender), U256::from(99_999u128));
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        assert_eq!(
+            provider.state().get_balance(&sender),
+            U256::from(99_999u128)
+        );
     }
 }
-

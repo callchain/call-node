@@ -1,7 +1,7 @@
 //! Ed25519: key generation, signing, verification (for consensus)
 
 use call_primitives::Ed25519PublicKey;
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer, Verifier};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use thiserror::Error;
 
@@ -31,8 +31,8 @@ pub fn ed25519_verify(
     signature: &[u8; 64],
     message: &[u8],
 ) -> Result<(), Ed25519Error> {
-    let verifying_key = VerifyingKey::from_bytes(public_key)
-        .map_err(|_| Ed25519Error::InvalidSignature)?;
+    let verifying_key =
+        VerifyingKey::from_bytes(public_key).map_err(|_| Ed25519Error::InvalidSignature)?;
     let sig = Signature::from_bytes(signature);
     verifying_key
         .verify(message, &sig)

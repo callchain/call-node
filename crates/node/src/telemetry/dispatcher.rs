@@ -1,10 +1,10 @@
 //! Alert dispatcher and background alert task.
 
 use std::collections::HashSet;
-use tokio::sync::RwLock;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
-use super::alert::{Alert, AlertSeverity, evaluate_alerts, default_alert_rules};
+use super::alert::{default_alert_rules, evaluate_alerts, Alert, AlertSeverity};
 use super::registry::TelemetryRegistry;
 
 // ── Alert Dispatcher ─────────────────────────────────────────────────
@@ -43,7 +43,12 @@ impl AlertDispatcher {
             "time": format!("{:?}", alert.triggered_at),
         });
         let body = serde_json::to_string(&payload).unwrap_or_default();
-        client.post(url).header("Content-Type", "application/json").body(body).send().await?;
+        client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
         Ok(())
     }
 
@@ -68,7 +73,12 @@ impl AlertDispatcher {
             }]
         });
         let body = serde_json::to_string(&payload).unwrap_or_default();
-        reqwest::Client::new().post(url).header("Content-Type", "application/json").body(body).send().await?;
+        reqwest::Client::new()
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
         Ok(())
     }
 }

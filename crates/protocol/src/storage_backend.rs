@@ -23,6 +23,7 @@ impl<B: StorageBackend> StorageBackend for &B {
     fn load(&self, address: Address, slot: U256) -> U256 {
         (**self).load(address, slot)
     }
+    #[allow(clippy::panic)]
     fn store(&mut self, _address: Address, _slot: U256, _value: U256) {
         panic!("cannot store through an immutable reference");
     }

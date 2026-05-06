@@ -34,7 +34,8 @@ fn gov_slot(proposal_id: u64, suffix: &[u8]) -> U256 {
 /// Status values: 0=None, 1=Active, 2=Queued, 3=Executed.
 fn read_proposal_status<S: call_evm::backend::ProtocolStorage>(evm: &S, proposal_id: u64) -> u8 {
     let slot = gov_slot(proposal_id, b"status");
-    evm.get_storage(&GOVERNANCE_ADDRESS, slot).to_be_bytes::<32>()[31]
+    evm.get_storage(&GOVERNANCE_ADDRESS, slot)
+        .to_be_bytes::<32>()[31]
 }
 
 /// Build EVM transaction calldata for governance precompile.
@@ -56,10 +57,16 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Stake a validator so there is a proposer
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let _ = consensus
-            .stake_validator(provider.state_mut(), voter_addr, [1u8; 32], one_million_call())
+            .stake_validator(
+                provider.state_mut(),
+                voter_addr,
+                [1u8; 32],
+                one_million_call(),
+            )
             .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
@@ -68,15 +75,26 @@ fn test_governance_proposal_full_lifecycle() {
     // Seed EVM storage for proposer fees + deposit (10_000 CALL)
     // Also seed native EVM balance for gas payment
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, proposer, one_million_call() * 3,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            proposer,
+            one_million_call() * 3,
         );
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, voter_addr, one_million_call(),
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            voter_addr,
+            one_million_call(),
         );
-        provider.state_mut().set_balance(proposer, call_primitives::U256::from(100_000_000_000u128));
-        provider.state_mut().set_balance(voter_addr, call_primitives::U256::from(100_000_000_000u128));
+        provider
+            .state_mut()
+            .set_balance(proposer, call_primitives::U256::from(100_000_000_000u128));
+        provider
+            .state_mut()
+            .set_balance(voter_addr, call_primitives::U256::from(100_000_000_000u128));
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
@@ -97,7 +115,7 @@ fn test_governance_proposal_full_lifecycle() {
         gas_limit: 5_000_000,
         gas_price: 10,
         to: Some(call_primitives::Address::from_slice(
-            &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
+            &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20],
         )),
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(submit_data),
@@ -115,7 +133,8 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Verify proposal is Active (status = 1)
     {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         assert_eq!(
             read_proposal_status(provider.state(), proposal_id),
             1,
@@ -133,7 +152,7 @@ fn test_governance_proposal_full_lifecycle() {
         gas_limit: 500_000,
         gas_price: 10,
         to: Some(call_primitives::Address::from_slice(
-            &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
+            &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20],
         )),
         value: call_primitives::U256::ZERO,
         data: gov_calldata(&[0xb0, 0x40, 0xd1, 0x66], &vote_args),
@@ -151,7 +170,7 @@ fn test_governance_proposal_full_lifecycle() {
         gas_limit: 500_000,
         gas_price: 10,
         to: Some(call_primitives::Address::from_slice(
-            &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20]
+            &alloy_primitives::Address::from(GOVERNANCE_ADDRESS).into_array()[..20],
         )),
         value: call_primitives::U256::ZERO,
         data: gov_calldata(&[0x92, 0x6c, 0x46, 0xb2], &queue_args),
@@ -162,7 +181,8 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Verify proposal is Queued (status = 2)
     {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         assert_eq!(
             read_proposal_status(provider.state(), proposal_id),
             2,
@@ -178,7 +198,8 @@ fn test_governance_proposal_full_lifecycle() {
 
     // Verify proposal is Executed (status = 3)
     {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         assert_eq!(
             read_proposal_status(provider.state(), proposal_id),
             3,

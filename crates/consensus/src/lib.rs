@@ -13,7 +13,6 @@ pub mod proposer;
 pub mod simplex;
 pub mod validator;
 
-
 #[cfg(test)]
 mod tests;
 

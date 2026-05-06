@@ -4,17 +4,14 @@
 //! Targets: <10MB storage, ~1KB/block bandwidth, ~50ms compute per block.
 
 use call_consensus::BlockHeader;
-use call_primitives::{Address, Balance, BlockHash, Hash, TxHash, ValidatorId};
+use call_crypto::{bls_verify_aggregate, BlsPublicKey, BlsSignature};
 use call_primitives::Ed25519PublicKey;
-use call_shielded::{
-    Note, ViewingKey,
-    verify_merkle_path, verify_zk_proof, ZkProof,
-};
-use call_crypto::{BlsPublicKey, BlsSignature, bls_verify_aggregate};
+use call_primitives::{Address, Balance, BlockHash, Hash, TxHash, ValidatorId};
+use call_shielded::{verify_merkle_path, verify_zk_proof, Note, ViewingKey, ZkProof};
+use reth_db::DatabaseEnv;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use reth_db::DatabaseEnv;
 
 // ── Serde wrappers for fixed-size byte arrays ────────────────────────
 
@@ -134,9 +131,7 @@ impl BlockSignatures {
     pub fn valid_count(&self, validators: &HashMap<ValidatorId, Ed25519PublicKey>) -> usize {
         self.signatures
             .iter()
-            .filter(|(vid, pubkey, _sig)| {
-                validators.get(vid).copied() == Some(pubkey.0)
-            })
+            .filter(|(vid, pubkey, _sig)| validators.get(vid).copied() == Some(pubkey.0))
             .count()
     }
 }
@@ -318,7 +313,9 @@ impl LightClient {
 
         // 3. State root consistency (only if checkpoint is set and height matches)
         if let Some(ref checkpoint) = self.checkpoint {
-            if header.height == checkpoint.block_height && header.state_root != checkpoint.state_root {
+            if header.height == checkpoint.block_height
+                && header.state_root != checkpoint.state_root
+            {
                 return Err(LightClientError::StateRootMismatch {
                     expected: checkpoint.state_root,
                     got: header.state_root,
@@ -446,15 +443,14 @@ impl LightClient {
             }
             Err(e) => return Err(e),
         }
-        self.verified_headers
-            .insert(header.height, header.hash());
+        self.verified_headers.insert(header.height, header.hash());
         self.latest_block_header = Some(header.clone());
 
         // Persist to database if available.
         if let Some(ref db) = self.db {
-            if let Err(e) = call_storage::reth_db::save_light_client_header(
-                db, header.height, &header.hash(),
-            ) {
+            if let Err(e) =
+                call_storage::reth_db::save_light_client_header(db, header.height, &header.hash())
+            {
                 tracing::warn!(error = %e, height = header.height, "light_client: failed to persist header");
             }
         }
@@ -466,7 +462,8 @@ impl LightClient {
     /// Called when a reorg is detected so the light client can re-sync from
     /// the last common ancestor.
     pub fn handle_reorg(&mut self, from_height: u64) {
-        let to_remove: Vec<u64> = self.verified_headers
+        let to_remove: Vec<u64> = self
+            .verified_headers
             .keys()
             .filter(|&&h| h >= from_height)
             .copied()
@@ -659,9 +656,7 @@ mod tests {
     }
 
     fn make_validators(count: u32) -> HashMap<ValidatorId, Ed25519PublicKey> {
-        (1..=count)
-            .map(|i| (i, test_pubkey(i as u8)))
-            .collect()
+        (1..=count).map(|i| (i, test_pubkey(i as u8))).collect()
     }
 
     fn make_header(height: u64, parent: BlockHash) -> BlockHeader {
@@ -680,7 +675,13 @@ mod tests {
 
     fn make_signatures(block_hash: BlockHash, count: u32) -> BlockSignatures {
         let sigs = (1..=count)
-            .map(|i| (i, PubKeyBytes(test_pubkey(i as u8)), SigBytes(test_sig(i as u8))))
+            .map(|i| {
+                (
+                    i,
+                    PubKeyBytes(test_pubkey(i as u8)),
+                    SigBytes(test_sig(i as u8)),
+                )
+            })
             .collect();
         BlockSignatures {
             block_hash,
@@ -701,7 +702,7 @@ mod tests {
         // Block 1
         let b1 = make_header(1, genesis.hash());
         let b1_sigs = make_signatures(b1.hash(), 14); // 14/21 = 2/3
-        // Need to add genesis to verified
+                                                      // Need to add genesis to verified
         client.verified_headers.insert(0, genesis.hash());
         assert!(client.verify_header(&b1, &b1_sigs).is_ok());
     }
@@ -987,13 +988,11 @@ mod tests {
     #[test]
     fn test_encrypted_balance_proof_structure() {
         let proof = EncryptedBalanceProof {
-            encrypted_notes: vec![
-                EncryptedNote {
-                    ciphertext: vec![1, 2, 3],
-                    commitment: test_hash(1),
-                    nullifier_tag: test_hash(2),
-                },
-            ],
+            encrypted_notes: vec![EncryptedNote {
+                ciphertext: vec![1, 2, 3],
+                commitment: test_hash(1),
+                nullifier_tag: test_hash(2),
+            }],
             merkle_proofs: vec![],
         };
         assert_eq!(proof.encrypted_notes.len(), 1);

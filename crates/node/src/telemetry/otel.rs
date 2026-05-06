@@ -16,8 +16,7 @@ use tracing_subscriber::{layer::SubscriberExt, Registry};
 use super::registry::TelemetryRegistry;
 
 /// Global tracer provider for shutdown and tracer creation.
-pub static GLOBAL_PROVIDER: std::sync::OnceLock<TracerProvider> =
-    std::sync::OnceLock::new();
+pub static GLOBAL_PROVIDER: std::sync::OnceLock<TracerProvider> = std::sync::OnceLock::new();
 
 /// Initialize OpenTelemetry tracing with a stdout exporter.
 /// Returns a configured `tracing` subscriber that sends spans to OpenTelemetry.
@@ -68,11 +67,7 @@ fn get_tracer(name: &'static str) -> opentelemetry_sdk::trace::Tracer {
 }
 
 /// Record a span for a block production event via OpenTelemetry.
-pub fn record_block_span(
-    registry: &TelemetryRegistry,
-    height: u64,
-    duration_ms: u64,
-) {
+pub fn record_block_span(registry: &TelemetryRegistry, height: u64, duration_ms: u64) {
     registry.record_block_produced();
 
     let tracer = get_tracer("call-node/consensus");

@@ -2,12 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    use call_primitives::{Address, AssetId};
-    use call_evm::provider::InMemoryStateProvider;
-    use call_consensus::exec::state_accessors;
-    use call_mempool::Mempool;
     use crate::handlers::RpcState;
-    use std::sync::{Arc, RwLock, OnceLock};
+    use call_consensus::exec::state_accessors;
+    use call_evm::provider::InMemoryStateProvider;
+    use call_mempool::Mempool;
+    use call_primitives::{Address, AssetId};
+    use std::sync::{Arc, OnceLock, RwLock};
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -55,7 +55,8 @@ mod tests {
     where
         F: FnOnce(&mut InMemoryStateProvider),
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
         f(&mut provider);
         provider.save_to_db(&state.db_env).unwrap();
     }
@@ -71,7 +72,10 @@ mod tests {
         let balance = state.get_evm_balance(&addr);
         assert_eq!(balance, alloy_primitives::U256::from(1000));
         // Zero for unknown address
-        assert_eq!(state.get_evm_balance(&test_addr(99)), alloy_primitives::U256::ZERO);
+        assert_eq!(
+            state.get_evm_balance(&test_addr(99)),
+            alloy_primitives::U256::ZERO
+        );
     }
 
     #[test]
@@ -102,9 +106,7 @@ mod tests {
         let state = make_test_state();
         let issuer = test_addr(1);
         with_test_state(&state, |evm| {
-            state_accessors::seed_asset(
-                evm, 1, "CAPPED", "Capped Token", 18, issuer, 10_000, 0, 1,
-            );
+            state_accessors::seed_asset(evm, 1, "CAPPED", "Capped Token", 18, issuer, 10_000, 0, 1);
         });
 
         let info = state.get_asset_info(1).expect("asset info");
@@ -138,7 +140,15 @@ mod tests {
 
         with_test_state(&state, |evm| {
             state_accessors::seed_asset(
-                evm, asset_id, "CALL", "Call Token", 18, Address::ZERO, 0, 6_000, 0,
+                evm,
+                asset_id,
+                "CALL",
+                "Call Token",
+                18,
+                Address::ZERO,
+                0,
+                6_000,
+                0,
             );
         });
 
@@ -153,7 +163,12 @@ mod tests {
 
         with_test_state(&state, |evm| {
             state_accessors::seed_agent(
-                evm, 0, owner, "test-agent", "https://agent.example.com", 0,
+                evm,
+                0,
+                owner,
+                "test-agent",
+                "https://agent.example.com",
+                0,
             );
         });
 
@@ -175,9 +190,7 @@ mod tests {
 
         with_test_state(&state, |evm| {
             state_accessors::seed_balance(evm, 1, owner, 50_000);
-            state_accessors::seed_agent(
-                evm, 0, owner, "balance-agent", "https://a.com", 0,
-            );
+            state_accessors::seed_agent(evm, 0, owner, "balance-agent", "https://a.com", 0);
             state_accessors::agent_set_balance(evm, 0, 1, 10_000);
         });
 
@@ -207,8 +220,8 @@ mod tests {
     fn test_rpc_get_transaction_receipt() {
         let state = make_test_state();
         use call_primitives::ExecutionStatus;
-        use call_protocol::{ProtocolReceipt, InstructionExecResult};
         use call_primitives::FeeCurrency;
+        use call_protocol::{InstructionExecResult, ProtocolReceipt};
 
         let tx_hash = call_primitives::TxHash::repeat_byte(0xAB);
         let receipt = ProtocolReceipt {
@@ -249,8 +262,8 @@ mod tests {
     fn test_rpc_get_transaction_receipt_reverted() {
         let state = make_test_state();
         use call_primitives::ExecutionStatus;
-        use call_protocol::{ProtocolReceipt, InstructionExecResult};
         use call_primitives::FeeCurrency;
+        use call_protocol::{InstructionExecResult, ProtocolReceipt};
 
         let tx_hash = call_primitives::TxHash::repeat_byte(0xCD);
         let receipt = ProtocolReceipt {
@@ -284,7 +297,11 @@ mod tests {
         let found = state.get_receipt(&tx_hash).expect("receipt exists");
         match &found.status {
             ExecutionStatus::Reverted { reason } => {
-                assert!(reason.contains("insufficient balance"), "expected revert reason, got: {}", reason);
+                assert!(
+                    reason.contains("insufficient balance"),
+                    "expected revert reason, got: {}",
+                    reason
+                );
             }
             other => panic!("expected Reverted, got {:?}", other),
         }
@@ -295,7 +312,10 @@ mod tests {
         let json = crate::standard::receipt_to_json(&found);
         assert_eq!(json["status"], "0x0", "reverted status should be 0x0");
         assert!(
-            json["revertReason"].as_str().unwrap().contains("insufficient balance"),
+            json["revertReason"]
+                .as_str()
+                .unwrap()
+                .contains("insufficient balance"),
             "revertReason should be present in JSON"
         );
     }
@@ -304,51 +324,59 @@ mod tests {
     fn test_rpc_get_block_receipts() {
         let state = make_test_state();
         use call_primitives::ExecutionStatus;
-        use call_protocol::ProtocolReceipt;
         use call_primitives::FeeCurrency;
+        use call_protocol::ProtocolReceipt;
 
         let tx1 = call_primitives::TxHash::repeat_byte(1);
         let tx2 = call_primitives::TxHash::repeat_byte(2);
-        state.store_receipt(tx1, ProtocolReceipt {
-            tx_hash: tx1,
-            status: ExecutionStatus::Success,
-            gas_used: 10_000,
-            gas_payer: test_addr(1),
-            fee_currency: FeeCurrency::Call,
-            fee_amount: 0,
-            block_number: 1,
-            block_hash: call_primitives::Hash::ZERO,
-            transaction_index: 0,
-            to: None,
-            contract_address: None,
-            cumulative_gas_used: 10_000,
-            effective_gas_price: 0,
-            logs_bloom: vec![],
-            instruction_results: vec![],
-            logs: vec![],
-            memos: vec![],
-            state_changes: vec![],
-        });
-        state.store_receipt(tx2, ProtocolReceipt {
-            tx_hash: tx2,
-            status: ExecutionStatus::Reverted { reason: "out of gas".into() },
-            gas_used: 5_000,
-            gas_payer: test_addr(2),
-            fee_currency: FeeCurrency::Call,
-            fee_amount: 0,
-            block_number: 1,
-            block_hash: call_primitives::Hash::ZERO,
-            transaction_index: 1,
-            to: None,
-            contract_address: None,
-            cumulative_gas_used: 15_000,
-            effective_gas_price: 0,
-            logs_bloom: vec![],
-            instruction_results: vec![],
-            logs: vec![],
-            memos: vec![],
-            state_changes: vec![],
-        });
+        state.store_receipt(
+            tx1,
+            ProtocolReceipt {
+                tx_hash: tx1,
+                status: ExecutionStatus::Success,
+                gas_used: 10_000,
+                gas_payer: test_addr(1),
+                fee_currency: FeeCurrency::Call,
+                fee_amount: 0,
+                block_number: 1,
+                block_hash: call_primitives::Hash::ZERO,
+                transaction_index: 0,
+                to: None,
+                contract_address: None,
+                cumulative_gas_used: 10_000,
+                effective_gas_price: 0,
+                logs_bloom: vec![],
+                instruction_results: vec![],
+                logs: vec![],
+                memos: vec![],
+                state_changes: vec![],
+            },
+        );
+        state.store_receipt(
+            tx2,
+            ProtocolReceipt {
+                tx_hash: tx2,
+                status: ExecutionStatus::Reverted {
+                    reason: "out of gas".into(),
+                },
+                gas_used: 5_000,
+                gas_payer: test_addr(2),
+                fee_currency: FeeCurrency::Call,
+                fee_amount: 0,
+                block_number: 1,
+                block_hash: call_primitives::Hash::ZERO,
+                transaction_index: 1,
+                to: None,
+                contract_address: None,
+                cumulative_gas_used: 15_000,
+                effective_gas_price: 0,
+                logs_bloom: vec![],
+                instruction_results: vec![],
+                logs: vec![],
+                memos: vec![],
+                state_changes: vec![],
+            },
+        );
 
         let receipts = state.get_all_receipts();
         assert_eq!(receipts.len(), 2);
@@ -428,12 +456,20 @@ mod tests {
 
         // Protocol transactions are rejected in EVM-only mempool mode
         let result = state.submit_payment(
-            sender, 1, asset_id, to, 5_000,
+            sender,
+            1,
+            asset_id,
+            to,
+            5_000,
             Some("test payment".into()),
-            100_000, 1_000_000,
+            100_000,
+            1_000_000,
             Some([0u8; 65]),
         );
-        assert!(result.is_err(), "protocol tx should be rejected in EVM-only mempool");
+        assert!(
+            result.is_err(),
+            "protocol tx should be rejected in EVM-only mempool"
+        );
         assert!(result.unwrap_err().contains("eth_sendRawTransaction"));
 
         // Balances unchanged
@@ -447,22 +483,26 @@ mod tests {
 
     #[test]
     fn test_rpc_submit_evm_tx_real_signed() {
-        use alloy_consensus::{SignableTransaction, TxLegacy};
         use alloy_consensus::crypto::secp256k1::sign_message;
+        use alloy_consensus::{SignableTransaction, TxLegacy};
         use alloy_primitives::TxKind;
 
         let state = make_test_state();
 
         // Known test key (standard Ethereum test private key)
         let secret = alloy_primitives::FixedBytes::<32>::from_slice(
-            &hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318").unwrap(),
+            &hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+                .unwrap(),
         );
         let signer_address: call_primitives::Address =
             alloy_primitives::address!("0x2c7536E3605D9C16a7a3D7b1898e529396a65c23");
 
         // Set up EVM state with balance
         with_test_state(&state, |evm| {
-            evm.set_balance(signer_address, alloy_primitives::U256::from(1_000_000_000_000i128));
+            evm.set_balance(
+                signer_address,
+                alloy_primitives::U256::from(1_000_000_000_000i128),
+            );
             evm.create_account(signer_address);
             evm.create_account(test_addr(2));
         });
@@ -546,8 +586,14 @@ mod tests {
         drop(fm2);
 
         let fm3 = crate::handlers::state::FilterManager::new(Arc::clone(&db));
-        assert!(fm3.get_filter(id).is_none(), "removed filter should not persist");
-        assert!(fm3.get_filter(id2).is_some(), "other filter should still exist");
+        assert!(
+            fm3.get_filter(id).is_none(),
+            "removed filter should not persist"
+        );
+        assert!(
+            fm3.get_filter(id2).is_some(),
+            "other filter should still exist"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

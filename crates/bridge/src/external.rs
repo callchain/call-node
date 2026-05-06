@@ -6,10 +6,10 @@
 //! - sign_bridge_event: validator signing service
 //! - BridgeConfig limits enforcement
 
-pub mod types;
 pub(crate) mod deposit;
+pub mod types;
 pub(crate) mod withdraw;
 
-pub use types::*;
 pub use deposit::*;
+pub use types::*;
 pub use withdraw::*;

@@ -8,11 +8,8 @@
 
 #![cfg(feature = "eth-sync")]
 
-use call_light_client::{
-    EthLightClient, GenesisState,
-    sync::sync_single_header,
-};
 use alloy_primitives::B256;
+use call_light_client::{sync::sync_single_header, EthLightClient, GenesisState};
 
 /// Real-network integration test for light client header verification.
 ///
@@ -42,8 +39,8 @@ fn test_light_client_real_network_header_sync() {
     assert!(anchor_block > 0, "anchor block must be non-zero");
 
     // Fetch anchor header
-    let anchor_header = sync_single_header(&eth_rpc_url, anchor_block
-    ).expect("fetch anchor header");
+    let anchor_header =
+        sync_single_header(&eth_rpc_url, anchor_block).expect("fetch anchor header");
 
     // Initialize light client
     let genesis = GenesisState {
@@ -57,10 +54,11 @@ fn test_light_client_real_network_header_sync() {
     let sync_count = 5usize;
     for i in 1..=sync_count {
         let block_num = anchor_block + i as u64;
-        let header = sync_single_header(&eth_rpc_url, block_num
-        ).expect(&format!("fetch header at block {block_num}"));
+        let header = sync_single_header(&eth_rpc_url, block_num)
+            .expect(&format!("fetch header at block {block_num}"));
 
-        client.submit_header(header)
+        client
+            .submit_header(header)
             .expect(&format!("submit header at block {block_num}"));
     }
 
@@ -103,14 +101,14 @@ fn fetch_block_number(eth_rpc_url: &str) -> Result<u64, String> {
         .map_err(|e| format!("RPC request failed: {e}"))?;
 
     let text = resp.into_string().map_err(|e| format!("read body: {e}"))?;
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("parse JSON: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("parse JSON: {e}"))?;
 
-    let result = json.get("result")
+    let result = json
+        .get("result")
         .and_then(|v| v.as_str())
         .ok_or("missing result in response")?;
 
     let hex = result.strip_prefix("0x").unwrap_or(result);
-    u64::from_str_radix(hex, 16)
-        .map_err(|e| format!("parse hex block number: {e}"))
+    u64::from_str_radix(hex, 16).map_err(|e| format!("parse hex block number: {e}"))
 }

@@ -1,16 +1,16 @@
 //! Callchain Protocol Layer — Core protocol types, execution, and economics.
 
-pub mod security;
 pub mod compliance;
+pub mod economics;
 pub mod gas;
 pub mod receipts;
-pub mod economics;
+pub mod security;
 pub mod storage_backend;
 
 pub use compliance::*;
+pub use economics::*;
 pub use gas::*;
 pub use receipts::*;
-pub use economics::*;
 
 use alloy_primitives::Address;
 use thiserror::Error;

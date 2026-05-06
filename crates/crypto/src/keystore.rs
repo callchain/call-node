@@ -136,10 +136,7 @@ pub fn decrypt_key(
 }
 
 /// Generate a new secp256k1 keypair, encrypt, and write to file
-pub fn generate_and_store(
-    path: &Path,
-    passphrase: &str,
-) -> Result<PublicKey, KeystoreError> {
+pub fn generate_and_store(path: &Path, passphrase: &str) -> Result<PublicKey, KeystoreError> {
     let signing_key = SigningKey::random(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
     let encoded = verifying_key.to_encoded_point(false);
@@ -151,21 +148,17 @@ pub fn generate_and_store(
 
     let json = serde_json::to_string_pretty(&keystore)
         .map_err(|e| KeystoreError::Io(format!("serialize: {e}")))?;
-    std::fs::write(path, json)
-        .map_err(|e| KeystoreError::Io(format!("write: {e}")))?;
+    std::fs::write(path, json).map_err(|e| KeystoreError::Io(format!("write: {e}")))?;
 
     Ok(PublicKey::from(pubkey))
 }
 
 /// Read and decrypt key from file
-pub fn load_key(
-    path: &Path,
-    passphrase: &str,
-) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| KeystoreError::Io(format!("read: {e}")))?;
-    let keystore: EncryptedKeystore = serde_json::from_str(&content)
-        .map_err(|_e| KeystoreError::InvalidData)?;
+pub fn load_key(path: &Path, passphrase: &str) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| KeystoreError::Io(format!("read: {e}")))?;
+    let keystore: EncryptedKeystore =
+        serde_json::from_str(&content).map_err(|_e| KeystoreError::InvalidData)?;
     decrypt_key(&keystore, passphrase)
 }
 
@@ -211,7 +204,10 @@ mod tests {
 
         let loaded = load_key(&tmp, "pass123").unwrap();
         let signing = SigningKey::from_slice(&*loaded).unwrap();
-        assert_eq!(signing.verifying_key().to_encoded_point(false).as_bytes()[1..].to_vec(), pubkey.as_slice().to_vec());
+        assert_eq!(
+            signing.verifying_key().to_encoded_point(false).as_bytes()[1..].to_vec(),
+            pubkey.as_slice().to_vec()
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 

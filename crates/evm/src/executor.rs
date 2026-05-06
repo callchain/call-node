@@ -2,29 +2,27 @@
 //!
 //! EVM transaction execution, ERC-20 deployment, gas tracking, validation.
 
-use call_primitives::Address;
+use crate::provider::InMemoryStateProvider;
 use crate::ProtocolStorage;
-use call_precompile::{
-    CallPrecompiles,
-    AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
-    ORACLE_ADDRESS, SHIELDED_ADDRESS, SWITCH_ADDRESS, VALIDATOR_ADDRESS,
-    ASSET_ADDRESS,
-};
-use call_switch::precompile::SwitchPrecompile;
-use call_bridge::precompile::BridgePrecompile;
-use call_shielded::precompile::ShieldedPrecompile;
-use call_asset::AssetPrecompile;
-use call_validator::ValidatorPrecompile;
-use call_compliance::CompliancePrecompile;
+use alloy_primitives::{keccak256, Bytes, FixedBytes, U256};
 use call_agent::AgentPrecompile;
-use call_oracle::precompile::OraclePrecompile;
+use call_asset::AssetPrecompile;
+use call_bridge::precompile::BridgePrecompile;
+use call_compliance::CompliancePrecompile;
 use call_governance::precompile::GovernancePrecompile;
-use alloy_primitives::{U256, Bytes, keccak256, FixedBytes};
+use call_oracle::precompile::OraclePrecompile;
+use call_precompile::{
+    CallPrecompiles, AGENT_ADDRESS, ASSET_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS,
+    GOVERNANCE_ADDRESS, ORACLE_ADDRESS, SHIELDED_ADDRESS, SWITCH_ADDRESS, VALIDATOR_ADDRESS,
+};
+use call_primitives::Address;
+use call_shielded::precompile::ShieldedPrecompile;
+use call_switch::precompile::SwitchPrecompile;
+use call_validator::ValidatorPrecompile;
 use revm::{
-    primitives::{hardfork::SpecId, TxKind, Log},
+    primitives::{hardfork::SpecId, Log, TxKind},
     Context, ExecuteEvm, MainBuilder, MainContext,
 };
-use crate::provider::InMemoryStateProvider;
 
 /// EVM execution error
 #[derive(Debug)]
@@ -121,15 +119,15 @@ impl EvmExecutor {
 
             // Build EVM with Callchain custom precompiles
             let precompiles = CallPrecompiles::new(self.spec_id)
-                .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
-                .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
-                .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
-                .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
+                .with_custom(ORACLE_ADDRESS, Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS, Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS, Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS, Box::new(ShieldedPrecompile))
                 .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
-                .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
+                .with_custom(VALIDATOR_ADDRESS, Box::new(ValidatorPrecompile))
                 .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
-                .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
-                .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile));
+                .with_custom(SWITCH_ADDRESS, Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS, Box::new(AgentPrecompile));
             let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
 
             let mut block_env = revm::context::BlockEnv::default();
@@ -145,10 +143,7 @@ impl EvmExecutor {
 
         let (success, output, gas_used, logs) = match result.result {
             revm::context_interface::result::ExecutionResult::Success {
-                gas,
-                output,
-                logs,
-                ..
+                gas, output, logs, ..
             } => {
                 let bytes = match output {
                     revm::context_interface::result::Output::Call(b) => b,
@@ -156,22 +151,23 @@ impl EvmExecutor {
                 };
                 (true, bytes, gas.spent(), logs)
             }
-            revm::context_interface::result::ExecutionResult::Revert {
-                gas,
-                output,
-                ..
-            } => (false, output, gas.spent(), vec![]),
+            revm::context_interface::result::ExecutionResult::Revert { gas, output, .. } => {
+                (false, output, gas.spent(), vec![])
+            }
             revm::context_interface::result::ExecutionResult::Halt { gas, .. } => {
                 (false, Bytes::default(), gas.spent(), vec![])
             }
         };
 
-        Ok((EvmExecutionResult {
-            success,
-            gas_used,
-            output,
-            logs,
-        }, revm_state))
+        Ok((
+            EvmExecutionResult {
+                success,
+                gas_used,
+                output,
+                logs,
+            },
+            revm_state,
+        ))
     }
 
     /// Execute an EVM transaction using any [`EvmStateProvider`] as the backing database.
@@ -232,15 +228,15 @@ impl EvmExecutor {
                 .modify_cfg_chained(|cfg: &mut revm::context::CfgEnv| cfg.set_spec(self.spec_id));
 
             let precompiles = CallPrecompiles::new(self.spec_id)
-                .with_custom(ORACLE_ADDRESS,     Box::new(OraclePrecompile))
-                .with_custom(BRIDGE_ADDRESS,     Box::new(BridgePrecompile))
-                .with_custom(ASSET_ADDRESS,      Box::new(AssetPrecompile))
-                .with_custom(SHIELDED_ADDRESS,   Box::new(ShieldedPrecompile))
+                .with_custom(ORACLE_ADDRESS, Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS, Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS, Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS, Box::new(ShieldedPrecompile))
                 .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
-                .with_custom(VALIDATOR_ADDRESS,  Box::new(ValidatorPrecompile))
+                .with_custom(VALIDATOR_ADDRESS, Box::new(ValidatorPrecompile))
                 .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
-                .with_custom(SWITCH_ADDRESS,     Box::new(SwitchPrecompile))
-                .with_custom(AGENT_ADDRESS,      Box::new(AgentPrecompile));
+                .with_custom(SWITCH_ADDRESS, Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS, Box::new(AgentPrecompile));
             let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
 
             let mut block_env = revm::context::BlockEnv::default();
@@ -256,10 +252,7 @@ impl EvmExecutor {
 
         let (success, output, gas_used, logs) = match result.result {
             revm::context_interface::result::ExecutionResult::Success {
-                gas,
-                output,
-                logs,
-                ..
+                gas, output, logs, ..
             } => {
                 let bytes = match output {
                     revm::context_interface::result::Output::Call(b) => b,
@@ -267,22 +260,23 @@ impl EvmExecutor {
                 };
                 (true, bytes, gas.spent(), logs)
             }
-            revm::context_interface::result::ExecutionResult::Revert {
-                gas,
-                output,
-                ..
-            } => (false, output, gas.spent(), vec![]),
+            revm::context_interface::result::ExecutionResult::Revert { gas, output, .. } => {
+                (false, output, gas.spent(), vec![])
+            }
             revm::context_interface::result::ExecutionResult::Halt { gas, .. } => {
                 (false, Bytes::default(), gas.spent(), vec![])
             }
         };
 
-        Ok((EvmExecutionResult {
-            success,
-            gas_used,
-            output,
-            logs,
-        }, revm_state))
+        Ok((
+            EvmExecutionResult {
+                success,
+                gas_used,
+                output,
+                logs,
+            },
+            revm_state,
+        ))
     }
 
     /// Deploy ERC-20 template contract for an asset.
@@ -342,9 +336,8 @@ impl EvmExecutor {
         amount: U256,
     ) -> Result<EvmExecutionResult, EvmError> {
         // keccak256("bridgeMint(address,uint256)")[:4]
-        let selector: FixedBytes<4> = FixedBytes::from_slice(
-            &keccak256("bridgeMint(address,uint256)")[..4],
-        );
+        let selector: FixedBytes<4> =
+            FixedBytes::from_slice(&keccak256("bridgeMint(address,uint256)")[..4]);
         let mut data = Vec::new();
         data.extend_from_slice(&selector[..]);
         // ABI-encode address (32 bytes, left-padded)
@@ -379,9 +372,8 @@ impl EvmExecutor {
         amount: U256,
     ) -> Result<EvmExecutionResult, EvmError> {
         // keccak256("bridgeBurn(uint256)")[:4]
-        let selector: FixedBytes<4> = FixedBytes::from_slice(
-            &keccak256("bridgeBurn(uint256)")[..4],
-        );
+        let selector: FixedBytes<4> =
+            FixedBytes::from_slice(&keccak256("bridgeBurn(uint256)")[..4]);
         let mut data = Vec::new();
         data.extend_from_slice(&selector[..]);
         // ABI-encode uint256
@@ -413,9 +405,8 @@ impl EvmExecutor {
         amount: U256,
     ) -> Result<EvmExecutionResult, EvmError> {
         // keccak256("issuerMint(address,uint256)")[:4]
-        let selector: FixedBytes<4> = FixedBytes::from_slice(
-            &keccak256("issuerMint(address,uint256)")[..4],
-        );
+        let selector: FixedBytes<4> =
+            FixedBytes::from_slice(&keccak256("issuerMint(address,uint256)")[..4]);
         let mut data = Vec::new();
         data.extend_from_slice(&selector[..]);
         // ABI-encode address (32 bytes, left-padded)
@@ -483,7 +474,12 @@ pub fn derive_create_address(deployer: Address, nonce: u64) -> Address {
     let nonce_bytes = if nonce == 0 {
         vec![]
     } else {
-        nonce.to_be_bytes().iter().skip_while(|&&b| b == 0).cloned().collect::<Vec<_>>()
+        nonce
+            .to_be_bytes()
+            .iter()
+            .skip_while(|&&b| b == 0)
+            .cloned()
+            .collect::<Vec<_>>()
     };
     if nonce_bytes.is_empty() {
         rlp_buf.push(0x80); // RLP empty string
@@ -501,7 +497,10 @@ pub fn derive_create_address(deployer: Address, nonce: u64) -> Address {
             out.push(0xc0 | rlp_buf.len() as u8);
         } else {
             let len_bytes = rlp_buf.len().to_be_bytes();
-            let first_nonzero = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+            let first_nonzero = len_bytes
+                .iter()
+                .position(|&b| b != 0)
+                .unwrap_or(len_bytes.len());
             let payload_len = len_bytes.len() - first_nonzero;
             out.push(0xf7 | payload_len as u8);
             out.extend_from_slice(&len_bytes[first_nonzero..]);
@@ -698,10 +697,24 @@ mod tests {
         let bridge = test_addr(0xFF);
         let issuer = test_addr(1);
         let (addr, result) = executor
-            .deploy_erc20_template(deployer, &mut state, "Test", "TST", 18, bridge, issuer, U256::from(0), U256::from(1))
+            .deploy_erc20_template(
+                deployer,
+                &mut state,
+                "Test",
+                "TST",
+                18,
+                bridge,
+                issuer,
+                U256::from(0),
+                U256::from(1),
+            )
             .unwrap();
         assert_eq!(addr, expected_addr);
-        assert!(result.success, "ERC-20 deploy failed: gas_used={}, output={:?}", result.gas_used, result.output);
+        assert!(
+            result.success,
+            "ERC-20 deploy failed: gas_used={}, output={:?}",
+            result.gas_used, result.output
+        );
     }
 
     #[test]
@@ -713,7 +726,13 @@ mod tests {
         state.create_account(caller);
 
         let result = executor
-            .evm_call_bridge_mint(caller, test_addr(0xCC), &mut state, test_addr(2), U256::from(500))
+            .evm_call_bridge_mint(
+                caller,
+                test_addr(0xCC),
+                &mut state,
+                test_addr(2),
+                U256::from(500),
+            )
             .unwrap();
         assert!(result.success);
     }
@@ -722,10 +741,8 @@ mod tests {
     fn test_evm_execute_with_provider() {
         use reth_storage_api::AccountReader;
 
-        let tmp = std::env::temp_dir().join(format!(
-            "call-evm-provider-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-evm-provider-test-{}", std::process::id()));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         // Seed MDBX with an account
@@ -774,10 +791,7 @@ mod tests {
     fn test_evm_execute_cached_block() {
         use reth_storage_api::AccountReader;
 
-        let tmp = std::env::temp_dir().join(format!(
-            "call-evm-cached-test-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("call-evm-cached-test-{}", std::process::id()));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         // Seed MDBX
@@ -813,7 +827,10 @@ mod tests {
 
         // Verify recipient balance
         let provider2 = crate::provider::InMemoryStateProvider::from_db(&db).expect("provider2");
-        let acc = provider2.basic_account(&test_addr(2)).expect("basic_account").expect("account exists");
+        let acc = provider2
+            .basic_account(&test_addr(2))
+            .expect("basic_account")
+            .expect("account exists");
         assert_eq!(acc.balance, U256::from(100));
 
         let _ = std::fs::remove_dir_all(&tmp);

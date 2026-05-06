@@ -183,9 +183,7 @@ fn load_vk_from_file(path: &Path) -> Result<VerifyingKey<Bn254>, KeyLoadError> {
 }
 
 /// Load proving keys if present (not required for validators).
-fn load_proving_keys_if_present(
-    dir: &Path,
-) -> Result<Option<ProductionProvingKeys>, KeyLoadError> {
+fn load_proving_keys_if_present(dir: &Path) -> Result<Option<ProductionProvingKeys>, KeyLoadError> {
     let transfer_pk = dir.join("transfer_pk.bin");
     let deposit_pk = dir.join("deposit_pk.bin");
     let withdraw_pk = dir.join("withdraw_pk.bin");

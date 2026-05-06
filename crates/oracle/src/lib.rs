@@ -4,17 +4,17 @@
 //! outlier detection, and TWAP history.
 
 pub mod constants;
-pub mod tracker;
 pub mod crypto;
 pub mod fetcher;
 pub mod precompile;
 #[cfg(test)]
 pub mod tests;
+pub mod tracker;
 
 pub use constants::*;
-pub use tracker::OracleTracker;
 pub use crypto::*;
 pub use fetcher::*;
+pub use tracker::OracleTracker;
 
 use call_primitives::{Address, Ed25519PublicKey, PricePair};
 use serde::{Deserialize, Serialize};

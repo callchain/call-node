@@ -3,82 +3,75 @@
 //! Minimal node that initializes all state components,
 //! starts an HTTP RPC server, runs consensus, and processes transactions.
 
+pub mod boot;
 pub mod cli;
 pub mod config;
-pub mod boot;
-pub mod telemetry;
 pub mod light_client;
 pub mod logging;
-pub mod wallet;
 pub mod state_persist;
+pub mod telemetry;
+pub mod wallet;
 
-pub mod block_producer;
 pub mod bft_loop;
-pub mod sync;
-pub mod network_handler;
+pub mod block_producer;
 pub mod governance_advancer;
+pub mod network_handler;
+pub mod sync;
 
-pub(crate) use network_handler::{
-    handle_network_message, SyncInflight,
-    BLOCK_CHANNEL, SYNC_CHANNEL,
-    SYNC_REQUEST_BATCH,
-};
-pub(crate) use sync::{handle_sync_request, apply_synced_blocks};
-pub(crate) use block_producer::block_production_loop;
 pub(crate) use bft_loop::bft_event_loop;
+pub(crate) use block_producer::block_production_loop;
+pub(crate) use network_handler::{
+    handle_network_message, SyncInflight, BLOCK_CHANNEL, SYNC_CHANNEL, SYNC_REQUEST_BATCH,
+};
+pub(crate) use sync::{apply_synced_blocks, handle_sync_request};
 
-use crate::light_client::{LightClient, BlockSignatures, SigBytes, PubKeyBytes};
+use crate::light_client::{BlockSignatures, LightClient, PubKeyBytes, SigBytes};
+use crate::state_persist::{
+    check_recovery_needed, clear_checkpoint, load_consensus_state_inner, load_fork_state,
+    load_receipts, load_state_from_db, persist_state_incremental, persist_state_to_db,
+    save_consensus_state_inner,
+};
 use call_consensus::{
-    Block, ConsensusParams, SimplexConsensus,
-    ForkManager,
-    bft::{CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest},
+    bft::{
+        CallAutomaton, CallRelay, CallReporter, FinalizationInfo, ProposeRequest, VerifyRequest,
+    },
     block_cache::BlockCache,
     digest::ConsensusDigest,
     proposer::{derive_vrf_seed, select_proposer_subset},
-};
-use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, SyncRequest};
-use call_primitives::BlockHash;
-use call_protocol::{
-    FeeParams,
-    security::P2PDefense,
-};
-use call_oracle::OracleTracker;
-use call_rpc::{RpcState, RpcConfig, build_rpc_module};
-use call_storage::{CallDb, open_db, PruneState};
-use call_storage::reth_db::{
-    save_prune_state as db_save_prune,
-};
-use reth_db::DatabaseEnv;
-use crate::state_persist::{
-    load_state_from_db, persist_state_to_db, persist_state_incremental,
-    load_receipts, load_fork_state,
-    check_recovery_needed, clear_checkpoint,
-    load_consensus_state_inner, save_consensus_state_inner,
+    Block, ConsensusParams, ForkManager, SimplexConsensus,
 };
 use call_mempool::Mempool;
+use call_network::{CommonwareConfig, CommonwareNetwork, Network, NetworkMessage, SyncRequest};
+use call_oracle::OracleTracker;
+use call_primitives::BlockHash;
+use call_protocol::{security::P2PDefense, FeeParams};
+use call_rpc::{build_rpc_module, RpcConfig, RpcState};
+use call_storage::reth_db::save_prune_state as db_save_prune;
+use call_storage::{open_db, CallDb, PruneState};
+use commonware_codec::extensions::DecodeExt;
 use jsonrpsee::server::ServerHandle;
+use reth_db::DatabaseEnv;
+use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use commonware_codec::extensions::DecodeExt;
 
 // Commonware Simplex BFT imports
-use commonware_consensus::simplex::{Config as SimplexConfig, Engine, ForwardingPolicy};
 use commonware_consensus::simplex::elector::RoundRobin;
 use commonware_consensus::simplex::scheme::ed25519::Scheme as Ed25519Scheme;
+use commonware_consensus::simplex::{Config as SimplexConfig, Engine, ForwardingPolicy};
 use commonware_consensus::types::{Epoch, ViewDelta};
 use commonware_cryptography::ed25519;
 use commonware_cryptography::Signer;
-use commonware_parallel::Sequential;
-use commonware_p2p::AddressableManager;
 use commonware_p2p::authenticated::lookup::{self as p2p_lookup, Config as P2PConfig};
 use commonware_p2p::utils::mux::Muxer;
-use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
-use commonware_runtime::{Quota, Runner, Metrics};
+use commonware_p2p::AddressableManager;
+use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::tokio::{Config as RuntimeConfig, Runner as TokioRunner};
+use commonware_runtime::{Metrics, Quota, Runner};
 use commonware_utils::ordered::Set;
 
 /// Chain ID for Callchain devnet
@@ -90,7 +83,6 @@ enum EpochRotationReason {
     /// Epoch boundary reached (height % epoch_length == 0)
     EpochBoundary,
 }
-
 
 /// The Callchain node
 pub struct CallNode {
@@ -132,15 +124,16 @@ impl CallNode {
         let db = open_db(data_dir.clone()).map_err(|e| format!("failed to open db: {e}"))?;
 
         // Restore prune state from disk if previously persisted
-        let prune_state = db.load_prune_state()
+        let prune_state = db
+            .load_prune_state()
             .map_err(|e| format!("failed to load prune state: {e}"))?;
 
         let db_env = &db.db;
 
         // Crash recovery: if a pending checkpoint exists, state may be inconsistent.
         // Clear the marker and start from genesis (safe — partial state is ignored).
-        let recovery_needed = check_recovery_needed(db_env)
-            .map_err(|e| format!("checkpoint check failed: {e}"))?;
+        let recovery_needed =
+            check_recovery_needed(db_env).map_err(|e| format!("checkpoint check failed: {e}"))?;
         if recovery_needed {
             tracing::warn!("pending checkpoint detected — previous shutdown was unclean; starting from genesis");
             let _ = clear_checkpoint(db_env);
@@ -178,27 +171,31 @@ impl CallNode {
             match load_fork_state(db_env) {
                 Ok(Some(fm)) => fm,
                 Ok(None) => {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env)
+                        .unwrap_or_default();
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        call_consensus::exec::state_accessors::read_validator_count(&provider) as u32,
+                        call_consensus::exec::state_accessors::read_validator_count(&provider)
+                            as u32,
                     )
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load fork state");
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env)
+                        .unwrap_or_default();
                     ForkManager::new(
                         call_primitives::ProtocolVersion::new(1, 0, 0),
-                        call_consensus::exec::state_accessors::read_validator_count(&provider) as u32,
+                        call_consensus::exec::state_accessors::read_validator_count(&provider)
+                            as u32,
                     )
                 }
             }
         };
 
-
         // Try to load persisted consensus state; fall back to genesis
         let consensus = if recovery_needed {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
+            let provider =
+                call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
             SimplexConsensus::new(ConsensusParams::default(), &provider)
         } else {
             match load_consensus_state_inner(db_env) {
@@ -212,7 +209,8 @@ impl CallNode {
                 }
                 Err(e) => {
                     tracing::info!(error = %e, "no persisted consensus state, starting from genesis");
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env).unwrap_or_default();
+                    let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env)
+                        .unwrap_or_default();
                     SimplexConsensus::new(ConsensusParams::default(), &provider)
                 }
             }
@@ -230,10 +228,11 @@ impl CallNode {
         for (tx_hash, receipt) in &receipts {
             for (idx, log) in receipt.logs.iter().enumerate() {
                 if let Ok(mut index) = state.log_index.write() {
-                    index
-                        .entry(log.address)
-                        .or_insert_with(Vec::new)
-                        .push((receipt.block_number, *tx_hash, idx));
+                    index.entry(log.address).or_insert_with(Vec::new).push((
+                        receipt.block_number,
+                        *tx_hash,
+                        idx,
+                    ));
                 }
             }
         }
@@ -370,7 +369,12 @@ impl CallNode {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                if let Err(e) = p2p_defense.lock().await.validate_message(peer_id.clone(), data.len(), now_ms) {
+                if let Err(e) =
+                    p2p_defense
+                        .lock()
+                        .await
+                        .validate_message(peer_id.clone(), data.len(), now_ms)
+                {
                     tracing::warn!(peer_id, error = %e, size = data.len(), "p2p: message rejected by defense");
                     continue;
                 }
@@ -379,7 +383,12 @@ impl CallNode {
                 if channel == SYNC_CHANNEL {
                     // Handle sync requests: respond with blocks
                     if let Ok(NetworkMessage::SyncRequest(request)) = bincode::deserialize(&data) {
-                        tracing::debug!(peer_id, start = request.start_height, count = request.count, "sync: request from peer");
+                        tracing::debug!(
+                            peer_id,
+                            start = request.start_height,
+                            count = request.count,
+                            "sync: request from peer"
+                        );
                         // Spawn the disk-and-serialize work into its own task
                         // so the receive loop doesn't block while we read up
                         // to SYNC_REQUEST_BATCH blocks from MDBX and JSON-
@@ -392,12 +401,17 @@ impl CallNode {
                         let peer_for_resp = peer_id.clone();
                         tokio::spawn(async move {
                             if let Some(response) = handle_sync_request(&db_env_owned, &request) {
-                                let resp_data = bincode::serialize(&NetworkMessage::SyncResponse(response))
-                                    .expect("serialize sync response");
-                                net_for_resp.send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data).await;
+                                let resp_data =
+                                    bincode::serialize(&NetworkMessage::SyncResponse(response))
+                                        .expect("serialize sync response");
+                                net_for_resp
+                                    .send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data)
+                                    .await;
                             }
                         });
-                    } else if let Ok(NetworkMessage::SyncResponse(response)) = bincode::deserialize(&data) {
+                    } else if let Ok(NetworkMessage::SyncResponse(response)) =
+                        bincode::deserialize(&data)
+                    {
                         // A response for our outstanding request landed —
                         // free the in-flight slot for this peer so the next
                         // BlockAnnouncement (or our own catch-up below) can
@@ -446,7 +460,9 @@ impl CallNode {
                                         count: SYNC_REQUEST_BATCH,
                                         full_state: false,
                                     };
-                                    if let Ok(req_data) = bincode::serialize(&NetworkMessage::SyncRequest(next)) {
+                                    if let Ok(req_data) =
+                                        bincode::serialize(&NetworkMessage::SyncRequest(next))
+                                    {
                                         let net = Arc::clone(&net_clone);
                                         let peer = peer_id.clone();
                                         tokio::spawn(async move {
@@ -470,7 +486,17 @@ impl CallNode {
                     if let Ok(NetworkMessage::BlockAnnouncement(_)) =
                         bincode::deserialize::<NetworkMessage>(&data)
                     {
-                        handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker).await;
+                        handle_network_message(
+                            &peer_id,
+                            channel,
+                            &data,
+                            &mempool,
+                            &state,
+                            &net_clone,
+                            &sync_inflight,
+                            &oracle_tracker,
+                        )
+                        .await;
                     } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
                         // Full block received from BFT relay — insert into cache for verify
                         let digest = ConsensusDigest::from(block.header.hash());
@@ -484,7 +510,17 @@ impl CallNode {
                         tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
                 } else {
-                    handle_network_message(&peer_id, channel, &data, &mempool, &state, &net_clone, &sync_inflight, &oracle_tracker).await;
+                    handle_network_message(
+                        &peer_id,
+                        channel,
+                        &data,
+                        &mempool,
+                        &state,
+                        &net_clone,
+                        &sync_inflight,
+                        &oracle_tracker,
+                    )
+                    .await;
                 }
             }
         });
@@ -861,7 +897,12 @@ impl CallNode {
             let consensus_height = consensus.read().unwrap().current_height();
             let disk_height = find_latest_height(&db_env);
             let mut local_height = consensus_height.max(disk_height);
-            tracing::info!(local_height, consensus_height, disk_height, "sync: checking local state");
+            tracing::info!(
+                local_height,
+                consensus_height,
+                disk_height,
+                "sync: checking local state"
+            );
 
             const BATCH_SIZE: u64 = 100;
             const MAX_EMPTY_ROUNDS: u32 = 3;
@@ -883,15 +924,23 @@ impl CallNode {
 
             // Build light client from current validator set once at the start
             let (trusted_validators, total_validators, bls_pubkeys) = {
-                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                 let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
                 let mut ed25519_map = std::collections::HashMap::new();
                 let mut bls_map = std::collections::HashMap::new();
                 for id in 1..=count {
-                    let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
-                    if addr == call_primitives::Address::ZERO { continue; }
-                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
-                    let bls_pk = call_consensus::exec::state_accessors::read_validator_bls_pubkey(&provider, addr);
+                    let addr =
+                        call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
+                    if addr == call_primitives::Address::ZERO {
+                        continue;
+                    }
+                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
+                        &provider, addr,
+                    );
+                    let bls_pk = call_consensus::exec::state_accessors::read_validator_bls_pubkey(
+                        &provider, addr,
+                    );
                     ed25519_map.insert(id as u32, pk);
                     if bls_pk != [0u8; 48] {
                         bls_map.insert(id as u32, bls_pk);
@@ -975,10 +1024,10 @@ impl CallNode {
                                 );
 
                                 // Keep the response with the most blocks.
-                                if best_response.as_ref().map_or(
-                                    true,
-                                    |best| response.blocks.len() > best.blocks.len(),
-                                ) {
+                                if best_response
+                                    .as_ref()
+                                    .map_or(true, |best| response.blocks.len() > best.blocks.len())
+                                {
                                     best_peer = peer_id;
                                     best_response = Some(response);
                                 }
@@ -1049,20 +1098,30 @@ impl CallNode {
                                     let max_gas = fee_params.max_gas_per_block.max(1);
                                     drop(fee_params);
                                     let total_gas = result.evm_gas_used;
-                                    let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
-                                    let mut evm_priority_fees: Vec<u128> = result.evm_tx_results.iter()
+                                    let gas_used_ratio =
+                                        (total_gas as f64 / max_gas as f64).min(1.0);
+                                    let mut evm_priority_fees: Vec<u128> = result
+                                        .evm_tx_results
+                                        .iter()
                                         .map(|e| e.gas_price.saturating_sub(base_fee))
                                         .collect();
                                     evm_priority_fees.sort_unstable();
                                     let n = evm_priority_fees.len().max(1);
-                                    let priority_fee_rewards: Vec<u128> = [0.0_f64, 10.0, 50.0, 90.0, 100.0]
-                                        .iter()
-                                        .map(|p| {
-                                            let p = (*p as f64).min(100.0).max(0.0);
-                                            let idx = ((n - 1) as f64 * p / 100.0).round() as usize;
-                                            evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS)
-                                        })
-                                        .collect();
+                                    let priority_fee_rewards: Vec<u128> =
+                                        [0.0_f64, 10.0, 50.0, 90.0, 100.0]
+                                            .iter()
+                                            .map(|p| {
+                                                let p = (*p as f64).min(100.0).max(0.0);
+                                                let idx =
+                                                    ((n - 1) as f64 * p / 100.0).round() as usize;
+                                                evm_priority_fees
+                                                    .get(idx.min(n - 1))
+                                                    .copied()
+                                                    .unwrap_or(
+                                                    call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS,
+                                                )
+                                            })
+                                            .collect();
                                     let entry = call_rpc::handlers::BlockFeeEntry {
                                         base_fee,
                                         gas_used_ratio,
@@ -1078,8 +1137,11 @@ impl CallNode {
 
                                 if let Ok(mut c) = consensus.write() {
                                     let _ = c.commit_block(&block, &result);
-                                    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-                                        &state.db_env).unwrap();
+                                    let mut provider =
+                                        call_evm::provider::InMemoryStateProvider::from_db(
+                                            &state.db_env,
+                                        )
+                                        .unwrap();
                                     c.advance_round(&mut provider);
                                     let _ = provider.save_to_db(&state.db_env);
                                 }
@@ -1112,14 +1174,20 @@ impl CallNode {
                 } else {
                     empty_rounds += 1;
                     if empty_rounds >= MAX_EMPTY_ROUNDS {
-                        tracing::info!("sync: no responses after {MAX_EMPTY_ROUNDS} rounds, stopping");
+                        tracing::info!(
+                            "sync: no responses after {MAX_EMPTY_ROUNDS} rounds, stopping"
+                        );
                         break;
                     }
                     continue;
                 }
 
                 if batch_applied > 0 {
-                    tracing::info!(applied = batch_applied, height = local_height, "sync: batch applied");
+                    tracing::info!(
+                        applied = batch_applied,
+                        height = local_height,
+                        "sync: batch applied"
+                    );
                 }
 
                 // If we received fewer blocks than requested, we're caught up
@@ -1176,10 +1244,7 @@ impl CallNode {
     /// Get mempool stats (EVM count, known tx count)
     pub fn mempool_stats(&self) -> (usize, usize) {
         let mempool = self.mempool.read().unwrap();
-        (
-            mempool.evm_pool.len(),
-            mempool.known_txs.len(),
-        )
+        (mempool.evm_pool.len(), mempool.known_txs.len())
     }
 
     /// Inject a network implementation (for testing).
@@ -1196,7 +1261,11 @@ fn current_timestamp_millis() -> u64 {
 }
 
 /// Persist a block to MDBX (height → serialized block + hash index).
-pub(crate) fn persist_block(db_env: &Arc<DatabaseEnv>, height: u64, block: &Block) -> Result<(), String> {
+pub(crate) fn persist_block(
+    db_env: &Arc<DatabaseEnv>,
+    height: u64,
+    block: &Block,
+) -> Result<(), String> {
     let key = height.to_be_bytes().to_vec();
     let value = serde_json::to_vec(block)
         .map_err(|e| format!("failed to serialize block {height}: {e}"))?;
@@ -1205,8 +1274,10 @@ pub(crate) fn persist_block(db_env: &Arc<DatabaseEnv>, height: u64, block: &Bloc
 
     let hash_key = block.header.hash().0.to_vec();
     let hash_value = height.to_be_bytes().to_vec();
-    call_storage::reth_db::db_put::<call_storage::reth_db::CallBlockHashIndex>(db_env, hash_key, hash_value)
-        .map_err(|e| format!("failed to write hash index for block {height}: {e}"))?;
+    call_storage::reth_db::db_put::<call_storage::reth_db::CallBlockHashIndex>(
+        db_env, hash_key, hash_value,
+    )
+    .map_err(|e| format!("failed to write hash index for block {height}: {e}"))?;
 
     call_storage::reth_db::save_block_hash_by_height(db_env, height, &block.header.hash())
         .map_err(|e| format!("failed to write height->hash for block {height}: {e}"))?;
@@ -1216,7 +1287,8 @@ pub(crate) fn persist_block(db_env: &Arc<DatabaseEnv>, height: u64, block: &Bloc
 /// Load a single block from MDBX by height.
 fn load_block(db_env: &Arc<DatabaseEnv>, height: u64) -> Option<Block> {
     let key = height.to_be_bytes().to_vec();
-    match call_storage::reth_db::db_get::<call_storage::reth_db::CallConsensusBlocks>(db_env, &key) {
+    match call_storage::reth_db::db_get::<call_storage::reth_db::CallConsensusBlocks>(db_env, &key)
+    {
         Ok(Some(data)) => serde_json::from_slice(&data).ok(),
         _ => None,
     }
@@ -1230,7 +1302,9 @@ fn find_latest_height(db_env: &Arc<DatabaseEnv>) -> u64 {
             for (key, _) in entries {
                 if key.len() == 8 {
                     let h = u64::from_be_bytes(key.try_into().unwrap_or([0; 8]));
-                    if h > max { max = h; }
+                    if h > max {
+                        max = h;
+                    }
                 }
             }
             max
@@ -1247,4 +1321,3 @@ impl Default for CallNode {
 
 #[cfg(test)]
 mod tests;
-

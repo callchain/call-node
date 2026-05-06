@@ -3,20 +3,22 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::governance_advancer::GovernanceAdvancer;
+use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL};
+use crate::{persist_block, persist_state_incremental, persist_state_to_db};
 use call_bridge::BridgeConfig;
 use call_consensus::{Block, SimplexConsensus};
-use call_primitives::BlockHash;
-use call_network::{Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, UpgradeAnnouncement};
+use call_evm::db::{prune_block_snapshots, save_block_snapshot};
+use call_mempool::Mempool;
+use call_network::{
+    BlockAnnouncement, Network, NetworkMessage, OraclePriceRequest, UpgradeAnnouncement,
+};
 use call_oracle::{OracleTracker, ORACLE_UPDATE_INTERVAL};
+use call_primitives::BlockHash;
 use call_primitives::{FeeCurrency, TxHash};
 use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
-use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
-use call_mempool::Mempool;
-use crate::{persist_block, persist_state_incremental, persist_state_to_db};
-use call_evm::db::{save_block_snapshot, prune_block_snapshots};
-use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL};
-use crate::governance_advancer::GovernanceAdvancer;
+use call_storage::{produce_state_snapshot, CallDb, PruneState, StateRoots};
 
 pub(crate) async fn block_production_loop(
     state: Arc<RpcState>,
@@ -37,7 +39,12 @@ pub(crate) async fn block_production_loop(
     let prune_config = call_storage::PruneConfig::default();
 
     let mut interval = tokio::time::interval(Duration::from_millis(
-        state.consensus_params.read().ok().map(|p| p.block_time_millis).unwrap_or(250),
+        state
+            .consensus_params
+            .read()
+            .ok()
+            .map(|p| p.block_time_millis)
+            .unwrap_or(250),
     ));
 
     loop {
@@ -93,9 +100,7 @@ pub(crate) async fn block_production_loop(
         // in the next block.  Only confirm txs that were actually executed
         // (skipped txs remain in the mempool for the next block).
         {
-            let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
-                .map(|r| r.tx_hash)
-                .collect();
+            let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter().map(|r| r.tx_hash).collect();
             let mut mp = mempool.write().unwrap();
             mp.confirm_transactions(&evm_hashes);
             // Also notify mempool defense so per-address tx_counts are decremented
@@ -108,18 +113,17 @@ pub(crate) async fn block_production_loop(
 
         // 3c. Finalize bridge deposits whose challenge period has expired
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             let config = BridgeConfig::default();
-            let finalized = call_consensus::exec::state_accessors::finalize_pending_external_deposits_evm(
-                provider.state_mut(),
-                height,
-                config.challenge_period_blocks,
-            );
-            if finalized > 0 {
-                tracing::info!(
-                    count = finalized,
-                    "bridge: deposits finalized and credited"
+            let finalized =
+                call_consensus::exec::state_accessors::finalize_pending_external_deposits_evm(
+                    provider.state_mut(),
+                    height,
+                    config.challenge_period_blocks,
                 );
+            if finalized > 0 {
+                tracing::info!(count = finalized, "bridge: deposits finalized and credited");
             }
             provider.state_mut().save_to_db(&state.db_env).unwrap();
         }
@@ -146,11 +150,18 @@ pub(crate) async fn block_production_loop(
         if is_oracle_boundary {
             if let Some(ref net) = network {
                 let tracked = {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                    let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(provider.state());
+                    let provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                    let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(
+                        provider.state(),
+                    );
                     let mut pairs = Vec::new();
                     for i in 0..count {
-                        let asset_id = call_consensus::exec::state_accessors::read_oracle_tracked_asset(provider.state(), i);
+                        let asset_id =
+                            call_consensus::exec::state_accessors::read_oracle_tracked_asset(
+                                provider.state(),
+                                i,
+                            );
                         pairs.push(call_primitives::PricePair::new(asset_id, 0));
                     }
                     pairs
@@ -166,7 +177,9 @@ pub(crate) async fn block_production_loop(
                         .expect("serialize oracle request");
                     net.broadcast(ORACLE_CHANNEL, msg).await;
                     // Configurable delay to allow validators to respond
-                    let delay_ms = state.consensus_params.read()
+                    let delay_ms = state
+                        .consensus_params
+                        .read()
                         .ok()
                         .map(|p| p.oracle_request_delay_ms)
                         .unwrap_or(200);
@@ -186,10 +199,8 @@ pub(crate) async fn block_production_loop(
             let tracker_guard = oracle_tracker.read().unwrap();
             let outliers: Vec<u32> = tracker_guard.last_outliers().to_vec();
             if !outliers.is_empty() {
-                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-                    &state.db_env,
-                )
-                .unwrap();
+                let mut provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                 let mut c = consensus.write().unwrap();
                 for vid in &outliers {
                     if let Err(e) = c.handle_oracle_outlier(provider.state_mut(), *vid) {
@@ -213,19 +224,20 @@ pub(crate) async fn block_production_loop(
                 if !rewards.is_empty() {
                     let mut provider =
                         call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                    call_consensus::exec::state_accessors::zero_oracle_reward_pool(provider.state_mut());
+                    call_consensus::exec::state_accessors::zero_oracle_reward_pool(
+                        provider.state_mut(),
+                    );
                     provider.state_mut().save_to_db(&state.db_env).unwrap();
                 }
                 rewards
             };
             if !contributions.is_empty() {
-                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-                    &state.db_env,
-                )
-                .unwrap();
+                let mut provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                 let mut c = consensus.write().unwrap();
                 for (vid, amount) in &contributions {
-                    if let Err(e) = c.distribute_oracle_reward(provider.state_mut(), *vid, *amount) {
+                    if let Err(e) = c.distribute_oracle_reward(provider.state_mut(), *vid, *amount)
+                    {
                         tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
                     }
                 }
@@ -245,7 +257,8 @@ pub(crate) async fn block_production_loop(
                 tracing::warn!(error = ?e, "commit failed");
                 continue;
             }
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             c.advance_round(&mut provider);
             if let Err(e) = provider.save_to_db(&state.db_env) {
                 tracing::warn!(error = ?e, "failed to save provider after epoch churn");
@@ -278,7 +291,9 @@ pub(crate) async fn block_production_loop(
             drop(fee_params);
             let total_gas = result.evm_gas_used;
             let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
-            let mut evm_priority_fees: Vec<u128> = result.evm_tx_results.iter()
+            let mut evm_priority_fees: Vec<u128> = result
+                .evm_tx_results
+                .iter()
                 .map(|e| e.gas_price.saturating_sub(base_fee))
                 .collect();
             evm_priority_fees.sort_unstable();
@@ -288,7 +303,10 @@ pub(crate) async fn block_production_loop(
                 .map(|p| {
                     let p = (*p as f64).min(100.0).max(0.0);
                     let idx = ((n - 1) as f64 * p / 100.0).round() as usize;
-                    evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS)
+                    evm_priority_fees
+                        .get(idx.min(n - 1))
+                        .copied()
+                        .unwrap_or(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS)
                 })
                 .collect();
             let entry = call_rpc::handlers::BlockFeeEntry {
@@ -306,7 +324,8 @@ pub(crate) async fn block_production_loop(
 
         // 10b. Advance governance proposal state machine
         {
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             let events = governance_advancer.advance(provider.state_mut(), new_height);
             provider.state_mut().save_to_db(&state.db_env).unwrap();
             drop(provider);
@@ -369,7 +388,11 @@ pub(crate) async fn block_production_loop(
         }
 
         // 11b. Broadcast ETH WebSocket events (newHeads + logs)
-        let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>();
+        let gas_used: u64 = result
+            .evm_tx_results
+            .iter()
+            .map(|e| e.gas_used)
+            .sum::<u64>();
         let base_fee = state.fee_params.read().map(|p| p.base_fee).unwrap_or(0);
         subscriptions.broadcast_eth_new_head(serde_json::json!({
             "hash": format!("0x{}", hex::encode(block_hash.as_slice())),
@@ -415,14 +438,19 @@ pub(crate) async fn block_production_loop(
         }
 
         // 12. Update prune tracking state
-        prune_state.add_block_body(height, call_storage::BlockBody {
-            block_hash: parent_hash,
-            tx_count: result.total_tx_count() as u32,
-            body_size: 0, // would be actual serialized size in production
-        });
+        prune_state.add_block_body(
+            height,
+            call_storage::BlockBody {
+                block_hash: parent_hash,
+                tx_count: result.total_tx_count() as u32,
+                body_size: 0, // would be actual serialized size in production
+            },
+        );
 
         // 13. Run periodic prune checks
-        if let Err(ref e) = call_storage::maybe_prune(&mut prune_state, new_height, &prune_config, Some(&db.db)) {
+        if let Err(ref e) =
+            call_storage::maybe_prune(&mut prune_state, new_height, &prune_config, Some(&db.db))
+        {
             tracing::warn!(error = %e, "prune check failed");
         }
         // Prune historical diff tables (account / storage history)
@@ -441,33 +469,51 @@ pub(crate) async fn block_production_loop(
         // 13a. Produce state snapshot at snapshot interval boundaries
         if new_height % prune_config.snapshot_interval == 0 {
             let evm_root = {
-                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                 let root = provider.state().compute_state_root();
                 call_primitives::Hash::from(root.0)
             };
 
             let shielded_root = {
-                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                 call_consensus::exec::state_accessors::read_shielded_merkle_root(provider.state())
             };
 
             let agent_root = {
-                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                let count = call_consensus::exec::state_accessors::read_agent_count(provider.state());
+                let provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let count =
+                    call_consensus::exec::state_accessors::read_agent_count(provider.state());
                 let mut agents = std::collections::HashMap::new();
                 for id in 0..count {
-                    let owner = call_consensus::exec::state_accessors::agent_get_owner(provider.state(), id);
+                    let owner = call_consensus::exec::state_accessors::agent_get_owner(
+                        provider.state(),
+                        id,
+                    );
                     if owner == call_primitives::Address::ZERO {
                         continue;
                     }
-                    let name = call_consensus::exec::state_accessors::agent_get_name(provider.state(), id);
-                    let registered_at = call_consensus::exec::state_accessors::agent_get_registered_at(provider.state(), id);
+                    let name =
+                        call_consensus::exec::state_accessors::agent_get_name(provider.state(), id);
+                    let registered_at =
+                        call_consensus::exec::state_accessors::agent_get_registered_at(
+                            provider.state(),
+                            id,
+                        );
                     agents.insert(id, (owner, name, registered_at));
                 }
                 call_storage::compute_agent_root(&agents)
             };
 
-            let roots = StateRoots { protocol_root: evm_root, evm_root, shielded_root, agent_root, consensus_root: evm_root };
+            let roots = StateRoots {
+                protocol_root: evm_root,
+                evm_root,
+                shielded_root,
+                agent_root,
+                consensus_root: evm_root,
+            };
             let snapshot_dir = db.data_dir.join("snapshots");
             match produce_state_snapshot(&mut prune_state, roots, new_height, Some(&snapshot_dir)) {
                 Ok(_) => {
@@ -487,7 +533,8 @@ pub(crate) async fn block_production_loop(
 
         // 14a. Save block state snapshot for historical queries
         {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            let provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             if let Err(ref e) = save_block_snapshot(db_env, new_height, provider.state()) {
                 tracing::warn!(error = %e, height = new_height, "failed to save block snapshot");
             }
@@ -507,7 +554,8 @@ pub(crate) async fn block_production_loop(
 
         // 16. Update current proposer address for eth_coinbase
         {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+            let provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
             let proposer_addr = call_consensus::exec::state_accessors::read_validator_addr(
                 provider.state(),
                 proposer as u64,
@@ -519,11 +567,20 @@ pub(crate) async fn block_production_loop(
 
         // 17. Broadcast to WebSocket subscribers
 
-        tracing::info!(height = new_height, tx_count = result.total_tx_count(), "committed block");
+        tracing::info!(
+            height = new_height,
+            tx_count = result.total_tx_count(),
+            "committed block"
+        );
 
         // Broadcast to WebSocket subscribers
         let tx_count = result.total_tx_count();
-        subscriptions.broadcast_block(height, format!("{:?}", block.header.hash()), proposer, tx_count);
+        subscriptions.broadcast_block(
+            height,
+            format!("{:?}", block.header.hash()),
+            proposer,
+            tx_count,
+        );
 
         // 17. Broadcast block announcement via P2P (post-commit)
         if let Some(ref net) = network {

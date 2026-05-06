@@ -58,11 +58,11 @@ pub struct GovernanceConfig {
 impl Default for GovernanceConfig {
     fn default() -> Self {
         Self {
-            validator_quorum_bps: 6667,    // 2/3
-            supply_quorum_bps: 2000,        // 20%
-            treasury_quorum_bps: 2000,      // 20%
-            simple_majority_bps: 5001,      // 50% + 1
-            emergency_pause_bps: 6667,      // 2/3
+            validator_quorum_bps: 6667, // 2/3
+            supply_quorum_bps: 2000,    // 20%
+            treasury_quorum_bps: 2000,  // 20%
+            simple_majority_bps: 5001,  // 50% + 1
+            emergency_pause_bps: 6667,  // 2/3
             review_period_blocks: REVIEW_PERIOD_BLOCKS,
             voting_period_blocks: VOTING_PERIOD_BLOCKS,
             timelock_period_blocks: TIMELOCK_PERIOD_BLOCKS,

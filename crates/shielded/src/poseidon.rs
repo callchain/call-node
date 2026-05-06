@@ -27,7 +27,10 @@ pub mod domain {
 /// Panics if inputs is empty or has more than 16 elements.
 pub fn poseidon_hash(inputs: &[ark_bn254::Fr]) -> ark_bn254::Fr {
     use poseidon_ark_no_std::Poseidon;
-    assert!(!inputs.is_empty() && inputs.len() <= 16, "Poseidon input count must be 1..=16");
+    assert!(
+        !inputs.is_empty() && inputs.len() <= 16,
+        "Poseidon input count must be 1..=16"
+    );
     let poseidon = Poseidon::new();
     let fr_inputs: Vec<_> = inputs.iter().copied().collect();
     poseidon.hash(fr_inputs).expect("poseidon hash failed")
@@ -76,7 +79,7 @@ pub fn poseidon_hash_tagged(tag: &str, inputs: &[ark_bn254::Fr]) -> ark_bn254::F
 
 #[cfg(feature = "real-prover")]
 pub mod gadget {
-    
+
     use ark_bn254::Fr;
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
@@ -93,9 +96,17 @@ pub mod gadget {
         use ark_ff::Zero;
         use ark_r1cs_std::prelude::*;
 
-        assert!(!inputs.is_empty() && inputs.len() <= 16, "Poseidon gadget input count must be 1..=16");
+        assert!(
+            !inputs.is_empty() && inputs.len() <= 16,
+            "Poseidon gadget input count must be 1..=16"
+        );
 
-        let Constants { c, m, n_rounds_f, n_rounds_p } = load_constants();
+        let Constants {
+            c,
+            m,
+            n_rounds_f,
+            n_rounds_p,
+        } = load_constants();
         let t = inputs.len() + 1;
         let n_rounds_p_t = n_rounds_p[t - 2];
 
@@ -173,18 +184,12 @@ pub fn value_to_fr_bytes(value: u128) -> [u8; 32] {
 }
 
 /// Multi-input convenience wrapper: hash exactly 3 inputs.
-pub fn poseidon_hash_3(
-    a: &ark_bn254::Fr,
-    b: &ark_bn254::Fr,
-    c: &ark_bn254::Fr,
-) -> ark_bn254::Fr {
+pub fn poseidon_hash_3(a: &ark_bn254::Fr, b: &ark_bn254::Fr, c: &ark_bn254::Fr) -> ark_bn254::Fr {
     poseidon_hash(&[*a, *b, *c])
 }
 
 /// Multi-input convenience wrapper: hash exactly 5 inputs.
-pub fn poseidon_hash_5(
-    inputs: [ark_bn254::Fr; 5],
-) -> ark_bn254::Fr {
+pub fn poseidon_hash_5(inputs: [ark_bn254::Fr; 5]) -> ark_bn254::Fr {
     poseidon_hash(&inputs)
 }
 
@@ -285,7 +290,11 @@ mod tests {
         }
         for i in 0..hashes.len() {
             for j in (i + 1)..hashes.len() {
-                assert_ne!(hashes[i], hashes[j], "domain {} == domain {}", domains[i], domains[j]);
+                assert_ne!(
+                    hashes[i], hashes[j],
+                    "domain {} == domain {}",
+                    domains[i], domains[j]
+                );
             }
         }
     }
@@ -322,15 +331,26 @@ mod tests {
     fn test_bytes_to_fr_large_values() {
         let aa = [0xAAu8; 32];
         let bb = [0xBBu8; 32];
-        let one_le = { let mut b = [0u8; 32]; b[0] = 1; b };
-        let two_le = { let mut b = [0u8; 32]; b[0] = 2; b };
+        let one_le = {
+            let mut b = [0u8; 32];
+            b[0] = 1;
+            b
+        };
+        let two_le = {
+            let mut b = [0u8; 32];
+            b[0] = 2;
+            b
+        };
         let zero = [0u8; 32];
         let fr_aa = bytes_to_fr(&aa);
         let fr_bb = bytes_to_fr(&bb);
         let fr_one = bytes_to_fr(&one_le);
         let fr_two = bytes_to_fr(&two_le);
         let fr_zero = bytes_to_fr(&zero);
-        assert_ne!(fr_aa, fr_bb, "[0xAA;32] and [0xBB;32] should map to different Fr elements");
+        assert_ne!(
+            fr_aa, fr_bb,
+            "[0xAA;32] and [0xBB;32] should map to different Fr elements"
+        );
         assert_ne!(fr_one, fr_zero, "[0x01,0x00...] should not map to zero");
         assert_ne!(fr_two, fr_zero, "[0x02,0x00...] should not map to zero");
     }
@@ -380,6 +400,9 @@ mod tests {
 
         let n_constraints = cs.num_constraints();
         assert!(n_constraints > 0, "no constraints generated");
-        assert!(n_constraints < 100_000, "too many constraints: {n_constraints}");
+        assert!(
+            n_constraints < 100_000,
+            "too many constraints: {n_constraints}"
+        );
     }
 }

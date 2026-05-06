@@ -1,32 +1,35 @@
 //! BFT consensus event loop — propose / verify / finalize / broadcast.
 
-use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, SYNC_CHANNEL};
+use crate::state_persist::save_fork_state;
+use crate::EpochRotationReason;
+use crate::{
+    current_timestamp_millis, load_block, persist_block, persist_state_incremental,
+    persist_state_to_db,
+};
 use call_consensus::{
     Block, BlockCache, BlockExecutionResult, ConsensusDigest, FinalizationInfo, ProposeRequest,
     SimplexConsensus, VerifyRequest,
 };
-use call_primitives::BlockHash;
-use crate::EpochRotationReason;
+use call_evm::db::{prune_block_snapshots, save_block_snapshot};
+use call_mempool::Mempool;
 use call_network::{
-    Network, NetworkMessage, BlockAnnouncement, OraclePriceRequest, SyncRequest,
-    EpochBoundarySignal,
+    BlockAnnouncement, EpochBoundarySignal, Network, NetworkMessage, OraclePriceRequest,
+    SyncRequest,
 };
 use call_oracle::{OracleTracker, ORACLE_UPDATE_INTERVAL};
-use call_primitives::{Address, Hash, FeeCurrency, TxHash};
+use call_primitives::BlockHash;
+use call_primitives::{Address, FeeCurrency, Hash, TxHash};
 use call_protocol::ProtocolReceipt;
 use call_rpc::{RpcState, SubscriptionManager};
-use call_storage::{CallDb, PruneState, StateRoots, produce_state_snapshot};
-use call_mempool::Mempool;
+use call_storage::{produce_state_snapshot, CallDb, PruneState, StateRoots};
 use commonware_codec::extensions::DecodeExt;
 use commonware_cryptography::Digest;
-use crate::{current_timestamp_millis, persist_block, load_block, persist_state_incremental, persist_state_to_db};
-use call_evm::db::{save_block_snapshot, prune_block_snapshots};
-use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, SYNC_CHANNEL};
-use crate::state_persist::save_fork_state;
 
 async fn apply_rollback_plan(
     plan: &call_consensus::RollbackPlan,
@@ -81,7 +84,10 @@ async fn apply_rollback_plan(
         if let Ok(entries) = std::fs::read_dir(&blocks_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if let Some(height_str) = name.strip_prefix("block-").and_then(|s| s.strip_suffix(".json")) {
+                    if let Some(height_str) = name
+                        .strip_prefix("block-")
+                        .and_then(|s| s.strip_suffix(".json"))
+                    {
                         if let Ok(height) = height_str.parse::<u64>() {
                             if height > plan.target_height {
                                 let _ = std::fs::remove_file(entry.path());
@@ -138,10 +144,8 @@ pub(crate) async fn bft_event_loop(
     governance_advancer: crate::governance_advancer::GovernanceAdvancer,
     snapshot_retention_blocks: u64,
 ) {
-    let mut execution_results: std::collections::HashMap<
-        ConsensusDigest,
-        BlockExecutionResult,
-    > = std::collections::HashMap::new();
+    let mut execution_results: std::collections::HashMap<ConsensusDigest, BlockExecutionResult> =
+        std::collections::HashMap::new();
     let prune_config = call_storage::PruneConfig::default();
 
     // Build a mapping from ed25519 pubkey -> validator id for propose lookups
@@ -152,7 +156,8 @@ pub(crate) async fn bft_event_loop(
         for id in 1..=count {
             let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
             if addr != Address::ZERO {
-                let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
+                let pk =
+                    call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
                 if let Ok(pk) = commonware_cryptography::ed25519::PublicKey::decode(&pk[..]) {
                     map.insert(pk, id as u32);
                 }
@@ -174,7 +179,18 @@ pub(crate) async fn bft_event_loop(
         // Check for pending emergency rollback and apply if present
         let rollback_plan = state.pending_rollback.write().unwrap().take();
         if let Some(plan) = rollback_plan {
-            apply_rollback_plan(&plan, &state, &consensus, &block_cache, &mut parent_hash, &mut prune_state, &data_dir, &db.db, &oracle_tracker).await;
+            apply_rollback_plan(
+                &plan,
+                &state,
+                &consensus,
+                &block_cache,
+                &mut parent_hash,
+                &mut prune_state,
+                &data_dir,
+                &db.db,
+                &oracle_tracker,
+            )
+            .await;
         }
 
         // === Epoch boundary quorum check ===
@@ -185,12 +201,13 @@ pub(crate) async fn bft_event_loop(
                     .iter()
                     .filter(|pk| {
                         let pk_hex = hex::encode(pk);
-                        peer_heights.get(&pk_hex).is_some_and(|h| *h >= boundary_height)
+                        peer_heights
+                            .get(&pk_hex)
+                            .is_some_and(|h| *h >= boundary_height)
                     })
                     .count();
                 let ready = ready_count >= quorum_threshold;
-                let timed_out = quorum_wait_start
-                    .is_some_and(|t| t.elapsed() >= quorum_timeout);
+                let timed_out = quorum_wait_start.is_some_and(|t| t.elapsed() >= quorum_timeout);
                 (ready, timed_out)
             };
 
@@ -214,8 +231,13 @@ pub(crate) async fn bft_event_loop(
         }
 
         // Check if network layer requested an engine restart (e.g. sync crossed epoch)
-        if state.engine_restart_signal.load(std::sync::atomic::Ordering::Relaxed) {
-            state.engine_restart_signal.store(false, std::sync::atomic::Ordering::Relaxed);
+        if state
+            .engine_restart_signal
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            state
+                .engine_restart_signal
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("BFT: engine restart requested by sync, exiting event loop");
             let _ = exit_tx.send(EpochRotationReason::EpochBoundary);
             break;

@@ -3,16 +3,16 @@
 //! Genesis struct with JSON parsing, initialization flow,
 //! state root computation, and chain ID management.
 
+use alloy_primitives::U256;
+use call_consensus::exec::state_accessors;
 use call_consensus::proposer::ConsensusParams;
 use call_crypto::keccak256;
-use call_evm::EvmExecutor;
 use call_evm::provider::InMemoryStateProvider;
+use call_evm::EvmExecutor;
 use call_primitives::{Address, AssetId, Balance, Ed25519PublicKey, Hash};
 use call_protocol::gas::FeeParams;
-use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use call_consensus::exec::state_accessors;
 
 // ── Genesis Types ─────────────────────────────────────────────────────
 
@@ -233,10 +233,14 @@ impl GenesisExecutor {
             return Err(GenesisError::InvalidJson("chain_name is empty".into()));
         }
         if self.genesis.chain_id == 0 {
-            return Err(GenesisError::InvalidJson("chain_id must be non-zero".into()));
+            return Err(GenesisError::InvalidJson(
+                "chain_id must be non-zero".into(),
+            ));
         }
         if self.genesis.timestamp_millis == 0 {
-            return Err(GenesisError::InvalidJson("timestamp_millis must be non-zero".into()));
+            return Err(GenesisError::InvalidJson(
+                "timestamp_millis must be non-zero".into(),
+            ));
         }
         if self.genesis.validators.is_empty() {
             return Err(GenesisError::InvalidJson("no genesis validators".into()));
@@ -261,10 +265,7 @@ impl GenesisExecutor {
     }
 
     /// Register assets and distribute initial balances (EVM only)
-    fn register_assets(
-        &self,
-        evm_state: &mut InMemoryStateProvider,
-    ) -> Result<(), GenesisError> {
+    fn register_assets(&self, evm_state: &mut InMemoryStateProvider) -> Result<(), GenesisError> {
         for asset in &self.genesis.initial_assets {
             // Distribute initial balances (EVM only)
             let mut total_allocated: Balance = 0;
@@ -303,8 +304,8 @@ impl GenesisExecutor {
         &self,
         evm_state: &mut InMemoryStateProvider,
     ) -> Result<(), GenesisError> {
-        use call_precompile::{address_to_u256, u128_to_u256, u64_to_u256, VALIDATOR_ADDRESS};
         use call_precompile::storage::storage_slot;
+        use call_precompile::{address_to_u256, u128_to_u256, u64_to_u256, VALIDATOR_ADDRESS};
 
         for (i, gv) in self.genesis.validators.iter().enumerate() {
             let addr = parse_address(&gv.address)?;
@@ -531,12 +532,12 @@ mod tests {
         let executor = GenesisExecutor::new(genesis);
         let state = executor.execute().unwrap();
 
-        let bal1 = call_consensus::exec::state_accessors::read_balance(
-            &state.evm_state, 1, test_addr(1));
+        let bal1 =
+            call_consensus::exec::state_accessors::read_balance(&state.evm_state, 1, test_addr(1));
         assert_eq!(bal1, 500_000_000 * 10u128.pow(18));
 
-        let bal2 = call_consensus::exec::state_accessors::read_balance(
-            &state.evm_state, 1, test_addr(2));
+        let bal2 =
+            call_consensus::exec::state_accessors::read_balance(&state.evm_state, 1, test_addr(2));
         assert_eq!(bal2, 500_000_000 * 10u128.pow(18));
     }
 

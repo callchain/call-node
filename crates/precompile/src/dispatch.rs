@@ -24,8 +24,7 @@ use crate::storage::{fill_precompile_output, StorageProvider};
 /// `validate = true` checks that the calldata length is an exact multiple
 /// of 32 bytes after the selector.
 pub fn decode_call<T: SolCall>(calldata: &[u8]) -> Result<T, PrecompileError> {
-    T::abi_decode(calldata)
-        .map_err(|e| PrecompileError::Other(format!("decode error: {e}").into()))
+    T::abi_decode(calldata).map_err(|e| PrecompileError::Other(format!("decode error: {e}").into()))
 }
 
 /// Encode a [`SolValue`] return value into ABI bytes.

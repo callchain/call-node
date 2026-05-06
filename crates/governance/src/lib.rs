@@ -2,14 +2,14 @@
 //!
 //! Proposal lifecycle, dual-track voting, timelock, emergency pause.
 
-pub mod types;
 pub mod config;
 pub mod error;
 pub mod precompile;
+pub mod types;
 
 #[cfg(test)]
 mod tests;
 
-pub use types::*;
 pub use config::*;
 pub use error::*;
+pub use types::*;

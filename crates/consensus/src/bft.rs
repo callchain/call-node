@@ -13,8 +13,8 @@ use commonware_consensus::{
     },
     Automaton, CertifiableAutomaton, Relay, Reporter,
 };
-use commonware_cryptography::Digest;
 use commonware_cryptography::ed25519;
+use commonware_cryptography::Digest;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -78,10 +78,7 @@ impl Automaton for CallAutomaton {
         ConsensusDigest::EMPTY
     }
 
-    async fn propose(
-        &mut self,
-        context: Self::Context,
-    ) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (tx, rx) = oneshot::channel();
         // If tokio has dropped, the channel close is harmless — consensus
         // will treat it as "unable to propose".
@@ -170,7 +167,8 @@ impl CallReporter {
 }
 
 impl Reporter for CallReporter {
-    type Activity = Activity<commonware_consensus::simplex::scheme::ed25519::Scheme, ConsensusDigest>;
+    type Activity =
+        Activity<commonware_consensus::simplex::scheme::ed25519::Scheme, ConsensusDigest>;
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity {

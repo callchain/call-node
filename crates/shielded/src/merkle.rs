@@ -3,8 +3,8 @@
 //! Depth-32 incremental Merkle tree with O(log n) insert.
 //! Uses keccak256 for hashing, supports up to ~4.2B leaves.
 
-use call_primitives::Hash;
 use call_crypto::keccak256;
+use call_primitives::Hash;
 
 /// Incremental Merkle Tree (fixed depth, append-only)
 ///
@@ -71,7 +71,10 @@ impl IncrementalMerkleTree {
         if self.count == 0 {
             return Self::empty_hash(self.depth);
         }
-        self.levels[self.depth].first().copied().unwrap_or(Self::empty_hash(self.depth))
+        self.levels[self.depth]
+            .first()
+            .copied()
+            .unwrap_or(Self::empty_hash(self.depth))
     }
 
     pub fn leaf_count(&self) -> usize {
@@ -96,9 +99,14 @@ impl IncrementalMerkleTree {
 
         for level in 0..self.depth {
             let is_right_child = current_idx & 1 == 1;
-            let sibling_idx = if is_right_child { current_idx - 1 } else { current_idx + 1 };
+            let sibling_idx = if is_right_child {
+                current_idx - 1
+            } else {
+                current_idx + 1
+            };
 
-            let sibling = self.levels[level].get(sibling_idx)
+            let sibling = self.levels[level]
+                .get(sibling_idx)
                 .copied()
                 .unwrap_or(Self::empty_hash(level));
 
@@ -148,11 +156,7 @@ impl Default for IncrementalMerkleTree {
 }
 
 /// Verify a Merkle proof
-pub fn verify_merkle_path(
-    leaf: Hash,
-    proof: &[(Hash, bool)],
-    expected_root: Hash,
-) -> bool {
+pub fn verify_merkle_path(leaf: Hash, proof: &[(Hash, bool)], expected_root: Hash) -> bool {
     let mut current = leaf;
     for (sibling, sibling_is_right) in proof {
         if *sibling_is_right {
@@ -234,8 +238,12 @@ mod tests {
 
         for (i, l) in leaves.iter().enumerate() {
             let proof = tree.proof_for_index(i);
-            assert!(verify_merkle_path(*l, &proof, tree.root()),
-                "proof failed for leaf {} at index {}", i, i);
+            assert!(
+                verify_merkle_path(*l, &proof, tree.root()),
+                "proof failed for leaf {} at index {}",
+                i,
+                i
+            );
         }
     }
 

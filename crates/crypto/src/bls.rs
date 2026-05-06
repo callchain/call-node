@@ -46,8 +46,8 @@ pub fn bls_generate() -> Result<(BlsSecretKey, BlsPublicKey), BlsError> {
     let mut ikm = [0u8; 32];
     OsRng.fill_bytes(&mut ikm);
 
-    let secret = blst::min_pk::SecretKey::key_gen(&ikm, &[])
-        .map_err(|_| BlsError::InvalidSecretKey)?;
+    let secret =
+        blst::min_pk::SecretKey::key_gen(&ikm, &[]).map_err(|_| BlsError::InvalidSecretKey)?;
     let public = BlsPublicKey(secret.sk_to_pk().to_bytes());
 
     Ok((BlsSecretKey { inner: secret }, public))
@@ -60,15 +60,10 @@ pub fn bls_sign(secret: &BlsSecretKey, msg: &[u8]) -> BlsSignature {
 }
 
 /// Verify a single BLS signature
-pub fn bls_verify(
-    pubkey: &BlsPublicKey,
-    msg: &[u8],
-    sig: &BlsSignature,
-) -> Result<(), BlsError> {
-    let pk = BlstPublicKey::uncompress(&pubkey.0)
-        .map_err(|_| BlsError::InvalidPublicKey)?;
-    let sig = blst::min_pk::Signature::uncompress(&sig.0)
-        .map_err(|_| BlsError::InvalidSignature)?;
+pub fn bls_verify(pubkey: &BlsPublicKey, msg: &[u8], sig: &BlsSignature) -> Result<(), BlsError> {
+    let pk = BlstPublicKey::uncompress(&pubkey.0).map_err(|_| BlsError::InvalidPublicKey)?;
+    let sig =
+        blst::min_pk::Signature::uncompress(&sig.0).map_err(|_| BlsError::InvalidSignature)?;
 
     let err = sig.verify(true, msg, DST, &[], &pk, true);
     if err == BLST_ERROR::BLST_SUCCESS {
@@ -106,12 +101,12 @@ pub fn bls_aggregate(sigs: &[BlsSignature]) -> Result<BlsSignature, BlsError> {
     if sigs.is_empty() {
         return Err(BlsError::InvalidSignature);
     }
-    let first = blst::min_pk::Signature::uncompress(&sigs[0].0)
-        .map_err(|_| BlsError::InvalidSignature)?;
+    let first =
+        blst::min_pk::Signature::uncompress(&sigs[0].0).map_err(|_| BlsError::InvalidSignature)?;
     let mut agg = AggregateSignature::from_signature(&first);
     for sig in &sigs[1..] {
-        let s = blst::min_pk::Signature::uncompress(&sig.0)
-            .map_err(|_| BlsError::InvalidSignature)?;
+        let s =
+            blst::min_pk::Signature::uncompress(&sig.0).map_err(|_| BlsError::InvalidSignature)?;
         agg.add_signature(&s, true)
             .map_err(|_| BlsError::InvalidSignature)?;
     }
@@ -132,8 +127,8 @@ pub fn bls_verify_aggregate(
         .collect::<Result<Vec<_>, _>>()?;
     let pk_refs: Vec<&BlstPublicKey> = pks.iter().collect();
 
-    let sig = blst::min_pk::Signature::uncompress(&agg_sig.0)
-        .map_err(|_| BlsError::InvalidSignature)?;
+    let sig =
+        blst::min_pk::Signature::uncompress(&agg_sig.0).map_err(|_| BlsError::InvalidSignature)?;
 
     let err = sig.fast_aggregate_verify(true, msg, DST, &pk_refs);
     if err == BLST_ERROR::BLST_SUCCESS {

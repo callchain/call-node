@@ -153,8 +153,7 @@ impl ForkManager {
     /// Schedule a height-activated upgrade
     pub fn schedule_upgrade(&mut self, entry: UpgradeEntry) {
         self.scheduled_upgrades.push(entry);
-        self.scheduled_upgrades
-            .sort_by_key(|e| e.activation_height);
+        self.scheduled_upgrades.sort_by_key(|e| e.activation_height);
     }
 
     /// Schedule an upgrade via governance proposal with timelock
@@ -265,7 +264,11 @@ impl ForkManager {
     }
 
     /// Check if a protocol feature is enabled at a specific version
-    pub fn is_feature_enabled_at(&self, feature: ProtocolFeature, version: ProtocolVersion) -> bool {
+    pub fn is_feature_enabled_at(
+        &self,
+        feature: ProtocolFeature,
+        version: ProtocolVersion,
+    ) -> bool {
         crate::fork::is_feature_enabled(feature, version)
     }
 
@@ -290,7 +293,11 @@ impl ForkManager {
             .ok_or(ForkError::ValidatorNotFound(validator_id))?;
 
         // Verify the nonce matches the expected nonce for this validator
-        let expected_nonce = self.rollback_nonces.get(&validator_id).copied().unwrap_or(0);
+        let expected_nonce = self
+            .rollback_nonces
+            .get(&validator_id)
+            .copied()
+            .unwrap_or(0);
         if nonce != expected_nonce {
             return Err(ForkError::RollbackNonceMismatch {
                 expected: expected_nonce,
@@ -303,12 +310,14 @@ impl ForkManager {
         ed25519_verify(public_key, &signature, &message)
             .map_err(|_| ForkError::InvalidSignature)?;
 
-        let rollback = self.active_rollback.get_or_insert_with(|| EmergencyRollback {
-            target_height,
-            target_version,
-            signatures: HashMap::new(),
-            total_validators: self.total_validators,
-        });
+        let rollback = self
+            .active_rollback
+            .get_or_insert_with(|| EmergencyRollback {
+                target_height,
+                target_version,
+                signatures: HashMap::new(),
+                total_validators: self.total_validators,
+            });
 
         // Validate the rollback target matches
         if rollback.target_height != target_height || rollback.target_version != target_version {
@@ -359,7 +368,10 @@ impl ForkManager {
     /// Check if emergency rollback is in progress
     pub fn rollback_progress(&self) -> Option<(u32, u32)> {
         self.active_rollback.as_ref().map(|r| {
-            (r.signatures.len() as u32, rollback_quorum(self.total_validators))
+            (
+                r.signatures.len() as u32,
+                rollback_quorum(self.total_validators),
+            )
         })
     }
 
@@ -538,7 +550,12 @@ mod tests {
     use call_crypto::ed25519_sign;
     use ed25519_dalek::SigningKey;
 
-    fn make_fork_manager(validator_count: u32) -> (ForkManager, Vec<(ValidatorId, Ed25519PublicKey, SigningKey)>) {
+    fn make_fork_manager(
+        validator_count: u32,
+    ) -> (
+        ForkManager,
+        Vec<(ValidatorId, Ed25519PublicKey, SigningKey)>,
+    ) {
         let mut fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), validator_count);
         let mut validators = Vec::new();
         for i in 0..validator_count {
@@ -592,14 +609,20 @@ mod tests {
         });
 
         // Block at height 1000 with correct version should pass
-        assert!(fm.validate_block_version(1000, ProtocolVersion::new(2, 0, 0)).is_ok());
+        assert!(fm
+            .validate_block_version(1000, ProtocolVersion::new(2, 0, 0))
+            .is_ok());
 
         // Block at height 1000 with old version should be rejected
-        let err = fm.validate_block_version(1000, ProtocolVersion::new(1, 0, 0)).unwrap_err();
+        let err = fm
+            .validate_block_version(1000, ProtocolVersion::new(1, 0, 0))
+            .unwrap_err();
         assert!(matches!(err, ForkError::VersionMismatch { .. }));
 
         // Block at height 500 with new version should also be rejected
-        let err = fm.validate_block_version(500, ProtocolVersion::new(2, 0, 0)).unwrap_err();
+        let err = fm
+            .validate_block_version(500, ProtocolVersion::new(2, 0, 0))
+            .unwrap_err();
         assert!(matches!(err, ForkError::VersionMismatch { .. }));
     }
 
@@ -609,13 +632,8 @@ mod tests {
         fm.set_timelock_blocks(500);
 
         // Schedule via governance at current height 100, activation at 700 (>= 100 + 500)
-        fm.schedule_governance_upgrade(
-            ProtocolVersion::new(1, 1, 0),
-            700,
-            42,
-            100,
-        )
-        .unwrap();
+        fm.schedule_governance_upgrade(ProtocolVersion::new(1, 1, 0), 700, 42, 100)
+            .unwrap();
 
         // Activation too early should fail
         assert!(fm
@@ -646,14 +664,22 @@ mod tests {
         // Submit signatures from 14 validators (nonce starts at 0 for all)
         for i in 0..13 {
             let (vid, _, signing_key) = &validators[i as usize];
-            let sig = ed25519_sign(signing_key, &rollback_message_hash(*vid, target_height, target_version, 0));
-            let result = fm.submit_rollback_signature(*vid, target_height, target_version, 0, sig).unwrap();
+            let sig = ed25519_sign(
+                signing_key,
+                &rollback_message_hash(*vid, target_height, target_version, 0),
+            );
+            let result = fm
+                .submit_rollback_signature(*vid, target_height, target_version, 0, sig)
+                .unwrap();
             assert!(result.is_none(), "quorum should not be reached yet");
         }
 
         // 14th signature reaches quorum
         let (vid14, _, signing_key14) = &validators[13];
-        let sig14 = ed25519_sign(signing_key14, &rollback_message_hash(*vid14, target_height, target_version, 0));
+        let sig14 = ed25519_sign(
+            signing_key14,
+            &rollback_message_hash(*vid14, target_height, target_version, 0),
+        );
         let result = fm
             .submit_rollback_signature(*vid14, target_height, target_version, 0, sig14)
             .unwrap();
@@ -677,31 +703,74 @@ mod tests {
         let (vid, _, signing_key) = &validators[0];
 
         // First signature with nonce 0 should succeed
-        let sig0 = ed25519_sign(signing_key, &rollback_message_hash(*vid, target_height, target_version, 0));
-        let result = fm.submit_rollback_signature(*vid, target_height, target_version, 0, sig0).unwrap();
+        let sig0 = ed25519_sign(
+            signing_key,
+            &rollback_message_hash(*vid, target_height, target_version, 0),
+        );
+        let result = fm
+            .submit_rollback_signature(*vid, target_height, target_version, 0, sig0)
+            .unwrap();
         assert!(result.is_none());
 
         // Replay with same nonce 0 should fail (nonce already consumed)
-        let sig0_replay = ed25519_sign(signing_key, &rollback_message_hash(*vid, target_height, target_version, 0));
-        let err = fm.submit_rollback_signature(*vid, target_height, target_version, 0, sig0_replay).unwrap_err();
-        assert!(matches!(err, ForkError::RollbackNonceMismatch { expected: 1, got: 0 }));
+        let sig0_replay = ed25519_sign(
+            signing_key,
+            &rollback_message_hash(*vid, target_height, target_version, 0),
+        );
+        let err = fm
+            .submit_rollback_signature(*vid, target_height, target_version, 0, sig0_replay)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ForkError::RollbackNonceMismatch {
+                expected: 1,
+                got: 0
+            }
+        ));
 
         // Signature with wrong nonce (2 instead of 1) should fail
-        let sig2 = ed25519_sign(signing_key, &rollback_message_hash(*vid, target_height, target_version, 2));
-        let err = fm.submit_rollback_signature(*vid, target_height, target_version, 2, sig2).unwrap_err();
-        assert!(matches!(err, ForkError::RollbackNonceMismatch { expected: 1, got: 2 }));
+        let sig2 = ed25519_sign(
+            signing_key,
+            &rollback_message_hash(*vid, target_height, target_version, 2),
+        );
+        let err = fm
+            .submit_rollback_signature(*vid, target_height, target_version, 2, sig2)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ForkError::RollbackNonceMismatch {
+                expected: 1,
+                got: 2
+            }
+        ));
 
         // Correct next nonce (1) should succeed in the same campaign
         // (dedup prevents same-validator twice, so we need a different validator)
         let (vid2, _, signing_key2) = &validators[1];
-        let sig1 = ed25519_sign(signing_key2, &rollback_message_hash(*vid2, target_height, target_version, 0));
-        let result = fm.submit_rollback_signature(*vid2, target_height, target_version, 0, sig1).unwrap();
+        let sig1 = ed25519_sign(
+            signing_key2,
+            &rollback_message_hash(*vid2, target_height, target_version, 0),
+        );
+        let result = fm
+            .submit_rollback_signature(*vid2, target_height, target_version, 0, sig1)
+            .unwrap();
         assert!(result.is_none());
 
         // After validator 2 signed with nonce 0, their next expected nonce is 1
-        let sig0_v2_replay = ed25519_sign(signing_key2, &rollback_message_hash(*vid2, target_height, target_version, 0));
-        let err = fm.submit_rollback_signature(*vid2, target_height, target_version, 0, sig0_v2_replay).unwrap_err();
-        assert!(matches!(err, ForkError::RollbackNonceMismatch { expected: 1, got: 0 }));
+        let sig0_v2_replay = ed25519_sign(
+            signing_key2,
+            &rollback_message_hash(*vid2, target_height, target_version, 0),
+        );
+        let err = fm
+            .submit_rollback_signature(*vid2, target_height, target_version, 0, sig0_v2_replay)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ForkError::RollbackNonceMismatch {
+                expected: 1,
+                got: 0
+            }
+        ));
     }
 
     #[test]
@@ -826,7 +895,9 @@ mod tests {
         assert!(matches!(err, ForkError::ValidatorNotFound(999)));
 
         // Signaling for unscheduled upgrade fails
-        let err = fm.signal_upgrade_readiness(0, ProtocolVersion::new(3, 0, 0)).unwrap_err();
+        let err = fm
+            .signal_upgrade_readiness(0, ProtocolVersion::new(3, 0, 0))
+            .unwrap_err();
         assert!(matches!(err, ForkError::UpgradeNotScheduled(_)));
 
         // Valid signal succeeds

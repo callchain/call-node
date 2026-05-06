@@ -25,10 +25,16 @@ async fn test_light_verify_block_header_valid() {
 
     // Stake validator in consensus with the Ed25519 pubkey
     let val_id: ValidatorId = {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(provider.state_mut(), validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(
+                provider.state_mut(),
+                validator_addr,
+                ed25519_pubkey,
+                one_million_call(),
+            )
             .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
@@ -37,7 +43,8 @@ async fn test_light_verify_block_header_valid() {
 
     // Seed validator into EVM storage (RPC reads from EVM, not legacy validator_state)
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_validator(
             provider.state_mut(),
             val_id as u64,
@@ -50,7 +57,9 @@ async fn test_light_verify_block_header_valid() {
     }
 
     // Produce a block
-    let block = node.produce_block(1_000_000).expect("block should be produced");
+    let block = node
+        .produce_block(1_000_000)
+        .expect("block should be produced");
     let mut header = block.header.clone();
     // Force proposer to our validator id so the RPC accepts it (proposer > 0 check)
     header.proposer = val_id;
@@ -62,8 +71,7 @@ async fn test_light_verify_block_header_valid() {
     let pubkey_hex = format!("0x{}", hex::encode(ed25519_pubkey));
 
     // Build the RPC module from node state
-    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state))
-        .expect("build rpc module");
+    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state)).expect("build rpc module");
 
     // Prepare the request payload
     let header_json = serde_json::to_value(&header).unwrap();
@@ -83,7 +91,10 @@ async fn test_light_verify_block_header_valid() {
         .await
         .expect("rpc call should succeed");
 
-    assert_eq!(result["valid"], true, "block header should be valid with quorum signatures");
+    assert_eq!(
+        result["valid"], true,
+        "block header should be valid with quorum signatures"
+    );
     assert_eq!(result["height"], header.height);
     assert_eq!(result["signatureCount"], 1);
     assert_eq!(result["quorum"], 1); // ceil(2/3 * 1) = 1
@@ -98,10 +109,16 @@ async fn test_light_verify_block_header_bad_parent() {
     let validator_addr = test_addr(1);
 
     let val_id: ValidatorId = {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(provider.state_mut(), validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(
+                provider.state_mut(),
+                validator_addr,
+                ed25519_pubkey,
+                one_million_call(),
+            )
             .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
@@ -109,7 +126,8 @@ async fn test_light_verify_block_header_bad_parent() {
     };
 
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_validator(
             provider.state_mut(),
             val_id as u64,
@@ -137,8 +155,7 @@ async fn test_light_verify_block_header_bad_parent() {
     let sig_hex = format!("0x{}", hex::encode(sig));
     let pubkey_hex = format!("0x{}", hex::encode(ed25519_pubkey));
 
-    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state))
-        .expect("build rpc module");
+    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state)).expect("build rpc module");
 
     let params = serde_json::json!({
         "header": serde_json::to_value(&header).unwrap(),
@@ -159,7 +176,10 @@ async fn test_light_verify_block_header_bad_parent() {
     // it mainly checks signature count and basic fields.
     // The parent hash check in the actual light client is against stored headers.
     // For this E2E test we verify the structural response.
-    assert!(result.get("valid").is_some(), "response should contain valid field");
+    assert!(
+        result.get("valid").is_some(),
+        "response should contain valid field"
+    );
 }
 
 /// `call_lightGetBalanceProof` returns a proof with the correct balance.
@@ -173,35 +193,40 @@ async fn test_light_get_balance_proof() {
 
     // Set balance in EVM storage
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), asset_id, addr, balance,
+            provider.state_mut(),
+            asset_id,
+            addr,
+            balance,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
-    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state))
-        .expect("build rpc module");
+    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state)).expect("build rpc module");
 
     let result: serde_json::Value = rpc_module
         .call("call_lightGetBalanceProof", (asset_id, format!("{addr:?}")))
         .await
         .expect("rpc call should succeed");
 
+    assert_eq!(result["assetId"], asset_id, "asset_id should match");
     assert_eq!(
-        result["assetId"], asset_id,
-        "asset_id should match"
-    );
-    assert_eq!(
-        result["address"], format!("{addr:?}"),
+        result["address"],
+        format!("{addr:?}"),
         "address should match"
     );
     assert_eq!(
-        result["balance"], balance.to_string(),
+        result["balance"],
+        balance.to_string(),
         "balance should match"
     );
     assert!(
-        result["stateCommitment"].as_str().unwrap().starts_with("0x"),
+        result["stateCommitment"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"),
         "state commitment should be a hex string"
     );
     assert!(
@@ -219,15 +244,20 @@ async fn test_light_get_balance_proof() {
 async fn test_light_get_balance_proof_unknown_address() {
     let node = TestNode::new();
 
-    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state))
-        .expect("build rpc module");
+    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state)).expect("build rpc module");
 
     let result: serde_json::Value = rpc_module
-        .call("call_lightGetBalanceProof", (1u64, format!("{:?}", test_addr(99))))
+        .call(
+            "call_lightGetBalanceProof",
+            (1u64, format!("{:?}", test_addr(99))),
+        )
         .await
         .expect("rpc call should succeed");
 
-    assert_eq!(result["balance"], "0", "unknown address should have zero balance");
+    assert_eq!(
+        result["balance"], "0",
+        "unknown address should have zero balance"
+    );
 }
 
 /// `call_lightVerifyBlockHeader` rejects a block with zero timestamp.
@@ -239,10 +269,16 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
     let validator_addr = test_addr(1);
 
     let val_id: ValidatorId = {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
         let id = consensus
-            .stake_validator(provider.state_mut(), validator_addr, ed25519_pubkey, one_million_call())
+            .stake_validator(
+                provider.state_mut(),
+                validator_addr,
+                ed25519_pubkey,
+                one_million_call(),
+            )
             .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
@@ -250,7 +286,8 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
     };
 
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_validator(
             provider.state_mut(),
             val_id as u64,
@@ -273,8 +310,7 @@ async fn test_light_verify_block_header_zero_timestamp_rejected() {
     let sig_hex = format!("0x{}", hex::encode(sig));
     let pubkey_hex = format!("0x{}", hex::encode(ed25519_pubkey));
 
-    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state))
-        .expect("build rpc module");
+    let rpc_module = call_rpc::build_rpc_module(Arc::clone(&node.state)).expect("build rpc module");
 
     let params = serde_json::json!({
         "header": serde_json::to_value(&header).unwrap(),

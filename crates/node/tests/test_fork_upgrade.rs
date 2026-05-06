@@ -6,8 +6,8 @@
 mod e2e;
 use e2e::harness::*;
 
-use call_primitives::{Address, BlockHash, ProtocolVersion};
 use call_evm::EvmTransaction;
+use call_primitives::{Address, BlockHash, ProtocolVersion};
 
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -37,16 +37,23 @@ async fn test_height_activated_upgrade() {
 
     let (_secret, sender) = test_keypair();
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 100_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            sender,
+            100_000,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
@@ -56,7 +63,12 @@ async fn test_height_activated_upgrade() {
 
     // Produce blocks up to and past the upgrade height
     for i in 0..60 {
-        node.insert_evm_tx(make_evm_tx(sender, i as u64, test_addr(50 + (i % 10) as u8), 100));
+        node.insert_evm_tx(make_evm_tx(
+            sender,
+            i as u64,
+            test_addr(50 + (i % 10) as u8),
+            100,
+        ));
 
         let ts = 1_000_000 + i * 250;
         let selection = { node.mempool.write().unwrap().select_transactions() };
@@ -66,13 +78,11 @@ async fn test_height_activated_upgrade() {
             (c.current_proposer(), c.current_height())
         };
 
-        let Some(proposer) = proposer else { continue; };
+        let Some(proposer) = proposer else {
+            continue;
+        };
 
-        let evm_txs: Vec<Vec<u8>> = selection
-            .evm_txs
-            .into_iter()
-            .map(|e| e.data)
-            .collect();
+        let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
         if height == upgrade_height && !upgraded {
             upgraded = true;
@@ -88,16 +98,11 @@ async fn test_height_activated_upgrade() {
         }
 
         let version = node.state.fork_manager.read().unwrap().current_version();
-        let mut block = call_consensus::Block::new(
-            height,
-            node.parent_hash,
-            ts,
-            proposer,
-            version,
-            evm_txs,
-        );
+        let mut block =
+            call_consensus::Block::new(height, node.parent_hash, ts, proposer, version, evm_txs);
 
-        let result = node.state
+        let result = node
+            .state
             .write_all()
             .execute_block_no_subsystems(&block, height)
             .expect("execution");
@@ -106,7 +111,8 @@ async fn test_height_activated_upgrade() {
         {
             let mut consensus = node.consensus.write().unwrap();
             consensus.commit_block(&block, &result).expect("commit");
-            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             consensus.advance_round(&mut provider);
         }
 
@@ -171,16 +177,28 @@ async fn test_governance_triggered_upgrade() {
     let (_secret, sender) = test_keypair();
     let val_addr = sender;
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), val_addr, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(
+                provider.state_mut(),
+                val_addr,
+                [1u8; 32],
+                one_million_call(),
+            )
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 100_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            sender,
+            100_000,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
@@ -188,15 +206,13 @@ async fn test_governance_triggered_upgrade() {
     let upgrade_height = 5u64;
     {
         let mut fm = node.state.fork_manager.write().unwrap();
-        fm.schedule_upgrade(
-            call_consensus::fork::UpgradeEntry {
-                version: ProtocolVersion::new(2, 0, 0),
-                activation_height: upgrade_height,
-                applied: false,
-                proposal_id: Some(1),
-                approved_at_height: Some(0),
-            },
-        );
+        fm.schedule_upgrade(call_consensus::fork::UpgradeEntry {
+            version: ProtocolVersion::new(2, 0, 0),
+            activation_height: upgrade_height,
+            applied: false,
+            proposal_id: Some(1),
+            approved_at_height: Some(0),
+        });
     }
 
     let mut upgraded = false;
@@ -215,6 +231,9 @@ async fn test_governance_triggered_upgrade() {
         }
     }
 
-    assert!(upgraded, "governance upgrade should have activated at height {upgrade_height}");
+    assert!(
+        upgraded,
+        "governance upgrade should have activated at height {upgrade_height}"
+    );
     assert_eq!(node.consensus_height(), 10);
 }

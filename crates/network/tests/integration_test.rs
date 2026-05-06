@@ -4,15 +4,15 @@
 //! verifying peer connection, message passing, and network health.
 
 use call_network::{
-    CommonwareConfig, CommonwareNetwork, Network, NetworkLimits,
-    load_or_generate_identity_key, NetworkMessage, TransactionMessage,
+    load_or_generate_identity_key, CommonwareConfig, CommonwareNetwork, Network, NetworkLimits,
+    NetworkMessage, TransactionMessage,
 };
 use call_primitives::TxHash;
 use commonware_codec::extensions::DecodeExt;
 use commonware_cryptography::ed25519;
 use commonware_cryptography::Signer;
-use std::net::TcpListener;
 use std::net::SocketAddr;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -78,7 +78,9 @@ async fn test_two_node_connection_and_message() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
+    let mut node1 = CommonwareNetwork::new(&config1, key1)
+        .await
+        .expect("node1 init");
 
     let node1_peer_id = node1.peer_id().to_string();
 
@@ -93,11 +95,16 @@ async fn test_two_node_connection_and_message() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
+    let mut node2 = CommonwareNetwork::new(&config2, key2)
+        .await
+        .expect("node2 init");
 
     // Node 1 also tracks node2 (mutual connection for bidirectional peer visibility)
     let node2_peer_id = node2.peer_id().to_string();
-    node1.connect(&format!("{node2_peer_id}@{node2_addr}")).await.expect("node1 connect to node2");
+    node1
+        .connect(&format!("{node2_peer_id}@{node2_addr}"))
+        .await
+        .expect("node1 connect to node2");
 
     // Poll until peers are visible (up to 10s)
     let mut attempts = 0;
@@ -105,8 +112,16 @@ async fn test_two_node_connection_and_message() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         attempts += 1;
     }
-    assert!(node1.peer_count() >= 1, "node1 should see at least 1 peer, saw {}", node1.peer_count());
-    assert!(node2.peer_count() >= 1, "node2 should see at least 1 peer, saw {}", node2.peer_count());
+    assert!(
+        node1.peer_count() >= 1,
+        "node1 should see at least 1 peer, saw {}",
+        node1.peer_count()
+    );
+    assert!(
+        node2.peer_count() >= 1,
+        "node2 should see at least 1 peer, saw {}",
+        node2.peer_count()
+    );
 
     // Node 1 broadcasts a transaction message
     let tx_data = vec![0x01, 0x02, 0x03];
@@ -167,7 +182,9 @@ async fn test_network_health_check() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
+    let mut node1 = CommonwareNetwork::new(&config1, key1)
+        .await
+        .expect("node1 init");
 
     let config2 = CommonwareConfig {
         listen_addr: ports[1],
@@ -179,13 +196,23 @@ async fn test_network_health_check() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
+    let mut node2 = CommonwareNetwork::new(&config2, key2)
+        .await
+        .expect("node2 init");
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Both nodes should be healthy (each tracks at least 1 peer)
-    assert!(node1.is_healthy(), "node1 should be healthy (peers: {})", node1.peer_count());
-    assert!(node2.is_healthy(), "node2 should be healthy (peers: {})", node2.peer_count());
+    assert!(
+        node1.is_healthy(),
+        "node1 should be healthy (peers: {})",
+        node1.peer_count()
+    );
+    assert!(
+        node2.is_healthy(),
+        "node2 should be healthy (peers: {})",
+        node2.peer_count()
+    );
 
     node1.stop();
     node2.stop();
@@ -214,7 +241,9 @@ async fn test_disconnect_removes_peer() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
+    let mut node1 = CommonwareNetwork::new(&config1, key1)
+        .await
+        .expect("node1 init");
 
     let config2 = CommonwareConfig {
         listen_addr: ports[1],
@@ -226,20 +255,31 @@ async fn test_disconnect_removes_peer() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
+    let mut node2 = CommonwareNetwork::new(&config2, key2)
+        .await
+        .expect("node2 init");
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Verify node1 sees node2
     let initial_count = node1.peer_count();
-    assert!(initial_count >= 1, "node1 should have at least 1 peer, saw {initial_count}");
+    assert!(
+        initial_count >= 1,
+        "node1 should have at least 1 peer, saw {initial_count}"
+    );
 
     // Disconnect node2 from node1's perspective
-    node1.disconnect(&node2_peer_id).await.expect("disconnect failed");
+    node1
+        .disconnect(&node2_peer_id)
+        .await
+        .expect("disconnect failed");
 
     // Peer should be removed from node1's tracking
     let after_count = node1.peer_count();
-    assert!(after_count < initial_count, "peer count should decrease (was {initial_count}, now {after_count})");
+    assert!(
+        after_count < initial_count,
+        "peer count should decrease (was {initial_count}, now {after_count})"
+    );
 
     node1.stop();
     node2.stop();
@@ -259,7 +299,10 @@ async fn test_identity_key_persistence() {
     let key2 = load_or_generate_identity_key(&dir, None).expect("generate key2");
     let peer_id_2 = hex::encode(key2.public_key().as_ref());
 
-    assert_eq!(peer_id_1, peer_id_2, "peer IDs should match across restarts");
+    assert_eq!(
+        peer_id_1, peer_id_2,
+        "peer IDs should match across restarts"
+    );
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&dir);
@@ -296,7 +339,9 @@ async fn test_peer_exchange_discovery() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node1 = CommonwareNetwork::new(&config1, key1).await.expect("node1 init");
+    let mut node1 = CommonwareNetwork::new(&config1, key1)
+        .await
+        .expect("node1 init");
 
     let config2 = CommonwareConfig {
         listen_addr: node2_addr,
@@ -308,7 +353,9 @@ async fn test_peer_exchange_discovery() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node2 = CommonwareNetwork::new(&config2, key2).await.expect("node2 init");
+    let mut node2 = CommonwareNetwork::new(&config2, key2)
+        .await
+        .expect("node2 init");
 
     // Node3 only knows Node1 initially
     let config3 = CommonwareConfig {
@@ -321,7 +368,9 @@ async fn test_peer_exchange_discovery() {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    let mut node3 = CommonwareNetwork::new(&config3, key3).await.expect("node3 init");
+    let mut node3 = CommonwareNetwork::new(&config3, key3)
+        .await
+        .expect("node3 init");
 
     // Wait for connections to establish (PEX test needs all peers connected)
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -340,7 +389,10 @@ async fn test_peer_exchange_discovery() {
 
     // Node1 also sends a dummy message so node3.receive() has something to return
     // after processing the PEX message internally.
-    let dummy = NetworkMessage::Transaction(TransactionMessage::new(vec![0xFF], TxHash::repeat_byte(0xBB)));
+    let dummy = NetworkMessage::Transaction(TransactionMessage::new(
+        vec![0xFF],
+        TxHash::repeat_byte(0xBB),
+    ));
     let dummy_data = bincode::serialize(&dummy).unwrap();
 
     // Retry PEX + broadcast + receive to tolerate P2P handshake timing under load
@@ -358,7 +410,10 @@ async fn test_peer_exchange_discovery() {
             _ => continue,
         }
     }
-    assert!(received, "node3 should receive the dummy message after retries");
+    assert!(
+        received,
+        "node3 should receive the dummy message after retries"
+    );
 
     // Node3 should now know about Node2 via PEX
     let node3_known = node3.known_peers().await;

@@ -3,8 +3,8 @@
 //! Measures key-value put/get/delete throughput and p99 latency
 //! using the reth-db MDBX backend.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use call_storage::{open_test_db, db_put, db_get, CallMetadataChainId};
+use call_storage::{db_get, db_put, open_test_db, CallMetadataChainId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 fn bench_db_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("storage/mdbx_write");
@@ -21,7 +21,13 @@ fn bench_db_write(c: &mut Criterion) {
                         for i in 0..count {
                             let key = format!("key_{:08}", i);
                             let value = format!("value_{}", i).repeat(10);
-                            if db_put::<CallMetadataChainId>(&db.db, key.into_bytes(), value.into_bytes()).is_ok() {
+                            if db_put::<CallMetadataChainId>(
+                                &db.db,
+                                key.into_bytes(),
+                                value.into_bytes(),
+                            )
+                            .is_ok()
+                            {
                                 ok += 1;
                             }
                         }
@@ -49,7 +55,11 @@ fn bench_db_read(c: &mut Criterion) {
                     for i in 0..count {
                         let key = format!("key_{:08}", i);
                         let value = format!("value_{}", i).repeat(10);
-                        let _ = db_put::<CallMetadataChainId>(&db.db, key.into_bytes(), value.into_bytes());
+                        let _ = db_put::<CallMetadataChainId>(
+                            &db.db,
+                            key.into_bytes(),
+                            value.into_bytes(),
+                        );
                     }
                 }
 

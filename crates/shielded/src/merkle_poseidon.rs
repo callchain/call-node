@@ -7,8 +7,8 @@
 //!
 //! All operations are gated behind the `poseidon` feature.
 
-use std::cell::RefCell;
 use crate::poseidon::poseidon_hash_pair;
+use std::cell::RefCell;
 
 // ============================================================================
 // PoseidonMerkleTree
@@ -186,11 +186,7 @@ impl Default for PoseidonMerkleTree {
 ///
 /// Recomputes the root from the leaf and proof path, comparing against
 /// `expected_root`. Returns `true` if the proof is valid.
-pub fn verify_poseidon_proof(
-    root: &[u8; 32],
-    leaf: &[u8; 32],
-    proof: &[([u8; 32], bool)],
-) -> bool {
+pub fn verify_poseidon_proof(root: &[u8; 32], leaf: &[u8; 32], proof: &[([u8; 32], bool)]) -> bool {
     let mut current = *leaf;
     for (sibling, sibling_is_right) in proof {
         if *sibling_is_right {

@@ -1,11 +1,11 @@
 //! Unit tests for the P2P layer.
 
 use super::super::limits::NetworkLimits;
-use super::super::p2p::message::*;
-use super::super::p2p::wire::{decode_with_channel, encode_with_channel};
 use super::super::p2p::config::CommonwareConfig;
 use super::super::p2p::memory::InMemoryNetwork;
+use super::super::p2p::message::*;
 use super::super::p2p::trait_::Network;
+use super::super::p2p::wire::{decode_with_channel, encode_with_channel};
 use call_primitives::{PricePair, TxHash};
 
 fn test_hash(n: u8) -> TxHash {
@@ -77,7 +77,11 @@ fn test_handshake() {
 #[test]
 fn test_oracle_price_request() {
     let req = OraclePriceRequest {
-        pairs: vec![PricePair::new(1, 0), PricePair::new(2, 0), PricePair::new(3, 0)],
+        pairs: vec![
+            PricePair::new(1, 0),
+            PricePair::new(2, 0),
+            PricePair::new(3, 0),
+        ],
         block: 1000,
         requester_id: 5,
     };
@@ -110,7 +114,9 @@ fn test_oracle_price_submission() {
     let msg = NetworkMessage::OraclePriceSubmission(sub.clone());
     let serialized = bincode::serialize(&msg).unwrap();
     let deserialized: NetworkMessage = bincode::deserialize(&serialized).unwrap();
-    assert!(matches!(deserialized, NetworkMessage::OraclePriceSubmission(s) if s.price == 2_000_000));
+    assert!(
+        matches!(deserialized, NetworkMessage::OraclePriceSubmission(s) if s.price == 2_000_000)
+    );
 }
 
 #[test]
@@ -125,7 +131,10 @@ fn test_network_event_oracle_variants() {
             requester_id: 0,
         },
     };
-    assert!(matches!(evt, NetworkEvent::OraclePriceRequestReceived { .. }));
+    assert!(matches!(
+        evt,
+        NetworkEvent::OraclePriceRequestReceived { .. }
+    ));
 
     let evt2 = NetworkEvent::OraclePriceSubmissionReceived {
         peer_id: "peer_2".into(),
@@ -139,7 +148,10 @@ fn test_network_event_oracle_variants() {
             sources: vec![],
         },
     };
-    assert!(matches!(evt2, NetworkEvent::OraclePriceSubmissionReceived { .. }));
+    assert!(matches!(
+        evt2,
+        NetworkEvent::OraclePriceSubmissionReceived { .. }
+    ));
 }
 
 #[test]
@@ -292,7 +304,12 @@ fn test_peer_exchange_serialization() {
 fn test_peer_exchange_truncate() {
     let mut pex = PeerExchange::new(
         (0..100)
-            .map(|i| (format!("peer_{i}"), format!("127.0.0.1:{i}").parse().unwrap()))
+            .map(|i| {
+                (
+                    format!("peer_{i}"),
+                    format!("127.0.0.1:{i}").parse().unwrap(),
+                )
+            })
             .collect(),
         "127.0.0.1:5000".parse().unwrap(),
     );

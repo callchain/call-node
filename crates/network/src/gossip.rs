@@ -27,7 +27,12 @@ pub enum ChannelId {
 impl ChannelId {
     /// All available channels
     pub fn all() -> &'static [Self] {
-        &[Self::Consensus, Self::ProtocolTx, Self::EvmTx, Self::StateSync]
+        &[
+            Self::Consensus,
+            Self::ProtocolTx,
+            Self::EvmTx,
+            Self::StateSync,
+        ]
     }
 }
 
@@ -180,8 +185,7 @@ impl RateLimiter {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
         self.last_refill = now;
-        self.tokens = (self.tokens + elapsed * self.refill_rate)
-            .min(self.max_tokens as f64);
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens as f64);
     }
 
     /// Reset the rate limiter
@@ -238,10 +242,7 @@ impl PeerState {
     pub fn record_message(&mut self) -> Result<(), NetworkError> {
         if self.banned {
             return Err(NetworkError::PeerBanned {
-                reason: self
-                    .ban_reason
-                    .clone()
-                    .unwrap_or_else(|| "unknown".into()),
+                reason: self.ban_reason.clone().unwrap_or_else(|| "unknown".into()),
             });
         }
         if !self.rate_limiter.try_consume() {
@@ -476,23 +477,13 @@ mod tests {
         manager.add_peer("peer_1".into()).unwrap();
 
         let tx = manager
-            .process_incoming_tx(
-                "peer_1",
-                vec![0u8; 100],
-                test_hash(1),
-                TxPriority::High,
-            )
+            .process_incoming_tx("peer_1", vec![0u8; 100], test_hash(1), TxPriority::High)
             .unwrap();
         assert!(tx.is_some());
 
         // Duplicate should be filtered
         let tx2 = manager
-            .process_incoming_tx(
-                "peer_1",
-                vec![0u8; 100],
-                test_hash(1),
-                TxPriority::High,
-            )
+            .process_incoming_tx("peer_1", vec![0u8; 100], test_hash(1), TxPriority::High)
             .unwrap();
         assert!(tx2.is_none());
     }
@@ -523,21 +514,13 @@ mod tests {
             test_hash(3),
             TxPriority::Standard,
         ));
-        manager.queue_for_propagation(PropagatedTx::new(
-            vec![2],
-            test_hash(1),
-            TxPriority::High,
-        ));
+        manager.queue_for_propagation(PropagatedTx::new(vec![2], test_hash(1), TxPriority::High));
         manager.queue_for_propagation(PropagatedTx::new(
             vec![3],
             test_hash(4),
             TxPriority::Standard,
         ));
-        manager.queue_for_propagation(PropagatedTx::new(
-            vec![4],
-            test_hash(2),
-            TxPriority::High,
-        ));
+        manager.queue_for_propagation(PropagatedTx::new(vec![4], test_hash(2), TxPriority::High));
 
         // Drain should return in priority order (High before Standard)
         let drained = manager.drain_pending();
@@ -562,12 +545,7 @@ mod tests {
         assert_eq!(manager.peer_count(), 1);
 
         // Sending from removed peer should fail
-        let result = manager.process_incoming_tx(
-            "p1",
-            vec![1],
-            test_hash(1),
-            TxPriority::High,
-        );
+        let result = manager.process_incoming_tx("p1", vec![1], test_hash(1), TxPriority::High);
         assert!(matches!(result, Err(NetworkError::PeerNotFound { .. })));
     }
 }

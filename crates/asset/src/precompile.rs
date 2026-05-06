@@ -7,11 +7,11 @@
 
 use crate::AssetStorage;
 use alloy_sol_types::{sol, SolCall};
+use call_precompile::storage::StorageProvider;
 use call_precompile::{
     dispatch, journal_backend::JournalBackend, ok_empty, require_caller, slot_asset_meta,
-    write_string32, ASSET_ADDRESS, COMPLIANCE_ADDRESS, slot_compliance,
+    slot_compliance, write_string32, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
 };
-use call_precompile::storage::StorageProvider;
 use call_primitives::{Address, U256};
 use call_protocol::CALL_ASSET_ID;
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -43,10 +43,7 @@ impl AssetPrecompile {
         storage: &mut dyn StorageProvider,
     ) -> Result<(), PrecompileError> {
         let policy_id = storage
-            .sload(
-                ASSET_ADDRESS,
-                slot_asset_meta(asset_id, b"compliance"),
-            )
+            .sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance"))
             .map(|v| v.to_be_bytes::<32>()[31] as u64)
             .unwrap_or(0);
 
@@ -55,10 +52,7 @@ impl AssetPrecompile {
         }
 
         let status = storage
-            .sload(
-                COMPLIANCE_ADDRESS,
-                slot_compliance(*addr, policy_id as u8),
-            )
+            .sload(COMPLIANCE_ADDRESS, slot_compliance(*addr, policy_id as u8))
             .map(|v| v.to_be_bytes::<32>()[31])
             .unwrap_or(0);
 
@@ -70,14 +64,23 @@ impl AssetPrecompile {
     }
 
     fn get_balance(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(calldata, 800, storage, |call, storage| {
-            let store = AssetStorage::new(JournalBackend::new(storage));
-            let balance = store.read_balance(call.assetId, call.account);
-            Ok(balance)
-        })
+        dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(
+            calldata,
+            800,
+            storage,
+            |call, storage| {
+                let store = AssetStorage::new(JournalBackend::new(storage));
+                let balance = store.read_balance(call.assetId, call.account);
+                Ok(balance)
+            },
+        )
     }
 
-    fn get_asset_info(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_asset_info(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         storage.deduct_gas(1000)?;
         let call = dispatch::decode_call::<IProtocolAsset::getAssetInfoCall>(calldata)?;
         let store = AssetStorage::new(JournalBackend::new(storage));
@@ -92,30 +95,53 @@ impl AssetPrecompile {
         out[191] = meta.status;
 
         let output = revm_precompile::PrecompileOutput::new(0, out.to_vec().into());
-        Ok(call_precompile::storage::fill_precompile_output(output, storage))
+        Ok(call_precompile::storage::fill_precompile_output(
+            output, storage,
+        ))
     }
 
-    fn transfer(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::transferCall, _>(calldata, 5000, storage, |call, storage| {
-            let from = require_caller(msg_sender)?;
-            Self::check_compliance(call.assetId, &from, storage)?;
-            Self::check_compliance(call.assetId, &call.to, storage)?;
-            let mut store = AssetStorage::new(JournalBackend::new(storage));
-            store
-                .transfer(call.assetId, from, call.to, call.amount)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            // Bridge CALL transfers to native EVM balance
-            if call.assetId == CALL_ASSET_ID {
-                storage.balance_sub(from, U256::from(call.amount))
-                    .map_err(|e| PrecompileError::Other(format!("native balance sub: {e}").into()))?;
-                storage.balance_add(call.to, U256::from(call.amount))
-                    .map_err(|e| PrecompileError::Other(format!("native balance add: {e}").into()))?;
-            }
-            Ok(())
-        })
+    fn transfer(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::transferCall, _>(
+            calldata,
+            5000,
+            storage,
+            |call, storage| {
+                let from = require_caller(msg_sender)?;
+                Self::check_compliance(call.assetId, &from, storage)?;
+                Self::check_compliance(call.assetId, &call.to, storage)?;
+                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                store
+                    .transfer(call.assetId, from, call.to, call.amount)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                // Bridge CALL transfers to native EVM balance
+                if call.assetId == CALL_ASSET_ID {
+                    storage
+                        .balance_sub(from, U256::from(call.amount))
+                        .map_err(|e| {
+                            PrecompileError::Other(format!("native balance sub: {e}").into())
+                        })?;
+                    storage
+                        .balance_add(call.to, U256::from(call.amount))
+                        .map_err(|e| {
+                            PrecompileError::Other(format!("native balance add: {e}").into())
+                        })?;
+                }
+                Ok(())
+            },
+        )
     }
 
-    fn batch_transfer(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn batch_transfer(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         let call = dispatch::decode_call::<IProtocolAsset::batchTransferCall>(calldata)?;
         if call.to.len() != call.amounts.len() {
             return Err(PrecompileError::Other(
@@ -134,8 +160,7 @@ impl AssetPrecompile {
             Self::check_compliance(call.assetId, to, storage)?;
         }
 
-        let pairs: Vec<(Address, u128)> =
-            call.to.into_iter().zip(call.amounts.into_iter()).collect();
+        let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts).collect();
         let mut store = AssetStorage::new(JournalBackend::new(storage));
         let cp = storage.checkpoint();
         store
@@ -144,11 +169,13 @@ impl AssetPrecompile {
         // Bridge CALL transfers to native EVM balance
         if call.assetId == CALL_ASSET_ID {
             let total: u128 = pairs.iter().map(|(_, amt)| *amt).sum();
-            storage.balance_sub(from, U256::from(total))
+            storage
+                .balance_sub(from, U256::from(total))
                 .map_err(|e| PrecompileError::Other(format!("native balance sub: {e}").into()))?;
             for (to, amount) in &pairs {
-                storage.balance_add(*to, U256::from(*amount))
-                    .map_err(|e| PrecompileError::Other(format!("native balance add: {e}").into()))?;
+                storage.balance_add(*to, U256::from(*amount)).map_err(|e| {
+                    PrecompileError::Other(format!("native balance add: {e}").into())
+                })?;
             }
         }
         storage.checkpoint_commit(cp);
@@ -156,70 +183,133 @@ impl AssetPrecompile {
         ok_empty(storage)
     }
 
-    fn approve(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::approveCall, _>(calldata, 3000, storage, |call, storage| {
-            let owner = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend::new(storage));
-            store.approve(call.assetId, owner, call.spender, call.amount);
-            Ok(())
-        })
+    fn approve(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::approveCall, _>(
+            calldata,
+            3000,
+            storage,
+            |call, storage| {
+                let owner = require_caller(msg_sender)?;
+                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                store.approve(call.assetId, owner, call.spender, call.amount);
+                Ok(())
+            },
+        )
     }
 
-    fn transfer_from(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::transferFromCall, _>(calldata, 6000, storage, |call, storage| {
-            let spender = require_caller(msg_sender)?;
-            Self::check_compliance(call.assetId, &call.from, storage)?;
-            Self::check_compliance(call.assetId, &call.to, storage)?;
-            let mut store = AssetStorage::new(JournalBackend::new(storage));
-            store
-                .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            // Bridge CALL transfers to native EVM balance
-            if call.assetId == CALL_ASSET_ID {
-                storage.balance_sub(call.from, U256::from(call.amount))
-                    .map_err(|e| PrecompileError::Other(format!("native balance sub: {e}").into()))?;
-                storage.balance_add(call.to, U256::from(call.amount))
-                    .map_err(|e| PrecompileError::Other(format!("native balance add: {e}").into()))?;
-            }
-            Ok(())
-        })
+    fn transfer_from(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::transferFromCall, _>(
+            calldata,
+            6000,
+            storage,
+            |call, storage| {
+                let spender = require_caller(msg_sender)?;
+                Self::check_compliance(call.assetId, &call.from, storage)?;
+                Self::check_compliance(call.assetId, &call.to, storage)?;
+                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                store
+                    .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                // Bridge CALL transfers to native EVM balance
+                if call.assetId == CALL_ASSET_ID {
+                    storage
+                        .balance_sub(call.from, U256::from(call.amount))
+                        .map_err(|e| {
+                            PrecompileError::Other(format!("native balance sub: {e}").into())
+                        })?;
+                    storage
+                        .balance_add(call.to, U256::from(call.amount))
+                        .map_err(|e| {
+                            PrecompileError::Other(format!("native balance add: {e}").into())
+                        })?;
+                }
+                Ok(())
+            },
+        )
     }
 
-    fn mint(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::mintCall, _>(calldata, 10000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend::new(storage));
-            store
-                .mint(call.assetId, caller, call.to, call.amount)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+    fn mint(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::mintCall, _>(
+            calldata,
+            10000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                store
+                    .mint(call.assetId, caller, call.to, call.amount)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
-    fn burn(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAsset::burnCall, _>(calldata, 8000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend::new(storage));
-            store
-                .burn(call.assetId, caller, call.from, call.amount)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+    fn burn(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAsset::burnCall, _>(
+            calldata,
+            8000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                store
+                    .burn(call.assetId, caller, call.from, call.amount)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
-    fn register(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate::<IProtocolAsset::registerCall, _, _>(calldata, 50000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let mut store = AssetStorage::new(JournalBackend::new(storage));
-            let asset_id = store
-                .register(&call.symbol, &call.name, call.decimals, call.maxSupply, caller)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(asset_id)
-        })
+    fn register(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate::<IProtocolAsset::registerCall, _, _>(
+            calldata,
+            50000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                let asset_id = store
+                    .register(
+                        &call.symbol,
+                        &call.name,
+                        call.decimals,
+                        call.maxSupply,
+                        caller,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(asset_id)
+            },
+        )
     }
 }
 
 impl call_precompile::StatefulPrecompile for AssetPrecompile {
+    #[allow(clippy::expect_used)]
     fn call(
         &mut self,
         calldata: &[u8],
@@ -229,7 +319,7 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
         match selector {
             IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata, storage),
             IProtocolAsset::getAssetInfoCall::SELECTOR => self.get_asset_info(calldata, storage),
@@ -262,11 +352,7 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let addr = Address::repeat_byte(0xAB);
 
-        provider.sstore(
-            ASSET_ADDRESS,
-            slot_balance(1, addr),
-            u128_to_u256(5000),
-        );
+        provider.sstore(ASSET_ADDRESS, slot_balance(1, addr), u128_to_u256(5000));
 
         let input = IProtocolAsset::getBalanceCall {
             assetId: 1,
@@ -275,12 +361,12 @@ mod tests {
         .abi_encode();
 
         let mut precompile = AssetPrecompile;
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
-        let balance = call_precompile::u256_to_u128(
-            alloy_primitives::U256::from_be_bytes::<32>(
-                result.bytes.as_ref().try_into().unwrap(),
-            ),
-        );
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let balance = call_precompile::u256_to_u128(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        ));
         assert_eq!(balance, 5000);
     }
 
@@ -290,11 +376,7 @@ mod tests {
         let from = Address::repeat_byte(0xAB);
         let to = Address::repeat_byte(0xCD);
 
-        provider.sstore(
-            ASSET_ADDRESS,
-            slot_balance(1, from),
-            u128_to_u256(1000),
-        );
+        provider.sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000));
         // Seed native EVM balance for CALL (asset_id=1) bridging
         provider.balance_add(from, U256::from(1000)).unwrap();
 
@@ -332,8 +414,14 @@ mod tests {
         let mut precompile = AssetPrecompile;
         let result = precompile.call(&input, issuer, &mut provider).unwrap();
         let asset_id = u64::from_be_bytes([
-            result.bytes[24], result.bytes[25], result.bytes[26], result.bytes[27],
-            result.bytes[28], result.bytes[29], result.bytes[30], result.bytes[31],
+            result.bytes[24],
+            result.bytes[25],
+            result.bytes[26],
+            result.bytes[27],
+            result.bytes[28],
+            result.bytes[29],
+            result.bytes[30],
+            result.bytes[31],
         ]);
         assert_eq!(asset_id, 1);
 
@@ -384,11 +472,7 @@ mod tests {
         let spender = Address::repeat_byte(0xEF);
         let recipient = Address::repeat_byte(0xCD);
 
-        provider.sstore(
-            ASSET_ADDRESS,
-            slot_balance(1, owner),
-            u128_to_u256(1000),
-        );
+        provider.sstore(ASSET_ADDRESS, slot_balance(1, owner), u128_to_u256(1000));
         // Seed native EVM balance for CALL (asset_id=1) bridging
         provider.balance_add(owner, U256::from(1000)).unwrap();
 

@@ -97,7 +97,9 @@ pub fn default_alert_rules() -> Vec<AlertRule> {
             "bridge_delay",
             AlertSeverity::Warning,
             "Bridge pending operations exceed 100",
-            Box::new(|r: &TelemetryRegistry| r.mempool_bridge_pending.load(Ordering::Relaxed) > 100),
+            Box::new(|r: &TelemetryRegistry| {
+                r.mempool_bridge_pending.load(Ordering::Relaxed) > 100
+            }),
         ),
         // Memory pressure: check system RAM usage via sysinfo
         AlertRule::new(
@@ -147,12 +149,11 @@ pub struct HealthState {
 
 /// Lightweight DB heartbeat: write and immediately delete a test key
 pub fn db_heartbeat(db: &reth_db::DatabaseEnv) -> Result<(), String> {
-    use call_storage::reth_db::{db_del, db_put};
     use call_storage::reth_db::CallMetadataChainId;
+    use call_storage::reth_db::{db_del, db_put};
     let key = b"__health_check__".to_vec();
     db_put::<CallMetadataChainId>(db, key.clone(), b"1".to_vec())
         .map_err(|e| format!("db write failed: {e}"))?;
-    db_del::<CallMetadataChainId>(db, &key)
-        .map_err(|e| format!("db delete failed: {e}"))?;
+    db_del::<CallMetadataChainId>(db, &key).map_err(|e| format!("db delete failed: {e}"))?;
     Ok(())
 }

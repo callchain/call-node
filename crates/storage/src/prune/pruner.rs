@@ -3,9 +3,14 @@
 //! Per spec §10.3.5: fast sync downloads a verified snapshot, restores it,
 //! then incrementally syncs to the current chain tip.
 
-use crate::prune::config::{snapshot_message_hash, NodeMode, PruneConfig, StateSnapshot, StateRoots};
+use crate::prune::config::{
+    snapshot_message_hash, NodeMode, PruneConfig, StateRoots, StateSnapshot,
+};
 use crate::prune::state::PruneState;
-use crate::reth_db::{compact_db, db_del, CallBlockHashByHeight, CallConsensusBlocks, CallConsensusState, CallReceipts};
+use crate::reth_db::{
+    compact_db, db_del, CallBlockHashByHeight, CallConsensusBlocks, CallConsensusState,
+    CallReceipts,
+};
 use crate::StorageError;
 use reth_db::DatabaseEnv;
 use std::path::Path;
@@ -104,7 +109,10 @@ pub fn prune_old_snapshots(
 ///
 /// Commits a flush transaction and marks the in-memory state accordingly.
 /// If `db` is provided, calls `compact_db()` to sync the database.
-pub fn compact_database(state: &mut PruneState, db: Option<&DatabaseEnv>) -> Result<(), StorageError> {
+pub fn compact_database(
+    state: &mut PruneState,
+    db: Option<&DatabaseEnv>,
+) -> Result<(), StorageError> {
     if let Some(db_env) = db {
         compact_db(db_env)?;
     }
@@ -152,8 +160,16 @@ pub fn maybe_prune(
 
     let prune_boundary = current_height.saturating_sub(config.keep_recent);
     prune_execution_traces(state, prune_boundary, db)?;
-    prune_receipts(state, current_height.saturating_sub(config.keep_receipt), db)?;
-    prune_block_bodies(state, current_height.saturating_sub(config.keep_block_body), db)?;
+    prune_receipts(
+        state,
+        current_height.saturating_sub(config.keep_receipt),
+        db,
+    )?;
+    prune_block_bodies(
+        state,
+        current_height.saturating_sub(config.keep_block_body),
+        db,
+    )?;
     prune_old_snapshots(state, config.snapshot_keep, db)?;
     compact_database(state, db)?;
 
@@ -205,7 +221,7 @@ pub fn produce_state_snapshot(
         shielded_root: roots.shielded_root,
         agent_root: roots.agent_root,
         consensus_root: roots.consensus_root,
-        total_size: 0, // would be estimated from DB size in production
+        total_size: 0,                // would be estimated from DB size in production
         validator_signatures: vec![], // collected by the node's BFT layer
     };
 
@@ -248,8 +264,7 @@ impl FastSyncFlow {
         let path = dir.join(format!("snapshot-{}.json", height));
         let data = std::fs::read(&path)
             .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
-        serde_json::from_slice(&data)
-            .map_err(|e| StorageError::Serialization(e.to_string()))
+        serde_json::from_slice(&data).map_err(|e| StorageError::Serialization(e.to_string()))
     }
 
     /// List all available snapshot heights in the directory.

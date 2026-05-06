@@ -1,10 +1,10 @@
 //! Callchain serialization — RLP, JSON, StorageCodec
 
-mod rlp;
 mod json;
+mod rlp;
 
-pub use rlp::*;
 pub use json::*;
+pub use rlp::*;
 
 use thiserror::Error;
 
@@ -40,8 +40,7 @@ impl<T: alloy_rlp::Encodable + alloy_rlp::Decodable> StorageCodec for T {
     }
 
     fn decode_from_buf(buf: &[u8]) -> Result<Self, SerializationError> {
-        Self::decode(&mut &buf[..])
-            .map_err(|e| SerializationError::RlpDecode(e.to_string()))
+        Self::decode(&mut &buf[..]).map_err(|e| SerializationError::RlpDecode(e.to_string()))
     }
 }
 

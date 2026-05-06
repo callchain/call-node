@@ -8,15 +8,13 @@
 //! so that the block state_root captures all state changes.
 
 use call_asset::AssetStorage;
-use call_evm::{ProtocolStorage, ProtocolStateBackend, ProtocolStateRefBackend};
-use call_precompile::{
-    address_to_u256, read_string32,
-    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
-    write_string32,
-    AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
-    ORACLE_ADDRESS, SHIELDED_ADDRESS, VALIDATOR_ADDRESS,
-};
+use call_evm::{ProtocolStateBackend, ProtocolStateRefBackend, ProtocolStorage};
 use call_precompile::storage::storage_slot;
+use call_precompile::{
+    address_to_u256, read_string32, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
+    u64_to_u256, write_string32, AGENT_ADDRESS, BRIDGE_ADDRESS, COMPLIANCE_ADDRESS,
+    GOVERNANCE_ADDRESS, ORACLE_ADDRESS, SHIELDED_ADDRESS, VALIDATOR_ADDRESS,
+};
 use call_primitives::{Address, U256};
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -101,7 +99,12 @@ pub fn slot_gov_proposal_data_len(proposal_id: u64) -> U256 {
 }
 
 pub fn slot_gov_proposal_data_chunk(proposal_id: u64, chunk_idx: u64) -> U256 {
-    storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], b"data_chunk", &chunk_idx.to_be_bytes()[..]])
+    storage_slot(&[
+        b"proposal",
+        &proposal_id.to_be_bytes()[..],
+        b"data_chunk",
+        &chunk_idx.to_be_bytes()[..],
+    ])
 }
 
 fn slot_gov_voter(proposal_id: u64, voter: Address) -> U256 {
@@ -225,7 +228,11 @@ pub(crate) fn slot_agent_registered_at(agent_id: u64) -> U256 {
 }
 
 pub(crate) fn slot_agent_balance(agent_id: u64, asset_id: u64) -> U256 {
-    storage_slot(&[b"abalance", &agent_id.to_be_bytes()[..], &asset_id.to_be_bytes()[..]])
+    storage_slot(&[
+        b"abalance",
+        &agent_id.to_be_bytes()[..],
+        &asset_id.to_be_bytes()[..],
+    ])
 }
 
 // Pack agent permissions into a single U256:
@@ -257,12 +264,16 @@ pub fn agent_get_owner(evm_state: &dyn ProtocolStorage, agent_id: u64) -> Addres
     u256_to_address(evm_state.get_storage(&AGENT_ADDRESS, slot_agent_owner(agent_id)))
 }
 
-
 pub fn agent_get_balance(evm_state: &dyn ProtocolStorage, agent_id: u64, asset_id: u64) -> u128 {
     u256_to_u128(evm_state.get_storage(&AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id)))
 }
 
-pub fn agent_set_balance(evm_state: &mut dyn ProtocolStorage, agent_id: u64, asset_id: u64, amount: u128) {
+pub fn agent_set_balance(
+    evm_state: &mut dyn ProtocolStorage,
+    agent_id: u64,
+    asset_id: u64,
+    amount: u128,
+) {
     evm_state.set_storage(
         AGENT_ADDRESS,
         slot_agent_balance(agent_id, asset_id),
@@ -282,32 +293,58 @@ pub fn agent_set_pubkey(evm_state: &mut dyn ProtocolStorage, agent_id: u64, pubk
 // ── Helpers for tests / genesis / RPC ─────────────────────────────────
 
 /// Seed an asset balance directly into EVM storage.
-pub fn seed_balance(evm_state: &mut dyn ProtocolStorage, asset_id: u64, addr: Address, amount: u128) {
+pub fn seed_balance(
+    evm_state: &mut dyn ProtocolStorage,
+    asset_id: u64,
+    addr: Address,
+    amount: u128,
+) {
     let mut store = AssetStorage::new(ProtocolStateBackend(evm_state));
     store.write_balance(asset_id, addr, amount);
 }
 
 /// Add to an asset balance in EVM storage (reads current, adds amount, writes back).
-pub fn add_balance_evm(evm_state: &mut dyn ProtocolStorage, asset_id: u64, addr: Address, amount: u128) {
+pub fn add_balance_evm(
+    evm_state: &mut dyn ProtocolStorage,
+    asset_id: u64,
+    addr: Address,
+    amount: u128,
+) {
     let mut store = AssetStorage::new(ProtocolStateBackend(evm_state));
     store.add_balance(asset_id, addr, amount).ok();
 }
 
 /// Deduct from an asset balance in EVM storage (reads current, subtracts amount, writes back).
 /// Returns true if deduction succeeded, false if insufficient balance.
-pub fn deduct_balance_evm(evm_state: &mut dyn ProtocolStorage, asset_id: u64, addr: Address, amount: u128) -> bool {
+pub fn deduct_balance_evm(
+    evm_state: &mut dyn ProtocolStorage,
+    asset_id: u64,
+    addr: Address,
+    amount: u128,
+) -> bool {
     let mut store = AssetStorage::new(ProtocolStateBackend(evm_state));
     store.deduct_balance(asset_id, addr, amount).is_ok()
 }
 
 /// Seed an allowance directly into EVM storage.
-pub fn seed_allowance(evm_state: &mut dyn ProtocolStorage, asset_id: u64, owner: Address, spender: Address, amount: u128) {
+pub fn seed_allowance(
+    evm_state: &mut dyn ProtocolStorage,
+    asset_id: u64,
+    owner: Address,
+    spender: Address,
+    amount: u128,
+) {
     let mut store = AssetStorage::new(ProtocolStateBackend(evm_state));
     store.write_allowance(asset_id, owner, spender, amount);
 }
 
 /// Read an allowance from EVM storage.
-pub fn read_allowance(evm_state: &dyn ProtocolStorage, asset_id: u64, owner: Address, spender: Address) -> u128 {
+pub fn read_allowance(
+    evm_state: &dyn ProtocolStorage,
+    asset_id: u64,
+    owner: Address,
+    spender: Address,
+) -> u128 {
     let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_allowance(asset_id, owner, spender)
 }
@@ -378,7 +415,11 @@ pub fn read_asset_status(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u8 {
 
 /// Seed bridge contract address for an asset in EVM storage.
 pub fn seed_bridge_contract(evm_state: &mut dyn ProtocolStorage, asset_id: u64, contract: Address) {
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_contract(asset_id), address_to_u256(contract));
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_contract(asset_id),
+        address_to_u256(contract),
+    );
 }
 
 /// Read total bridge deposits for an asset from EVM storage.
@@ -406,11 +447,16 @@ pub fn read_bridge_pending_hash(evm_state: &dyn ProtocolStorage, index: u64) -> 
 
 /// Read bridge pending deposit status from EVM storage.
 pub fn read_bridge_pending_status(evm_state: &dyn ProtocolStorage, tx_hash: [u8; 32]) -> u8 {
-    evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash)).to_be_bytes::<32>()[31]
+    evm_state
+        .get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash))
+        .to_be_bytes::<32>()[31]
 }
 
 /// Read bridge pending deposit recipient from EVM storage.
-pub fn read_bridge_pending_recipient(evm_state: &dyn ProtocolStorage, tx_hash: [u8; 32]) -> Address {
+pub fn read_bridge_pending_recipient(
+    evm_state: &dyn ProtocolStorage,
+    tx_hash: [u8; 32],
+) -> Address {
     u256_to_address(evm_state.get_storage(&BRIDGE_ADDRESS, slot_bridge_pending_recipient(tx_hash)))
 }
 
@@ -439,18 +485,54 @@ pub fn seed_bridge_pending(
     block: u64,
 ) {
     let count = read_bridge_pending_count(evm_state);
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(count), alloy_primitives::U256::from_be_slice(&tx_hash));
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_count(), u64_to_u256(count + 1));
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash), alloy_primitives::U256::from(1u8));
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_recipient(tx_hash), address_to_u256(recipient));
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_asset(tx_hash), u64_to_u256(asset_id));
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_amount(tx_hash), u128_to_u256(amount));
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_block(tx_hash), u64_to_u256(block));
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_hash(count),
+        alloy_primitives::U256::from_be_slice(&tx_hash),
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_count(),
+        u64_to_u256(count + 1),
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_status(tx_hash),
+        alloy_primitives::U256::from(1u8),
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_recipient(tx_hash),
+        address_to_u256(recipient),
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_asset(tx_hash),
+        u64_to_u256(asset_id),
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_amount(tx_hash),
+        u128_to_u256(amount),
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_block(tx_hash),
+        u64_to_u256(block),
+    );
 }
 
 /// Set bridge pending deposit status in EVM storage (0=pending, 2=finalized, 3=rejected).
-pub fn set_bridge_pending_status(evm_state: &mut dyn ProtocolStorage, tx_hash: [u8; 32], status: u8) {
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash), alloy_primitives::U256::from(status));
+pub fn set_bridge_pending_status(
+    evm_state: &mut dyn ProtocolStorage,
+    tx_hash: [u8; 32],
+    status: u8,
+) {
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_status(tx_hash),
+        alloy_primitives::U256::from(status),
+    );
 }
 
 /// Read whether a source tx has been processed from EVM storage.
@@ -459,8 +541,16 @@ pub fn read_bridge_processed(evm_state: &dyn ProtocolStorage, tx_hash: [u8; 32])
 }
 
 /// Mark a source tx as processed in EVM storage.
-pub fn seed_bridge_processed(evm_state: &mut dyn ProtocolStorage, tx_hash: [u8; 32], block_height: u64) {
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash), u64_to_u256(block_height));
+pub fn seed_bridge_processed(
+    evm_state: &mut dyn ProtocolStorage,
+    tx_hash: [u8; 32],
+    block_height: u64,
+) {
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_processed(tx_hash),
+        u64_to_u256(block_height),
+    );
 }
 
 /// Remove a pending deposit from the EVM pending list by swapping with last.
@@ -482,10 +572,22 @@ pub fn remove_bridge_pending(evm_state: &mut dyn ProtocolStorage, tx_hash: [u8; 
     // Swap with last and decrement count
     if index < count - 1 {
         let last_hash = read_bridge_pending_hash(evm_state, count - 1);
-        evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(index), alloy_primitives::U256::from_be_slice(&last_hash));
+        evm_state.set_storage(
+            BRIDGE_ADDRESS,
+            slot_bridge_pending_hash(index),
+            alloy_primitives::U256::from_be_slice(&last_hash),
+        );
     }
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(count - 1), U256::ZERO);
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_count(), u64_to_u256(count - 1));
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_hash(count - 1),
+        U256::ZERO,
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_count(),
+        u64_to_u256(count - 1),
+    );
 }
 
 /// Read bridge daily usage for an asset from EVM storage.
@@ -499,9 +601,22 @@ pub fn read_bridge_daily_day(evm_state: &dyn ProtocolStorage, asset_id: u64) -> 
 }
 
 /// Update bridge daily usage for an asset in EVM storage.
-pub fn update_bridge_daily(evm_state: &mut dyn ProtocolStorage, asset_id: u64, used: u128, day: u64) {
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id), u128_to_u256(used));
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id), u64_to_u256(day));
+pub fn update_bridge_daily(
+    evm_state: &mut dyn ProtocolStorage,
+    asset_id: u64,
+    used: u128,
+    day: u64,
+) {
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_daily_used(asset_id),
+        u128_to_u256(used),
+    );
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_daily_day(asset_id),
+        u64_to_u256(day),
+    );
 }
 
 /// Read whether external bridge is globally paused from EVM storage.
@@ -511,7 +626,11 @@ pub fn read_bridge_external_paused(evm_state: &dyn ProtocolStorage) -> bool {
 
 /// Set external bridge pause status in EVM storage.
 pub fn seed_bridge_external_paused(evm_state: &mut dyn ProtocolStorage, paused: bool) {
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_external_paused(), if paused { U256::from(1u8) } else { U256::ZERO });
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_external_paused(),
+        if paused { U256::from(1u8) } else { U256::ZERO },
+    );
 }
 
 /// Read whether bridge is paused for a specific asset from EVM storage.
@@ -521,7 +640,11 @@ pub fn read_bridge_paused(evm_state: &dyn ProtocolStorage, asset_id: u64) -> boo
 
 /// Set bridge pause status for a specific asset in EVM storage.
 pub fn seed_bridge_paused(evm_state: &mut dyn ProtocolStorage, asset_id: u64, paused: bool) {
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_paused(asset_id), if paused { U256::from(1u8) } else { U256::ZERO });
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_paused(asset_id),
+        if paused { U256::from(1u8) } else { U256::ZERO },
+    );
 }
 
 /// Finalize pending external deposits whose challenge period has expired.
@@ -592,7 +715,11 @@ pub fn finalize_pending_external_deposits_evm(
     for i in new_count..count {
         evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_hash(i), U256::ZERO);
     }
-    evm_state.set_storage(BRIDGE_ADDRESS, slot_bridge_pending_count(), u64_to_u256(new_count));
+    evm_state.set_storage(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_count(),
+        u64_to_u256(new_count),
+    );
 
     finalized
 }
@@ -636,7 +763,10 @@ pub fn seed_asset_compliance(evm_state: &mut dyn ProtocolStorage, asset_id: u64,
 }
 
 /// Read asset contract address from EVM storage.
-pub fn read_asset_contract_address(evm_state: &dyn ProtocolStorage, asset_id: u64) -> Option<Address> {
+pub fn read_asset_contract_address(
+    evm_state: &dyn ProtocolStorage,
+    asset_id: u64,
+) -> Option<Address> {
     let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     let val = store.load_meta_u256(asset_id, b"contract");
     if val.is_zero() {
@@ -647,7 +777,11 @@ pub fn read_asset_contract_address(evm_state: &dyn ProtocolStorage, asset_id: u6
 }
 
 /// Set asset contract address in EVM storage.
-pub fn seed_asset_contract_address(evm_state: &mut dyn ProtocolStorage, asset_id: u64, addr: Address) {
+pub fn seed_asset_contract_address(
+    evm_state: &mut dyn ProtocolStorage,
+    asset_id: u64,
+    addr: Address,
+) {
     let mut store = AssetStorage::new(ProtocolStateBackend(evm_state));
     store.store_meta_u256(asset_id, b"contract", address_to_u256(addr));
 }
@@ -655,7 +789,8 @@ pub fn seed_asset_contract_address(evm_state: &mut dyn ProtocolStorage, asset_id
 /// Read asset registered_at from EVM storage.
 pub fn read_asset_registered_at(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u64 {
     let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.load_meta_u256(asset_id, b"registered_at")
+    store
+        .load_meta_u256(asset_id, b"registered_at")
         .try_into()
         .map(|v: u128| v as u64)
         .unwrap_or(0)
@@ -710,7 +845,9 @@ pub fn read_validator_pubkey(evm_state: &dyn ProtocolStorage, addr: Address) -> 
 
 /// Read validator status from EVM storage.
 pub fn read_validator_status(evm_state: &dyn ProtocolStorage, addr: Address) -> u8 {
-    evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_status(addr)).to_be_bytes::<32>()[31]
+    evm_state
+        .get_storage(&VALIDATOR_ADDRESS, slot_validator_status(addr))
+        .to_be_bytes::<32>()[31]
 }
 
 /// Read validator unbond height from EVM storage.
@@ -721,7 +858,10 @@ pub fn read_validator_unbond_height(evm_state: &dyn ProtocolStorage, addr: Addre
 /// Read validator BLS pubkey from EVM storage.
 pub fn read_validator_bls_pubkey(evm_state: &dyn ProtocolStorage, addr: Address) -> [u8; 48] {
     let hi = evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_bls_pubkey(addr));
-    let lo = evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_bls_pubkey(addr) + U256::from(1));
+    let lo = evm_state.get_storage(
+        &VALIDATOR_ADDRESS,
+        slot_validator_bls_pubkey(addr) + U256::from(1),
+    );
     let mut pk = [0u8; 48];
     pk[0..32].copy_from_slice(&hi.to_be_bytes::<32>());
     pk[32..48].copy_from_slice(&lo.to_be_bytes::<32>()[0..16]);
@@ -729,7 +869,11 @@ pub fn read_validator_bls_pubkey(evm_state: &dyn ProtocolStorage, addr: Address)
 }
 
 /// Set validator unbond height in EVM storage.
-pub fn set_validator_unbond_height(evm_state: &mut dyn ProtocolStorage, addr: Address, height: u64) {
+pub fn set_validator_unbond_height(
+    evm_state: &mut dyn ProtocolStorage,
+    addr: Address,
+    height: u64,
+) {
     evm_state.set_storage(
         VALIDATOR_ADDRESS,
         slot_validator_unbond_height(addr),
@@ -738,7 +882,11 @@ pub fn set_validator_unbond_height(evm_state: &mut dyn ProtocolStorage, addr: Ad
 }
 
 /// Set validator BLS pubkey in EVM storage.
-pub fn set_validator_bls_pubkey(evm_state: &mut dyn ProtocolStorage, addr: Address, bls_pubkey: [u8; 48]) {
+pub fn set_validator_bls_pubkey(
+    evm_state: &mut dyn ProtocolStorage,
+    addr: Address,
+    bls_pubkey: [u8; 48],
+) {
     evm_state.set_storage(
         VALIDATOR_ADDRESS,
         slot_validator_bls_pubkey(addr),
@@ -789,12 +937,20 @@ pub fn read_validator_addresses(evm_state: &dyn ProtocolStorage) -> Vec<Address>
 
 /// Read governance proposal status from EVM storage.
 pub fn read_gov_proposal_status(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u8 {
-    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status")).to_be_bytes::<32>()[31]
+    evm_state
+        .get_storage(
+            &GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"status"),
+        )
+        .to_be_bytes::<32>()[31]
 }
 
 /// Read governance paused flag from EVM storage.
 pub fn read_gov_paused(evm_state: &dyn ProtocolStorage) -> bool {
-    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_paused()).to_be_bytes::<32>()[31] == 1
+    evm_state
+        .get_storage(&GOVERNANCE_ADDRESS, slot_gov_paused())
+        .to_be_bytes::<32>()[31]
+        == 1
 }
 
 /// Read governance proposal count from EVM storage.
@@ -804,28 +960,48 @@ pub fn read_gov_proposal_count(evm_state: &dyn ProtocolStorage) -> u64 {
 
 /// Read governance proposal proposer from EVM storage.
 pub fn read_gov_proposal_proposer(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> Address {
-    u256_to_address(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer")))
+    u256_to_address(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"proposer"),
+    ))
 }
 
 /// Read governance proposal title bytes from EVM storage.
 pub fn read_gov_proposal_title(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> [u8; 32] {
-    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"title")).to_be_bytes::<32>()
+    evm_state
+        .get_storage(
+            &GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"title"),
+        )
+        .to_be_bytes::<32>()
 }
 
 /// Read governance proposal description bytes from EVM storage.
-pub fn read_gov_proposal_description(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> [u8; 32] {
-    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"desc")).to_be_bytes::<32>()
+pub fn read_gov_proposal_description(
+    evm_state: &dyn ProtocolStorage,
+    proposal_id: u64,
+) -> [u8; 32] {
+    evm_state
+        .get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"desc"))
+        .to_be_bytes::<32>()
 }
 
 /// Read governance proposal data hash from EVM storage.
 pub fn read_gov_proposal_data_hash(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> [u8; 32] {
-    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"data")).to_be_bytes::<32>()
+    evm_state
+        .get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"data"))
+        .to_be_bytes::<32>()
 }
 
 /// Read governance proposal execution data from chunked EVM storage.
 /// Mirrors GovernanceStorage::read_proposal_execution_data in the precompile.
-pub fn read_gov_proposal_execution_data(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> Vec<u8> {
-    let data_len = u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal_data_len(proposal_id))) as usize;
+pub fn read_gov_proposal_execution_data(
+    evm_state: &dyn ProtocolStorage,
+    proposal_id: u64,
+) -> Vec<u8> {
+    let data_len = u256_to_u64(
+        evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal_data_len(proposal_id)),
+    ) as usize;
     if data_len == 0 {
         return Vec::new();
     }
@@ -833,7 +1009,10 @@ pub fn read_gov_proposal_execution_data(evm_state: &dyn ProtocolStorage, proposa
     let num_chunks = (data_len + 31) / 32;
     for chunk_idx in 0..num_chunks {
         let chunk = evm_state
-            .get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64))
+            .get_storage(
+                &GOVERNANCE_ADDRESS,
+                slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64),
+            )
             .to_be_bytes::<32>();
         let remaining = data_len - result.len();
         result.extend_from_slice(&chunk[..remaining.min(32)]);
@@ -842,66 +1021,129 @@ pub fn read_gov_proposal_execution_data(evm_state: &dyn ProtocolStorage, proposa
 }
 
 /// Read governance proposal votes from EVM storage.
-pub fn read_gov_proposal_votes(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> (u128, u128, u128) {
-    let for_votes = u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_for")));
-    let against = u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_against")));
-    let abstain = u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"votes_abstain")));
+pub fn read_gov_proposal_votes(
+    evm_state: &dyn ProtocolStorage,
+    proposal_id: u64,
+) -> (u128, u128, u128) {
+    let for_votes = u256_to_u128(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"votes_for"),
+    ));
+    let against = u256_to_u128(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"votes_against"),
+    ));
+    let abstain = u256_to_u128(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"votes_abstain"),
+    ));
     (for_votes, against, abstain)
 }
 
 /// Read governance proposal deposit from EVM storage.
 pub fn read_gov_proposal_deposit(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u128 {
-    u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"deposit")))
+    u256_to_u128(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"deposit"),
+    ))
 }
 
 /// Read governance proposal queued_at block from EVM storage.
 pub fn read_gov_proposal_queued_at(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u64 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"queued_at")))
+    u256_to_u64(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"queued_at"),
+    ))
 }
 
 /// Read whether a specific voter has voted on a proposal.
-pub fn read_gov_voter_vote(evm_state: &dyn ProtocolStorage, proposal_id: u64, voter: Address) -> u8 {
-    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_voter(proposal_id, voter)).to_be_bytes::<32>()[31]
+pub fn read_gov_voter_vote(
+    evm_state: &dyn ProtocolStorage,
+    proposal_id: u64,
+    voter: Address,
+) -> u8 {
+    evm_state
+        .get_storage(&GOVERNANCE_ADDRESS, slot_gov_voter(proposal_id, voter))
+        .to_be_bytes::<32>()[31]
 }
 
 /// Read governance proposal start_block from EVM storage.
 pub fn read_gov_proposal_start_block(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u64 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"start_block")))
+    u256_to_u64(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"start_block"),
+    ))
 }
 
 /// Read governance proposal end_block from EVM storage.
 pub fn read_gov_proposal_end_block(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u64 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"end_block")))
+    u256_to_u64(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"end_block"),
+    ))
 }
 
 /// Read governance proposal execution_block from EVM storage.
 pub fn read_gov_proposal_execution_block(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u64 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"execution_block")))
+    u256_to_u64(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"execution_block"),
+    ))
 }
 
 /// Read governance proposal type from EVM storage.
 pub fn read_gov_proposal_type(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u8 {
-    evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposal_type")).to_be_bytes::<32>()[31]
+    evm_state
+        .get_storage(
+            &GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"proposal_type"),
+        )
+        .to_be_bytes::<32>()[31]
 }
 
 /// Read governance proposal review period end block from EVM storage.
 pub fn read_gov_proposal_review_end(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u64 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"review_end")))
+    u256_to_u64(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"review_end"),
+    ))
 }
 
 /// Write governance proposal review period end block to EVM storage.
-pub fn write_gov_proposal_review_end(evm_state: &mut dyn ProtocolStorage, proposal_id: u64, review_end: u64) {
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"review_end"), u64_to_u256(review_end));
+pub fn write_gov_proposal_review_end(
+    evm_state: &mut dyn ProtocolStorage,
+    proposal_id: u64,
+    review_end: u64,
+) {
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"review_end"),
+        u64_to_u256(review_end),
+    );
 }
 
 /// Read governance proposal quorum required from EVM storage.
-pub fn read_gov_proposal_quorum_required(evm_state: &dyn ProtocolStorage, proposal_id: u64) -> u128 {
-    u256_to_u128(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"quorum_required")))
+pub fn read_gov_proposal_quorum_required(
+    evm_state: &dyn ProtocolStorage,
+    proposal_id: u64,
+) -> u128 {
+    u256_to_u128(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"quorum_required"),
+    ))
 }
 
 /// Write governance proposal quorum required to EVM storage.
-pub fn write_gov_proposal_quorum_required(evm_state: &mut dyn ProtocolStorage, proposal_id: u64, quorum: u128) {
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"quorum_required"), u128_to_u256(quorum));
+pub fn write_gov_proposal_quorum_required(
+    evm_state: &mut dyn ProtocolStorage,
+    proposal_id: u64,
+    quorum: u128,
+) {
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"quorum_required"),
+        u128_to_u256(quorum),
+    );
 }
 
 /// Read last submission block for an address from EVM storage.
@@ -910,8 +1152,16 @@ pub fn read_gov_last_submission_block(evm_state: &dyn ProtocolStorage, addr: Add
 }
 
 /// Write last submission block for an address to EVM storage.
-pub fn write_gov_last_submission_block(evm_state: &mut dyn ProtocolStorage, addr: Address, block: u64) {
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_last_submission(addr), u64_to_u256(block));
+pub fn write_gov_last_submission_block(
+    evm_state: &mut dyn ProtocolStorage,
+    addr: Address,
+    block: u64,
+) {
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_last_submission(addr),
+        u64_to_u256(block),
+    );
 }
 
 fn slot_gov_last_submission(addr: Address) -> U256 {
@@ -956,22 +1206,28 @@ pub fn read_gov_config_review_period(evm_state: &dyn ProtocolStorage) -> u64 {
 
 /// Read governance config validator_quorum_bps from EVM storage.
 pub fn read_gov_config_validator_quorum_bps(evm_state: &dyn ProtocolStorage) -> u32 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"validator_quorum_bps"))) as u32
+    u256_to_u64(evm_state.get_storage(
+        &GOVERNANCE_ADDRESS,
+        slot_gov_config(b"validator_quorum_bps"),
+    )) as u32
 }
 
 /// Read governance config supply_quorum_bps from EVM storage.
 pub fn read_gov_config_supply_quorum_bps(evm_state: &dyn ProtocolStorage) -> u32 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"supply_quorum_bps"))) as u32
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"supply_quorum_bps")))
+        as u32
 }
 
 /// Read governance config treasury_quorum_bps from EVM storage.
 pub fn read_gov_config_treasury_quorum_bps(evm_state: &dyn ProtocolStorage) -> u32 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"treasury_quorum_bps"))) as u32
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"treasury_quorum_bps")))
+        as u32
 }
 
 /// Read governance config simple_majority_bps from EVM storage.
 pub fn read_gov_config_simple_majority_bps(evm_state: &dyn ProtocolStorage) -> u32 {
-    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"simple_majority_bps"))) as u32
+    u256_to_u64(evm_state.get_storage(&GOVERNANCE_ADDRESS, slot_gov_config(b"simple_majority_bps")))
+        as u32
 }
 
 /// Read governance config proposal_cooldown from EVM storage.
@@ -980,35 +1236,93 @@ pub fn read_gov_config_proposal_cooldown(evm_state: &dyn ProtocolStorage) -> u64
 }
 
 /// Write governance proposal status to EVM storage.
-pub fn write_gov_proposal_status(evm_state: &mut dyn ProtocolStorage, proposal_id: u64, status: u8) {
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"), U256::from(status));
+pub fn write_gov_proposal_status(
+    evm_state: &mut dyn ProtocolStorage,
+    proposal_id: u64,
+    status: u8,
+) {
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_proposal(proposal_id, b"status"),
+        U256::from(status),
+    );
 }
 
 /// Write a governance config value (u128) to EVM storage.
 pub fn write_gov_config_u128(evm_state: &mut dyn ProtocolStorage, suffix: &[u8], value: u128) {
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(suffix), u128_to_u256(value));
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(suffix),
+        u128_to_u256(value),
+    );
 }
 
 /// Seed governance config defaults into EVM storage.
 pub fn seed_gov_config(evm_state: &mut dyn ProtocolStorage) {
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"voting_period"), u64_to_u256(100));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"timelock"), u64_to_u256(100));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"execution_timeout"), u64_to_u256(1000));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"deposit"), u128_to_u256(10_000));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"quorum_bps"), u128_to_u256(3_333));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"review_period"), u64_to_u256(10));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"validator_quorum_bps"), u64_to_u256(6667));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"supply_quorum_bps"), u64_to_u256(2000));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"treasury_quorum_bps"), u64_to_u256(2000));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"simple_majority_bps"), u64_to_u256(5001));
-    evm_state.set_storage(GOVERNANCE_ADDRESS, slot_gov_config(b"proposal_cooldown"), u64_to_u256(345_600));
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"voting_period"),
+        u64_to_u256(100),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"timelock"),
+        u64_to_u256(100),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"execution_timeout"),
+        u64_to_u256(1000),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"deposit"),
+        u128_to_u256(10_000),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"quorum_bps"),
+        u128_to_u256(3_333),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"review_period"),
+        u64_to_u256(10),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"validator_quorum_bps"),
+        u64_to_u256(6667),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"supply_quorum_bps"),
+        u64_to_u256(2000),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"treasury_quorum_bps"),
+        u64_to_u256(2000),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"simple_majority_bps"),
+        u64_to_u256(5001),
+    );
+    evm_state.set_storage(
+        GOVERNANCE_ADDRESS,
+        slot_gov_config(b"proposal_cooldown"),
+        u64_to_u256(345_600),
+    );
 }
 
 // ── Compliance read helpers ───────────────────────────────────────────
 
 /// Read compliance status for an address under a policy from EVM storage.
 pub fn read_compliance_status(evm_state: &dyn ProtocolStorage, addr: Address, policy_id: u8) -> u8 {
-    evm_state.get_storage(&COMPLIANCE_ADDRESS, slot_compliance(addr, policy_id)).to_be_bytes::<32>()[31]
+    evm_state
+        .get_storage(&COMPLIANCE_ADDRESS, slot_compliance(addr, policy_id))
+        .to_be_bytes::<32>()[31]
 }
 
 // ── Oracle reward pool (stored in EVM storage) ────────────────────────
@@ -1019,7 +1333,8 @@ fn slot_oracle_reward_pool() -> U256 {
 
 /// Read the oracle reward pool from EVM storage.
 pub fn read_oracle_reward_pool(evm_state: &dyn ProtocolStorage) -> u128 {
-    evm_state.get_storage(&ORACLE_ADDRESS, slot_oracle_reward_pool())
+    evm_state
+        .get_storage(&ORACLE_ADDRESS, slot_oracle_reward_pool())
         .to_be_bytes::<32>()[16..32]
         .try_into()
         .map(u128::from_be_bytes)
@@ -1029,7 +1344,11 @@ pub fn read_oracle_reward_pool(evm_state: &dyn ProtocolStorage) -> u128 {
 /// Add to the oracle reward pool in EVM storage.
 pub fn add_oracle_reward(evm_state: &mut dyn ProtocolStorage, amount: u128) {
     let current = read_oracle_reward_pool(evm_state);
-    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_reward_pool(), u128_to_u256(current + amount));
+    evm_state.set_storage(
+        ORACLE_ADDRESS,
+        slot_oracle_reward_pool(),
+        u128_to_u256(current + amount),
+    );
 }
 
 // ── Oracle price read helpers ─────────────────────────────────────────
@@ -1069,11 +1388,31 @@ pub fn seed_oracle_price(
     block: u64,
     count: u64,
 ) {
-    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"price"), u128_to_u256(price));
-    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"twap"), u128_to_u256(twap));
-    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"ts"), u64_to_u256(timestamp));
-    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"block"), u64_to_u256(block));
-    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle(asset_id, b"count"), u64_to_u256(count));
+    evm_state.set_storage(
+        ORACLE_ADDRESS,
+        slot_oracle(asset_id, b"price"),
+        u128_to_u256(price),
+    );
+    evm_state.set_storage(
+        ORACLE_ADDRESS,
+        slot_oracle(asset_id, b"twap"),
+        u128_to_u256(twap),
+    );
+    evm_state.set_storage(
+        ORACLE_ADDRESS,
+        slot_oracle(asset_id, b"ts"),
+        u64_to_u256(timestamp),
+    );
+    evm_state.set_storage(
+        ORACLE_ADDRESS,
+        slot_oracle(asset_id, b"block"),
+        u64_to_u256(block),
+    );
+    evm_state.set_storage(
+        ORACLE_ADDRESS,
+        slot_oracle(asset_id, b"count"),
+        u64_to_u256(count),
+    );
 }
 
 // ── Oracle tracked assets ─────────────────────────────────────────────
@@ -1099,9 +1438,17 @@ pub fn read_oracle_tracked_asset(evm_state: &dyn ProtocolStorage, index: u64) ->
 /// Set the list of tracked oracle assets in EVM storage.
 pub fn seed_oracle_tracked_assets(evm_state: &mut dyn ProtocolStorage, asset_ids: Vec<u64>) {
     let count = asset_ids.len() as u64;
-    evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_tracked_count(), u64_to_u256(count));
+    evm_state.set_storage(
+        ORACLE_ADDRESS,
+        slot_oracle_tracked_count(),
+        u64_to_u256(count),
+    );
     for (i, asset_id) in asset_ids.iter().enumerate() {
-        evm_state.set_storage(ORACLE_ADDRESS, slot_oracle_tracked_asset(i as u64), u64_to_u256(*asset_id));
+        evm_state.set_storage(
+            ORACLE_ADDRESS,
+            slot_oracle_tracked_asset(i as u64),
+            u64_to_u256(*asset_id),
+        );
     }
     // Zero out any old entries beyond the new list
     let old_count = read_oracle_tracked_count(evm_state);
@@ -1126,13 +1473,37 @@ pub fn seed_validator(
 ) {
     let count = u256_to_u64(evm_state.get_storage(&VALIDATOR_ADDRESS, slot_validator_count()));
     if validator_id > count {
-        evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_count(), u64_to_u256(validator_id));
+        evm_state.set_storage(
+            VALIDATOR_ADDRESS,
+            slot_validator_count(),
+            u64_to_u256(validator_id),
+        );
     }
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_addr(validator_id), address_to_u256(addr));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_by_addr(addr), u64_to_u256(validator_id));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(stake));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_pubkey(addr), U256::from_be_slice(&ed25519_pubkey));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::from(status));
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_addr(validator_id),
+        address_to_u256(addr),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_by_addr(addr),
+        u64_to_u256(validator_id),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_stake(addr),
+        u128_to_u256(stake),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_pubkey(addr),
+        U256::from_be_slice(&ed25519_pubkey),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_status(addr),
+        U256::from(status),
+    );
     set_validator_bls_pubkey(evm_state, addr, [0u8; 48]);
 }
 
@@ -1165,12 +1536,36 @@ pub fn stake_validator_evm(
 ) -> u64 {
     let count = read_validator_count(evm_state);
     let validator_id = count + 1;
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_count(), u64_to_u256(validator_id));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_addr(validator_id), address_to_u256(addr));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_by_addr(addr), u64_to_u256(validator_id));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(amount));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_pubkey(addr), U256::from_be_slice(&ed25519_pubkey));
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::from(1u8));
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_count(),
+        u64_to_u256(validator_id),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_addr(validator_id),
+        address_to_u256(addr),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_by_addr(addr),
+        u64_to_u256(validator_id),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_stake(addr),
+        u128_to_u256(amount),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_pubkey(addr),
+        U256::from_be_slice(&ed25519_pubkey),
+    );
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_status(addr),
+        U256::from(1u8),
+    );
     set_validator_bls_pubkey(evm_state, addr, [0u8; 48]);
     validator_id
 }
@@ -1185,7 +1580,11 @@ pub fn slash_validator_evm(
     let current = read_validator_stake(evm_state, addr);
     let slashed = current.min(amount);
     let new_stake = current.saturating_sub(slashed);
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(new_stake));
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_stake(addr),
+        u128_to_u256(new_stake),
+    );
     if new_stake == 0 {
         evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::ZERO);
     }
@@ -1193,13 +1592,13 @@ pub fn slash_validator_evm(
 }
 
 /// Distribute a reward to a validator by adding to their stake in EVM storage.
-pub fn distribute_reward_evm(
-    evm_state: &mut dyn ProtocolStorage,
-    addr: Address,
-    amount: u128,
-) {
+pub fn distribute_reward_evm(evm_state: &mut dyn ProtocolStorage, addr: Address, amount: u128) {
     let current = read_validator_stake(evm_state, addr);
-    evm_state.set_storage(VALIDATOR_ADDRESS, slot_validator_stake(addr), u128_to_u256(current + amount));
+    evm_state.set_storage(
+        VALIDATOR_ADDRESS,
+        slot_validator_stake(addr),
+        u128_to_u256(current + amount),
+    );
 }
 
 /// Seed agent metadata directly into EVM storage (for tests / genesis).
@@ -1215,11 +1614,27 @@ pub fn seed_agent(
     if agent_id >= count {
         evm_state.set_storage(AGENT_ADDRESS, slot_agent_count(), u64_to_u256(agent_id + 1));
     }
-    evm_state.set_storage(AGENT_ADDRESS, slot_agent_owner(agent_id), address_to_u256(owner));
-    evm_state.set_storage(AGENT_ADDRESS, slot_agent_name(agent_id), write_string32(name));
+    evm_state.set_storage(
+        AGENT_ADDRESS,
+        slot_agent_owner(agent_id),
+        address_to_u256(owner),
+    );
+    evm_state.set_storage(
+        AGENT_ADDRESS,
+        slot_agent_name(agent_id),
+        write_string32(name),
+    );
     evm_state.set_storage(AGENT_ADDRESS, slot_agent_url(agent_id), write_string32(url));
-    evm_state.set_storage(AGENT_ADDRESS, slot_agent_registered_at(agent_id), u64_to_u256(registered_at));
-    evm_state.set_storage(AGENT_ADDRESS, slot_agent_perms(agent_id), pack_agent_perms(1_000, 0, 1));
+    evm_state.set_storage(
+        AGENT_ADDRESS,
+        slot_agent_registered_at(agent_id),
+        u64_to_u256(registered_at),
+    );
+    evm_state.set_storage(
+        AGENT_ADDRESS,
+        slot_agent_perms(agent_id),
+        pack_agent_perms(1_000, 0, 1),
+    );
 }
 
 // ── Shielded storage slot helpers ─────────────────────────────────────
@@ -1254,14 +1669,23 @@ pub fn read_shielded_commitment_count(evm_state: &dyn ProtocolStorage) -> u64 {
 }
 
 /// Read a shielded commitment by index from EVM storage.
-pub fn read_shielded_commitment(evm_state: &dyn ProtocolStorage, index: u64) -> call_primitives::Hash {
+pub fn read_shielded_commitment(
+    evm_state: &dyn ProtocolStorage,
+    index: u64,
+) -> call_primitives::Hash {
     let cm_u256 = evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment(index));
     call_primitives::Hash::from_slice(&cm_u256.to_be_bytes::<32>())
 }
 
 /// Check if a nullifier is spent in EVM storage.
-pub fn read_shielded_nullifier_spent(evm_state: &dyn ProtocolStorage, nullifier: &call_shielded::Nullifier) -> bool {
-    evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_nullifier(nullifier)).to_be_bytes::<32>()[31] == 1
+pub fn read_shielded_nullifier_spent(
+    evm_state: &dyn ProtocolStorage,
+    nullifier: &call_shielded::Nullifier,
+) -> bool {
+    evm_state
+        .get_storage(&SHIELDED_ADDRESS, slot_shielded_nullifier(nullifier))
+        .to_be_bytes::<32>()[31]
+        == 1
 }
 
 /// Seed a shielded commitment directly into EVM storage (for tests / genesis).
@@ -1270,9 +1694,14 @@ pub fn seed_shielded_commitment(
     index: u64,
     commitment: call_primitives::Hash,
 ) {
-    let count = u256_to_u64(evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment_count()));
+    let count =
+        u256_to_u64(evm_state.get_storage(&SHIELDED_ADDRESS, slot_shielded_commitment_count()));
     if index >= count {
-        evm_state.set_storage(SHIELDED_ADDRESS, slot_shielded_commitment_count(), u64_to_u256(index + 1));
+        evm_state.set_storage(
+            SHIELDED_ADDRESS,
+            slot_shielded_commitment_count(),
+            u64_to_u256(index + 1),
+        );
     }
     evm_state.set_storage(
         SHIELDED_ADDRESS,
@@ -1282,7 +1711,10 @@ pub fn seed_shielded_commitment(
 }
 
 /// Seed a shielded nullifier as spent directly into EVM storage (for tests / genesis).
-pub fn seed_shielded_nullifier(evm_state: &mut dyn ProtocolStorage, nullifier: &call_shielded::Nullifier) {
+pub fn seed_shielded_nullifier(
+    evm_state: &mut dyn ProtocolStorage,
+    nullifier: &call_shielded::Nullifier,
+) {
     evm_state.set_storage(
         SHIELDED_ADDRESS,
         slot_shielded_nullifier(nullifier),

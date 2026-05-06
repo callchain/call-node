@@ -27,11 +27,11 @@
 //!   T4. Value conservation: sum(output values) <= sum(input values), enforce non-negative diff
 //!   T5. Range & asset validity: Non-zero check for all notes, 128-bit range, asset_id match
 
+use crate::poseidon::domain;
+use crate::poseidon::{bytes_to_fr, poseidon_hash_tagged};
 use ark_bn254::Fr;
 use ark_ff::{Field, Zero};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use crate::poseidon::{poseidon_hash_tagged, bytes_to_fr};
-use crate::poseidon::domain;
 
 // ============================================================================
 // Witness types
@@ -133,12 +133,12 @@ impl TransferCircuit {
 
 impl ConstraintSynthesizer<Fr> for TransferCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        use crate::poseidon::gadget::poseidon_hash_gadget;
         use ark_r1cs_std::alloc::AllocVar;
         use ark_r1cs_std::boolean::Boolean;
         use ark_r1cs_std::eq::EqGadget;
         use ark_r1cs_std::fields::fp::FpVar;
         use ark_r1cs_std::prelude::ToBitsGadget;
-        use crate::poseidon::gadget::poseidon_hash_gadget;
 
         let inputs = self.input_notes.ok_or(SynthesisError::AssignmentMissing)?;
         let outputs = self.output_notes.ok_or(SynthesisError::AssignmentMissing)?;
@@ -216,7 +216,8 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
             let sk_var = FpVar::new_witness(cs.clone(), || Ok(sk_fr))?;
 
             // T1: Nullifier derivation
-            let fvk_from_ivk = poseidon_hash_gadget(cs.clone(), &[fvk_tag_var.clone(), ivk_var.clone()])?;
+            let fvk_from_ivk =
+                poseidon_hash_gadget(cs.clone(), &[fvk_tag_var.clone(), ivk_var.clone()])?;
             let computed_nf = poseidon_hash_gadget(cs.clone(), &[fvk_from_ivk, rho_var.clone()])?;
             computed_nf.enforce_equal(&nullifier_vars[i])?;
 
@@ -227,7 +228,12 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
             // T2: Merkle path validity
             let note_commitment = poseidon_hash_gadget(
                 cs.clone(),
-                &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+                &[
+                    value_var.clone(),
+                    asset_id_var.clone(),
+                    rcm_var.clone(),
+                    rho_var.clone(),
+                ],
             )?;
 
             let mut current = note_commitment;
@@ -278,7 +284,12 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
             // Recompute commitment: H(value || asset_id || rcm || rho)
             let computed_cm = poseidon_hash_gadget(
                 cs.clone(),
-                &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+                &[
+                    value_var.clone(),
+                    asset_id_var.clone(),
+                    rcm_var.clone(),
+                    rho_var.clone(),
+                ],
             )?;
             computed_cm.enforce_equal(&commitment_vars[i])?;
 
@@ -345,7 +356,7 @@ pub const fn transfer_public_input_count(n_inputs: usize, n_outputs: usize) -> u
     n_inputs * 32   // nullifiers
         + n_outputs * 32  // commitments
         + 8               // asset_id
-        + 32              // merkle_root
+        + 32 // merkle_root
 }
 
 // ============================================================================
@@ -355,10 +366,10 @@ pub const fn transfer_public_input_count(n_inputs: usize, n_outputs: usize) -> u
 #[cfg(all(test, feature = "real-prover"))]
 mod tests {
     use super::*;
-    use crate::test_utils::{test_hash, test_spending_key};
-    use crate::ViewingKey;
     use crate::merkle_poseidon::PoseidonMerkleTree;
     use crate::poseidon::{fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
+    use crate::test_utils::{test_hash, test_spending_key};
+    use crate::ViewingKey;
 
     /// Compute rcm for a note using Poseidon (matches Note::new and circuit D3).
     fn compute_rcm_plain(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
@@ -407,7 +418,11 @@ mod tests {
         asset_id: u64,
         spending_key: &[u8; 32],
         rho: [u8; 32],
-    ) -> (InputNoteWitness, [u8; 32] /* nullifier */, [u8; 32] /* commitment */) {
+    ) -> (
+        InputNoteWitness,
+        [u8; 32], /* nullifier */
+        [u8; 32], /* commitment */
+    ) {
         let vk = ViewingKey::generate(spending_key);
         let rcm = compute_rcm_plain(&vk, value, asset_id, &rho);
         let nullifier = derive_nullifier_plain(&vk.incoming_view_key, &rho);
@@ -449,14 +464,11 @@ mod tests {
     }
 
     /// Build complete test data for a 1-input, 1-output transfer.
-    fn make_1in_1out_data(
-        input_value: u128,
-        output_value: u128,
-        asset_id: u64,
-    ) -> TransferCircuit {
+    fn make_1in_1out_data(input_value: u128, output_value: u128, asset_id: u64) -> TransferCircuit {
         let sk = test_spending_key(1);
         let rho_in = test_hash(10).0;
-        let (input_witness, nullifier, input_cm) = make_input_note(input_value, asset_id, &sk, rho_in);
+        let (input_witness, nullifier, input_cm) =
+            make_input_note(input_value, asset_id, &sk, rho_in);
 
         // Build Merkle tree with input commitment
         let mut tree = PoseidonMerkleTree::new(32);
@@ -468,12 +480,8 @@ mod tests {
         let out_sk = test_spending_key(2);
         let out_vk = ViewingKey::generate(&out_sk);
         let rho_out = test_hash(20).0;
-        let (output_witness, output_cm) = make_output_note(
-            output_value,
-            asset_id,
-            out_vk.incoming_view_key,
-            rho_out,
-        );
+        let (output_witness, output_cm) =
+            make_output_note(output_value, asset_id, out_vk.incoming_view_key, rho_out);
 
         TransferCircuit::new(
             vec![nullifier],
@@ -592,8 +600,7 @@ mod tests {
         let input_value: u128 = 100;
         let output_value: u128 = 200; // More than input
 
-        let (input_witness, nullifier, input_cm) =
-            make_input_note(input_value, 1, &sk, rho_in);
+        let (input_witness, nullifier, input_cm) = make_input_note(input_value, 1, &sk, rho_in);
 
         let mut tree = PoseidonMerkleTree::new(32);
         tree.insert(&input_cm);
@@ -602,12 +609,8 @@ mod tests {
 
         let out_vk = ViewingKey::generate(&test_spending_key(2));
         let rho_out = test_hash(20).0;
-        let (output_witness, output_cm) = make_output_note(
-            output_value,
-            1,
-            out_vk.incoming_view_key,
-            rho_out,
-        );
+        let (output_witness, output_cm) =
+            make_output_note(output_value, 1, out_vk.incoming_view_key, rho_out);
 
         let circuit = TransferCircuit::new(
             vec![nullifier],
@@ -621,7 +624,10 @@ mod tests {
 
         let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
         circuit.generate_constraints(cs.clone()).unwrap();
-        assert!(!cs.is_satisfied().unwrap(), "circuit should reject output > input");
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "circuit should reject output > input"
+        );
     }
 
     #[test]
@@ -630,8 +636,7 @@ mod tests {
         let sk = test_spending_key(1);
         let rho_in = test_hash(10).0;
 
-        let (input_witness, nullifier, input_cm) =
-            make_input_note(0, 1, &sk, rho_in);
+        let (input_witness, nullifier, input_cm) = make_input_note(0, 1, &sk, rho_in);
 
         let mut tree = PoseidonMerkleTree::new(32);
         tree.insert(&input_cm);
@@ -660,11 +665,13 @@ mod tests {
         // Should fail: zero input value
         let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
         let result = circuit.generate_constraints(cs.clone());
-        assert!(result.is_err() || !cs.is_satisfied().unwrap(), "circuit should reject zero-value input");
+        assert!(
+            result.is_err() || !cs.is_satisfied().unwrap(),
+            "circuit should reject zero-value input"
+        );
 
         // Also test zero output value
-        let (input_witness2, nullifier2, input_cm2) =
-            make_input_note(100, 1, &sk, test_hash(11).0);
+        let (input_witness2, nullifier2, input_cm2) = make_input_note(100, 1, &sk, test_hash(11).0);
 
         let mut tree2 = PoseidonMerkleTree::new(32);
         tree2.insert(&input_cm2);
@@ -690,7 +697,10 @@ mod tests {
 
         let cs2 = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
         let result2 = circuit2.generate_constraints(cs2.clone());
-        assert!(result2.is_err() || !cs2.is_satisfied().unwrap(), "circuit should reject zero-value output");
+        assert!(
+            result2.is_err() || !cs2.is_satisfied().unwrap(),
+            "circuit should reject zero-value output"
+        );
     }
 
     #[test]
@@ -700,8 +710,7 @@ mod tests {
         let rho_in = test_hash(10).0;
 
         // Input note created with asset_id=1
-        let (input_witness, nullifier, _input_cm_wrong) =
-            make_input_note(1000, 1, &sk, rho_in);
+        let (input_witness, nullifier, _input_cm_wrong) = make_input_note(1000, 1, &sk, rho_in);
 
         // But we compute commitment with asset_id=1 (matching the note)
         let input_cm = compute_commitment_plain(1000, 1, &input_witness.rcm, &rho_in);
@@ -714,12 +723,8 @@ mod tests {
         // Output note with asset_id=1
         let out_vk = ViewingKey::generate(&test_spending_key(2));
         let rho_out = test_hash(20).0;
-        let (output_witness, output_cm) = make_output_note(
-            900,
-            1,
-            out_vk.incoming_view_key,
-            rho_out,
-        );
+        let (output_witness, output_cm) =
+            make_output_note(900, 1, out_vk.incoming_view_key, rho_out);
 
         // Public asset_id=2, but notes use asset_id=1 -> should fail
         let circuit = TransferCircuit::new(
@@ -734,7 +739,10 @@ mod tests {
 
         let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
         circuit.generate_constraints(cs.clone()).unwrap();
-        assert!(!cs.is_satisfied().unwrap(), "circuit should reject mismatched asset_id");
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "circuit should reject mismatched asset_id"
+        );
     }
 
     #[test]
@@ -745,19 +753,31 @@ mod tests {
         // Derive IVK from spending key
         let derived_ivk = derive_ivk_from_spending_key(&sk);
         let expected_ivk = bytes_to_fr(&vk.incoming_view_key);
-        assert_eq!(derived_ivk, expected_ivk, "IVK must match ViewingKey derivation");
+        assert_eq!(
+            derived_ivk, expected_ivk,
+            "IVK must match ViewingKey derivation"
+        );
 
         // Different spending key -> different IVK
         let sk2 = test_spending_key(43);
         let derived_ivk2 = derive_ivk_from_spending_key(&sk2);
-        assert_ne!(derived_ivk, derived_ivk2, "different spending keys must produce different IVKs");
+        assert_ne!(
+            derived_ivk, derived_ivk2,
+            "different spending keys must produce different IVKs"
+        );
 
         // Wrong spending key should not match
         let wrong_ivk = derive_ivk_from_spending_key(&test_spending_key(99));
-        assert_ne!(wrong_ivk, expected_ivk, "wrong spending key must not match IVK");
+        assert_ne!(
+            wrong_ivk, expected_ivk,
+            "wrong spending key must not match IVK"
+        );
 
         // Deterministic derivation
         let derived_ivk_again = derive_ivk_from_spending_key(&sk);
-        assert_eq!(derived_ivk, derived_ivk_again, "IVK derivation must be deterministic");
+        assert_eq!(
+            derived_ivk, derived_ivk_again,
+            "IVK derivation must be deterministic"
+        );
     }
 }

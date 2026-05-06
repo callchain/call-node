@@ -4,13 +4,13 @@
 //! - External bridge: cross-chain deposit/withdraw with validator signatures
 
 mod deposit;
-mod withdraw;
 mod external;
 pub mod precompile;
+mod withdraw;
 
-pub use withdraw::*;
 pub use external::*;
 pub use precompile::{BridgePrecompile, BRIDGE_ADDRESS};
+pub use withdraw::*;
 
 use alloy_primitives::{Address, B256, U256};
 use call_primitives::AssetId;
@@ -81,8 +81,9 @@ impl BridgeOp {
 
     pub fn amount(&self) -> u128 {
         match self {
-            BridgeOp::DepositToEvm { amount, .. }
-            | BridgeOp::WithdrawToProtocol { amount, .. } => *amount,
+            BridgeOp::DepositToEvm { amount, .. } | BridgeOp::WithdrawToProtocol { amount, .. } => {
+                *amount
+            }
         }
     }
 }
@@ -151,8 +152,8 @@ impl Default for BridgeConfig {
         authorized.insert(
             1u64,
             vec![Address::from_slice(&[
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ])],
         );
         Self {

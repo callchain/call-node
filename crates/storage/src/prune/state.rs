@@ -85,7 +85,11 @@ impl PruneState {
     /// Record a state snapshot.
     pub fn add_snapshot(&mut self, snapshot: StateSnapshot) {
         // Keep snapshots sorted by height
-        if let Some(pos) = self.snapshots.iter().position(|s| s.height > snapshot.height) {
+        if let Some(pos) = self
+            .snapshots
+            .iter()
+            .position(|s| s.height > snapshot.height)
+        {
             self.snapshots.insert(pos, snapshot);
         } else {
             self.snapshots.push_back(snapshot);

@@ -6,7 +6,7 @@
 //!   cargo x build       — release build
 //!   cargo x bench       — benchmark suite
 
-use xshell::{Shell, cmd};
+use xshell::{cmd, Shell};
 
 fn main() -> anyhow::Result<()> {
     let sh = Shell::new()?;

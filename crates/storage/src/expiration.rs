@@ -10,9 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 /// EVM empty account code hash (keccak256 of empty bytes)
 pub const EVM_EMPTY_CODE_HASH: [u8; 32] = [
-    0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c, 0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03,
-    0xc0, 0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x77, 0x35, 0xb7, 0xa3, 0xe5, 0x4f, 0x50, 0x4b,
-    0x89, 0xe8,
+    0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c, 0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03, 0xc0,
+    0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x77, 0x35, 0xb7, 0xa3, 0xe5, 0x4f, 0x50, 0x4b, 0x89, 0xe8,
 ];
 
 // ─── Types ─────────────────────────────────────────────────────────────
@@ -75,9 +74,7 @@ impl Default for EvmAccountState {
 impl EvmAccountState {
     /// Per EIP-161: an account is "empty" if nonce=0, balance=0, code_hash=empty
     pub fn is_empty(&self) -> bool {
-        self.nonce == 0
-            && self.balance == 0
-            && self.code_hash == EVM_EMPTY_CODE_HASH
+        self.nonce == 0 && self.balance == 0 && self.code_hash == EVM_EMPTY_CODE_HASH
     }
 }
 
@@ -118,7 +115,7 @@ impl ExpirationPolicy {
         }
     }
 
-    /// ─── Protocol Layer (never expires) ───────────────────────────────
+    // ─── Protocol Layer (never expires) ───────────────────────────────
 
     /// Set a protocol balance (never expires)
     pub fn set_balance(&mut self, account: String, balance: u128) {
@@ -160,7 +157,7 @@ impl ExpirationPolicy {
         self.agent_registrations.remove(&agent_id);
     }
 
-    /// ─── EVM Layer (EIP-161 empty account cleanup) ────────────────────
+    // ─── EVM Layer (EIP-161 empty account cleanup) ────────────────────
 
     /// Set an EVM account state
     pub fn set_evm_account(&mut self, address: [u8; 20], state: EvmAccountState) {
@@ -202,7 +199,7 @@ impl ExpirationPolicy {
         false
     }
 
-    /// ─── Historical Data (prunable but not expired) ───────────────────
+    // ─── Historical Data (prunable but not expired) ───────────────────
 
     /// Add a historical trace
     pub fn add_trace(&mut self, block_number: u64, action: String, account: String) {
@@ -216,7 +213,8 @@ impl ExpirationPolicy {
     /// Prune historical traces older than the boundary
     pub fn prune_old_traces(&mut self, current_block: u64) {
         let boundary = current_block.saturating_sub(self.keep_recent);
-        self.historical_traces.retain(|t| t.block_number >= boundary);
+        self.historical_traces
+            .retain(|t| t.block_number >= boundary);
     }
 
     /// Verify that current balances are not affected by pruning

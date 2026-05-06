@@ -1,9 +1,9 @@
 //! secp256k1: key generation, signing, verification, address recovery
 
 use call_primitives::{Address, PublicKey, Signature};
-use k256::ecdsa::{VerifyingKey, Signature as K256Signature, RecoveryId};
 use k256::ecdsa::signature::hazmat::PrehashVerifier;
 use k256::ecdsa::SigningKey;
+use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey};
 use rand::rngs::OsRng;
 use sha3::{Digest, Keccak256};
 use thiserror::Error;
@@ -31,9 +31,12 @@ pub fn generate_keypair() -> ([u8; 32], PublicKey) {
 
 /// Sign a 32-byte message hash with the given secret key.
 /// Returns a 65-byte signature (r || s || v).
+#[allow(clippy::expect_used)]
 pub fn secp256k1_sign(secret_key: &[u8; 32], msg_hash: &[u8; 32]) -> Signature {
     let signing_key = SigningKey::from_slice(secret_key).expect("valid secret key");
-    let (sig, recovery_id) = signing_key.sign_prehash_recoverable(msg_hash).expect("sign");
+    let (sig, recovery_id) = signing_key
+        .sign_prehash_recoverable(msg_hash)
+        .expect("sign");
 
     let mut result = [0u8; 65];
     let r_bytes = sig.r().to_bytes();
@@ -50,10 +53,8 @@ pub fn secp256k1_verify(
     signature: &Signature,
     msg_hash: &[u8; 32],
 ) -> Result<(), Secp256k1Error> {
-    let verifying_key = VerifyingKey::from_sec1_bytes(
-        &[&[0x04], public_key.as_slice()].concat(),
-    )
-    .map_err(|_| Secp256k1Error::InvalidSignature)?;
+    let verifying_key = VerifyingKey::from_sec1_bytes(&[&[0x04], public_key.as_slice()].concat())
+        .map_err(|_| Secp256k1Error::InvalidSignature)?;
 
     let sig = K256Signature::from_slice(&signature[..64])
         .map_err(|_| Secp256k1Error::InvalidSignature)?;
@@ -74,8 +75,7 @@ pub fn recover_secp256k1_signer(
     let sig = K256Signature::from_slice(&signature[..64])
         .map_err(|_| Secp256k1Error::InvalidSignature)?;
 
-    let recovery_id = RecoveryId::from_byte(signature[64])
-        .ok_or(Secp256k1Error::RecoveryFailed)?;
+    let recovery_id = RecoveryId::from_byte(signature[64]).ok_or(Secp256k1Error::RecoveryFailed)?;
 
     let recovered_pk = VerifyingKey::recover_from_prehash(msg_hash, &sig, recovery_id)
         .map_err(|_| Secp256k1Error::RecoveryFailed)?;
@@ -137,7 +137,10 @@ mod tests {
 
         let recovered = recover_secp256k1_signer(&msg, &sig).expect("recover");
         let addr_b = pubkey_to_address(&pubkey_b);
-        assert_ne!(recovered, addr_b, "recovered address should not match a different key");
+        assert_ne!(
+            recovered, addr_b,
+            "recovered address should not match a different key"
+        );
     }
 
     #[test]

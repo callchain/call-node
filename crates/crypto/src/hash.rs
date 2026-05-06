@@ -1,8 +1,8 @@
 //! Hash functions: keccak256, sha256, Merkle tree
 
 use call_primitives::Hash;
-use sha3::{Digest, Keccak256};
 use sha2::Sha256;
+use sha3::{Digest, Keccak256};
 
 /// Compute Keccak-256 hash
 pub fn keccak256(data: &[u8]) -> Hash {
@@ -151,6 +151,10 @@ mod tests {
         assert!(verify_merkle_proof(b, &proof, root));
 
         // Wrong proof should fail
-        assert!(!verify_merkle_proof(a, &[(keccak256(b"wrong"), false)], root));
+        assert!(!verify_merkle_proof(
+            a,
+            &[(keccak256(b"wrong"), false)],
+            root
+        ));
     }
 }

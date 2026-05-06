@@ -2,14 +2,13 @@
 
 use std::sync::{Arc, RwLock};
 
-use call_network::{
-    Network, NetworkMessage,
-    TransactionMessage, SyncRequest, OraclePriceRequest, OraclePriceSubmission,
-    UpgradeAnnouncement,
-};
-use call_oracle::{OracleTracker, OracleSubmission, OracleConfig, OracleValidatorInfo};
-use call_rpc::RpcState;
 use call_mempool::Mempool;
+use call_network::{
+    Network, NetworkMessage, OraclePriceRequest, OraclePriceSubmission, SyncRequest,
+    TransactionMessage, UpgradeAnnouncement,
+};
+use call_oracle::{OracleConfig, OracleSubmission, OracleTracker, OracleValidatorInfo};
+use call_rpc::RpcState;
 
 /// P2P channel for transaction gossip.
 pub(crate) const TX_CHANNEL: u64 = 1;
@@ -52,17 +51,21 @@ pub(crate) async fn handle_network_message(
         TX_CHANNEL => {
             if let Ok(tx_msg) = serde_json::from_slice::<TransactionMessage>(data) {
                 if tx_msg.verify_checksum() {
-                    if let Ok(evm_tx) = serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data) {
+                    if let Ok(evm_tx) =
+                        serde_json::from_slice::<call_evm::EvmTransaction>(&tx_msg.data)
+                    {
                         let caller = evm_tx.caller;
                         // Validate nonce and balance against chain state before insertion
                         let mut pool = match mempool.write() {
                             Ok(p) => p,
                             Err(_) => return,
                         };
-                        let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(&state.db_env));
+                        let provider =
+                            call_evm::provider::LazyStateProvider::new(Arc::clone(&state.db_env));
                         let committed_nonce = provider.get_nonce(&caller);
                         let balance = provider.get_balance(&caller);
-                        let result = pool.insert_evm_tx_with_state(evm_tx, committed_nonce, balance);
+                        let result =
+                            pool.insert_evm_tx_with_state(evm_tx, committed_nonce, balance);
                         if let Err(e) = result {
                             tracing::debug!(error = %e, caller = ?caller, "P2P tx rejected");
                         }
@@ -145,7 +148,8 @@ pub(crate) async fn handle_network_message(
             let peer_id_owned = peer_id.to_string();
             let net = Arc::clone(network);
             tokio::spawn(async move {
-                net.send_to(SYNC_CHANNEL, vec![peer_id_owned], req_data).await;
+                net.send_to(SYNC_CHANNEL, vec![peer_id_owned], req_data)
+                    .await;
             });
         }
         SYNC_CHANNEL => {
@@ -160,15 +164,21 @@ pub(crate) async fn handle_network_message(
                 let peer_id_owned = peer_id.to_string();
                 tokio::spawn(async move {
                     let is_validator = {
-                        let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(&state_clone.db_env));
-                        let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
+                        let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
+                            &state_clone.db_env,
+                        ));
+                        let count =
+                            call_consensus::exec::state_accessors::read_validator_count(&provider);
                         let mut active = 0;
                         for id in 1..=count {
                             let addr = call_consensus::exec::state_accessors::read_validator_addr(
-                                &provider, id);
+                                &provider, id,
+                            );
                             if addr != call_primitives::Address::ZERO {
-                                let status = call_consensus::exec::state_accessors::read_validator_status(
-                                    &provider, addr);
+                                let status =
+                                    call_consensus::exec::state_accessors::read_validator_status(
+                                        &provider, addr,
+                                    );
                                 if status != 0 {
                                     active += 1;
                                 }
@@ -188,10 +198,12 @@ pub(crate) async fn handle_network_message(
                         for pair in &request.pairs {
                             // Read last known price from EVM storage
                             let price = {
-                                let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
-                                    &state_clone.db_env));
+                                let provider = call_evm::provider::LazyStateProvider::new(
+                                    Arc::clone(&state_clone.db_env),
+                                );
                                 call_consensus::exec::state_accessors::read_oracle_price(
-                                    &provider, pair.base)
+                                    &provider, pair.base,
+                                )
                             };
                             if price != 0 {
                                 // Send back as an oracle price submission
@@ -204,8 +216,12 @@ pub(crate) async fn handle_network_message(
                                     signature: [0u8; 64], // would be signed
                                     sources: vec!["local_oracle".into()],
                                 };
-                                if let Ok(msg) = bincode::serialize(&NetworkMessage::OraclePriceSubmission(submission)) {
-                                    net_clone.send_to(ORACLE_CHANNEL, vec![peer_id_owned.clone()], msg).await;
+                                if let Ok(msg) = bincode::serialize(
+                                    &NetworkMessage::OraclePriceSubmission(submission),
+                                ) {
+                                    net_clone
+                                        .send_to(ORACLE_CHANNEL, vec![peer_id_owned.clone()], msg)
+                                        .await;
                                 }
                             }
                         }
@@ -231,31 +247,48 @@ pub(crate) async fn handle_network_message(
                     // Build validator set and config from EVM state
                     let (config, validators) = {
                         let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
-                            &state_clone.db_env));
+                            &state_clone.db_env,
+                        ));
                         let config = OracleConfig::default();
-                        let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
+                        let count =
+                            call_consensus::exec::state_accessors::read_validator_count(&provider);
                         let mut validators = std::collections::HashMap::new();
                         for id in 1..=count {
-                            let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
-                            if addr == call_primitives::Address::ZERO { continue; }
-                            let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
-                            let status = call_consensus::exec::state_accessors::read_validator_status(&provider, addr);
-                            validators.insert(id as u32, OracleValidatorInfo {
-                                validator_id: id as u32,
-                                address: addr,
-                                public_key: pk,
-                                is_active: status != 0,
-                                outlier_count: 0,
-                                last_submission_block: 0,
-                                submission_count: 0,
-                            });
+                            let addr = call_consensus::exec::state_accessors::read_validator_addr(
+                                &provider, id,
+                            );
+                            if addr == call_primitives::Address::ZERO {
+                                continue;
+                            }
+                            let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
+                                &provider, addr,
+                            );
+                            let status =
+                                call_consensus::exec::state_accessors::read_validator_status(
+                                    &provider, addr,
+                                );
+                            validators.insert(
+                                id as u32,
+                                OracleValidatorInfo {
+                                    validator_id: id as u32,
+                                    address: addr,
+                                    public_key: pk,
+                                    is_active: status != 0,
+                                    outlier_count: 0,
+                                    last_submission_block: 0,
+                                    submission_count: 0,
+                                },
+                            );
                         }
                         (config, validators)
                     };
                     match tracker_guard.submit_price(oracle_submission, &config, &validators) {
                         Ok(Some(aggregated)) => {
                             // Quorum reached — write aggregated price to EVM storage
-                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state_clone.db_env).unwrap();
+                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
+                                &state_clone.db_env,
+                            )
+                            .unwrap();
                             call_consensus::exec::state_accessors::seed_oracle_price(
                                 &mut provider,
                                 aggregated.pair.base,

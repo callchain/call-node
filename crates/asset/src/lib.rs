@@ -5,8 +5,8 @@ pub use precompile::AssetPrecompile;
 use call_precompile::{
     slot_allowance, slot_asset_meta, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
 };
-use call_protocol::storage_backend::StorageBackend;
 use call_primitives::{Address, Balance, U256};
+use call_protocol::storage_backend::StorageBackend;
 
 #[derive(Debug)]
 pub enum AssetError {
@@ -74,7 +74,8 @@ impl<B: StorageBackend> AssetStorage<B> {
 
     pub fn write_balance(&mut self, asset_id: u64, addr: Address, amount: Balance) {
         let slot = slot_balance(asset_id, addr);
-        self.backend.store(ASSET_ADDRESS, slot, u128_to_u256(amount));
+        self.backend
+            .store(ASSET_ADDRESS, slot, u128_to_u256(amount));
     }
 
     pub fn add_balance(
@@ -84,7 +85,9 @@ impl<B: StorageBackend> AssetStorage<B> {
         amount: Balance,
     ) -> Result<(), AssetError> {
         let current = self.read_balance(asset_id, addr);
-        let new = current.checked_add(amount).ok_or(AssetError::BalanceOverflow)?;
+        let new = current
+            .checked_add(amount)
+            .ok_or(AssetError::BalanceOverflow)?;
         self.write_balance(asset_id, addr, new);
         Ok(())
     }
@@ -125,7 +128,8 @@ impl<B: StorageBackend> AssetStorage<B> {
     // ── Metadata operations ───────────────────────────────────────────
 
     pub fn load_meta_u256(&self, asset_id: u64, key: &[u8]) -> U256 {
-        self.backend.load(ASSET_ADDRESS, slot_asset_meta(asset_id, key))
+        self.backend
+            .load(ASSET_ADDRESS, slot_asset_meta(asset_id, key))
     }
 
     pub fn load_meta_u128(&self, asset_id: u64, key: &[u8]) -> u128 {
@@ -133,8 +137,7 @@ impl<B: StorageBackend> AssetStorage<B> {
     }
 
     pub fn load_meta_u8(&self, asset_id: u64, key: &[u8]) -> u8 {
-        self.load_meta_u256(asset_id, key)
-            .to_be_bytes::<32>()[31]
+        self.load_meta_u256(asset_id, key).to_be_bytes::<32>()[31]
     }
 
     pub fn load_meta_address(&self, asset_id: u64, key: &[u8]) -> Address {
@@ -170,21 +173,9 @@ impl<B: StorageBackend> AssetStorage<B> {
     pub fn write_meta(&mut self, asset_id: u64, meta: &AssetMeta) {
         self.store_meta_string(asset_id, b"symbol", &meta.symbol);
         self.store_meta_string(asset_id, b"name", &meta.name);
-        self.store_meta_u256(
-            asset_id,
-            b"decimals",
-            U256::from(meta.decimals),
-        );
-        self.store_meta_u256(
-            asset_id,
-            b"issuer",
-            address_to_u256(meta.issuer),
-        );
-        self.store_meta_u256(
-            asset_id,
-            b"max_supply",
-            u128_to_u256(meta.max_supply),
-        );
+        self.store_meta_u256(asset_id, b"decimals", U256::from(meta.decimals));
+        self.store_meta_u256(asset_id, b"issuer", address_to_u256(meta.issuer));
+        self.store_meta_u256(asset_id, b"max_supply", u128_to_u256(meta.max_supply));
         self.store_meta_u256(asset_id, b"supply", u128_to_u256(meta.supply));
         self.store_meta_u256(asset_id, b"status", U256::from(meta.status));
     }
@@ -227,13 +218,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         Ok(())
     }
 
-    pub fn approve(
-        &mut self,
-        asset_id: u64,
-        owner: Address,
-        spender: Address,
-        amount: Balance,
-    ) {
+    pub fn approve(&mut self, asset_id: u64, owner: Address, spender: Address, amount: Balance) {
         self.write_allowance(asset_id, owner, spender, amount);
     }
 
@@ -363,7 +348,10 @@ mod tests {
 
     impl StorageBackend for TestBackend {
         fn load(&self, address: Address, slot: U256) -> U256 {
-            self.storage.get(&(address, slot)).copied().unwrap_or(U256::ZERO)
+            self.storage
+                .get(&(address, slot))
+                .copied()
+                .unwrap_or(U256::ZERO)
         }
         fn store(&mut self, address: Address, slot: U256, value: U256) {
             self.storage.insert((address, slot), value);
@@ -419,7 +407,9 @@ mod tests {
         {
             let mut store = AssetStorage::new(&mut backend);
             // Register asset
-            let asset_id = store.register("GOLD", "Gold Token", 18, 10000, issuer).unwrap();
+            let asset_id = store
+                .register("GOLD", "Gold Token", 18, 10000, issuer)
+                .unwrap();
             assert_eq!(asset_id, 1);
 
             // Mint
@@ -442,7 +432,9 @@ mod tests {
         let recipient = Address::repeat_byte(0x22);
         {
             let mut store = AssetStorage::new(&mut backend);
-            let asset_id = store.register("GOLD", "Gold Token", 18, 10000, issuer).unwrap();
+            let asset_id = store
+                .register("GOLD", "Gold Token", 18, 10000, issuer)
+                .unwrap();
             let err = store.mint(asset_id, attacker, recipient, 100).unwrap_err();
             assert!(matches!(err, AssetError::NotIssuer));
         }

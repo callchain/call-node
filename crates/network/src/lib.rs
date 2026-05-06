@@ -9,4 +9,9 @@ pub mod p2p;
 
 pub use gossip::*;
 pub use limits::*;
-pub use p2p::{CommonwareNetwork, CommonwareConfig, load_or_generate_identity_key, Network, NetworkMessage, BlockAnnouncement, TransactionMessage, SyncRequest, SyncResponse, OraclePriceRequest, OraclePriceSubmission, UpgradeAnnouncement, PeerExchange, InMemoryNetwork, EpochBoundarySignal, EngineRestartRequest, EngineRestartReason};
+pub use p2p::{
+    load_or_generate_identity_key, BlockAnnouncement, CommonwareConfig, CommonwareNetwork,
+    EngineRestartReason, EngineRestartRequest, EpochBoundarySignal, InMemoryNetwork, Network,
+    NetworkMessage, OraclePriceRequest, OraclePriceSubmission, PeerExchange, SyncRequest,
+    SyncResponse, TransactionMessage, UpgradeAnnouncement,
+};

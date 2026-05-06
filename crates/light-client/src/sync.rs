@@ -22,15 +22,18 @@ pub fn sync_single_header(eth_rpc_url: &str, block_number: u64) -> Result<EthHea
         .send_string(&body.to_string())
         .map_err(|e| format!("RPC request failed: {e}"))?;
 
-    let text = resp.into_string().map_err(|e| {
-        format!("Failed to read response body: {e}")
-    })?;
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("Failed to read response body: {e}"))?;
 
-    let response: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("Failed to parse JSON response: {e}"))?;
+    let response: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("Failed to parse JSON response: {e}"))?;
 
     let result = response.get("result").ok_or_else(|| {
-        let error = response.get("error").cloned().unwrap_or(serde_json::Value::Null);
+        let error = response
+            .get("error")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         format!("RPC error: {error}")
     })?;
 
@@ -40,8 +43,8 @@ pub fn sync_single_header(eth_rpc_url: &str, block_number: u64) -> Result<EthHea
 
     // eth_getBlockByNumber returns header fields as JSON, not RLP bytes.
     // We reconstruct the RLP from the returned fields.
-    let header_rlp = decode_eth_header_rlp(result)
-        .ok_or("Failed to decode header RLP from RPC response")?;
+    let header_rlp =
+        decode_eth_header_rlp(result).ok_or("Failed to decode header RLP from RPC response")?;
 
     Ok(EthHeader::from_rlp(header_rlp))
 }
@@ -71,25 +74,35 @@ pub fn sync_header_range(
 /// Fetch the finalized checkpoint from Ethereum beacon chain.
 /// Returns (block_number, block_hash).
 pub fn fetch_finalized_checkpoint(beacon_url: &str) -> Result<(u64, B256), String> {
-    let url = format!("{}/eth/v1/beacon/states/finalized/finality_checkpoints", beacon_url);
+    let url = format!(
+        "{}/eth/v1/beacon/states/finalized/finality_checkpoints",
+        beacon_url
+    );
     let resp = ureq::get(&url)
         .call()
         .map_err(|e| format!("Beacon API request failed: {e}"))?;
 
-    let text = resp.into_string().map_err(|e| {
-        format!("Failed to read beacon response body: {e}")
-    })?;
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("Failed to read beacon response body: {e}"))?;
 
     let response: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("Failed to parse beacon JSON response: {e}"))?;
 
-    let data = response.get("data").ok_or("Missing 'data' in beacon response")?;
-    let header = data.get("header").ok_or("Missing 'header' in beacon data")?;
-    let block = header.get("beacon").ok_or("Missing 'beacon' in header data")?;
+    let data = response
+        .get("data")
+        .ok_or("Missing 'data' in beacon response")?;
+    let header = data
+        .get("header")
+        .ok_or("Missing 'header' in beacon data")?;
+    let block = header
+        .get("beacon")
+        .ok_or("Missing 'beacon' in header data")?;
 
     let slot_val = block.get("slot").ok_or("Missing 'slot' in beacon header")?;
     let block_number: u64 = if let Some(s) = slot_val.as_str() {
-        s.parse().map_err(|e| format!("Failed to parse slot as u64: {e}"))?
+        s.parse()
+            .map_err(|e| format!("Failed to parse slot as u64: {e}"))?
     } else if let Some(n) = slot_val.as_u64() {
         n
     } else {
@@ -185,10 +198,8 @@ fn hex_from_json(value: &serde_json::Value, key: &str) -> Option<Vec<u8>> {
 
 /// Get the RLP encoding length for a byte field.
 fn rlp_field_len(data: &[u8]) -> usize {
-    if data.is_empty() {
-        1 // 0x80 (empty)
-    } else if data.len() == 1 && data[0] < 0x80 {
-        1 // single byte
+    if data.is_empty() || (data.len() == 1 && data[0] < 0x80) {
+        1
     } else if data.len() < 56 {
         1 + data.len() // short string
     } else {

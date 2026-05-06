@@ -7,9 +7,9 @@
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, dispatch, journal_backend::JournalBackend, require_caller,
-    slot_asset_meta, storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128,
-    u256_to_u64, u64_to_u256, ASSET_ADDRESS,
+    address_to_u256, dispatch, journal_backend::JournalBackend, require_caller, slot_asset_meta,
+    storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
+    ASSET_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -17,9 +17,11 @@ use call_validator::ValidatorStorage;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
 #[cfg(feature = "light-client-bridge")]
-use call_light_client::{parse_bridge_event_from_logs, parse_receipt_logs, rlp_encode_u64, verify_mpt_proof};
-#[cfg(feature = "light-client-bridge")]
 use crate::external::types::{FraudProof, FraudProofType};
+#[cfg(feature = "light-client-bridge")]
+use call_light_client::{
+    parse_bridge_event_from_logs, parse_receipt_logs, rlp_encode_u64, verify_mpt_proof,
+};
 
 pub const BRIDGE_ADDRESS: Address =
     alloy_primitives::address!("0000000000000000000000000000000000000103");
@@ -183,11 +185,17 @@ impl<B: StorageBackend> BridgeStorage<B> {
     // ── Read operations ───────────────────────────────────────────────
 
     pub fn get_total_deposits(&self) -> u128 {
-        u256_to_u128(self.backend.load(BRIDGE_ADDRESS, slot_bridge_total_deposits()))
+        u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_total_deposits()),
+        )
     }
 
     pub fn get_total_withdrawals(&self) -> u128 {
-        u256_to_u128(self.backend.load(BRIDGE_ADDRESS, slot_bridge_total_withdrawals()))
+        u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_total_withdrawals()),
+        )
     }
 
     pub fn is_paused(&self) -> bool {
@@ -276,7 +284,10 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     pub fn read_global_challenge_bond(&self) -> u128 {
-        let stored = u256_to_u128(self.backend.load(BRIDGE_ADDRESS, slot_challenge_bond_amount()));
+        let stored = u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_challenge_bond_amount()),
+        );
         if stored == 0 {
             DEFAULT_CHALLENGE_BOND
         } else {
@@ -542,10 +553,10 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 .add_balance(CALL_ASSET_ID, challenger, reward)
                 .map_err(|_| BridgeError::BalanceOverflow)?;
 
-            let validator = u256_to_address(
-                self.backend
-                    .load(BRIDGE_ADDRESS, slot_bridge_challenge_original_validator(source_tx_hash)),
-            );
+            let validator = u256_to_address(self.backend.load(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_original_validator(source_tx_hash),
+            ));
             let _ = validator_store.slash_stake(asset_store, validator);
 
             self.backend.store(
@@ -555,10 +566,10 @@ impl<B: StorageBackend> BridgeStorage<B> {
             );
             Ok(true)
         } else {
-            let validator = u256_to_address(
-                self.backend
-                    .load(BRIDGE_ADDRESS, slot_bridge_challenge_original_validator(source_tx_hash)),
-            );
+            let validator = u256_to_address(self.backend.load(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_original_validator(source_tx_hash),
+            ));
             asset_store
                 .add_balance(CALL_ASSET_ID, validator, bond)
                 .map_err(|_| BridgeError::BalanceOverflow)?;
@@ -630,16 +641,17 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     fn verify_fraud_proof(&self, source_tx_hash: [u8; 32]) -> bool {
-        let proof_hash = self
-            .backend
-            .load(BRIDGE_ADDRESS, slot_bridge_challenge_proof_hash(source_tx_hash));
+        let proof_hash = self.backend.load(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_proof_hash(source_tx_hash),
+        );
         if proof_hash == U256::ZERO {
             return false;
         }
-        let proof_len = u256_to_u64(
-            self.backend
-                .load(BRIDGE_ADDRESS, slot_bridge_challenge_proof_len(source_tx_hash)),
-        );
+        let proof_len = u256_to_u64(self.backend.load(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_proof_len(source_tx_hash),
+        ));
         if proof_len < 32 {
             return false;
         }
@@ -699,11 +711,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
                     Some(root) => root,
                     None => return false,
                 };
-                let result = verify_mpt_proof(
-                    tx_root,
-                    &source_tx_hash,
-                    &fraud_proof.mpt_nodes,
-                );
+                let result = verify_mpt_proof(tx_root, &source_tx_hash, &fraud_proof.mpt_nodes);
                 matches!(result, Ok(None))
             }
             FraudProofType::ReceiptConflict { receipt_index } => {
@@ -712,11 +720,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
                     None => return false,
                 };
                 let index_key = rlp_encode_u64(receipt_index);
-                let result = verify_mpt_proof(
-                    receipts_root,
-                    &index_key,
-                    &fraud_proof.mpt_nodes,
-                );
+                let result = verify_mpt_proof(receipts_root, &index_key, &fraud_proof.mpt_nodes);
                 let receipt_rlp = match result {
                     Ok(Some(rlp)) => rlp,
                     _ => return false,
@@ -775,11 +779,16 @@ impl BridgePrecompile {
         calldata: &[u8],
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::view::<IProtocolBridge::getTotalDepositsCall, _, _>(calldata, 1500, storage, |_call, storage| {
-            let backend = JournalBackend::new(storage);
-            let store = BridgeStorage::new(backend);
-            Ok(store.get_total_deposits())
-        })
+        dispatch::view::<IProtocolBridge::getTotalDepositsCall, _, _>(
+            calldata,
+            1500,
+            storage,
+            |_call, storage| {
+                let backend = JournalBackend::new(storage);
+                let store = BridgeStorage::new(backend);
+                Ok(store.get_total_deposits())
+            },
+        )
     }
 
     fn get_total_withdrawals(
@@ -787,11 +796,16 @@ impl BridgePrecompile {
         calldata: &[u8],
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::view::<IProtocolBridge::getTotalWithdrawalsCall, _, _>(calldata, 1500, storage, |_call, storage| {
-            let backend = JournalBackend::new(storage);
-            let store = BridgeStorage::new(backend);
-            Ok(store.get_total_withdrawals())
-        })
+        dispatch::view::<IProtocolBridge::getTotalWithdrawalsCall, _, _>(
+            calldata,
+            1500,
+            storage,
+            |_call, storage| {
+                let backend = JournalBackend::new(storage);
+                let store = BridgeStorage::new(backend);
+                Ok(store.get_total_withdrawals())
+            },
+        )
     }
 
     fn bridge_to_evm(
@@ -800,16 +814,21 @@ impl BridgePrecompile {
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::bridgeToEvmCall, _>(calldata, 30000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            bridge_store
-                .bridge_to_evm(&mut asset_store, call.assetId, call.to, call.amount, caller)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::bridgeToEvmCall, _>(
+            calldata,
+            30000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                bridge_store
+                    .bridge_to_evm(&mut asset_store, call.assetId, call.to, call.amount, caller)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
     fn bridge_to_protocol(
@@ -818,15 +837,20 @@ impl BridgePrecompile {
         _msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::bridgeToProtocolCall, _>(calldata, 30000, storage, |call, storage| {
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            bridge_store
-                .bridge_to_protocol(&mut asset_store, call.assetId, call.to, call.amount)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::bridgeToProtocolCall, _>(
+            calldata,
+            30000,
+            storage,
+            |call, storage| {
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                bridge_store
+                    .bridge_to_protocol(&mut asset_store, call.assetId, call.to, call.amount)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
     fn external_deposit(
@@ -835,25 +859,30 @@ impl BridgePrecompile {
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::externalDepositCall, _>(calldata, 30000, storage, |call, storage| {
-            let validator = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            let block_height = storage.block_number();
-            bridge_store
-                .external_deposit(
-                    &mut asset_store,
-                    call.sourceTxHash.into(),
-                    call.assetId,
-                    call.recipient,
-                    call.amount,
-                    validator,
-                    block_height,
-                )
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::externalDepositCall, _>(
+            calldata,
+            30000,
+            storage,
+            |call, storage| {
+                let validator = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                let block_height = storage.block_number();
+                bridge_store
+                    .external_deposit(
+                        &mut asset_store,
+                        call.sourceTxHash.into(),
+                        call.assetId,
+                        call.recipient,
+                        call.amount,
+                        validator,
+                        block_height,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
     fn external_withdraw(
@@ -862,16 +891,21 @@ impl BridgePrecompile {
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::externalWithdrawCall, _>(calldata, 30000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            bridge_store
-                .external_withdraw(&mut asset_store, call.assetId, call.amount, caller)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::externalWithdrawCall, _>(
+            calldata,
+            30000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                bridge_store
+                    .external_withdraw(&mut asset_store, call.assetId, call.amount, caller)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
     fn deposit(
@@ -880,22 +914,27 @@ impl BridgePrecompile {
         _msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::depositCall, _>(calldata, 30000, storage, |call, storage| {
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            bridge_store
-                .deposit(
-                    &mut asset_store,
-                    call.sourceChain,
-                    call.targetAddress,
-                    call.amount,
-                    call.assetId,
-                    call.proof.to_vec(),
-                )
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::depositCall, _>(
+            calldata,
+            30000,
+            storage,
+            |call, storage| {
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                bridge_store
+                    .deposit(
+                        &mut asset_store,
+                        call.sourceChain,
+                        call.targetAddress,
+                        call.amount,
+                        call.assetId,
+                        call.proof.to_vec(),
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
     fn initiate_challenge(
@@ -904,23 +943,28 @@ impl BridgePrecompile {
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::initiateChallengeCall, _>(calldata, 50000, storage, |call, storage| {
-            let challenger = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            let block_number = storage.block_number();
-            bridge_store
-                .initiate_challenge(
-                    &mut asset_store,
-                    call.sourceTxHash.into(),
-                    call.proof.to_vec(),
-                    challenger,
-                    block_number,
-                )
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::initiateChallengeCall, _>(
+            calldata,
+            50000,
+            storage,
+            |call, storage| {
+                let challenger = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                let block_number = storage.block_number();
+                bridge_store
+                    .initiate_challenge(
+                        &mut asset_store,
+                        call.sourceTxHash.into(),
+                        call.proof.to_vec(),
+                        challenger,
+                        block_number,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
     fn resolve_challenge(
@@ -929,22 +973,27 @@ impl BridgePrecompile {
         _msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::resolveChallengeCall, _>(calldata, 100000, storage, |call, storage| {
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            let mut validator_store = ValidatorStorage::new(backend);
-            let block_number = storage.block_number();
-            bridge_store
-                .resolve_challenge(
-                    &mut asset_store,
-                    &mut validator_store,
-                    call.sourceTxHash.into(),
-                    block_number,
-                )
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::resolveChallengeCall, _>(
+            calldata,
+            100000,
+            storage,
+            |call, storage| {
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                let mut validator_store = ValidatorStorage::new(backend);
+                let block_number = storage.block_number();
+                bridge_store
+                    .resolve_challenge(
+                        &mut asset_store,
+                        &mut validator_store,
+                        call.sourceTxHash.into(),
+                        block_number,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 
     fn get_challenge_status(
@@ -952,15 +1001,20 @@ impl BridgePrecompile {
         calldata: &[u8],
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::view::<IProtocolBridge::getChallengeStatusCall, _, _>(calldata, 1500, storage, |call, storage| {
-            let backend = JournalBackend::new(storage);
-            let store = BridgeStorage::new(backend);
-            let status = store.read_challenge_status(call.sourceTxHash.into());
-            let deadline = store.read_challenge_deadline(call.sourceTxHash.into());
-            let bond = store.read_challenge_bond_for_tx(call.sourceTxHash.into());
-            let challenger = store.read_challenge_challenger(call.sourceTxHash.into());
-            Ok((status as u64, deadline, bond, challenger))
-        })
+        dispatch::view::<IProtocolBridge::getChallengeStatusCall, _, _>(
+            calldata,
+            1500,
+            storage,
+            |call, storage| {
+                let backend = JournalBackend::new(storage);
+                let store = BridgeStorage::new(backend);
+                let status = store.read_challenge_status(call.sourceTxHash.into());
+                let deadline = store.read_challenge_deadline(call.sourceTxHash.into());
+                let bond = store.read_challenge_bond_for_tx(call.sourceTxHash.into());
+                let challenger = store.read_challenge_challenger(call.sourceTxHash.into());
+                Ok((status as u64, deadline, bond, challenger))
+            },
+        )
     }
 
     fn withdraw_challenge_bond(
@@ -969,16 +1023,21 @@ impl BridgePrecompile {
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::withdrawChallengeBondCall, _>(calldata, 5000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut bridge_store = BridgeStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            bridge_store
-                .withdraw_challenge_bond(&mut asset_store, call.sourceTxHash.into(), caller)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-            Ok(())
-        })
+        dispatch::mutate_void::<IProtocolBridge::withdrawChallengeBondCall, _>(
+            calldata,
+            5000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut bridge_store = BridgeStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                bridge_store
+                    .withdraw_challenge_bond(&mut asset_store, call.sourceTxHash.into(), caller)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
     }
 }
 
@@ -1012,9 +1071,7 @@ impl call_precompile::StatefulPrecompile for BridgePrecompile {
             IProtocolBridge::externalWithdrawCall::SELECTOR => {
                 self.external_withdraw(calldata, msg_sender, storage)
             }
-            IProtocolBridge::depositCall::SELECTOR => {
-                self.deposit(calldata, msg_sender, storage)
-            }
+            IProtocolBridge::depositCall::SELECTOR => self.deposit(calldata, msg_sender, storage),
             IProtocolBridge::initiateChallengeCall::SELECTOR => {
                 self.initiate_challenge(calldata, msg_sender, storage)
             }
@@ -1053,28 +1110,24 @@ mod tests {
     fn test_bridge_precompile_stateful_reads() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
 
-        provider.set(
-            BRIDGE_ADDRESS,
-            U256::from(0),
-            u128_to_u256(5000),
-        );
-        provider.set(
-            BRIDGE_ADDRESS,
-            U256::from(1),
-            u128_to_u256(2000),
-        );
+        provider.set(BRIDGE_ADDRESS, U256::from(0), u128_to_u256(5000));
+        provider.set(BRIDGE_ADDRESS, U256::from(1), u128_to_u256(2000));
 
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::getTotalDepositsCall {}.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         let deposits = u256_to_u128(U256::from_be_bytes::<32>(
             result.bytes.as_ref().try_into().unwrap(),
         ));
         assert_eq!(deposits, 5000);
 
         let input = IProtocolBridge::getTotalWithdrawalsCall {}.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         let withdrawals = u256_to_u128(U256::from_be_bytes::<32>(
             result.bytes.as_ref().try_into().unwrap(),
         ));
@@ -1106,44 +1159,53 @@ mod tests {
         .abi_encode();
 
         let result = precompile.call(&input, validator, &mut provider);
-        assert!(result.is_ok(), "external_deposit failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "external_deposit failed: {:?}",
+            result.err()
+        );
 
-        let stored_asset_id =
-            u256_to_u64(provider.get(
-                BRIDGE_ADDRESS,
-                slot_bridge_deposit_asset_id(source_tx_hash),
-            ).unwrap_or(U256::ZERO));
+        let stored_asset_id = u256_to_u64(
+            provider
+                .get(BRIDGE_ADDRESS, slot_bridge_deposit_asset_id(source_tx_hash))
+                .unwrap_or(U256::ZERO),
+        );
         assert_eq!(stored_asset_id, 1);
 
         let stored_recipient = u256_to_address(
-            provider.get(
-                BRIDGE_ADDRESS,
-                slot_bridge_deposit_recipient(source_tx_hash),
-            ).unwrap_or(U256::ZERO),
+            provider
+                .get(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_deposit_recipient(source_tx_hash),
+                )
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(stored_recipient, recipient);
 
         let stored_amount = u256_to_u128(
-            provider.get(
-                BRIDGE_ADDRESS,
-                slot_bridge_deposit_amount(source_tx_hash),
-            ).unwrap_or(U256::ZERO),
+            provider
+                .get(BRIDGE_ADDRESS, slot_bridge_deposit_amount(source_tx_hash))
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(stored_amount, 1000);
 
         let stored_height = u256_to_u64(
-            provider.get(
-                BRIDGE_ADDRESS,
-                slot_bridge_deposit_block_height(source_tx_hash),
-            ).unwrap_or(U256::ZERO),
+            provider
+                .get(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_deposit_block_height(source_tx_hash),
+                )
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(stored_height, 10);
 
         let stored_validator = u256_to_address(
-            provider.get(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_original_validator(source_tx_hash),
-            ).unwrap_or(U256::ZERO),
+            provider
+                .get(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_challenge_original_validator(source_tx_hash),
+                )
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(stored_validator, validator);
     }
@@ -1167,11 +1229,7 @@ mod tests {
             slot_balance(CALL_ASSET_ID, challenger),
             u128_to_u256(5000),
         );
-        provider.set(
-            ASSET_ADDRESS,
-            slot_balance(1, recipient),
-            u128_to_u256(0),
-        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
 
         let mut precompile = BridgePrecompile;
 
@@ -1193,41 +1251,43 @@ mod tests {
         .abi_encode();
 
         let result = precompile.call(&input, challenger, &mut provider);
-        assert!(result.is_ok(), "initiate_challenge failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "initiate_challenge failed: {:?}",
+            result.err()
+        );
 
-        let status = provider.get(
-            BRIDGE_ADDRESS,
-            slot_bridge_challenge_status(source_tx_hash),
-        )
-        .map(|v| v.to_be_bytes::<32>()[31])
-        .unwrap_or(0);
+        let status = provider
+            .get(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
         assert_eq!(status, 1); // Pending
 
         let stored_challenger = u256_to_address(
-            provider.get(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_challenger(source_tx_hash),
-            )
-            .unwrap_or(U256::ZERO),
+            provider
+                .get(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_challenge_challenger(source_tx_hash),
+                )
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(stored_challenger, challenger);
 
         let deadline = u256_to_u64(
-            provider.get(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_deadline(source_tx_hash),
-            )
-            .unwrap_or(U256::ZERO),
+            provider
+                .get(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_challenge_deadline(source_tx_hash),
+                )
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(deadline, 110); // block 10 + period 100
 
         // Bond deducted from challenger
         let challenger_bal = u256_to_u128(
-            provider.get(
-                ASSET_ADDRESS,
-                slot_balance(CALL_ASSET_ID, challenger),
-            )
-            .unwrap_or(U256::ZERO),
+            provider
+                .get(ASSET_ADDRESS, slot_balance(CALL_ASSET_ID, challenger))
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(challenger_bal, 4000); // 5000 - 1000 bond
     }
@@ -1269,11 +1329,7 @@ mod tests {
             slot_balance(CALL_ASSET_ID, challenger),
             u128_to_u256(5000),
         );
-        provider.set(
-            ASSET_ADDRESS,
-            slot_balance(1, recipient),
-            u128_to_u256(0),
-        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
 
         let mut precompile = BridgePrecompile;
 
@@ -1317,11 +1373,7 @@ mod tests {
             slot_balance(CALL_ASSET_ID, challenger),
             u128_to_u256(5000),
         );
-        provider.set(
-            ASSET_ADDRESS,
-            slot_balance(1, recipient),
-            u128_to_u256(0),
-        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
 
         let mut precompile = BridgePrecompile;
 
@@ -1372,11 +1424,7 @@ mod tests {
             slot_balance(CALL_ASSET_ID, validator),
             u128_to_u256(100),
         );
-        provider.set(
-            ASSET_ADDRESS,
-            slot_balance(1, recipient),
-            u128_to_u256(0),
-        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
 
         let mut precompile = BridgePrecompile;
 
@@ -1407,24 +1455,24 @@ mod tests {
         .abi_encode();
 
         let result = precompile.call(&input, Address::ZERO, &mut provider);
-        assert!(result.is_ok(), "resolve_challenge failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "resolve_challenge failed: {:?}",
+            result.err()
+        );
 
         // Status should be Failed (3)
-        let status = provider.get(
-            BRIDGE_ADDRESS,
-            slot_bridge_challenge_status(source_tx_hash),
-        )
-        .map(|v| v.to_be_bytes::<32>()[31])
-        .unwrap_or(0);
+        let status = provider
+            .get(BRIDGE_ADDRESS, slot_bridge_challenge_status(source_tx_hash))
+            .map(|v| v.to_be_bytes::<32>()[31])
+            .unwrap_or(0);
         assert_eq!(status, 3);
 
         // Validator should have received the bond
         let validator_bal = u256_to_u128(
-            provider.get(
-                ASSET_ADDRESS,
-                slot_balance(CALL_ASSET_ID, validator),
-            )
-            .unwrap_or(U256::ZERO),
+            provider
+                .get(ASSET_ADDRESS, slot_balance(CALL_ASSET_ID, validator))
+                .unwrap_or(U256::ZERO),
         );
         assert_eq!(validator_bal, 1100); // 100 + 1000 bond
     }
@@ -1453,11 +1501,7 @@ mod tests {
             slot_balance(CALL_ASSET_ID, validator),
             u128_to_u256(100),
         );
-        provider.set(
-            ASSET_ADDRESS,
-            slot_balance(1, recipient),
-            u128_to_u256(0),
-        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
 
         let mut precompile = BridgePrecompile;
 
@@ -1484,12 +1528,28 @@ mod tests {
 
         // Build minimal Ethereum header RLP with tx_root set.
         let mut fields: Vec<Vec<u8>> = Vec::new();
-        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // parent_hash
+        fields.push({
+            let mut v = vec![0xa0];
+            v.extend([0u8; 32]);
+            v
+        }); // parent_hash
         fields.push(vec![0x80]); // sha3_uncles
         fields.push(vec![0x80]); // miner
-        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // state_root
-        fields.push({ let mut v = vec![0xa0]; v.extend_from_slice(&tx_root.0); v }); // tx_root
-        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // receipt_root
+        fields.push({
+            let mut v = vec![0xa0];
+            v.extend([0u8; 32]);
+            v
+        }); // state_root
+        fields.push({
+            let mut v = vec![0xa0];
+            v.extend_from_slice(&tx_root.0);
+            v
+        }); // tx_root
+        fields.push({
+            let mut v = vec![0xa0];
+            v.extend([0u8; 32]);
+            v
+        }); // receipt_root
         fields.push(vec![0x80]); // logs_bloom
         fields.push(vec![0x01]); // difficulty
         fields.push(vec![0x01]); // block_number
@@ -1497,8 +1557,16 @@ mod tests {
         fields.push(vec![0x80]); // gas_used
         fields.push(vec![0x01]); // timestamp
         fields.push(vec![0x80]); // extra_data
-        fields.push({ let mut v = vec![0xa0]; v.extend([0u8; 32]); v }); // mix_hash
-        fields.push({ let mut v = vec![0x88]; v.extend([0u8; 8]); v }); // nonce
+        fields.push({
+            let mut v = vec![0xa0];
+            v.extend([0u8; 32]);
+            v
+        }); // mix_hash
+        fields.push({
+            let mut v = vec![0x88];
+            v.extend([0u8; 8]);
+            v
+        }); // nonce
         fields.push(vec![0x80]); // base_fee
         let payload_len: usize = fields.iter().map(|f| f.len()).sum();
         let mut header_rlp = Vec::new();
@@ -1506,7 +1574,10 @@ mod tests {
             header_rlp.push(0xC0 + payload_len as u8);
         } else {
             let len_bytes = payload_len.to_be_bytes();
-            let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+            let skip = len_bytes
+                .iter()
+                .position(|&b| b != 0)
+                .unwrap_or(len_bytes.len());
             header_rlp.push(0xF7 + (len_bytes.len() - skip) as u8);
             header_rlp.extend_from_slice(&len_bytes[skip..]);
         }
@@ -1539,7 +1610,11 @@ mod tests {
         .abi_encode();
 
         let result = precompile.call(&input, Address::ZERO, &mut provider);
-        assert!(result.is_ok(), "resolve_challenge failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "resolve_challenge failed: {:?}",
+            result.err()
+        );
 
         // Status should be Successful (2)
         let status = provider
@@ -1583,11 +1658,7 @@ mod tests {
             slot_balance(CALL_ASSET_ID, challenger),
             u128_to_u256(5000),
         );
-        provider.set(
-            ASSET_ADDRESS,
-            slot_balance(1, recipient),
-            u128_to_u256(0),
-        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
 
         let mut precompile = BridgePrecompile;
 
@@ -1615,7 +1686,9 @@ mod tests {
         }
         .abi_encode();
 
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes.len(), 128);
         assert_eq!(result.bytes[31], 1); // status = Pending
         let deadline = u64::from_be_bytes({

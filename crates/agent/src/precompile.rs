@@ -7,10 +7,8 @@
 use crate::AgentStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
-use call_precompile::{
-    dispatch, journal_backend::JournalBackend, require_caller,
-};
 use call_precompile::storage::StorageProvider;
+use call_precompile::{dispatch, journal_backend::JournalBackend, require_caller};
 use call_primitives::Address;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
@@ -51,7 +49,13 @@ impl AgentPrecompile {
                 let mut store = AgentStorage::new(JournalBackend::new(storage));
                 let block_number = storage.block_number();
                 store
-                    .register_agent(&call.name, &call.url, call.pubkeyHash.into(), caller, block_number)
+                    .register_agent(
+                        &call.name,
+                        &call.url,
+                        call.pubkeyHash.into(),
+                        caller,
+                        block_number,
+                    )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(())
             },
@@ -146,7 +150,7 @@ impl AgentPrecompile {
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::batchPayCall, _>(
             calldata,
-            30000 * 1, // base gas; per-recipient gas not scaled in dispatch
+            30000, // base gas; per-recipient gas not scaled in dispatch
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
@@ -218,7 +222,11 @@ impl AgentPrecompile {
         )
     }
 
-    fn get_agent_owner(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_agent_owner(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentOwnerCall, _, _>(
             calldata,
             2000,
@@ -230,7 +238,11 @@ impl AgentPrecompile {
         )
     }
 
-    fn get_agent_balance(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_agent_balance(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentBalanceCall, _, _>(
             calldata,
             2000,
@@ -242,7 +254,11 @@ impl AgentPrecompile {
         )
     }
 
-    fn get_agent_name(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_agent_name(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentNameCall, _, _>(
             calldata,
             2000,
@@ -254,7 +270,11 @@ impl AgentPrecompile {
         )
     }
 
-    fn get_agent_url(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_agent_url(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentUrlCall, _, _>(
             calldata,
             2000,
@@ -266,7 +286,11 @@ impl AgentPrecompile {
         )
     }
 
-    fn get_agent_perms(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_agent_perms(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentPermsCall, _, _>(
             calldata,
             2000,
@@ -280,6 +304,7 @@ impl AgentPrecompile {
 }
 
 impl call_precompile::StatefulPrecompile for AgentPrecompile {
+    #[allow(clippy::expect_used)]
     fn call(
         &mut self,
         calldata: &[u8],
@@ -289,17 +314,29 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
         match selector {
-            IProtocolAgent::registerAgentCall::SELECTOR => self.register_agent(calldata, msg_sender, storage),
-            IProtocolAgent::grantBalanceCall::SELECTOR => self.grant_balance(calldata, msg_sender, storage),
-            IProtocolAgent::revokeBalanceCall::SELECTOR => self.revoke_balance(calldata, msg_sender, storage),
+            IProtocolAgent::registerAgentCall::SELECTOR => {
+                self.register_agent(calldata, msg_sender, storage)
+            }
+            IProtocolAgent::grantBalanceCall::SELECTOR => {
+                self.grant_balance(calldata, msg_sender, storage)
+            }
+            IProtocolAgent::revokeBalanceCall::SELECTOR => {
+                self.revoke_balance(calldata, msg_sender, storage)
+            }
             IProtocolAgent::payCall::SELECTOR => self.pay(calldata, msg_sender, storage),
             IProtocolAgent::batchPayCall::SELECTOR => self.batch_pay(calldata, msg_sender, storage),
-            IProtocolAgent::withdrawBalanceCall::SELECTOR => self.withdraw_balance(calldata, msg_sender, storage),
-            IProtocolAgent::revokeAgentCall::SELECTOR => self.revoke_agent(calldata, msg_sender, storage),
+            IProtocolAgent::withdrawBalanceCall::SELECTOR => {
+                self.withdraw_balance(calldata, msg_sender, storage)
+            }
+            IProtocolAgent::revokeAgentCall::SELECTOR => {
+                self.revoke_agent(calldata, msg_sender, storage)
+            }
             IProtocolAgent::getAgentOwnerCall::SELECTOR => self.get_agent_owner(calldata, storage),
-            IProtocolAgent::getAgentBalanceCall::SELECTOR => self.get_agent_balance(calldata, storage),
+            IProtocolAgent::getAgentBalanceCall::SELECTOR => {
+                self.get_agent_balance(calldata, storage)
+            }
             IProtocolAgent::getAgentNameCall::SELECTOR => self.get_agent_name(calldata, storage),
             IProtocolAgent::getAgentUrlCall::SELECTOR => self.get_agent_url(calldata, storage),
             IProtocolAgent::getAgentPermsCall::SELECTOR => self.get_agent_perms(calldata, storage),
@@ -311,10 +348,8 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompile::{
-        slot_balance, u128_to_u256, ASSET_ADDRESS, StatefulPrecompile,
-    };
     use call_precompile::storage::HashMapStorageProvider;
+    use call_precompile::{slot_balance, u128_to_u256, StatefulPrecompile, ASSET_ADDRESS};
     use call_primitives::Address;
 
     #[test]
@@ -345,18 +380,24 @@ mod tests {
 
         // getAgentOwner(0)
         let input = IProtocolAgent::getAgentOwnerCall { agentId: 0 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         let owner = Address::from_slice(&result.bytes[12..32]);
         assert_eq!(owner, sender);
 
         // getAgentName(0)
         let input = IProtocolAgent::getAgentNameCall { agentId: 0 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(&result.bytes[0..9], b"TestAgent");
 
         // getAgentUrl(0)
         let input = IProtocolAgent::getAgentUrlCall { agentId: 0 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(&result.bytes[0..15], b"http://test.com");
     }
 
@@ -368,11 +409,9 @@ mod tests {
 
         // Seed sender balance
         let sender_slot = slot_balance(crate::CALL_ASSET_ID, sender);
-        provider.sstore(
-            ASSET_ADDRESS,
-            sender_slot,
-            u128_to_u256(10_000),
-        ).unwrap();
+        provider
+            .sstore(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000))
+            .unwrap();
 
         let mut precompile = AgentPrecompile;
 
@@ -401,7 +440,9 @@ mod tests {
             assetId: crate::CALL_ASSET_ID,
         }
         .abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         let bal = u128::from_be_bytes({
             let mut buf = [0u8; 16];
             buf.copy_from_slice(&result.bytes[16..32]);
@@ -426,7 +467,9 @@ mod tests {
             assetId: crate::CALL_ASSET_ID,
         }
         .abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         let bal = u128::from_be_bytes({
             let mut buf = [0u8; 16];
             buf.copy_from_slice(&result.bytes[16..32]);
@@ -449,7 +492,9 @@ mod tests {
             assetId: crate::CALL_ASSET_ID,
         }
         .abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         let bal = u128::from_be_bytes({
             let mut buf = [0u8; 16];
             buf.copy_from_slice(&result.bytes[16..32]);

@@ -12,8 +12,7 @@ pub fn rlp_encode<T: Encodable>(value: &T) -> Vec<u8> {
 
 /// RLP-decode bytes into type T
 pub fn rlp_decode<T: Decodable>(buf: &[u8]) -> Result<T, SerializationError> {
-    T::decode(&mut &buf[..])
-        .map_err(|e| SerializationError::RlpDecode(e.to_string()))
+    T::decode(&mut &buf[..]).map_err(|e| SerializationError::RlpDecode(e.to_string()))
 }
 
 #[cfg(test)]

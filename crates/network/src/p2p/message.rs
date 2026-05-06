@@ -48,7 +48,11 @@ pub struct TransactionMessage {
 impl TransactionMessage {
     pub fn new(data: Vec<u8>, hash: TxHash) -> Self {
         let checksum = crc32_fast(&data);
-        Self { data, hash, checksum }
+        Self {
+            data,
+            hash,
+            checksum,
+        }
     }
 
     /// Verify data integrity

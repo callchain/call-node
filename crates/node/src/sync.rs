@@ -2,16 +2,19 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::persist_block;
 use call_consensus::{Block, SimplexConsensus};
-use call_primitives::BlockHash;
 use call_network::SyncResponse;
+use call_primitives::BlockHash;
 use call_primitives::FeeCurrency;
 use call_protocol::ProtocolReceipt;
 use call_rpc::RpcState;
 use reth_db::DatabaseEnv;
-use crate::persist_block;
 
-pub(crate) fn handle_sync_request(db_env: &Arc<DatabaseEnv>, request: &call_network::SyncRequest) -> Option<SyncResponse> {
+pub(crate) fn handle_sync_request(
+    db_env: &Arc<DatabaseEnv>,
+    request: &call_network::SyncRequest,
+) -> Option<SyncResponse> {
     let mut blocks = Vec::new();
     let end = request.start_height.saturating_add(request.count);
     for h in request.start_height..end {
@@ -30,10 +33,13 @@ pub(crate) fn handle_sync_request(db_env: &Arc<DatabaseEnv>, request: &call_netw
     if blocks.is_empty() {
         return None;
     }
-    let state_root = blocks.last().and_then(|b| {
-        let block: Block = serde_json::from_slice(b).ok()?;
-        Some(block.header.state_root)
-    }).unwrap_or(BlockHash::ZERO);
+    let state_root = blocks
+        .last()
+        .and_then(|b| {
+            let block: Block = serde_json::from_slice(b).ok()?;
+            Some(block.header.state_root)
+        })
+        .unwrap_or(BlockHash::ZERO);
     Some(SyncResponse {
         start_height: request.start_height,
         blocks,
@@ -133,7 +139,9 @@ pub(crate) fn apply_synced_blocks(
                     drop(fee_params);
                     let total_gas = result.evm_gas_used;
                     let gas_used_ratio = (total_gas as f64 / max_gas as f64).min(1.0);
-                    let mut evm_priority_fees: Vec<u128> = result.evm_tx_results.iter()
+                    let mut evm_priority_fees: Vec<u128> = result
+                        .evm_tx_results
+                        .iter()
                         .map(|e| e.gas_price.saturating_sub(base_fee))
                         .collect();
                     evm_priority_fees.sort_unstable();
@@ -143,7 +151,10 @@ pub(crate) fn apply_synced_blocks(
                         .map(|p| {
                             let p = (*p as f64).min(100.0).max(0.0);
                             let idx = ((n - 1) as f64 * p / 100.0).round() as usize;
-                            evm_priority_fees.get(idx.min(n - 1)).copied().unwrap_or(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS)
+                            evm_priority_fees
+                                .get(idx.min(n - 1))
+                                .copied()
+                                .unwrap_or(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS)
                         })
                         .collect();
                     let entry = call_rpc::handlers::BlockFeeEntry {
@@ -199,7 +210,11 @@ pub(crate) fn apply_synced_blocks(
                 }
 
                 // Broadcast ETH WebSocket events
-                let gas_used: u64 = result.evm_tx_results.iter().map(|e| e.gas_used).sum::<u64>();
+                let gas_used: u64 = result
+                    .evm_tx_results
+                    .iter()
+                    .map(|e| e.gas_used)
+                    .sum::<u64>();
                 let base_fee = state.fee_params.read().map(|p| p.base_fee).unwrap_or(0);
                 state.subscriptions.broadcast_eth_new_head(serde_json::json!({
                     "hash": format!("0x{}", hex::encode(block_hash.as_slice())),
@@ -242,7 +257,8 @@ pub(crate) fn apply_synced_blocks(
                     if let Err(e) = c.commit_block(&block, &result) {
                         tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
                     }
-                    let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                    let mut provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
                     c.advance_round(&mut provider);
                     if let Err(e) = provider.save_to_db(&state.db_env) {
                         tracing::warn!(error = ?e, "sync: failed to save provider after epoch churn");
@@ -278,7 +294,9 @@ pub(crate) fn apply_synced_blocks(
                 new_height,
                 "sync: crossed epoch boundary, requesting engine restart"
             );
-            state.engine_restart_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .engine_restart_signal
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

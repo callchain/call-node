@@ -6,8 +6,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Full node configuration — loaded from TOML file, overridden by CLI.
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct NodeConfig {
     #[serde(default)]
     pub mode: NodeMode,
@@ -33,9 +32,7 @@ pub struct NodeConfig {
     pub governance: GovernanceConfig,
 }
 
-
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct GovernanceConfig {
     #[serde(default)]
     pub require_auth: bool,
@@ -74,16 +71,16 @@ pub struct KeysConfig {
     pub vault_key_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct GenesisConfig {
     #[serde(default = "GenesisConfig::default_path")]
     pub path: Option<PathBuf>,
 }
 
-
 impl GenesisConfig {
-    fn default_path() -> Option<PathBuf> { None }
+    fn default_path() -> Option<PathBuf> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,7 +114,9 @@ impl P2pConfig {
     fn default_listen_addr() -> SocketAddr {
         "0.0.0.0:51235".parse().unwrap()
     }
-    fn default_max_peers() -> u32 { 50 }
+    fn default_max_peers() -> u32 {
+        50
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,10 +160,18 @@ impl Default for RpcConfig {
 }
 
 impl RpcConfig {
-    fn default_http_addr() -> SocketAddr { "127.0.0.1:8545".parse().unwrap() }
-    fn default_ws_addr() -> SocketAddr { "127.0.0.1:8546".parse().unwrap() }
-    fn default_max_connections() -> u32 { 100 }
-    fn default_rate_limit_window_secs() -> u64 { 60 }
+    fn default_http_addr() -> SocketAddr {
+        "127.0.0.1:8545".parse().unwrap()
+    }
+    fn default_ws_addr() -> SocketAddr {
+        "127.0.0.1:8546".parse().unwrap()
+    }
+    fn default_max_connections() -> u32 {
+        100
+    }
+    fn default_rate_limit_window_secs() -> u64 {
+        60
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -195,8 +202,12 @@ impl StorageConfig {
             .map(|d| d.join(".callchain"))
             .unwrap_or_else(|| PathBuf::from(".callchain"))
     }
-    fn default_cache_size() -> u64 { 1024 }
-    fn default_snapshot_retention() -> u64 { 128 }
+    fn default_cache_size() -> u64 {
+        1024
+    }
+    fn default_snapshot_retention() -> u64 {
+        128
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,7 +225,9 @@ impl Default for MetricsConfig {
 }
 
 impl MetricsConfig {
-    fn default_addr() -> SocketAddr { "0.0.0.0:9090".parse().unwrap() }
+    fn default_addr() -> SocketAddr {
+        "0.0.0.0:9090".parse().unwrap()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -235,8 +248,12 @@ impl Default for LoggingConfig {
 }
 
 impl LoggingConfig {
-    fn default_level() -> String { "info".into() }
-    fn default_format() -> String { "text".into() }
+    fn default_level() -> String {
+        "info".into()
+    }
+    fn default_format() -> String {
+        "text".into()
+    }
 }
 
 // ── Merge: CLI overrides TOML ────────────────────────────────────────
@@ -246,8 +263,7 @@ impl NodeConfig {
     pub fn from_file(path: &PathBuf) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read config file: {e}"))?;
-        toml::from_str(&content)
-            .map_err(|e| format!("failed to parse config file: {e}"))
+        toml::from_str(&content).map_err(|e| format!("failed to parse config file: {e}"))
     }
 
     /// Apply CLI arguments on top of this config (CLI takes priority)
@@ -266,19 +282,27 @@ impl NodeConfig {
             self.keys.validator_key.clone_from(&args.validator_key);
         }
         if args.validator_keystore.is_some() {
-            self.keys.validator_keystore.clone_from(&args.validator_keystore);
+            self.keys
+                .validator_keystore
+                .clone_from(&args.validator_keystore);
         }
         if args.validator_keystore_pass.is_some() {
-            self.keys.validator_keystore_pass.clone_from(&args.validator_keystore_pass);
+            self.keys
+                .validator_keystore_pass
+                .clone_from(&args.validator_keystore_pass);
         }
         if args.identity_key.is_some() {
             self.keys.identity_key.clone_from(&args.identity_key);
         }
         if args.identity_keystore.is_some() {
-            self.keys.identity_keystore.clone_from(&args.identity_keystore);
+            self.keys
+                .identity_keystore
+                .clone_from(&args.identity_keystore);
         }
         if args.identity_keystore_pass.is_some() {
-            self.keys.identity_keystore_pass.clone_from(&args.identity_keystore_pass);
+            self.keys
+                .identity_keystore_pass
+                .clone_from(&args.identity_keystore_pass);
         }
         if args.aws_kms_key_id.is_some() {
             self.keys.aws_kms_key_id.clone_from(&args.aws_kms_key_id);
@@ -303,7 +327,9 @@ impl NodeConfig {
             self.p2p.listen_addr = args.p2p_listen_addr;
         }
         if args.p2p_bootstrap_peers.is_some() {
-            self.p2p.bootstrap_peers.clone_from(&args.p2p_bootstrap_peers);
+            self.p2p
+                .bootstrap_peers
+                .clone_from(&args.p2p_bootstrap_peers);
         }
         if let Some(max_peers) = args.p2p_max_peers {
             self.p2p.max_peers = max_peers;
@@ -369,7 +395,10 @@ impl NodeConfig {
         if self.mode == NodeMode::Validator {
             let key_sources = [
                 ("--validator-key", self.keys.validator_key.is_some()),
-                ("--validator-keystore", self.keys.validator_keystore.is_some()),
+                (
+                    "--validator-keystore",
+                    self.keys.validator_keystore.is_some(),
+                ),
                 ("--aws-kms-key-id", self.keys.aws_kms_key_id.is_some()),
                 ("--vault-addr", self.keys.vault_addr.is_some()),
             ];
@@ -381,7 +410,11 @@ impl NodeConfig {
             if active_sources.len() > 1 {
                 return Err(format!(
                     "provide exactly one key source, got: {}",
-                    active_sources.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
+                    active_sources
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
             if let Some(ref key) = self.keys.validator_key {
@@ -391,7 +424,10 @@ impl NodeConfig {
             }
             if let Some(ref path) = self.keys.validator_keystore {
                 if !path.exists() {
-                    return Err(format!("validator keystore file not found: {}", path.display()));
+                    return Err(format!(
+                        "validator keystore file not found: {}",
+                        path.display()
+                    ));
                 }
             }
             if self.keys.vault_addr.is_some() {
@@ -451,21 +487,36 @@ mod tests {
         let args = CliArgs::parse_from([
             "calld",
             "--validator",
-            "--validator-key", &valid_key(),
-            "--identity-key", &valid_key(),
-            "--genesis-path", "/tmp/genesis.json",
-            "--p2p-listen-addr", "0.0.0.0:6000",
-            "--p2p-bootstrap-peers", "peer1@127.0.0.1:51235",
-            "--p2p-max-peers", "100",
-            "--http-addr", "127.0.0.1:9545",
-            "--ws-addr", "127.0.0.1:9546",
-            "--rpc-max-connections", "200",
-            "--data-dir", "/tmp/callchain",
-            "--db-cache-size", "2048",
-            "--metrics-addr", "0.0.0.0:9091",
-            "--log-level", "debug",
-            "--log-format", "json",
-            "--config", "/tmp/config.toml",
+            "--validator-key",
+            &valid_key(),
+            "--identity-key",
+            &valid_key(),
+            "--genesis-path",
+            "/tmp/genesis.json",
+            "--p2p-listen-addr",
+            "0.0.0.0:6000",
+            "--p2p-bootstrap-peers",
+            "peer1@127.0.0.1:51235",
+            "--p2p-max-peers",
+            "100",
+            "--http-addr",
+            "127.0.0.1:9545",
+            "--ws-addr",
+            "127.0.0.1:9546",
+            "--rpc-max-connections",
+            "200",
+            "--data-dir",
+            "/tmp/callchain",
+            "--db-cache-size",
+            "2048",
+            "--metrics-addr",
+            "0.0.0.0:9091",
+            "--log-level",
+            "debug",
+            "--log-format",
+            "json",
+            "--config",
+            "/tmp/config.toml",
         ]);
 
         assert!(args.validator);
@@ -473,7 +524,10 @@ mod tests {
         assert_eq!(args.identity_key, Some(valid_key()));
         assert_eq!(args.genesis_path, Some(PathBuf::from("/tmp/genesis.json")));
         assert_eq!(args.p2p_listen_addr, "0.0.0.0:6000".parse().unwrap());
-        assert_eq!(args.p2p_bootstrap_peers, Some("peer1@127.0.0.1:51235".into()));
+        assert_eq!(
+            args.p2p_bootstrap_peers,
+            Some("peer1@127.0.0.1:51235".into())
+        );
         assert_eq!(args.p2p_max_peers, Some(100));
         assert_eq!(args.http_addr, "127.0.0.1:9545".parse().unwrap());
         assert_eq!(args.ws_addr, "127.0.0.1:9546".parse().unwrap());
@@ -530,9 +584,15 @@ format = "json"
         assert_eq!(config.mode, NodeMode::Validator);
         assert!(config.keys.validator_key.is_some());
         assert!(config.keys.identity_key.is_some());
-        assert_eq!(config.genesis.path, Some(PathBuf::from("/tmp/genesis.json")));
+        assert_eq!(
+            config.genesis.path,
+            Some(PathBuf::from("/tmp/genesis.json"))
+        );
         assert_eq!(config.p2p.listen_addr, "0.0.0.0:6000".parse().unwrap());
-        assert_eq!(config.p2p.bootstrap_peers, Some("peer1@127.0.0.1:51235".into()));
+        assert_eq!(
+            config.p2p.bootstrap_peers,
+            Some("peer1@127.0.0.1:51235".into())
+        );
         assert_eq!(config.p2p.max_peers, 100);
         assert_eq!(config.p2p.allow_private_ips, Some(true));
         assert_eq!(config.rpc.http_addr, "127.0.0.1:9545".parse().unwrap());
@@ -567,9 +627,12 @@ level = "warn"
         // CLI with different values
         let args = CliArgs::parse_from([
             "calld",
-            "--p2p-listen-addr", "0.0.0.0:7000",
-            "--http-addr", "127.0.0.1:18545",
-            "--log-level", "trace",
+            "--p2p-listen-addr",
+            "0.0.0.0:7000",
+            "--http-addr",
+            "127.0.0.1:18545",
+            "--log-level",
+            "trace",
         ]);
 
         let config = base.merge_from_cli(&args);
@@ -591,8 +654,10 @@ level = "warn"
 
         let config = NodeConfig::default().merge_from_cli(&CliArgs::parse_from([
             "calld",
-            "--data-dir", data_dir.to_str().unwrap(),
-            "--log-level", "warn",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--log-level",
+            "warn",
         ]));
 
         // Fresh DB should not have blocks directory
@@ -616,8 +681,10 @@ level = "warn"
 
         let config = NodeConfig::default().merge_from_cli(&CliArgs::parse_from([
             "calld",
-            "--data-dir", data_dir.to_str().unwrap(),
-            "--log-level", "warn",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--log-level",
+            "warn",
         ]));
 
         // Existing data should be detected

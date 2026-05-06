@@ -3,6 +3,8 @@
 //! Used by domain precompiles (e.g. `call-asset::AssetStorage`) to delegate
 //! business-logic storage operations to the live EVM state.
 
+#![allow(unsafe_code)]
+
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
 
@@ -35,6 +37,7 @@ impl JournalBackend {
         Self { ptr, vtable }
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn as_mut(&self) -> &mut dyn StorageProvider {
         let fat: *mut dyn StorageProvider = unsafe { std::mem::transmute((self.ptr, self.vtable)) };
         unsafe { &mut *fat }

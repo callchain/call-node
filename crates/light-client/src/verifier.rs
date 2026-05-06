@@ -39,7 +39,11 @@ pub fn compact_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
         (nibbles[0] << 4) | type_low
     } else {
         // Even: type in high nibble (0x00=ext, 0x20=leaf), no nibble in prefix
-        if is_leaf { 0x20 } else { 0x00 }
+        if is_leaf {
+            0x20
+        } else {
+            0x00
+        }
     };
     let mut out = Vec::with_capacity(1 + nibbles.len() / 2 + 1);
     out.push(first_byte);
@@ -75,23 +79,23 @@ fn compact_decode(data: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
         // Even-length key
         has_odd = false;
         is_leaf = match high {
-            0 => false,  // even extension
-            2 => true,   // even leaf
+            0 => false, // even extension
+            2 => true,  // even leaf
             _ => return Err(MptError::InvalidNode),
         };
     } else {
         // Odd-length key: type in low nibble (1=ext, 3=leaf)
         has_odd = true;
         is_leaf = match low {
-            1 => false,  // odd extension
-            3 => true,   // odd leaf
+            1 => false, // odd extension
+            3 => true,  // odd leaf
             _ => return Err(MptError::InvalidNode),
         };
     }
 
     let mut nibbles = Vec::with_capacity(data.len() * 2);
     if has_odd {
-        nibbles.push(high);  // first nibble in high nibble
+        nibbles.push(high); // first nibble in high nibble
     }
     for &byte in &data[1..] {
         nibbles.push(byte >> 4);
@@ -221,7 +225,10 @@ pub(crate) fn rlp_encode_short_bytes(data: &[u8]) -> Vec<u8> {
     } else {
         // Long string encoding
         let len_bytes = data.len().to_be_bytes();
-        let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+        let skip = len_bytes
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(len_bytes.len());
         let num_len_bytes = len_bytes.len() - skip;
         let mut out = Vec::with_capacity(1 + num_len_bytes + data.len());
         out.push(0xB7 + num_len_bytes as u8);
@@ -241,7 +248,10 @@ fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
     } else {
         // Long list encoding: 0xF7 + num_length_bytes + length_be_bytes + payload
         let len_bytes = total_len.to_be_bytes();
-        let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+        let skip = len_bytes
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(len_bytes.len());
         let num_len_bytes = len_bytes.len() - skip;
         out.push(0xF7 + num_len_bytes as u8);
         out.extend_from_slice(&len_bytes[skip..]);
@@ -300,7 +310,7 @@ pub fn verify_mpt_proof(
                     // Extension
                     if remaining.starts_with(&node_key) {
                         remaining = &remaining[node_key.len()..];
-                        expected_hash = extract_child_ref(items[1])?;
+                        expected_hash = extract_child_ref(items[1]);
                     } else {
                         return Ok(None);
                     }
@@ -322,7 +332,7 @@ pub fn verify_mpt_proof(
                 if child_ref.is_empty() || (child_ref.len() == 1 && child_ref[0] == 0x80) {
                     return Ok(None); // empty child
                 }
-                expected_hash = extract_child_ref(child_ref)?;
+                expected_hash = extract_child_ref(child_ref);
             }
             _ => return Err(MptError::InvalidNode),
         }
@@ -336,17 +346,17 @@ pub fn verify_mpt_proof(
 /// If the field is a 32-byte raw hash, return it directly.
 /// If it's an RLP-encoded 32-byte string (0xb8, 0x20, ...), extract the raw hash.
 /// If it's inline RLP (< 32 bytes), hash it to get the reference.
-fn extract_child_ref(data: &[u8]) -> Result<B256, MptError> {
+fn extract_child_ref(data: &[u8]) -> B256 {
     // Case 1: raw 32-byte hash
     if data.len() == 32 {
-        return Ok(B256::from_slice(data));
+        return B256::from_slice(data);
     }
     // Case 2: RLP-encoded 32-byte string (0xb8, 0x20, <32 bytes>)
     if data.len() == 34 && data[0] == 0xb8 && data[1] == 0x20 {
-        return Ok(B256::from_slice(&data[2..34]));
+        return B256::from_slice(&data[2..34]);
     }
     // Case 3: inline RLP — hash the RLP bytes to get the node reference
-    Ok(keccak256(data))
+    keccak256(data)
 }
 
 /// Helper to build an RLP-encoded leaf node for testing.
@@ -368,10 +378,7 @@ pub(crate) fn make_extension_node_rlp(key_nibbles: &[u8], child_hash: B256) -> V
 
 /// Helper to build an RLP-encoded branch node for testing.
 #[cfg(test)]
-pub(crate) fn make_branch_node_rlp(
-    children: &[Option<B256>; 16],
-    value: Option<&[u8]>,
-) -> Vec<u8> {
+pub(crate) fn make_branch_node_rlp(children: &[Option<B256>; 16], value: Option<&[u8]>) -> Vec<u8> {
     let mut items = Vec::with_capacity(17);
     for i in 0..16 {
         if let Some(hash) = children[i] {

@@ -75,7 +75,12 @@ impl<'a> StateWriteBundle<'a> {
     ) -> Result<BlockExecutionResult, ConsensusError> {
         let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&self.db_env)
             .map_err(|e| ConsensusError::InvalidBlock(format!("db load: {e}")))?;
-        let result = block.execute(&mut provider, &mut self.fee_params, height, Some(&self.db_env))?;
+        let result = block.execute(
+            &mut provider,
+            &mut self.fee_params,
+            height,
+            Some(&self.db_env),
+        )?;
         provider
             .state()
             .save_to_db(&self.db_env)

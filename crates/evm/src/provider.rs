@@ -8,14 +8,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use alloy_primitives::{Address, BlockNumber, StorageKey, StorageValue, B256, U256, Bytes};
+use alloy_primitives::{Address, BlockNumber, Bytes, StorageKey, StorageValue, B256, U256};
 use reth_db::DatabaseEnv;
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_trie::{
-    updates::TrieUpdates,
-    HashedPostState, HashedStorage, MultiProof, MultiProofTargets, StorageMultiProof,
-    StorageProof, TrieInput,
+    updates::TrieUpdates, HashedPostState, HashedStorage, MultiProof, MultiProofTargets,
+    StorageMultiProof, StorageProof, TrieInput,
 };
 use reth_trie_common::AccountProof;
 use revm_database::BundleState;
@@ -26,12 +25,12 @@ use reth_storage_api::{
     StateProviderFactory, StateRootProvider, StorageRootProvider,
 };
 
+use crate::db::load_block_snapshot;
 use crate::state::EvmAccount;
 use crate::trie::{
-    compute_state_root_reth, compute_state_root_with_updates,
-    compute_account_proof, compute_state_multiproof, to_reth_account,
+    compute_account_proof, compute_state_multiproof, compute_state_root_reth,
+    compute_state_root_with_updates, to_reth_account,
 };
-use crate::db::load_block_snapshot;
 
 // ── In-memory StateProvider (production state container) ──────────────
 
@@ -77,8 +76,11 @@ impl InMemoryStateProvider {
                 continue;
             }
             let addr = Address::from_slice(&key);
-            let account: EvmAccount = serde_json::from_slice(&value)
-                .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("deserialize account: {e}"))))?;
+            let account: EvmAccount = serde_json::from_slice(&value).map_err(|e| {
+                ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                    "deserialize account: {e}"
+                )))
+            })?;
             accounts.insert(addr, account);
         }
 
@@ -87,11 +89,15 @@ impl InMemoryStateProvider {
                 continue;
             }
             let addr = Address::from_slice(&key[..20]);
-            let slot_bytes: [u8; 32] = key[20..52].try_into()
-                .map_err(|_| ProviderError::Database(reth_db::DatabaseError::Other("invalid storage key".into())))?;
+            let slot_bytes: [u8; 32] = key[20..52].try_into().map_err(|_| {
+                ProviderError::Database(reth_db::DatabaseError::Other("invalid storage key".into()))
+            })?;
             let slot = U256::from_be_bytes(slot_bytes);
-            let slot_value: U256 = serde_json::from_slice(&value)
-                .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("deserialize storage: {e}"))))?;
+            let slot_value: U256 = serde_json::from_slice(&value).map_err(|e| {
+                ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                    "deserialize storage: {e}"
+                )))
+            })?;
 
             if let Some(acc) = accounts.get_mut(&addr) {
                 acc.storage.insert(slot, slot_value);
@@ -102,8 +108,13 @@ impl InMemoryStateProvider {
     }
 
     /// Persist full state to MDBX.
-    pub fn save_to_db(&self, db: &DatabaseEnv) -> Result<(), revm::database_interface::ErasedError> {
-        use call_storage::reth_db::{db_clear, db_batch_put, CallEvmAccounts, CallEvmStorage, CallBytecodes};
+    pub fn save_to_db(
+        &self,
+        db: &DatabaseEnv,
+    ) -> Result<(), revm::database_interface::ErasedError> {
+        use call_storage::reth_db::{
+            db_batch_put, db_clear, CallBytecodes, CallEvmAccounts, CallEvmStorage,
+        };
 
         db_clear::<CallEvmAccounts>(db).map_err(revm::database_interface::ErasedError::new)?;
         db_clear::<CallEvmStorage>(db).map_err(revm::database_interface::ErasedError::new)?;
@@ -172,7 +183,10 @@ impl InMemoryStateProvider {
     }
 
     pub fn get_balance(&self, address: &Address) -> U256 {
-        self.accounts.get(address).map(|a| a.balance).unwrap_or(U256::ZERO)
+        self.accounts
+            .get(address)
+            .map(|a| a.balance)
+            .unwrap_or(U256::ZERO)
     }
 
     pub fn set_balance(&mut self, address: Address, balance: U256) {
@@ -196,7 +210,11 @@ impl InMemoryStateProvider {
     }
 
     pub fn set_storage(&mut self, address: Address, key: U256, value: U256) {
-        self.accounts.entry(address).or_default().storage.insert(key, value);
+        self.accounts
+            .entry(address)
+            .or_default()
+            .storage
+            .insert(key, value);
     }
 
     pub fn set_code(&mut self, address: Address, code: Bytes) {
@@ -240,8 +258,7 @@ impl InMemoryStateProvider {
 
     /// Compute the Ethereum state trie root.
     pub fn compute_state_root(&self) -> B256 {
-        compute_state_root_reth(self)
-            .expect("reth-trie state root computation should not fail")
+        compute_state_root_reth(self).expect("reth-trie state root computation should not fail")
     }
 
     /// Compute state root and collect trie updates.
@@ -283,9 +300,18 @@ impl core::fmt::Debug for LazyStateProvider {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LazyStateProvider")
             .field("db", &"<DatabaseEnv>")
-            .field("cached_accounts", &self.cache.read().map(|c| c.len()).unwrap_or(0))
-            .field("cached_code_entries", &self.code_cache.read().map(|c| c.len()).unwrap_or(0))
-            .field("block_hashes", &self.block_hashes.read().map(|h| h.len()).unwrap_or(0))
+            .field(
+                "cached_accounts",
+                &self.cache.read().map(|c| c.len()).unwrap_or(0),
+            )
+            .field(
+                "cached_code_entries",
+                &self.code_cache.read().map(|c| c.len()).unwrap_or(0),
+            )
+            .field(
+                "block_hashes",
+                &self.block_hashes.read().map(|h| h.len()).unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -315,23 +341,19 @@ impl LazyStateProvider {
 
         // Load from MDBX
         let key = address.as_slice().to_vec();
-        let account: Option<EvmAccount> =
-            match call_storage::reth_db::db_get::<call_storage::reth_db::CallEvmAccounts>(
-                &self.db,
-                &key,
-            )
-            .map_err(|e| {
-                ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
-            })? {
-                Some(bytes) => Some(
-                    serde_json::from_slice(&bytes).map_err(|e| {
-                        ProviderError::Database(reth_db::DatabaseError::Other(format!(
-                            "deserialize account: {e}"
-                        )))
-                    })?,
-                ),
-                None => None,
-            };
+        let account: Option<EvmAccount> = match call_storage::reth_db::db_get::<
+            call_storage::reth_db::CallEvmAccounts,
+        >(&self.db, &key)
+        .map_err(|e| {
+            ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
+        })? {
+            Some(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
+                ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                    "deserialize account: {e}"
+                )))
+            })?),
+            None => None,
+        };
 
         if let Some(ref acc) = account {
             let mut cache = self.cache.write().map_err(|_| {
@@ -363,19 +385,20 @@ impl LazyStateProvider {
         key.extend_from_slice(address.as_slice());
         key.extend_from_slice(&slot.to_be_bytes::<32>());
 
-        let value: U256 = match call_storage::reth_db::db_get::<
-            call_storage::reth_db::CallEvmStorage,
-        >(&self.db, &key)
-        .map_err(|e| {
-            ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
-        })? {
-            Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                ProviderError::Database(reth_db::DatabaseError::Other(format!(
-                    "deserialize storage: {e}"
-                )))
-            })?,
-            None => U256::ZERO,
-        };
+        let value: U256 =
+            match call_storage::reth_db::db_get::<call_storage::reth_db::CallEvmStorage>(
+                &self.db, &key,
+            )
+            .map_err(|e| {
+                ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
+            })? {
+                Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+                    ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                        "deserialize storage: {e}"
+                    )))
+                })?,
+                None => U256::ZERO,
+            };
 
         // Update cache
         {
@@ -531,9 +554,7 @@ impl reth_revm::database::EvmStateProvider for LazyStateProvider {
             .code_cache
             .read()
             .map_err(|_| {
-                ProviderError::Database(reth_db::DatabaseError::Other(
-                    "code cache poisoned".into(),
-                ))
+                ProviderError::Database(reth_db::DatabaseError::Other("code cache poisoned".into()))
             })?
             .get(code_hash)
             .cloned();
@@ -551,9 +572,7 @@ impl reth_revm::database::EvmStateProvider for LazyStateProvider {
 }
 
 impl BlockHashReader for InMemoryStateProvider {
-    fn block_hash(&self,
-        number: BlockNumber,
-    ) -> ProviderResult<Option<B256>> {
+    fn block_hash(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
         Ok(self.block_hashes.get(&number).copied())
     }
 
@@ -567,18 +586,13 @@ impl BlockHashReader for InMemoryStateProvider {
 }
 
 impl AccountReader for InMemoryStateProvider {
-    fn basic_account(&self,
-        address: &Address,
-    ) -> ProviderResult<Option<Account>> {
+    fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
         Ok(self.accounts.get(address).map(|acc| to_reth_account(acc)))
     }
 }
 
 impl BytecodeReader for InMemoryStateProvider {
-    fn bytecode_by_hash(
-        &self,
-        code_hash: &B256,
-    ) -> ProviderResult<Option<Bytecode>> {
+    fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         for acc in self.accounts.values() {
             let hash = if acc.code.is_empty() {
                 revm::primitives::KECCAK_EMPTY
@@ -604,9 +618,7 @@ impl StateRootProvider for InMemoryStateProvider {
             })
     }
 
-    fn state_root_from_nodes(&self,
-        _input: TrieInput,
-    ) -> ProviderResult<B256> {
+    fn state_root_from_nodes(&self, _input: TrieInput) -> ProviderResult<B256> {
         self.state_root(HashedPostState::default())
     }
 
@@ -614,12 +626,11 @@ impl StateRootProvider for InMemoryStateProvider {
         &self,
         _hashed_state: HashedPostState,
     ) -> ProviderResult<(B256, TrieUpdates)> {
-        compute_state_root_with_updates(self)
-            .map_err(|e| {
-                ProviderError::Database(reth_db::DatabaseError::Other(format!(
-                    "state root error: {e:?}"
-                )))
-            })
+        compute_state_root_with_updates(self).map_err(|e| {
+            ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                "state root error: {e:?}"
+            )))
+        })
     }
 
     fn state_root_from_nodes_with_updates(
@@ -640,9 +651,9 @@ impl StorageRootProvider for InMemoryStateProvider {
         Ok(account.map(|a| a.storage_root()).unwrap_or_else(|| {
             // Ethereum empty trie root
             B256::new([
-                0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6,
-                0x92, 0xc0, 0xf8, 0x6e, 0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0,
-                0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
+                0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0,
+                0xf8, 0x6e, 0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5,
+                0xe3, 0x63, 0xb4, 0x21,
             ])
         }))
     }
@@ -673,8 +684,9 @@ impl StateProofProvider for InMemoryStateProvider {
         address: Address,
         slots: &[B256],
     ) -> ProviderResult<AccountProof> {
-        compute_account_proof(self, address, slots)
-            .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("proof error: {e:?}"))))
+        compute_account_proof(self, address, slots).map_err(|e| {
+            ProviderError::Database(reth_db::DatabaseError::Other(format!("proof error: {e:?}")))
+        })
     }
 
     fn multiproof(
@@ -682,8 +694,11 @@ impl StateProofProvider for InMemoryStateProvider {
         _input: TrieInput,
         targets: MultiProofTargets,
     ) -> ProviderResult<MultiProof> {
-        compute_state_multiproof(self, targets)
-            .map_err(|e| ProviderError::Database(reth_db::DatabaseError::Other(format!("multiproof error: {e:?}"))))
+        compute_state_multiproof(self, targets).map_err(|e| {
+            ProviderError::Database(reth_db::DatabaseError::Other(format!(
+                "multiproof error: {e:?}"
+            )))
+        })
     }
 
     fn witness(
@@ -696,9 +711,7 @@ impl StateProofProvider for InMemoryStateProvider {
 }
 
 impl HashedPostStateProvider for InMemoryStateProvider {
-    fn hashed_post_state(&self,
-        bundle_state: &BundleState,
-    ) -> HashedPostState {
+    fn hashed_post_state(&self, bundle_state: &BundleState) -> HashedPostState {
         crate::trie::hashed_post_state_from_bundle_state(bundle_state)
     }
 }
@@ -810,26 +823,21 @@ impl BlockNumReader for CallchainStateProviderFactory {
 }
 
 impl BlockIdReader for CallchainStateProviderFactory {
-    fn pending_block_num_hash(&self,
-    ) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
+    fn pending_block_num_hash(&self) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
         Ok(None)
     }
 
-    fn safe_block_num_hash(&self,
-    ) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
+    fn safe_block_num_hash(&self) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
         Ok(None)
     }
 
-    fn finalized_block_num_hash(
-        &self,
-    ) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
+    fn finalized_block_num_hash(&self) -> ProviderResult<Option<alloy_eips::BlockNumHash>> {
         Ok(None)
     }
 }
 
 impl StateProviderFactory for CallchainStateProviderFactory {
-    fn latest(&self,
-    ) -> ProviderResult<StateProviderBox> {
+    fn latest(&self) -> ProviderResult<StateProviderBox> {
         let provider = InMemoryStateProvider::from_db(&self.db)?;
         Ok(Box::new(provider))
     }
@@ -843,19 +851,14 @@ impl StateProviderFactory for CallchainStateProviderFactory {
                 let provider = provider.with_block_hashes(HashMap::new());
                 Ok(Box::new(provider))
             }
-            Ok(None) => {
-                self.latest()
-            }
+            Ok(None) => self.latest(),
             Err(e) => Err(ProviderError::Database(reth_db::DatabaseError::Other(
-                format!("snapshot load error: {e:?}")
+                format!("snapshot load error: {e:?}"),
             ))),
         }
     }
 
-    fn history_by_block_hash(
-        &self,
-        _block_hash: B256,
-    ) -> ProviderResult<StateProviderBox> {
+    fn history_by_block_hash(&self, _block_hash: B256) -> ProviderResult<StateProviderBox> {
         self.latest()
     }
 
@@ -903,9 +906,9 @@ impl StorageRoot for EvmAccount {
     fn storage_root(&self) -> B256 {
         if self.storage.is_empty() {
             return B256::new([
-                0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6,
-                0x92, 0xc0, 0xf8, 0x6e, 0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0,
-                0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
+                0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0,
+                0xf8, 0x6e, 0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5,
+                0xe3, 0x63, 0xb4, 0x21,
             ]);
         }
         let mut hb = alloy_trie::HashBuilder::default();
@@ -946,7 +949,9 @@ mod tests {
         assert_eq!(acc.balance, U256::from(1000));
         assert_eq!(acc.nonce, 1);
 
-        let storage = provider.storage(test_addr(1), U256::from(42).into()).unwrap();
+        let storage = provider
+            .storage(test_addr(1), U256::from(42).into())
+            .unwrap();
         assert_eq!(storage, Some(U256::from(123)));
 
         assert!(provider.basic_account(&test_addr(0xFF)).unwrap().is_none());
@@ -964,10 +969,8 @@ mod tests {
 
     #[test]
     fn test_factory_latest() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-provider-factory-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-provider-factory-test-{}", std::process::id()));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         let mut provider = InMemoryStateProvider::new();
@@ -986,10 +989,8 @@ mod tests {
 
     #[test]
     fn test_factory_history_by_block_number() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-provider-history-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-provider-history-test-{}", std::process::id()));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         let mut snapshot = InMemoryStateProvider::new();
@@ -1008,11 +1009,15 @@ mod tests {
         let latest_acc = latest.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(latest_acc.balance, U256::from(1111));
 
-        let hist = factory.history_by_block_number(5).expect("historical provider");
+        let hist = factory
+            .history_by_block_number(5)
+            .expect("historical provider");
         let hist_acc = hist.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(hist_acc.balance, U256::from(7777));
 
-        let missing = factory.history_by_block_number(99).expect("fallback provider");
+        let missing = factory
+            .history_by_block_number(99)
+            .expect("fallback provider");
         let missing_acc = missing.basic_account(&test_addr(1)).unwrap().unwrap();
         assert_eq!(missing_acc.balance, U256::from(1111));
 
@@ -1021,10 +1026,8 @@ mod tests {
 
     #[test]
     fn test_lazy_provider_reads_from_db() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-lazy-provider-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-lazy-provider-test-{}", std::process::id()));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         // Seed MDBX with state via InMemoryStateProvider
@@ -1033,7 +1036,10 @@ mod tests {
         seed.create_account(test_addr(1));
         seed.increment_nonce(test_addr(1));
         seed.set_storage(test_addr(1), U256::from(42), U256::from(123));
-        seed.set_code(test_addr(2), Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0x55]));
+        seed.set_code(
+            test_addr(2),
+            Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0x55]),
+        );
         seed.save_to_db(&db).expect("seed");
 
         // Create lazy provider — should NOT load full state
@@ -1042,7 +1048,10 @@ mod tests {
         // On-demand reads
         assert_eq!(lazy.get_balance(&test_addr(1)), U256::from(5000));
         assert_eq!(lazy.get_nonce(&test_addr(1)), 1);
-        assert_eq!(lazy.get_storage(&test_addr(1), U256::from(42)), U256::from(123));
+        assert_eq!(
+            lazy.get_storage(&test_addr(1), U256::from(42)),
+            U256::from(123)
+        );
         assert_eq!(
             lazy.get_code(&test_addr(2)),
             Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0x55])
@@ -1077,17 +1086,14 @@ mod tests {
         let lazy = LazyStateProvider::new(db);
 
         // Test EvmStateProvider trait methods
-        let acc = reth_revm::database::EvmStateProvider::basic_account(
-            &lazy, &test_addr(1),
-        )
-        .unwrap()
-        .unwrap();
+        let acc = reth_revm::database::EvmStateProvider::basic_account(&lazy, &test_addr(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(acc.balance, U256::from(1000));
 
-        let storage = reth_revm::database::EvmStateProvider::storage(
-            &lazy, test_addr(1), B256::ZERO,
-        )
-        .unwrap();
+        let storage =
+            reth_revm::database::EvmStateProvider::storage(&lazy, test_addr(1), B256::ZERO)
+                .unwrap();
         assert_eq!(storage, Some(U256::ZERO));
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1095,10 +1101,8 @@ mod tests {
 
     #[test]
     fn test_lazy_provider_writes_to_cache() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-lazy-cache-write-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-lazy-cache-write-test-{}", std::process::id()));
         let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
 
         let lazy = LazyStateProvider::new(db);
@@ -1109,7 +1113,10 @@ mod tests {
         lazy.increment_nonce(test_addr(1));
 
         assert_eq!(lazy.get_balance(&test_addr(1)), U256::from(999));
-        assert_eq!(lazy.get_storage(&test_addr(1), U256::from(7)), U256::from(77));
+        assert_eq!(
+            lazy.get_storage(&test_addr(1), U256::from(7)),
+            U256::from(77)
+        );
         assert_eq!(lazy.get_nonce(&test_addr(1)), 1);
 
         let _ = std::fs::remove_dir_all(&tmp);

@@ -3,11 +3,11 @@ pub mod precompile;
 pub use precompile::ValidatorPrecompile;
 
 use call_asset::AssetStorage;
-use call_precompile::{
-    address_to_u256, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
-    u64_to_u256, VALIDATOR_ADDRESS,
-};
 use call_precompile::storage::storage_slot;
+use call_precompile::{
+    address_to_u256, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
+    VALIDATOR_ADDRESS,
+};
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
 
@@ -128,11 +128,17 @@ impl<B: StorageBackend> ValidatorStorage<B> {
     }
 
     pub fn read_validator_by_index(&self, index: u64) -> Address {
-        u256_to_address(self.backend.load(VALIDATOR_ADDRESS, slot_validator_addr(index)))
+        u256_to_address(
+            self.backend
+                .load(VALIDATOR_ADDRESS, slot_validator_addr(index)),
+        )
     }
 
     pub fn read_stake(&self, addr: Address) -> u128 {
-        u256_to_u128(self.backend.load(VALIDATOR_ADDRESS, slot_validator_stake(addr)))
+        u256_to_u128(
+            self.backend
+                .load(VALIDATOR_ADDRESS, slot_validator_stake(addr)),
+        )
     }
 
     pub fn read_status(&self, addr: Address) -> u8 {
@@ -275,6 +281,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         Ok(())
     }
 
+    #[allow(clippy::expect_used)]
     pub fn claim_unbonded(
         &mut self,
         asset_store: &mut AssetStorage<B>,
@@ -309,9 +316,9 @@ impl<B: StorageBackend> ValidatorStorage<B> {
                 .backend
                 .load(VALIDATOR_ADDRESS, slot_unbonding(i))
                 .to_be_bytes::<32>();
-            let entry_id = u64::from_be_bytes(packed[8..16].try_into().unwrap());
+            let entry_id = u64::from_be_bytes(packed[8..16].try_into().expect("fixed slice"));
             if entry_id == stored_id {
-                amount = u128::from_be_bytes(packed[16..32].try_into().unwrap());
+                amount = u128::from_be_bytes(packed[16..32].try_into().expect("fixed slice"));
                 found_idx = Some(i);
                 break;
             }
@@ -392,12 +399,21 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             call_precompile::slot_validator_by_addr(validator),
             U256::ZERO,
         );
-        self.backend
-            .store(VALIDATOR_ADDRESS, slot_validator_stake(validator), U256::ZERO);
-        self.backend
-            .store(VALIDATOR_ADDRESS, slot_validator_status(validator), U256::ZERO);
-        self.backend
-            .store(VALIDATOR_ADDRESS, slot_validator_pubkey(validator), U256::ZERO);
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_validator_stake(validator),
+            U256::ZERO,
+        );
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_validator_status(validator),
+            U256::ZERO,
+        );
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_validator_pubkey(validator),
+            U256::ZERO,
+        );
         self.backend.store(
             VALIDATOR_ADDRESS,
             slot_validator_unbond_height(validator),
@@ -412,10 +428,10 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 mod tests {
     use super::*;
     use call_asset::AssetStorage;
+    use call_precompile::storage::{HashMapStorageProvider, StorageProvider};
     use call_precompile::{
         journal_backend::JournalBackend, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
     };
-    use call_precompile::storage::{HashMapStorageProvider, StorageProvider};
     use call_primitives::Address;
 
     fn test_addr(n: u8) -> Address {
@@ -424,7 +440,11 @@ mod tests {
 
     fn seed_balance(provider: &mut HashMapStorageProvider, addr: Address, amount: u128) {
         provider
-            .sstore(ASSET_ADDRESS, slot_balance(CALL_ASSET_ID, addr), u128_to_u256(amount))
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, addr),
+                u128_to_u256(amount),
+            )
             .unwrap();
     }
 
@@ -440,12 +460,7 @@ mod tests {
         let mut asset_store = AssetStorage::new(backend);
         let mut validator_store = ValidatorStorage::new(backend);
 
-        let result = validator_store.stake(
-            &mut asset_store,
-            [0xAAu8; 32],
-            5_000_000,
-            caller,
-        );
+        let result = validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller);
         assert!(result.is_ok(), "stake failed: {:?}", result.err());
 
         assert_eq!(validator_store.read_stake(caller), 5_000_000);
@@ -493,12 +508,7 @@ mod tests {
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
             .unwrap();
 
-        let result = validator_store.stake(
-            &mut asset_store,
-            [0xBBu8; 32],
-            5_000_000,
-            caller,
-        );
+        let result = validator_store.stake(&mut asset_store, [0xBBu8; 32], 5_000_000, caller);
         assert!(
             matches!(result, Err(ValidatorError::AlreadyStaked)),
             "expected AlreadyStaked, got {:?}",
@@ -516,12 +526,7 @@ mod tests {
         let mut asset_store = AssetStorage::new(backend);
         let mut validator_store = ValidatorStorage::new(backend);
 
-        let result = validator_store.stake(
-            &mut asset_store,
-            [0xAAu8; 32],
-            5_000_000,
-            caller,
-        );
+        let result = validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller);
         assert!(
             matches!(result, Err(ValidatorError::InsufficientBalance)),
             "expected InsufficientBalance, got {:?}",

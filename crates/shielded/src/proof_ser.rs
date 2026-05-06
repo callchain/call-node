@@ -26,19 +26,26 @@ pub fn serialize_groth16_proof(proof: Proof<Bn254>) -> Vec<u8> {
     let mut buf = Vec::with_capacity(GROTH16_PROOF_SIZE);
 
     // Serialize proof_a (G1Affine, compressed)
-    proof_a_compressed(&proof).serialize_compressed(&mut buf)
+    proof_a_compressed(&proof)
+        .serialize_compressed(&mut buf)
         .expect("G1 serialization failed");
 
     // Serialize proof_b (G2Affine, compressed)
-    proof_b_compressed(&proof).serialize_compressed(&mut buf)
+    proof_b_compressed(&proof)
+        .serialize_compressed(&mut buf)
         .expect("G2 serialization failed");
 
     // Serialize proof_c (G1Affine, compressed)
-    proof_c_compressed(&proof).serialize_compressed(&mut buf)
+    proof_c_compressed(&proof)
+        .serialize_compressed(&mut buf)
         .expect("G1 serialization failed");
 
-    debug_assert_eq!(buf.len(), GROTH16_PROOF_SIZE,
-        "expected {GROTH16_PROOF_SIZE} bytes, got {}", buf.len());
+    debug_assert_eq!(
+        buf.len(),
+        GROTH16_PROOF_SIZE,
+        "expected {GROTH16_PROOF_SIZE} bytes, got {}",
+        buf.len()
+    );
 
     buf
 }
@@ -67,7 +74,11 @@ pub fn deserialize_groth16_proof(data: &[u8]) -> Result<Proof<Bn254>, ProofDeser
     let proof_c = G1Affine::deserialize_compressed(&data[96..128])
         .map_err(|_| ProofDeserializeError::InvalidPoint("proof_c"))?;
 
-    Ok(Proof { a: proof_a, b: proof_b, c: proof_c })
+    Ok(Proof {
+        a: proof_a,
+        b: proof_b,
+        c: proof_c,
+    })
 }
 
 /// Encode public inputs as Fr bytes appended after the proof.
@@ -87,7 +98,9 @@ pub fn append_public_inputs(proof_data: &[u8], public_inputs: &[ark_bn254::Fr]) 
 /// Extract public inputs from a proof buffer that was built with [`append_public_inputs`].
 ///
 /// Returns `(proof_bytes, public_inputs)` where proof_bytes is the first 128 bytes.
-pub fn extract_public_inputs(data: &[u8]) -> Result<(&[u8], Vec<ark_bn254::Fr>), ProofDeserializeError> {
+pub fn extract_public_inputs(
+    data: &[u8],
+) -> Result<(&[u8], Vec<ark_bn254::Fr>), ProofDeserializeError> {
     if data.len() < GROTH16_PROOF_SIZE {
         return Err(ProofDeserializeError::TooShort {
             expected: GROTH16_PROOF_SIZE,
@@ -146,12 +159,12 @@ pub enum ProofDeserializeError {
 #[cfg(all(test, feature = "real-prover"))]
 mod tests {
     use super::*;
+    use ark_bn254::Fr;
     use ark_groth16::Groth16;
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+    use ark_snark::SNARK;
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::SeedableRng;
-    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-    use ark_bn254::Fr;
-    use ark_snark::SNARK;
 
     /// Tiny test circuit with 3 public inputs.
     #[derive(Debug, Clone)]
@@ -206,13 +219,19 @@ mod tests {
     #[test]
     fn test_deserialize_too_short() {
         let result = deserialize_groth16_proof(&[0u8; 64]);
-        assert!(matches!(result, Err(ProofDeserializeError::TooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(ProofDeserializeError::TooShort { .. })
+        ));
     }
 
     #[test]
     fn test_deserialize_empty() {
         let result = deserialize_groth16_proof(&[]);
-        assert!(matches!(result, Err(ProofDeserializeError::TooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(ProofDeserializeError::TooShort { .. })
+        ));
     }
 
     #[test]
@@ -247,7 +266,10 @@ mod tests {
     #[test]
     fn test_extract_public_inputs_too_short() {
         let result = extract_public_inputs(&[0u8; 50]);
-        assert!(matches!(result, Err(ProofDeserializeError::TooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(ProofDeserializeError::TooShort { .. })
+        ));
     }
 
     #[test]

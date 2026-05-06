@@ -120,7 +120,8 @@ impl AuditLog {
 
         while current_level.len() > 1 {
             let next_level = Vec::with_capacity(current_level.len().div_ceil(2));
-            let mut next_paths: Vec<Vec<(Hash, bool)>> = vec![Vec::new(); current_level.len().div_ceil(2)];
+            let mut next_paths: Vec<Vec<(Hash, bool)>> =
+                vec![Vec::new(); current_level.len().div_ceil(2)];
 
             for (i, chunk) in current_level.chunks(2).enumerate() {
                 let (_parent, _sibling_left) = match chunk {

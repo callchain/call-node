@@ -1,9 +1,9 @@
 //! External bridge withdrawal and signing logic.
 
+use crate::external::types::{bridge_event_hash, ExternalChain};
 use alloy_primitives::{Address, B256};
-use call_primitives::{AssetId, Signature};
 use call_crypto::secp256k1_sign;
-use crate::external::types::{ExternalChain, bridge_event_hash};
+use call_primitives::{AssetId, Signature};
 
 /// Sign a bridge event as a validator (per spec §5.6.2)
 ///

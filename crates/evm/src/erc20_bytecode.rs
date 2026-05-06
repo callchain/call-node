@@ -48,9 +48,7 @@ pub fn build_erc20_init_code(
     let symbol_offset: u32 = name_offset + 32 + ((name_len as u32 + 31) / 32) * 32;
 
     let init = init_bytecode();
-    let mut encoded = Vec::with_capacity(
-        init.len() + 224 + 64 + name_len + symbol_len + 64,
-    );
+    let mut encoded = Vec::with_capacity(init.len() + 224 + 64 + name_len + symbol_len + 64);
 
     // Init code
     encoded.extend_from_slice(&init);

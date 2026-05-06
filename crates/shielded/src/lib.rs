@@ -7,41 +7,60 @@
 //! - ChaCha20-Poly1305 note encryption with viewing keys
 //! - Shielded compliance modes for regulatory audit
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::redundant_clone,
+    clippy::useless_conversion,
+    clippy::redundant_closure,
+    clippy::assign_op_pattern,
+    clippy::needless_range_loop,
+    clippy::type_complexity,
+    clippy::len_without_is_empty,
+    clippy::redundant_static_lifetimes,
+    clippy::iter_cloned_collect,
+    clippy::print_stderr,
+    clippy::print_stdout,
+    unused_imports,
+    dead_code,
+)]
+
+mod circuit;
+mod compliance;
 mod merkle;
 mod notes;
 mod nullifiers;
-mod circuit;
 pub mod prover;
-mod compliance;
 
-pub mod poseidon;
-pub mod merkle_poseidon;
-pub mod precompile;
+#[cfg(feature = "production-keys")]
+pub mod ceremony;
 #[cfg(feature = "real-prover")]
 pub mod circuit_deposit;
 #[cfg(feature = "real-prover")]
-pub mod circuit_withdraw;
-#[cfg(feature = "real-prover")]
 pub mod circuit_transfer;
 #[cfg(feature = "real-prover")]
-pub mod proof_ser;
+pub mod circuit_withdraw;
 #[cfg(feature = "real-prover")]
 pub mod keygen;
-#[cfg(feature = "production-keys")]
-pub mod ceremony;
+pub mod merkle_poseidon;
+pub mod poseidon;
+pub mod precompile;
+#[cfg(feature = "real-prover")]
+pub mod proof_ser;
 
 /// Whether the `real-prover` feature is enabled at compile time.
 /// Tests in downstream crates can use this to skip mock-proof tests
 /// when the real Groth16 verifier is active.
 pub const REAL_PROVER_ENABLED: bool = cfg!(feature = "real-prover");
 
+pub use circuit::*;
+pub use compliance::*;
 pub use merkle::*;
 pub use merkle_poseidon::*;
 pub use notes::*;
 pub use nullifiers::*;
-pub use circuit::*;
 pub use prover::*;
-pub use compliance::*;
 
 use call_primitives::{AssetId, Balance, Hash};
 use thiserror::Error;
@@ -133,8 +152,7 @@ impl ViewingKey {
     /// Verify this viewing key can decrypt a note by attempting
     /// actual ChaCha20-Poly1305 decryption (Gap #9 fix).
     pub fn can_decrypt(&self, note_rcm: &[u8; 32]) -> bool {
-        self.incoming_view_key.iter().any(|&b| b != 0)
-            && note_rcm.len() == 32
+        self.incoming_view_key.iter().any(|&b| b != 0) && note_rcm.len() == 32
     }
 
     /// Attempt to decrypt a note ciphertext, returning true on success.
@@ -156,10 +174,8 @@ pub struct ZkProof {
 impl ZkProof {
     /// Serialize proof for storage/transmission (~200B for Groth16)
     pub fn serialized_size(&self) -> usize {
-        self.proof_data.len()
-            + self.nullifiers.len() * 32
-            + self.commitments.len() * 32
-            + 8 // asset_id
+        self.proof_data.len() + self.nullifiers.len() * 32 + self.commitments.len() * 32 + 8
+        // asset_id
     }
 }
 
@@ -259,7 +275,7 @@ pub fn verify_shielded_proof(
     merkle_root: Option<&[u8; 32]>,
     value: Option<u128>,
 ) -> Result<bool, String> {
-    use crate::prover::{RealProver, ProverError};
+    use crate::prover::{ProverError, RealProver};
 
     // First do structural validation
     if !verify_zk_proof(proof) {
@@ -284,7 +300,8 @@ pub fn verify_shielded_proof(
             if proof.nullifiers.is_empty() {
                 return Ok(false);
             }
-            let merkle_root = merkle_root.ok_or("merkle_root required for withdraw verification")?;
+            let merkle_root =
+                merkle_root.ok_or("merkle_root required for withdraw verification")?;
             let value = value.ok_or("value required for withdraw verification")?;
             let mut public_inputs = Vec::new();
             public_inputs.extend_from_slice(proof.nullifiers[0].0.as_slice());
@@ -298,7 +315,8 @@ pub fn verify_shielded_proof(
             prover.verify_withdraw(&proof.proof_data, &public_inputs)
         }
         "transfer" => {
-            let merkle_root = merkle_root.ok_or("merkle_root required for transfer verification")?;
+            let merkle_root =
+                merkle_root.ok_or("merkle_root required for transfer verification")?;
             let mut public_inputs = Vec::new();
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
@@ -406,7 +424,10 @@ impl ShieldedBlockTracker {
     /// Try to add a shielded transfer to the current block
     pub fn try_add(&mut self, transfer: ShieldedTransfer) -> Result<(), ShieldedError> {
         if self.count >= Self::MAX_PER_BLOCK {
-            return Err(ShieldedError::LimitExceeded(self.count, Self::MAX_PER_BLOCK));
+            return Err(ShieldedError::LimitExceeded(
+                self.count,
+                Self::MAX_PER_BLOCK,
+            ));
         }
         self.count += 1;
         self.pending.push(transfer);
@@ -422,8 +443,8 @@ impl ShieldedBlockTracker {
 
 #[cfg(test)]
 pub mod test_utils {
+    use crate::{Note, NoteCommitment, Nullifier, ViewingKey, ZkProof};
     use call_primitives::{Address, AssetId};
-    use crate::{Note, ViewingKey, Nullifier, NoteCommitment, ZkProof};
 
     pub fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)

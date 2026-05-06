@@ -3,8 +3,8 @@
 //! Internal withdrawal logic has been moved to EVM-based execution.
 //! All bridge state (limits, pauses, pending deposits) lives in EVM storage.
 
-use alloy_primitives::{Address, U256};
 use crate::BridgeError;
+use alloy_primitives::{Address, U256};
 
 /// Check if there is sufficient EVM balance for a withdrawal.
 pub fn check_withdraw_balance(

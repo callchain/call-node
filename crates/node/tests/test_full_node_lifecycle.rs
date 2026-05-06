@@ -16,7 +16,13 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(_secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> call_evm::EvmTransaction {
+fn make_tx(
+    _secret: &[u8; 32],
+    sender: Address,
+    nonce: u64,
+    to: Address,
+    amount: u128,
+) -> call_evm::EvmTransaction {
     call_evm::EvmTransaction {
         caller: sender,
         nonce,
@@ -39,18 +45,30 @@ async fn test_node_starts_at_genesis() {
 
     // Stake validator so proposer selection works
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), test_addr(1), [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(
+                provider.state_mut(),
+                test_addr(1),
+                [1u8; 32],
+                one_million_call(),
+            )
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Setup balance
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, test_addr(1), 10_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            test_addr(1),
+            10_000,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
@@ -72,20 +90,29 @@ async fn test_node_process_transactions() {
 
     // Stake validator
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     // Seed EVM storage with CALL balance for fees + native balance for gas
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            sender,
+            10_000_000,
         );
-        provider.state_mut().set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
+        provider
+            .state_mut()
+            .set_balance(sender, call_primitives::U256::from(100_000_000_000u128));
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
@@ -113,16 +140,23 @@ async fn test_node_persist_and_recover() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 10_000_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            sender,
+            10_000_000,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
@@ -152,7 +186,10 @@ async fn test_node_persist_and_recover() {
     // Read blocks back and verify
     for block in &node.blocks_produced {
         let height = block.header.height;
-        let path = node.data_dir.join("blocks").join(format!("{height:012}.json"));
+        let path = node
+            .data_dir
+            .join("blocks")
+            .join(format!("{height:012}.json"));
         assert!(path.exists(), "block {height} should exist");
 
         let data = std::fs::read(&path).unwrap();
@@ -169,24 +206,39 @@ async fn test_block_chain_continuity() {
 
     let (secret, sender) = test_keypair();
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let mut consensus = node.consensus.write().unwrap();
-        consensus.stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call()).unwrap();
+        consensus
+            .stake_validator(provider.state_mut(), sender, [1u8; 32], one_million_call())
+            .unwrap();
         consensus.refresh_proposer_subset(provider.state());
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
     {
-        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         call_consensus::exec::state_accessors::seed_balance(
-            provider.state_mut(), call_protocol::CALL_ASSET_ID, sender, 100_000,
+            provider.state_mut(),
+            call_protocol::CALL_ASSET_ID,
+            sender,
+            100_000,
         );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
     let mut prev_hash = BlockHash::ZERO;
     for i in 0..10 {
-        node.insert_evm_tx(make_tx(&secret, sender, i as u64, test_addr(10 + i as u8), 100));
-        let block = node.produce_block(1_000_000 + i * 250).expect("produce block");
+        node.insert_evm_tx(make_tx(
+            &secret,
+            sender,
+            i as u64,
+            test_addr(10 + i as u8),
+            100,
+        ));
+        let block = node
+            .produce_block(1_000_000 + i * 250)
+            .expect("produce block");
         assert_eq!(block.header.parent_hash, prev_hash);
         assert_eq!(block.header.height, i);
         prev_hash = block.header.hash();

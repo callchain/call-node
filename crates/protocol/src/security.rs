@@ -74,7 +74,12 @@ impl ReplayProtector {
         // Bound the set size to prevent memory DoS
         if self.seen_hashes.len() > self.max_seen {
             // Remove ~25% of entries when over limit
-            let to_remove: Vec<_> = self.seen_hashes.iter().take(self.max_seen / 4).copied().collect();
+            let to_remove: Vec<_> = self
+                .seen_hashes
+                .iter()
+                .take(self.max_seen / 4)
+                .copied()
+                .collect();
             for h in &to_remove {
                 self.seen_hashes.remove(h);
             }
@@ -268,19 +273,13 @@ mod tests {
         }
 
         // 6th tx should be rate limited
-        let result = defense.validate_tx_submission(
-            Address::repeat_byte(1),
-            TxHash::repeat_byte(5),
-            1000,
-        );
+        let result =
+            defense.validate_tx_submission(Address::repeat_byte(1), TxHash::repeat_byte(5), 1000);
         assert!(matches!(result, Err(SecurityError::RateLimited)));
 
         // New window: tx should pass again
-        let result = defense.validate_tx_submission(
-            Address::repeat_byte(1),
-            TxHash::repeat_byte(6),
-            2001,
-        );
+        let result =
+            defense.validate_tx_submission(Address::repeat_byte(1), TxHash::repeat_byte(6), 2001);
         assert!(result.is_ok());
     }
 
@@ -299,19 +298,13 @@ mod tests {
         }
 
         // 6th should hit saturation
-        let result = defense.validate_tx_submission(
-            Address::repeat_byte(1),
-            TxHash::repeat_byte(5),
-            1006,
-        );
+        let result =
+            defense.validate_tx_submission(Address::repeat_byte(1), TxHash::repeat_byte(5), 1006);
         assert!(matches!(result, Err(SecurityError::AddressSaturation)));
 
         // Different address should still work
-        let result = defense.validate_tx_submission(
-            Address::repeat_byte(2),
-            TxHash::repeat_byte(6),
-            1007,
-        );
+        let result =
+            defense.validate_tx_submission(Address::repeat_byte(2), TxHash::repeat_byte(6), 1007);
         assert!(result.is_ok());
     }
 
@@ -326,11 +319,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Replay should be detected
-        let result = defense.validate_tx_submission(
-            Address::repeat_byte(1),
-            hash,
-            1001,
-        );
+        let result = defense.validate_tx_submission(Address::repeat_byte(1), hash, 1001);
         assert!(matches!(result, Err(SecurityError::ReplayDetected)));
     }
 
@@ -352,14 +341,10 @@ mod tests {
         assert!(matches!(err, SecurityError::PeerRateLimited));
 
         // Different peer should work
-        assert!(p2p
-            .validate_message("peer2".to_string(), 100, 1030)
-            .is_ok());
+        assert!(p2p.validate_message("peer2".to_string(), 100, 1030).is_ok());
 
         // New window for peer1
-        assert!(p2p
-            .validate_message("peer1".to_string(), 100, 2001)
-            .is_ok());
+        assert!(p2p.validate_message("peer1".to_string(), 100, 2001).is_ok());
 
         // Large message should be rejected
         let err = p2p

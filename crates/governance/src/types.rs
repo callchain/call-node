@@ -151,10 +151,21 @@ pub struct EmergencyPauseState {
 /// Drained each block and forwarded to WebSocket subscribers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GovernanceEvent {
-    ProposalAdvanced { id: u64, from: ProposalState, to: ProposalState },
-    ProposalExecuted { id: u64, proposal_type: String },
-    ProposalExpired { id: u64 },
-    ProposalDefeated { id: u64 },
+    ProposalAdvanced {
+        id: u64,
+        from: ProposalState,
+        to: ProposalState,
+    },
+    ProposalExecuted {
+        id: u64,
+        proposal_type: String,
+    },
+    ProposalExpired {
+        id: u64,
+    },
+    ProposalDefeated {
+        id: u64,
+    },
 }
 
 /// A protocol upgrade scheduled by a governance proposal.
@@ -173,4 +184,3 @@ pub struct FeeCurrencyEntry {
     pub oracle_price_key: String,
     pub added_at_block: u64,
 }
-

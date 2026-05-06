@@ -1,10 +1,10 @@
 //! External bridge deposit logic.
 
+use crate::external::types::ExternalBridgeOp;
+use crate::{BridgeConfig, BridgeError};
 use alloy_primitives::{Address, B256};
 use call_primitives::U256;
 use call_protocol::storage_backend::StorageBackend;
-use crate::{BridgeConfig, BridgeError};
-use crate::external::types::ExternalBridgeOp;
 
 /// Result of processing an external deposit.
 #[derive(Debug, Clone)]
@@ -19,7 +19,8 @@ pub enum ExternalDepositResult {
 
 // ── EVM bridge state helpers ──────────────────────────────────────────
 
-const BRIDGE_ADDRESS: alloy_primitives::Address = alloy_primitives::address!("0000000000000000000000000000000000000103");
+const BRIDGE_ADDRESS: alloy_primitives::Address =
+    alloy_primitives::address!("0000000000000000000000000000000000000103");
 
 fn slot_bridge_processed(tx_hash: [u8; 32]) -> U256 {
     call_precompile::storage::storage_slot(&[b"processed", &tx_hash])
@@ -94,22 +95,62 @@ fn seed_bridge_pending<B: StorageBackend>(
     block: u64,
 ) {
     let count = read_bridge_pending_count(backend);
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_hash(count), U256::from_be_slice(&tx_hash));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_count(), call_precompile::u64_to_u256(count + 1));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_status(tx_hash), U256::from(1u8));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_recipient(tx_hash), call_precompile::address_to_u256(recipient));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_asset(tx_hash), call_precompile::u64_to_u256(asset_id));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_amount(tx_hash), call_precompile::u128_to_u256(amount));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_pending_block(tx_hash), call_precompile::u64_to_u256(block));
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_hash(count),
+        U256::from_be_slice(&tx_hash),
+    );
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_count(),
+        call_precompile::u64_to_u256(count + 1),
+    );
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_status(tx_hash),
+        U256::from(1u8),
+    );
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_recipient(tx_hash),
+        call_precompile::address_to_u256(recipient),
+    );
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_asset(tx_hash),
+        call_precompile::u64_to_u256(asset_id),
+    );
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_amount(tx_hash),
+        call_precompile::u128_to_u256(amount),
+    );
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_pending_block(tx_hash),
+        call_precompile::u64_to_u256(block),
+    );
 }
 
 fn seed_bridge_processed<B: StorageBackend>(backend: &mut B, tx_hash: [u8; 32], block_height: u64) {
-    backend.store(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash), call_precompile::u64_to_u256(block_height));
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_processed(tx_hash),
+        call_precompile::u64_to_u256(block_height),
+    );
 }
 
 fn update_bridge_daily<B: StorageBackend>(backend: &mut B, asset_id: u64, used: u128, day: u64) {
-    backend.store(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id), call_precompile::u128_to_u256(used));
-    backend.store(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id), call_precompile::u64_to_u256(day));
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_daily_used(asset_id),
+        call_precompile::u128_to_u256(used),
+    );
+    backend.store(
+        BRIDGE_ADDRESS,
+        slot_bridge_daily_day(asset_id),
+        call_precompile::u64_to_u256(day),
+    );
 }
 
 /// Check and update daily limit using EVM storage.
@@ -130,7 +171,11 @@ fn check_and_update_daily_limit<B: StorageBackend>(
     if used + amount > daily_limit {
         return Err(BridgeError::ExceedsDailyLimit(asset_id, used, daily_limit));
     }
-    let new_day = if current_block >= reset_at + blocks_per_day { current_block } else { reset_at };
+    let new_day = if current_block >= reset_at + blocks_per_day {
+        current_block
+    } else {
+        reset_at
+    };
     update_bridge_daily(backend, asset_id, used + amount, new_day);
     Ok(())
 }
@@ -179,10 +224,21 @@ pub fn process_external_deposit_evm<B: StorageBackend>(
     super::types::verify_bridge_signatures(op, validators, config.min_validator_signatures)?;
 
     if *amount > config.max_per_tx {
-        return Err(BridgeError::ExceedsMaxPerTx(*asset_id, *amount, config.max_per_tx));
+        return Err(BridgeError::ExceedsMaxPerTx(
+            *asset_id,
+            *amount,
+            config.max_per_tx,
+        ));
     }
 
-    check_and_update_daily_limit(backend, *asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
+    check_and_update_daily_limit(
+        backend,
+        *asset_id,
+        *amount,
+        config.daily_limit_per_asset,
+        current_block,
+        config.blocks_per_day,
+    )?;
 
     let fee = config.bridge_fee;
     let net_amount = if fee >= *amount {
@@ -191,7 +247,14 @@ pub fn process_external_deposit_evm<B: StorageBackend>(
         amount - fee
     };
 
-    seed_bridge_pending(backend, **source_tx_hash, *recipient, *asset_id, net_amount, current_block);
+    seed_bridge_pending(
+        backend,
+        **source_tx_hash,
+        *recipient,
+        *asset_id,
+        net_amount,
+        current_block,
+    );
     seed_bridge_processed(backend, **source_tx_hash, current_block);
 
     Ok(ExternalDepositResult::Queued {
@@ -220,16 +283,18 @@ pub fn process_light_client_deposit_evm<B: StorageBackend>(
         amount,
     } = op
     else {
-        return Err(BridgeError::EvmExecutionFailed("not a light client deposit op".into()));
+        return Err(BridgeError::EvmExecutionFailed(
+            "not a light client deposit op".into(),
+        ));
     };
 
     light_client
         .submit_header(header.clone())
         .map_err(|e| BridgeError::MptProofError(e.to_string()))?;
 
-    let block_number = header.number().ok_or_else(|| {
-        BridgeError::MptProofError("header missing block number".into())
-    })?;
+    let block_number = header
+        .number()
+        .ok_or_else(|| BridgeError::MptProofError("header missing block number".into()))?;
 
     let tx_hash = header.block_hash;
     light_client
@@ -263,12 +328,30 @@ pub fn process_light_client_deposit_evm<B: StorageBackend>(
     }
 
     if *amount > config.max_per_tx {
-        return Err(BridgeError::ExceedsMaxPerTx(*asset_id, *amount, config.max_per_tx));
+        return Err(BridgeError::ExceedsMaxPerTx(
+            *asset_id,
+            *amount,
+            config.max_per_tx,
+        ));
     }
 
-    check_and_update_daily_limit(backend, *asset_id, *amount, config.daily_limit_per_asset, current_block, config.blocks_per_day)?;
+    check_and_update_daily_limit(
+        backend,
+        *asset_id,
+        *amount,
+        config.daily_limit_per_asset,
+        current_block,
+        config.blocks_per_day,
+    )?;
 
-    seed_bridge_pending(backend, *source_tx_hash, *recipient, *asset_id, *amount, current_block);
+    seed_bridge_pending(
+        backend,
+        *source_tx_hash,
+        *recipient,
+        *asset_id,
+        *amount,
+        current_block,
+    );
     seed_bridge_processed(backend, *source_tx_hash, current_block);
 
     Ok(ExternalDepositResult::Queued {

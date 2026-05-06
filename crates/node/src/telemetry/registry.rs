@@ -92,7 +92,13 @@ impl TelemetryRegistry {
     }
 
     /// Register or update a metric
-    pub fn register_metric(&self, name: &str, help: &str, r#type: MetricType, samples: Vec<MetricSample>) {
+    pub fn register_metric(
+        &self,
+        name: &str,
+        help: &str,
+        r#type: MetricType,
+        samples: Vec<MetricSample>,
+    ) {
         let mut metrics = self.metrics.write().unwrap();
         metrics.insert(
             name.to_string(),
@@ -107,20 +113,26 @@ impl TelemetryRegistry {
 
     /// Set a gauge metric value
     pub fn set_gauge(&self, name: &str, help: &str, value: f64, labels: HashMap<String, String>) {
-        self.register_metric(name, help, MetricType::Gauge, vec![MetricSample { labels, value }]);
+        self.register_metric(
+            name,
+            help,
+            MetricType::Gauge,
+            vec![MetricSample { labels, value }],
+        );
     }
 
     /// Increment a counter metric
     pub fn increment_counter(&self, name: &str, help: &str) {
         let mut metrics = self.metrics.write().unwrap();
-        let metric = metrics
-            .entry(name.to_string())
-            .or_insert_with(|| Metric {
-                name: name.to_string(),
-                help: help.to_string(),
-                r#type: MetricType::Counter,
-                samples: vec![MetricSample { labels: HashMap::new(), value: 0.0 }],
-            });
+        let metric = metrics.entry(name.to_string()).or_insert_with(|| Metric {
+            name: name.to_string(),
+            help: help.to_string(),
+            r#type: MetricType::Counter,
+            samples: vec![MetricSample {
+                labels: HashMap::new(),
+                value: 0.0,
+            }],
+        });
         if let Some(sample) = metric.samples.first_mut() {
             sample.value += 1.0;
         }
@@ -133,13 +145,15 @@ impl TelemetryRegistry {
 
     /// Record a consensus block produced
     pub fn record_block_produced(&self) {
-        self.consensus_blocks_produced.fetch_add(1, Ordering::Relaxed);
+        self.consensus_blocks_produced
+            .fetch_add(1, Ordering::Relaxed);
         self.consensus_rounds.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a consensus block committed
     pub fn record_block_committed(&self) {
-        self.consensus_blocks_committed.fetch_add(1, Ordering::Relaxed);
+        self.consensus_blocks_committed
+            .fetch_add(1, Ordering::Relaxed);
         *self.last_block_committed_at.write().unwrap() = Some(Instant::now());
     }
 
@@ -156,7 +170,8 @@ impl TelemetryRegistry {
     pub fn set_seconds_since_last_block_for_test(&self, secs: u64) {
         // Store an Instant that is `secs` seconds in the past.
         // Instant doesn't support subtraction, so we use start_time as reference.
-        let past = self.start_time
+        let past = self
+            .start_time
             .checked_sub(Duration::from_secs(secs))
             .unwrap_or_else(|| {
                 // If start_time can't go back that far, use a very old reference.
@@ -182,7 +197,8 @@ impl TelemetryRegistry {
 
     /// Set bridge pending count
     pub fn set_bridge_pending(&self, count: usize) {
-        self.mempool_bridge_pending.store(count as u64, Ordering::Relaxed);
+        self.mempool_bridge_pending
+            .store(count as u64, Ordering::Relaxed);
     }
 
     /// Set P2P peer count
@@ -192,12 +208,14 @@ impl TelemetryRegistry {
 
     /// Record bytes sent over P2P
     pub fn record_p2p_bytes_sent(&self, bytes: usize) {
-        self.p2p_bytes_sent.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.p2p_bytes_sent
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     /// Record bytes received over P2P
     pub fn record_p2p_bytes_received(&self, bytes: usize) {
-        self.p2p_bytes_received.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.p2p_bytes_received
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     /// Record block production latency in milliseconds
@@ -230,9 +248,11 @@ impl TelemetryRegistry {
     /// Record cumulative storage prune counters
     pub fn record_storage_prune(&self, traces: u64, receipts: u64, bodies: u64, snapshots: u64) {
         self.storage_traces_pruned.store(traces, Ordering::Relaxed);
-        self.storage_receipts_pruned.store(receipts, Ordering::Relaxed);
+        self.storage_receipts_pruned
+            .store(receipts, Ordering::Relaxed);
         self.storage_bodies_pruned.store(bodies, Ordering::Relaxed);
-        self.storage_snapshots_pruned.store(snapshots, Ordering::Relaxed);
+        self.storage_snapshots_pruned
+            .store(snapshots, Ordering::Relaxed);
     }
 
     /// Compute quantiles (p50, p95, p99) from a sorted slice
@@ -315,27 +335,54 @@ impl TelemetryRegistry {
             let mut block_lat = self.block_latency_ms.write().unwrap();
             block_lat.sort_unstable();
             output.push_str("# HELP block_latency_ms Block production latency in milliseconds\n# TYPE block_latency_ms summary\n");
-            output.push_str(&format!("block_latency_ms{{quantile=\"0.5\"}} {}\n", Self::quantile(&block_lat, 0.5)));
-            output.push_str(&format!("block_latency_ms{{quantile=\"0.95\"}} {}\n", Self::quantile(&block_lat, 0.95)));
-            output.push_str(&format!("block_latency_ms{{quantile=\"0.99\"}} {}\n", Self::quantile(&block_lat, 0.99)));
+            output.push_str(&format!(
+                "block_latency_ms{{quantile=\"0.5\"}} {}\n",
+                Self::quantile(&block_lat, 0.5)
+            ));
+            output.push_str(&format!(
+                "block_latency_ms{{quantile=\"0.95\"}} {}\n",
+                Self::quantile(&block_lat, 0.95)
+            ));
+            output.push_str(&format!(
+                "block_latency_ms{{quantile=\"0.99\"}} {}\n",
+                Self::quantile(&block_lat, 0.99)
+            ));
             output.push_str(&format!("block_latency_ms_count {}\n", block_lat.len()));
         }
         {
             let mut tx_lat = self.tx_latency_ms.write().unwrap();
             tx_lat.sort_unstable();
             output.push_str("# HELP tx_latency_ms Transaction execution latency in milliseconds\n# TYPE tx_latency_ms summary\n");
-            output.push_str(&format!("tx_latency_ms{{quantile=\"0.5\"}} {}\n", Self::quantile(&tx_lat, 0.5)));
-            output.push_str(&format!("tx_latency_ms{{quantile=\"0.95\"}} {}\n", Self::quantile(&tx_lat, 0.95)));
-            output.push_str(&format!("tx_latency_ms{{quantile=\"0.99\"}} {}\n", Self::quantile(&tx_lat, 0.99)));
+            output.push_str(&format!(
+                "tx_latency_ms{{quantile=\"0.5\"}} {}\n",
+                Self::quantile(&tx_lat, 0.5)
+            ));
+            output.push_str(&format!(
+                "tx_latency_ms{{quantile=\"0.95\"}} {}\n",
+                Self::quantile(&tx_lat, 0.95)
+            ));
+            output.push_str(&format!(
+                "tx_latency_ms{{quantile=\"0.99\"}} {}\n",
+                Self::quantile(&tx_lat, 0.99)
+            ));
             output.push_str(&format!("tx_latency_ms_count {}\n", tx_lat.len()));
         }
         {
             let mut p2p_lat = self.p2p_latency_ms.write().unwrap();
             p2p_lat.sort_unstable();
             output.push_str("# HELP p2p_latency_ms P2P operation latency in milliseconds\n# TYPE p2p_latency_ms summary\n");
-            output.push_str(&format!("p2p_latency_ms{{quantile=\"0.5\"}} {}\n", Self::quantile(&p2p_lat, 0.5)));
-            output.push_str(&format!("p2p_latency_ms{{quantile=\"0.95\"}} {}\n", Self::quantile(&p2p_lat, 0.95)));
-            output.push_str(&format!("p2p_latency_ms{{quantile=\"0.99\"}} {}\n", Self::quantile(&p2p_lat, 0.99)));
+            output.push_str(&format!(
+                "p2p_latency_ms{{quantile=\"0.5\"}} {}\n",
+                Self::quantile(&p2p_lat, 0.5)
+            ));
+            output.push_str(&format!(
+                "p2p_latency_ms{{quantile=\"0.95\"}} {}\n",
+                Self::quantile(&p2p_lat, 0.95)
+            ));
+            output.push_str(&format!(
+                "p2p_latency_ms{{quantile=\"0.99\"}} {}\n",
+                Self::quantile(&p2p_lat, 0.99)
+            ));
             output.push_str(&format!("p2p_latency_ms_count {}\n", p2p_lat.len()));
         }
 
@@ -344,7 +391,9 @@ impl TelemetryRegistry {
         for metric in metrics.values() {
             output.push_str(&format!(
                 "# HELP {} {}\n# TYPE {} {}\n",
-                metric.name, metric.help, metric.name,
+                metric.name,
+                metric.help,
+                metric.name,
                 match metric.r#type {
                     MetricType::Counter => "counter",
                     MetricType::Gauge => "gauge",

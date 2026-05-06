@@ -3,14 +3,14 @@
 //! Block and BlockHeader types with hash, validation, and execution.
 
 use call_crypto::keccak256;
+use call_evm::EvmTransaction;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_protocol::gas::FeeParams;
-use call_evm::EvmTransaction;
 use serde::{Deserialize, Serialize};
 
+use crate::exec::state_accessors;
 use crate::validator::ConsensusError;
 use crate::ForkManager;
-use crate::exec::state_accessors;
 
 // ── Signature Wrapper (for serde) ─────────────────────────────────────
 
@@ -160,10 +160,7 @@ impl Block {
             bls_signer_bitmap: Vec::new(),
         };
 
-        Self {
-            header,
-            evm_txs,
-        }
+        Self { header, evm_txs }
     }
 
     /// Validate block structure and header
@@ -200,9 +197,7 @@ impl Block {
                     .saturating_mul(call_evm::U256::from(tx.gas_price));
                 let evm_balance = provider.state().get_balance(&tx.caller);
                 if evm_balance < gas_cost {
-                    let needed: u128 = (gas_cost - evm_balance)
-                        .try_into()
-                        .unwrap_or(u128::MAX);
+                    let needed: u128 = (gas_cost - evm_balance).try_into().unwrap_or(u128::MAX);
                     let protocol_balance = state_accessors::read_balance(
                         provider.state(),
                         call_protocol::CALL_ASSET_ID,
@@ -224,16 +219,13 @@ impl Block {
         }
 
         let provider_for_exec = provider.clone();
-        let (block_tx_result, revm_delta) =
-            call_evm::block_executor::execute_block_transactions(
-                &self.evm_txs,
-                provider_for_exec,
-                current_block_height,
-                fee_params.base_fee,
-            )
-            .map_err(|e| ConsensusError::InvalidBlock(format!(
-                "evm execution failed: {e}"
-            )))?;
+        let (block_tx_result, revm_delta) = call_evm::block_executor::execute_block_transactions(
+            &self.evm_txs,
+            provider_for_exec,
+            current_block_height,
+            fee_params.base_fee,
+        )
+        .map_err(|e| ConsensusError::InvalidBlock(format!("evm execution failed: {e}")))?;
 
         // Apply revm delta back to the provider.
         provider.state_mut().apply_from_revm_state(&revm_delta);
@@ -275,10 +267,8 @@ impl Block {
         // captures all consensus-driven state changes.
         let validator_share = total_fees * fee_params.validator_fee_share_bps as u128 / 10_000;
         if validator_share > 0 {
-            let proposer_addr = state_accessors::read_validator_addr(
-                provider.state(),
-                self.header.proposer as u64,
-            );
+            let proposer_addr =
+                state_accessors::read_validator_addr(provider.state(), self.header.proposer as u64);
             if proposer_addr != call_primitives::Address::ZERO {
                 state_accessors::distribute_reward_evm(
                     provider.state_mut(),
@@ -407,4 +397,3 @@ fn decode_evm_tx(raw: &[u8]) -> Result<EvmTransaction, ()> {
 
 // ── Consensus Error (re-exported for block validation) ────────────────
 // Defined in validator.rs, re-exported via lib.rs
-

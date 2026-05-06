@@ -7,10 +7,12 @@
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, dispatch, journal_backend::JournalBackend, require_caller,
+    address_to_u256, dispatch,
+    journal_backend::JournalBackend,
+    require_caller,
     storage::{storage_slot, StorageProvider},
-    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
-    COMPLIANCE_ADDRESS, VALIDATOR_ADDRESS,
+    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, COMPLIANCE_ADDRESS,
+    VALIDATOR_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -63,7 +65,11 @@ fn slot_gov_proposal_review_end(proposal_id: u64) -> U256 {
 }
 
 fn slot_gov_proposal_quorum_required(proposal_id: u64) -> U256 {
-    storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], b"quorum_required"])
+    storage_slot(&[
+        b"proposal",
+        &proposal_id.to_be_bytes()[..],
+        b"quorum_required",
+    ])
 }
 
 fn slot_gov_last_submission(addr: Address) -> U256 {
@@ -75,7 +81,12 @@ fn slot_gov_proposal_data_len(proposal_id: u64) -> U256 {
 }
 
 fn slot_gov_proposal_data_chunk(proposal_id: u64, chunk_idx: u64) -> U256 {
-    storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], b"data_chunk", &chunk_idx.to_be_bytes()[..]])
+    storage_slot(&[
+        b"proposal",
+        &proposal_id.to_be_bytes()[..],
+        b"data_chunk",
+        &chunk_idx.to_be_bytes()[..],
+    ])
 }
 
 // ── GovernanceStorage ─────────────────────────────────────────────────
@@ -91,12 +102,18 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     }
 
     pub fn read_proposal_count(&self) -> u64 {
-        u256_to_u64(self.backend.load(GOVERNANCE_ADDRESS, slot_gov_proposal_count()))
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_proposal_count()),
+        )
     }
 
     pub fn read_proposal_status(&self, proposal_id: u64) -> u8 {
         self.backend
-            .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"status"))
+            .load(
+                GOVERNANCE_ADDRESS,
+                slot_gov_proposal(proposal_id, b"status"),
+            )
             .to_be_bytes::<32>()[31]
     }
 
@@ -121,10 +138,10 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     }
 
     pub fn read_proposal_proposer(&self, proposal_id: u64) -> Address {
-        u256_to_address(
-            self.backend
-                .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer")),
-        )
+        u256_to_address(self.backend.load(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"proposer"),
+        ))
     }
 
     /// Read back the execution_data stored in chunked slots.
@@ -141,7 +158,10 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         for chunk_idx in 0..num_chunks {
             let chunk = self
                 .backend
-                .load(GOVERNANCE_ADDRESS, slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64))
+                .load(
+                    GOVERNANCE_ADDRESS,
+                    slot_gov_proposal_data_chunk(proposal_id, chunk_idx as u64),
+                )
                 .to_be_bytes::<32>();
             let remaining = data_len - result.len();
             result.extend_from_slice(&chunk[..remaining.min(32)]);
@@ -171,15 +191,24 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     // ── Config read helpers ─────────────────────────────────────────────
 
     pub fn read_config_u64(&self, suffix: &[u8]) -> u64 {
-        u256_to_u64(self.backend.load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)))
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)),
+        )
     }
 
     pub fn read_config_u128(&self, suffix: &[u8]) -> u128 {
-        u256_to_u128(self.backend.load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)))
+        u256_to_u128(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)),
+        )
     }
 
     pub fn read_config_u32(&self, suffix: &[u8]) -> u32 {
-        u256_to_u64(self.backend.load(GOVERNANCE_ADDRESS, slot_gov_config(suffix))) as u32
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)),
+        ) as u32
     }
 
     pub fn write_config_u64(&mut self, suffix: &[u8], value: u64) {
@@ -422,9 +451,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         }
 
         if voting_power == 0 {
-            return Err(PrecompileError::Other(
-                "governance: no voting power".into(),
-            ));
+            return Err(PrecompileError::Other("governance: no voting power".into()));
         }
 
         self.backend
@@ -446,11 +473,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         Ok(())
     }
 
-    pub fn queue(
-        &mut self,
-        proposal_id: u64,
-        current_block: u64,
-    ) -> Result<(), PrecompileError> {
+    pub fn queue(&mut self, proposal_id: u64, current_block: u64) -> Result<(), PrecompileError> {
         // Auto-advance Pending -> Active if review period passed
         let status = self.read_proposal_status(proposal_id);
         let start_block = self.read_proposal_u64(proposal_id, b"start_block");
@@ -483,10 +506,10 @@ impl<B: StorageBackend> GovernanceStorage<B> {
 
         if !has_quorum {
             // Defeat: confiscate deposit
-            let proposer = u256_to_address(
-                self.backend
-                    .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer")),
-            );
+            let proposer = u256_to_address(self.backend.load(
+                GOVERNANCE_ADDRESS,
+                slot_gov_proposal(proposal_id, b"proposer"),
+            ));
             if proposer != Address::ZERO {
                 self.backend.store(
                     GOVERNANCE_ADDRESS,
@@ -499,15 +522,17 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 slot_gov_proposal(proposal_id, b"status"),
                 U256::from(4u8),
             );
-            return Err(PrecompileError::Other("governance: quorum not reached".into()));
+            return Err(PrecompileError::Other(
+                "governance: quorum not reached".into(),
+            ));
         }
 
         if votes_for <= votes_against {
             // Defeat: confiscate deposit
-            let proposer = u256_to_address(
-                self.backend
-                    .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer")),
-            );
+            let proposer = u256_to_address(self.backend.load(
+                GOVERNANCE_ADDRESS,
+                slot_gov_proposal(proposal_id, b"proposer"),
+            ));
             if proposer != Address::ZERO {
                 self.backend.store(
                     GOVERNANCE_ADDRESS,
@@ -567,24 +592,24 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     ) -> Result<(), PrecompileError> {
         self.require_proposal_status(proposal_id, 2, "governance: proposal not queued")?;
 
-        let _queued_at = u256_to_u64(
-            self.backend
-                .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"queued_at")),
-        );
-        let execution_block = u256_to_u64(
-            self.backend
-                .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"execution_block")),
-        );
+        let _queued_at = u256_to_u64(self.backend.load(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"queued_at"),
+        ));
+        let execution_block = u256_to_u64(self.backend.load(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"execution_block"),
+        ));
         if current_block < execution_block {
             return Err(PrecompileError::Other(
                 "governance: timelock not elapsed".into(),
             ));
         }
 
-        let proposer = u256_to_address(
-            self.backend
-                .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"proposer")),
-        );
+        let proposer = u256_to_address(self.backend.load(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"proposer"),
+        ));
         let _ = executor;
         let _ = proposer;
 
@@ -626,11 +651,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             }
             5 => {
                 // EmergencyPause: set paused flag
-                self.backend.store(
-                    GOVERNANCE_ADDRESS,
-                    slot_gov_paused(),
-                    U256::from(1u8),
-                );
+                self.backend
+                    .store(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::from(1u8));
             }
             6 => {
                 // FeeCurrencyAdd: execution_data = ABI-encoded (uint64 assetId)
@@ -696,18 +718,15 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                     let amount = u128::from_be_bytes(amount_buf);
                     // Read current stake and slash
                     let stake_slot = storage_slot(&[validator.as_slice(), b"stake"]);
-                    let current_stake = u256_to_u128(
-                        self.backend.load(VALIDATOR_ADDRESS, stake_slot),
-                    );
+                    let current_stake =
+                        u256_to_u128(self.backend.load(VALIDATOR_ADDRESS, stake_slot));
                     let new_stake = current_stake.saturating_sub(amount);
-                    self.backend.store(
-                        VALIDATOR_ADDRESS,
-                        stake_slot,
-                        u128_to_u256(new_stake),
-                    );
+                    self.backend
+                        .store(VALIDATOR_ADDRESS, stake_slot, u128_to_u256(new_stake));
                     if new_stake == 0 {
                         let status_slot = storage_slot(&[validator.as_slice(), b"status"]);
-                        self.backend.store(VALIDATOR_ADDRESS, status_slot, U256::ZERO);
+                        self.backend
+                            .store(VALIDATOR_ADDRESS, status_slot, U256::ZERO);
                     }
                 }
             }
@@ -745,10 +764,10 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             _ => {}
         }
 
-        let deposit = u256_to_u128(
-            self.backend
-                .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, b"deposit")),
-        );
+        let deposit = u256_to_u128(self.backend.load(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"deposit"),
+        ));
         if deposit > 0 && proposer != Address::ZERO {
             asset_store
                 .add_balance(CALL_ASSET_ID, proposer, deposit)
@@ -770,11 +789,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     }
 
     pub fn emergency_pause(&mut self, reason: [u8; 32], _pauser: Address) {
-        self.backend.store(
-            GOVERNANCE_ADDRESS,
-            slot_gov_paused(),
-            U256::from(1u8),
-        );
+        self.backend
+            .store(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::from(1u8));
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_pause_reason(),
@@ -783,8 +799,10 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     }
 
     pub fn emergency_resume(&mut self) {
-        self.backend.store(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::ZERO);
-        self.backend.store(GOVERNANCE_ADDRESS, slot_gov_pause_reason(), U256::ZERO);
+        self.backend
+            .store(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::ZERO);
+        self.backend
+            .store(GOVERNANCE_ADDRESS, slot_gov_pause_reason(), U256::ZERO);
     }
 }
 
@@ -817,281 +835,379 @@ impl GovernancePrecompile {
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::submitProposalCall, _>(calldata, 200_000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut gov_store = GovernanceStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
-            let block_number = storage.block_number();
-            let proposal_id = gov_store
-                .submit_proposal(
-                    &mut asset_store,
-                    call.proposalType,
-                    call.title.to_string(),
-                    call.description.to_string(),
-                    call.executionData.to_vec(),
-                    caller,
-                    block_number,
-                )
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+        dispatch::mutate_void::<IProtocolGovernance::submitProposalCall, _>(
+            calldata,
+            200_000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut gov_store = GovernanceStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
+                let block_number = storage.block_number();
+                let proposal_id = gov_store
+                    .submit_proposal(
+                        &mut asset_store,
+                        call.proposalType,
+                        call.title.to_string(),
+                        call.description.to_string(),
+                        call.executionData.to_vec(),
+                        caller,
+                        block_number,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-            // Emit ProposalSubmitted(proposalId, proposer)
-            let topic0 = alloy_primitives::keccak256(b"ProposalSubmitted(uint64,address)");
-            let mut event_data = Vec::with_capacity(64);
-            event_data.extend_from_slice(&u64_to_u256(proposal_id).to_be_bytes::<32>());
-            event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
-            if let Some(log) = alloy_primitives::LogData::new(
-                vec![topic0],
-                alloy_primitives::Bytes::from(event_data),
-            ) {
-                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
-            }
+                // Emit ProposalSubmitted(proposalId, proposer)
+                let topic0 = alloy_primitives::keccak256(b"ProposalSubmitted(uint64,address)");
+                let mut event_data = Vec::with_capacity(64);
+                event_data.extend_from_slice(&u64_to_u256(proposal_id).to_be_bytes::<32>());
+                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                }
 
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     }
 
-    fn vote(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::voteCall, _>(calldata, 10_000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut gov_store = GovernanceStorage::new(backend);
+    fn vote(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::voteCall, _>(
+            calldata,
+            10_000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut gov_store = GovernanceStorage::new(backend);
 
-            // Compute voting power based on proposal type
-            let proposal_type = gov_store.read_proposal_u8(call.proposalId, b"proposal_type");
-            let mut voting_power: u128 = 0;
+                // Compute voting power based on proposal type
+                let proposal_type = gov_store.read_proposal_u8(call.proposalId, b"proposal_type");
+                let mut voting_power: u128 = 0;
 
-            // Validator check (1=1 for validator proposals, joint voting)
-            let validator_store = ValidatorStorage::new(backend);
-            let validator_id = validator_store.read_validator_id(caller);
-            let is_validator = validator_id != 0;
+                // Validator check (1=1 for validator proposals, joint voting)
+                let validator_store = ValidatorStorage::new(backend);
+                let validator_id = validator_store.read_validator_id(caller);
+                let is_validator = validator_id != 0;
 
-            // CALL balance check
-            let asset_store = AssetStorage::new(backend);
-            let call_balance = asset_store.read_balance(CALL_ASSET_ID, caller);
+                // CALL balance check
+                let asset_store = AssetStorage::new(backend);
+                let call_balance = asset_store.read_balance(CALL_ASSET_ID, caller);
 
-            match proposal_type {
-                0 | 1 | 3 => {
-                    // ParameterChange, ProtocolUpgrade, ValidatorSlash: validator 1=1 + balance weighted
-                    if is_validator {
-                        voting_power = voting_power.max(1);
+                match proposal_type {
+                    0 | 1 | 3 => {
+                        // ParameterChange, ProtocolUpgrade, ValidatorSlash: validator 1=1 + balance weighted
+                        if is_validator {
+                            voting_power = voting_power.max(1);
+                        }
+                        voting_power = voting_power.max(call_balance);
                     }
-                    voting_power = voting_power.max(call_balance);
-                }
-                2 => {
-                    // TreasurySpend: CALL balance weighted
-                    voting_power = call_balance;
-                }
-                4 => {
-                    // ComplianceUpdate: joint voting (validator 1 + issuer weight)
-                    if is_validator {
-                        voting_power += 1;
+                    2 => {
+                        // TreasurySpend: CALL balance weighted
+                        voting_power = call_balance;
                     }
-                    // Check if caller is an asset issuer (simplified: check if they have issuer-level balance)
-                    // Full issuer check would scan all assets; for now use balance proxy.
-                    voting_power = voting_power.max(call_balance);
-                }
-                5 => {
-                    // EmergencyPause: validator only, 1=1
-                    if is_validator {
-                        voting_power = 1;
+                    4 => {
+                        // ComplianceUpdate: joint voting (validator 1 + issuer weight)
+                        if is_validator {
+                            voting_power += 1;
+                        }
+                        // Check if caller is an asset issuer (simplified: check if they have issuer-level balance)
+                        // Full issuer check would scan all assets; for now use balance proxy.
+                        voting_power = voting_power.max(call_balance);
+                    }
+                    5 => {
+                        // EmergencyPause: validator only, 1=1
+                        if is_validator {
+                            voting_power = 1;
+                        }
+                    }
+                    6 | 7 | 8 | 9 => {
+                        // FeeCurrencyAdd, FeeCurrencyRemove, FeeCurrencyCap, ValidatorKeyRotation: simple majority
+                        if is_validator {
+                            voting_power = voting_power.max(1);
+                        }
+                        voting_power = voting_power.max(call_balance);
+                    }
+                    _ => {
+                        // Unknown type: default to balance weighted
+                        voting_power = call_balance;
                     }
                 }
-                6 | 7 | 8 | 9 => {
-                    // FeeCurrencyAdd, FeeCurrencyRemove, FeeCurrencyCap, ValidatorKeyRotation: simple majority
-                    if is_validator {
-                        voting_power = voting_power.max(1);
-                    }
-                    voting_power = voting_power.max(call_balance);
+
+                let block_number = storage.block_number();
+                gov_store
+                    .vote(
+                        call.proposalId,
+                        call.vote,
+                        caller,
+                        voting_power,
+                        block_number,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                // Emit VoteCast(proposalId, voter, vote, power)
+                let topic0 = alloy_primitives::keccak256(b"VoteCast(uint64,address,uint8,uint128)");
+                let mut event_data = Vec::with_capacity(128);
+                event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
+                event_data.extend_from_slice(&U256::from(call.vote).to_be_bytes::<32>());
+                event_data.extend_from_slice(&u128_to_u256(voting_power).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
                 }
-                _ => {
-                    // Unknown type: default to balance weighted
-                    voting_power = call_balance;
+
+                Ok(())
+            },
+        )
+    }
+
+    fn queue(
+        &self,
+        calldata: &[u8],
+        _msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::queueCall, _>(
+            calldata,
+            20_000,
+            storage,
+            |call, storage| {
+                let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
+                let block_number = storage.block_number();
+                gov_store
+                    .queue(call.proposalId, block_number)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                // Emit ProposalQueued(proposalId, queuedAt)
+                let topic0 = alloy_primitives::keccak256(b"ProposalQueued(uint64,uint64)");
+                let mut event_data = Vec::with_capacity(64);
+                event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                event_data.extend_from_slice(&u64_to_u256(block_number).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
                 }
-            }
 
-            let block_number = storage.block_number();
-            gov_store
-                .vote(call.proposalId, call.vote, caller, voting_power, block_number)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-
-            // Emit VoteCast(proposalId, voter, vote, power)
-            let topic0 = alloy_primitives::keccak256(b"VoteCast(uint64,address,uint8,uint128)");
-            let mut event_data = Vec::with_capacity(128);
-            event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
-            event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
-            event_data.extend_from_slice(&U256::from(call.vote).to_be_bytes::<32>());
-            event_data.extend_from_slice(&u128_to_u256(voting_power).to_be_bytes::<32>());
-            if let Some(log) = alloy_primitives::LogData::new(
-                vec![topic0],
-                alloy_primitives::Bytes::from(event_data),
-            ) {
-                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
-            }
-
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     }
 
-    fn queue(&self, calldata: &[u8], _msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::queueCall, _>(calldata, 20_000, storage, |call, storage| {
-            let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
-            let block_number = storage.block_number();
-            gov_store
-                .queue(call.proposalId, block_number)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+    fn execute(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::executeCall, _>(
+            calldata,
+            20_000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let backend = JournalBackend::new(storage);
+                let mut gov_store = GovernanceStorage::new(backend);
+                let mut asset_store = AssetStorage::new(backend);
 
-            // Emit ProposalQueued(proposalId, queuedAt)
-            let topic0 = alloy_primitives::keccak256(b"ProposalQueued(uint64,uint64)");
-            let mut event_data = Vec::with_capacity(64);
-            event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
-            event_data.extend_from_slice(&u64_to_u256(block_number).to_be_bytes::<32>());
-            if let Some(log) = alloy_primitives::LogData::new(
-                vec![topic0],
-                alloy_primitives::Bytes::from(event_data),
-            ) {
-                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
-            }
+                // Authorization check: proposer or validator
+                let proposer = gov_store.read_proposal_proposer(call.proposalId);
+                let is_proposer = caller == proposer;
+                let validator_store = ValidatorStorage::new(backend);
+                let is_validator = validator_store.read_validator_id(caller) != 0;
+                if !is_proposer && !is_validator {
+                    return Err(PrecompileError::Other(
+                        "governance: unauthorized executor".into(),
+                    ));
+                }
 
-            Ok(())
-        })
+                let block_number = storage.block_number();
+                gov_store
+                    .execute(&mut asset_store, call.proposalId, block_number, caller)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                // Emit ProposalExecuted(proposalId)
+                let topic0 = alloy_primitives::keccak256(b"ProposalExecuted(uint64)");
+                let mut event_data = Vec::with_capacity(32);
+                event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                }
+
+                Ok(())
+            },
+        )
     }
 
-    fn execute(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::executeCall, _>(calldata, 20_000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
-            let backend = JournalBackend::new(storage);
-            let mut gov_store = GovernanceStorage::new(backend);
-            let mut asset_store = AssetStorage::new(backend);
+    fn emergency_pause(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::emergencyPauseCall, _>(
+            calldata,
+            30_000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
 
-            // Authorization check: proposer or validator
-            let proposer = gov_store.read_proposal_proposer(call.proposalId);
-            let is_proposer = caller == proposer;
-            let validator_store = ValidatorStorage::new(backend);
-            let is_validator = validator_store.read_validator_id(caller) != 0;
-            if !is_proposer && !is_validator {
-                return Err(PrecompileError::Other(
-                    "governance: unauthorized executor".into(),
-                ));
-            }
+                // Verify caller is a registered validator
+                let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
+                let validator_id = validator_store.read_validator_id(caller);
+                if validator_id == 0 {
+                    return Err(PrecompileError::Other(
+                        "sender not a registered validator".into(),
+                    ));
+                }
 
-            let block_number = storage.block_number();
-            gov_store
-                .execute(&mut asset_store, call.proposalId, block_number, caller)
-                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
+                gov_store.emergency_pause(call.reason.into(), caller);
 
-            // Emit ProposalExecuted(proposalId)
-            let topic0 = alloy_primitives::keccak256(b"ProposalExecuted(uint64)");
-            let mut event_data = Vec::with_capacity(32);
-            event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
-            if let Some(log) = alloy_primitives::LogData::new(
-                vec![topic0],
-                alloy_primitives::Bytes::from(event_data),
-            ) {
-                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
-            }
+                // Emit EmergencyPaused(pauser, reason)
+                let topic0 = alloy_primitives::keccak256(b"EmergencyPaused(address,bytes32)");
+                let mut event_data = Vec::with_capacity(64);
+                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
+                event_data.extend_from_slice(&call.reason.as_ref());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                }
 
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     }
 
-    fn emergency_pause(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::emergencyPauseCall, _>(calldata, 30_000, storage, |call, storage| {
-            let caller = require_caller(msg_sender)?;
+    fn emergency_resume(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolGovernance::emergencyResumeCall, _>(
+            calldata,
+            20_000,
+            storage,
+            |_call, storage| {
+                let caller = require_caller(msg_sender)?;
 
-            // Verify caller is a registered validator
-            let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
-            let validator_id = validator_store.read_validator_id(caller);
-            if validator_id == 0 {
-                return Err(PrecompileError::Other(
-                    "sender not a registered validator".into(),
-                ));
-            }
+                // Verify caller is a registered validator
+                let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
+                let validator_id = validator_store.read_validator_id(caller);
+                if validator_id == 0 {
+                    return Err(PrecompileError::Other(
+                        "sender not a registered validator".into(),
+                    ));
+                }
 
-            let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
-            gov_store.emergency_pause(call.reason.into(), caller);
+                let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
+                gov_store.emergency_resume();
 
-            // Emit EmergencyPaused(pauser, reason)
-            let topic0 = alloy_primitives::keccak256(b"EmergencyPaused(address,bytes32)");
-            let mut event_data = Vec::with_capacity(64);
-            event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
-            event_data.extend_from_slice(&call.reason.as_ref());
-            if let Some(log) = alloy_primitives::LogData::new(
-                vec![topic0],
-                alloy_primitives::Bytes::from(event_data),
-            ) {
-                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
-            }
+                // Emit EmergencyResumed(resumer)
+                let topic0 = alloy_primitives::keccak256(b"EmergencyResumed(address)");
+                let mut event_data = Vec::with_capacity(32);
+                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                }
 
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     }
 
-    fn emergency_resume(&self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolGovernance::emergencyResumeCall, _>(calldata, 20_000, storage, |_call, storage| {
-            let caller = require_caller(msg_sender)?;
-
-            // Verify caller is a registered validator
-            let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
-            let validator_id = validator_store.read_validator_id(caller);
-            if validator_id == 0 {
-                return Err(PrecompileError::Other(
-                    "sender not a registered validator".into(),
-                ));
-            }
-
-            let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
-            gov_store.emergency_resume();
-
-            // Emit EmergencyResumed(resumer)
-            let topic0 = alloy_primitives::keccak256(b"EmergencyResumed(address)");
-            let mut event_data = Vec::with_capacity(32);
-            event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
-            if let Some(log) = alloy_primitives::LogData::new(
-                vec![topic0],
-                alloy_primitives::Bytes::from(event_data),
-            ) {
-                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
-            }
-
-            Ok(())
-        })
+    fn get_proposal_status(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolGovernance::getProposalStatusCall, _, _>(
+            calldata,
+            2000,
+            storage,
+            |call, storage| {
+                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                Ok(U256::from(store.read_proposal_status(call.proposalId)))
+            },
+        )
     }
 
-    fn get_proposal_status(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::getProposalStatusCall, _, _>(calldata, 2000, storage, |call, storage| {
-            let store = GovernanceStorage::new(JournalBackend::new(storage));
-            Ok(U256::from(store.read_proposal_status(call.proposalId)))
-        })
-    }
-
-    fn get_proposal_votes(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::getProposalVotesCall, _, _>(calldata, 2000, storage, |call, storage| {
-            let store = GovernanceStorage::new(JournalBackend::new(storage));
-            let votes_for = store.read_vote_tally(call.proposalId, b"votes_for");
-            let votes_against = store.read_vote_tally(call.proposalId, b"votes_against");
-            let votes_abstain = store.read_vote_tally(call.proposalId, b"votes_abstain");
-            Ok((votes_for, votes_against, votes_abstain))
-        })
+    fn get_proposal_votes(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolGovernance::getProposalVotesCall, _, _>(
+            calldata,
+            2000,
+            storage,
+            |call, storage| {
+                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                let votes_for = store.read_vote_tally(call.proposalId, b"votes_for");
+                let votes_against = store.read_vote_tally(call.proposalId, b"votes_against");
+                let votes_abstain = store.read_vote_tally(call.proposalId, b"votes_abstain");
+                Ok((votes_for, votes_against, votes_abstain))
+            },
+        )
     }
 
     fn is_paused(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::isPausedCall, _, _>(calldata, 1000, storage, |_call, storage| {
-            let store = GovernanceStorage::new(JournalBackend::new(storage));
-            Ok(U256::from(if store.is_paused() { 1u8 } else { 0u8 }))
-        })
+        dispatch::view::<IProtocolGovernance::isPausedCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |_call, storage| {
+                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                Ok(U256::from(if store.is_paused() { 1u8 } else { 0u8 }))
+            },
+        )
     }
 
-    fn get_proposal_count(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::view::<IProtocolGovernance::getProposalCountCall, _, _>(calldata, 1000, storage, |_call, storage| {
-            let store = GovernanceStorage::new(JournalBackend::new(storage));
-            Ok(store.read_proposal_count())
-        })
+    fn get_proposal_count(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolGovernance::getProposalCountCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |_call, storage| {
+                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                Ok(store.read_proposal_count())
+            },
+        )
     }
 }
 
 impl call_precompile::StatefulPrecompile for GovernancePrecompile {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address, storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn call(
+        &mut self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+    ) -> PrecompileResult {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
         }
@@ -1102,15 +1218,21 @@ impl call_precompile::StatefulPrecompile for GovernancePrecompile {
             }
             IProtocolGovernance::voteCall::SELECTOR => self.vote(calldata, msg_sender, storage),
             IProtocolGovernance::queueCall::SELECTOR => self.queue(calldata, msg_sender, storage),
-            IProtocolGovernance::executeCall::SELECTOR => self.execute(calldata, msg_sender, storage),
+            IProtocolGovernance::executeCall::SELECTOR => {
+                self.execute(calldata, msg_sender, storage)
+            }
             IProtocolGovernance::emergencyPauseCall::SELECTOR => {
                 self.emergency_pause(calldata, msg_sender, storage)
             }
             IProtocolGovernance::emergencyResumeCall::SELECTOR => {
                 self.emergency_resume(calldata, msg_sender, storage)
             }
-            IProtocolGovernance::getProposalStatusCall::SELECTOR => self.get_proposal_status(calldata, storage),
-            IProtocolGovernance::getProposalVotesCall::SELECTOR => self.get_proposal_votes(calldata, storage),
+            IProtocolGovernance::getProposalStatusCall::SELECTOR => {
+                self.get_proposal_status(calldata, storage)
+            }
+            IProtocolGovernance::getProposalVotesCall::SELECTOR => {
+                self.get_proposal_votes(calldata, storage)
+            }
             IProtocolGovernance::isPausedCall::SELECTOR => self.is_paused(calldata, storage),
             IProtocolGovernance::getProposalCountCall::SELECTOR => {
                 self.get_proposal_count(calldata, storage)
@@ -1126,7 +1248,9 @@ impl call_precompile::StatefulPrecompile for GovernancePrecompile {
 mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
-    use call_precompile::{slot_balance, slot_validator_by_addr, u128_to_u256, u64_to_u256, StatefulPrecompile};
+    use call_precompile::{
+        slot_balance, slot_validator_by_addr, u128_to_u256, u64_to_u256, StatefulPrecompile,
+    };
     use call_precompile::{ASSET_ADDRESS, VALIDATOR_ADDRESS};
 
     #[test]
@@ -1143,17 +1267,21 @@ mod tests {
         let sender = Address::repeat_byte(0x44);
 
         // Seed sender balance
-        provider.sstore(
-            ASSET_ADDRESS,
-            slot_balance(CALL_ASSET_ID, sender),
-            u128_to_u256(100_000),
-        ).unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, sender),
+                u128_to_u256(100_000),
+            )
+            .unwrap();
         // Seed review_period=0 so proposal is active immediately
-        provider.sstore(
-            GOVERNANCE_ADDRESS,
-            slot_gov_config(b"review_period"),
-            u64_to_u256(0),
-        ).unwrap();
+        provider
+            .sstore(
+                GOVERNANCE_ADDRESS,
+                slot_gov_config(b"review_period"),
+                u64_to_u256(0),
+            )
+            .unwrap();
 
         let mut precompile = GovernancePrecompile;
 
@@ -1170,18 +1298,26 @@ mod tests {
 
         // getProposalCount
         let input = IProtocolGovernance::getProposalCountCall {}.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
-        let count = u256_to_u64(U256::from_be_bytes::<32>(result.bytes.as_ref().try_into().unwrap()));
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let count = u256_to_u64(U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        ));
         assert_eq!(count, 1);
 
         // getProposalStatus(1)
         let input = IProtocolGovernance::getProposalStatusCall { proposalId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes[31], 1); // active
 
         // getProposalVotes(1)
         let input = IProtocolGovernance::getProposalVotesCall { proposalId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(&result.bytes[16..32], &[0u8; 16]); // votes_for = 0
         assert_eq!(&result.bytes[48..64], &[0u8; 16]); // votes_against = 0
         assert_eq!(&result.bytes[80..96], &[0u8; 16]); // votes_abstain = 0
@@ -1193,17 +1329,21 @@ mod tests {
         let sender = Address::repeat_byte(0x44);
 
         // Seed sender balance
-        provider.sstore(
-            ASSET_ADDRESS,
-            slot_balance(CALL_ASSET_ID, sender),
-            u128_to_u256(100_000),
-        ).unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, sender),
+                u128_to_u256(100_000),
+            )
+            .unwrap();
         // Seed review_period=0 so proposal is active immediately
-        provider.sstore(
-            GOVERNANCE_ADDRESS,
-            slot_gov_config(b"review_period"),
-            u64_to_u256(0),
-        ).unwrap();
+        provider
+            .sstore(
+                GOVERNANCE_ADDRESS,
+                slot_gov_config(b"review_period"),
+                u64_to_u256(0),
+            )
+            .unwrap();
 
         let mut precompile = GovernancePrecompile;
 
@@ -1231,7 +1371,9 @@ mod tests {
 
         // getProposalVotes(1)
         let input = IProtocolGovernance::getProposalVotesCall { proposalId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         let votes_for = u128::from_be_bytes({
             let mut buf = [0u8; 16];
             buf.copy_from_slice(&result.bytes[16..32]);
@@ -1246,7 +1388,9 @@ mod tests {
 
         // getProposalStatus(1) should be 2 (queued)
         let input = IProtocolGovernance::getProposalStatusCall { proposalId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes[31], 2);
     }
 
@@ -1256,22 +1400,28 @@ mod tests {
         let sender = Address::repeat_byte(0x44);
 
         // Seed validator so pause/resume work
-        provider.sstore(
-            VALIDATOR_ADDRESS,
-            slot_validator_by_addr(sender),
-            u64_to_u256(1),
-        ).unwrap();
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_validator_by_addr(sender),
+                u64_to_u256(1),
+            )
+            .unwrap();
 
         let mut precompile = GovernancePrecompile;
 
         // isPaused() -> false
         let input = IProtocolGovernance::isPausedCall {}.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes[31], 0);
 
         // emergencyPause(reason)
         let input = IProtocolGovernance::emergencyPauseCall {
-            reason: alloy_primitives::FixedBytes::<32>::from_slice(b"Emergency reason________________"),
+            reason: alloy_primitives::FixedBytes::<32>::from_slice(
+                b"Emergency reason________________",
+            ),
         }
         .abi_encode();
         let result = precompile.call(&input, sender, &mut provider);
@@ -1279,7 +1429,9 @@ mod tests {
 
         // isPaused() -> true
         let input = IProtocolGovernance::isPausedCall {}.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes[31], 1);
 
         // emergencyResume()
@@ -1289,7 +1441,9 @@ mod tests {
 
         // isPaused() -> false
         let input = IProtocolGovernance::isPausedCall {}.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes[31], 0);
     }
 }

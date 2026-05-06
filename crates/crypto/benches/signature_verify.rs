@@ -3,11 +3,11 @@
 //! Measures Ed25519 and secp256k1 verify performance, including batch
 //! verification scenarios.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use call_crypto::{
-    ed25519_generate_keypair, ed25519_sign, ed25519_verify,
-    generate_keypair, secp256k1_sign, secp256k1_verify, keccak256,
+    ed25519_generate_keypair, ed25519_sign, ed25519_verify, generate_keypair, keccak256,
+    secp256k1_sign, secp256k1_verify,
 };
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 fn bench_ed25519_single(c: &mut Criterion) {
     let (pubkey, signing_key) = ed25519_generate_keypair();
@@ -97,5 +97,11 @@ fn bench_secp256k1_batch(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_ed25519_single, bench_ed25519_batch, bench_secp256k1_single, bench_secp256k1_batch);
+criterion_group!(
+    benches,
+    bench_ed25519_single,
+    bench_ed25519_batch,
+    bench_secp256k1_single,
+    bench_secp256k1_batch
+);
 criterion_main!(benches);

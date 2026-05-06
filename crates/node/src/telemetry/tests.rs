@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
-use super::alert::{AlertSeverity, evaluate_alerts, default_alert_rules, HealthState};
+use super::alert::{default_alert_rules, evaluate_alerts, AlertSeverity, HealthState};
 use super::registry::TelemetryRegistry;
 use super::server::start_metrics_server;
 
@@ -89,13 +89,19 @@ fn test_alert_consensus_stall() {
     reg.record_consensus_timeout();
     let alerts = evaluate_alerts(&reg, &rules);
     let stall = alerts.iter().find(|a| a.name == "consensus_stall");
-    assert!(stall.is_none(), "should not alert when no block ever committed");
+    assert!(
+        stall.is_none(),
+        "should not alert when no block ever committed"
+    );
 
     // Commit a block → stall clears
     reg.record_block_committed();
     let alerts = evaluate_alerts(&reg, &rules);
     let stall = alerts.iter().find(|a| a.name == "consensus_stall");
-    assert!(stall.is_none(), "should not alert right after block committed");
+    assert!(
+        stall.is_none(),
+        "should not alert right after block committed"
+    );
 
     // Simulate stall: pretend the last committed block was 61 seconds ago
     reg.set_seconds_since_last_block_for_test(61);
@@ -200,10 +206,7 @@ fn dummy_health() -> HealthState {
         db: db.db,
         network: None,
         consensus: std::sync::Arc::new(std::sync::RwLock::new(
-            call_consensus::SimplexConsensus::new(
-                call_consensus::ConsensusParams::default(),
-                &evm,
-            ),
+            call_consensus::SimplexConsensus::new(call_consensus::ConsensusParams::default(), &evm),
         )),
     }
 }
@@ -292,7 +295,10 @@ fn test_opentelemetry_span_recording() {
 
     // Verify the registry side-effects work (OTel spans require global init)
     registry.record_block_produced();
-    assert_eq!(registry.consensus_blocks_produced.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        registry.consensus_blocks_produced.load(Ordering::Relaxed),
+        1
+    );
 
     registry.set_p2p_peers(10);
     assert_eq!(registry.p2p_peers.load(Ordering::Relaxed), 10);

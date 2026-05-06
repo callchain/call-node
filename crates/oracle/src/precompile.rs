@@ -6,8 +6,11 @@
 
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
-    dispatch, journal_backend::JournalBackend, require_caller,
-    storage::{storage_slot, StorageProvider}, u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256,
+    dispatch,
+    journal_backend::JournalBackend,
+    require_caller,
+    storage::{storage_slot, StorageProvider},
+    u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -62,23 +65,38 @@ impl<B: StorageBackend> OracleStorage<B> {
     }
 
     pub fn read_price(&self, asset_id: u64) -> u128 {
-        u256_to_u128(self.backend.load(ORACLE_ADDRESS, slot_oracle_price(asset_id)))
+        u256_to_u128(
+            self.backend
+                .load(ORACLE_ADDRESS, slot_oracle_price(asset_id)),
+        )
     }
 
     pub fn read_twap(&self, asset_id: u64) -> u128 {
-        u256_to_u128(self.backend.load(ORACLE_ADDRESS, slot_oracle_twap(asset_id)))
+        u256_to_u128(
+            self.backend
+                .load(ORACLE_ADDRESS, slot_oracle_twap(asset_id)),
+        )
     }
 
     pub fn read_timestamp(&self, asset_id: u64) -> u64 {
-        u256_to_u64(self.backend.load(ORACLE_ADDRESS, slot_oracle_timestamp(asset_id)))
+        u256_to_u64(
+            self.backend
+                .load(ORACLE_ADDRESS, slot_oracle_timestamp(asset_id)),
+        )
     }
 
     pub fn read_block(&self, asset_id: u64) -> u64 {
-        u256_to_u64(self.backend.load(ORACLE_ADDRESS, slot_oracle_block(asset_id)))
+        u256_to_u64(
+            self.backend
+                .load(ORACLE_ADDRESS, slot_oracle_block(asset_id)),
+        )
     }
 
     pub fn read_count(&self, asset_id: u64) -> u64 {
-        u256_to_u64(self.backend.load(ORACLE_ADDRESS, slot_oracle_count(asset_id)))
+        u256_to_u64(
+            self.backend
+                .load(ORACLE_ADDRESS, slot_oracle_count(asset_id)),
+        )
     }
 
     pub fn is_stale(&self, asset_id: u64, current_ts: u64) -> bool {
@@ -87,11 +105,17 @@ impl<B: StorageBackend> OracleStorage<B> {
     }
 
     pub fn read_tracked_count(&self) -> u64 {
-        u256_to_u64(self.backend.load(ORACLE_ADDRESS, slot_oracle_tracked_count()))
+        u256_to_u64(
+            self.backend
+                .load(ORACLE_ADDRESS, slot_oracle_tracked_count()),
+        )
     }
 
     pub fn read_tracked_asset(&self, index: u64) -> u64 {
-        u256_to_u64(self.backend.load(ORACLE_ADDRESS, slot_oracle_tracked_asset(index)))
+        u256_to_u64(
+            self.backend
+                .load(ORACLE_ADDRESS, slot_oracle_tracked_asset(index)),
+        )
     }
 
     pub fn set_tracked_assets(&mut self, asset_ids: Vec<u64>) {
@@ -110,21 +134,12 @@ impl<B: StorageBackend> OracleStorage<B> {
         // Zero out any old entries beyond the new list
         let old_count = self.read_tracked_count();
         for i in asset_ids.len() as u64..old_count {
-            self.backend.store(
-                ORACLE_ADDRESS,
-                slot_oracle_tracked_asset(i),
-                U256::ZERO,
-            );
+            self.backend
+                .store(ORACLE_ADDRESS, slot_oracle_tracked_asset(i), U256::ZERO);
         }
     }
 
-    pub fn submit_price(
-        &mut self,
-        asset_id: u64,
-        price: u128,
-        timestamp: u64,
-        block_number: u64,
-    ) {
+    pub fn submit_price(&mut self, asset_id: u64, price: u128, timestamp: u64, block_number: u64) {
         self.backend.store(
             ORACLE_ADDRESS,
             slot_oracle_price(asset_id),
@@ -200,7 +215,11 @@ impl OraclePrecompile {
         let current_ts = storage.timestamp().to::<u64>();
         dispatch::view::<IProtocolOracle::isStaleCall, _, _>(calldata, 1000, storage, |call, _| {
             let store = OracleStorage::new(backend);
-            Ok(U256::from(if store.is_stale(call.assetId, current_ts) { 1u8 } else { 0u8 }))
+            Ok(U256::from(if store.is_stale(call.assetId, current_ts) {
+                1u8
+            } else {
+                0u8
+            }))
         })
     }
 
@@ -230,7 +249,8 @@ impl OraclePrecompile {
                 store.submit_price(call.assetId, call.price, call.timestamp, call.blockNumber);
 
                 // Emit PriceSubmitted event
-                let topic0 = alloy_primitives::keccak256(b"PriceSubmitted(uint64,uint128,uint64,uint64)");
+                let topic0 =
+                    alloy_primitives::keccak256(b"PriceSubmitted(uint64,uint128,uint64,uint64)");
                 let mut event_data = Vec::with_capacity(128);
                 event_data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
                 event_data.extend_from_slice(&u128_to_u256(call.price).to_be_bytes::<32>());
@@ -311,8 +331,8 @@ impl call_precompile::StatefulPrecompile for OraclePrecompile {
 mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
-    use call_precompile::{slot_validator_by_addr, u64_to_u256, StatefulPrecompile};
     use call_precompile::VALIDATOR_ADDRESS;
+    use call_precompile::{slot_validator_by_addr, u64_to_u256, StatefulPrecompile};
 
     #[test]
     fn test_oracle_address() {
@@ -329,7 +349,11 @@ mod tests {
 
         // Seed caller as a validator
         provider
-            .sstore(VALIDATOR_ADDRESS, slot_validator_by_addr(caller), u64_to_u256(1))
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_validator_by_addr(caller),
+                u64_to_u256(1),
+            )
             .unwrap();
 
         // submitPrice
@@ -356,9 +380,12 @@ mod tests {
         // getPrice
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::getPriceCall { assetId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
-        let price =
-            u256_to_u128(U256::from_be_bytes::<32>(result.bytes.as_ref().try_into().unwrap()));
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let price = u256_to_u128(U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        ));
         assert_eq!(price, 2_000_000);
     }
 
@@ -369,7 +396,11 @@ mod tests {
 
         // Seed caller as a validator
         provider
-            .sstore(VALIDATOR_ADDRESS, slot_validator_by_addr(caller), u64_to_u256(1))
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_validator_by_addr(caller),
+                u64_to_u256(1),
+            )
             .unwrap();
 
         // Submit two prices
@@ -388,9 +419,12 @@ mod tests {
         // getTWAP
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::getTWAPCall { assetId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
-        let twap =
-            u256_to_u128(U256::from_be_bytes::<32>(result.bytes.as_ref().try_into().unwrap()));
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let twap = u256_to_u128(U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        ));
         // Cumulative average: (1_000_000 + 2_000_000) / 2 = 1_500_000
         assert_eq!(twap, 1_500_000);
 
@@ -398,14 +432,18 @@ mod tests {
         provider.set_timestamp(U256::from(2000));
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes[31], 0);
 
         // isStale with chain timestamp = 5000 (stale, 5000 - 1000 = 4000 > 3600)
         provider.set_timestamp(U256::from(5000));
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         assert_eq!(result.bytes[31], 1);
     }
 

@@ -7,9 +7,9 @@
 //! were previously required.
 
 mod e2e;
-use e2e::harness::{NodeBuilder, DeterministicRuntime, test_keypair};
 use call_primitives::Address;
 use call_shielded::ShieldedBlockTracker;
+use e2e::harness::{test_keypair, DeterministicRuntime, NodeBuilder};
 
 fn addr(n: u8) -> Address {
     Address::repeat_byte(n)
@@ -36,7 +36,8 @@ fn test_e2e_shielded_deposit_flow() {
 
     // Shielded state starts empty
     let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-    let leaf_count = call_consensus::exec::state_accessors::read_shielded_commitment_count(provider.state());
+    let leaf_count =
+        call_consensus::exec::state_accessors::read_shielded_commitment_count(provider.state());
     assert_eq!(leaf_count, 0);
 }
 
@@ -55,7 +56,8 @@ fn test_e2e_shielded_withdraw_flow() {
 
     // EVM storage balance is seeded by NodeBuilder
     let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-    let sender_bal = call_consensus::exec::state_accessors::read_balance(provider.state(), 0, sender);
+    let sender_bal =
+        call_consensus::exec::state_accessors::read_balance(provider.state(), 0, sender);
     assert_eq!(sender_bal, 1_000_000_000);
 }
 
@@ -120,8 +122,10 @@ async fn test_e2e_shielded_multi_node_consensus() {
     {
         let node0_ref = runtime.simulator.node(0);
         let node0 = node0_ref.read().unwrap();
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node0.state.db_env).unwrap();
-        let leaf_count = call_consensus::exec::state_accessors::read_shielded_commitment_count(provider.state());
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node0.state.db_env).unwrap();
+        let leaf_count =
+            call_consensus::exec::state_accessors::read_shielded_commitment_count(provider.state());
         assert_eq!(leaf_count, 0);
     }
 }
@@ -143,8 +147,10 @@ fn test_e2e_shielded_lifecycle() {
 
     // Verify EVM storage balances are intact
     {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-        let sender_bal = call_consensus::exec::state_accessors::read_balance(provider.state(), 1, sender);
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let sender_bal =
+            call_consensus::exec::state_accessors::read_balance(provider.state(), 1, sender);
         assert_eq!(sender_bal, 1_000_000_000);
     }
 }

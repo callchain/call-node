@@ -63,6 +63,7 @@ impl CompliancePrecompile {
 }
 
 impl call_precompile::StatefulPrecompile for CompliancePrecompile {
+    #[allow(clippy::expect_used)]
     fn call(
         &mut self,
         calldata: &[u8],
@@ -72,7 +73,7 @@ impl call_precompile::StatefulPrecompile for CompliancePrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
         match selector {
             IProtocolCompliance::updateComplianceCall::SELECTOR => {
                 self.update_compliance(calldata, msg_sender, storage)
@@ -91,7 +92,7 @@ mod tests {
     use call_precompile::storage::HashMapStorageProvider;
     use call_precompile::{
         storage::{storage_slot, StorageProvider},
-        u8_to_u256, ASSET_ADDRESS, StatefulPrecompile,
+        u8_to_u256, StatefulPrecompile, ASSET_ADDRESS,
     };
     use call_primitives::Address;
 
@@ -135,16 +136,18 @@ mod tests {
         .abi_encode();
 
         let result = precompile.call(&input, issuer, &mut provider);
-        assert!(result.is_ok(), "update_compliance failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "update_compliance failed: {:?}",
+            result.err()
+        );
 
         // checkCompliance(assetId=1, target) -> false (Restricted)
-        let input = IProtocolCompliance::checkComplianceCall {
-            assetId: 1,
-            target,
-        }
-        .abi_encode();
+        let input = IProtocolCompliance::checkComplianceCall { assetId: 1, target }.abi_encode();
 
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         // bool false = 0 in last byte
         assert_eq!(result.bytes[31], 0);
 
@@ -155,7 +158,9 @@ mod tests {
         }
         .abi_encode();
 
-        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
         // bool true = 1 in last byte
         assert_eq!(result.bytes[31], 1);
     }

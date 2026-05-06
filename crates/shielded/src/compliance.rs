@@ -6,7 +6,7 @@
 //! - IssuerAuditable: asset issuer can view transactions via viewing key
 //! - WhitelistedOnly: only whitelisted addresses can participate
 
-use crate::{ShieldedError, ViewingKey, Note};
+use crate::{Note, ShieldedError, ViewingKey};
 use call_primitives::Address;
 use std::collections::HashSet;
 
@@ -28,29 +28,23 @@ pub enum ShieldedComplianceMode {
 
 impl ShieldedComplianceMode {
     /// Check if a shielded transfer complies with this mode
-    pub fn check_compliance(
-        &self,
-        notes: &[Note],
-    ) -> Result<(), ShieldedError> {
+    pub fn check_compliance(&self, notes: &[Note]) -> Result<(), ShieldedError> {
         match self {
             ShieldedComplianceMode::Unrestricted => Ok(()),
             ShieldedComplianceMode::KycRequired { kyc_registry } => {
                 self.check_kyc(kyc_registry, notes)
             }
-            ShieldedComplianceMode::IssuerAuditable { issuer, auditor_view_key } => {
-                self.check_auditable(issuer, auditor_view_key, notes)
-            }
+            ShieldedComplianceMode::IssuerAuditable {
+                issuer,
+                auditor_view_key,
+            } => self.check_auditable(issuer, auditor_view_key, notes),
             ShieldedComplianceMode::WhitelistedOnly { whitelist } => {
                 self.check_whitelist(whitelist, notes)
             }
         }
     }
 
-    fn check_kyc(
-        &self,
-        kyc_registry: &[Address],
-        notes: &[Note],
-    ) -> Result<(), ShieldedError> {
+    fn check_kyc(&self, kyc_registry: &[Address], notes: &[Note]) -> Result<(), ShieldedError> {
         if kyc_registry.is_empty() {
             return Err(ShieldedError::ComplianceViolation(
                 "KYC registry is empty".into(),
@@ -61,9 +55,10 @@ impl ShieldedComplianceMode {
         for (i, note) in notes.iter().enumerate() {
             let recipient = Self::derive_address_from_ivk(note);
             if !kyc_registry.contains(&recipient) {
-                return Err(ShieldedError::ComplianceViolation(
-                    format!("note {} recipient not KYC-verified", i),
-                ));
+                return Err(ShieldedError::ComplianceViolation(format!(
+                    "note {} recipient not KYC-verified",
+                    i
+                )));
             }
         }
         Ok(())
@@ -110,9 +105,10 @@ impl ShieldedComplianceMode {
         for (i, note) in notes.iter().enumerate() {
             let recipient = Self::derive_address_from_ivk(note);
             if !whitelist.contains(&recipient) {
-                return Err(ShieldedError::ComplianceViolation(
-                    format!("note {} recipient not whitelisted", i),
-                ));
+                return Err(ShieldedError::ComplianceViolation(format!(
+                    "note {} recipient not whitelisted",
+                    i
+                )));
             }
         }
         Ok(())
@@ -263,10 +259,7 @@ mod tests {
     fn test_audit_record_creation() {
         let sk = test_spending_key(42);
         let vk = ViewingKey::generate(&sk);
-        let notes = vec![
-            test_note(1000, 1, 1),
-            test_note(500, 2, 2),
-        ];
+        let notes = vec![test_note(1000, 1, 1), test_note(500, 2, 2)];
         let record = AuditRecord::from_notes(100, &vk, &notes);
         assert_eq!(record.block, 100);
         assert_eq!(record.decrypted_values.len(), 2);

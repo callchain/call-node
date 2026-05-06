@@ -20,9 +20,7 @@ use alloy_primitives::{keccak256, B256};
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::proof::{
-    parse_bridge_event_from_logs, parse_receipt_logs, rlp_encode_u64,
-};
+use super::proof::{parse_bridge_event_from_logs, parse_receipt_logs, rlp_encode_u64};
 
 /// Ethereum light client state.
 pub struct EthLightClient {
@@ -47,10 +45,13 @@ impl EthLightClient {
     pub fn init(genesis: GenesisState) -> Self {
         let latest = genesis.anchor_block;
         let mut verified = HashMap::new();
-        verified.insert(latest, EthHeader {
-            rlp_bytes: Vec::new(),
-            block_hash: genesis.anchor_hash,
-        });
+        verified.insert(
+            latest,
+            EthHeader {
+                rlp_bytes: Vec::new(),
+                block_hash: genesis.anchor_hash,
+            },
+        );
         Self {
             genesis,
             verified_headers: verified,
@@ -74,9 +75,9 @@ impl EthLightClient {
     /// (where `n` is the number of headers flushed from the buffer).
     /// Returns `Err(BufferFull)` if the buffer is at capacity.
     pub fn submit_header(&mut self, header: EthHeader) -> Result<(), LightClientError> {
-        let block_num = header.number().ok_or_else(|| {
-            LightClientError::InvalidHeader("cannot decode block number".into())
-        })?;
+        let block_num = header
+            .number()
+            .ok_or_else(|| LightClientError::InvalidHeader("cannot decode block number".into()))?;
 
         // Must be after anchor
         if block_num <= self.genesis.anchor_block {
@@ -219,13 +220,13 @@ impl EthLightClient {
     /// above the fork point. The caller should resubmit them.
     /// Returns `Err(BeforeFinalized)` if the fork point is at or below finalized.
     pub fn handle_reorg(&mut self, header: EthHeader) -> Result<Vec<EthHeader>, LightClientError> {
-        let block_num = header.number().ok_or_else(|| {
-            LightClientError::InvalidHeader("cannot decode block number".into())
-        })?;
+        let block_num = header
+            .number()
+            .ok_or_else(|| LightClientError::InvalidHeader("cannot decode block number".into()))?;
 
-        let parent_hash = header.parent_hash().ok_or_else(|| {
-            LightClientError::InvalidHeader("cannot decode parent hash".into())
-        })?;
+        let parent_hash = header
+            .parent_hash()
+            .ok_or_else(|| LightClientError::InvalidHeader("cannot decode parent hash".into()))?;
 
         // Find where this parent_hash exists in verified headers
         let mut fork_point: Option<u64> = None;
@@ -259,7 +260,7 @@ impl EthLightClient {
         self.latest_block = fork;
 
         // Insert the new header
-        self.verified_headers.insert(block_num, header.clone());
+        self.verified_headers.insert(block_num, header);
         if block_num > self.latest_block {
             self.latest_block = block_num;
         }
@@ -273,16 +274,21 @@ impl EthLightClient {
         let mut results = Vec::new();
         loop {
             // Find the lowest buffered header whose parent is verified
-            let next = self.buffer.iter().find(|(block_num, _header)| {
-                let parent = block_num.saturating_sub(1);
-                self.verified_headers.contains_key(&parent)
-            }).map(|(n, h)| (*n, h.clone()));
+            let next = self
+                .buffer
+                .iter()
+                .find(|(block_num, _header)| {
+                    let parent = block_num.saturating_sub(1);
+                    self.verified_headers.contains_key(&parent)
+                })
+                .map(|(n, h)| (*n, h.clone()));
 
             match next {
                 Some((n, _)) => {
-                    let header = self.buffer.remove(&n).unwrap();
-                    let result = self.insert_verified_header(header);
-                    results.push(result);
+                    if let Some(header) = self.buffer.remove(&n) {
+                        let result = self.insert_verified_header(header);
+                        results.push(result);
+                    }
                 }
                 None => break,
             }
@@ -292,9 +298,9 @@ impl EthLightClient {
 
     /// Insert a header into verified headers without re-running parent verification.
     fn insert_verified_header(&mut self, header: EthHeader) -> Result<(), LightClientError> {
-        let block_num = header.number().ok_or_else(|| {
-            LightClientError::InvalidHeader("cannot decode block number".into())
-        })?;
+        let block_num = header
+            .number()
+            .ok_or_else(|| LightClientError::InvalidHeader("cannot decode block number".into()))?;
 
         if self.verified_headers.contains_key(&block_num) {
             return Err(LightClientError::DuplicateHeader(block_num));
@@ -384,16 +390,13 @@ impl EthLightClient {
 
         let proof_rlps = tx_proof.node_rlps();
         if proof_rlps.is_empty() {
-            return Err(LightClientError::MptProofError(
-                "empty tx proof".into(),
-            ));
+            return Err(LightClientError::MptProofError("empty tx proof".into()));
         }
 
         // In the transactions trie, the key is the RLP-encoded transaction hash.
         // For the proof, we use the raw tx_hash bytes as the key.
-        let result =
-            verifier::verify_mpt_proof(tx_root, &_tx_hash[..], &proof_rlps)
-                .map_err(|e| LightClientError::MptProofError(e.to_string()))?;
+        let result = verifier::verify_mpt_proof(tx_root, &_tx_hash[..], &proof_rlps)
+            .map_err(|e| LightClientError::MptProofError(e.to_string()))?;
 
         if result.is_none() {
             return Err(LightClientError::TxNotFound);
@@ -435,19 +438,18 @@ impl EthLightClient {
 
         // In the receipts trie, the key is the RLP-encoded receipt index.
         let index_key = rlp_encode_u64(receipt_proof.receipt_index);
-        let result =
-            verifier::verify_mpt_proof(receipts_root, &index_key, &proof_rlps)
-                .map_err(|e| LightClientError::MptProofError(e.to_string()))?;
+        let result = verifier::verify_mpt_proof(receipts_root, &index_key, &proof_rlps)
+            .map_err(|e| LightClientError::MptProofError(e.to_string()))?;
 
         let receipt_rlp = result.ok_or(LightClientError::ReceiptNotFound)?;
 
         // Parse the receipt RLP to extract logs
-        let logs = parse_receipt_logs(&receipt_rlp)
-            .map_err(|e| LightClientError::LogParseError(e))?;
+        let logs =
+            parse_receipt_logs(&receipt_rlp).map_err(LightClientError::LogParseError)?;
 
         // Find the bridge deposit event
-        let bridge_event = parse_bridge_event_from_logs(&logs)
-            .ok_or(LightClientError::BridgeEventNotFound)?;
+        let bridge_event =
+            parse_bridge_event_from_logs(&logs).ok_or(LightClientError::BridgeEventNotFound)?;
 
         Ok(bridge_event)
     }

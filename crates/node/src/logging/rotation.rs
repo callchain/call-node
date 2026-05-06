@@ -7,22 +7,20 @@ use crate::logging::config::LogRotation;
 pub fn should_rotate(path: &Path, rotation: &LogRotation) -> bool {
     match rotation {
         LogRotation::None => false,
-        LogRotation::Size(max_bytes) => {
-            path.metadata()
-                .map(|m| m.len() >= *max_bytes)
-                .unwrap_or(false)
-        }
-        LogRotation::Daily => {
-            path.metadata()
-                .and_then(|m| m.modified())
-                .map(|modified| {
-                    let now = std::time::SystemTime::now();
-                    now.duration_since(modified)
-                        .map(|d| d.as_secs() >= 86_400)
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false)
-        }
+        LogRotation::Size(max_bytes) => path
+            .metadata()
+            .map(|m| m.len() >= *max_bytes)
+            .unwrap_or(false),
+        LogRotation::Daily => path
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|modified| {
+                let now = std::time::SystemTime::now();
+                now.duration_since(modified)
+                    .map(|d| d.as_secs() >= 86_400)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false),
     }
 }
 

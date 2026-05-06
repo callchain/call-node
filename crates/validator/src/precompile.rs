@@ -182,6 +182,7 @@ impl ValidatorPrecompile {
 }
 
 impl call_precompile::StatefulPrecompile for ValidatorPrecompile {
+    #[allow(clippy::expect_used)]
     fn call(
         &mut self,
         calldata: &[u8],
@@ -191,7 +192,7 @@ impl call_precompile::StatefulPrecompile for ValidatorPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let selector: [u8; 4] = calldata[..4].try_into().expect("slice length checked above");
         match selector {
             IProtocolValidator::stakeCall::SELECTOR => self.stake(calldata, msg_sender, storage),
             IProtocolValidator::unstakeCall::SELECTOR => {

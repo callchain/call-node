@@ -12,10 +12,10 @@
 //!   D2. Value range: Non-zero, 128-bit range
 //!   D3. RCM determinism: H("rcm" || ivk || value || asset_id || rho) == rcm
 
+use crate::poseidon::bytes_to_fr;
 use ark_bn254::Fr;
 use ark_ff::{Field, Zero};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use crate::poseidon::bytes_to_fr;
 
 /// Witness data for a deposit note.
 #[derive(Debug, Clone)]
@@ -58,12 +58,12 @@ impl DepositCircuit {
 
 impl ConstraintSynthesizer<Fr> for DepositCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        use crate::poseidon::gadget::poseidon_hash_gadget;
         use ark_r1cs_std::alloc::AllocVar;
         use ark_r1cs_std::boolean::Boolean;
         use ark_r1cs_std::eq::EqGadget;
         use ark_r1cs_std::fields::fp::FpVar;
         use ark_r1cs_std::prelude::ToBitsGadget;
-        use crate::poseidon::gadget::poseidon_hash_gadget;
 
         let witness = self.witness.ok_or(SynthesisError::AssignmentMissing)?;
 
@@ -95,7 +95,12 @@ impl ConstraintSynthesizer<Fr> for DepositCircuit {
         // H(value || asset_id || rcm || rho) == public commitment
         let computed_cm = poseidon_hash_gadget(
             cs.clone(),
-            &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+            &[
+                value_var.clone(),
+                asset_id_var.clone(),
+                rcm_var.clone(),
+                rho_var.clone(),
+            ],
         )?;
         computed_cm.enforce_equal(&commitment_var)?;
 
@@ -150,9 +155,9 @@ pub const fn deposit_public_input_count() -> usize {
 #[cfg(all(test, feature = "real-prover"))]
 mod tests {
     use super::*;
+    use crate::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
     use crate::test_utils::{test_hash, test_spending_key};
     use crate::ViewingKey;
-    use crate::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
 
     fn make_deposit_witness(value: u128, seed: u8) -> DepositWitness {
         let sk = test_spending_key(seed);

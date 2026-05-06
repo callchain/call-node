@@ -1,6 +1,6 @@
 //! EVM account data type.
 
-use alloy_primitives::{U256, Bytes};
+use alloy_primitives::{Bytes, U256};
 use std::collections::HashMap;
 
 /// EVM account info.

@@ -17,7 +17,9 @@
 
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
-use ark_relations::r1cs::{ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, SynthesisMode};
+use ark_relations::r1cs::{
+    ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, SynthesisMode,
+};
 use ark_std::io::Write;
 use std::fs::File;
 use std::path::Path;
@@ -84,9 +86,21 @@ fn write_r1cs_binary(
     let mut constraint_data: Vec<u8> = Vec::new();
 
     for constraint_idx in 0..m_constraints {
-        let a_entries = matrices.a.get(constraint_idx).map(|v| v.as_slice()).unwrap_or(&[]);
-        let b_entries = matrices.b.get(constraint_idx).map(|v| v.as_slice()).unwrap_or(&[]);
-        let c_entries = matrices.c.get(constraint_idx).map(|v| v.as_slice()).unwrap_or(&[]);
+        let a_entries = matrices
+            .a
+            .get(constraint_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let b_entries = matrices
+            .b
+            .get(constraint_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let c_entries = matrices
+            .c
+            .get(constraint_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
 
         // Write A entries — matrix format is Vec<Vec<(F, usize)>>: (coeff, wire_idx)
         constraint_data.write_all(&(a_entries.len() as u64).to_le_bytes())?;
@@ -147,9 +161,17 @@ fn build_deposit_circuit() -> DepositCircuit {
     use call_shielded::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash};
     use call_shielded::ViewingKey;
 
-    let sk = { let mut k = [0u8; 32]; k[0] = 1; k };
+    let sk = {
+        let mut k = [0u8; 32];
+        k[0] = 1;
+        k
+    };
     let vk = ViewingKey::generate(&sk);
-    let rho = { let mut h = [0u8; 32]; h[0] = 1; h };
+    let rho = {
+        let mut h = [0u8; 32];
+        h[0] = 1;
+        h
+    };
     let value: u128 = 1000;
     let asset_id: u64 = 1;
 
@@ -168,7 +190,12 @@ fn build_deposit_circuit() -> DepositCircuit {
     let rcm_fr = poseidon_hash(&[rcm_tag_fr, ivk_fr, value_fr, asset_fr, rho_fr]);
     let rcm = fr_to_bytes(&rcm_fr);
 
-    let witness = DepositWitness { value, rcm, recipient_ivk: vk.incoming_view_key, rho };
+    let witness = DepositWitness {
+        value,
+        rcm,
+        recipient_ivk: vk.incoming_view_key,
+        rho,
+    };
 
     // Compute commitment
     let cm_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
@@ -180,13 +207,21 @@ fn build_deposit_circuit() -> DepositCircuit {
 /// Build a withdraw circuit with witness data.
 fn build_withdraw_circuit() -> WithdrawCircuit {
     use call_shielded::circuit_withdraw::WithdrawWitness;
-    use call_shielded::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, domain};
     use call_shielded::merkle_poseidon::PoseidonMerkleTree;
+    use call_shielded::poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash};
     use call_shielded::ViewingKey;
 
-    let sk = { let mut k = [0u8; 32]; k[0] = 1; k };
+    let sk = {
+        let mut k = [0u8; 32];
+        k[0] = 1;
+        k
+    };
     let vk = ViewingKey::generate(&sk);
-    let rho = { let mut h = [0u8; 32]; h[0] = 1; h };
+    let rho = {
+        let mut h = [0u8; 32];
+        h[0] = 1;
+        h
+    };
     let value: u128 = 500;
     let asset_id: u64 = 1;
 
@@ -222,25 +257,44 @@ fn build_withdraw_circuit() -> WithdrawCircuit {
     let merkle_path = tree.proof_for_last();
 
     let witness = WithdrawWitness {
-        note_value: value, rcm, recipient_ivk: vk.incoming_view_key, rho, merkle_path,
+        note_value: value,
+        rcm,
+        recipient_ivk: vk.incoming_view_key,
+        rho,
+        merkle_path,
     };
     let target_address = [1u8; 20];
 
-    WithdrawCircuit::new(nullifier, asset_id, value, target_address, merkle_root, witness)
+    WithdrawCircuit::new(
+        nullifier,
+        asset_id,
+        value,
+        target_address,
+        merkle_root,
+        witness,
+    )
 }
 
 /// Build a transfer circuit with witness data.
 fn build_transfer_circuit() -> TransferCircuit {
     use call_shielded::circuit_transfer::{InputNoteWitness, OutputNoteWitness};
-    use call_shielded::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, domain};
     use call_shielded::merkle_poseidon::PoseidonMerkleTree;
+    use call_shielded::poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash};
     use call_shielded::ViewingKey;
 
     let asset_id: u64 = 1;
 
-    let sk = { let mut k = [0u8; 32]; k[0] = 1; k };
+    let sk = {
+        let mut k = [0u8; 32];
+        k[0] = 1;
+        k
+    };
     let vk = ViewingKey::generate(&sk);
-    let rho_in = { let mut h = [0u8; 32]; h[0] = 10; h };
+    let rho_in = {
+        let mut h = [0u8; 32];
+        h[0] = 10;
+        h
+    };
 
     // Input note
     let mut value_bytes = [0u8; 32];
@@ -274,14 +328,25 @@ fn build_transfer_circuit() -> TransferCircuit {
     let merkle_path = tree.proof_for_last();
 
     let input_witness = InputNoteWitness {
-        value: 1000, rcm: rcm_in, recipient_ivk: vk.incoming_view_key,
-        rho: rho_in, spending_key: sk,
+        value: 1000,
+        rcm: rcm_in,
+        recipient_ivk: vk.incoming_view_key,
+        rho: rho_in,
+        spending_key: sk,
     };
 
     // Output note
-    let out_sk = { let mut k = [0u8; 32]; k[0] = 2; k };
+    let out_sk = {
+        let mut k = [0u8; 32];
+        k[0] = 2;
+        k
+    };
     let out_vk = ViewingKey::generate(&out_sk);
-    let rho_out = { let mut h = [0u8; 32]; h[0] = 20; h };
+    let rho_out = {
+        let mut h = [0u8; 32];
+        h[0] = 20;
+        h
+    };
     let mut out_value_bytes = [0u8; 32];
     out_value_bytes[..16].copy_from_slice(&900u128.to_le_bytes());
     let out_value_fr = bytes_to_fr(&out_value_bytes);
@@ -294,12 +359,20 @@ fn build_transfer_circuit() -> TransferCircuit {
     let output_cm = fr_to_bytes(&output_cm_fr);
 
     let output_witness = OutputNoteWitness {
-        value: 900, rcm: rcm_out, recipient_ivk: out_vk.incoming_view_key, rho: rho_out,
+        value: 900,
+        rcm: rcm_out,
+        recipient_ivk: out_vk.incoming_view_key,
+        rho: rho_out,
     };
 
     TransferCircuit::new(
-        vec![nullifier], vec![output_cm], asset_id, merkle_root,
-        vec![input_witness], vec![output_witness], vec![merkle_path],
+        vec![nullifier],
+        vec![output_cm],
+        asset_id,
+        merkle_root,
+        vec![input_witness],
+        vec![output_witness],
+        vec![merkle_path],
     )
 }
 

@@ -41,7 +41,10 @@ impl Network for InMemoryNetwork {
     }
 
     async fn try_broadcast(&self, channel: u64, message: Vec<u8>) -> Result<(), NetworkError> {
-        let mut buffer = self.message_buffer.lock().map_err(|_| NetworkError::NetworkError("lock poisoned".into()))?;
+        let mut buffer = self
+            .message_buffer
+            .lock()
+            .map_err(|_| NetworkError::NetworkError("lock poisoned".into()))?;
         buffer.push(("broadcast".into(), channel, message));
         Ok(())
     }
@@ -55,8 +58,13 @@ impl Network for InMemoryNetwork {
     }
 
     async fn receive(&self) -> Result<(String, u64, Vec<u8>), NetworkError> {
-        let mut buffer = self.message_buffer.lock().map_err(|_| NetworkError::NetworkError("lock poisoned".into()))?;
-        buffer.pop().ok_or_else(|| NetworkError::NetworkError("no messages".into()))
+        let mut buffer = self
+            .message_buffer
+            .lock()
+            .map_err(|_| NetworkError::NetworkError("lock poisoned".into()))?;
+        buffer
+            .pop()
+            .ok_or_else(|| NetworkError::NetworkError("no messages".into()))
     }
 
     fn peer_count(&self) -> usize {
@@ -64,7 +72,10 @@ impl Network for InMemoryNetwork {
     }
 
     fn peer_ids(&self) -> Vec<String> {
-        self.connected_peers.lock().map(|p| p.clone()).unwrap_or_default()
+        self.connected_peers
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default()
     }
 
     async fn connect(&self, address: &str) -> Result<(), NetworkError> {
@@ -84,6 +95,9 @@ impl Network for InMemoryNetwork {
     }
 
     fn is_healthy(&self) -> bool {
-        self.connected_peers.lock().map(|p| !p.is_empty()).unwrap_or(false)
+        self.connected_peers
+            .lock()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
     }
 }

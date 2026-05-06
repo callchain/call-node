@@ -26,11 +26,11 @@
 //!   W3. Value match: note_value == public value
 //!   W4. Range & asset: Non-zero value, 128-bit range, asset_id consistency
 
+use crate::poseidon::bytes_to_fr;
+use crate::poseidon::domain;
 use ark_bn254::Fr;
 use ark_ff::{Field, Zero};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use crate::poseidon::bytes_to_fr;
-use crate::poseidon::domain;
 
 /// Witness data for a withdraw note.
 #[derive(Debug, Clone)]
@@ -101,12 +101,12 @@ impl WithdrawCircuit {
 
 impl ConstraintSynthesizer<Fr> for WithdrawCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        use crate::poseidon::gadget::poseidon_hash_gadget;
         use ark_r1cs_std::alloc::AllocVar;
         use ark_r1cs_std::boolean::Boolean;
         use ark_r1cs_std::eq::EqGadget;
         use ark_r1cs_std::fields::fp::FpVar;
         use ark_r1cs_std::prelude::ToBitsGadget;
-        use crate::poseidon::gadget::poseidon_hash_gadget;
 
         let witness = self.witness.ok_or(SynthesisError::AssignmentMissing)?;
 
@@ -150,7 +150,12 @@ impl ConstraintSynthesizer<Fr> for WithdrawCircuit {
         // W2: Merkle path validity
         let note_commitment = poseidon_hash_gadget(
             cs.clone(),
-            &[value_var.clone(), asset_id_var.clone(), rcm_var.clone(), rho_var.clone()],
+            &[
+                value_var.clone(),
+                asset_id_var.clone(),
+                rcm_var.clone(),
+                rho_var.clone(),
+            ],
         )?;
 
         let mut current = note_commitment;
@@ -215,10 +220,10 @@ pub const fn withdraw_public_input_count() -> usize {
 #[cfg(all(test, feature = "real-prover"))]
 mod tests {
     use super::*;
-    use crate::test_utils::{test_hash, test_spending_key};
-    use crate::ViewingKey;
     use crate::merkle_poseidon::PoseidonMerkleTree;
     use crate::poseidon::{fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
+    use crate::test_utils::{test_hash, test_spending_key};
+    use crate::ViewingKey;
 
     /// Build a withdraw witness and all public inputs from scratch.
     fn make_withdraw_data(
@@ -274,7 +279,14 @@ mod tests {
             merkle_path,
         };
 
-        (nullifier, asset_id, value, target_address, merkle_root, witness)
+        (
+            nullifier,
+            asset_id,
+            value,
+            target_address,
+            merkle_root,
+            witness,
+        )
     }
 
     fn compute_rcm_plain(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
@@ -295,7 +307,12 @@ mod tests {
             make_withdraw_data(1000, 1, 1);
 
         let circuit = WithdrawCircuit::new(
-            nullifier, asset_id, value, target_address, merkle_root, witness,
+            nullifier,
+            asset_id,
+            value,
+            target_address,
+            merkle_root,
+            witness,
         );
 
         let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
@@ -351,7 +368,12 @@ mod tests {
         assert_eq!(witness.note_value, value);
 
         let circuit = WithdrawCircuit::new(
-            nullifier, asset_id, value, target_address, merkle_root, witness,
+            nullifier,
+            asset_id,
+            value,
+            target_address,
+            merkle_root,
+            witness,
         );
         assert_eq!(circuit.value, value);
 
@@ -373,7 +395,12 @@ mod tests {
         bad_nullifier[0] ^= 0xFF;
 
         let circuit = WithdrawCircuit::new(
-            bad_nullifier, asset_id, value, target_address, merkle_root, witness,
+            bad_nullifier,
+            asset_id,
+            value,
+            target_address,
+            merkle_root,
+            witness,
         );
 
         let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
@@ -421,9 +448,7 @@ mod tests {
             merkle_path,
         };
 
-        let circuit = WithdrawCircuit::new(
-            nullifier, 1, value, [99u8; 20], merkle_root, witness,
-        );
+        let circuit = WithdrawCircuit::new(nullifier, 1, value, [99u8; 20], merkle_root, witness);
 
         let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
         let result = circuit.generate_constraints(cs.clone());

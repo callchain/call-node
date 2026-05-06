@@ -2,8 +2,8 @@
 //!
 //! ProtocolReceipt, logs, state changes, root computation, prune strategy.
 
-use call_primitives::{Address, FeeCurrency, Hash, TxHash};
 use call_primitives::ExecutionStatus;
+use call_primitives::{Address, FeeCurrency, Hash, TxHash};
 
 /// Log entry in a receipt (per spec §18.4)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

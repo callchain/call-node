@@ -77,7 +77,10 @@ pub async fn query_balance(
     rpc_url: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let client = Client::new();
-    let body = rpc_body("call_protocolBalance", serde_json::json!([asset_id, address]));
+    let body = rpc_body(
+        "call_protocolBalance",
+        serde_json::json!([asset_id, address]),
+    );
 
     if let Some(result) = rpc_call(&client, rpc_url, body).await? {
         println!("{}", serde_json::to_string_pretty(&result)?);

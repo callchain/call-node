@@ -60,9 +60,7 @@ impl NetworkLimits {
             ));
         }
         if self.max_message_size == 0 {
-            return Err(NetworkError::InvalidLimits(
-                "max_message_size must be > 0",
-            ));
+            return Err(NetworkError::InvalidLimits("max_message_size must be > 0"));
         }
         if self.known_txs_cache_size == 0 {
             return Err(NetworkError::InvalidLimits(

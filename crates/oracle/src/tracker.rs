@@ -5,8 +5,8 @@
 //! per-period contributor/outlier tracking (both lost on restart).
 
 use crate::{
-    oracle_message_hash, oracle_quorum, AggregatedPrice, OracleConfig,
-    OracleError, OracleSubmission, OracleValidatorInfo, PricePair,
+    oracle_message_hash, oracle_quorum, AggregatedPrice, OracleConfig, OracleError,
+    OracleSubmission, OracleValidatorInfo, PricePair,
 };
 use call_crypto::ed25519_verify;
 use std::collections::HashMap;
@@ -45,7 +45,10 @@ impl OracleTracker {
         }
 
         // Period check: only accept at update interval boundaries
-        if !submission.block_number.is_multiple_of(config.update_interval) {
+        if !submission
+            .block_number
+            .is_multiple_of(config.update_interval)
+        {
             return Err(OracleError::WrongPeriod);
         }
 
@@ -181,9 +184,17 @@ pub fn aggregate_submissions(
         .collect();
 
     let first_ts = submissions.values().map(|s| s.timestamp).min().unwrap_or(0);
-    let block = submissions.values().map(|s| s.block_number).next().unwrap_or(0);
+    let block = submissions
+        .values()
+        .map(|s| s.block_number)
+        .next()
+        .unwrap_or(0);
 
-    let pair = submissions.values().next().map(|s| s.pair).unwrap_or(PricePair::new(0, 0));
+    let pair = submissions
+        .values()
+        .next()
+        .map(|s| s.pair)
+        .unwrap_or(PricePair::new(0, 0));
 
     let aggregated = AggregatedPrice {
         pair,

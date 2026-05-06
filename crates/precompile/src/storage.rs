@@ -129,7 +129,9 @@ where
 {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
         // Ensure account is loaded into journal before accessing storage.
-        let _ = self.journal.load_account(address)
+        let _ = self
+            .journal
+            .load_account(address)
             .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
 
         let result = self
@@ -142,16 +144,15 @@ where
         Ok(result.data)
     }
 
-    fn sstore(
-        &mut self,
-        address: Address,
-        key: U256,
-        value: U256,
-    ) -> Result<(), PrecompileError> {
+    fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
         if self.is_static {
-            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+            return Err(PrecompileError::Other(
+                "static call cannot mutate state".into(),
+            ));
         }
-        let _ = self.journal.load_account(address)
+        let _ = self
+            .journal
+            .load_account(address)
             .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
 
         let result = self
@@ -166,9 +167,9 @@ where
 
         // Refunds (Cancun rules, simplified)
         let s = &result.data;
-        if s.original_value == value && s.present_value != value {
-            self.refund_gas(4800);
-        } else if s.present_value != U256::ZERO && value == U256::ZERO {
+        if (s.original_value == value && s.present_value != value)
+            || (s.present_value != U256::ZERO && value == U256::ZERO)
+        {
             self.refund_gas(4800);
         }
         Ok(())
@@ -179,25 +180,18 @@ where
         Ok(self.journal.tload(address, key))
     }
 
-    fn tstore(
-        &mut self,
-        address: Address,
-        key: U256,
-        value: U256,
-    ) -> Result<(), PrecompileError> {
+    fn tstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
         if self.is_static {
-            return Err(PrecompileError::Other("static call cannot mutate state".into()));
+            return Err(PrecompileError::Other(
+                "static call cannot mutate state".into(),
+            ));
         }
         self.deduct_gas(100)?; // TSTORE = warm write
         self.journal.tstore(address, key, value);
         Ok(())
     }
 
-    fn emit_event(
-        &mut self,
-        address: Address,
-        event: LogData,
-    ) -> Result<(), PrecompileError> {
+    fn emit_event(&mut self, address: Address, event: LogData) -> Result<(), PrecompileError> {
         let topics_gas = 375u64 * event.topics().len() as u64;
         let data_gas = 8u64 * event.data.len() as u64;
         self.deduct_gas(375 + topics_gas + data_gas)?;
@@ -262,13 +256,14 @@ where
 
     fn balance_add(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
         if self.is_static {
-            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+            return Err(PrecompileError::Other(
+                "static call cannot mutate balance".into(),
+            ));
         }
         let success = {
-            let mut account = self
-                .journal
-                .load_account_mut(address)
-                .map_err(|e| PrecompileError::Other(format!("load_account_mut error: {:?}", e).into()))?;
+            let mut account = self.journal.load_account_mut(address).map_err(|e| {
+                PrecompileError::Other(format!("load_account_mut error: {:?}", e).into())
+            })?;
             account.data.incr_balance(amount)
         };
         if !success {
@@ -279,13 +274,14 @@ where
 
     fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
         if self.is_static {
-            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+            return Err(PrecompileError::Other(
+                "static call cannot mutate balance".into(),
+            ));
         }
         let success = {
-            let mut account = self
-                .journal
-                .load_account_mut(address)
-                .map_err(|e| PrecompileError::Other(format!("load_account_mut error: {:?}", e).into()))?;
+            let mut account = self.journal.load_account_mut(address).map_err(|e| {
+                PrecompileError::Other(format!("load_account_mut error: {:?}", e).into())
+            })?;
             account.data.decr_balance(amount)
         };
         if !success {
@@ -296,10 +292,9 @@ where
 
     fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
         let balance = {
-            let account = self
-                .journal
-                .load_account(address)
-                .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+            let account = self.journal.load_account(address).map_err(|e| {
+                PrecompileError::Other(format!("load_account error: {:?}", e).into())
+            })?;
             account.data.info.balance
         };
         self.deduct_gas(100)?;
@@ -314,7 +309,8 @@ pub const INPUT_PER_WORD_COST: u64 = 6;
 
 /// Compute gas cost for calldata of the given length.
 pub fn input_cost(len: usize) -> u64 {
-    len.div_ceil(32).saturating_mul(INPUT_PER_WORD_COST as usize) as u64
+    len.div_ceil(32)
+        .saturating_mul(INPUT_PER_WORD_COST as usize) as u64
 }
 
 /// Compute a storage slot from multiple concatenated byte slices.
@@ -341,6 +337,7 @@ pub fn fill_precompile_output(
 // ── Test Double: HashMapStorageProvider ───────────────────────────────
 
 #[derive(Debug, Default)]
+#[allow(clippy::type_complexity)]
 pub struct HashMapStorageProvider {
     persistent: HashMap<(Address, U256), U256>,
     transient: HashMap<(Address, U256), U256>,
@@ -391,7 +388,11 @@ impl HashMapStorageProvider {
 
     fn warm_slot(&mut self, address: Address, key: U256) {
         if !self.accessed_slots.contains_key(&(address, key)) {
-            let original = self.persistent.get(&(address, key)).copied().unwrap_or_default();
+            let original = self
+                .persistent
+                .get(&(address, key))
+                .copied()
+                .unwrap_or_default();
             self.accessed_slots.insert((address, key), original);
         }
     }
@@ -427,15 +428,14 @@ impl StorageProvider for HashMapStorageProvider {
         let gas = if is_warm { 100 } else { 2100 };
         self.deduct_gas(gas)?;
         self.warm_slot(address, key);
-        Ok(self.persistent.get(&(address, key)).copied().unwrap_or_default())
+        Ok(self
+            .persistent
+            .get(&(address, key))
+            .copied()
+            .unwrap_or_default())
     }
 
-    fn sstore(
-        &mut self,
-        address: Address,
-        key: U256,
-        value: U256,
-    ) -> Result<(), PrecompileError> {
+    fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
         if self.is_static {
             return Err(PrecompileError::Other("static call".into()));
         }
@@ -444,12 +444,20 @@ impl StorageProvider for HashMapStorageProvider {
         let dynamic_gas = if is_warm { 0 } else { 2100 };
         self.deduct_gas(static_gas + dynamic_gas)?;
 
-        let present = self.persistent.get(&(address, key)).copied().unwrap_or_default();
-        let original = self.accessed_slots.get(&(address, key)).copied().unwrap_or_default();
+        let present = self
+            .persistent
+            .get(&(address, key))
+            .copied()
+            .unwrap_or_default();
+        let original = self
+            .accessed_slots
+            .get(&(address, key))
+            .copied()
+            .unwrap_or_default();
 
-        if original == value && present != value {
-            self.refund_gas(4800);
-        } else if present != U256::ZERO && value == U256::ZERO {
+        if (original == value && present != value)
+            || (present != U256::ZERO && value == U256::ZERO)
+        {
             self.refund_gas(4800);
         }
 
@@ -460,15 +468,14 @@ impl StorageProvider for HashMapStorageProvider {
 
     fn tload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
         self.deduct_gas(100)?;
-        Ok(self.transient.get(&(address, key)).copied().unwrap_or_default())
+        Ok(self
+            .transient
+            .get(&(address, key))
+            .copied()
+            .unwrap_or_default())
     }
 
-    fn tstore(
-        &mut self,
-        address: Address,
-        key: U256,
-        value: U256,
-    ) -> Result<(), PrecompileError> {
+    fn tstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
         if self.is_static {
             return Err(PrecompileError::Other("static call".into()));
         }
@@ -477,11 +484,7 @@ impl StorageProvider for HashMapStorageProvider {
         Ok(())
     }
 
-    fn emit_event(
-        &mut self,
-        address: Address,
-        event: LogData,
-    ) -> Result<(), PrecompileError> {
+    fn emit_event(&mut self, address: Address, event: LogData) -> Result<(), PrecompileError> {
         let topics_gas = 375u64 * event.topics().len() as u64;
         let data_gas = 8u64 * event.data.len() as u64;
         self.deduct_gas(375 + topics_gas + data_gas)?;
@@ -569,10 +572,13 @@ impl StorageProvider for HashMapStorageProvider {
 
     fn balance_add(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
         if self.is_static {
-            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+            return Err(PrecompileError::Other(
+                "static call cannot mutate balance".into(),
+            ));
         }
         let current = self.balances.get(&address).copied().unwrap_or_default();
-        let new = current.checked_add(amount)
+        let new = current
+            .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
         self.balances.insert(address, new);
         self.deduct_gas(100)
@@ -580,10 +586,13 @@ impl StorageProvider for HashMapStorageProvider {
 
     fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
         if self.is_static {
-            return Err(PrecompileError::Other("static call cannot mutate balance".into()));
+            return Err(PrecompileError::Other(
+                "static call cannot mutate balance".into(),
+            ));
         }
         let current = self.balances.get(&address).copied().unwrap_or_default();
-        let new = current.checked_sub(amount)
+        let new = current
+            .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("insufficient native balance".into()))?;
         self.balances.insert(address, new);
         self.deduct_gas(100)
@@ -597,7 +606,10 @@ impl StorageProvider for HashMapStorageProvider {
 
 impl call_protocol::storage_backend::StorageBackend for HashMapStorageProvider {
     fn load(&self, address: Address, slot: U256) -> U256 {
-        self.persistent.get(&(address, slot)).copied().unwrap_or_default()
+        self.persistent
+            .get(&(address, slot))
+            .copied()
+            .unwrap_or_default()
     }
 
     fn store(&mut self, address: Address, slot: U256, value: U256) {
@@ -677,7 +689,10 @@ mod tests {
     #[test]
     fn test_storage_slot() {
         let slot = storage_slot(&[b"validators"]);
-        assert_eq!(slot, U256::from_be_slice(keccak256(b"validators").as_slice()));
+        assert_eq!(
+            slot,
+            U256::from_be_slice(keccak256(b"validators").as_slice())
+        );
     }
 
     #[test]

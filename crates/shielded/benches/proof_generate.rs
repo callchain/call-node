@@ -8,12 +8,12 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 #[cfg(feature = "real-prover")]
 fn bench_proof_deposit(c: &mut Criterion) {
+    use call_shielded::prover::RealProver;
     use call_shielded::{
         circuit_deposit::{DepositCircuit, DepositWitness},
         poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged},
         ViewingKey,
     };
-    use call_shielded::prover::RealProver;
 
     let prover = RealProver::setup();
 
@@ -69,13 +69,13 @@ fn bench_proof_deposit(c: &mut Criterion) {
 
 #[cfg(feature = "real-prover")]
 fn bench_proof_transfer(c: &mut Criterion) {
+    use call_shielded::prover::RealProver;
     use call_shielded::{
-        circuit_transfer::{TransferCircuit, InputNoteWitness, OutputNoteWitness},
+        circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit},
         merkle_poseidon::PoseidonMerkleTree,
         poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged},
         ViewingKey,
     };
-    use call_shielded::prover::RealProver;
 
     let prover = RealProver::setup();
 
@@ -181,6 +181,8 @@ criterion_main!(benches);
 #[cfg(not(feature = "real-prover"))]
 fn main() {
     eprintln!("This benchmark requires the `real-prover` feature.");
-    eprintln!("Run with: cargo bench -p call-shielded --bench proof_generate --features real-prover");
+    eprintln!(
+        "Run with: cargo bench -p call-shielded --bench proof_generate --features real-prover"
+    );
     std::process::exit(1);
 }

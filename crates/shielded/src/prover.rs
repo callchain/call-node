@@ -3,7 +3,7 @@
 //! Groth16 prover/verifier interface with ~200B proofs and ~3ms verification.
 //! Provides Halo2 migration path via trait abstraction.
 
-use crate::{ZkProof, ShieldedCircuit};
+use crate::{ShieldedCircuit, ZkProof};
 
 /// Prover trait for generating ZK proofs
 pub trait Prover: Send + Sync {
@@ -27,7 +27,8 @@ impl MockProver {
 impl Prover for MockProver {
     fn prove(&self, circuit: &ShieldedCircuit) -> Result<ZkProof, ProverError> {
         // Verify constraints first
-        circuit.verify_constraints()
+        circuit
+            .verify_constraints()
             .map_err(|e| ProverError::ConstraintViolation(format!("{:?}", e)))?;
 
         // Generate a mock proof (~200 bytes to simulate Groth16)
@@ -69,8 +70,8 @@ pub enum ProverError {
 mod real_prover_impl {
     use super::ProverError;
     use crate::circuit_deposit::DepositCircuit;
-    use crate::circuit_withdraw::WithdrawCircuit;
     use crate::circuit_transfer::TransferCircuit;
+    use crate::circuit_withdraw::WithdrawCircuit;
     use crate::proof_ser;
 
     use ark_bn254::Bn254;
@@ -160,15 +161,21 @@ mod real_prover_impl {
         #[cfg(feature = "production-keys")]
         pub fn from_production_keys(keys: crate::ceremony::ProductionKeys) -> Self {
             Self {
-                transfer_pk: keys.pk.as_ref()
+                transfer_pk: keys
+                    .pk
+                    .as_ref()
                     .map(|p| p.transfer.clone())
                     .unwrap_or_else(|| Self::empty_proving_key()),
                 transfer_vk: keys.vk.transfer,
-                withdraw_pk: keys.pk.as_ref()
+                withdraw_pk: keys
+                    .pk
+                    .as_ref()
                     .map(|p| p.withdraw.clone())
                     .unwrap_or_else(|| Self::empty_proving_key()),
                 withdraw_vk: keys.vk.withdraw,
-                deposit_pk: keys.pk.as_ref()
+                deposit_pk: keys
+                    .pk
+                    .as_ref()
                     .map(|p| p.deposit.clone())
                     .unwrap_or_else(|| Self::empty_proving_key()),
                 deposit_vk: keys.vk.deposit,
@@ -190,7 +197,8 @@ mod real_prover_impl {
             keys_dir: impl AsRef<std::path::Path>,
             genesis_hashes: &crate::ceremony::GenesisKeyHashes,
         ) -> Result<Self, crate::ceremony::KeyLoadError> {
-            let keys = crate::ceremony::ProductionKeys::load_with_verification(keys_dir, genesis_hashes)?;
+            let keys =
+                crate::ceremony::ProductionKeys::load_with_verification(keys_dir, genesis_hashes)?;
             Ok(Self::from_production_keys(keys))
         }
 
@@ -231,7 +239,11 @@ mod real_prover_impl {
         }
 
         /// Verify a deposit proof against the verifying key and public inputs.
-        pub fn verify_deposit(&self, proof_data: &[u8], public_inputs: &[u8]) -> Result<bool, ProverError> {
+        pub fn verify_deposit(
+            &self,
+            proof_data: &[u8],
+            public_inputs: &[u8],
+        ) -> Result<bool, ProverError> {
             let proof = proof_ser::deserialize_groth16_proof(proof_data)
                 .map_err(|_e| ProverError::ProofVerification)?;
 
@@ -244,7 +256,11 @@ mod real_prover_impl {
         }
 
         /// Verify a withdraw proof against the verifying key and public inputs.
-        pub fn verify_withdraw(&self, proof_data: &[u8], public_inputs: &[u8]) -> Result<bool, ProverError> {
+        pub fn verify_withdraw(
+            &self,
+            proof_data: &[u8],
+            public_inputs: &[u8],
+        ) -> Result<bool, ProverError> {
             let proof = proof_ser::deserialize_groth16_proof(proof_data)
                 .map_err(|_e| ProverError::ProofVerification)?;
 
@@ -256,7 +272,11 @@ mod real_prover_impl {
         }
 
         /// Verify a transfer proof against the verifying key and public inputs.
-        pub fn verify_transfer(&self, proof_data: &[u8], public_inputs: &[u8]) -> Result<bool, ProverError> {
+        pub fn verify_transfer(
+            &self,
+            proof_data: &[u8],
+            public_inputs: &[u8],
+        ) -> Result<bool, ProverError> {
             let proof = proof_ser::deserialize_groth16_proof(proof_data)
                 .map_err(|_e| ProverError::ProofVerification)?;
 
@@ -384,10 +404,10 @@ mod real_prover_impl {
     // ---------------------------------------------------------------------------
 
     use crate::circuit_deposit::DepositWitness;
-    use crate::circuit_withdraw::WithdrawWitness;
     use crate::circuit_transfer::{InputNoteWitness, OutputNoteWitness};
-    use crate::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, domain};
+    use crate::circuit_withdraw::WithdrawWitness;
     use crate::merkle_poseidon::PoseidonMerkleTree;
+    use crate::poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash};
     use crate::ViewingKey;
 
     pub(crate) fn setup_spending_key(n: u8) -> [u8; 32] {
@@ -416,7 +436,12 @@ mod real_prover_impl {
         bytes
     }
 
-    pub(crate) fn setup_compute_rcm(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
+    pub(crate) fn setup_compute_rcm(
+        vk: &ViewingKey,
+        value: u128,
+        asset_id: u64,
+        rho: &[u8; 32],
+    ) -> [u8; 32] {
         // Must match the circuit's D3 constraint: poseidon_hash([rcm_tag, ivk, value, asset, rho])
         let rcm_tag = setup_domain_tag_to_bytes("rcm");
         let rcm_tag_fr = bytes_to_fr(&rcm_tag);
@@ -441,7 +466,12 @@ mod real_prover_impl {
         fr_to_bytes(&nf_fr)
     }
 
-    pub(crate) fn setup_compute_commitment(value: u128, asset_id: u64, rcm: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
+    pub(crate) fn setup_compute_commitment(
+        value: u128,
+        asset_id: u64,
+        rcm: &[u8; 32],
+        rho: &[u8; 32],
+    ) -> [u8; 32] {
         let value_bytes = setup_value_to_fr_bytes(value);
         let value_fr = bytes_to_fr(&value_bytes);
         let mut asset_bytes = [0u8; 32];
@@ -461,7 +491,12 @@ mod real_prover_impl {
         let asset_id: u64 = 1;
 
         let rcm = setup_compute_rcm(&vk, value, asset_id, &rho);
-        let witness = DepositWitness { value, rcm, recipient_ivk: vk.incoming_view_key, rho };
+        let witness = DepositWitness {
+            value,
+            rcm,
+            recipient_ivk: vk.incoming_view_key,
+            rho,
+        };
         let commitment = setup_compute_commitment(value, asset_id, &rcm, &rho);
 
         DepositCircuit::new(commitment, asset_id, witness)
@@ -484,11 +519,22 @@ mod real_prover_impl {
         let merkle_path = tree.proof_for_last();
 
         let witness = WithdrawWitness {
-            note_value: value, rcm, recipient_ivk: vk.incoming_view_key, rho, merkle_path,
+            note_value: value,
+            rcm,
+            recipient_ivk: vk.incoming_view_key,
+            rho,
+            merkle_path,
         };
         let target_address = [1u8; 20];
 
-        WithdrawCircuit::new(nullifier, asset_id, value, target_address, merkle_root, witness)
+        WithdrawCircuit::new(
+            nullifier,
+            asset_id,
+            value,
+            target_address,
+            merkle_root,
+            witness,
+        )
     }
 
     pub(crate) fn setup_transfer_circuit() -> TransferCircuit {
@@ -507,8 +553,11 @@ mod real_prover_impl {
         let merkle_path = tree.proof_for_last();
 
         let input_witness = InputNoteWitness {
-            value: 1000, rcm: rcm_in, recipient_ivk: vk.incoming_view_key,
-            rho: rho_in, spending_key: sk,
+            value: 1000,
+            rcm: rcm_in,
+            recipient_ivk: vk.incoming_view_key,
+            rho: rho_in,
+            spending_key: sk,
         };
 
         let out_sk = setup_spending_key(2);
@@ -518,12 +567,20 @@ mod real_prover_impl {
         let output_cm = setup_compute_commitment(900, asset_id, &rcm_out, &rho_out);
 
         let output_witness = OutputNoteWitness {
-            value: 900, rcm: rcm_out, recipient_ivk: out_vk.incoming_view_key, rho: rho_out,
+            value: 900,
+            rcm: rcm_out,
+            recipient_ivk: out_vk.incoming_view_key,
+            rho: rho_out,
         };
 
         TransferCircuit::new(
-            vec![nullifier], vec![output_cm], asset_id, merkle_root,
-            vec![input_witness], vec![output_witness], vec![merkle_path],
+            vec![nullifier],
+            vec![output_cm],
+            asset_id,
+            merkle_root,
+            vec![input_witness],
+            vec![output_witness],
+            vec![merkle_path],
         )
     }
 
@@ -544,7 +601,9 @@ mod real_prover_impl {
             let prover = RealProver::setup();
             let circuit = setup_deposit_circuit();
 
-            let proof_data = prover.prove_deposit(&circuit).expect("deposit prove failed");
+            let proof_data = prover
+                .prove_deposit(&circuit)
+                .expect("deposit prove failed");
             assert_eq!(proof_data.len(), 128, "Groth16 proof should be 128 bytes");
 
             // Deposit circuit public inputs: commitment + asset_id (2 Fr = 64 bytes)
@@ -553,7 +612,8 @@ mod real_prover_impl {
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
             public_inputs.extend_from_slice(&asset_bytes);
 
-            let valid = prover.verify_deposit(&proof_data, &public_inputs)
+            let valid = prover
+                .verify_deposit(&proof_data, &public_inputs)
                 .expect("deposit verify failed");
             assert!(valid, "valid deposit proof should verify");
         }
@@ -563,7 +623,9 @@ mod real_prover_impl {
             let prover = RealProver::setup();
             let circuit = setup_withdraw_circuit();
 
-            let proof_data = prover.prove_withdraw(&circuit).expect("withdraw prove failed");
+            let proof_data = prover
+                .prove_withdraw(&circuit)
+                .expect("withdraw prove failed");
             assert_eq!(proof_data.len(), 128);
 
             // Withdraw circuit public inputs: nullifier + asset_id + merkle_root + value (4 Fr = 128 bytes)
@@ -577,7 +639,8 @@ mod real_prover_impl {
             value_bytes[..16].copy_from_slice(&circuit.value.to_le_bytes());
             public_inputs.extend_from_slice(&value_bytes);
 
-            let valid = prover.verify_withdraw(&proof_data, &public_inputs)
+            let valid = prover
+                .verify_withdraw(&proof_data, &public_inputs)
                 .expect("withdraw verify failed");
             assert!(valid, "valid withdraw proof should verify");
         }
@@ -587,7 +650,9 @@ mod real_prover_impl {
             let prover = RealProver::setup();
             let circuit = setup_transfer_circuit();
 
-            let proof_data = prover.prove_transfer(&circuit).expect("transfer prove failed");
+            let proof_data = prover
+                .prove_transfer(&circuit)
+                .expect("transfer prove failed");
             assert_eq!(proof_data.len(), 128);
 
             // Transfer circuit public inputs: asset_id + merkle_root + nullifiers + commitments
@@ -600,7 +665,8 @@ mod real_prover_impl {
             public_inputs.extend_from_slice(&circuit.nullifiers[0]);
             public_inputs.extend_from_slice(&circuit.commitments[0]);
 
-            let valid = prover.verify_transfer(&proof_data, &public_inputs)
+            let valid = prover
+                .verify_transfer(&proof_data, &public_inputs)
                 .expect("transfer verify failed");
             assert!(valid, "valid transfer proof should verify");
         }
@@ -642,16 +708,16 @@ mod real_prover_impl {
     }
 }
 
-#[cfg(feature = "real-prover")]
-pub use real_prover_impl::RealProver;
 #[cfg(all(feature = "real-prover", test))]
 pub(crate) use real_prover_impl::setup_withdraw_circuit;
+#[cfg(feature = "real-prover")]
+pub use real_prover_impl::RealProver;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::test_note;
     use crate::merkle_poseidon::PoseidonMerkleTree;
+    use crate::test_utils::test_note;
 
     fn build_circuit_with_proof() -> (ShieldedCircuit, ZkProof) {
         let mut tree = PoseidonMerkleTree::new(32);
@@ -670,7 +736,8 @@ mod tests {
             1,
             vec![input],
             vec![output],
-        ).with_merkle_paths(vec![proof]);
+        )
+        .with_merkle_paths(vec![proof]);
 
         let zk_proof = ZkProof {
             proof_data: vec![1u8; 200],
@@ -710,7 +777,6 @@ mod tests {
         };
         assert!(!prover.verify(&bad).unwrap());
     }
-
 
     #[test]
     fn test_mock_prover_constraint_violation() {

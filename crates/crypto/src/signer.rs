@@ -59,7 +59,11 @@ impl LocalSigner {
     /// Create a local signer from raw 32-byte secret key
     pub fn from_raw_key(key: Zeroizing<[u8; 32]>) -> Result<Self, SignerError> {
         let (pubkey, address) = Self::derive_pubkey_and_address(&key)?;
-        Ok(Self { key, pubkey, address })
+        Ok(Self {
+            key,
+            pubkey,
+            address,
+        })
     }
 
     /// Create a local signer from hex-encoded secret key
@@ -143,7 +147,8 @@ impl AwsKmsSigner {
             .await
             .map_err(|e| SignerError::KmsError(format!("get_public_key: {e}")))?;
 
-        let pk_der = resp.public_key()
+        let pk_der = resp
+            .public_key()
             .ok_or_else(|| SignerError::KmsError("no public key in response".into()))?
             .as_ref();
 
@@ -151,15 +156,21 @@ impl AwsKmsSigner {
         let pubkey = Self::parse_sec1_pubkey(pk_der)?;
         let address = pubkey_to_address(&pubkey);
 
-        Ok(Self { client, key_id, pubkey, address })
+        Ok(Self {
+            client,
+            key_id,
+            pubkey,
+            address,
+        })
     }
 
     fn parse_sec1_pubkey(der: &[u8]) -> Result<PublicKey, SignerError> {
         // SEC1 uncompressed: 0x04 || 32-byte x || 32-byte y
         if der.len() != 65 || der[0] != 0x04 {
-            return Err(SignerError::KmsError(
-                format!("expected 65-byte uncompressed SEC1 key, got {} bytes", der.len())
-            ));
+            return Err(SignerError::KmsError(format!(
+                "expected 65-byte uncompressed SEC1 key, got {} bytes",
+                der.len()
+            )));
         }
         let mut pubkey = [0u8; 64];
         pubkey.copy_from_slice(&der[1..]);
@@ -176,18 +187,21 @@ impl Signer for AwsKmsSigner {
         let rt = tokio::runtime::Handle::try_current()
             .map_err(|e| SignerError::KmsError(format!("no tokio runtime: {e}")))?;
 
-        let sig_resp = rt.block_on(async {
-            self.client
-                .sign()
-                .key_id(&self.key_id)
-                .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
-                .message(aws_sdk_kms::primitives::Blob::new(msg_hash.as_slice()))
-                .message_type(aws_sdk_kms::types::MessageType::Digest)
-                .send()
-                .await
-        }).map_err(|e| SignerError::KmsError(format!("KMS sign failed: {e}")))?;
+        let sig_resp = rt
+            .block_on(async {
+                self.client
+                    .sign()
+                    .key_id(&self.key_id)
+                    .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
+                    .message(aws_sdk_kms::primitives::Blob::new(msg_hash.as_slice()))
+                    .message_type(aws_sdk_kms::types::MessageType::Digest)
+                    .send()
+                    .await
+            })
+            .map_err(|e| SignerError::KmsError(format!("KMS sign failed: {e}")))?;
 
-        let sig_der = sig_resp.signature()
+        let sig_der = sig_resp
+            .signature()
             .ok_or_else(|| SignerError::KmsError("no signature in KMS response".into()))?
             .as_ref();
 
@@ -213,8 +227,8 @@ impl AwsKmsSigner {
     /// Convert ASN.1 DER ECDSA signature to raw 65-byte format (r || s || v)
     fn der_to_raw(der: &[u8]) -> Result<Signature, SignerError> {
         use k256::ecdsa::Signature as K256Sig;
-        let sig = K256Sig::from_der(der)
-            .map_err(|e| SignerError::KmsError(format!("DER parse: {e}")))?;
+        let sig =
+            K256Sig::from_der(der).map_err(|e| SignerError::KmsError(format!("DER parse: {e}")))?;
 
         let r_bytes = sig.r().to_bytes();
         let s_bytes = sig.s().to_bytes();
@@ -253,7 +267,11 @@ impl HashiVaultSigner {
         key_name: String,
     ) -> Result<Self, SignerError> {
         let client = reqwest::Client::new();
-        let url = format!("{}/v1/transit/keys/{}", vault_addr.trim_end_matches('/'), key_name);
+        let url = format!(
+            "{}/v1/transit/keys/{}",
+            vault_addr.trim_end_matches('/'),
+            key_name
+        );
 
         let resp = client
             .get(&url)
@@ -283,14 +301,21 @@ impl HashiVaultSigner {
         let pubkey = Self::parse_sec1_pubkey(&pk_der)?;
         let address = pubkey_to_address(&pubkey);
 
-        Ok(Self { vault_addr, token, key_name, pubkey, address })
+        Ok(Self {
+            vault_addr,
+            token,
+            key_name,
+            pubkey,
+            address,
+        })
     }
 
     fn parse_sec1_pubkey(der: &[u8]) -> Result<PublicKey, SignerError> {
         if der.len() != 65 || der[0] != 0x04 {
-            return Err(SignerError::KmsError(
-                format!("expected 65-byte uncompressed SEC1 key, got {} bytes", der.len())
-            ));
+            return Err(SignerError::KmsError(format!(
+                "expected 65-byte uncompressed SEC1 key, got {} bytes",
+                der.len()
+            )));
         }
         let mut pubkey = [0u8; 64];
         pubkey.copy_from_slice(&der[1..]);
@@ -334,7 +359,8 @@ impl Signer for HashiVaultSigner {
             base64::engine::general_purpose::STANDARD.decode(&sig_b64[idx + 1..])
         } else {
             base64::engine::general_purpose::STANDARD.decode(sig_b64)
-        }.map_err(|e| SignerError::KmsError(format!("base64: {e}")))?;
+        }
+        .map_err(|e| SignerError::KmsError(format!("base64: {e}")))?;
 
         Self::der_to_raw(&sig_bytes)
     }
@@ -356,8 +382,8 @@ impl Signer for HashiVaultSigner {
 impl HashiVaultSigner {
     fn der_to_raw(der: &[u8]) -> Result<Signature, SignerError> {
         use k256::ecdsa::Signature as K256Sig;
-        let sig = K256Sig::from_der(der)
-            .map_err(|e| SignerError::KmsError(format!("DER parse: {e}")))?;
+        let sig =
+            K256Sig::from_der(der).map_err(|e| SignerError::KmsError(format!("DER parse: {e}")))?;
 
         let r_bytes = sig.r().to_bytes();
         let s_bytes = sig.s().to_bytes();

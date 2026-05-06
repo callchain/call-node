@@ -1,15 +1,20 @@
 //! Oracle tests
 
 use crate::{
-    oracle_quorum, sign_oracle_submission, OracleConfig, OracleError,
-    OracleTracker, OracleSubmission, PricePair, OracleValidatorInfo,
+    oracle_quorum, sign_oracle_submission, OracleConfig, OracleError, OracleSubmission,
+    OracleTracker, OracleValidatorInfo, PricePair,
 };
 use call_crypto::ed25519_generate_keypair;
 use call_primitives::{Address, Ed25519PublicKey};
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 
-fn make_tracker() -> (OracleTracker, Vec<(u32, Ed25519PublicKey, SigningKey)>, OracleConfig, HashMap<u32, OracleValidatorInfo>) {
+fn make_tracker() -> (
+    OracleTracker,
+    Vec<(u32, Ed25519PublicKey, SigningKey)>,
+    OracleConfig,
+    HashMap<u32, OracleValidatorInfo>,
+) {
     let mut config = OracleConfig::default();
     config.min_data_sources = 0; // tests don't need real data sources
     let tracker = OracleTracker::default();
@@ -21,15 +26,18 @@ fn make_tracker() -> (OracleTracker, Vec<(u32, Ed25519PublicKey, SigningKey)>, O
         let (pubkey, signing_key) = ed25519_generate_keypair();
         let vid = i as u32;
         let address = Address::repeat_byte(i as u8);
-        validator_map.insert(vid, OracleValidatorInfo {
-            validator_id: vid,
-            address,
-            public_key: pubkey,
-            is_active: true,
-            outlier_count: 0,
-            last_submission_block: 0,
-            submission_count: 0,
-        });
+        validator_map.insert(
+            vid,
+            OracleValidatorInfo {
+                validator_id: vid,
+                address,
+                public_key: pubkey,
+                is_active: true,
+                outlier_count: 0,
+                last_submission_block: 0,
+                submission_count: 0,
+            },
+        );
         validators.push((vid, pubkey, signing_key));
     }
 
@@ -49,15 +57,19 @@ fn submit_all(
     for (vid, _, signing_key) in validators {
         let timestamp = block * 1000;
         let sig = sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
-        if let Ok(Some(agg)) = tracker.submit_price(OracleSubmission {
-            validator_id: *vid,
-            pair,
-            price,
-            block_number: block,
-            timestamp,
-            signature: sig,
-            sources: Vec::new(),
-        }, config, validator_map) {
+        if let Ok(Some(agg)) = tracker.submit_price(
+            OracleSubmission {
+                validator_id: *vid,
+                pair,
+                price,
+                block_number: block,
+                timestamp,
+                signature: sig,
+                sources: Vec::new(),
+            },
+            config,
+            validator_map,
+        ) {
             result = Some(agg);
         }
     }
@@ -86,7 +98,16 @@ fn test_oracle_submission_valid() {
     let block = 1000u64;
     let price = 2_000_000u128;
 
-    let agg = submit_all(&mut tracker, &validators, &validator_map, &config, pair, block, price).unwrap();
+    let agg = submit_all(
+        &mut tracker,
+        &validators,
+        &validator_map,
+        &config,
+        pair,
+        block,
+        price,
+    )
+    .unwrap();
 
     let q = quorum_for(&validators);
     assert_eq!(agg.median_price, price);
@@ -137,7 +158,9 @@ fn test_oracle_submission_duplicate() {
         signature: sig,
         sources: Vec::new(),
     };
-    assert!(tracker.submit_price(submission, &config, &validator_map).is_ok());
+    assert!(tracker
+        .submit_price(submission, &config, &validator_map)
+        .is_ok());
 
     // Same validator, same block = duplicate (overwrites, not error)
     let sig2 = sign_oracle_submission(signing_key, *vid, pair, 2_100_000, block, timestamp);
@@ -151,7 +174,9 @@ fn test_oracle_submission_duplicate() {
         sources: Vec::new(),
     };
     // Tracker allows overwriting the same validator's submission
-    assert!(tracker.submit_price(submission2, &config, &validator_map).is_ok());
+    assert!(tracker
+        .submit_price(submission2, &config, &validator_map)
+        .is_ok());
 }
 
 #[test]
@@ -258,7 +283,15 @@ fn test_oracle_distribute_rewards() {
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
 
-    submit_all(&mut tracker, &validators, &validator_map, &config, pair, block, 2_000_000);
+    submit_all(
+        &mut tracker,
+        &validators,
+        &validator_map,
+        &config,
+        pair,
+        block,
+        2_000_000,
+    );
 
     // After successful aggregation, contributors should be recorded
     assert!(!tracker.current_contributors.is_empty());
@@ -294,7 +327,9 @@ fn test_oracle_clear_pending() {
         signature: sig,
         sources: Vec::new(),
     };
-    tracker.submit_price(submission, &config, &validator_map).unwrap();
+    tracker
+        .submit_price(submission, &config, &validator_map)
+        .unwrap();
 
     tracker.clear_pending();
     // After clearing, a new submission should work (pending is empty)
@@ -308,5 +343,7 @@ fn test_oracle_clear_pending() {
         signature: sig2,
         sources: Vec::new(),
     };
-    assert!(tracker.submit_price(submission2, &config, &validator_map).is_ok());
+    assert!(tracker
+        .submit_price(submission2, &config, &validator_map)
+        .is_ok());
 }

@@ -1,8 +1,8 @@
 //! Price fetcher trait and implementations
 
+use crate::PricePair;
 #[cfg(feature = "http-fetcher")]
 use call_primitives::AssetId;
-use crate::PricePair;
 
 /// Trait for fetching prices from external data sources.
 /// Validators implement this to provide real-time price data
@@ -69,7 +69,8 @@ impl PriceFetcher for HttpPriceFetcher {
             let body: serde_json::Value = resp.json().await.ok()?;
             // Support common formats: {"price": "123.45"}, {"lastPrice": "123.45"},
             // or a plain number
-            let price_str = body.get("price")
+            let price_str = body
+                .get("price")
                 .or_else(|| body.get("lastPrice"))
                 .or_else(|| body.get("last"))?
                 .as_str()?;

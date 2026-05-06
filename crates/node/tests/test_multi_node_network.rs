@@ -6,8 +6,8 @@
 mod e2e;
 use e2e::harness::*;
 
-use call_primitives::{Address, TxHash};
 use call_network::{Network, NetworkMessage, TransactionMessage};
+use call_primitives::{Address, TxHash};
 
 const BLOCK_CHANNEL: u64 = 2;
 const TX_CHANNEL: u64 = 1;
@@ -20,7 +20,13 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(_secret: &[u8; 32], sender: Address, nonce: u64, to: Address, amount: u128) -> call_evm::EvmTransaction {
+fn make_tx(
+    _secret: &[u8; 32],
+    sender: Address,
+    nonce: u64,
+    to: Address,
+    amount: u128,
+) -> call_evm::EvmTransaction {
     call_evm::EvmTransaction {
         caller: sender,
         nonce,

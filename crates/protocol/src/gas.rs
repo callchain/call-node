@@ -30,15 +30,15 @@ pub struct FeeParams {
 impl Default for FeeParams {
     fn default() -> Self {
         Self {
-            base_fee: 10,                // 10 wei initial
+            base_fee: 10,                     // 10 wei initial
             target_gas_per_block: 10_000_000, // 10M
             max_gas_per_block: 20_000_000,    // 20M
-            adjustment_coefficient: 1,   // numerator (denominator = 8)
-            min_base_fee: 1,             // 1 wei
-            max_base_fee: 1_000_000_000, // 1B wei
-            initial_base_fee: 10,        // 10 wei
-            oracle_fee_share_bps: 100,   // 1% of block fees to oracle rewards
-            validator_fee_share_bps: 0,  // 0% to validator rewards by default
+            adjustment_coefficient: 1,        // numerator (denominator = 8)
+            min_base_fee: 1,                  // 1 wei
+            max_base_fee: 1_000_000_000,      // 1B wei
+            initial_base_fee: 10,             // 10 wei
+            oracle_fee_share_bps: 100,        // 1% of block fees to oracle rewards
+            validator_fee_share_bps: 0,       // 0% to validator rewards by default
         }
     }
 }
@@ -66,7 +66,7 @@ pub fn update_base_fee(params: &mut FeeParams, gas_used: u64) {
         let decrease = (params.base_fee as i128)
             .saturating_mul(numerator)
             .saturating_div(denominator);
-        params.base_fee = (params.base_fee as i128 - decrease)
-            .max(params.min_base_fee as i128) as u128;
+        params.base_fee =
+            (params.base_fee as i128 - decrease).max(params.min_base_fee as i128) as u128;
     }
 }

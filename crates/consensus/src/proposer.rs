@@ -72,7 +72,7 @@ impl Default for ConsensusParams {
             // Validator staking (mainnet conservative defaults)
             min_self_stake: 1_000_000 * 10u128.pow(18),
             unbonding_period_blocks: 120_960, // ~8.4h at 250ms block time
-            offline_slash_rate_bps: 10,        // 0.1%
+            offline_slash_rate_bps: 10,       // 0.1%
             key_rotation_grace_blocks: 100,
             // Churn control
             churn_limit_quotient: 16,
@@ -115,10 +115,7 @@ impl ConsensusParams {
     }
 
     /// Create with all parameters configurable
-    pub const fn with_epoch_length(
-        self,
-        epoch_length: u64,
-    ) -> Self {
+    pub const fn with_epoch_length(self, epoch_length: u64) -> Self {
         Self {
             epoch_length,
             ..self
@@ -138,7 +135,10 @@ impl ConsensusParams {
 
     /// Compute churn limit from qualified validator count
     pub fn churn_limit(&self, qualified_count: u64) -> u64 {
-        std::cmp::max(self.min_churn_limit, qualified_count / self.churn_limit_quotient)
+        std::cmp::max(
+            self.min_churn_limit,
+            qualified_count / self.churn_limit_quotient,
+        )
     }
 }
 
@@ -221,7 +221,11 @@ pub fn verify_proposer_in_subset(proposer: ValidatorId, subset: &[ValidatorId]) 
 /// **Not cryptographically secure** — retained only for tests that do not
 /// have validator public keys available.
 #[cfg(test)]
-pub fn select_proposer_subset_lcg(validators: &[ValidatorId], round: u64, subset_size: u32) -> Vec<ValidatorId> {
+pub fn select_proposer_subset_lcg(
+    validators: &[ValidatorId],
+    round: u64,
+    subset_size: u32,
+) -> Vec<ValidatorId> {
     if validators.is_empty() || subset_size == 0 {
         return Vec::new();
     }

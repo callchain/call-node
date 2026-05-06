@@ -2,21 +2,20 @@
 
 #[cfg(feature = "real-prover")]
 mod shielded_flow {
-    use call_shielded::*;
-    use call_primitives::Hash;
-    use call_shielded::circuit_deposit::{DepositCircuit, DepositWitness};
-    use call_shielded::circuit_withdraw::{WithdrawCircuit, WithdrawWitness};
-    use call_shielded::circuit_transfer::{TransferCircuit, InputNoteWitness, OutputNoteWitness};
-    use call_shielded::encryption::{encrypt_note, decrypt_note};
-    use call_shielded::ShieldedComplianceMode;
-    use call_shielded::poseidon::{poseidon_hash, bytes_to_fr, fr_to_bytes, domain};
     use ark_bn254::Fr;
     use ark_ff::Field;
+    use call_primitives::Hash;
+    use call_shielded::circuit_deposit::{DepositCircuit, DepositWitness};
+    use call_shielded::circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit};
+    use call_shielded::circuit_withdraw::{WithdrawCircuit, WithdrawWitness};
+    use call_shielded::encryption::{decrypt_note, encrypt_note};
+    use call_shielded::poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash};
+    use call_shielded::ShieldedComplianceMode;
+    use call_shielded::*;
 
     fn domain_tag_to_fr(tag: &str) -> Fr {
         Fr::from_random_bytes(tag.as_bytes()).unwrap_or_default()
     }
-
 
     fn test_hash(n: u8) -> call_primitives::Hash {
         call_primitives::Hash::repeat_byte(n)
@@ -55,7 +54,12 @@ mod shielded_flow {
         bytes
     }
 
-    fn compute_poseidon_commitment(value: u128, asset_id: u64, rcm: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
+    fn compute_poseidon_commitment(
+        value: u128,
+        asset_id: u64,
+        rcm: &[u8; 32],
+        rho: &[u8; 32],
+    ) -> [u8; 32] {
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
         let cm_fr = poseidon_hash(&[
@@ -134,10 +138,17 @@ mod shielded_flow {
         let out_cm = compute_poseidon_commitment(900, asset_id, &rcm_out, &rho_out);
 
         let input1 = InputNoteWitness {
-            value: 1000, rcm: rcm1, recipient_ivk: vk1.incoming_view_key, rho: rho1, spending_key: sk1,
+            value: 1000,
+            rcm: rcm1,
+            recipient_ivk: vk1.incoming_view_key,
+            rho: rho1,
+            spending_key: sk1,
         };
         let output = OutputNoteWitness {
-            value: 900, rcm: rcm_out, recipient_ivk: out_vk.incoming_view_key, rho: rho_out,
+            value: 900,
+            rcm: rcm_out,
+            recipient_ivk: out_vk.incoming_view_key,
+            rho: rho_out,
         };
 
         let circuit = TransferCircuit::new(
@@ -305,15 +316,27 @@ mod shielded_flow {
         let out_cm = compute_poseidon_commitment(1000, 1, &rcm_out, &rho_out);
 
         let input_witness = InputNoteWitness {
-            value: 500, rcm: rcm1, recipient_ivk: vk1.incoming_view_key, rho: rho1, spending_key: sk1,
+            value: 500,
+            rcm: rcm1,
+            recipient_ivk: vk1.incoming_view_key,
+            rho: rho1,
+            spending_key: sk1,
         };
         let output_witness = OutputNoteWitness {
-            value: 1000, rcm: rcm_out, recipient_ivk: out_vk.incoming_view_key, rho: rho_out,
+            value: 1000,
+            rcm: rcm_out,
+            recipient_ivk: out_vk.incoming_view_key,
+            rho: rho_out,
         };
 
         let circuit = TransferCircuit::new(
-            vec![nf1], vec![out_cm], 1, merkle_root,
-            vec![input_witness], vec![output_witness], vec![path1],
+            vec![nf1],
+            vec![out_cm],
+            1,
+            merkle_root,
+            vec![input_witness],
+            vec![output_witness],
+            vec![path1],
         );
 
         let prover = RealProver::setup();
@@ -345,7 +368,10 @@ mod shielded_flow {
         proof[10] ^= 0xFF;
 
         let result = prover.verify_deposit(&proof, &[]);
-        assert!(result.is_err() || !result.unwrap_or(false), "tampered proof should be rejected");
+        assert!(
+            result.is_err() || !result.unwrap_or(false),
+            "tampered proof should be rejected"
+        );
     }
 
     #[test]
@@ -359,7 +385,11 @@ mod shielded_flow {
         let proof = prover.prove_deposit(&circuit).unwrap();
         let elapsed = start.elapsed();
 
-        assert!(elapsed.as_secs() < 30, "proving took too long: {:?}", elapsed);
+        assert!(
+            elapsed.as_secs() < 30,
+            "proving took too long: {:?}",
+            elapsed
+        );
         assert!(!proof.is_empty());
     }
 

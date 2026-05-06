@@ -3,8 +3,7 @@ pub mod precompile;
 pub use precompile::CompliancePrecompile;
 
 use call_precompile::{
-    storage::storage_slot, u256_to_address, u8_to_u256,
-    ASSET_ADDRESS, COMPLIANCE_ADDRESS,
+    storage::storage_slot, u256_to_address, u8_to_u256, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -196,7 +195,8 @@ mod tests {
         );
 
         let mut store = ComplianceStorage::new(backend);
-        let result = store.update_compliance(1, Address::repeat_byte(0x22), 3, Address::repeat_byte(0x99));
+        let result =
+            store.update_compliance(1, Address::repeat_byte(0x22), 3, Address::repeat_byte(0x99));
         assert!(matches!(result, Err(ComplianceError::NotIssuer)));
     }
 

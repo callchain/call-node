@@ -7,28 +7,28 @@
 //! - `GET /health` — health check (no auth)
 
 use axum::{
-    Json, Router,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
+    Json, Router,
 };
 use call_crypto::keccak256;
 use call_shielded::{
-    ViewingKey,
     circuit_deposit::{DepositCircuit, DepositWitness},
-    circuit_withdraw::{WithdrawCircuit, WithdrawWitness},
     circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit},
-    poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, domain},
+    circuit_withdraw::{WithdrawCircuit, WithdrawWitness},
+    poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash},
     prover::RealProver,
+    ViewingKey,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     time::Instant,
 };
@@ -246,7 +246,10 @@ pub(crate) fn build_router(state: ProverState) -> Router {
         .route("/prove/deposit", post(handle_deposit))
         .route("/prove/transfer", post(handle_transfer))
         .route("/prove/withdraw", post(handle_withdraw))
-        .route_layer(middleware::from_fn_with_state(state.clone(), auth_and_rate_limit));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_and_rate_limit,
+        ));
 
     Router::new()
         .route("/health", get(health_check))
@@ -284,11 +287,7 @@ fn cache_get(
     None
 }
 
-fn cache_insert(
-    cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>,
-    key: [u8; 32],
-    proof: Vec<u8>,
-) {
+fn cache_insert(cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>, key: [u8; 32], proof: Vec<u8>) {
     cache.insert(key, (proof, Instant::now()));
 }
 
@@ -336,10 +335,12 @@ async fn handle_deposit(
     let circuit = DepositCircuit::new(commitment, req.asset_id, witness);
 
     state.inflight.fetch_add(1, Ordering::Relaxed);
-    let proof_data = state
-        .prover
-        .prove_deposit(&circuit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("prove failed: {e}")))?;
+    let proof_data = state.prover.prove_deposit(&circuit).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("prove failed: {e}"),
+        )
+    })?;
     state.inflight.fetch_sub(1, Ordering::Relaxed);
 
     {
@@ -386,8 +387,8 @@ async fn handle_transfer(
             .merkle_path
             .iter()
             .map(|e| {
-                let sibling = decode_hex_32(&e.sibling, "merklePath.sibling")
-                    .expect("valid merkle sibling");
+                let sibling =
+                    decode_hex_32(&e.sibling, "merklePath.sibling").expect("valid merkle sibling");
                 (sibling, e.is_right)
             })
             .collect();
@@ -472,10 +473,12 @@ async fn handle_transfer(
     );
 
     state.inflight.fetch_add(1, Ordering::Relaxed);
-    let proof_data = state
-        .prover
-        .prove_transfer(&circuit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("prove failed: {e}")))?;
+    let proof_data = state.prover.prove_transfer(&circuit).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("prove failed: {e}"),
+        )
+    })?;
     state.inflight.fetch_sub(1, Ordering::Relaxed);
 
     {
@@ -561,10 +564,12 @@ async fn handle_withdraw(
     );
 
     state.inflight.fetch_add(1, Ordering::Relaxed);
-    let proof_data = state
-        .prover
-        .prove_withdraw(&circuit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("prove failed: {e}")))?;
+    let proof_data = state.prover.prove_withdraw(&circuit).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("prove failed: {e}"),
+        )
+    })?;
     state.inflight.fetch_sub(1, Ordering::Relaxed);
 
     {
@@ -588,8 +593,8 @@ async fn handle_withdraw(
 
 fn decode_hex_32(s: &str, field: &str) -> Result<[u8; 32], (StatusCode, String)> {
     let cleaned = s.trim_start_matches("0x");
-    let bytes =
-        hex::decode(cleaned).map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid {field}: {e}")))?;
+    let bytes = hex::decode(cleaned)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid {field}: {e}")))?;
     if bytes.len() != 32 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -603,8 +608,8 @@ fn decode_hex_32(s: &str, field: &str) -> Result<[u8; 32], (StatusCode, String)>
 
 fn decode_hex_20(s: &str, field: &str) -> Result<[u8; 20], (StatusCode, String)> {
     let cleaned = s.trim_start_matches("0x");
-    let bytes =
-        hex::decode(cleaned).map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid {field}: {e}")))?;
+    let bytes = hex::decode(cleaned)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid {field}: {e}")))?;
     if bytes.len() != 20 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -750,7 +755,10 @@ mod tests {
 
     #[test]
     fn test_decode_hex_32_valid() {
-        let result = decode_hex_32("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "test");
+        let result = decode_hex_32(
+            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            "test",
+        );
         assert!(result.is_ok());
         let arr = result.unwrap();
         assert_eq!(arr[0], 0x12);

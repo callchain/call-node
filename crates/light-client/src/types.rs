@@ -51,7 +51,7 @@ impl EthHeader {
     /// Get the block number from the header.
     pub fn number(&self) -> Option<u64> {
         let item = decode_rlp_field(&self.rlp_bytes, 8)?; // block_number is field index 8
-        // Decode big-endian integer from bytes
+                                                          // Decode big-endian integer from bytes
         let mut bytes = [0u8; 8];
         let start = bytes.len().saturating_sub(item.len());
         bytes[start..].copy_from_slice(item);
@@ -219,7 +219,10 @@ pub struct ReceiptProof {
 
 impl ReceiptProof {
     pub fn new(receipt_index: u64, nodes: Vec<MptProofNode>) -> Self {
-        Self { receipt_index, nodes }
+        Self {
+            receipt_index,
+            nodes,
+        }
     }
 
     pub fn node_rlps(&self) -> Vec<Vec<u8>> {

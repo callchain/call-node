@@ -1,23 +1,25 @@
 //! call-rpc — JSON-RPC server (per spec §11)
 
 pub mod handlers;
-pub mod standard;
-pub mod ws;
 pub mod rate_limit;
+pub mod standard;
 pub mod state_bundle;
+pub mod ws;
 
 #[cfg(test)]
 mod tests;
 
 pub use handlers::*;
-pub use standard::*;
-pub use ws::*;
 pub use rate_limit::RateLimiter;
+pub use standard::*;
 pub use state_bundle::*;
+pub use ws::*;
 
-use jsonrpsee::server::{Server, ServerHandle, stop_channel, serve_with_graceful_shutdown, Methods};
-use jsonrpsee::RpcModule;
+use jsonrpsee::server::{
+    serve_with_graceful_shutdown, stop_channel, Methods, Server, ServerHandle,
+};
 use jsonrpsee::types::ErrorObjectOwned;
+use jsonrpsee::RpcModule;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -57,7 +59,9 @@ impl Default for RpcConfig {
 }
 
 /// Build a combined RPC module with all endpoints
-pub fn build_rpc_module(state: Arc<RpcState>) -> Result<RpcModule<Arc<RpcState>>, ErrorObjectOwned> {
+pub fn build_rpc_module(
+    state: Arc<RpcState>,
+) -> Result<RpcModule<Arc<RpcState>>, ErrorObjectOwned> {
     let mut module = RpcModule::new(state.clone());
     standard::register_standard_rpc(&mut module)?;
     callchain::register_callchain_rpc(&mut module)?;
@@ -103,7 +107,8 @@ async fn start_rpc_server<Context>(
 where
     Context: Send + Sync + 'static,
 {
-    let listener = TcpListener::bind(addr).await
+    let listener = TcpListener::bind(addr)
+        .await
         .map_err(|e| ErrorObjectOwned::owned(-32603, format!("bind failed: {}", e), None::<()>))?;
 
     let (stop_handle, server_handle) = stop_channel();
@@ -115,17 +120,19 @@ where
     let methods: Methods = module.into();
 
     // Optional TLS
-    let tls_acceptor = if let (Some(ref cert), Some(ref key)) = (&config.tls_cert_path, &config.tls_key_path) {
-        Some(build_tls_acceptor(cert, key)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, format!("TLS init failed: {}", e), None::<()>))?)
-    } else {
-        None
-    };
+    let tls_acceptor =
+        if let (Some(ref cert), Some(ref key)) = (&config.tls_cert_path, &config.tls_key_path) {
+            Some(build_tls_acceptor(cert, key).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("TLS init failed: {}", e), None::<()>)
+            })?)
+        } else {
+            None
+        };
 
     // Optional rate limiter
-    let rate_limiter = config.rate_limit_rps.map(|rps| {
-        RateLimiter::new(rps, config.rate_limit_window_secs)
-    });
+    let rate_limiter = config
+        .rate_limit_rps
+        .map(|rps| RateLimiter::new(rps, config.rate_limit_window_secs));
 
     let is_https = tls_acceptor.is_some();
     let protocol = if is_https { "HTTPS" } else { "HTTP" };
@@ -175,7 +182,8 @@ where
                                 tls_stream,
                                 svc,
                                 stop_handle2.shutdown(),
-                            ).await;
+                            )
+                            .await;
                         }
                         Err(e) => {
                             tracing::warn!("TLS handshake failed: {}", e);
@@ -185,11 +193,8 @@ where
             } else {
                 tokio::spawn(async move {
                     let svc = svc_builder2.build(methods2, stop_handle2.clone());
-                    let _ = serve_with_graceful_shutdown(
-                        stream,
-                        svc,
-                        stop_handle2.shutdown(),
-                    ).await;
+                    let _ =
+                        serve_with_graceful_shutdown(stream, svc, stop_handle2.shutdown()).await;
                 });
             }
         }
@@ -198,11 +203,15 @@ where
     Ok(server_handle)
 }
 
-fn build_tls_acceptor(cert_path: &str, key_path: &str) -> Result<tokio_rustls::TlsAcceptor, String> {
+fn build_tls_acceptor(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<tokio_rustls::TlsAcceptor, String> {
     use std::fs::File;
     use std::io::BufReader;
 
-    let cert_file = File::open(cert_path).map_err(|e| format!("open cert '{}': {}", cert_path, e))?;
+    let cert_file =
+        File::open(cert_path).map_err(|e| format!("open cert '{}': {}", cert_path, e))?;
     let mut cert_reader = BufReader::new(cert_file);
     let certs: Vec<rustls::Certificate> = rustls_pemfile::certs(&mut cert_reader)
         .map_err(|e| format!("parse cert: {}", e))?
@@ -220,7 +229,8 @@ fn build_tls_acceptor(cert_path: &str, key_path: &str) -> Result<tokio_rustls::T
 
     // Fallback to RSA traditional format if no PKCS#8 keys found
     if keys.is_empty() {
-        let mut key_reader2 = BufReader::new(File::open(key_path).map_err(|e| format!("re-open key: {}", e))?);
+        let mut key_reader2 =
+            BufReader::new(File::open(key_path).map_err(|e| format!("re-open key: {}", e))?);
         keys = rustls_pemfile::rsa_private_keys(&mut key_reader2)
             .map_err(|e| format!("parse RSA key: {}", e))?
             .into_iter()
@@ -228,7 +238,10 @@ fn build_tls_acceptor(cert_path: &str, key_path: &str) -> Result<tokio_rustls::T
             .collect();
     }
 
-    let key = keys.into_iter().next().ok_or("no private key found in key file")?;
+    let key = keys
+        .into_iter()
+        .next()
+        .ok_or("no private key found in key file")?;
 
     let config = rustls::ServerConfig::builder()
         .with_safe_defaults()

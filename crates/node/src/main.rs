@@ -6,7 +6,10 @@
 use call_node::boot::boot_node;
 use call_node::cli::{CliArgs, Commands, WalletCommand};
 use call_node::config::NodeConfig;
-use call_node::telemetry::{init_opentelemetry_tracing, start_alert_task, start_metrics_server, AlertDispatcher, HealthState};
+use call_node::telemetry::{
+    init_opentelemetry_tracing, start_alert_task, start_metrics_server, AlertDispatcher,
+    HealthState,
+};
 use call_node::wallet;
 use clap::Parser;
 use std::sync::Arc;
@@ -56,7 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         network: node.network.clone(),
         consensus: Arc::clone(&node.consensus),
     };
-    let metrics_addr = start_metrics_server(Arc::clone(&registry), health, config.metrics.addr).await?;
+    let metrics_addr =
+        start_metrics_server(Arc::clone(&registry), health, config.metrics.addr).await?;
     tracing::info!("  Metrics server started on http://{metrics_addr}");
 
     // Start background alert evaluation task
@@ -82,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 /// Handle CLI subcommands
-async fn handle_command(command: &Commands) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn handle_command(
+    command: &Commands,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match command {
         Commands::Run { .. } => {
             // Fall through to normal boot (should not reach here due to earlier check)
@@ -92,16 +98,25 @@ async fn handle_command(command: &Commands) -> Result<(), Box<dyn std::error::Er
     }
 }
 
-async fn handle_wallet(cmd: &WalletCommand) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn handle_wallet(
+    cmd: &WalletCommand,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match cmd {
         WalletCommand::GenerateKeys => wallet::generate_keys(),
         WalletCommand::Address { pubkey } => wallet::derive_address(pubkey),
-        WalletCommand::Balance { address, asset_id, rpc_url } => {
-            wallet::query_balance(address, *asset_id, rpc_url).await
-        }
-        WalletCommand::Send { from_key, to, asset_id, amount, nonce, rpc_url } => {
-            wallet::send_payment(from_key, to, *asset_id, *amount, *nonce, rpc_url).await
-        }
+        WalletCommand::Balance {
+            address,
+            asset_id,
+            rpc_url,
+        } => wallet::query_balance(address, *asset_id, rpc_url).await,
+        WalletCommand::Send {
+            from_key,
+            to,
+            asset_id,
+            amount,
+            nonce,
+            rpc_url,
+        } => wallet::send_payment(from_key, to, *asset_id, *amount, *nonce, rpc_url).await,
         WalletCommand::ServerInfo { rpc_url } => wallet::server_info(rpc_url).await,
         WalletCommand::Mempool { rpc_url } => wallet::mempool_stats(rpc_url).await,
     }

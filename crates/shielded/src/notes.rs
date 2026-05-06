@@ -2,8 +2,8 @@
 //!
 //! Note-based UTXO model with encrypted values and commitment derivation.
 
+use crate::{poseidon, NoteCommitment, Nullifier, ViewingKey};
 use call_primitives::{AssetId, Balance, Hash};
-use crate::{NoteCommitment, Nullifier, ViewingKey, poseidon};
 
 /// A shielded note: encrypted value with commitment and nullifier derivation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -22,12 +22,7 @@ impl Note {
     /// Create a new shielded note.
     ///
     /// RCM is derived via Poseidon: H("rcm" || ivk || value || asset || rho).
-    pub fn new(
-        value: Balance,
-        asset_id: AssetId,
-        viewing_key: &ViewingKey,
-        rho: Hash,
-    ) -> Self {
+    pub fn new(value: Balance, asset_id: AssetId, viewing_key: &ViewingKey, rho: Hash) -> Self {
         let ivk_fr = poseidon::bytes_to_fr(&viewing_key.incoming_view_key);
         let value_bytes = poseidon::value_to_fr_bytes(value);
         let value_fr = poseidon::bytes_to_fr(&value_bytes);
@@ -35,7 +30,10 @@ impl Note {
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
         let asset_fr = poseidon::bytes_to_fr(&asset_bytes);
         let rho_fr = poseidon::bytes_to_fr(&rho.0);
-        let rcm_fr = poseidon::poseidon_hash_tagged(poseidon::domain::RCM, &[ivk_fr, value_fr, asset_fr, rho_fr]);
+        let rcm_fr = poseidon::poseidon_hash_tagged(
+            poseidon::domain::RCM,
+            &[ivk_fr, value_fr, asset_fr, rho_fr],
+        );
         let rcm = poseidon::fr_to_bytes(&rcm_fr);
 
         Self {
@@ -125,7 +123,10 @@ impl Note {
 
 /// Note encryption/decryption using ChaCha20-Poly1305
 pub mod encryption {
-    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, aead::{Aead, KeyInit}};
+    use chacha20poly1305::{
+        aead::{Aead, KeyInit},
+        ChaCha20Poly1305, Key, Nonce,
+    };
     use rand::RngCore;
 
     /// Encrypt note data with a symmetric key derived from viewing key
@@ -137,7 +138,8 @@ pub mod encryption {
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher.encrypt(nonce, plaintext)
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext)
             .expect("encryption should not fail");
 
         // Prepend nonce to ciphertext
@@ -160,7 +162,8 @@ pub mod encryption {
         let payload = &ciphertext[12..];
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        cipher.decrypt(nonce, payload)
+        cipher
+            .decrypt(nonce, payload)
             .map_err(|_| "decryption failed")
     }
 

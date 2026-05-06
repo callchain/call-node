@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 use reth_db::DatabaseEnv;
 
-use crate::StorageError;
 use crate::prune::PruneState;
-use crate::reth_db::{init_call_db, load_prune_state as db_load_prune, save_prune_state as db_save_prune};
+use crate::reth_db::{
+    init_call_db, load_prune_state as db_load_prune, save_prune_state as db_save_prune,
+};
+use crate::StorageError;
 
 /// Database handle with mandatory reth-db (MDBX) persistence.
 #[derive(Clone)]
@@ -37,9 +39,8 @@ impl CallDb {
 /// Initializes reth-db (MDBX). If initialization fails, returns an error
 /// immediately — there is no fallback.
 pub fn open_db(data_dir: PathBuf) -> Result<CallDb, StorageError> {
-    std::fs::create_dir_all(&data_dir).map_err(|e| {
-        StorageError::IoError(std::io::Error::other(e.to_string()))
-    })?;
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| StorageError::IoError(std::io::Error::other(e.to_string())))?;
 
     let db = init_call_db(&data_dir)?;
 
@@ -55,15 +56,12 @@ pub fn open_test_db() -> Result<CallDb, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prune::{ExecutionTrace, BlockBody};
+    use crate::prune::{BlockBody, ExecutionTrace};
     use call_primitives::Hash;
 
     #[test]
     fn test_db_open_create() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-db-open-test-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("call-db-open-test-{}", std::process::id()));
         let db = open_db(tmp.clone()).expect("open db");
         assert!(db.data_dir.exists());
         let _ = std::fs::remove_dir_all(&db.data_dir);
@@ -82,8 +80,22 @@ mod tests {
 
         // Save fresh prune state
         let mut state = PruneState::new();
-        state.add_execution_trace(100, ExecutionTrace { tx_index: 0, gas_used: 50000, success: true });
-        state.add_block_body(100, BlockBody { block_hash: Hash::ZERO, tx_count: 5, body_size: 1024 });
+        state.add_execution_trace(
+            100,
+            ExecutionTrace {
+                tx_index: 0,
+                gas_used: 50000,
+                success: true,
+            },
+        );
+        state.add_block_body(
+            100,
+            BlockBody {
+                block_hash: Hash::ZERO,
+                tx_count: 5,
+                body_size: 1024,
+            },
+        );
         db.save_prune_state(&state).expect("save");
 
         // Load it back

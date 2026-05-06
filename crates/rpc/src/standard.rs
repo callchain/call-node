@@ -1,17 +1,20 @@
 //! Standard Ethereum JSON-RPC endpoints (per spec §11.1)
 
-use crate::handlers::{RpcState, invalid_params, internal_error};
+use crate::handlers::{internal_error, invalid_params, RpcState};
 use call_primitives::Address;
-use jsonrpsee::RpcModule;
 use jsonrpsee::types::ErrorObjectOwned;
+use jsonrpsee::RpcModule;
 use std::sync::Arc;
 
 /// Register standard RPC methods
-pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<(), ErrorObjectOwned> {
+pub fn register_standard_rpc(
+    module: &mut RpcModule<Arc<RpcState>>,
+) -> Result<(), ErrorObjectOwned> {
     // eth_getBalance
     module
         .register_async_method("eth_getBalance", |params, state, _ctx| async move {
-            let (address, block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let (address, block_tag): (String, Option<String>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let addr = address
                 .parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
@@ -24,7 +27,8 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 Some(tag) => {
                     let current = state.get_current_block();
                     let block_num = parse_block_tag(tag, current);
-                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num) {
+                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num)
+                    {
                         Ok(Some(account)) => account.balance,
                         _ => alloy_primitives::U256::ZERO,
                     }
@@ -37,38 +41,45 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_call
     module
         .register_async_method("eth_call", |params, state, _ctx| async move {
-            let (call_obj, block_tag): (serde_json::Value, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let from = call_obj.get("from")
+            let (call_obj, block_tag): (serde_json::Value, Option<String>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let from = call_obj
+                .get("from")
                 .and_then(|v| v.as_str())
                 .map(|s| s.parse::<alloy_primitives::Address>())
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or_default();
-            let to = call_obj.get("to")
+            let to = call_obj
+                .get("to")
                 .and_then(|v| v.as_str())
                 .map(|s| s.parse::<alloy_primitives::Address>())
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?;
-            let value = call_obj.get("value")
+            let value = call_obj
+                .get("value")
                 .and_then(|v| v.as_str())
                 .map(|s| alloy_primitives::U256::from_str_radix(s.trim_start_matches("0x"), 16))
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or_default();
-            let data = call_obj.get("data")
+            let data = call_obj
+                .get("data")
                 .and_then(|v| v.as_str())
                 .map(|s| hex::decode(s.trim_start_matches("0x")))
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .map(alloy_primitives::Bytes::from)
                 .unwrap_or_default();
-            let gas = call_obj.get("gas")
+            let gas = call_obj
+                .get("gas")
                 .and_then(|v| v.as_str())
                 .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16))
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or(30_000_000);
-            let gas_price = call_obj.get("gasPrice")
+            let gas_price = call_obj
+                .get("gasPrice")
                 .and_then(|v| v.as_str())
                 .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
                 .transpose()
@@ -102,9 +113,7 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 .map_err(|e| invalid_params(e.to_string()))?;
 
             match state.submit_evm_tx(&raw_tx_bytes) {
-                Ok(tx_hash) => {
-                    Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(tx_hash)))
-                }
+                Ok(tx_hash) => Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(tx_hash))),
                 Err(e) => Err(invalid_params(e)),
             }
         })
@@ -112,16 +121,19 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
     // eth_getTransactionReceipt
     module
-        .register_async_method("eth_getTransactionReceipt", |params, state, _ctx| async move {
-            let tx_hash: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let hash = tx_hash
-                .parse::<alloy_primitives::B256>()
-                .map_err(|e| invalid_params(e.to_string()))?;
-            match state.get_receipt(&hash) {
-                Some(receipt) => Ok::<_, ErrorObjectOwned>(Some(receipt_to_json(&receipt))),
-                None => Ok::<_, ErrorObjectOwned>(None),
-            }
-        })
+        .register_async_method(
+            "eth_getTransactionReceipt",
+            |params, state, _ctx| async move {
+                let tx_hash: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+                let hash = tx_hash
+                    .parse::<alloy_primitives::B256>()
+                    .map_err(|e| invalid_params(e.to_string()))?;
+                match state.get_receipt(&hash) {
+                    Some(receipt) => Ok::<_, ErrorObjectOwned>(Some(receipt_to_json(&receipt))),
+                    None => Ok::<_, ErrorObjectOwned>(None),
+                }
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_blockNumber
@@ -135,7 +147,8 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getLogs
     module
         .register_async_method("eth_getLogs", |params, state, _ctx| async move {
-            let filter: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let filter: serde_json::Value =
+                params.one().map_err(|e| invalid_params(e.to_string()))?;
             let logs = get_logs_from_filter(&filter, &state)?;
             Ok::<_, ErrorObjectOwned>(logs)
         })
@@ -144,61 +157,81 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_newFilter
     module
         .register_async_method("eth_newFilter", |params, state, _ctx| async move {
-            let filter: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let filter: serde_json::Value =
+                params.one().map_err(|e| invalid_params(e.to_string()))?;
             let current = state.get_current_block();
 
-            let from_block = filter.get("fromBlock")
+            let from_block = filter
+                .get("fromBlock")
                 .and_then(|v| v.as_str())
                 .map(|s| parse_block_tag(s, current))
                 .unwrap_or(current);
-            let to_block = filter.get("toBlock")
+            let to_block = filter
+                .get("toBlock")
                 .and_then(|v| v.as_str())
                 .map(|s| parse_block_tag(s, current))
                 .unwrap_or(current);
-            let block_hash = filter.get("blockHash")
+            let block_hash = filter
+                .get("blockHash")
                 .and_then(|v| v.as_str())
                 .map(|s| s.parse::<alloy_primitives::B256>())
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?;
 
-            let addresses: Vec<call_primitives::Address> = filter.get("address")
+            let addresses: Vec<call_primitives::Address> = filter
+                .get("address")
                 .map(|v| match v {
                     serde_json::Value::String(s) => vec![s.parse::<alloy_primitives::Address>()]
-                        .into_iter().filter_map(|r| r.ok()).collect(),
-                    serde_json::Value::Array(arr) => arr.iter()
-                        .filter_map(|x| x.as_str()
-                            .and_then(|s| s.parse::<alloy_primitives::Address>().ok()))
+                        .into_iter()
+                        .filter_map(|r| r.ok())
+                        .collect(),
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|x| {
+                            x.as_str()
+                                .and_then(|s| s.parse::<alloy_primitives::Address>().ok())
+                        })
                         .collect(),
                     _ => vec![],
                 })
                 .unwrap_or_default();
 
-            let topics: Vec<Option<Vec<call_primitives::Hash>>> = filter.get("topics")
+            let topics: Vec<Option<Vec<call_primitives::Hash>>> = filter
+                .get("topics")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().map(|entry| {
-                    match entry {
-                        serde_json::Value::String(s) => {
-                            s.parse::<alloy_primitives::B256>().ok()
-                                .map(|h| vec![call_primitives::Hash::from(h.0)])
-                        }
-                        serde_json::Value::Array(arr) => {
-                            let hashes: Vec<_> = arr.iter()
-                                .filter_map(|x| x.as_str())
-                                .filter_map(|s| s.parse::<alloy_primitives::B256>().ok())
-                                .map(|h| call_primitives::Hash::from(h.0))
-                                .collect();
-                            if hashes.is_empty() { None } else { Some(hashes) }
-                        }
-                        serde_json::Value::Null => None,
-                        _ => None,
-                    }
-                }).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|entry| match entry {
+                            serde_json::Value::String(s) => s
+                                .parse::<alloy_primitives::B256>()
+                                .ok()
+                                .map(|h| vec![call_primitives::Hash::from(h.0)]),
+                            serde_json::Value::Array(arr) => {
+                                let hashes: Vec<_> = arr
+                                    .iter()
+                                    .filter_map(|x| x.as_str())
+                                    .filter_map(|s| s.parse::<alloy_primitives::B256>().ok())
+                                    .map(|h| call_primitives::Hash::from(h.0))
+                                    .collect();
+                                if hashes.is_empty() {
+                                    None
+                                } else {
+                                    Some(hashes)
+                                }
+                            }
+                            serde_json::Value::Null => None,
+                            _ => None,
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
 
             // If blockHash is given, override fromBlock/toBlock to that block's height
             let (from_block, to_block) = if let Some(hash) = block_hash {
                 let cp_hash = call_primitives::Hash::from(hash.0);
-                let height = state.block_hash_index.read()
+                let height = state
+                    .block_hash_index
+                    .read()
                     .ok()
                     .and_then(|idx| idx.get(&cp_hash).copied())
                     .unwrap_or(current);
@@ -223,7 +256,9 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     module
         .register_async_method("eth_newBlockFilter", |_params, state, _ctx| async move {
             let current = state.get_current_block();
-            let filter = crate::handlers::state::Filter::Block { last_height: current.saturating_sub(1) };
+            let filter = crate::handlers::state::Filter::Block {
+                last_height: current.saturating_sub(1),
+            };
             let id = state.filter_manager.create_filter(filter);
             Ok::<_, ErrorObjectOwned>(format!("0x{:x}", id))
         })
@@ -231,11 +266,16 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
     // eth_newPendingTransactionFilter
     module
-        .register_async_method("eth_newPendingTransactionFilter", |_params, state, _ctx| async move {
-            let filter = crate::handlers::state::Filter::PendingTransaction { seen: std::collections::HashSet::new() };
-            let id = state.filter_manager.create_filter(filter);
-            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", id))
-        })
+        .register_async_method(
+            "eth_newPendingTransactionFilter",
+            |_params, state, _ctx| async move {
+                let filter = crate::handlers::state::Filter::PendingTransaction {
+                    seen: std::collections::HashSet::new(),
+                };
+                let id = state.filter_manager.create_filter(filter);
+                Ok::<_, ErrorObjectOwned>(format!("0x{:x}", id))
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getFilterChanges
@@ -250,7 +290,13 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             };
 
             let result = match filter {
-                crate::handlers::state::Filter::Log { from_block, to_block, addresses, topics, last_block } => {
+                crate::handlers::state::Filter::Log {
+                    from_block,
+                    to_block,
+                    addresses,
+                    topics,
+                    last_block,
+                } => {
                     let current = state.get_current_block();
                     let effective_from = last_block.saturating_add(1).max(from_block);
                     let effective_to = to_block.min(current);
@@ -277,7 +323,9 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                                             }
                                         }
                                     }
-                                    if !matched { continue; }
+                                    if !matched {
+                                        continue;
+                                    }
                                 }
                                 results.push(log_to_json(log, &receipt, log_idx));
                             }
@@ -285,7 +333,10 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                     }
                     // Update cursor
                     let new_filter = crate::handlers::state::Filter::Log {
-                        from_block, to_block, addresses, topics,
+                        from_block,
+                        to_block,
+                        addresses,
+                        topics,
                         last_block: effective_to,
                     };
                     state.filter_manager.update_filter(id, new_filter);
@@ -296,17 +347,28 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                     let mut results = Vec::new();
                     for h in last_height.saturating_add(1)..=current {
                         if let Some(block) = state.load_block(h) {
-                            results.push(serde_json::Value::String(format!("0x{}", hex::encode(block.header.hash().as_slice()))));
+                            results.push(serde_json::Value::String(format!(
+                                "0x{}",
+                                hex::encode(block.header.hash().as_slice())
+                            )));
                         }
                     }
-                    state.filter_manager.update_filter(id, crate::handlers::state::Filter::Block { last_height: current });
+                    state.filter_manager.update_filter(
+                        id,
+                        crate::handlers::state::Filter::Block {
+                            last_height: current,
+                        },
+                    );
                     serde_json::Value::Array(results)
                 }
                 crate::handlers::state::Filter::PendingTransaction { mut seen } => {
                     // Collect pending tx hashes from EVM mempool only
                     let mut pending = Vec::new();
                     {
-                        let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
+                        let mempool = state
+                            .mempool
+                            .read()
+                            .map_err(|_| internal_error("lock poisoned".into()))?;
                         for entry in mempool.evm_pool.iter() {
                             let hash = call_crypto::keccak256(&entry.data);
                             let tx_hash = call_primitives::TxHash::from(hash.0);
@@ -315,8 +377,13 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                             }
                         }
                     }
-                    state.filter_manager.update_filter(id, crate::handlers::state::Filter::PendingTransaction { seen });
-                    serde_json::Value::Array(pending.into_iter().map(serde_json::Value::String).collect())
+                    state.filter_manager.update_filter(
+                        id,
+                        crate::handlers::state::Filter::PendingTransaction { seen },
+                    );
+                    serde_json::Value::Array(
+                        pending.into_iter().map(serde_json::Value::String).collect(),
+                    )
                 }
             };
 
@@ -336,7 +403,13 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             };
 
             let result = match filter {
-                crate::handlers::state::Filter::Log { from_block, to_block, addresses, topics, .. } => {
+                crate::handlers::state::Filter::Log {
+                    from_block,
+                    to_block,
+                    addresses,
+                    topics,
+                    ..
+                } => {
                     let current = state.get_current_block();
                     let effective_to = to_block.min(current);
                     let mut results = Vec::new();
@@ -362,7 +435,9 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                                             }
                                         }
                                     }
-                                    if !matched { continue; }
+                                    if !matched {
+                                        continue;
+                                    }
                                 }
                                 results.push(log_to_json(log, &receipt, log_idx));
                             }
@@ -493,7 +568,11 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_gasPrice
     module
         .register_async_method("eth_gasPrice", |_params, state, _ctx| async move {
-            let base_fee = state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee;
+            let base_fee = state
+                .fee_params
+                .read()
+                .map_err(|_| internal_error("lock poisoned".into()))?
+                .base_fee;
             let gas_price = base_fee.saturating_add(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS);
             Ok::<_, ErrorObjectOwned>(format!("0x{:x}", gas_price))
         })
@@ -501,16 +580,25 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
     // eth_maxPriorityFeePerGas
     module
-        .register_async_method("eth_maxPriorityFeePerGas", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>(format!("0x{:x}", call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS))
-        })
+        .register_async_method(
+            "eth_maxPriorityFeePerGas",
+            |_params, _state, _ctx| async move {
+                Ok::<_, ErrorObjectOwned>(format!(
+                    "0x{:x}",
+                    call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS
+                ))
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_feeHistory
     module
         .register_async_method("eth_feeHistory", |params, state, _ctx| async move {
-            let (block_count, newest_block, reward_percentiles): (String, String, Option<Vec<f64>>) =
-                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let (block_count, newest_block, reward_percentiles): (
+                String,
+                String,
+                Option<Vec<f64>>,
+            ) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let block_count = u64::from_str_radix(block_count.trim_start_matches("0x"), 16)
                 .map_err(|e| invalid_params(e.to_string()))?;
             let newest_block_num = match newest_block.as_str() {
@@ -519,8 +607,16 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 _ => newest_block.parse().unwrap_or(0),
             };
 
-            let history = state.fee_history.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let entries: Vec<_> = history.iter().rev().take(block_count as usize).cloned().collect();
+            let history = state
+                .fee_history
+                .read()
+                .map_err(|_| internal_error("lock poisoned".into()))?;
+            let entries: Vec<_> = history
+                .iter()
+                .rev()
+                .take(block_count as usize)
+                .cloned()
+                .collect();
             let oldest_block = entries.last().map(|(n, _)| *n).unwrap_or(newest_block_num);
 
             let mut base_fee_per_gas = Vec::new();
@@ -540,7 +636,11 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 }
             }
 
-            let next_base_fee = state.fee_params.read().map_err(|_| internal_error("lock poisoned".into()))?.base_fee;
+            let next_base_fee = state
+                .fee_params
+                .read()
+                .map_err(|_| internal_error("lock poisoned".into()))?
+                .base_fee;
             base_fee_per_gas.push(format!("0x{:x}", next_base_fee));
 
             let mut result = serde_json::json!({
@@ -552,8 +652,12 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
                 result["reward"] = serde_json::Value::Array(
                     reward
                         .into_iter()
-                        .map(|r| serde_json::Value::Array(r.into_iter().map(serde_json::Value::String).collect()))
-                        .collect()
+                        .map(|r| {
+                            serde_json::Value::Array(
+                                r.into_iter().map(serde_json::Value::String).collect(),
+                            )
+                        })
+                        .collect(),
                 );
             }
             Ok::<_, ErrorObjectOwned>(result)
@@ -563,7 +667,11 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_syncing
     module
         .register_async_method("eth_syncing", |_params, state, _ctx| async move {
-            let progress = state.sync_progress.read().map_err(|_| internal_error("lock poisoned".into()))?.clone();
+            let progress = state
+                .sync_progress
+                .read()
+                .map_err(|_| internal_error("lock poisoned".into()))?
+                .clone();
             match progress {
                 Some(p) if p.current_block < p.highest_block => {
                     Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -579,56 +687,74 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
     // eth_getTransactionCount
     module
-        .register_async_method("eth_getTransactionCount", |params, state, _ctx| async move {
-            let (address, block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let addr = address.parse::<alloy_primitives::Address>()
-                .map_err(|e| invalid_params(e.to_string()))?;
-            let cp_address = Address::from_slice(addr.as_slice());
+        .register_async_method(
+            "eth_getTransactionCount",
+            |params, state, _ctx| async move {
+                let (address, block_tag): (String, Option<String>) =
+                    params.parse().map_err(|e| invalid_params(e.to_string()))?;
+                let addr = address
+                    .parse::<alloy_primitives::Address>()
+                    .map_err(|e| invalid_params(e.to_string()))?;
+                let cp_address = Address::from_slice(addr.as_slice());
 
-            let nonce = match block_tag.as_deref() {
-                Some("pending") => {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                        .map_err(|e| internal_error(format!("db error: {e}")))?;
-                    let committed_nonce = provider.state().get_nonce(&cp_address);
-                    let mempool = state.mempool.read().map_err(|_| internal_error("lock poisoned".into()))?;
-                    committed_nonce.max(mempool.evm_pool.get_address_nonce(&cp_address))
-                }
-                Some("latest") | Some("safe") | Some("finalized") | None => {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                        .map_err(|e| internal_error(format!("db error: {e}")))?;
-                    provider.state().get_nonce(&cp_address)
-                }
-                Some(tag) => {
-                    let current = state.get_current_block();
-                    let block_num = parse_block_tag(tag, current);
-                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num) {
-                        Ok(Some(account)) => account.nonce,
-                        _ => 0,
+                let nonce = match block_tag.as_deref() {
+                    Some("pending") => {
+                        let provider =
+                            call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                        let committed_nonce = provider.state().get_nonce(&cp_address);
+                        let mempool = state
+                            .mempool
+                            .read()
+                            .map_err(|_| internal_error("lock poisoned".into()))?;
+                        committed_nonce.max(mempool.evm_pool.get_address_nonce(&cp_address))
                     }
-                }
-            };
-            Ok::<_, ErrorObjectOwned>(format!("0x{nonce:x}"))
-        })
+                    Some("latest") | Some("safe") | Some("finalized") | None => {
+                        let provider =
+                            call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                        provider.state().get_nonce(&cp_address)
+                    }
+                    Some(tag) => {
+                        let current = state.get_current_block();
+                        let block_num = parse_block_tag(tag, current);
+                        match call_evm::db::get_historical_account(
+                            &state.db_env,
+                            cp_address,
+                            block_num,
+                        ) {
+                            Ok(Some(account)) => account.nonce,
+                            _ => 0,
+                        }
+                    }
+                };
+                Ok::<_, ErrorObjectOwned>(format!("0x{nonce:x}"))
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getCode
     module
         .register_async_method("eth_getCode", |params, state, _ctx| async move {
-            let (address, block_tag): (String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let addr = address.parse::<alloy_primitives::Address>()
+            let (address, block_tag): (String, Option<String>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let addr = address
+                .parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
             let cp_address = Address::from_slice(addr.as_slice());
 
             let code = match block_tag.as_deref() {
                 Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                        .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    let provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                            .map_err(|e| internal_error(format!("db error: {e}")))?;
                     provider.state().get_code(&cp_address)
                 }
                 Some(tag) => {
                     let current = state.get_current_block();
                     let block_num = parse_block_tag(tag, current);
-                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num) {
+                    match call_evm::db::get_historical_account(&state.db_env, cp_address, block_num)
+                    {
                         Ok(Some(account)) => account.code,
                         _ => alloy_primitives::Bytes::default(),
                     }
@@ -641,8 +767,10 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getStorageAt
     module
         .register_async_method("eth_getStorageAt", |params, state, _ctx| async move {
-            let (address, key_hex, block_tag): (String, String, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let addr = address.parse::<alloy_primitives::Address>()
+            let (address, key_hex, block_tag): (String, String, Option<String>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let addr = address
+                .parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
             let key = alloy_primitives::U256::from_str_radix(key_hex.trim_start_matches("0x"), 16)
                 .map_err(|e| invalid_params(e.to_string()))?;
@@ -650,14 +778,20 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
 
             let value = match block_tag.as_deref() {
                 Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                        .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    let provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                            .map_err(|e| internal_error(format!("db error: {e}")))?;
                     provider.state().get_storage(&cp_address, key)
                 }
                 Some(tag) => {
                     let current = state.get_current_block();
                     let block_num = parse_block_tag(tag, current);
-                    match call_evm::db::get_historical_storage(&state.db_env, cp_address, key, block_num) {
+                    match call_evm::db::get_historical_storage(
+                        &state.db_env,
+                        cp_address,
+                        key,
+                        block_num,
+                    ) {
                         Ok(value) => value,
                         _ => alloy_primitives::U256::ZERO,
                     }
@@ -670,38 +804,45 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_estimateGas
     module
         .register_async_method("eth_estimateGas", |params, state, _ctx| async move {
-            let (call_obj, block_tag): (serde_json::Value, Option<String>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let from = call_obj.get("from")
+            let (call_obj, block_tag): (serde_json::Value, Option<String>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let from = call_obj
+                .get("from")
                 .and_then(|v| v.as_str())
                 .map(|s| s.parse::<alloy_primitives::Address>())
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or_default();
-            let to = call_obj.get("to")
+            let to = call_obj
+                .get("to")
                 .and_then(|v| v.as_str())
                 .map(|s| s.parse::<alloy_primitives::Address>())
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?;
-            let value = call_obj.get("value")
+            let value = call_obj
+                .get("value")
                 .and_then(|v| v.as_str())
                 .map(|s| alloy_primitives::U256::from_str_radix(s.trim_start_matches("0x"), 16))
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or_default();
-            let data = call_obj.get("data")
+            let data = call_obj
+                .get("data")
                 .and_then(|v| v.as_str())
                 .map(|s| hex::decode(s.trim_start_matches("0x")))
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .map(alloy_primitives::Bytes::from)
                 .unwrap_or_default();
-            let gas = call_obj.get("gas")
+            let gas = call_obj
+                .get("gas")
                 .and_then(|v| v.as_str())
                 .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16))
                 .transpose()
                 .map_err(|e| invalid_params(e.to_string()))?
                 .unwrap_or(30_000_000);
-            let gas_price = call_obj.get("gasPrice")
+            let gas_price = call_obj
+                .get("gasPrice")
                 .and_then(|v| v.as_str())
                 .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
                 .transpose()
@@ -727,12 +868,17 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getBlockByNumber
     module
         .register_async_method("eth_getBlockByNumber", |params, state, _ctx| async move {
-            let (block_tag, full_txs): (String, Option<bool>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let (block_tag, full_txs): (String, Option<bool>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let current = state.get_current_block();
             let block_number = parse_block_tag(&block_tag, current);
 
             if let Some(block) = state.load_block(block_number) {
-                return Ok::<_, ErrorObjectOwned>(block_to_json(&block, &state, full_txs.unwrap_or(false)));
+                return Ok::<_, ErrorObjectOwned>(block_to_json(
+                    &block,
+                    &state,
+                    full_txs.unwrap_or(false),
+                ));
             }
 
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
@@ -742,13 +888,19 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_getBlockByHash
     module
         .register_async_method("eth_getBlockByHash", |params, state, _ctx| async move {
-            let (block_hash_str, full_txs): (String, Option<bool>) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let hash = block_hash_str.parse::<alloy_primitives::B256>()
+            let (block_hash_str, full_txs): (String, Option<bool>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let hash = block_hash_str
+                .parse::<alloy_primitives::B256>()
                 .map_err(|e| invalid_params(e.to_string()))?;
             let cp_hash = call_primitives::Hash::from(hash.0);
 
             if let Some(block) = state.load_block_by_hash(&cp_hash) {
-                return Ok::<_, ErrorObjectOwned>(block_to_json(&block, &state, full_txs.unwrap_or(false)));
+                return Ok::<_, ErrorObjectOwned>(block_to_json(
+                    &block,
+                    &state,
+                    full_txs.unwrap_or(false),
+                ));
             }
 
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
@@ -805,93 +957,114 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
             let block_number = parse_block_tag(&block_tag, current);
 
             let receipts = state.get_receipts_by_block(block_number);
-            let json_receipts: Vec<serde_json::Value> = receipts
-                .iter()
-                .map(|r| receipt_to_json(r))
-                .collect();
+            let json_receipts: Vec<serde_json::Value> =
+                receipts.iter().map(|r| receipt_to_json(r)).collect();
             Ok::<_, ErrorObjectOwned>(serde_json::Value::Array(json_receipts))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getBlockTransactionCountByHash
     module
-        .register_async_method("eth_getBlockTransactionCountByHash", |params, state, _ctx| async move {
-            let block_hash_str: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let hash = block_hash_str.parse::<alloy_primitives::B256>()
-                .map_err(|e| invalid_params(e.to_string()))?;
-            let cp_hash = call_primitives::Hash::from(hash.0);
+        .register_async_method(
+            "eth_getBlockTransactionCountByHash",
+            |params, state, _ctx| async move {
+                let block_hash_str: String =
+                    params.one().map_err(|e| invalid_params(e.to_string()))?;
+                let hash = block_hash_str
+                    .parse::<alloy_primitives::B256>()
+                    .map_err(|e| invalid_params(e.to_string()))?;
+                let cp_hash = call_primitives::Hash::from(hash.0);
 
-            if let Some(block) = state.load_block_by_hash(&cp_hash) {
-                let count = block.evm_txs.len();
-                return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(format!("0x{:x}", count)));
-            }
-            Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
-        })
+                if let Some(block) = state.load_block_by_hash(&cp_hash) {
+                    let count = block.evm_txs.len();
+                    return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(
+                        format!("0x{:x}", count),
+                    ));
+                }
+                Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getBlockTransactionCountByNumber
     module
-        .register_async_method("eth_getBlockTransactionCountByNumber", |params, state, _ctx| async move {
-            let block_tag: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
-            let current = state.get_current_block();
-            let block_number = parse_block_tag(&block_tag, current);
+        .register_async_method(
+            "eth_getBlockTransactionCountByNumber",
+            |params, state, _ctx| async move {
+                let block_tag: String = params.one().map_err(|e| invalid_params(e.to_string()))?;
+                let current = state.get_current_block();
+                let block_number = parse_block_tag(&block_tag, current);
 
-            if let Some(block) = state.load_block(block_number) {
-                let count = block.evm_txs.len();
-                return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(format!("0x{:x}", count)));
-            }
-            Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
-        })
+                if let Some(block) = state.load_block(block_number) {
+                    let count = block.evm_txs.len();
+                    return Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::String(
+                        format!("0x{:x}", count),
+                    ));
+                }
+                Ok::<serde_json::Value, ErrorObjectOwned>(serde_json::Value::Null)
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getTransactionByBlockHashAndIndex
     module
-        .register_async_method("eth_getTransactionByBlockHashAndIndex", |params, state, _ctx| async move {
-            let (block_hash_str, idx_str): (String, String) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let hash = block_hash_str.parse::<alloy_primitives::B256>()
-                .map_err(|e| invalid_params(e.to_string()))?;
-            let cp_hash = call_primitives::Hash::from(hash.0);
-            let idx = u64::from_str_radix(idx_str.trim_start_matches("0x"), 16)
-                .map_err(|e| invalid_params(e.to_string()))?;
+        .register_async_method(
+            "eth_getTransactionByBlockHashAndIndex",
+            |params, state, _ctx| async move {
+                let (block_hash_str, idx_str): (String, String) =
+                    params.parse().map_err(|e| invalid_params(e.to_string()))?;
+                let hash = block_hash_str
+                    .parse::<alloy_primitives::B256>()
+                    .map_err(|e| invalid_params(e.to_string()))?;
+                let cp_hash = call_primitives::Hash::from(hash.0);
+                let idx = u64::from_str_radix(idx_str.trim_start_matches("0x"), 16)
+                    .map_err(|e| invalid_params(e.to_string()))?;
 
-            if let Some(block) = state.load_block_by_hash(&cp_hash) {
-                let evm_len = block.evm_txs.len() as u64;
-                if idx < evm_len {
-                    let raw = &block.evm_txs[idx as usize];
-                    if let Some(json) = evm_raw_tx_to_json(raw, cp_hash, block.header.height, idx) {
-                        return Ok::<_, ErrorObjectOwned>(json);
+                if let Some(block) = state.load_block_by_hash(&cp_hash) {
+                    let evm_len = block.evm_txs.len() as u64;
+                    if idx < evm_len {
+                        let raw = &block.evm_txs[idx as usize];
+                        if let Some(json) =
+                            evm_raw_tx_to_json(raw, cp_hash, block.header.height, idx)
+                        {
+                            return Ok::<_, ErrorObjectOwned>(json);
+                        }
                     }
+                    // Protocol txs are no longer accepted via mempool; blocks may still
+                    // contain them from consensus, but RPC lookup is EVM-only.
                 }
-                // Protocol txs are no longer accepted via mempool; blocks may still
-                // contain them from consensus, but RPC lookup is EVM-only.
-            }
-            Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
-        })
+                Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getTransactionByBlockNumberAndIndex
     module
-        .register_async_method("eth_getTransactionByBlockNumberAndIndex", |params, state, _ctx| async move {
-            let (block_tag, idx_str): (String, String) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
-            let current = state.get_current_block();
-            let block_number = parse_block_tag(&block_tag, current);
-            let idx = u64::from_str_radix(idx_str.trim_start_matches("0x"), 16)
-                .map_err(|e| invalid_params(e.to_string()))?;
+        .register_async_method(
+            "eth_getTransactionByBlockNumberAndIndex",
+            |params, state, _ctx| async move {
+                let (block_tag, idx_str): (String, String) =
+                    params.parse().map_err(|e| invalid_params(e.to_string()))?;
+                let current = state.get_current_block();
+                let block_number = parse_block_tag(&block_tag, current);
+                let idx = u64::from_str_radix(idx_str.trim_start_matches("0x"), 16)
+                    .map_err(|e| invalid_params(e.to_string()))?;
 
-            if let Some(block) = state.load_block(block_number) {
-                let block_hash = block.header.hash();
-                let evm_len = block.evm_txs.len() as u64;
-                if idx < evm_len {
-                    let raw = &block.evm_txs[idx as usize];
-                    if let Some(json) = evm_raw_tx_to_json(raw, block_hash, block_number, idx) {
-                        return Ok::<_, ErrorObjectOwned>(json);
+                if let Some(block) = state.load_block(block_number) {
+                    let block_hash = block.header.hash();
+                    let evm_len = block.evm_txs.len() as u64;
+                    if idx < evm_len {
+                        let raw = &block.evm_txs[idx as usize];
+                        if let Some(json) = evm_raw_tx_to_json(raw, block_hash, block_number, idx) {
+                            return Ok::<_, ErrorObjectOwned>(json);
+                        }
                     }
+                    // Protocol txs are no longer accepted via mempool; blocks may still
+                    // contain them from consensus, but RPC lookup is EVM-only.
                 }
-                // Protocol txs are no longer accepted via mempool; blocks may still
-                // contain them from consensus, but RPC lookup is EVM-only.
-            }
-            Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
-        })
+                Ok::<_, ErrorObjectOwned>(serde_json::Value::Null)
+            },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_sendTransaction — not supported
@@ -949,23 +1122,29 @@ pub fn register_standard_rpc(module: &mut RpcModule<Arc<RpcState>>) -> Result<()
     // eth_coinbase
     module
         .register_async_method("eth_coinbase", |_params, state, _ctx| async move {
-            let addr = state.current_proposer_addr.read().map(|a| *a).unwrap_or(Address::ZERO);
+            let addr = state
+                .current_proposer_addr
+                .read()
+                .map(|a| *a)
+                .unwrap_or(Address::ZERO);
             Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(addr.as_slice())))
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getUncleCountByBlockNumber
     module
-        .register_async_method("eth_getUncleCountByBlockNumber", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>("0x0")
-        })
+        .register_async_method(
+            "eth_getUncleCountByBlockNumber",
+            |_params, _state, _ctx| async move { Ok::<_, ErrorObjectOwned>("0x0") },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getUncleCountByBlockHash
     module
-        .register_async_method("eth_getUncleCountByBlockHash", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>("0x0")
-        })
+        .register_async_method(
+            "eth_getUncleCountByBlockHash",
+            |_params, _state, _ctx| async move { Ok::<_, ErrorObjectOwned>("0x0") },
+        )
         .map_err(|e| internal_error(e.to_string()))?;
 
     // eth_getUncleByBlockNumberAndIndex
@@ -1155,7 +1334,7 @@ fn evm_raw_tx_to_json(
     block_number: u64,
     tx_index: u64,
 ) -> Option<serde_json::Value> {
-    use alloy_consensus::{TxEnvelope, Transaction as _};
+    use alloy_consensus::{Transaction as _, TxEnvelope};
     use alloy_rlp::Decodable;
 
     let envelope = TxEnvelope::decode(&mut &raw[..]).ok()?;
@@ -1237,58 +1416,77 @@ fn get_logs_from_filter(
 ) -> Result<Vec<serde_json::Value>, ErrorObjectOwned> {
     let current = state.get_current_block();
 
-    let from_block = filter.get("fromBlock")
+    let from_block = filter
+        .get("fromBlock")
         .and_then(|v| v.as_str())
         .map(|s| parse_block_tag(s, current))
         .unwrap_or(current);
-    let to_block = filter.get("toBlock")
+    let to_block = filter
+        .get("toBlock")
         .and_then(|v| v.as_str())
         .map(|s| parse_block_tag(s, current))
         .unwrap_or(current);
-    let block_hash = filter.get("blockHash")
+    let block_hash = filter
+        .get("blockHash")
         .and_then(|v| v.as_str())
         .map(|s| s.parse::<alloy_primitives::B256>())
         .transpose()
         .map_err(|e| invalid_params(e.to_string()))?;
 
-    let addresses: Vec<call_primitives::Address> = filter.get("address")
+    let addresses: Vec<call_primitives::Address> = filter
+        .get("address")
         .map(|v| match v {
             serde_json::Value::String(s) => vec![s.parse::<alloy_primitives::Address>()]
-                .into_iter().filter_map(|r| r.ok()).collect(),
-            serde_json::Value::Array(arr) => arr.iter()
-                .filter_map(|x| x.as_str()
-                    .and_then(|s| s.parse::<alloy_primitives::Address>().ok()))
+                .into_iter()
+                .filter_map(|r| r.ok())
+                .collect(),
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .filter_map(|x| {
+                    x.as_str()
+                        .and_then(|s| s.parse::<alloy_primitives::Address>().ok())
+                })
                 .collect(),
             _ => vec![],
         })
         .unwrap_or_default();
 
-    let topics: Vec<Option<Vec<call_primitives::Hash>>> = filter.get("topics")
+    let topics: Vec<Option<Vec<call_primitives::Hash>>> = filter
+        .get("topics")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|entry| {
-            match entry {
-                serde_json::Value::String(s) => {
-                    s.parse::<alloy_primitives::B256>().ok()
-                        .map(|h| vec![call_primitives::Hash::from(h.0)])
-                }
-                serde_json::Value::Array(arr) => {
-                    let hashes: Vec<_> = arr.iter()
-                        .filter_map(|x| x.as_str())
-                        .filter_map(|s| s.parse::<alloy_primitives::B256>().ok())
-                        .map(|h| call_primitives::Hash::from(h.0))
-                        .collect();
-                    if hashes.is_empty() { None } else { Some(hashes) }
-                }
-                serde_json::Value::Null => None,
-                _ => None,
-            }
-        }).collect())
+        .map(|arr| {
+            arr.iter()
+                .map(|entry| match entry {
+                    serde_json::Value::String(s) => s
+                        .parse::<alloy_primitives::B256>()
+                        .ok()
+                        .map(|h| vec![call_primitives::Hash::from(h.0)]),
+                    serde_json::Value::Array(arr) => {
+                        let hashes: Vec<_> = arr
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .filter_map(|s| s.parse::<alloy_primitives::B256>().ok())
+                            .map(|h| call_primitives::Hash::from(h.0))
+                            .collect();
+                        if hashes.is_empty() {
+                            None
+                        } else {
+                            Some(hashes)
+                        }
+                    }
+                    serde_json::Value::Null => None,
+                    _ => None,
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     // If blockHash is given, override fromBlock/toBlock to that block's height
     let (from_block, to_block) = if let Some(hash) = block_hash {
         let cp_hash = call_primitives::Hash::from(hash.0);
-        let height = state.block_hash_index.read()
+        let height = state
+            .block_hash_index
+            .read()
             .ok()
             .and_then(|idx| idx.get(&cp_hash).copied())
             .unwrap_or(current);
@@ -1320,7 +1518,9 @@ fn get_logs_from_filter(
                             }
                         }
                     }
-                    if !matched { continue; }
+                    if !matched {
+                        continue;
+                    }
                 }
                 results.push(log_to_json(log, &receipt, log_idx));
             }

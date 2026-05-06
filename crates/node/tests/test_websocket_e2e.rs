@@ -41,7 +41,9 @@ async fn test_ws_subscribe_new_blocks() {
     let sub_id = parse_subscription_id(&resp);
     assert!(!sub_id.is_empty(), "should get subscription id");
 
-    node.state.subscriptions.broadcast_block(42, "0xabc".into(), 7, 3);
+    node.state
+        .subscriptions
+        .broadcast_block(42, "0xabc".into(), 7, 3);
 
     let event = recv_event(&mut rx).await;
     assert_eq!(event["params"]["result"]["type"], "new_block");
@@ -95,7 +97,9 @@ async fn test_ws_subscribe_bridge_completed() {
     let sub_id = parse_subscription_id(&resp);
     assert!(!sub_id.is_empty());
 
-    node.state.subscriptions.broadcast_bridge(99, "completed".into());
+    node.state
+        .subscriptions
+        .broadcast_bridge(99, "completed".into());
 
     let event = recv_event(&mut rx).await;
     assert_eq!(event["params"]["result"]["type"], "bridge_completed");
@@ -145,7 +149,9 @@ async fn test_ws_subscribe_agent_executed() {
     let sub_id = parse_subscription_id(&resp);
     assert!(!sub_id.is_empty());
 
-    node.state.subscriptions.broadcast_agent_exec(3, "deploy".into());
+    node.state
+        .subscriptions
+        .broadcast_agent_exec(3, "deploy".into());
 
     let event = recv_event(&mut rx).await;
     assert_eq!(event["params"]["result"]["type"], "agent_executed");

@@ -21,8 +21,7 @@ pub fn generate_keys_for_circuit<C: ConstraintSynthesizer<ark_bn254::Fr> + Clone
     use ark_std::rand::SeedableRng;
 
     let rng = &mut StdRng::seed_from_u64(42);
-    Groth16::<Bn254>::circuit_specific_setup(circuit, rng)
-        .expect("circuit-specific setup failed")
+    Groth16::<Bn254>::circuit_specific_setup(circuit, rng).expect("circuit-specific setup failed")
 }
 
 /// Save proving and verifying keys to disk.
@@ -62,19 +61,21 @@ pub fn save_keys(
 /// Reads files:
 /// - `{path_prefix}.pk` — serialized proving key
 /// - `{path_prefix}.vk` — serialized verifying key
-pub fn load_keys(path_prefix: &str) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>), KeygenError> {
+pub fn load_keys(
+    path_prefix: &str,
+) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>), KeygenError> {
     let pk_path = format!("{}.pk", path_prefix);
     let vk_path = format!("{}.vk", path_prefix);
 
     // Load proving key
-    let pk_bytes = std::fs::read(&pk_path)
-        .map_err(|e| KeygenError::Io(format!("read {}: {}", pk_path, e)))?;
+    let pk_bytes =
+        std::fs::read(&pk_path).map_err(|e| KeygenError::Io(format!("read {}: {}", pk_path, e)))?;
     let pk = ProvingKey::<Bn254>::deserialize_compressed(&pk_bytes[..])
         .map_err(|e| KeygenError::Deserialize(format!("PK: {}", e)))?;
 
     // Load verifying key
-    let vk_bytes = std::fs::read(&vk_path)
-        .map_err(|e| KeygenError::Io(format!("read {}: {}", vk_path, e)))?;
+    let vk_bytes =
+        std::fs::read(&vk_path).map_err(|e| KeygenError::Io(format!("read {}: {}", vk_path, e)))?;
     let vk = VerifyingKey::<Bn254>::deserialize_compressed(&vk_bytes[..])
         .map_err(|e| KeygenError::Deserialize(format!("VK: {}", e)))?;
 
@@ -151,10 +152,10 @@ mod tests {
 
     impl ConstraintSynthesizer<Fr> for TinyCircuit {
         fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+            use ark_ff::Zero;
             use ark_r1cs_std::alloc::AllocVar;
             use ark_r1cs_std::fields::fp::FpVar;
             use ark_r1cs_std::prelude::*;
-            use ark_ff::Zero;
 
             let a = Fr::from(3u64);
             let b = Fr::from(5u64);
@@ -165,7 +166,8 @@ mod tests {
             let c_var = FpVar::new_input(cs.clone(), || Ok(c))?;
 
             // Enforce a * b = c (creates an actual R1CS constraint)
-            let _ = (&a_var * &b_var - &c_var).enforce_equal(&FpVar::new_constant(cs.clone(), Fr::zero())?)?;
+            let _ = (&a_var * &b_var - &c_var)
+                .enforce_equal(&FpVar::new_constant(cs.clone(), Fr::zero())?)?;
             Ok(())
         }
     }
@@ -176,10 +178,10 @@ mod tests {
 
     impl ConstraintSynthesizer<Fr> for BiggerCircuit {
         fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+            use ark_ff::Zero;
             use ark_r1cs_std::alloc::AllocVar;
             use ark_r1cs_std::fields::fp::FpVar;
             use ark_r1cs_std::prelude::*;
-            use ark_ff::Zero;
 
             // 5 public inputs
             for i in 1u64..=5u64 {
@@ -233,7 +235,10 @@ mod tests {
         let (pk_orig, vk_orig) = generate_keys_for_circuit(circuit);
 
         let temp_dir = std::env::temp_dir();
-        let path_prefix = temp_dir.join("test_keygen_keys").to_string_lossy().to_string();
+        let path_prefix = temp_dir
+            .join("test_keygen_keys")
+            .to_string_lossy()
+            .to_string();
 
         // Save keys
         save_keys(&pk_orig, &vk_orig, &path_prefix).unwrap();
@@ -276,8 +281,10 @@ mod tests {
         assert!(info.public_input_count > 0, "should have public inputs");
         assert!(info.pk_size_bytes > 0, "PK should be non-empty");
         assert!(info.vk_size_bytes > 0, "VK should be non-empty");
-        assert!(info.pk_size_bytes > info.vk_size_bytes,
-            "PK should be larger than VK");
+        assert!(
+            info.pk_size_bytes > info.vk_size_bytes,
+            "PK should be larger than VK"
+        );
     }
 
     #[test]
@@ -290,15 +297,24 @@ mod tests {
         let big_info = KeyInfo::from_circuit_and_keys(BiggerCircuit, &pk_big, &vk_big);
 
         // Bigger circuit has more public inputs (5 vs 3)
-        assert!(big_info.public_input_count > small_info.public_input_count,
+        assert!(
+            big_info.public_input_count > small_info.public_input_count,
             "bigger circuit should have more public inputs: {} vs {}",
-            big_info.public_input_count, small_info.public_input_count);
-        assert!(big_info.pk_size_bytes > small_info.pk_size_bytes,
+            big_info.public_input_count,
+            small_info.public_input_count
+        );
+        assert!(
+            big_info.pk_size_bytes > small_info.pk_size_bytes,
             "bigger circuit PK should be larger: {} vs {}",
-            big_info.pk_size_bytes, small_info.pk_size_bytes);
-        assert!(big_info.vk_size_bytes > small_info.vk_size_bytes,
+            big_info.pk_size_bytes,
+            small_info.pk_size_bytes
+        );
+        assert!(
+            big_info.vk_size_bytes > small_info.vk_size_bytes,
             "bigger circuit VK should be larger: {} vs {}",
-            big_info.vk_size_bytes, small_info.vk_size_bytes);
+            big_info.vk_size_bytes,
+            small_info.vk_size_bytes
+        );
 
         // All should have PK larger than VK
         assert!(small_info.pk_size_bytes > small_info.vk_size_bytes);

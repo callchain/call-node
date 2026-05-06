@@ -196,6 +196,7 @@ pub fn encode_bool(value: bool) -> [u8; 32] {
 // ── U256 conversion helpers ───────────────────────────────────────────
 
 /// Read a u128 from the low 16 bytes of a U256.
+#[allow(clippy::unwrap_used)]
 pub fn u256_to_u128(v: U256) -> u128 {
     u128::from_be_bytes(v.to_be_bytes::<32>()[16..32].try_into().unwrap())
 }
@@ -208,6 +209,7 @@ pub fn u128_to_u256(v: u128) -> U256 {
 }
 
 /// Read a u64 from the low 8 bytes of a U256.
+#[allow(clippy::unwrap_used)]
 pub fn u256_to_u64(v: U256) -> u64 {
     u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().unwrap())
 }
@@ -318,7 +320,11 @@ pub fn slot_compliance(addr: Address, policy_id: u8) -> U256 {
 // ── Balance helpers ───────────────────────────────────────────────────
 
 /// Load an asset balance from storage.
-pub fn load_bal(storage: &mut dyn crate::storage::StorageProvider, asset_id: u64, addr: Address) -> u128 {
+pub fn load_bal(
+    storage: &mut dyn crate::storage::StorageProvider,
+    asset_id: u64,
+    addr: Address,
+) -> u128 {
     storage
         .sload(ASSET_ADDRESS, slot_balance(asset_id, addr))
         .map(u256_to_u128)
@@ -326,12 +332,26 @@ pub fn load_bal(storage: &mut dyn crate::storage::StorageProvider, asset_id: u64
 }
 
 /// Save an asset balance to storage.
-pub fn save_bal(storage: &mut dyn crate::storage::StorageProvider, asset_id: u64, addr: Address, amount: u128) {
-    let _ = storage.sstore(ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(amount));
+pub fn save_bal(
+    storage: &mut dyn crate::storage::StorageProvider,
+    asset_id: u64,
+    addr: Address,
+    amount: u128,
+) {
+    let _ = storage.sstore(
+        ASSET_ADDRESS,
+        slot_balance(asset_id, addr),
+        u128_to_u256(amount),
+    );
 }
 
 /// Credit a balance (checked add).
-pub fn credit_bal(storage: &mut dyn crate::storage::StorageProvider, asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
+pub fn credit_bal(
+    storage: &mut dyn crate::storage::StorageProvider,
+    asset_id: u64,
+    addr: Address,
+    amount: u128,
+) -> Result<(), PrecompileError> {
     let bal = load_bal(storage, asset_id, addr)
         .checked_add(amount)
         .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
@@ -340,7 +360,12 @@ pub fn credit_bal(storage: &mut dyn crate::storage::StorageProvider, asset_id: u
 }
 
 /// Debit a balance (checked sub).
-pub fn debit_bal(storage: &mut dyn crate::storage::StorageProvider, asset_id: u64, addr: Address, amount: u128) -> Result<(), PrecompileError> {
+pub fn debit_bal(
+    storage: &mut dyn crate::storage::StorageProvider,
+    asset_id: u64,
+    addr: Address,
+    amount: u128,
+) -> Result<(), PrecompileError> {
     let bal = load_bal(storage, asset_id, addr)
         .checked_sub(amount)
         .ok_or_else(|| PrecompileError::Other("insufficient balance".into()))?;
@@ -369,7 +394,10 @@ pub fn is_validator(storage: &mut dyn crate::storage::StorageProvider, sender: A
 }
 
 /// Require the sender to be a registered validator.
-pub fn require_validator(storage: &mut dyn crate::storage::StorageProvider, sender: Address) -> Result<(), PrecompileError> {
+pub fn require_validator(
+    storage: &mut dyn crate::storage::StorageProvider,
+    sender: Address,
+) -> Result<(), PrecompileError> {
     if !is_validator(storage, sender) {
         return Err(PrecompileError::Other(
             "sender not a registered validator".into(),

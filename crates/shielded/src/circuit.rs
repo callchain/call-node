@@ -5,8 +5,8 @@
 //! - Private inputs: notes[], new_notes[], spending_key, merkle_path[]
 //! - 5 constraints for validity
 
+use crate::{Note, NoteCommitment, Nullifier};
 use call_primitives::{AssetId, Balance};
-use crate::{NoteCommitment, Nullifier, Note};
 
 /// ZK circuit for a single shielded transfer
 #[derive(Debug, Clone)]
@@ -148,7 +148,11 @@ impl ShieldedCircuit {
     /// Compute the Merkle root from a proof path and leaf.
     ///
     /// Uses Poseidon hashing to match the R1CS circuit and on-chain Merkle tree.
-    fn compute_root_from_path(&self, proof: &[(call_primitives::Hash, bool)], leaf: call_primitives::Hash) -> call_primitives::Hash {
+    fn compute_root_from_path(
+        &self,
+        proof: &[(call_primitives::Hash, bool)],
+        leaf: call_primitives::Hash,
+    ) -> call_primitives::Hash {
         let mut current: [u8; 32] = leaf.into();
         for (sibling, is_left) in proof {
             let sibling_bytes: [u8; 32] = (*sibling).into();
@@ -191,8 +195,8 @@ pub enum CircuitError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{test_hash, test_note, test_spending_key};
     use crate::merkle_poseidon::PoseidonMerkleTree;
+    use crate::test_utils::{test_hash, test_note, test_spending_key};
 
     fn build_valid_circuit() -> ShieldedCircuit {
         let input = test_note(1000, 1, 1);
@@ -200,13 +204,7 @@ mod tests {
         let nf = input.nullifier();
         let cm = output.commitment();
 
-        ShieldedCircuit::new(
-            vec![nf],
-            vec![cm],
-            1,
-            vec![input],
-            vec![output],
-        )
+        ShieldedCircuit::new(vec![nf], vec![cm], 1, vec![input], vec![output])
     }
 
     #[test]
@@ -279,13 +277,8 @@ mod tests {
         let nf = input.nullifier();
         let cm = output.commitment();
 
-        let circuit = ShieldedCircuit::new(
-            vec![nf],
-            vec![cm],
-            1,
-            vec![input],
-            vec![output],
-        ).with_merkle_paths(vec![proof]);
+        let circuit = ShieldedCircuit::new(vec![nf], vec![cm], 1, vec![input], vec![output])
+            .with_merkle_paths(vec![proof]);
 
         assert!(circuit.check_merkle_path_valid().is_ok());
     }
@@ -302,13 +295,8 @@ mod tests {
         let nf = input.nullifier();
         let cm = output.commitment();
 
-        let circuit = ShieldedCircuit::new(
-            vec![nf],
-            vec![cm],
-            1,
-            vec![input],
-            vec![output],
-        ).with_merkle_paths(vec![proof]);
+        let circuit = ShieldedCircuit::new(vec![nf], vec![cm], 1, vec![input], vec![output])
+            .with_merkle_paths(vec![proof]);
 
         assert!(circuit.verify_constraints().is_ok());
     }

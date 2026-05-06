@@ -1,6 +1,6 @@
 //! Callchain primitives — shared base types
 
-pub use alloy_primitives::{Address, B256, U256, Bytes};
+pub use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
@@ -62,7 +62,9 @@ impl PricePair {
 // ─── Protocol version ───────────────────────────────────────────
 
 /// Protocol version (semver-like)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, RlpEncodable, RlpDecodable, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, RlpEncodable, RlpDecodable, Serialize, Deserialize,
+)]
 pub struct ProtocolVersion {
     pub major: u16,
     pub minor: u16,
@@ -71,7 +73,11 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 }
 
@@ -144,7 +150,10 @@ mod tests {
         // EIP-55 checksum is handled by alloy_primitives::Address::parse_checksummed
         let addr = Address::parse_checksummed("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", None)
             .expect("valid checksum");
-        assert_eq!(addr.to_checksum(None), "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+        assert_eq!(
+            addr.to_checksum(None),
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+        );
     }
 
     #[test]
@@ -196,7 +205,9 @@ mod tests {
         assert!(ok.is_success());
         assert!(!ok.is_reverted());
 
-        let fail = ExecutionStatus::Reverted { reason: "out of gas".into() };
+        let fail = ExecutionStatus::Reverted {
+            reason: "out of gas".into(),
+        };
         assert!(!fail.is_success());
         assert!(fail.is_reverted());
     }

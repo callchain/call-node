@@ -1,12 +1,12 @@
 //! External bridge types and shared utilities.
 
-use alloy_primitives::{Address, B256};
-use call_primitives::{AssetId, Signature};
-use call_crypto::{keccak256, recover_secp256k1_signer};
 use crate::{BridgeConfig, BridgeError};
+use alloy_primitives::{Address, B256};
+use call_crypto::{keccak256, recover_secp256k1_signer};
+use call_primitives::{AssetId, Signature};
 
 #[cfg(feature = "light-client-bridge")]
-use call_light_client::{EthHeader, TxInclusionProof, ReceiptProof};
+use call_light_client::{EthHeader, ReceiptProof, TxInclusionProof};
 
 /// Supported external chains (per spec §5.6)
 #[derive(Debug, Clone, PartialEq, Eq)]

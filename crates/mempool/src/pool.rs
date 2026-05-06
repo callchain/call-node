@@ -2,9 +2,9 @@
 //!
 //! EVM-only mempool with capacity limits, eviction, and anti-spam.
 
-use call_primitives::{Address, TxHash, U256};
 use call_crypto::keccak256;
 use call_evm::EvmTransaction;
+use call_primitives::{Address, TxHash, U256};
 use std::collections::{HashMap, HashSet};
 
 use crate::priority::{MempoolEntry, PoolKind, PoolLimits, PriorityPool};
@@ -25,8 +25,8 @@ pub struct MempoolConfig {
 impl Default for MempoolConfig {
     fn default() -> Self {
         Self {
-            min_fee: 1_000,           // 1000 wei minimum
-            min_gas_price: 1,         // 1 wei per gas unit
+            min_fee: 1_000,            // 1000 wei minimum
+            min_gas_price: 1,          // 1 wei per gas unit
             max_gas_limit: 10_000_000, // 10M gas limit
         }
     }
@@ -40,9 +40,17 @@ pub enum MempoolError {
     #[error("duplicate transaction: {0}")]
     Duplicate(TxHash),
     #[error("pool capacity reached: {pool} full ({count}/{max})")]
-    PoolFull { pool: String, count: usize, max: usize },
+    PoolFull {
+        pool: String,
+        count: usize,
+        max: usize,
+    },
     #[error("per-address limit reached: {address}, {count}/{max}")]
-    AddressLimitReached { address: Address, count: usize, max: usize },
+    AddressLimitReached {
+        address: Address,
+        count: usize,
+        max: usize,
+    },
     #[error("fee too low: {fee} < {min}")]
     FeeTooLow { fee: u128, min: u128 },
     #[error("gas limit exceeded: {gas} > {max}")]
@@ -104,12 +112,10 @@ impl Mempool {
     // ── EVM Transactions ─────────────────────────────────────────────
 
     /// Insert an EVM transaction into the mempool
-    pub fn insert_evm_tx(
-        &mut self,
-        tx: EvmTransaction,
-    ) -> Result<TxHash, MempoolError> {
+    pub fn insert_evm_tx(&mut self, tx: EvmTransaction) -> Result<TxHash, MempoolError> {
         // Serialize full EvmTransaction for block execution (decode_evm_tx supports JSON fallback)
-        let data = serde_json::to_vec(&tx).map_err(|e| MempoolError::Generic(format!("serialize: {e}")))?;
+        let data = serde_json::to_vec(&tx)
+            .map_err(|e| MempoolError::Generic(format!("serialize: {e}")))?;
         let hash = keccak256(&data);
 
         // Deduplication check
@@ -209,9 +215,7 @@ impl Mempool {
         // `known_txs` is also kept so duplicate submissions are still rejected
         // while a tx is awaiting block inclusion.
 
-        MempoolSelection {
-            evm_txs,
-        }
+        MempoolSelection { evm_txs }
     }
 
     // ── Maintenance ────────────────────────────────────────────────
@@ -220,10 +224,8 @@ impl Mempool {
     ///
     /// Called each block to enforce the 72-block lifetime limit.
     pub fn prune_expired(&mut self) -> usize {
-        self.evm_pool.remove_expired(
-            self.current_block,
-            self.limits.lifetime_blocks,
-        )
+        self.evm_pool
+            .remove_expired(self.current_block, self.limits.lifetime_blocks)
     }
 
     /// Remove transactions confirmed in a block (by hash).
@@ -241,7 +243,8 @@ impl Mempool {
     /// Increment expected nonce for a sender after their tx is included in a block.
     pub fn increment_nonce(&mut self, sender: Address) {
         let current = self.expected_nonces.get(&sender).copied().unwrap_or(0);
-        self.expected_nonces.insert(sender, current.saturating_add(1));
+        self.expected_nonces
+            .insert(sender, current.saturating_add(1));
     }
 
     /// Get the expected next EVM nonce for a sender, accounting for pending mempool txs.
@@ -285,8 +288,8 @@ pub struct PoolStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_primitives::Address;
     use call_evm::EvmTransaction;
+    use call_primitives::Address;
     use call_primitives::U256;
 
     fn test_addr(n: u8) -> Address {
@@ -348,7 +351,10 @@ mod tests {
 
         // 4th tx should fail
         let result = mempool.insert_evm_tx(make_evm_tx(3, 100));
-        assert!(matches!(result, Err(MempoolError::AddressLimitReached { .. })));
+        assert!(matches!(
+            result,
+            Err(MempoolError::AddressLimitReached { .. })
+        ));
     }
 
     #[test]
@@ -447,7 +453,13 @@ mod tests {
         let balance = U256::from(10_000_000u128);
 
         let result = mempool.insert_evm_tx_with_state(tx, 0, balance);
-        assert!(matches!(result, Err(MempoolError::InvalidNonce { expected: 0, got: 1 })));
+        assert!(matches!(
+            result,
+            Err(MempoolError::InvalidNonce {
+                expected: 0,
+                got: 1
+            })
+        ));
     }
 
     #[test]
@@ -457,7 +469,10 @@ mod tests {
         let balance = U256::from(0u128); // not enough for gas
 
         let result = mempool.insert_evm_tx_with_state(tx, 0, balance);
-        assert!(matches!(result, Err(MempoolError::InsufficientBalance { .. })));
+        assert!(matches!(
+            result,
+            Err(MempoolError::InsufficientBalance { .. })
+        ));
     }
 
     #[test]
@@ -476,6 +491,12 @@ mod tests {
         // Third tx with nonce 0 should fail (duplicate nonce)
         let tx0_dup = make_evm_tx(0, 100);
         let result = mempool.insert_evm_tx_with_state(tx0_dup, 0, balance);
-        assert!(matches!(result, Err(MempoolError::InvalidNonce { expected: 2, got: 0 })));
+        assert!(matches!(
+            result,
+            Err(MempoolError::InvalidNonce {
+                expected: 2,
+                got: 0
+            })
+        ));
     }
 }

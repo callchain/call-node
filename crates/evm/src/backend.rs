@@ -1,5 +1,5 @@
-use call_protocol::storage_backend::StorageBackend;
 use call_primitives::{Address, U256};
+use call_protocol::storage_backend::StorageBackend;
 
 // ── ProtocolStorage trait ─────────────────────────────────────────────
 
@@ -116,4 +116,3 @@ impl<'a, S: ProtocolStorage + ?Sized> StorageBackend for ProtocolStateRefBackend
         panic!("ProtocolStateRefBackend is read-only");
     }
 }
-

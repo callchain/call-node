@@ -109,9 +109,9 @@ mod serde_bytes {
     {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
         let len = bytes.len();
-        let arr: [u8; 64] = bytes.try_into().map_err(|_| {
-            serde::de::Error::custom(format!("expected 64 bytes, got {len}"))
-        })?;
+        let arr: [u8; 64] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom(format!("expected 64 bytes, got {len}")))?;
         Ok(arr)
     }
 }
@@ -126,8 +126,7 @@ pub fn snapshot_message_hash(snapshot: &StateSnapshot) -> [u8; 32] {
     buf.extend_from_slice(snapshot.agent_root.as_slice());
     buf.extend_from_slice(snapshot.consensus_root.as_slice());
     buf.extend_from_slice(&snapshot.total_size.to_be_bytes());
-    let h = call_crypto::keccak256(&buf);
-    h.0
+    call_crypto::keccak256(&buf).0
 }
 
 /// Pre-computed state roots from all sub-systems at a given block height.
@@ -150,8 +149,18 @@ pub struct StateRoots {
 
 /// Hash a protocol balance map into a single root.
 pub fn compute_protocol_root(
-    balances: &HashMap<(call_primitives::AssetId, call_primitives::Address), call_primitives::Balance>,
-    allowances: &HashMap<(call_primitives::AssetId, call_primitives::Address, call_primitives::Address), call_primitives::Balance>,
+    balances: &HashMap<
+        (call_primitives::AssetId, call_primitives::Address),
+        call_primitives::Balance,
+    >,
+    allowances: &HashMap<
+        (
+            call_primitives::AssetId,
+            call_primitives::Address,
+            call_primitives::Address,
+        ),
+        call_primitives::Balance,
+    >,
 ) -> Hash {
     let mut buf = Vec::new();
     let mut entries: Vec<_> = balances.iter().collect();
@@ -169,14 +178,11 @@ pub fn compute_protocol_root(
         buf.extend_from_slice(spender.as_slice());
         buf.extend_from_slice(&amount.to_be_bytes());
     }
-    let h = keccak256(&buf);
-    h
+    keccak256(&buf)
 }
 
 /// Hash the agent registry into a single root.
-pub fn compute_agent_root(
-    agents: &HashMap<u64, (call_primitives::Address, String, u64)>,
-) -> Hash {
+pub fn compute_agent_root(agents: &HashMap<u64, (call_primitives::Address, String, u64)>) -> Hash {
     let mut buf = Vec::new();
     let mut entries: Vec<_> = agents.iter().collect();
     entries.sort_by_key(|(id, _)| *id);
@@ -186,14 +192,11 @@ pub fn compute_agent_root(
         buf.extend_from_slice(name.as_bytes());
         buf.extend_from_slice(&registered_at.to_be_bytes());
     }
-    let h = keccak256(&buf);
-    h
+    keccak256(&buf)
 }
 
 /// Hash the validator set into a single root.
-pub fn compute_consensus_root(
-    validators: &HashMap<u32, (call_primitives::Address, u128)>,
-) -> Hash {
+pub fn compute_consensus_root(validators: &HashMap<u32, (call_primitives::Address, u128)>) -> Hash {
     let mut buf = Vec::new();
     let mut entries: Vec<_> = validators.iter().collect();
     entries.sort_by_key(|(id, _)| *id);
@@ -202,6 +205,5 @@ pub fn compute_consensus_root(
         buf.extend_from_slice(addr.as_slice());
         buf.extend_from_slice(&stake.to_be_bytes());
     }
-    let h = keccak256(&buf);
-    h
+    keccak256(&buf)
 }

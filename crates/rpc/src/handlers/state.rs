@@ -1,24 +1,24 @@
 //! RpcState struct and its methods.
 
-use call_protocol::{ProtocolReceipt, FeeParams};
-use call_protocol::security::MempoolDefense;
-use call_evm::{EvmExecutor, EvmTransaction, EvmExecutionResult};
-use call_consensus::{ForkManager, RollbackPlan, ConsensusParams};
-use call_consensus::exec::state_accessors;
-use call_primitives::{Address, AssetId, Balance, TxHash, Hash};
-use call_crypto::SignerRef;
-use call_mempool::Mempool;
-use alloy_consensus::{TxEnvelope, Transaction as _, transaction::SignerRecoverable};
+use crate::handlers::helpers::{AgentInfoResponse, AssetInfoResponse, ShieldedTreeStateResponse};
+use crate::ws::SubscriptionManager;
+use alloy_consensus::{transaction::SignerRecoverable, Transaction as _, TxEnvelope};
 use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
-use crate::ws::SubscriptionManager;
-use crate::handlers::helpers::{AssetInfoResponse, AgentInfoResponse, ShieldedTreeStateResponse};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::{HashMap, VecDeque, HashSet};
-use std::sync::{Arc, RwLock};
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use call_consensus::exec::state_accessors;
+use call_consensus::{ConsensusParams, ForkManager, RollbackPlan};
+use call_crypto::SignerRef;
+use call_evm::{EvmExecutionResult, EvmExecutor, EvmTransaction};
+use call_mempool::Mempool;
+use call_primitives::{Address, AssetId, Balance, Hash, TxHash};
+use call_protocol::security::MempoolDefense;
+use call_protocol::{FeeParams, ProtocolReceipt};
 use reth_db::DatabaseEnv;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-block fee data for eth_feeHistory queries.
 #[derive(Debug, Clone)]
@@ -82,15 +82,18 @@ impl FilterManager {
             next_id: 1,
             filters: HashMap::new(),
         });
-        Self { db_env, state: RwLock::new(state) }
+        Self {
+            db_env,
+            state: RwLock::new(state),
+        }
     }
 
     fn load_state(db_env: &DatabaseEnv) -> Option<FilterManagerState> {
-        let bytes = call_storage::reth_db::db_get::<
-            call_storage::reth_db::CallRpcFilters,
-        >(db_env, b"filters")
-            .ok()
-            .flatten()?;
+        let bytes = call_storage::reth_db::db_get::<call_storage::reth_db::CallRpcFilters>(
+            db_env, b"filters",
+        )
+        .ok()
+        .flatten()?;
         serde_json::from_slice(&bytes).ok()
     }
 
@@ -98,9 +101,11 @@ impl FilterManager {
         if let Ok(state) = self.state.read() {
             let _ = (|| -> Result<(), Box<dyn std::error::Error>> {
                 let bytes = serde_json::to_vec(&*state)?;
-                call_storage::reth_db::db_put::<
-                    call_storage::reth_db::CallRpcFilters,
-                >(&self.db_env, b"filters".to_vec(), bytes)?;
+                call_storage::reth_db::db_put::<call_storage::reth_db::CallRpcFilters>(
+                    &self.db_env,
+                    b"filters".to_vec(),
+                    bytes,
+                )?;
                 Ok(())
             })();
         }
@@ -115,7 +120,13 @@ impl FilterManager {
             let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
             let id = state.next_id;
             state.next_id = state.next_id.wrapping_add(1).max(1);
-            state.filters.insert(id, FilterEntry { filter, last_polled_at: now });
+            state.filters.insert(
+                id,
+                FilterEntry {
+                    filter,
+                    last_polled_at: now,
+                },
+            );
             id
         };
         self.save_state();
@@ -123,7 +134,8 @@ impl FilterManager {
     }
 
     pub fn get_filter(&self, id: u64) -> Option<Filter> {
-        self.state.read()
+        self.state
+            .read()
             .ok()
             .and_then(|s| s.filters.get(&id).map(|e| e.filter.clone()))
     }
@@ -240,11 +252,7 @@ pub struct RpcState {
 }
 
 impl RpcState {
-    pub fn new(
-        db_env: Arc<DatabaseEnv>,
-        mempool: Arc<RwLock<Mempool>>,
-        chain_id: u64,
-    ) -> Self {
+    pub fn new(db_env: Arc<DatabaseEnv>, mempool: Arc<RwLock<Mempool>>, chain_id: u64) -> Self {
         let total_validators = {
             let provider = call_evm::provider::InMemoryStateProvider::from_db(&db_env).ok();
             let count = provider
@@ -360,17 +368,21 @@ impl RpcState {
     }
 
     pub fn get_receipt(&self, tx_hash: &TxHash) -> Option<ProtocolReceipt> {
-        self.receipts.read().ok().and_then(|r| r.get(tx_hash).cloned())
+        self.receipts
+            .read()
+            .ok()
+            .and_then(|r| r.get(tx_hash).cloned())
     }
 
     pub fn store_receipt(&self, tx_hash: TxHash, receipt: ProtocolReceipt) {
         // Index logs by address for efficient eth_getLogs queries
         for (idx, log) in receipt.logs.iter().enumerate() {
             if let Ok(mut index) = self.log_index.write() {
-                index
-                    .entry(log.address)
-                    .or_insert_with(Vec::new)
-                    .push((receipt.block_number, tx_hash, idx));
+                index.entry(log.address).or_insert_with(Vec::new).push((
+                    receipt.block_number,
+                    tx_hash,
+                    idx,
+                ));
             }
         }
         // Index block hash -> height for eth_getBlockByHash
@@ -459,7 +471,10 @@ impl RpcState {
     /// Load a block from MDBX by height.
     pub fn load_block(&self, height: u64) -> Option<call_consensus::Block> {
         let key = height.to_be_bytes().to_vec();
-        match call_storage::reth_db::db_get::<call_storage::reth_db::CallConsensusBlocks>(&self.db_env, &key) {
+        match call_storage::reth_db::db_get::<call_storage::reth_db::CallConsensusBlocks>(
+            &self.db_env,
+            &key,
+        ) {
             Ok(Some(data)) => serde_json::from_slice(&data).ok(),
             _ => None,
         }
@@ -468,7 +483,13 @@ impl RpcState {
     /// Load a block from MDBX by hash (using the on-disk hash index).
     pub fn load_block_by_hash(&self, hash: &Hash) -> Option<call_consensus::Block> {
         let hash_key = hash.as_slice().to_vec();
-        let height_bytes = call_storage::reth_db::db_get::<call_storage::reth_db::CallBlockHashIndex>(&self.db_env, &hash_key).ok().flatten()?;
+        let height_bytes =
+            call_storage::reth_db::db_get::<call_storage::reth_db::CallBlockHashIndex>(
+                &self.db_env,
+                &hash_key,
+            )
+            .ok()
+            .flatten()?;
         if height_bytes.len() != 8 {
             return None;
         }
@@ -479,7 +500,8 @@ impl RpcState {
     /// Enable or disable governance signature requirements.
     /// When true, governance RPC methods require valid secp256k1 signatures.
     pub fn set_governance_auth(&self, require_auth: bool) {
-        self.require_governance_auth.store(require_auth, Ordering::SeqCst);
+        self.require_governance_auth
+            .store(require_auth, Ordering::SeqCst);
     }
 
     pub fn register_agent(
@@ -494,7 +516,12 @@ impl RpcState {
         self.with_provider_mut(|provider| {
             let count = call_consensus::exec::state_accessors::read_agent_count(provider);
             call_consensus::exec::state_accessors::seed_agent(
-                provider, count, owner, &name, &url, current_block,
+                provider,
+                count,
+                owner,
+                &name,
+                &url,
+                current_block,
             );
             let pubkey_hash: [u8; 32] = if pubkey.len() >= 32 {
                 pubkey[..32].try_into().unwrap()
@@ -529,19 +556,37 @@ impl RpcState {
             .unwrap_or(0)
     }
 
-    pub fn grant_agent_balance(&self, agent_id: u64, asset_id: AssetId, amount: Balance) -> Result<(), String> {
+    pub fn grant_agent_balance(
+        &self,
+        agent_id: u64,
+        asset_id: AssetId,
+        amount: Balance,
+    ) -> Result<(), String> {
         self.with_provider_mut(|provider| {
             let owner = call_consensus::exec::state_accessors::agent_get_owner(provider, agent_id);
             if owner == call_primitives::Address::ZERO {
                 return Err("agent not found".into());
             }
-            let owner_balance = call_consensus::exec::state_accessors::read_balance(provider, asset_id, owner);
+            let owner_balance =
+                call_consensus::exec::state_accessors::read_balance(provider, asset_id, owner);
             if owner_balance < amount {
                 return Err("insufficient owner balance for grant".into());
             }
-            call_consensus::exec::state_accessors::seed_balance(provider, asset_id, owner, owner_balance - amount);
-            let agent_balance = call_consensus::exec::state_accessors::agent_get_balance(provider, agent_id, asset_id);
-            call_consensus::exec::state_accessors::agent_set_balance(provider, agent_id, asset_id, agent_balance + amount);
+            call_consensus::exec::state_accessors::seed_balance(
+                provider,
+                asset_id,
+                owner,
+                owner_balance - amount,
+            );
+            let agent_balance = call_consensus::exec::state_accessors::agent_get_balance(
+                provider, agent_id, asset_id,
+            );
+            call_consensus::exec::state_accessors::agent_set_balance(
+                provider,
+                agent_id,
+                asset_id,
+                agent_balance + amount,
+            );
             Ok(())
         })?
     }
@@ -552,7 +597,9 @@ impl RpcState {
             if owner == call_primitives::Address::ZERO {
                 return Err("agent not found".into());
             }
-            call_consensus::exec::state_accessors::agent_set_balance(provider, agent_id, asset_id, 0);
+            call_consensus::exec::state_accessors::agent_set_balance(
+                provider, agent_id, asset_id, 0,
+            );
             Ok(())
         })?
     }
@@ -567,7 +614,9 @@ impl RpcState {
         self.load_provider()
             .map(|p| ShieldedTreeStateResponse {
                 merkle_root: call_consensus::exec::state_accessors::read_shielded_merkle_root(&p),
-                leaf_count: call_consensus::exec::state_accessors::read_shielded_commitment_count(&p),
+                leaf_count: call_consensus::exec::state_accessors::read_shielded_commitment_count(
+                    &p,
+                ),
                 nullifier_count: 0,
             })
             .unwrap_or(ShieldedTreeStateResponse {
@@ -595,7 +644,10 @@ impl RpcState {
     ) -> Result<EvmExecutionResult, String> {
         let executor = EvmExecutor::new(self.chain_id);
 
-        let current = *self.current_block.read().map_err(|_| "lock poisoned".to_string())?;
+        let current = *self
+            .current_block
+            .read()
+            .map_err(|_| "lock poisoned".to_string())?;
         let block_num = at_block.unwrap_or(current);
 
         let state = if block_num == current {
@@ -603,9 +655,11 @@ impl RpcState {
         } else {
             match call_evm::db::load_block_snapshot(&self.db_env, block_num) {
                 Ok(Some(snapshot)) => snapshot,
-                Ok(None) => return Err(format!(
+                Ok(None) => {
+                    return Err(format!(
                     "no state snapshot available for block {block_num} (retention may have expired)"
-                )),
+                ))
+                }
                 Err(e) => return Err(format!("failed to load block snapshot: {e}")),
             }
         };
@@ -622,22 +676,24 @@ impl RpcState {
             data,
             chain_id: self.chain_id,
         };
-        let base_fee = self.fee_params.read().map_err(|_| "lock poisoned".to_string())?.base_fee;
+        let base_fee = self
+            .fee_params
+            .read()
+            .map_err(|_| "lock poisoned".to_string())?
+            .base_fee;
 
-        let (result, _delta) = executor.execute_tx_provider(tx, state, block_num, base_fee).map_err(|e| format!("{e}"))?;
+        let (result, _delta) = executor
+            .execute_tx_provider(tx, state, block_num, base_fee)
+            .map_err(|e| format!("{e}"))?;
         Ok(result)
     }
 
     // ── EVM submission (inserts into mempool + executes) ──────────────
 
     /// Submit a signed EVM transaction: validates, inserts into mempool, and executes
-    pub fn submit_evm_tx(
-        &self,
-        raw_tx: &[u8],
-    ) -> Result<TxHash, String> {
+    pub fn submit_evm_tx(&self, raw_tx: &[u8]) -> Result<TxHash, String> {
         let mut cursor = raw_tx;
-        let envelope = TxEnvelope::decode(&mut cursor)
-            .map_err(|e| format!("invalid RLP: {e}"))?;
+        let envelope = TxEnvelope::decode(&mut cursor).map_err(|e| format!("invalid RLP: {e}"))?;
 
         // Recover signer address from the signed transaction
         let signer = envelope
@@ -673,11 +729,16 @@ impl RpcState {
             let provider = self.load_provider().map_err(|e| e.to_string())?;
             let committed_nonce = provider.state().get_nonce(&caller);
             let expected_nonce = {
-                let mempool = self.mempool.read().map_err(|_| "lock poisoned".to_string())?;
+                let mempool = self
+                    .mempool
+                    .read()
+                    .map_err(|_| "lock poisoned".to_string())?;
                 mempool.get_expected_evm_nonce(caller, committed_nonce)
             };
             if nonce != expected_nonce {
-                return Err(format!("invalid nonce: expected {expected_nonce}, got {nonce}"));
+                return Err(format!(
+                    "invalid nonce: expected {expected_nonce}, got {nonce}"
+                ));
             }
             let balance = provider.state().get_balance(&caller);
             let max_cost = gas_price.saturating_mul(gas_limit as u128);
@@ -688,11 +749,31 @@ impl RpcState {
 
         // Extract to, value, and input (calldata) from envelope
         let (to_addr, value, input) = match &envelope {
-            TxEnvelope::Legacy(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
-            TxEnvelope::Eip1559(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
-            TxEnvelope::Eip2930(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
-            TxEnvelope::Eip7702(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
-            TxEnvelope::Eip4844(signed) => (signed.tx().to().map(|a| Address::from(*a)), signed.tx().value(), signed.tx().input().clone()),
+            TxEnvelope::Legacy(signed) => (
+                signed.tx().to().map(|a| Address::from(*a)),
+                signed.tx().value(),
+                signed.tx().input().clone(),
+            ),
+            TxEnvelope::Eip1559(signed) => (
+                signed.tx().to().map(|a| Address::from(*a)),
+                signed.tx().value(),
+                signed.tx().input().clone(),
+            ),
+            TxEnvelope::Eip2930(signed) => (
+                signed.tx().to().map(|a| Address::from(*a)),
+                signed.tx().value(),
+                signed.tx().input().clone(),
+            ),
+            TxEnvelope::Eip7702(signed) => (
+                signed.tx().to().map(|a| Address::from(*a)),
+                signed.tx().value(),
+                signed.tx().input().clone(),
+            ),
+            TxEnvelope::Eip4844(signed) => (
+                signed.tx().to().map(|a| Address::from(*a)),
+                signed.tx().value(),
+                signed.tx().input().clone(),
+            ),
         };
 
         // Build EvmTransaction for mempool insertion
@@ -708,8 +789,7 @@ impl RpcState {
         };
 
         // Compute JSON hash (used by mempool and block execution for receipt storage)
-        let json_bytes = serde_json::to_vec(&evm_tx)
-            .map_err(|e| format!("json serialize: {e}"))?;
+        let json_bytes = serde_json::to_vec(&evm_tx).map_err(|e| format!("json serialize: {e}"))?;
         let json_hash = TxHash::from_slice(&call_crypto::keccak256(&json_bytes).0);
 
         // Compute RLP hash (used by mempool defense for raw-tx replay protection)
@@ -721,17 +801,27 @@ impl RpcState {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
-            defense.validate_tx_submission(caller, rlp_hash, now_ms)
+            let mut defense = self
+                .mempool_defense
+                .write()
+                .map_err(|_| "lock poisoned".to_string())?;
+            defense
+                .validate_tx_submission(caller, rlp_hash, now_ms)
                 .map_err(|e| format!("mempool defense: {e}"))?;
         }
 
         // Insert into mempool (for tracking/dedup)
         {
-            let mut mempool = self.mempool.write().map_err(|_| "lock poisoned".to_string())?;
+            let mut mempool = self
+                .mempool
+                .write()
+                .map_err(|_| "lock poisoned".to_string())?;
             if let Err(e) = mempool.insert_evm_tx(evm_tx) {
                 // Rollback defense state so the tx can be re-submitted later
-                let mut defense = self.mempool_defense.write().map_err(|_| "lock poisoned".to_string())?;
+                let mut defense = self
+                    .mempool_defense
+                    .write()
+                    .map_err(|_| "lock poisoned".to_string())?;
                 defense.rollback_submission(caller, rlp_hash);
                 return Err(format!("mempool insertion failed: {e}"));
             }
@@ -742,7 +832,8 @@ impl RpcState {
         // consensus layer includes this tx in a block.
 
         // Broadcast pending tx for eth_subscribe("newPendingTransactions")
-        self.subscriptions.broadcast_eth_pending_tx(format!("0x{}", hex::encode(json_hash.as_slice())));
+        self.subscriptions
+            .broadcast_eth_pending_tx(format!("0x{}", hex::encode(json_hash.as_slice())));
 
         Ok(json_hash)
     }
@@ -770,10 +861,7 @@ impl RpcState {
 
     /// Insert a pre-built protocol transaction into the mempool.
     /// DEPRECATED: The mempool is now EVM-only. Returns an error.
-    pub fn insert_protocol_tx(
-        &self,
-        _tx: Vec<u8>,
-    ) -> Result<call_primitives::TxHash, String> {
+    pub fn insert_protocol_tx(&self, _tx: Vec<u8>) -> Result<call_primitives::TxHash, String> {
         Err("protocol transactions are no longer accepted directly; submit via eth_sendRawTransaction".into())
     }
 
