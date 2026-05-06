@@ -293,6 +293,10 @@ mod shielded_flow {
         (transfer, input_cm)
     }
 
+    // ark-groth16 constraint checks are debug_assert!-gated, so this only
+    // works in debug mode. In release mode the proof generates successfully
+    // (but would be rejected by verify).
+    #[cfg(debug_assertions)]
     #[test]
     fn test_real_process_transfer_value_violation() {
         // The transfer circuit enforces value conservation (T4 constraint):
