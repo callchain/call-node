@@ -16,7 +16,7 @@ use call_storage::reth_db::{
     db_get, db_put, db_del, db_iter_all,
     CallEvmAccounts, CallEvmStorage, CallTrieUpdates, CallBlockStateSnapshots,
     CallAccountHistory, CallStorageHistory,
-    CallAccountTrie, CallStorageTrie, CallBlockHashByHeight,
+    CallAccountTrie, CallStorageTrie, CallBlockHashByHeight, CallBytecodes,
 };
 use crate::state::EvmAccount;
 
@@ -87,10 +87,17 @@ impl DatabaseRef for EvmDb {
         }
     }
 
-    fn code_by_hash_ref(&self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
-        // Code is always loaded via `basic_ref` (AccountInfo includes the full code).
-        // This path should not be hit in normal operation.
-        Ok(Bytecode::default())
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        match db_get::<CallBytecodes>(&self.db, code_hash.as_slice())
+            .map_err(ErasedError::new)?
+        {
+            Some(bytes) if !bytes.is_empty() => Ok(Bytecode::new_raw(bytes.into())),
+            _ => {
+                // Fallback: code may have been stored before the bytecodes table
+                // existed, or the hash is unknown. Return empty bytecode.
+                Ok(Bytecode::default())
+            }
+        }
     }
 
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
@@ -125,6 +132,16 @@ pub fn apply_revm_state_to_mdbx(
             // Note: we don't have a range-delete for storage; in production
             // this would require iterating all slots for this address.
             continue;
+        }
+
+        // Upsert bytecode table (keyed by code_hash)
+        if let Some(c) = &account.info.code {
+            let code = c.original_bytes();
+            if !code.is_empty() {
+                let code_hash = c.hash_slow();
+                call_storage::reth_db::save_bytecode(db, &code_hash, &code)
+                    .map_err(ErasedError::new)?;
+            }
         }
 
         // Upsert account info
@@ -633,6 +650,29 @@ mod tests {
         // Missing block returns zero
         let missing = evm_db.block_hash_ref(99).expect("block_hash_ref missing");
         assert_eq!(missing, B256::ZERO);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_evm_db_code_by_hash_ref() {
+        let tmp = std::env::temp_dir().join(format!("call-evm-db-code-test-{}", std::process::id()));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        let code = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0x55]);
+        let code_hash = alloy_primitives::keccak256(&code);
+
+        // Save bytecode via helper
+        call_storage::reth_db::save_bytecode(&db, &code_hash, &code)
+            .expect("save bytecode");
+
+        let evm_db = EvmDb::new(db);
+        let loaded = evm_db.code_by_hash_ref(code_hash).expect("code_by_hash_ref");
+        assert_eq!(loaded.original_bytes(), code);
+
+        // Unknown hash returns empty bytecode
+        let unknown = evm_db.code_by_hash_ref(B256::from([0xFFu8; 32])).expect("code_by_hash_ref unknown");
+        assert!(unknown.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

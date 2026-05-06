@@ -270,6 +270,19 @@ impl Table for CallRpcFilters {
     type Value = Vec<u8>;
 }
 
+/// Bytecodes: serialized code_hash (B256) -> raw bytecode bytes
+///
+/// Enables `code_by_hash_ref` lookups when revm's CacheDB only caches
+/// the code_hash and needs to fetch the full bytecode on demand.
+#[derive(Debug)]
+pub struct CallBytecodes;
+impl Table for CallBytecodes {
+    const NAME: &'static str = "call_bytecodes";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// All Callchain tables
 pub struct CallTables;
 impl TableSet for CallTables {
@@ -300,6 +313,7 @@ impl TableSet for CallTables {
                 box_info::<CallBlockHashIndex>,
                 box_info::<CallBlockHashByHeight>,
                 box_info::<CallRpcFilters>,
+                box_info::<CallBytecodes>,
             ]
             .into_iter()
             .map(|f| f()),
@@ -494,6 +508,21 @@ pub fn load_block_hash_by_height(db: &DatabaseEnv, height: u64) -> Result<Option
 pub fn delete_block_hash_by_height(db: &DatabaseEnv, height: u64) -> Result<(), StorageError> {
     let key = height.to_be_bytes().to_vec();
     db_del::<CallBlockHashByHeight>(db, &key)
+}
+
+/// Save raw bytecode keyed by its keccak256 hash.
+pub fn save_bytecode(db: &DatabaseEnv, code_hash: &call_primitives::BlockHash, code: &[u8]) -> Result<(), StorageError> {
+    db_put::<CallBytecodes>(db, code_hash.as_slice().to_vec(), code.to_vec())
+}
+
+/// Load raw bytecode by its keccak256 hash.
+pub fn load_bytecode(db: &DatabaseEnv, code_hash: &call_primitives::BlockHash) -> Result<Option<Vec<u8>>, StorageError> {
+    db_get::<CallBytecodes>(db, code_hash.as_slice())
+}
+
+/// Delete bytecode by hash (used during pruning).
+pub fn delete_bytecode(db: &DatabaseEnv, code_hash: &call_primitives::BlockHash) -> Result<(), StorageError> {
+    db_del::<CallBytecodes>(db, code_hash.as_slice())
 }
 
 #[cfg(test)]

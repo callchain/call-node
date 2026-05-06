@@ -103,7 +103,7 @@ impl InMemoryStateProvider {
 
     /// Persist full state to MDBX.
     pub fn save_to_db(&self, db: &DatabaseEnv) -> Result<(), revm::database_interface::ErasedError> {
-        use call_storage::reth_db::{db_clear, db_batch_put, CallEvmAccounts, CallEvmStorage};
+        use call_storage::reth_db::{db_clear, db_batch_put, CallEvmAccounts, CallEvmStorage, CallBytecodes};
 
         db_clear::<CallEvmAccounts>(db).map_err(revm::database_interface::ErasedError::new)?;
         db_clear::<CallEvmStorage>(db).map_err(revm::database_interface::ErasedError::new)?;
@@ -120,6 +120,17 @@ impl InMemoryStateProvider {
         if !account_entries.is_empty() {
             db_batch_put::<CallEvmAccounts>(db, account_entries)
                 .map_err(revm::database_interface::ErasedError::new)?;
+        }
+
+        // Persist bytecodes keyed by code_hash for code_by_hash_ref lookups
+        for (_addr, acc) in &self.accounts {
+            if !acc.code.is_empty() {
+                let code_hash = alloy_primitives::keccak256(&acc.code);
+                let key = code_hash.as_slice().to_vec();
+                let value = acc.code.as_ref().to_vec();
+                db_batch_put::<CallBytecodes>(db, vec![(key, value)])
+                    .map_err(revm::database_interface::ErasedError::new)?;
+            }
         }
 
         let mut storage_entries = Vec::new();
