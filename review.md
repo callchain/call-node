@@ -21,8 +21,6 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - Precompile gas tracking is automatic
 
 **Key Gaps:**
-- Governance advancer side effects only implement EmergencyPause
-- Prover service has no auth/rate-limiting
 - Some crates have zero or minimal tests
 
 ---
@@ -143,8 +141,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - `sync.rs` — chain sync
   - `governance_advancer.rs` — per-block governance state machine
   - `light_client.rs` — light client verification (minimal)
-- **Issues:**
-  - `governance_advancer.rs:243` — TODO: only EmergencyPause side effects implemented in advancer. Other proposal types need data parsing.
+- **Issues:** None significant
 - **Integration Tests:** 14 e2e test files covering full node lifecycle, bridge, governance, consensus, EVM compatibility, forks, light client, shielded, stress, malicious proposer, multi-node network.
 
 #### `crates/rpc` (4125 LOC, 17 tests)
@@ -194,10 +191,10 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Status:** Mostly Complete
 - **Functions:** submitProposal, vote, queue, execute, emergencyPause, emergencyResume, getProposalStatus, getProposalVotes, isPaused, getProposalCount
 - **Assessment:**
-  - `execute()` now implements side effects for all major proposal types (ParameterChange, TreasurySpend, EmergencyPause, FeeCurrencyAdd/Remove, ValidatorKeyRotation)
+  - `execute()` now implements side effects for all major proposal types (ParameterChange, ProtocolUpgrade, TreasurySpend, ValidatorSlash, ComplianceUpdate, EmergencyPause, FeeCurrencyAdd/Remove/Cap, ValidatorKeyRotation)
   - ABI updated to match E2E signer: `submitProposal(uint8,string,string,bytes)`
   - Execution data stored in chunked slots for retrieval
-  - **Gap:** `governance_advancer.rs` (node layer) only applies EmergencyPause side effects. Other types need the same treatment.
+  - `governance_advancer.rs` (node layer) mirrors all precompile side effects and is kept in sync.
 
 #### `crates/validator` (786 LOC, 4 tests)
 - **Address:** 0x204
@@ -255,10 +252,12 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Status:** Minimal
 - **Purpose:** HTTP service for generating Groth16 proofs for shielded transactions
 - **Issues:**
-  - No authentication or rate limiting on proof requests
-  - Panics on malformed hex input instead of returning 400
+  - ~~No authentication or rate limiting on proof requests~~ — **FIXED**: API key auth via `X-API-Key` header + token-bucket rate limiting per key
+  - ~~Panics on malformed hex input~~ — **FIXED**: returns 400 with descriptive error
   - Global static prover — no key rotation without restart
-- **Assessment:** Very small. Most proving logic lives in `shielded` crate. Not production-hardened.
+  - Proof cache with TTL for identical nullifier requests
+  - `/health` endpoint returns proving key status, queue depth, and cache size
+- **Assessment:** Now has auth, rate limiting, and proof caching. Most proving logic still lives in `shielded` crate.
 
 ---
 
@@ -337,14 +336,11 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 
 ### Active TODOs in Production Code
 
-1. **`crates/node/src/governance_advancer.rs:243`**
-   ```rust
-   // TODO: other proposal types need additional data parsing.
-   ```
-   Only EmergencyPause side effects are applied by the advancer. ParameterChange, TreasurySpend, etc. need the same chunked-data reading logic that `GovernanceStorage::execute()` now has.
+None remaining.
 
 ### Resolved in Recent Commits
 
+1. ~~Governance advancer only EmergencyPause~~ — **FIXED**: All 10 proposal types (0–9) now have side effects in both `GovernanceAdvancer` and `GovernanceStorage::execute()`.
 2. ~~Governance `execute()` only implemented EmergencyPause~~ — **FIXED** in commit 566583d
 3. ~~Bridge `verify_fraud_proof()` always returned false~~ — **FIXED** in commit 566583d
 4. ~~Block storage as JSON files~~ — **FIXED**: fully migrated to MDBX `CallConsensusBlocks`/`CallBlockHashIndex` tables
@@ -354,6 +350,9 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 8. ~~Light client no persistent storage~~ — **FIXED**: `CallLightClientHeaders` MDBX table with save/load/delete; `new_with_db` constructor
 9. ~~Network no backpressure~~ — **FIXED**: `try_broadcast` returns `Result` on all `Network` implementations
 10. ~~ZK proving blocks async runtime~~ — **FIXED**: Groth16 proof generation runs in `tokio::task::spawn_blocking`
+11. ~~Prover no auth/rate limiting~~ — **FIXED**: `X-API-Key` header validation + token-bucket rate limiting per key
+12. ~~Prover no proof cache~~ — **FIXED**: `HashMap<Nullifier, (Proof, Instant)>` with configurable TTL
+13. ~~Prover health endpoint minimal~~ — **FIXED**: Returns `proving_key_loaded`, `queue_depth`, `cache_size`
 
 ### Warnings
 
@@ -406,11 +405,9 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 
 ### High Priority
 
-1. **Fix Governance Advancer side effects** — Mirror the `GovernanceStorage::execute()` implementation in `GovernanceAdvancer::apply_side_effects()` for all proposal types.
+1. **Add standalone validator tests** — The validator crate deserves its own test suite independent of consensus integration tests.
 
-2. **Add standalone validator tests** — The validator crate deserves its own test suite independent of consensus integration tests.
-
-3. **Clean up warnings** — Run `cargo fix` for shielded unused imports. Consider documenting the intentional unsafe blocks.
+2. **Clean up warnings** — Run `cargo fix` for shielded unused imports. Consider documenting the intentional unsafe blocks.
 
 ### Medium Priority
 
@@ -433,7 +430,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 Callchain is a well-architected, modular blockchain codebase with strong test coverage and clean separation of concerns. The reth migration is complete and solid. Most protocol features are implemented and tested.
 
 The main gaps are:
-- Governance advancer needs to catch up to precompile-level side effect implementation
 - A few crates (switch, compliance, prover) are thin/minimal
+- Prover has no unit tests (integration-tested via shielded crate)
 
 The codebase is in good shape for continued development. All tests pass, the architecture is sound, and the documentation is comprehensive.

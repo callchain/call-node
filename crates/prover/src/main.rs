@@ -7,13 +7,21 @@
 //! Usage:
 //!   call-prover                       # default port 8550
 //!   call-prover --listen-addr 0.0.0.0:8550
+//!   call-prover --api-keys key1,key2  # require X-API-Key header
 
 mod server;
 
 use server::{ProverMode, ProverState, build_router};
 use call_shielded::prover::RealProver;
 use clap::Parser;
-use std::net::SocketAddr;
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::{
+        Arc, Mutex,
+        atomic::AtomicUsize,
+    },
+};
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -22,6 +30,18 @@ struct CliArgs {
     /// HTTP listen address
     #[arg(long, default_value = "127.0.0.1:8550")]
     listen_addr: SocketAddr,
+
+    /// Comma-separated list of valid API keys. If unset, all requests are allowed.
+    #[arg(long, value_delimiter = ',')]
+    api_keys: Vec<String>,
+
+    /// Max requests per second per API key (token bucket)
+    #[arg(long, default_value = "10.0")]
+    max_qps: f64,
+
+    /// Proof cache TTL in seconds
+    #[arg(long, default_value = "300")]
+    cache_ttl_secs: u64,
 }
 
 #[tokio::main]
@@ -39,7 +59,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize prover — uses production keys if available, falls back to dev setup
     let prover = RealProver::global();
     let mode = ProverMode::Dev; // RealProver::global() handles production fallback internally
-    let state = ProverState { prover, mode };
+
+    let api_keys: HashSet<String> = args.api_keys.into_iter().collect();
+    let auth_enabled = !api_keys.is_empty();
+
+    let state = ProverState {
+        prover,
+        mode,
+        api_keys: Arc::new(api_keys),
+        rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+        max_qps: args.max_qps.max(0.1),
+        proof_cache: Arc::new(Mutex::new(HashMap::new())),
+        cache_ttl_secs: args.cache_ttl_secs,
+        inflight: Arc::new(AtomicUsize::new(0)),
+    };
 
     // Build and start server
     let app = build_router(state);
@@ -47,6 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(
         addr = %args.listen_addr,
         mode = mode.as_str(),
+        auth_enabled = auth_enabled,
+        max_qps = args.max_qps,
         "shielded prover service starting"
     );
 

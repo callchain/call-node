@@ -1,15 +1,17 @@
 //! HTTP prover server — accepts shielded proving requests over JSON/HTTP.
 //!
 //! Endpoints:
-//! - `POST /prove/deposit` — generate a deposit proof
-//! - `POST /prove/transfer` — generate a transfer proof
-//! - `POST /prove/withdraw` — generate a withdraw proof
-//! - `GET /health` — health check
+//! - `POST /prove/deposit` — generate a deposit proof (auth + rate limit)
+//! - `POST /prove/transfer` — generate a transfer proof (auth + rate limit)
+//! - `POST /prove/withdraw` — generate a withdraw proof (auth + rate limit)
+//! - `GET /health` — health check (no auth)
 
 use axum::{
     Json, Router,
-    extract::State,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
 };
 use call_crypto::keccak256;
@@ -22,7 +24,15 @@ use call_shielded::{
     prover::RealProver,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
+use tracing::{info, warn};
 
 // ── Server State ───────────────────────────────────────────────────────────
 
@@ -30,6 +40,12 @@ use tracing::info;
 pub(crate) struct ProverState {
     pub prover: &'static RealProver,
     pub mode: ProverMode,
+    pub api_keys: Arc<HashSet<String>>,
+    pub rate_limiter: Arc<Mutex<HashMap<String, TokenBucket>>>,
+    pub max_qps: f64,
+    pub proof_cache: Arc<Mutex<HashMap<[u8; 32], (Vec<u8>, Instant)>>>,
+    pub cache_ttl_secs: u64,
+    pub inflight: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy)]
@@ -46,6 +62,84 @@ impl ProverMode {
             ProverMode::Dev => "dev",
         }
     }
+}
+
+// ── Token Bucket Rate Limiter ─────────────────────────────────────────────
+
+pub(crate) struct TokenBucket {
+    tokens: f64,
+    last_update: Instant,
+    max_qps: f64,
+}
+
+impl TokenBucket {
+    fn new(max_qps: f64) -> Self {
+        Self {
+            tokens: max_qps * 2.0, // burst capacity = 2x max_qps
+            last_update: Instant::now(),
+            max_qps,
+        }
+    }
+
+    fn try_consume(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_update).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.max_qps).min(self.max_qps * 2.0);
+        self.last_update = now;
+
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// ── Auth + Rate Limit Middleware ──────────────────────────────────────────
+
+async fn auth_and_rate_limit(
+    State(state): State<ProverState>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    // If no API keys configured, allow all (dev mode)
+    if state.api_keys.is_empty() {
+        return Ok(next.run(request).await);
+    }
+
+    let api_key = headers
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let api_key = match api_key {
+        Some(key) => key,
+        None => {
+            warn!("missing X-API-Key header");
+            return Err((StatusCode::UNAUTHORIZED, "missing X-API-Key".into()));
+        }
+    };
+
+    if !state.api_keys.contains(&api_key) {
+        warn!("invalid X-API-Key");
+        return Err((StatusCode::UNAUTHORIZED, "invalid X-API-Key".into()));
+    }
+
+    // Rate limit check
+    {
+        let mut limiter = state.rate_limiter.lock().unwrap();
+        let bucket = limiter
+            .entry(api_key.clone())
+            .or_insert_with(|| TokenBucket::new(state.max_qps));
+        if !bucket.try_consume() {
+            warn!(api_key = %api_key, "rate limit exceeded");
+            return Err((StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded".into()));
+        }
+    }
+
+    Ok(next.run(request).await)
 }
 
 // ── Request/Response Types ─────────────────────────────────────────────────
@@ -140,26 +234,62 @@ pub(crate) struct WithdrawResponse {
 pub(crate) struct HealthResponse {
     pub status: &'static str,
     pub mode: &'static str,
+    pub proving_key_loaded: bool,
+    pub queue_depth: usize,
+    pub cache_size: usize,
 }
 
 // ── Router ─────────────────────────────────────────────────────────────────
 
 pub(crate) fn build_router(state: ProverState) -> Router {
-    Router::new()
-        .route("/health", get(health_check))
+    let protected = Router::new()
         .route("/prove/deposit", post(handle_deposit))
         .route("/prove/transfer", post(handle_transfer))
         .route("/prove/withdraw", post(handle_withdraw))
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth_and_rate_limit));
+
+    Router::new()
+        .route("/health", get(health_check))
+        .merge(protected)
         .with_state(state)
 }
 
 // ── Health ─────────────────────────────────────────────────────────────────
 
 async fn health_check(State(state): State<ProverState>) -> Json<HealthResponse> {
+    let cache_size = state.proof_cache.lock().unwrap().len();
+    let queue_depth = state.inflight.load(Ordering::Relaxed);
     Json(HealthResponse {
         status: "ok",
         mode: state.mode.as_str(),
+        proving_key_loaded: true, // RealProver::global() would have panicked if keys failed to load
+        queue_depth,
+        cache_size,
     })
+}
+
+// ── Proof Cache Helpers ───────────────────────────────────────────────────
+
+fn cache_get(
+    cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>,
+    key: &[u8; 32],
+    ttl_secs: u64,
+) -> Option<Vec<u8>> {
+    let now = Instant::now();
+    if let Some((proof, ts)) = cache.get(key) {
+        if now.duration_since(*ts).as_secs() < ttl_secs {
+            return Some(proof.clone());
+        }
+    }
+    None
+}
+
+fn cache_insert(
+    cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>,
+    key: [u8; 32],
+    proof: Vec<u8>,
+) {
+    cache.insert(key, (proof, Instant::now()));
 }
 
 // ── Deposit ────────────────────────────────────────────────────────────────
@@ -182,6 +312,20 @@ async fn handle_deposit(
     // Compute commitment: poseidon_hash([value, asset_id, rcm, rho])
     let commitment = compute_commitment_poseidon(req.value, req.asset_id, &rcm, &rho);
 
+    // Cache key = nullifier(recipient_ivk, rho)
+    let cache_key = compute_nullifier(&recipient_ivk, &rho);
+    {
+        let mut cache = state.proof_cache.lock().unwrap();
+        if let Some(cached_proof) = cache_get(&mut *cache, &cache_key, state.cache_ttl_secs) {
+            info!("deposit proof cache hit");
+            return Ok(Json(DepositResponse {
+                proof: hex::encode(&cached_proof),
+                commitment: hex::encode(commitment),
+                asset_id: req.asset_id,
+            }));
+        }
+    }
+
     let witness = DepositWitness {
         value: req.value,
         rcm,
@@ -191,10 +335,17 @@ async fn handle_deposit(
 
     let circuit = DepositCircuit::new(commitment, req.asset_id, witness);
 
+    state.inflight.fetch_add(1, Ordering::Relaxed);
     let proof_data = state
         .prover
         .prove_deposit(&circuit)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("prove failed: {e}")))?;
+    state.inflight.fetch_sub(1, Ordering::Relaxed);
+
+    {
+        let mut cache = state.proof_cache.lock().unwrap();
+        cache_insert(&mut *cache, cache_key, proof_data.clone());
+    }
 
     info!(
         asset_id = req.asset_id,
@@ -276,6 +427,32 @@ async fn handle_transfer(
         });
     }
 
+    // Cache key = keccak256 of (nullifiers + commitments + merkle_root)
+    let cache_key = {
+        let mut key_data = Vec::with_capacity(nullifiers.len() * 32 + commitments.len() * 32 + 32);
+        for nf in &nullifiers {
+            key_data.extend_from_slice(nf);
+        }
+        for cm in &commitments {
+            key_data.extend_from_slice(cm);
+        }
+        key_data.extend_from_slice(&merkle_root);
+        keccak256(&key_data).0
+    };
+    {
+        let mut cache = state.proof_cache.lock().unwrap();
+        if let Some(cached_proof) = cache_get(&mut *cache, &cache_key, state.cache_ttl_secs) {
+            info!("transfer proof cache hit");
+            let nf_hex: Vec<String> = nullifiers.iter().map(hex::encode).collect();
+            let cm_hex: Vec<String> = commitments.iter().map(hex::encode).collect();
+            return Ok(Json(TransferResponse {
+                proof: hex::encode(&cached_proof),
+                nullifiers: nf_hex,
+                commitments: cm_hex,
+            }));
+        }
+    }
+
     // Pre-compute hex strings before moving vectors into circuit
     let nf_hex: Vec<String> = nullifiers.iter().map(hex::encode).collect();
     let cm_hex: Vec<String> = commitments.iter().map(hex::encode).collect();
@@ -294,10 +471,17 @@ async fn handle_transfer(
         merkle_paths,
     );
 
+    state.inflight.fetch_add(1, Ordering::Relaxed);
     let proof_data = state
         .prover
         .prove_transfer(&circuit)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("prove failed: {e}")))?;
+    state.inflight.fetch_sub(1, Ordering::Relaxed);
+
+    {
+        let mut cache = state.proof_cache.lock().unwrap();
+        cache_insert(&mut *cache, cache_key, proof_data.clone());
+    }
 
     info!(
         inputs = req.inputs.len(),
@@ -333,6 +517,19 @@ async fn handle_withdraw(
     let nullifier = compute_nullifier(&recipient_ivk, &rho);
     let _commitment = compute_commitment_poseidon(req.value, req.asset_id, &rcm, &rho);
 
+    // Cache key = nullifier
+    let cache_key = nullifier;
+    {
+        let mut cache = state.proof_cache.lock().unwrap();
+        if let Some(cached_proof) = cache_get(&mut *cache, &cache_key, state.cache_ttl_secs) {
+            info!("withdraw proof cache hit");
+            return Ok(Json(WithdrawResponse {
+                proof: hex::encode(&cached_proof),
+                nullifier: hex::encode(nullifier),
+            }));
+        }
+    }
+
     let merkle_path: Vec<([u8; 32], bool)> = req
         .merkle_path
         .iter()
@@ -363,10 +560,17 @@ async fn handle_withdraw(
         witness,
     );
 
+    state.inflight.fetch_add(1, Ordering::Relaxed);
     let proof_data = state
         .prover
         .prove_withdraw(&circuit)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("prove failed: {e}")))?;
+    state.inflight.fetch_sub(1, Ordering::Relaxed);
+
+    {
+        let mut cache = state.proof_cache.lock().unwrap();
+        cache_insert(&mut *cache, cache_key, proof_data.clone());
+    }
 
     info!(
         value = req.value,
