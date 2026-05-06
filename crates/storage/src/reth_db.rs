@@ -219,6 +219,20 @@ impl Table for CallBlockStateSnapshots {
     type Value = Vec<u8>;
 }
 
+/// Light client verified headers: serialized block_height -> serialized BlockHeader
+///
+/// Stores block headers verified by the protocol light client so they
+/// survive node restarts. Loaded on startup and updated after each
+/// successful header verification.
+#[derive(Debug)]
+pub struct CallLightClientHeaders;
+impl Table for CallLightClientHeaders {
+    const NAME: &'static str = "call_light_client_headers";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// All Callchain tables
 pub struct CallTables;
 impl TableSet for CallTables {
@@ -245,6 +259,7 @@ impl TableSet for CallTables {
                 box_info::<CallBlockStateSnapshots>,
                 box_info::<CallAccountTrie>,
                 box_info::<CallStorageTrie>,
+                box_info::<CallLightClientHeaders>,
             ]
             .into_iter()
             .map(|f| f()),
@@ -385,6 +400,39 @@ pub fn load_prune_state(db: &DatabaseEnv) -> Result<crate::prune::PruneState, St
         Some(data) => serde_json::from_slice(&data).map_err(|e| StorageError::Serialization(e.to_string())),
         None => Ok(crate::prune::PruneState::new()),
     }
+}
+
+/// Save a verified light-client header hash to the database.
+pub fn save_light_client_header(db: &DatabaseEnv, height: u64, block_hash: &call_primitives::BlockHash) -> Result<(), StorageError> {
+    let key = height.to_be_bytes().to_vec();
+    db_put::<CallLightClientHeaders>(db, key, block_hash.0.to_vec())
+}
+
+/// Load a verified light-client header hash from the database by height.
+pub fn load_light_client_header(db: &DatabaseEnv, height: u64) -> Result<Option<call_primitives::BlockHash>, StorageError> {
+    let key = height.to_be_bytes().to_vec();
+    match db_get::<CallLightClientHeaders>(db, &key)? {
+        Some(data) if data.len() == 32 => Ok(Some(call_primitives::BlockHash::from_slice(&data))),
+        _ => Ok(None),
+    }
+}
+
+/// Load all verified light-client header hashes from the database.
+pub fn load_all_light_client_headers(db: &DatabaseEnv) -> Result<std::collections::HashMap<u64, call_primitives::BlockHash>, StorageError> {
+    let mut headers = std::collections::HashMap::new();
+    for (key, value) in db_iter_all::<CallLightClientHeaders>(db)? {
+        if key.len() == 8 && value.len() == 32 {
+            let height = u64::from_be_bytes(key.try_into().unwrap());
+            headers.insert(height, call_primitives::BlockHash::from_slice(&value));
+        }
+    }
+    Ok(headers)
+}
+
+/// Delete a light-client header hash from the database (used during reorg handling).
+pub fn delete_light_client_header(db: &DatabaseEnv, height: u64) -> Result<(), StorageError> {
+    let key = height.to_be_bytes().to_vec();
+    db_del::<CallLightClientHeaders>(db, &key)
 }
 
 #[cfg(test)]

@@ -898,10 +898,11 @@ impl CallNode {
                 (ed25519_map, count as u32, bls_map)
             };
 
-            let mut light_client = LightClient::new(
+            let mut light_client = LightClient::new_with_db(
                 state.chain_id,
                 trusted_validators,
                 total_validators,
+                Arc::clone(&state.db_env),
             );
             light_client.set_bls_pubkeys(bls_pubkeys);
 

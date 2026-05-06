@@ -13,6 +13,8 @@ use call_shielded::{
 use call_crypto::{BlsPublicKey, BlsSignature, bls_verify_aggregate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use reth_db::DatabaseEnv;
 
 // ── Serde wrappers for fixed-size byte arrays ────────────────────────
 
@@ -154,6 +156,8 @@ pub struct LightClient {
     pub total_validators: u32,
     /// BLS12-381 public keys for aggregated signature verification
     pub bls_pubkeys: HashMap<ValidatorId, [u8; 48]>,
+    /// Optional MDBX database for persistent header storage.
+    db: Option<Arc<DatabaseEnv>>,
 }
 
 /// Sync checkpoint for fast initial sync
@@ -180,6 +184,38 @@ impl LightClient {
             verified_headers: HashMap::new(),
             total_validators,
             bls_pubkeys: HashMap::new(),
+            db: None,
+        }
+    }
+
+    /// Create a new light client backed by persistent storage.
+    /// Loads any previously verified headers from the database.
+    pub fn new_with_db(
+        chain_id: u64,
+        trusted_validators: HashMap<ValidatorId, Ed25519PublicKey>,
+        total_validators: u32,
+        db: Arc<DatabaseEnv>,
+    ) -> Self {
+        let mut verified_headers = HashMap::new();
+        match call_storage::reth_db::load_all_light_client_headers(&db) {
+            Ok(headers) => {
+                for (height, hash) in headers {
+                    verified_headers.insert(height, hash);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "light_client: failed to load headers from db");
+            }
+        }
+        Self {
+            chain_id,
+            trusted_validators,
+            latest_block_header: None,
+            checkpoint: None,
+            verified_headers,
+            total_validators,
+            bls_pubkeys: HashMap::new(),
+            db: Some(db),
         }
     }
 
@@ -388,17 +424,64 @@ impl LightClient {
         Ok(total)
     }
 
-    /// Incremental sync: verify and append block header
+    /// Incremental sync: verify and append block header.
+    ///
+    /// On a parent-hash mismatch a reorg is triggered: all headers at or above
+    /// the conflicting height are removed (both in-memory and from persistent
+    /// storage) and verification is retried once.
     pub fn sync_incremental(
         &mut self,
         header: &BlockHeader,
         signatures: &BlockSignatures,
     ) -> Result<(), LightClientError> {
-        self.verify_header(header, signatures)?;
+        match self.verify_header(header, signatures) {
+            Ok(()) => {}
+            Err(LightClientError::ParentHashMismatch { .. }) => {
+                tracing::info!(
+                    height = header.height,
+                    "light_client: reorg detected, rewinding headers"
+                );
+                self.handle_reorg(header.height.saturating_sub(1));
+                self.verify_header(header, signatures)?;
+            }
+            Err(e) => return Err(e),
+        }
         self.verified_headers
             .insert(header.height, header.hash());
         self.latest_block_header = Some(header.clone());
+
+        // Persist to database if available.
+        if let Some(ref db) = self.db {
+            if let Err(e) = call_storage::reth_db::save_light_client_header(
+                db, header.height, &header.hash(),
+            ) {
+                tracing::warn!(error = %e, height = header.height, "light_client: failed to persist header");
+            }
+        }
         Ok(())
+    }
+
+    /// Remove all verified headers at or above `from_height` (inclusive).
+    ///
+    /// Called when a reorg is detected so the light client can re-sync from
+    /// the last common ancestor.
+    pub fn handle_reorg(&mut self, from_height: u64) {
+        let to_remove: Vec<u64> = self.verified_headers
+            .keys()
+            .filter(|&&h| h >= from_height)
+            .copied()
+            .collect();
+        for height in to_remove {
+            self.verified_headers.remove(&height);
+            if let Some(ref db) = self.db {
+                if let Err(e) = call_storage::reth_db::delete_light_client_header(db, height) {
+                    tracing::warn!(error = %e, height, "light_client: failed to delete header from db");
+                }
+            }
+        }
+        // We only persist hashes, so we cannot reconstruct the full header.
+        // Reset to None; the next successful sync will restore it.
+        self.latest_block_header = None;
     }
 
     /// Get number of verified headers
