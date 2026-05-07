@@ -2,9 +2,9 @@
 
 **Date:** 2026-05-06
 **Branch:** main
-**Commits ahead of origin:** 6
+**Commits ahead of origin:** 0
 **Total Rust LOC:** ~53,000
-**Total unit tests:** 556 test functions
+**Total unit tests:** 610 test functions
 **Workspace test status:** ALL PASSING
 
 ---
@@ -157,7 +157,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Status:** Mature
 - **Purpose:** P2P networking via commonware-p2p
 - **Issues:**
-  - Peer exchange (PEX) accepts addresses from any peer without verification
+  - ~~Peer exchange (PEX) accepts addresses from any peer without verification~~ — **FIXED**: PEX messages now validate peer IDs and addresses before processing, rejecting malformed or injected entries
 - **Assessment:** Well-tested. Handles peer discovery, block/tx gossip.
 
 ### 3.4 Domain Precompiles
@@ -254,7 +254,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - EthLightClient lacks BLS consensus verification (sync committee) — **DEFERRED**: Requires Ethereum consensus layer integration; parent-hash chain + finalized checkpoint is sufficient for devnet/testnet bridge
 - **Assessment:** Protocol light client is production-ready (independent service, persistent storage, BLS aggregate verification, validator set refresh at epoch boundaries). EthLightClient header chain, MPT proofs, and bridge event parsing are tested and functional.
 
-#### `crates/prover` (543 LOC, 0 tests)
+#### `crates/prover` (543 LOC, 9 tests)
 - **Status:** Minimal
 - **Purpose:** HTTP service for generating Groth16 proofs for shielded transactions
 - **Issues:**
@@ -332,8 +332,8 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 | 0x202 | shielded | Shielded | Complete |
 | 0x203 | governance | Governance | Mostly Complete |
 | 0x204 | validator | Validator | Complete |
-| 0x205 | compliance | Compliance | Minimal |
-| 0x207 | switch | Switch | Minimal |
+| 0x205 | compliance | Compliance | Functional |
+| 0x207 | switch | Switch | Functional |
 | 0x209 | agent | Agent | Minimal |
 
 ---
@@ -360,7 +360,7 @@ None remaining.
 12. ~~Prover no proof cache~~ — **FIXED**: `HashMap<Nullifier, (Proof, Instant)>` with configurable TTL
 13. ~~Prover health endpoint minimal~~ — **FIXED**: Returns `proving_key_loaded`, `queue_depth`, `cache_size`
 14. ~~EvmDb `code_by_hash_ref` stub~~ — **FIXED**: `CallBytecodes` MDBX table with save/load via `apply_revm_state_to_mdbx` and `InMemoryStateProvider::save_to_db`
-15. ~~Compliance/agent/prover minimal tests~~ — **FIXED**: 7+ compliance lib tests, 15+ agent lib tests, 9 prover server tests
+15. ~~Compliance/agent/prover minimal tests~~ — **FIXED**: 9 compliance lib tests, 15+ agent lib tests, 9 prover server tests
 16. ~~Validator no standalone tests~~ — **FIXED**: 20 lib-layer tests for stake/unstake/claim/slash edge cases
 17. ~~Switch no lib tests~~ — **FIXED**: 20 tests covering native CALL/ERC-20 paths, overflow/underflow, inactive asset, zero amount
 
@@ -376,13 +376,11 @@ None remaining.
 
 7. ~~**Validator crate has no standalone tests**~~ — **FIXED**: 14 lib-layer tests covering stake, unstake, claim, slash, and read operations
 
-8. ~~**Switch and Compliance crates have minimal tests**~~ — **FIXED**: Switch has 12 tests (7 precompile + 5 lib); Compliance has 9 tests (2 precompile + 7 lib)
+8. ~~**Switch and Compliance crates have minimal tests**~~ — **FIXED**: Switch has 20 tests (8 precompile + 12 lib); Compliance has 11 tests (2 precompile + 9 lib)
 
 9. ~~**Prover crate has no unit tests**~~ — **FIXED**: 9 tests for TokenBucket, proof cache, and hex decode helpers
 
-10. **Light client is not production-ready**
-    - Has data structures and basic validation
-    - No active sync or header verification loop
+10. ~~**Light client is not production-ready**~~ — **FIXED**: Protocol `LightClientService` is an independent tokio task with active header gossip, persistent MDBX storage, BLS aggregate verification, and validator set refresh at epoch boundaries.
 
 ---
 
@@ -416,9 +414,9 @@ None remaining.
 
 ### Low Priority
 
-7. **Merge or expand prover crate** — Consider consolidating with shielded or adding standalone proof utilities.
+5. **Merge or expand prover crate** — Consider consolidating with shielded or adding standalone proof utilities.
 
-8. **Add more E2E tests** — Governance vote/queue/execute flow, oracle price submission, shielded transfers.
+6. **Add more E2E tests** — Governance vote/queue/execute flow, oracle price submission, shielded transfers.
 
 ---
 
