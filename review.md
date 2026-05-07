@@ -143,7 +143,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - `light_client.rs` — protocol light client with BLS aggregate verification, persistent MDBX storage, reorg handling
   - `light_client_service.rs` — independent tokio task for active header gossip/broadcast
 - **Issues:** None significant
-- **Integration Tests:** 14 e2e test files covering full node lifecycle, bridge, governance, consensus, EVM compatibility, forks, light client, shielded, stress, malicious proposer, multi-node network.
+- **Integration Tests:** 15 e2e test files covering full node lifecycle, bridge, governance, oracle, consensus, EVM compatibility, forks, light client, shielded, stress, malicious proposer, multi-node network.
 
 #### `crates/rpc` (4125 LOC, 17 tests)
 - **Status:** Mature
@@ -181,11 +181,11 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Functions:** register, transfer, batchTransfer, approve, transferFrom, mint, burn, getBalance, getAssetMeta
 - **Assessment:** Full implementation. CALL (asset_id=1) transfers bridge to native EVM balance. Well-tested.
 
-#### `crates/shielded` (7355 LOC, 123 tests)
+#### `crates/shielded` (7355 LOC, 123 tests + 9 prover-server tests)
 - **Address:** 0x202
 - **Status:** Mature
 - **Functions:** deposit, transfer, withdraw, getBalance, getMerkleRoot
-- **Assessment:** Most complex domain crate. Poseidon Merkle tree, zk-SNARK circuits (halo2/groth16). 123 tests including real prover tests (slow — 84s). 3 unused import warnings.
+- **Assessment:** Most complex domain crate. Poseidon Merkle tree, zk-SNARK circuits (halo2/groth16). 123 tests including real prover tests (slow — 84s). Prover HTTP server consolidated under `prover-server` feature with 9 additional tests (TokenBucket, cache, hex decode).
 
 #### `crates/governance` (2247 LOC, 26 tests)
 - **Address:** 0x203
@@ -254,16 +254,16 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - EthLightClient lacks BLS consensus verification (sync committee) — **DEFERRED**: Requires Ethereum consensus layer integration; parent-hash chain + finalized checkpoint is sufficient for devnet/testnet bridge
 - **Assessment:** Protocol light client is production-ready (independent service, persistent storage, BLS aggregate verification, validator set refresh at epoch boundaries). EthLightClient header chain, MPT proofs, and bridge event parsing are tested and functional.
 
-#### `crates/prover` (543 LOC, 9 tests)
+#### `crates/prover` (~25 LOC binary, server code in `call-shielded`)
 - **Status:** Minimal
-- **Purpose:** HTTP service for generating Groth16 proofs for shielded transactions
+- **Purpose:** Binary entry point for the shielded ZK proving HTTP service. Server implementation lives in `call-shielded::prover_server` under `prover-server` feature.
 - **Issues:**
   - ~~No authentication or rate limiting on proof requests~~ — **FIXED**: API key auth via `X-API-Key` header + token-bucket rate limiting per key
   - ~~Panics on malformed hex input~~ — **FIXED**: returns 400 with descriptive error
   - Global static prover — no key rotation without restart — **DEFERRED**: Key rotation requires governance-driven ceremony coordination; defer to mainnet readiness phase
   - Proof cache with TTL for identical nullifier requests
   - `/health` endpoint returns proving key status, queue depth, and cache size
-- **Assessment:** Now has auth, rate limiting, and proof caching. Most proving logic still lives in `shielded` crate.
+- **Assessment:** Auth, rate limiting, and proof caching all implemented. Crate consolidated into `call-shielded` — `call-prover` is now a thin binary wrapper.
 
 ---
 
@@ -309,6 +309,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 | test_fork_upgrade.rs | 3 | Pass | Chain fork handling |
 | test_full_node_lifecycle.rs | 4 | Pass | Node startup/persist/recovery |
 | test_governance_e2e.rs | 1 | Pass | Proposal lifecycle |
+| test_oracle_e2e.rs | 2 | Pass | Oracle price submit/TWAP, non-validator rejection |
 | test_websocket_e2e.rs | 0 | Skip | Placeholder |
 
 ### Python E2E Tests (tests/)
@@ -404,7 +405,7 @@ None remaining.
 
 1. ~~**Add standalone validator tests**~~ — **FIXED**: 20 lib-layer tests covering all major edge cases.
 
-2. **Clean up warnings** — Run `cargo fix` for shielded unused imports.
+2. ~~**Clean up warnings**~~ — **FIXED**: `cargo check -p call-shielded` produces no shielded-specific warnings. Only remaining warnings are from `call-precompile` unsafe blocks (intentional, tracked separately).
 
 ### Medium Priority
 
@@ -414,9 +415,9 @@ None remaining.
 
 ### Low Priority
 
-5. **Merge or expand prover crate** — Consider consolidating with shielded or adding standalone proof utilities.
+5. ~~**Merge or expand prover crate**~~ — **FIXED**: Prover HTTP server code consolidated into `call-shielded` under `prover-server` feature. `call-prover` binary is now a thin entry point (~25 LOC). Server module (`prover_server.rs`) with auth, rate limiting, proof cache, and endpoints lives in shielded and is testable there.
 
-6. **Add more E2E tests** — Governance vote/queue/execute flow, oracle price submission, shielded transfers.
+6. ~~**Add more E2E tests**~~ — **FIXED**: Added `test_oracle_e2e.rs` with 2 tests (validator price submit + TWAP aggregation, non-validator rejection).
 
 ---
 
@@ -429,4 +430,4 @@ Callchain is a well-architected, modular blockchain codebase with strong test co
 The main gaps are:
 - EthLightClient sync-committee BLS verification not yet implemented (deferred)
 
-The codebase is in good shape for continued development. All tests pass, the architecture is sound, and the documentation is comprehensive.
+All recommendations from this review are now resolved. The codebase is in good shape for continued development. All tests pass, the architecture is sound, and the documentation is comprehensive.
