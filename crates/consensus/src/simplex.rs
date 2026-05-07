@@ -498,7 +498,7 @@ mod tests {
     use super::*;
     use crate::exec::state_accessors::seed_validator;
     use call_evm::provider::InMemoryStateProvider;
-    use call_primitives::{Address, Ed25519PublicKey};
+    use call_primitives::{Address, Ed25519PublicKey, ProtocolVersion};
 
     fn test_addr(n: u8) -> Address {
         Address::repeat_byte(n)
@@ -742,6 +742,236 @@ mod tests {
         assert_eq!(
             exited, churn_limit,
             "epoch churn should respect churn limit"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Byzantine consensus tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_validate_block_wrong_height_rejected() {
+        let (consensus, _evm) = make_test_consensus(10);
+        let fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 10);
+
+        let block = Block::new(
+            99, // wrong height
+            BlockHash::ZERO,
+            1_000_000,
+            consensus.current_proposer().unwrap(),
+            ProtocolVersion::new(1, 0, 0),
+            vec![],
+        );
+
+        let result = consensus.validate_block(&block, BlockHash::ZERO, &fm);
+        assert!(
+            result.is_err(),
+            "block with wrong height should be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("height"), "error should mention height: {}", err);
+    }
+
+    #[test]
+    fn test_validate_block_wrong_parent_hash_rejected() {
+        let (consensus, _evm) = make_test_consensus(10);
+        let fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 10);
+
+        let block = Block::new(
+            consensus.current_height(),
+            BlockHash::from([0xABu8; 32]), // wrong parent
+            1_000_000,
+            consensus.current_proposer().unwrap(),
+            ProtocolVersion::new(1, 0, 0),
+            vec![],
+        );
+
+        let result = consensus.validate_block(&block, BlockHash::ZERO, &fm);
+        assert!(
+            result.is_err(),
+            "block with wrong parent hash should be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("parent hash"),
+            "error should mention parent hash: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_block_zero_proposer_rejected() {
+        let (consensus, _evm) = make_test_consensus(10);
+        let fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 10);
+
+        let block = Block::new(
+            consensus.current_height(),
+            BlockHash::ZERO,
+            1_000_000,
+            0, // zero proposer
+            ProtocolVersion::new(1, 0, 0),
+            vec![],
+        );
+
+        let result = consensus.validate_block(&block, BlockHash::ZERO, &fm);
+        assert!(
+            result.is_err(),
+            "block with zero proposer should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_block_zero_timestamp_rejected() {
+        let (consensus, _evm) = make_test_consensus(10);
+        let fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 10);
+
+        let block = Block::new(
+            consensus.current_height(),
+            BlockHash::ZERO,
+            0, // zero timestamp
+            consensus.current_proposer().unwrap(),
+            ProtocolVersion::new(1, 0, 0),
+            vec![],
+        );
+
+        let result = consensus.validate_block(&block, BlockHash::ZERO, &fm);
+        assert!(
+            result.is_err(),
+            "block with zero timestamp should be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("timestamp"),
+            "error should mention timestamp: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_block_wrong_version_rejected() {
+        let (consensus, _evm) = make_test_consensus(10);
+        let fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 10);
+
+        let block = Block::new(
+            consensus.current_height(),
+            BlockHash::ZERO,
+            1_000_000,
+            consensus.current_proposer().unwrap(),
+            ProtocolVersion::new(2, 0, 0), // wrong version
+            vec![],
+        );
+
+        let result = consensus.validate_block(&block, BlockHash::ZERO, &fm);
+        assert!(
+            result.is_err(),
+            "block with wrong version should be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("version"),
+            "error should mention version: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_commit_block_wrong_height_rejected() {
+        let (mut consensus, _evm) = make_test_consensus(10);
+
+        let block = Block::new(
+            99, // wrong height
+            BlockHash::ZERO,
+            1_000_000,
+            consensus.current_proposer().unwrap(),
+            ProtocolVersion::new(1, 0, 0),
+            vec![],
+        );
+
+        let result = BlockExecutionResult {
+            state_root: call_primitives::Hash::ZERO,
+            evm_tx_count: 0,
+            total_validator_reward: 0,
+            evm_gas_used: 0,
+            evm_tx_results: vec![],
+        };
+
+        let commit_result = consensus.commit_block(&block, &result);
+        assert!(
+            commit_result.is_err(),
+            "commit_block with wrong height should fail"
+        );
+    }
+
+    #[test]
+    fn test_handle_double_sign_nonexistent_validator_fails() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+
+        let result = consensus.handle_double_sign(&mut evm, 9999);
+        assert!(
+            result.is_err(),
+            "double-sign for non-existent validator should fail"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("not found"),
+            "error should say validator not found"
+        );
+    }
+
+    #[test]
+    fn test_handle_offline_nonexistent_validator_fails() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+
+        let result = consensus.handle_offline(&mut evm, 9999, 5);
+        assert!(
+            result.is_err(),
+            "offline penalty for non-existent validator should fail"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("not found"),
+            "error should say validator not found"
+        );
+    }
+
+    #[test]
+    fn test_cumulative_double_sign_slash() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+
+        let val1 = 1;
+        let val2 = 2;
+
+        let slashed1 = consensus.handle_double_sign(&mut evm, val1).unwrap();
+        let slashed2 = consensus.handle_double_sign(&mut evm, val2).unwrap();
+
+        assert_eq!(slashed1, one_million_call());
+        assert_eq!(slashed2, one_million_call());
+
+        let active = consensus.active_validators(&evm);
+        assert!(!active.contains(&val1));
+        assert!(!active.contains(&val2));
+
+        // Remaining validators should still be active
+        assert_eq!(active.len(), 8);
+    }
+
+    #[test]
+    fn test_proposer_subset_changes_after_validator_removal() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+
+        let subset_before = consensus.proposer_subset().to_vec();
+        assert!(!subset_before.is_empty());
+
+        // Remove validator 1 via double-sign slash
+        consensus.handle_double_sign(&mut evm, 1).unwrap();
+
+        // Refresh proposer subset
+        consensus.refresh_proposer_subset(&evm);
+
+        let subset_after = consensus.proposer_subset().to_vec();
+
+        // Validator 1 should no longer be in the subset
+        assert!(
+            !subset_after.contains(&1),
+            "slashed validator should not appear in proposer subset"
         );
     }
 }
