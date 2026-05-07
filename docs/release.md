@@ -431,7 +431,7 @@ If a release causes consensus halts, state corruption, or critical bugs:
 export CALL_COMPLIANCE_DATA_URL="https://api.example.com/compliance/sanctioned"
 ```
 
-The node will fetch this URL every 5 minutes and update the `ComplianceEngine` blacklist.
+The node will fetch this URL every 5 minutes and update the compliance blacklist in EVM storage under the compliance precompile (`0x205`).
 
 **Expected response format**:
 ```json

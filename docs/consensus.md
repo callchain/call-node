@@ -149,7 +149,7 @@ For **Validator** mode:
 
 For **Full / Archive** mode:
 - Steps 1-6 as above
-- Step 7 runs the old `block_production_loop()` (single-node, no BFT)
+- Step 7 starts the BFT engine for block verification and sync (does not produce blocks unless the node is in the VRF-selected validator subset)
 
 ---
 

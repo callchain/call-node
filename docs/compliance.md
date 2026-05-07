@@ -13,7 +13,7 @@ Provide a layered, asset-specific compliance framework that:
 2. Checks **both sender and recipient** on every value-moving precompile call.
 3. Supports **issuer-managed address compliance** — asset issuers can flag individual addresses as Restricted, UnderReview, etc.
 4. Allows **runtime custom policy handlers** for integrations (e.g. on-chain KYC oracle, geographic restriction).
-5. Survives node restarts via **database persistence** of all compliance state.
+5. All compliance state lives in EVM storage and is committed atomically with the EVM state root.
 
 ---
 
@@ -23,7 +23,7 @@ Provide a layered, asset-specific compliance framework that:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     Compliance Check Flow                            │
 │                                                                     │
-│  AssetRegistry        ComplianceEngine         PrecompileExec      │
+│  AssetRegistry        Compliance state (EVM)       PrecompileExec  │
 │  ┌────────────┐       ┌──────────────┐        ┌────────────────┐   │
 │  │ asset_id   │──────▶│ policy_id    │        │ Transfer       │   │
 │  │ compliance │       │ (0–4)        │        │ BatchTransfer  │   │
@@ -33,7 +33,7 @@ Provide a layered, asset-specific compliance framework that:
 │  IssuerState          │  whitelisted │        └────────────────┘   │
 │  ┌────────────┐       │  address_    │               │              │
 │  │ frozen     │       │  states      │               ▼              │
-│  │ (separate) │       └──────────────┘    check_compliance_by_      │
+│  │ (EVM)      │       └──────────────┘    check_compliance_by_      │
 │  └────────────┘                           policy_id(sender + to)    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -46,9 +46,9 @@ Each `Asset` in `AssetRegistry` stores a `compliance_policy: u8`:
 | policy_id | Policy | Check |
 |---|---|---|
 | 0 | `None` | Always pass |
-| 1 | `OfacBlacklist` | Address NOT in `ComplianceEngine.sanctioned` |
-| 2 | `KycRequired` | Address IS in `ComplianceEngine.kyc_verified` |
-| 3 | `Whitelist` | Address IS in `ComplianceEngine.whitelisted` |
+| 1 | `OfacBlacklist` | Address NOT in sanctioned set (EVM storage) |
+| 2 | `KycRequired` | Address IS in kyc_verified set (EVM storage) |
+| 3 | `Whitelist` | Address IS in whitelisted set (EVM storage) |
 | 4 | `Custom` | All registered `CustomComplianceHandler`s return `true` |
 
 Policy is set at asset registration (`register_asset`) and can be updated by the issuer via `IssuerAction::UpdatePolicy`.
@@ -72,28 +72,18 @@ The **Compliance precompile at `0x205`** provides the same functionality via sta
 
 | Operation | Precompile Function | Gas |
 |---|---|---|
-| `UpdateCompliance` | `updateCompliance(uint64,address,uint8)` | 10,000 |
-| — | `checkCompliance(uint64,address)` (read-only) | 1,000 |
+| `UpdateCompliance` | `updateCompliance(uint64,address,uint8)` | base + storage |
+| — | `checkCompliance(uint64,address)` (read-only) | base + storage |
+
+Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`.
 
 See [precompile.md](precompile.md) for the full ABI.
 
-### Compliance Engine State
+### Compliance State in EVM Storage
 
-`ComplianceEngine` (`crates/protocol/src/compliance.rs`):
+All compliance state — sanctioned sets, KYC verified sets, whitelisted sets, and per-address compliance statuses — lives in EVM storage slots under the Compliance precompile address (`0x205`). There is no in-memory `ComplianceEngine` struct with `HashSet`s, no `ComplianceEngineSnapshot`, and no separate `CallComplianceState` database table.
 
-```rust
-pub struct ComplianceEngine {
-    sanctioned: HashSet<Address>,      // OFAC-style blacklist
-    kyc_verified: HashSet<Address>,    // KYC registry
-    whitelisted: HashSet<Address>,     // Whitelist registry
-    custom_handlers: HashMap<u8, Box<dyn CustomComplianceHandler + Send + Sync>>,
-    address_states: HashMap<(Address, u8), AddressComplianceState>,
-}
-```
-
-**Persistence**: `ComplianceEngineSnapshot` (derived `Serialize`/`Deserialize`) captures all sets and address states. Custom handlers are runtime-only `Box<dyn>` trait objects and are intentionally excluded — they must be re-registered at node boot. The snapshot is stored as a JSON blob under key `[0]` in the `CallComplianceState` MDBX table.
-
-**Atomic rollback**: `ComplianceEngine` implements `Clone`. During precompile execution, the engine is cloned before execution; if any precompile call fails, the clone replaces the live instance, rolling back all compliance-side mutations.
+State is read and written via `StorageRef` during precompile execution and is committed atomically with the EVM state root. Revm's Journal handles automatic rollback on transaction failure; there is no manual clone/snapshot mechanism.
 
 ### Precompile-Level Enforcement
 
@@ -130,18 +120,12 @@ There is no direct RPC mutation endpoint for compliance state. All changes flow 
 | Component | Status | Details |
 |---|---|---|
 | **Policy types** | Ready | All 5 policies (None, OfacBlacklist, KycRequired, Whitelist, Custom) implemented and tested |
-| **Sender + recipient checks** | Ready | `Transfer`, `BatchTransfer`, `TransferFrom` check both sender and recipient compliance (Gap 6 fixed) |
+| **Sender + recipient checks** | Ready | `Transfer`, `BatchTransfer`, `TransferFrom` check both sender and recipient compliance |
 | **Per-address status** | Ready | `Clear`/`UnderReview`/`Flagged`/`Restricted` statuses; `Restricted` blocks unconditionally |
-| **Custom handlers** | Ready | `CustomComplianceHandler` trait; all registered handlers must approve (Gap 8 fixed) |
+| **Custom handlers** | Ready | `CustomComplianceHandler` trait; all registered handlers must approve |
 | **Issuer authorization** | Ready | `UpdateCompliance` and `UpdatePolicy` require `asset.issuer == sender` |
-| **Atomic rollback** | Ready | `ComplianceEngine` cloned for snapshot-based rollback alongside `BalanceState` and `ShieldedState` (Gap 1 fixed) |
-| **State persistence** | Ready | `ComplianceEngineSnapshot` + `CallComplianceState` MDBX table; load/save wired in `CallNode::new()` and `persist_state_to_db()` (Gap 7 fixed) |
-
-### Persistence Details
-
-- **Save**: `save_compliance_state()` calls `engine.snapshot()`, serializes to JSON, writes to `CallComplianceState` table key `[0]`
-- **Load**: `load_compliance_state()` reads the blob, deserializes to `ComplianceEngineSnapshot`, then calls `engine.restore_from_snapshot()`
-- **Custom handlers**: NOT persisted. Nodes must re-register handlers at boot time (e.g. via `node_init` hooks or config)
+| **Atomic rollback** | Ready | Revm Journal handles automatic rollback on transaction failure |
+| **State persistence** | Ready | All state in EVM storage under `0x205`, committed with EVM state root |
 
 ---
 
@@ -149,9 +133,9 @@ There is no direct RPC mutation endpoint for compliance state. All changes flow 
 
 ### Known Limitations
 
-#### Custom Handler Re-registration
+#### Custom Handler Registration
 
-**Problem**: `Box<dyn CustomComplianceHandler>` cannot be serialized. After a node restart, all custom handlers are lost even though the rest of compliance state is restored.
+**Problem**: `Box<dyn CustomComplianceHandler>` cannot be serialized. After a node restart, custom handlers must be re-registered.
 
 **Impact**: Assets using `CompliancePolicy::Custom` will silently pass all checks until handlers are re-registered.
 
@@ -167,11 +151,11 @@ There is no direct RPC mutation endpoint for compliance state. All changes flow 
 
 #### Frozen Addresses (IssuerState) Are Separate
 
-**Problem**: `IssuerState.frozen` (per-asset address freezing) and `ComplianceEngine` (global policy enforcement) are separate systems. An address can be frozen for asset A but still pass compliance for asset B.
+**Problem**: `IssuerState.frozen` (per-asset address freezing) and compliance policy enforcement are separate systems in EVM storage. An address can be frozen for asset A but still pass compliance for asset B.
 
 **Impact**: Operators must manage two independent restriction mechanisms.
 
-**Status**: By design — `IssuerState` freezing is asset-specific issuer discretion; `ComplianceEngine` is policy-driven. They serve different use cases.
+**Status**: By design — `IssuerState` freezing is asset-specific issuer discretion; compliance policy enforcement is policy-driven. They serve different use cases. Both live in EVM storage.
 
 ---
 
@@ -187,4 +171,4 @@ There is no direct RPC mutation endpoint for compliance state. All changes flow 
 
 ---
 
-*Last updated: 2026-04-20*
+*Last updated: 2026-05-07*

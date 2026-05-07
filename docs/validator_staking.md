@@ -1,5 +1,7 @@
 # Validator Staking & Unbonding Parameters
 
+> **Design Proposal** — This document describes intended parameters and mechanisms that are not yet fully implemented. Tier 2/3 parameters, churn limits, safety floors, dynamic unbonding, and two-phase exit are planned but not present in the current codebase.
+>
 > This document defines the quantitative parameters for validator stake/unstake churn control, unbonding period, and validator-set stability in Callchain.
 >
 > Last updated: 2026-04-27
@@ -163,10 +165,10 @@ These parameters are defined in this document but do not yet exist in code. They
                                │ serialize / deserialize
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  RocksDB (persistent)                                               │
+│  MDBX (persistent)                                                  │
 │  ────────────────────                                               │
-│  Table: call_consensus_state                                        │
-│  Table: call_validator_state  ← extend schema                      │
+│  Table: CallConsensusState                                          │
+│  Table: CallEvmStorage (validator data under precompile 0x204)      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -363,7 +365,7 @@ The validator state is already saved and loaded here:
 
 ```rust
 // Save (existing pattern)
-db_put::<CallValidatorState>(db, b"consensus", &serialized)?;
+db_put::<CallConsensusState>(db, b"consensus", &serialized)?;
 
 // Load (existing pattern)
 Ok(SimplexConsensus::restore_from_persisted(state, validators.clone()))
@@ -426,7 +428,7 @@ When a `UpdateConsensusParam` proposal passes timelock:
 2. It acquires a write lock on the shared `ConsensusParams` (or sends a message to `bft_loop`).
 3. The new value is written to both:
    - **In-memory** `ConsensusParams` (effective immediately for new blocks)
-   - **RocksDB** under a well-known key (e.g. `call_governance_params`) so it survives restart
+   - **MDBX** under a well-known key (e.g. `call_governance_params`) so it survives restart
 4. `bft_loop.rs` or `block_producer.rs` reads the updated params on the next block.
 
 ### 6.3 Governance Thresholds

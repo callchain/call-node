@@ -29,7 +29,7 @@ All state-mutating operations are submitted via standard `eth_sendRawTransaction
 
 | Endpoint | Type | Description |
 |----------|------|-------------|
-| `eth_getBalance` | Read-only | Reads EVM balance from `EvmState` |
+| `eth_getBalance` | Read-only | Reads EVM balance from EVM storage (`CallEvmAccounts`) |
 | `eth_call` | Read-only | Executes read-only EVM call, returns output |
 | `eth_sendRawTransaction` | Transaction | Decodes RLP tx, validates nonce/balance, submits to mempool |
 | `eth_getTransactionReceipt` | Read-only | Returns protocol receipt by tx hash |
@@ -55,7 +55,7 @@ All state-mutating operations are submitted via standard `eth_sendRawTransaction
 | `call_protocolBalance` | Returns protocol-layer balance for an address and asset |
 | `call_getNonce` | Returns the next nonce for an address |
 | `call_compliancePolicy` | Returns compliance policy for an asset |
-| `call_totalBalance` | Returns total protocol-layer balance sum for an asset (equivalent to `protocol_supply`) |
+| `call_totalBalance` | **Legacy** — returns outdated `Asset.total_supply` field; use `call_assetInfo` instead |
 | `call_agentInfo` | Returns agent metadata by `agent_id` |
 | `call_agentBalance` | Returns total balance held by an agent |
 | `call_agentHistory` | Returns receipt history filtered by agent owner |
@@ -118,20 +118,22 @@ Response:
 
 #### Supported Precompile Operations
 
-| Operation | Precompile | Function Selector | Gas |
-|-----------|------------|-------------------|-----|
+All precompiles use **dynamic gas metering**: `gas_used = base_gas + sloads * 50 + sstores * 500`.
+
+| Operation | Precompile | Function Selector | Base Gas |
+|-----------|------------|-------------------|----------|
 | `transfer` | `0x201` | `transfer(uint64,address,uint128)` | 5,000 |
-| `batchTransfer` | `0x201` | `batchTransfer(uint64,address[],uint128[])` | 5,000 per recipient |
+| `batchTransfer` | `0x201` | `batchTransfer(uint64,address[],uint128[])` | 5,000 |
 | `register` | `0x201` | `register(string,string,uint8,uint128)` | 50,000 |
 | `mint` | `0x201` | `mint(uint64,address,uint128)` | 6,000 |
 | `burn` | `0x201` | `burn(uint64,address,uint128)` | 5,000 |
 | `registerAgent` | `0x209` | `registerAgent(bytes32,string,string)` | 6,000 |
 | `grant` | `0x209` | `grant(uint64,uint64,uint128)` | 6,000 |
 | `revoke` | `0x209` | `revoke(uint64,uint64)` | 6,000 |
-| `submitProposal` | `0x203` | `submitProposal(uint8,string,string,bytes)` | 20,000 |
+| `submitProposal` | `0x203` | `submitProposal(uint8,string,string,bytes)` | 10,000 |
 | `vote` | `0x203` | `vote(uint64,uint8)` | 10,000 |
-| `queue` | `0x203` | `queue(uint64)` | 10,000 |
-| `execute` | `0x203` | `execute(uint64)` | 20,000 |
+| `queue` | `0x203` | `queue(uint64)` | 15,000 |
+| `execute` | `0x203` | `execute(uint64)` | 30,000 |
 | `emergencyPause` | `0x203` | `emergencyPause(string)` | 20,000 |
 | `emergencyResume` | `0x203` | `emergencyResume()` | 20,000 |
 | `externalBridgeDeposit` | `0x103` | `externalBridgeDeposit(bytes32,uint64,...)` | 10,000 |
@@ -141,8 +143,10 @@ Response:
 | `issuerMint` | `0x201` | `issuerMint(uint64,address,uint128)` | 6,000 |
 | `stake` | `0x204` | `stake(bytes,uint128)` | 20,000 |
 | `unstake` | `0x204` | `unstake(uint64)` | 20,000 |
-| `claimUnbonded` | `0x204` | `claimUnbonded(uint64)` | 20,000 |
+| `claimUnbonded` | `0x204` | `claimUnbonded(uint64)` | 15,000 |
 | `submitRollbackSignature` | `0x203` | `submitRollbackSignature(uint64,uint64,...)` | 10,000 |
+
+> **Note**: Dynamic storage gas is added automatically by `EvmStorageProvider` per Cancun rules (warm/cold sload, sstore refunds). The base gas covers decoding and business logic overhead.
 
 See [precompile.md](precompile.md) for the full ABI reference including exact selector bytes and argument encoding.
 

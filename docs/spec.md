@@ -142,8 +142,6 @@ reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 struct Block {
     header: BlockHeader,
     evm_txs: Vec<EvmTx>,                     // EVM transactions (raw RLP bytes; may call precompiles)
-    system_txs: Vec<SystemTx>,               // system transactions
-    bridge_operations: Vec<BridgeOp>,         // bridge operations
 }
 
 struct BlockHeader {
@@ -166,14 +164,9 @@ Each block is processed in the following order:
 ```
 1. Execute EVM transactions (evm_txs)
    - Standard EVM calls, including precompile invocations at 0x101–0x209
-2. Execute bridge operations (bridge_operations)
-   - Process EVM → Protocol withdrawal requests
-   - Process Protocol → EVM deposit requests
-3. Execute system transactions (system_txs)
-   - Validator reward distribution
-   - Fee settlement
-   - Compliance policy updates
-4. Compute final state root, pack block header
+   - Validator rewards, fee settlement, and bridge operations are all applied
+     through EVM transactions that call the appropriate precompiles
+2. Compute final state root, pack block header
 ```
 
 ---
@@ -293,26 +286,25 @@ All protocol operations are invoked via standard EVM transactions calling precom
 
 **Precompile Address Ranges:**
 
-| Address Range | Function |
-|---------------|----------|
-| `0x101`       | Asset registry and queries |
-| `0x102`       | Protocol balance transfers |
-| `0x103`       | Batch transfers |
-| `0x104`       | Allowance management (approve/transferFrom) |
-| `0x105`       | Issuer mint/burn |
-| `0x106`       | Agent operations (pay, batchPay, call, bridgeDeposit) |
-| `0x107`       | Internal bridge (deposit/withdraw) |
-| `0x108`       | Compliance updates |
-| `0x109`       | Shielded pool (deposit/transfer/withdraw) |
+| Address | Function |
+|---------|----------|
+| `0x101` | Oracle (price feeds, TWAP) |
+| `0x103` | External bridge (deposit/withdraw/challenge) |
+| `0x201` | Asset (transfer, batchTransfer, approve, transferFrom, mint, burn, register) |
+| `0x202` | Shielded pool (deposit, transfer, withdraw) |
+| `0x203` | Governance (propose, vote, queue, execute, emergency pause/resume) |
+| `0x204` | Validator staking (stake, unstake, claimUnbonded) |
+| `0x205` | Compliance (updateCompliance, checkCompliance) |
+| `0x207` | Switch (internal bridge: switchToEvm / switchToProtocol) |
+| `0x209` | Agent (register, grant, revoke) |
 | `0x10a`–`0x1ff` | Reserved for future protocol operations |
-| `0x200`–`0x209` | Oracle and system precompiles |
 
 **EVM Transaction Calling a Precompile:**
 
 ```rust
 /// Standard EVM transaction (EIP-1559 or legacy) targeting a protocol precompile
 struct EvmTx {
-    to: Address,           // precompile address, e.g. 0x102 for transfer
+    to: Address,           // precompile address, e.g. 0x201 for transfer
     data: Vec<u8>,         // ABI-encoded precompile input
     value: u128,           // CALL value (usually 0 for precompile calls)
     gas_limit: u64,
@@ -327,7 +319,7 @@ struct EvmTx {
 **Example: Protocol transfer via precompile**
 
 ```solidity
-// Solidity interface for the transfer precompile at 0x102
+// Solidity interface for the transfer precompile at 0x201
 interface IProtocolTransfer {
     function transfer(
         uint64 assetId,
@@ -352,7 +344,7 @@ contract Example {
 
 ```rust
 let tx = EvmTx {
-    to: Address::from_hex("0x102"),          // transfer precompile
+    to: Address::from_hex("0x201"),          // transfer precompile
     data: encode_abi("transfer", &[          // ABI-encoded arguments
         Token::Uint(asset_id.into()),
         Token::Address(recipient),
@@ -374,16 +366,15 @@ let tx = EvmTx {
 ```rust
 fn call_precompile(address: Address, input: &[u8], gas_limit: u64) -> PrecompileResult {
     match address {
-        0x101 => asset_registry_precompile(input, gas_limit),
-        0x102 => protocol_transfer_precompile(input, gas_limit),
-        0x103 => batch_transfer_precompile(input, gas_limit),
-        0x104 => allowance_precompile(input, gas_limit),
-        0x105 => issuer_mint_burn_precompile(input, gas_limit),
-        0x106 => agent_precompile(input, gas_limit),
-        0x107 => bridge_precompile(input, gas_limit),
-        0x108 => compliance_precompile(input, gas_limit),
-        0x109 => shielded_pool_precompile(input, gas_limit),
-        0x200..=0x209 => system_precompile(address, input, gas_limit),
+        0x101 => oracle_precompile(input, gas_limit),
+        0x103 => bridge_precompile(input, gas_limit),
+        0x201 => asset_precompile(input, gas_limit),
+        0x202 => shielded_pool_precompile(input, gas_limit),
+        0x203 => governance_precompile(input, gas_limit),
+        0x204 => validator_precompile(input, gas_limit),
+        0x205 => compliance_precompile(input, gas_limit),
+        0x207 => switch_precompile(input, gas_limit),
+        0x209 => agent_precompile(input, gas_limit),
         _ => Err(PrecompileError::NotFound),
     }
 }
@@ -391,44 +382,23 @@ fn call_precompile(address: Address, input: &[u8], gas_limit: u64) -> Precompile
 
 **Thread-Local State Sharing:**
 
-Precompiles access native protocol state through a thread-local `StateHookGuard`, which provides a snapshot-isolated view of protocol balances, allowances, and asset registry. This allows revm to execute precompile calls without modifying the EVM state trie directly.
-
-```rust
-thread_local! {
-    static PROTOCOL_STATE_HOOK: RefCell<Option<ProtocolStateHook>> = RefCell::new(None);
-}
-
-struct StateHookGuard {
-    _marker: PhantomData<()>,
-}
-
-impl StateHookGuard {
-    fn with_hook<R, F: FnOnce(&ProtocolStateHook) -> R>(f: F) -> R {
-        PROTOCOL_STATE_HOOK.with(|hook| {
-            let hook = hook.borrow();
-            f(hook.as_ref().expect("state hook not set"))
-        })
-    }
-}
-```
+Precompiles access EVM storage directly via `StorageRef`, a safe wrapper around revm's journal that decomposes the fat pointer without aliased mutable references. All protocol state (balances, assets, validators, etc.) is stored in EVM storage slots under precompile-specific addresses. Revm's existing Journal mechanism provides per-call atomicity and automatic rollback on failure.
 
 ### 3.6 Precompile Execution Semantics
 
-Protocol operations execute inside revm as standard EVM precompile calls. Each precompile receives ABI-encoded input data and operates on native protocol state through the thread-local `StateHookGuard`. Revm's existing Journal mechanism provides per-call atomicity; protocol state changes made by precompiles participate in this rollback model via snapshot-based isolation.
+Protocol operations execute inside revm as standard EVM precompile calls. Each precompile receives ABI-encoded input data and operates on EVM storage through `StorageRef`. Revm's existing Journal mechanism provides per-call atomicity and automatic rollback on failure; no separate protocol-state snapshot is needed.
 
 ```rust
 /// Precompile execution entry point (called by revm during EVM execution)
 fn execute_precompile(address: Address, input: &[u8], gas_limit: u64) -> PrecompileResult {
-    // 1. Set up protocol state hook for this thread
-    let _guard = StateHookGuard::new();
+    // 1. Set up safe storage reference for this call frame
+    let storage = StorageRef::new();
 
-    // 2. Take a protocol-state snapshot before executing
-    let snapshot = take_protocol_snapshot();
+    // 2. Decode ABI input and dispatch to the appropriate handler
+    let result = dispatch_precompile(address, input, gas_limit, &storage);
 
-    // 3. Decode ABI input and dispatch to the appropriate handler
-    let result = dispatch_precompile(address, input, gas_limit);
-
-    // 4. On failure, roll back protocol state; revm rolls back EVM state independently
+    // 3. On failure, revm's Journal rolls back EVM state (including any storage
+    //    writes made through StorageRef) automatically. No separate snapshot needed.
     match &result {
         Ok(_) => commit_protocol_changes(),
         Err(_) => restore_protocol_snapshot(&snapshot),
@@ -438,73 +408,67 @@ fn execute_precompile(address: Address, input: &[u8], gas_limit: u64) -> Precomp
 }
 
 /// Dispatch table for protocol precompiles
-fn dispatch_precompile(address: Address, input: &[u8], gas_limit: u64) -> PrecompileResult {
+fn dispatch_precompile(address: Address, input: &[u8], gas_limit: u64, storage: &StorageRef) -> PrecompileResult {
     match address {
-        0x101 => asset_registry_handler(input, gas_limit),
-        0x102 => protocol_transfer_handler(input, gas_limit),
-        0x103 => batch_transfer_handler(input, gas_limit),
-        0x104 => allowance_handler(input, gas_limit),
-        0x105 => issuer_mint_burn_handler(input, gas_limit),
-        0x106 => agent_handler(input, gas_limit),
-        0x107 => bridge_handler(input, gas_limit),
-        0x108 => compliance_handler(input, gas_limit),
-        0x109 => shielded_pool_handler(input, gas_limit),
-        0x200..=0x209 => system_precompile_handler(address, input, gas_limit),
+        0x101 => oracle_handler(input, gas_limit, storage),
+        0x103 => bridge_handler(input, gas_limit, storage),
+        0x201 => asset_handler(input, gas_limit, storage),   // transfer, batchTransfer, approve, mint, burn, register
+        0x202 => shielded_handler(input, gas_limit, storage),
+        0x203 => governance_handler(input, gas_limit, storage),
+        0x204 => validator_handler(input, gas_limit, storage),
+        0x205 => compliance_handler(input, gas_limit, storage),
+        0x207 => switch_handler(input, gas_limit, storage),
+        0x209 => agent_handler(input, gas_limit, storage),
         _ => Err(PrecompileError::NotFound),
     }
 }
 
-/// Example: transfer precompile handler
-fn protocol_transfer_handler(input: &[u8], gas_limit: u64) -> PrecompileResult {
+/// Example: transfer precompile handler (asset precompile at 0x201)
+fn asset_transfer_handler(input: &[u8], gas_limit: u64, storage: &StorageRef) -> PrecompileResult {
     let decoded = decode_abi_transfer(input)?;
-    let (asset_id, to, amount, memo) = decoded;
+    let (asset_id, to, amount) = decoded;
 
     let sender = msg_sender(); // provided by revm call frame
-    let asset = get_asset(asset_id)?;
+    let asset = get_asset(asset_id, storage)?;
 
-    check_compliance(&asset, sender, to)?;
-    transfer_balance(asset_id, sender, to, amount)?;
-    if let Some(m) = memo {
-        record_memo(tx_hash(), &m)?;
-    }
+    check_compliance(&asset, sender, to, storage)?;
+    transfer_balance(asset_id, sender, to, amount, storage)?;
+
+    // Dynamic gas metering based on storage operations performed
+    let gas_used = TRANSFER_BASE_GAS + storage.sload_count() * 50 + storage.sstore_count() * 500;
 
     Ok(PrecompileOutput {
-        gas_used: TRANSFER_BASE_GAS,
+        gas_used,
         bytes: encode_abi_bool(true),
     })
 }
 ```
 
-**Atomicity Guarantee:** Revm's Journal already guarantees that any EVM call frame (including precompiles) rolls back on failure. Protocol state accessed through `StateHookGuard` mirrors this by taking a native snapshot before each precompile invocation and restoring it on error. Gas consumed by a failed precompile call is still charged (consistent with Ethereum semantics).
+**Atomicity Guarantee:** Revm's Journal already guarantees that any EVM call frame (including precompiles) rolls back on failure. Protocol state lives in EVM storage under precompile addresses; writes made through `StorageRef` are subject to the same Journal rollback. No separate protocol-state snapshot is needed. Gas consumed by a failed precompile call is still charged (consistent with Ethereum semantics).
 
-**Composability via Smart Contracts:** Because precompiles are ordinary EVM call targets, a smart contract can call multiple precompiles in a single transaction. Atomicity across multiple precompile calls within one contract invocation is guaranteed by revm's transaction-level Journal. For example, a payroll contract can loop over `0x102` (transfer) calls, and if any one fails, the entire contract call reverts.
+**Composability via Smart Contracts:** Because precompiles are ordinary EVM call targets, a smart contract can call multiple precompiles in a single transaction. Atomicity across multiple precompile calls within one contract invocation is guaranteed by revm's transaction-level Journal. For example, a payroll contract can loop over `0x201` (transfer) calls, and if any one fails, the entire contract call reverts.
 
 ### 3.7 EVM Gas Accounting for Precompile Calls
 
 Protocol operations consume EVM gas according to standard Ethereum accounting. Each precompile call is an independent EVM call frame with its own gas limit and cost. There is no multi-precompile discount; gas is charged per call based on the precompile's fixed gas schedule.
 
-**Precompile Gas Schedule:**
+**Precompile Gas Model (Dynamic Metering):**
 
-| Operation | Gas Cost | Description |
-|-----------|----------|-------------|
-| Transfer (`0x102`) | 10,000 gas | Standard protocol transfer |
-| Batch transfer (`0x103`) | 10,000 + n × 1,000 gas | Base + per-recipient |
-| Approve / Mint / Burn (`0x104`/`0x105`) | 5,000 gas | Allowance or issuer ops |
-| Bridge deposit (`0x107`) | 10,000 gas | Protocol → EVM bridge |
-| Shielded deposit/withdraw (`0x109`) | 20,000 gas | Includes ZK proof verification |
-| Shielded transfer (`0x109`) | 50,000 gas | Includes ZK proof verification |
-| Agent operations (`0x106`) | 50% of base rate | Agent-exclusive discount |
-| External bridge deposit | 30,000 gas | Includes signature verification |
-
-**Fee Calculation:**
+All precompiles use dynamic gas metering based on actual storage operations:
 
 ```
-Total fee = base_fee × gas_used + priority_fee
+gas_used = base_gas + sloads × 50 + sstores × 500
 ```
 
-Where `gas_used` is the cumulative EVM gas consumed by all call frames in the transaction (including precompile calls). Revm's standard gas metering applies; precompiles deduct gas before executing and return unused gas on success.
+| Component | Cost | Description |
+|-----------|------|-------------|
+| Base gas | 2,100–30,000 | Per-precompile fixed overhead (varies by operation) |
+| SLOAD | 50 gas | Per warm storage read |
+| SSTORE | 500 gas | Per storage write |
 
-**Example:** A smart contract performing 100 transfers by calling `0x102` in a loop consumes `100 × 10,000 = 1,000,000 gas`. A batch-transfer precompile call (`0x103`) with 100 recipients consumes `10,000 + 100 × 1,000 = 110,000 gas`, achieving similar savings through efficient batching at the precompile level.
+Precompiles access EVM storage through `StorageRef`, which automatically tracks every `sload`/`sstore` and deducts gas according to Cancun rules. Revm's standard gas metering applies; unused gas is returned on success.
+
+**Example:** An asset transfer precompile call at `0x201` that performs 2 SLOADs (read sender balance, read recipient balance) and 2 SSTOREs (write sender balance, write recipient balance) consumes `5,000 + 2×50 + 2×500 = 6,100 gas`.
 
 ### 3.8 Shielded Pool
 
@@ -1239,70 +1203,57 @@ A bridges back to protocol layer:
 
 ### 5.2 Bridge Operations
 
+Bridge operations are standard EVM transactions calling the bridge precompile (`0x103`).
+All state (pending deposits, pool balances, challenge windows) lives in EVM storage
+under the bridge precompile address. There is no separate protocol-layer balance.
+
 ```rust
-enum BridgeOp {
-    /// Protocol layer → EVM layer
-    /// Deduct from protocol balance, mint on EVM layer
-    DepositToEvm {
-        asset_id: AssetId,
-        from: Address,
-        to: Address,
-        amount: u128,
-    },
-    /// EVM layer → Protocol layer
-    /// Burn on EVM layer, restore to protocol balance
-    WithdrawToProtocol {
-        asset_id: AssetId,
-        from: Address,
-        to: Address,
-        amount: u128,
-    },
+/// Bridge precompile input (ABI-encoded)
+enum BridgeCall {
+    /// Cross-chain deposit: record incoming deposit, release to recipient
+    Deposit { asset_id: AssetId, recipient: Address, amount: u128, proof: Vec<u8> },
+    /// Cross-chain withdrawal: lock funds, emit outbound event
+    Withdraw { asset_id: AssetId, amount: u128, destination: Vec<u8> },
+    /// Challenge a fraudulent deposit
+    Challenge { deposit_id: u64, evidence: Vec<u8> },
 }
 ```
 
 ### 5.3 Bridge Execution
 
-**Protocol → EVM (Deposit):**
+**Deposit (cross-chain → Callchain):**
 
 ```rust
-fn execute_deposit(op: &BridgeOp) -> Result<()> {
-    let asset = get_asset(op.asset_id)?;
+fn execute_deposit(input: &BridgeCall, storage: &StorageRef) -> Result<()> {
+    // 1. Verify deposit proof (light-client or merkle proof)
+    verify_deposit_proof(&input.proof)?;
 
-    // 1. Deduct balance from protocol layer
-    let balance = protocol_balances
-        .get_mut(&op.asset_id)
-        .ok_or(AssetNotFound)?;
-    let user_balance = balance.get_mut(&op.from).ok_or(InsufficientBalance)?;
-    ensure!(*user_balance >= op.amount, InsufficientBalance);
-    *user_balance -= op.amount;
+    // 2. Check pool balance in EVM storage
+    let pool = read_pool_balance(input.asset_id, storage)?;
+    ensure!(pool >= input.amount, InsufficientPoolBalance);
 
-    // 2. Mint on EVM layer
-    evm_call(
-        asset.evm_contract,
-        encode("bridgeMint(address,uint256)", op.to, op.amount),
-    )?;
+    // 3. Transfer from bridge pool to recipient via asset precompile (0x201)
+    transfer_balance(input.asset_id, BRIDGE_ADDRESS, input.recipient, input.amount, storage)?;
+
+    // 4. Emit deposit event log
+    emit_bridge_deposit_log(input.asset_id, input.recipient, input.amount);
 
     Ok(())
 }
 ```
 
-**EVM → Protocol (Withdraw):**
+**Withdraw (Callchain → cross-chain):**
 
 ```rust
-fn execute_withdraw(op: &BridgeOp) -> Result<()> {
-    let asset = get_asset(op.asset_id)?;
+fn execute_withdraw(input: &BridgeCall, storage: &StorageRef) -> Result<()> {
+    // 1. Transfer from caller to bridge pool via asset precompile (0x201)
+    transfer_balance(input.asset_id, msg_sender(), BRIDGE_ADDRESS, input.amount, storage)?;
 
-    // 1. Burn on EVM layer
-    evm_call(
-        asset.evm_contract,
-        encode("bridgeBurn(address,uint256)", op.from, op.amount),
-    )?;
+    // 2. Record outbound withdrawal in EVM storage
+    record_outbound_withdrawal(input.asset_id, msg_sender(), input.amount, input.destination, storage)?;
 
-    // 2. Increase balance on protocol layer
-    let balance = protocol_balances
-        .entry(op.asset_id)
-        .or_default();
-    *balance.entry(op.to).or_insert(0) += op.amount;
+    // 3. Emit withdrawal event log
+    emit_bridge_withdraw_log(input.asset_id, msg_sender(), input.amount);
 
     Ok(())
 }
@@ -1311,21 +1262,17 @@ fn execute_withdraw(op: &BridgeOp) -> Result<()> {
 ### 5.4 Bridge Timing
 
 ```
-In each block's execution order, bridge operations execute in the second step:
+Bridge operations are standard EVM transactions calling the bridge precompile (0x103).
+There is no separate bridge execution step — they execute atomically within the EVM
+alongside all other transactions in the block.
 
-1. EVM transactions execute
-   → Users may trigger bridge_withdraw on the EVM layer
-   → These requests are added to the pending bridge queue
-   → Users may also call the bridge precompile (0x107) for protocol-layer deposits
-
-2. Bridge operations execute
-   → Process bridge requests in the pending queue
-   → Guaranteed to complete within the same block
-
-3. System transactions execute
+1. EVM transactions execute (including bridge precompile calls at 0x103)
+   → Users call the bridge precompile for cross-chain deposits/withdrawals
+   → State changes are applied immediately in the same transaction
 ```
 
-This means **Protocol → EVM and EVM → Protocol conversions complete within the same block**, no waiting required.
+All bridge state (pending deposits, challenges, pool balances) lives in EVM storage
+under the bridge precompile address.
 
 ### 5.5 User Experience
 
@@ -1624,7 +1571,7 @@ enum FeePayer {
 }
 ```
 
-**Owner-sponsored payment is the recommended mode for Agent payments.** The Agent submits standard EVM transactions calling the Agent precompile (`0x106`), and Gas is deducted from the Owner account via an authorized sponsor precompile or ERC-4337 paymaster. The Owner signs once to authorize, and the Agent's subsequent transactions do not require the Owner to sign again. Agents can submit multiple Agent operations in separate calls within the same block or batch them via a smart contract.
+**Owner-sponsored payment is the recommended mode for Agent payments.** The Agent submits standard EVM transactions calling the Agent precompile (`0x209`), and Gas is deducted from the Owner account via an authorized sponsor precompile or ERC-4337 paymaster. The Owner signs once to authorize, and the Agent's subsequent transactions do not require the Owner to sign again. Agents can submit multiple Agent operations in separate calls within the same block or batch them via a smart contract.
 
 ### 6.3 Agent Fund Authorization
 
@@ -1677,7 +1624,7 @@ type AgentNonces = HashMap<(Address, u64), u64>;
 
 ### 6.5 Agent Precompile Operations
 
-Agent operations are invoked via the Agent precompile at address `0x106`. Agents submit standard EVM transactions calling this precompile with ABI-encoded arguments. The precompile verifies Agent permissions, deducts funds from the Agent sub-account, and executes the requested operation.
+Agent operations are invoked via the Agent precompile at address `0x209`. Agents submit standard EVM transactions calling this precompile with ABI-encoded arguments. The precompile verifies Agent permissions, deducts funds from the Agent sub-account, and executes the requested operation.
 
 **Supported Agent precompile functions:**
 
@@ -1694,7 +1641,7 @@ interface IAgentPrecompile {
 
 ```rust
 let tx = EvmTx {
-    to: Address::from_hex("0x106"),          // Agent precompile
+    to: Address::from_hex("0x209"),          // Agent precompile
     data: encode_abi("agentPay", &[
         Token::Uint(agent_id.into()),
         Token::Uint(asset_id.into()),
@@ -1715,7 +1662,7 @@ let tx = EvmTx {
 
 ```solidity
 contract AgentRouter {
-    IAgentPrecompile constant AGENT = IAgentPrecompile(0x106);
+    IAgentPrecompile constant AGENT = IAgentPrecompile(0x209);
 
     function executeStrategy(uint64 agentId, uint64 assetId) external {
         // Bridge to EVM
@@ -1728,11 +1675,11 @@ contract AgentRouter {
 
 ### 6.6 Agent Transaction Signing and Verification
 
-Agents sign standard EVM transactions with their secp256k1 key. The Agent precompile (`0x106`) performs additional verification before executing the operation.
+Agents sign standard EVM transactions with their secp256k1 key. The Agent precompile (`0x209`) performs additional verification before executing the operation.
 
 ```rust
 struct SignedAgentTx {
-    evm_tx: EvmTx,                    // standard EVM transaction calling 0x106
+    evm_tx: EvmTx,                    // standard EVM transaction calling 0x209
     owner_signature: Option<Signature>,  // large transactions require Owner's second confirmation
 }
 ```
@@ -1753,7 +1700,7 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 
     // 3. Decode precompile call and verify permissions
     let (precompile_addr, decoded) = decode_precompile_call(&tx.evm_tx.data)?;
-    ensure!(precompile_addr == 0x106, "Not an agent precompile call");
+    ensure!(precompile_addr == 0x209, "Not an agent precompile call");
 
     let perms = &agent.permissions;
     if let Some(asset_id) = decoded.asset_id() {
@@ -1791,7 +1738,7 @@ fn verify_agent_tx(tx: &SignedAgentTx) -> Result<()> {
 
 ### 6.7 Agent Transaction Execution and Fee Handling
 
-Agent transactions are standard EVM transactions that invoke the Agent precompile (`0x106`). They are executed by revm like any other EVM call, with the precompile performing Agent-specific validation and state changes.
+Agent transactions are standard EVM transactions that invoke the Agent precompile (`0x209`). They are executed by revm like any other EVM call, with the precompile performing Agent-specific validation and state changes.
 
 ```rust
 fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
@@ -1879,8 +1826,6 @@ Uses **commonware-p2p** as the P2P network layer, seamlessly integrated with Sim
 
 ```
 EvmTx (including precompile calls) → gossipsub, standard priority
-BridgeOp                           → packed in blocks, not propagated separately
-SystemTx                           → generated by validators only
 ```
 
 ---
@@ -2001,7 +1946,7 @@ impl<'de> Deserialize<'de> for Address { /* JSON: from hex string */ }
 ```rust
 // RLP encoding (P2P propagation)
 let tx = EvmTx {
-    to: Address::from_hex("0x102"),          // transfer precompile
+    to: Address::from_hex("0x201"),          // transfer precompile
     data: encode_abi("transfer", &[Token::Uint(asset_id.into()), Token::Address(to), Token::Uint(amount.into())]),
     value: 0,
     gas_limit: 21_000,
@@ -2049,7 +1994,7 @@ callchain/
 │   ├── contracts/{addr}/           # contract code
 │   └── storage/{addr}/{slot}       # contract storage
 ├── bridge/
-│   └── pending_ops/                # pending bridge operations
+│   └── (deprecated — all bridge state lives in EVM storage under 0x103)
 ├── consensus/
 │   ├── blocks/{height}             # block data
 │   └── state/{height}              # state snapshots
@@ -3449,12 +3394,11 @@ The genesis configuration is provided in JSON format:
 
 ### 17.1 Design
 
-The transaction pool maintains EVM transactions waiting to be packed. All transactions are standard EVM transactions (which may include precompile calls). Bridge operations and system transactions are generated by validators and not propagated through the mempool.
+The transaction pool maintains EVM transactions waiting to be packed. All transactions are standard EVM transactions (which may include precompile calls).
 
 ```rust
 struct Mempool {
     evm_pool: PriorityTxs<EvmTx>,        // EVM transactions (including precompile calls)
-    pending_bridges: VecDeque<BridgeOp>, // pending bridges (validator-generated)
     known_txs: LruCache<TxHash, ()>,     // deduplication cache
 }
 ```
@@ -3464,7 +3408,6 @@ struct Mempool {
 | Dimension | Strategy |
 |------|------|
 | EvmTx sorting | Descending by `max_priority_fee_per_gas` + timestamp FIFO |
-| BridgeOp | FIFO by arrival order, batch processed within block |
 
 **Priority score:**
 ```rust
@@ -3501,13 +3444,12 @@ fn priority_score(tx: &EvmTx) -> u128 {
 ### 18.1 Formal Definition
 
 ```
-State = (ProtocolBalances, EvmState, BridgeState, ShieldedState)
+State = EvmState   // All state (balances, assets, validators, etc.) lives in EVM storage
 
 apply_block(state, block) -> Result<State> {
     state = execute_evm_txs(state, block.evm_txs)?;
-    // Precompile calls inside evm_txs update ProtocolBalances atomically via StateHookGuard
-    state = execute_bridge(state, block.bridge_operations)?;
-    state = execute_system_txs(state, block.system_txs)?;
+    // Precompile calls inside evm_txs read/write protocol state from EVM storage
+    // via StorageRef. Revm's Journal guarantees per-transaction atomicity.
     Ok(state)
 }
 ```
@@ -3528,11 +3470,6 @@ apply_block(state, block) -> Result<State> {
 - Sender balance >= gas_limit * gas_price + value
 - gas_limit <= block gas limit
 
-**BridgeOp validation:**
-- Corresponding EVM-layer bridge contract has triggered (WithdrawToProtocol)
-- Or protocol-layer bridge request has been recorded (DepositToEvm)
-- Asset exists and bridge pool balance is sufficient
-
 **Shielded precompile validation:**
 - ZK proof verification passes (Groth16/Halo2)
 - All nullifiers unspent (anti-double-spend)
@@ -3545,9 +3482,8 @@ apply_block(state, block) -> Result<State> {
 ### 18.3 Atomicity Guarantee
 
 All operations within a block either all succeed or all roll back:
-- EVM transactions: Revm's Journal mechanism guarantees single-tx atomicity. Precompile calls share this guarantee via `StateHookGuard` snapshot isolation.
-- Bridge operations: Two-step operation (deduct+mint / burn+restore) completed within the same function
-- Block level: State root computed after all operations, inconsistent results reject the block
+- EVM transactions: Revm's Journal mechanism guarantees single-tx atomicity. Precompile calls share this guarantee because protocol state lives in EVM storage accessed via `StorageRef`.
+- Block level: State root computed after all EVM transactions, inconsistent results reject the block
 
 ### 18.4 Transaction Receipts
 
@@ -3575,12 +3511,12 @@ struct EvmLogEntry {
 }
 ```
 
-**Precompile event logs:** Protocol precompiles emit logs with their own address (e.g., `0x102` for transfers). Wallets and indexers can filter by precompile address to track protocol operations.
+**Precompile event logs:** Protocol precompiles emit logs with their own address (e.g., `0x201` for transfers). Wallets and indexers can filter by precompile address to track protocol operations.
 
 ```rust
 // Example: transfer precompile emits a log
 EvmLogEntry {
-    address: Address::from_hex("0x102"),
+    address: Address::from_hex("0x201"),
     topics: vec![
         keccak256("Transfer(uint64,address,address,uint128)"),
         H256::from_low_u64_be(asset_id),
@@ -3810,11 +3746,6 @@ metrics: {
     call_mempool_size: GaugeVec,          // by type
     call_transactions_processed_total: CounterVec, // by type/status
     call_transaction_execution_time_seconds: Histogram,
-
-    // Bridge
-    bridge_operations_processed_total: Counter,
-    bridge_deposit_total: CounterVec,      // by asset
-    bridge_withdraw_total: CounterVec,
 
     // P2P Network
     call_p2p_peers: Gauge,
@@ -4529,13 +4460,10 @@ contract MyDEX {
    └── Bridge operation → Auto-created by wallet → broadcast
 
 2. Validators collect transactions
-   ├── EVM transactions (including precompile calls) → ordered by gas price
-   └── Internal queue: BridgeOp
+   └── EVM transactions (including precompile calls) → ordered by gas price
 
 3. Validators pack block
-   ├── Execute EVM transactions → update EVM state (precompiles update protocol state via StateHookGuard)
-   ├── Execute bridge operations → synchronize two-layer balances
-   └── Execute system transactions → reward/fee settlement
+   └── Execute EVM transactions → update EVM state (precompiles read/write protocol state via StorageRef)
 
 4. Simplex consensus block production
    ├── Proposer packs → broadcasts proposal
@@ -4557,6 +4485,5 @@ contract MyDEX {
 | Internal Bridge | Internal bridge, asset conversion mechanism between two layers |
 | Asset Registry | Asset registry, records all protocol assets |
 | CompliancePolicy | Compliance policy, defines transfer restrictions for assets |
-| BridgeOp | Bridge operation, transfers assets between two layers |
 | Simplex | Low-latency BFT consensus algorithm, O(n) communication complexity |
 | Commonware | Rust implementation framework for Simplex consensus |

@@ -2,14 +2,13 @@
 
 ## Overview
 
-The Agent Layer (`crates/agent`) enables delegated transaction execution on behalf of users. An agent is a registered entity (e.g., a dApp, service, or automated wallet) that can sign and execute protocol transactions within owner-defined constraints.
+The Agent Layer (`crates/agent`) enables delegated balance management and payments on behalf of users. An agent is a registered entity (e.g., a dApp, service, or automated wallet) that operates within owner-defined constraints.
 
 **Key features:**
-- Agent registration with optional domain verification
-- Per-agent permissions (asset whitelist, counterparty restrictions, daily/tx limits)
+- Agent registration with metadata
 - Agent-specific balance management (owner-funded sub-accounts)
-- Agent transaction verification with dual-signature support (agent + owner)
-- 0.5x gas discount for agent-mediated transactions
+- Agent-mediated payments and batch payments
+- Basic per-transaction limits and asset allowlists
 
 ## Precompile Alternative
 
@@ -17,9 +16,14 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 
 | Operation | Function | Gas |
 |---|---|---|
-| Register agent | `register(bytes,string,string)` | 10,000 |
-| Grant balance | `grant(uint64,uint64,uint128)` | 10,000 |
-| Revoke balance | `revoke(uint64,uint64)` | 10,000 |
+| Register agent | `register(bytes32,string,string)` | 6,000 + storage |
+| Grant balance | `grant(uint64,uint64,uint128)` | 6,000 + storage |
+| Revoke balance | `revoke(uint64,uint64)` | 6,000 + storage |
+| Pay | `pay(uint64,uint64,address,uint128)` | 6,000 + storage |
+| Batch pay | `batchPay(uint64,uint64,address[],uint128[])` | 6,000 + storage |
+| Withdraw balance | `withdrawBalance(uint64,uint64,uint128)` | 6,000 + storage |
+
+Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`, where `base_gas = 6,000` for all agent operations.
 
 See [precompile.md](precompile.md) for the full ABI.
 
@@ -31,32 +35,21 @@ See [precompile.md](precompile.md) for the full ABI.
 ┌─────────────────────────────────────────────────────────────┐
 │  Agent Payment Layer                                         │
 │                                                             │
-│  ┌────────────────────┐  ┌──────────────────────────────┐  │
-│  │ AgentRegistry      │  │ AgentBalances                │  │
-│  │ - agents: id→reg   │  │ - (owner, id, asset)→amount │  │
-│  │ - by_owner         │  │ - grant / revoke / deduct   │  │
-│  │ - by_name          │  │                              │  │
-│  └────────────────────┘  └──────────────────────────────┘  │
-│                                                             │
-│  ┌────────────────────┐  ┌──────────────────────────────┐  │
-│  │ AgentPermissions   │  │ AgentNonces                  │  │
-│  │ - allowed_assets   │  │ - (owner, id)→nonce          │  │
-│  │ - daily_limit      │  │ - check_and_increment        │  │
-│  │ - per_tx_limit     │  └──────────────────────────────┘  │
-│  │ - allowed_counter- │                                     │
-│  │   parties          │  ┌──────────────────────────────┐  │
-│  │ - expires_at       │  │ AgentTxContext               │  │
-│  └────────────────────┘  │ - agent_id, nonce, sig       │  │
-│                          │ - owner_public_key             │  │
-│  ┌────────────────────┐  └──────────────────────────────┘  │
-│  │ AgentFeeConfig     │  ┌──────────────────────────────┐  │
-│  │ - fee_payer        │  │ AgentEvents                  │  │
-│  │ - require_owner_   │  │ - event_type, agent_id       │  │
-│  │   signature_above  │  │ - asset_id, amount           │  │
-│  └────────────────────┘  │ - block_height               │  │
-│                          └──────────────────────────────┘  │
-│                          verify_agent_tx (5-step)          │
-│                          execute_agent_tx (0.5x gas)       │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ AgentStorage<B: StorageBackend>                      │  │
+│  │                                                      │  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │  │
+│  │  │ AgentRegistry│  │ AgentBalances│  │ AgentNonces │  │  │
+│  │  │ - agents    │  │ - (owner,id,│  │ - (owner,id)│  │  │
+│  │  │ - by_owner  │  │   asset)→amt│  │ → nonce     │  │  │
+│  │  │ - by_name   │  │ - grant     │  │ - increment │  │  │
+│  │  │             │  │ - revoke    │  │             │  │  │
+│  │  │             │  │ - deduct    │  │             │  │  │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  │  │
+│  │                                                      │  │
+│  │  Reads / writes EVM storage slots under AGENT_ADDRESS │  │
+│  │  (0x209) via StorageRef                               │  │
+│  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -64,83 +57,53 @@ See [precompile.md](precompile.md) for the full ABI.
 
 ## Key Components
 
-### 1. Agent Registration (`registry.rs`)
+### 1. Agent Storage (`lib.rs`, `precompile.rs`)
+
+`AgentStorage<B: StorageBackend>` is the single struct that manages all agent state. It reads and writes EVM storage slots under the agent precompile address (`0x209`) using `StorageRef`.
+
+Implemented operations:
+- `register_agent(owner, name, url)` — registers a new agent, returns `agent_id`
+- `grant_balance(owner, agent_id, asset_id, amount)` — credits agent balance, deducts from owner
+- `revoke_balance(owner, agent_id, asset_id)` — revokes all agent balance for an asset
+- `pay(owner, agent_id, asset_id, recipient, amount)` — pays from agent balance to recipient
+- `batch_pay(owner, agent_id, asset_id, recipients[], amounts[])` — batch payment from agent balance
+- `withdraw_balance(owner, agent_id, asset_id, amount)` — withdraws from agent balance back to owner
+- `revoke_agent(owner, agent_id)` — deregisters an agent
+
+Agents are caller-authenticated only (`msg.sender` is the owner). There are no agent-level signatures.
+
+### 2. Agent Registration
 
 `AgentRegistration` fields:
 - `agent_id`: auto-incremented unique ID
 - `owner`: Address that controls the agent
-- `agent_public_key`: secp256k1 public key for agent signatures
-- `name`, `url`, `metadata_hash`: descriptive metadata
-- `domain_proof`: Optional DNS TXT or HTTP file verification
-- `domain_verified`: Whether domain proof passed validation
+- `name`, `url`: descriptive metadata
 - `registered_at`: Block number of registration
 
-`AgentRegistry` supports:
+`AgentStorage` supports:
 - Register by owner with name uniqueness enforcement
 - Lookup by ID, name, or owner
-- Update config (name, URL, metadata)
-- Update domain proof
+- Agent revocation
 
+### 3. Agent Permissions
 
-### 2. Agent Permissions (`permissions.rs`)
-
-`AgentPermissions` controls what an agent can do:
+The actual implementation enforces only basic limits:
 
 | Field | Default | Behavior |
 |-------|---------|----------|
 | `allowed_assets` | `[1]` (only CALL) | Asset whitelist |
-| `daily_limit` | `10_000` | Daily cumulative amount |
 | `per_tx_limit` | `1_000` | Per-transaction cap |
-| `allowed_counterparties` | `[]` (empty = all) | Recipient whitelist |
-| `allowed_protocols` | `[]` (empty = none) | EVM contract whitelist |
-| `expires_at` | `0` (never) | Permission expiry block |
 
-`verify_agent_permissions()` checks:
-1. Expiration (block-number based)
-2. Asset allowed
-3. Counterparty allowed
-4. Per-tx limit
-5. Daily limit (with auto-reset every 86,400,000 ms = 24 hours, timestamp-based)
-6. Owner daily fee limit
+There is no `daily_limit`, `allowed_counterparties`, `allowed_protocols`, `expires_at`, or per-precompile permission checking.
 
+### 4. Agent Balances
 
-### 3. Agent Balances (`balances.rs`)
+Agent balances are stored as EVM storage slots under `0x209`:
 
-`AgentBalances`: `HashMap<(owner, agent_id, asset_id), u128>`
-
-- `grant_funds()`: Deducts from owner's protocol balance, then credits agent
-- `top_up()`: Same as grant (semantic alias)
-- `revoke_funds()`: Removes all balance for an agent, returns amount
+- `grant_balance()`: Deducts from owner's EVM balance, credits agent sub-account
+- `revoke_balance()`: Removes all balance for an agent/asset
 - `deduct()`: Subtracts with underflow check
 - `credit()`: Adds with `checked_add` overflow protection
-
-
-### 4. Agent Transaction Verification (`executor.rs`)
-
-`verify_agent_tx()` performs 5-step validation:
-1. Agent signature verification (secp256k1)
-2. Nonce check (sequential, no gaps)
-3. Per-precompile permission checks (all payments in a batch)
-4. Expiry check (uses `protocol_tx.expires_at` as block deadline)
-5. Owner signature threshold for large amounts
-
-`execute_agent_tx()`:
-1. Calculates gas with 0.5x discount
-2. Deducts fee from agent balance using the transaction's `fee_currency`
-3. Executes precompile calls
-
-
-### 5. Agent Activity Audit Trail (`lib.rs`, `block.rs`)
-
-`AgentEventType` enum:
-- `AgentPay`, `AgentBatchPay`, `AgentCall`, `AgentBridgeDeposit`
-- `AgentRegistered`, `AgentRevoked`
-
-`AgentEvent` struct:
-- `event_type`, `agent_id`, `tx_hash`, `asset_id`, `amount`, `recipient`, `block_height`
-
-Emitted during `Block::execute` by `execute_agent_precompile()` for every successful agent precompile call. Included in `BlockExecutionResult::agent_events` and hashed into `compute_receipt_root()`.
-
 
 ---
 
@@ -148,11 +111,8 @@ Emitted during `Block::execute` by `execute_agent_precompile()` for every succes
 
 | File | Role |
 |------|------|
-| `lib.rs` | `AgentError`, `AgentFeeConfig`, `FeePayer`, `SignedAgentTx`, `DomainProof`, `AgentEvent`, `AgentEventType` |
-| `registry.rs` | `AgentRegistration`, `AgentRegistry`, domain proof handling |
-| `permissions.rs` | `AgentPermissions`, `AgentDailyUsage`, permission verification |
-| `balances.rs` | `AgentBalances`, `AgentNonces` |
-| `executor.rs` | `verify_agent_tx()`, `execute_agent_tx()`, precompile helpers |
+| `lib.rs` | `AgentStorage`, `AgentError`, `AgentRegistration`, balance and nonce helpers |
+| `precompile.rs` | Precompile dispatch for `0x209`, selector decoding, EVM storage integration |
 
 ---
 
@@ -160,18 +120,14 @@ Emitted during `Block::execute` by `execute_agent_precompile()` for every succes
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Agent registration | 🟢 Ready | Name uniqueness, metadata storage, real DNS/HTTP domain verification, agent revocation, configurable registration fee |
-| Permissions | 🟢 Ready | Restrictive defaults, full per-precompile checking including all batch payments |
+| Agent registration | 🟢 Ready | Name uniqueness, metadata storage, agent revocation |
+| Permissions | 🟡 Partial | Basic per-tx limit and asset allowlist only |
 | Balance management | 🟢 Ready | Grant deducts from owner, overflow-protected credit, underflow-protected deduct |
-| Transaction verification | 🟢 Ready | 5-step validation with independent `expires_at` field, no longer conflates fee with time |
-| Transaction execution | 🟢 Ready | Proper EVM call execution, wired into block production with inline permission checks, fee_currency-aware gas deduction |
-| Persistence | 🟢 Ready | AgentRegistry, AgentBalances, and AgentNonces all persisted to MDBX |
+| Payments | 🟢 Ready | Single and batch pay from agent balance |
+| Persistence | 🟢 Ready | All state in EVM storage under `0x209`, committed with EVM state root |
 
 ---
 
 ## Test Status
 
-- `cargo test -p call-agent` — 46 unit tests covering registration (including fee deduction, insufficient balance rejection), domain proof format, balance operations (grant deducts from owner, overflow protection), nonce tracking, permission checks, precompile call extraction (including batch transfer multi-payment), agent pay/batch pay, bridge deposit failure recovery, tx hash determinism
-- `cargo test -p call-consensus` — block execution order test verifies `AgentPay` / `AgentBatchPay` / `AgentCall` / `AgentBridgeDeposit` execute correctly during `Block::execute`; `test_agent_precompile_emits_event` verifies `AgentEvent` emission and receipt root inclusion; `test_expired_transaction_rejected` verifies `expires_at` enforcement
-- `cargo test -p call-node --lib` — node startup and state persistence tests verify agent registry, balances, and nonces are saved/loaded to MDBX correctly
-- `cargo test -p call-protocol --test test_agent_flow` — integration tests covering registration, domain proof, balance operations, nonce sequential/stale rejection
+- `cargo test -p call-agent` — unit tests covering registration, balance operations, nonce tracking, permission checks, precompile call extraction, agent pay/batch pay

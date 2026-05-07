@@ -188,13 +188,13 @@ If any rule fails, the node exits with a `GenesisError` during boot.
 When `GenesisExecutor::execute()` runs:
 
 1. **Validate** the schema (rules above).
-2. **Initialize** empty state tables (`BalanceState`, `AssetRegistry`, `EvmState`, `ValidatorStateManager`).
-3. **Register assets** — for each `GenesisAsset`, register in `AssetRegistry` and distribute balances. Asset `1` also populates EVM native balances.
-4. **Register validators** — stake each `GenesisValidator` into `ValidatorStateManager`.
-5. **Register fee currencies** — add each `GenesisFeeCurrency` to the fee-currency registry.
-6. **Deploy EVM ERC-20 templates** — for asset `1` (CALL), deploy the system ERC-20 contract into `EvmState`.
-7. **Initialize oracle** — register all genesis validators as oracle reporters and set tracked assets.
-8. **Compute state roots** — `payment_root`, `evm_state_root`, and `bridge_root` (always `ZERO` in genesis).
+2. **Initialize** empty EVM state (`CallEvmAccounts`, `CallEvmStorage`).
+3. **Register assets** — for each `GenesisAsset`, write asset metadata and balances into EVM storage under the asset precompile address (`0x201`). Asset `1` also populates EVM native balances.
+4. **Register validators** — stake each `GenesisValidator` into EVM storage under the validator precompile address (`0x204`).
+5. **Register fee currencies** — add each `GenesisFeeCurrency` to the fee-currency registry in EVM storage.
+6. **Deploy EVM ERC-20 templates** — for asset `1` (CALL), deploy the system ERC-20 contract into EVM state.
+7. **Initialize oracle** — write tracked assets into EVM storage under the oracle precompile address (`0x101`).
+8. **Compute state root** — `evm_root` (single source of truth; all state lives in EVM storage).
 
 ---
 

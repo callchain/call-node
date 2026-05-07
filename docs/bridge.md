@@ -85,7 +85,7 @@ The `proof` parameter in `initiateChallenge` contains evidence that the original
 | Light Client | SPV proof demonstrating the source tx is on a re-orged fork, or invalid state root |
 | Rollup | State transition fraud proof showing the deposit state root is invalid |
 
-The `verify_fraud_proof()` function is bridge-type-specific and may be delegated to a dedicated verifier precompile (`0x104`).
+The `verify_fraud_proof()` function is bridge-type-specific. For the initial implementation, a stub returning `false` is acceptable. Full cryptographic verification can be added incrementally without changing the challenge state machine.
 
 ---
 
@@ -281,7 +281,7 @@ Full debt-tracking against validators (e.g., transferring slashed stake to treas
 
 ### 8.1 Block Height Access
 
-Precompiles need access to `block.number` for deadline calculations. This is provided through `StorageCtx` via `EvmStorageProvider`, which receives `number` from revm's block context during `CallPrecompiles::run`.
+Precompiles need access to `block.number` for deadline calculations. This is provided through `StorageRef` via `EvmStorageProvider`, which receives `number` from revm's block context during `CallPrecompiles::run`.
 
 ### 8.2 Proof Verification Architecture
 
@@ -290,8 +290,7 @@ Precompiles need access to `block.number` for deadline calculations. This is pro
 ```rust
 fn verify_fraud_proof(source_tx_hash: [u8; 32]) -> bool {
     // Option A: Inline for known chain types
-    // Option B: Delegate to BridgeVerifier precompile (0x104)
-    // Option C: Governance-upgradable verifier contract
+    // Option B: Governance-upgradable verifier contract
 }
 ```
 
@@ -326,7 +325,7 @@ The following parameters should be governance-configurable via the Governance pr
 |------|------|
 | `crates/bridge/src/precompile.rs` | Bridge precompile implementation (`0x103`) |
 | `crates/validator/src/precompile.rs` | Validator stake slash mechanism |
-| `crates/precompile/src/storage.rs` | `StorageCtx`, `EvmStorageProvider`, storage slot helpers |
+| `crates/precompile/src/storage.rs` | `StorageRef`, `EvmStorageProvider`, storage slot helpers |
 
 ---
 

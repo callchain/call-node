@@ -57,21 +57,19 @@ pub struct CallDb {
 
 | Category | Tables |
 |----------|--------|
-| Protocol | `CallProtocolAssets`, `CallProtocolBalances`, `CallProtocolAllowances` |
-| Shielded | `CallShieldedMerkleTree`, `CallShieldedNullifiers`, `CallShieldedCommitments`, `CallShieldedViewingKeys` |
-| Agent | `CallAgents`, `CallAgentBalances`, `CallAgentNonces` |
-| EVM | `CallEvmAccounts`, `CallEvmContracts`, `CallEvmStorage` |
-| Bridge | `CallBridgeOps` |
+| EVM | `CallEvmAccounts`, `CallEvmStorage` |
+| Trie | `CallTrieUpdates`, `CallAccountTrie`, `CallStorageTrie` |
+| History | `CallAccountHistory`, `CallStorageHistory`, `CallBlockStateSnapshots` |
+| Block Index | `CallBlockHashIndex`, `CallBlockHashByHeight` |
 | Consensus | `CallConsensusBlocks`, `CallConsensusState` |
-| Metadata | `CallMetadataChainId`, `CallValidators`, `CallMetadataCompliance`, `CallMetadataAgents` |
-| Receipts | `CallReceipts`, `CallLogs`, `CallMemos` |
-| Fee/Oracle | `CallFeeCurrencyRegistry`, `CallOraclePrices`, `CallOracleValidatorInfo` |
-| Governance | `CallGovernanceProposals`, `CallVoteDelegations` |
-| Sponsorship | `CallSponsorAuths`, `CallSponsorPools`, `CallSponsorDailyUsage` |
-| Security | `CallSessionKeys`, `CallMultiSigConfigs`, `CallSocialRecoveryConfigs` |
-| System | `CallPruneState`, `CallGovernanceState`, `CallComplianceState`, `CallOracleState`, `CallForkState`, `CallCheckpoint` |
+| Receipts | `CallReceipts`, `CallReceiptsByBlock` |
+| Metadata | `CallMetadataChainId` |
+| Light Client | `CallLightClientHeaders` |
+| RPC | `CallRpcFilters` |
+| Bytecode | `CallBytecodes` |
+| System | `CallPruneState`, `CallFeeParams`, `CallForkState`, `CallCheckpoint` |
 
-Tables are registered via `CallTables: TableSet` and initialized with `init_db_for::<_, CallTables>`. All tables use `Vec<u8>` key/value with serde_json serialization.
+22 MDBX tables are registered via `CallTables: TableSet` and initialized with `init_db_for::<_, CallTables>`. All tables use `Vec<u8>` key/value with serde_json serialization. Protocol state (balances, assets, validators, etc.) lives in EVM storage slots (`CallEvmStorage`) under precompile addresses — no separate protocol-layer tables.
 
 **CRUD helpers** in `reth_db.rs`:
 - `db_put<T>`, `db_get<T>`, `db_del<T>` — single key operations
@@ -123,14 +121,16 @@ pub struct StateSnapshot {
 }
 ```
 
-**`produce_state_snapshot()`** — called by the block production pipeline at `snapshot_interval` boundaries. Computes roots from live state (protocol balances, EVM state trie, shielded Merkle tree, agent registry, validator set), records the snapshot in `PruneState`, and saves to `<data_dir>/snapshots/snapshot-{height}.json`.
+**`produce_state_snapshot()`** — called by the block production pipeline at `snapshot_interval` boundaries. The EVM state root is computed by reth-trie. `protocol_root` and `consensus_root` are set equal to `evm_root` since all state lives in EVM storage. `shielded_root` and `agent_root` are read from their respective precompile storage slots. The snapshot is recorded in `PruneState` and saved to `<data_dir>/snapshots/snapshot-{height}.json`.
 
 **`verify_snapshot()`** — performs cryptographic Ed25519 verification of each validator signature against the snapshot message hash, then checks that at least 2/3 of the validator set signed. If no public keys are provided, falls back to count-only mode (tests only).
 
-**Root computation helpers:**
-- `compute_protocol_root()` — keccak256 of sorted (asset, address, balance) + allowances
-- `compute_agent_root()` — keccak256 of sorted agent registrations
-- `compute_consensus_root()` — keccak256 of sorted validator stakes
+**Root computation:**
+- `evm_root` — computed by reth-trie from `CallEvmAccounts` and `CallEvmStorage`
+- `protocol_root` — equal to `evm_root` (all protocol state lives in EVM storage)
+- `consensus_root` — equal to `evm_root` (validator state lives in EVM storage under `0x204`)
+- `shielded_root` — read from EVM storage under `SHIELDED_ADDRESS` (`0x202`)
+- `agent_root` — read from EVM storage under `AGENT_ADDRESS` (`0x209`)
 
 ### 5. Fast Sync (`prune.rs`)
 

@@ -153,7 +153,7 @@ call-node 当前使用自定义 `CallchainBlockExecutor` trait（`crates/evm/src
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| 15 | StorageCtx TLS → revm JournalTr | ✅ | 所有 precompile 通过 `EvmStorageProvider` 直接访问 revm `JournalTr` |
+| 15 | StorageRef → revm JournalTr | ✅ | 所有 precompile 通过 `EvmStorageProvider` 直接访问 revm `JournalTr` |
 | 16 | precompile gas 自动计费 | 🔮 Future | 当前手动 `deduct_gas()` 正确工作；需 revm 架构支持才能完全自动 |
 | 17 | System Contract 部署 | 🔮 Future | 长期将协议逻辑从 Rust precompile 迁移为 Solidity system contract |
 
@@ -166,4 +166,4 @@ call-node 当前使用自定义 `CallchainBlockExecutor` trait（`crates/evm/src
 - **call-node 当前执行层**：`crates/evm/src/executor.rs` — `EvmExecutor::execute_tx_provider()`
 - **call-node 状态层**：`crates/evm/src/provider.rs` — `InMemoryStateProvider`
 - **call-node trie 层**：`crates/evm/src/trie.rs` — `MdbxTrieCursorFactory`
-- **call-node precompile 状态访问**：`crates/precompile/src/storage.rs` — `StorageCtx` TLS
+- **call-node precompile 状态访问**：`crates/precompile/src/storage.rs` — `StorageRef` (safe journal decomposition)

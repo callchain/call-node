@@ -70,7 +70,6 @@ The Observability layer (`crates/node/src/telemetry.rs`, `crates/node/src/loggin
 | `consensus_timeouts` | Counter | Total consensus timeouts |
 | `mempool_tx_count` | Gauge | Current mempool transaction count |
 | `mempool_tx_rejected` | Counter | Total rejected transactions |
-| `mempool_bridge_pending` | Gauge | Pending bridge operations |
 | `p2p_peers` | Gauge | Connected peer count |
 | `p2p_bytes_sent` | Counter | Total bytes sent over P2P |
 | `p2p_bytes_received` | Counter | Total bytes received over P2P |
@@ -132,7 +131,6 @@ Default alert rules with continuous background evaluation every 30 seconds:
 | `consensus_stall` | Critical | timeouts > 0 AND seconds_since_last_block > 60s |
 | `validator_offline` | Critical | p2p_peers == 0 |
 | `mempool_overflow` | Warning | mempool_tx_count > 10,000 |
-| `bridge_delay` | Warning | bridge_pending > 100 |
 | `high_memory_usage` | Warning | RAM usage > 90% |
 | `low_disk_space` | Critical | Disk free < 10 GB |
 

@@ -25,11 +25,9 @@ All user transactions are standard EVM transactions (`EvmTransaction`). Protocol
 │  register / grant / revoke ───────────┤                    │
 │  updateCompliance ────────────────────┘                    │
 │                                                             │
-│  ┌──────────────┐  ┌──────────┐  ┌──────────────┐        │
-│  │ AccountState │  │AssetRegistry│ │ComplianceEngine│       │
-│  │  (balances + │  │ (asset     │  │ (blacklist,   │       │
-│  │   allowances)│  │  metadata) │  │  KYC, custom) │       │
-│  └──────────────┘  └──────────┘  └──────────────┘        │
+│  All protocol state (balances, assets, validators, etc.)   │
+│  lives in EVM storage slots under precompile addresses.    │
+│  No separate in-memory protocol state structures.          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,7 +56,7 @@ All protocol operations are exposed as EVM precompile functions at fixed address
 | `0x204` | `stake` / `unstake` / `claimUnbonded` | Validator staking | Sender balance |
 | `0x207` | `switchToEvm` / `switchToProtocol` | Protocol ↔ EVM bridge | Sender balance |
 
-**Atomicity:** Precompiles run inside revm, which provides automatic state rollback on revert. Precompile write operations also use snapshot-based rollback for protocol state (`BalanceState`, `ComplianceEngine`, `ShieldedState`) when an individual precompile call fails within a larger EVM transaction.
+**Atomicity:** Precompiles run inside revm, which provides automatic state rollback on revert. Protocol state lives in EVM storage under precompile addresses; writes made through `StorageRef` are subject to the same Journal rollback as any EVM contract. No separate protocol-state snapshot is needed.
 
 ### 2. Transaction Model
 
@@ -66,38 +64,29 @@ All transactions are standard EVM transactions (`EvmTransaction`, RLP-encoded). 
 
 **Signature verification:** Standard Ethereum secp256k1 ECDSA recovery (same as any EVM chain).
 
-**Nonce sequencing:** Standard EVM nonce, managed per address in `EvmState`.
+**Nonce sequencing:** Standard EVM nonce, managed per address in EVM storage (`CallEvmAccounts`).
 
 ### 3. Gas & Fee Model
 
-**Gas cost table (per precompile):**
+**Dynamic gas metering:**
 
-| Precompile | Function | Base Gas |
-|------------|----------|----------|
-| `0x201` | `transfer` | 5,000 |
-| `0x201` | `batchTransfer` | 5,000 per recipient |
-| `0x201` | `approve` | 4,000 |
-| `0x201` | `transferFrom` | 5,500 |
-| `0x201` | `mint` | 6,000 |
-| `0x201` | `burn` | 5,000 |
-| `0x207` | `switchToEvm` / `switchToProtocol` | 8,000 |
-| `0x202` | `deposit` / `withdraw` | 50,000 |
-| `0x202` | `transfer` | 100,000 |
-| `0x101` | `submitPrice` | 3,000 |
-| `0x103` | `externalBridgeDeposit` | 10,000 |
-| `0x103` | `externalBridgeWithdraw` | 8,000 |
-| `0x103` | `challengeBridgeDeposit` | 6,000 |
-| `0x209` | `register` | 6,000 |
-| `0x209` | `grant` | 6,000 |
-| `0x209` | `revoke` | 6,000 |
-| `0x205` | `updateCompliance` | 6,000 |
-| `0x203` | `submitProposal` | 20,000 |
-| `0x203` | `vote` | 10,000 |
-| `0x203` | `queue` / `execute` | 10,000 / 20,000 |
-| `0x203` | `emergencyPause` / `emergencyResume` | 20,000 |
-| `0x204` | `stake` | 20,000 |
-| `0x204` | `unstake` | 20,000 |
-| `0x204` | `claimUnbonded` | 20,000 |
+Precompile gas is computed dynamically based on storage operations performed:
+
+```
+gas_used = base_gas + sloads * 50 + sstores * 500
+```
+
+| Precompile | Base Gas | Typical Storage Ops |
+|------------|----------|---------------------|
+| `0x201` | 5,000 | 2–4 sloads + 2–4 sstores |
+| `0x207` | 8,000 | 2 sloads + 2 sstores + EVM call |
+| `0x202` | 25,000 | Merkle tree / ZK proof ops |
+| `0x101` | 3,000 | 1–2 sloads + 1 sstore |
+| `0x103` | 10,000 | Signature verification + sstores |
+| `0x209` | 6,000 | 2–3 sloads + 2 sstores |
+| `0x205` | 6,000 | 1 sload + 1 sstore |
+| `0x203` | 10,000 | 2–5 sloads + 2–5 sstores |
+| `0x204` | 20,000 | 3–5 sloads + 3–5 sstores |
 
 **Fee calculation:** `fee = gas_units * (base_fee + priority_fee)`
 
@@ -118,11 +107,11 @@ if gas_used < target:  decrease = base_fee * (|diff|/target) * (1/8)
 - `ProtocolBalances`: `HashMap<(AssetId, Address), Balance>`
 - `Allowances`: `HashMap<(AssetId, Owner, Spender), Balance>`
 
-Operations use `checked_add`/`checked_sub` for overflow/underflow protection. All balance mutations go through `BalanceState` methods.
+Operations use `checked_add`/`checked_sub` for overflow/underflow protection. All balance mutations go through EVM storage under the asset precompile (`0x201`).
 
 ### 5. Asset Registry (`registry.rs`)
 
-- `AssetRegistry`: `HashMap<AssetId, Asset>` with symbol uniqueness enforcement
+- Asset metadata lives in EVM storage under the Asset precompile (`0x201`) with symbol uniqueness enforcement
 - Registration fee: 10 CALL (checked at transaction level, not in registry)
 - Asset status: Active / Frozen / Delisted
 - Issuer-only operations: freeze, delist, mint supply, transfer ownership, update compliance policy
@@ -140,7 +129,7 @@ Per-address compliance status (Clear / UnderReview / Flagged / Restricted) is st
 
 `CompliancePolicy::Custom` iterates all registered handlers and requires all to pass. `check_compliance()` checks sender and recipient for Transfer, and all three parties (sender, from, to) for TransferFrom.
 
-**Persistence:** Compliance state is persisted to DB via `save_compliance_state` / `load_compliance_state` in the node lifecycle.
+**Persistence:** Compliance state is stored in EVM storage slots under the compliance precompile address (`0x205`). No separate DB persistence is needed — state is committed atomically with the EVM state root.
 
 ---
 
@@ -150,7 +139,7 @@ All protocol components are production-ready. No remaining gaps.
 
 | Component | Status |
 |-----------|--------|
-| Precompile execution | 🟢 Ready | Atomic rollback covers BalanceState + ComplianceEngine + ShieldedState |
+| Precompile execution | 🟢 Ready | Atomic rollback covers all EVM storage mutations via revm Journal |
 | Balance management | 🟢 Ready | Checked arithmetic, no known gaps |
 | Asset registry | 🟢 Ready | `registered_at` set by caller, total supply tracked on mint |
 | Gas/fee model | 🟢 Ready | PoolSponsor implemented, all sponsor variants wired, priority fee enforced |

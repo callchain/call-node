@@ -13,11 +13,11 @@
 
 ## 1. 概述
 
-Callchain 是一个高性能 Layer-1 区块链，采用**单一 EVM 执行域架构**：所有交易均为标准 EVM 交易，协议层功能（资产转账、桥接、Agent 支付、Shielded 隐私等）通过预编译合约地址（`0x101`–`0x209`）暴露给 EVM。协议状态与 EVM 状态通过内部桥接机制实现资产在两层之间的无缝流转。
+Callchain 是一个高性能 Layer-1 区块链，采用**单一 EVM 执行域架构**：所有交易均为标准 EVM 交易，协议功能（资产转账、桥接、Agent 支付、Shielded 隐私、合规、治理等）通过预编译合约地址（`0x101`–`0x209`）暴露给 EVM。所有状态统一存储在 EVM 存储中，不存在独立的协议层状态。
 
 ### 1.1 设计原则
 
-- **资产一等公民**：稳定币等资产在协议层拥有原生余额映射，享受确定性执行和固定费用
+- **资产一等公民**：稳定币等资产在 EVM 存储中拥有原生余额映射，享受确定性执行和固定费用
 - **开放发行**：任何人都能在链上注册资产，无需许可
 - **EVM 兼容**：完全兼容以太坊，现有 DeFi 生态可无缝迁移
 - **单一执行域**：所有交易均为 EVM 交易，协议功能通过预编译地址暴露
@@ -35,18 +35,13 @@ Callchain 是一个高性能 Layer-1 区块链，采用**单一 EVM 执行域架
                          │
           ┌──────────────┼──────────────┐
           ▼              ▼              ▼
-   预编译合约        EVM 合约        系统交易
-   (0x101-0x209)   (DeFi/ERC-20)   (奖励/费用结算)
-          │              │
-          ▼              ▼
-   ProtocolBalances   ERC-20 Storage
-   (协议级余额映射)   (合约独立余额)
+   预编译合约        EVM 合约        费用结算
+   (0x101-0x209)   (DeFi/ERC-20)   (验证者奖励)
           │              │
           └──────────┬───┘
                      ▼
-            Internal Bridge
-           (协议级内部桥接)
-           lock-and-release 机制
+              EVM 统一存储
+         (所有状态共存于 EVM 存储槽)
 ```
 
 ---
@@ -144,9 +139,9 @@ reth-trie-db = { git = "https://github.com/paradigmxyz/reth", rev = "a550b7a" }
 struct Block {
     header: BlockHeader,
     evm_txs: Vec<EvmTx>,                     // EVM 交易（RLP 编码原始字节）
-    system_txs: Vec<SystemTx>,               // 系统交易
-    bridge_operations: Vec<BridgeOp>,         // 桥接操作
 }
+
+// 注：不存在 system_txs 或 bridge_operations 字段；所有操作均为 EVM 交易
 
 struct BlockHeader {
     parent_hash: Hash,
@@ -169,15 +164,10 @@ struct BlockHeader {
 1. 执行 EVM 交易（evm_txs）
    - 标准以太坊交易通过 revm 执行
    - 协议操作通过调用预编译地址（0x101–0x209）触发
-2. 执行桥接操作（bridge_operations）
-   - 处理 EVM → Protocol 的提取请求
-   - 处理 Protocol → EVM 的存款请求
-3. 执行系统交易（system_txs）
-   - 验证者奖励分配
-   - 费用结算
-   - 合规策略更新
-4. 计算最终状态根，打包区块头
+2. 计算最终状态根，打包区块头
 ```
+
+注：仅有 2 步 —— 执行 EVM 交易后计算状态根。不存在独立的桥接或系统交易步骤。
 
 ---
 
@@ -185,7 +175,7 @@ struct BlockHeader {
 
 ### 3.1 资产注册表
 
-任何人均可注册资产。注册后自动获得协议层余额映射。
+任何人均可注册资产。注册后自动在 EVM 存储中创建资产状态。
 
 ```rust
 struct Asset {
@@ -226,21 +216,35 @@ fn register_asset(
 注册时：
 1. 扣除注册费（防止垃圾注册）
 2. 分配唯一 AssetId
-3. 创建协议层余额映射，`balances[issuer] = initial_supply`
+3. 在 EVM 存储中写入初始余额，`storage.write(0x201, balance_slot(asset_id, issuer), initial_supply)`
 4. 在 EVM 层自动部署对应的 ERC-20 合约
-5. ERC-20 合约初始供应为 0（所有资产在协议层）
-6. 桥接合约获得该代币的 mint/burn 权限
+5. ERC-20 合约初始供应 = initial_supply（所有资产统一在 EVM 存储中）
+6. 预编译合约通过 StorageRef 直接读写 EVM 存储管理余额
 
 ### 3.3 余额管理
 
+所有资产余额统一存储在 EVM 存储中，预编译通过 `StorageRef` 直接读写：
+
 ```rust
-/// 协议层余额映射
+/// 资产余额存储在 EVM 存储槽中（通过预编译地址 0x201 管理）
 /// asset_id → (address → balance)
-type ProtocolBalances = HashMap<AssetId, HashMap<Address, u128>>;
+/// 实际存储：address(0x201) 的存储槽映射
+fn read_balance(storage: &StorageRef, asset_id: AssetId, addr: Address) -> u128 {
+    let slot = compute_balance_slot(asset_id, addr);
+    storage.read(PRECOMPILE_ASSET, slot).as_u128()
+}
+
+fn write_balance(storage: &mut StorageRef, asset_id: AssetId, addr: Address, amount: u128) {
+    let slot = compute_balance_slot(asset_id, addr);
+    storage.write(PRECOMPILE_ASSET, slot, U256::from(amount));
+}
 
 /// 允许度映射（用于 approve/transferFrom）
 /// (asset_id, owner, spender) → amount
-type Allowances = HashMap<(AssetId, Address, Address), u128>;
+fn read_allowance(storage: &StorageRef, asset_id: AssetId, owner: Address, spender: Address) -> u128 {
+    let slot = compute_allowance_slot(asset_id, owner, spender);
+    storage.read(PRECOMPILE_ASSET, slot).as_u128()
+}
 ```
 
 ### 3.4 合规策略
@@ -260,11 +264,11 @@ enum CompliancePolicy {
 }
 ```
 
-协议层在每次转账前执行合规检查：
+预编译在每次转账前执行合规检查（通过 StorageRef 读取 EVM 存储中的合规状态）：
 
 ```rust
 fn check_compliance(
-    state: &ProtocolState,
+    storage: &StorageRef,
     asset: &Asset,
     from: Address,
     to: Address,
@@ -295,62 +299,49 @@ fn check_compliance(
 
 ### 3.5 协议预编译调用模型 (Protocol Precompile Model)
 
-所有协议层功能（资产转账、桥接、Agent 支付、Shielded 隐私等）均通过 EVM 预编译地址暴露。用户发送标准 EVM 交易，目标地址为预编译地址，数据为 ABI 编码的操作参数。
+所有协议功能（资产转账、桥接、Agent 支付、Shielded 隐私等）均通过 EVM 预编译地址暴露。用户发送标准 EVM 交易，目标地址为预编译地址，数据为 ABI 编码的操作参数。
 
 **预编译地址范围：** `0x101` – `0x209`
 
 ```rust
 /// 预编译地址分配
-const PRECOMPILE_ASSET_REGISTRY: Address = address!(0x101);  // 资产注册
-const PRECOMPILE_TRANSFER: Address     = address!(0x102);  // 单笔转账
-const PRECOMPILE_BATCH_TRANSFER: Address = address!(0x103); // 批量转账
-const PRECOMPILE_APPROVE: Address      = address!(0x104);  // 授权
-const PRECOMPILE_TRANSFER_FROM: Address = address!(0x105); // 代授权转账
-const PRECOMPILE_MINT: Address         = address!(0x106);  // 发行方增发
-const PRECOMPILE_BURN: Address         = address!(0x107);  // 发行方销毁
-const PRECOMPILE_BRIDGE_DEPOSIT: Address = address!(0x108); // 协议层 → EVM 层桥接
-const PRECOMPILE_BRIDGE_WITHDRAW: Address = address!(0x109); // EVM 层 → 协议层桥接
-const PRECOMPILE_AGENT_PAY: Address    = address!(0x10A);  // Agent 代付
-const PRECOMPILE_AGENT_BATCH_PAY: Address = address!(0x10B); // Agent 批量支付
-const PRECOMPILE_AGENT_CALL: Address   = address!(0x10C);  // Agent 调用 EVM 合约
-const PRECOMPILE_SHIELDED_DEPOSIT: Address = address!(0x10D); // 存入 Shielded Pool
-const PRECOMPILE_SHIELDED_TRANSFER: Address = address!(0x10E); // 隐私转账
-const PRECOMPILE_SHIELDED_WITHDRAW: Address = address!(0x10F); // 从 Shielded Pool 提取
-const PRECOMPILE_UPDATE_COMPLIANCE: Address = address!(0x110); // 更新合规状态
-// ... 预留至 0x209
+const PRECOMPILE_ORACLE: Address       = address!(0x101);  // 预言机（价格喂送、TWAP）
+const PRECOMPILE_EXTERNAL_BRIDGE: Address = address!(0x103);  // 外部桥接（存款/提款/挑战）
+const PRECOMPILE_ASSET: Address        = address!(0x201);  // 资产（转账、批量转账、授权、transferFrom、增发、销毁、注册）
+const PRECOMPILE_SHIELDED: Address     = address!(0x202);  // 隐私池（存款、转账、提款）
+const PRECOMPILE_GOVERNANCE: Address   = address!(0x203);  // 治理（提议、投票、排队、执行、紧急暂停/恢复）
+const PRECOMPILE_VALIDATOR: Address    = address!(0x204);  // 验证者质押（质押、解押、领取解绑）
+const PRECOMPILE_COMPLIANCE: Address   = address!(0x205);  // 合规（更新合规、检查合规）
+const PRECOMPILE_SWITCH: Address       = address!(0x207);  // 切换（已废弃：所有状态统一在 EVM 存储中）
+const PRECOMPILE_AGENT: Address        = address!(0x209);  // Agent（注册、授权、撤销）
+// 0x10a–0x1ff 预留用于未来协议操作
 ```
 
 **预编译执行上下文：**
 
-预编译合约通过 Thread-Local 状态共享（`StateHookGuard`）访问协议层状态，在 revm 执行框架内运行：
+预编译合约通过 `StorageRef` 安全访问 EVM 存储，在 revm 执行框架内运行。`StorageRef` 分解胖指针避免别名可变引用，所有协议状态（余额、资产、验证者等）以预编译地址存储在 EVM 存储槽中。revm 的 Journal 机制提供每次调用的原子性和失败自动回滚：
 
 ```rust
-/// 预编译执行入口
+/// 预编译执行入口（由 revm 在 EVM 执行期间调用）
 fn execute_precompile(
     address: Address,
     input: &Bytes,
     gas_limit: u64,
     evm_context: &mut Context,
 ) -> PrecompileResult {
-    // 1. 通过 StateHookGuard 获取协议状态引用
-    let state = StateHookGuard::current();
+    // 1. 建立安全存储引用
+    let storage = StorageRef::new();
 
-    // 2. 解析 ABI 编码的输入
-    let decoded = abi_decode(address, input)?;
+    // 2. 解析 ABI 编码的输入并分发到对应处理器
+    let result = dispatch_precompile(address, input, gas_limit, &storage);
 
-    // 3. 执行协议操作
-    let result = match address {
-        PRECOMPILE_TRANSFER => execute_transfer(state, decoded)?,
-        PRECOMPILE_BATCH_TRANSFER => execute_batch_transfer(state, decoded)?,
-        PRECOMPILE_BRIDGE_DEPOSIT => execute_bridge_deposit(state, decoded)?,
-        PRECOMPILE_AGENT_PAY => execute_agent_pay(state, decoded)?,
-        PRECOMPILE_SHIELDED_TRANSFER => execute_shielded_transfer(state, decoded)?,
-        // ... 其他预编译
-        _ => return Err(PrecompileError::NotFound),
-    };
+    // 3. 失败时 revm 的 Journal 自动回滚 EVM 状态（包括通过 StorageRef 的存储写入）
+    match &result {
+        Ok(_) => {},
+        Err(_) => {}, // Journal 自动回滚，无需额外操作
+    }
 
-    // 4. 返回 ABI 编码的输出
-    Ok(PrecompileOutput::new(gas_used, abi_encode(result)))
+    result
 }
 ```
 
@@ -358,31 +349,27 @@ fn execute_precompile(
 
 ```solidity
 // 用例 1：发工资 — 单笔 EVM 交易批量支付给 100 人
-// 调用预编译 0x103 (BatchTransfer)
+// 调用资产预编译 0x201 (batchTransfer)
 bytes memory data = abi.encode(
     USDC_ASSET_ID,           // uint64 asset_id
     recipients,              // address[] to
     amounts,                 // uint128[] amounts
     "PAYROLL-MAR-2026"       // string reference
 );
-address(PRECOMPILE_BATCH_TRANSFER).call(data);
+address(0x201).call(data);
 
-// 用例 2：DeFi 入场 — 桥接 + ERC-20 approve 一步完成
-// 交易 1：调用预编译 0x108 (BridgeDeposit) 将 USDC 桥到 EVM 层
+// 用例 2：跨链桥接 — 调用外部桥接预编译 0x103
 bytes memory bridgeData = abi.encode(USDC_ASSET_ID, user_address, 1000_000000);
-address(PRECOMPILE_BRIDGE_DEPOSIT).call(bridgeData);
+address(0x103).call(bridgeData);
 
-// 交易 2：调用标准 ERC-20 approve（EVM 合约层）
-usdcToken.approve(dexRouter, type(uint256).max);
-
-// 用例 3：Agent 自动付款 — 调用预编译 0x10A (AgentPay)
+// 用例 3：Agent 自动付款 — 调用 Agent 预编译 0x209
 bytes memory agentData = abi.encode(
     agent_id,                // uint64 agent_id
     USDC_ASSET_ID,           // uint64 asset_id
     vendor,                  // address to
     100_000000               // uint128 amount
 );
-address(PRECOMPILE_AGENT_PAY).call(agentData);
+address(0x209).call(agentData);
 ```
 
 **设计理由：**
@@ -391,7 +378,7 @@ address(PRECOMPILE_AGENT_PAY).call(agentData);
 2. **工具兼容**：MetaMask、Foundry、Hardhat 等以太坊工具可直接使用
 3. **原子性**：单笔 EVM 交易内可组合多个预编译调用（通过合约或 multicall）
 4. **费用统一**：统一使用 EVM gas 模型，无需独立的费用计算
-5. **状态隔离**：预编译通过 `StateHookGuard` 访问协议状态，与 EVM 状态互不干扰
+5. **状态统一**：预编译通过 `StorageRef` 访问 EVM 存储，所有协议状态与 EVM 状态共存于同一存储层
 
 **支付备注（PaymentMemo）：**
 
@@ -419,11 +406,10 @@ fn execute_precompile(
     gas_limit: u64,
     evm_context: &mut Context,
 ) -> PrecompileResult {
-    // 1. 通过 StateHookGuard 获取协议状态的可变引用
-    let state = StateHookGuard::current();
+    // 1. 通过 StorageRef 获取 EVM 存储的安全引用
+    let storage = StorageRef::new();
 
-    // 2. 保存协议状态快照（用于回滚）
-    let state_snapshot = state.take_snapshot();
+    // 2. revm Journal 自动处理回滚，无需额外快照
 
     // 3. 解析 ABI 编码输入
     let decoded = match abi_decode(address, input) {
@@ -433,89 +419,98 @@ fn execute_precompile(
 
     // 4. 执行对应协议操作
     let result = match address {
-        PRECOMPILE_TRANSFER => {
-            let (asset_id, to, amount) = decoded.as_transfer()?;
-            check_compliance(state, asset_id, msg_sender, to)?;
-            transfer_balance(state, asset_id, msg_sender, to, amount)?;
-        }
-        PRECOMPILE_BATCH_TRANSFER => {
-            let (asset_id, payments) = decoded.as_batch_transfer()?;
-            for payment in payments {
-                check_compliance(state, asset_id, msg_sender, payment.to)?;
-                transfer_balance(state, asset_id, msg_sender, payment.to, payment.amount)?;
+        PRECOMPILE_ASSET => {
+            match decoded.asset_op()? {
+                AssetOp::Transfer { asset_id, to, amount } => {
+                    check_compliance(&storage, asset_id, msg_sender, to)?;
+                    transfer_balance(&mut storage, asset_id, msg_sender, to, amount)?;
+                }
+                AssetOp::BatchTransfer { asset_id, payments } => {
+                    for payment in payments {
+                        check_compliance(&storage, asset_id, msg_sender, payment.to)?;
+                        transfer_balance(&mut storage, asset_id, msg_sender, payment.to, payment.amount)?;
+                    }
+                }
+                AssetOp::Approve { asset_id, spender, amount } => {
+                    set_allowance(&mut storage, asset_id, msg_sender, spender, amount)?;
+                }
+                AssetOp::TransferFrom { asset_id, from, to, amount } => {
+                    spend_allowance(&mut storage, asset_id, from, msg_sender, to, amount)?;
+                }
+                AssetOp::Mint { asset_id, to, amount } => {
+                    let asset = get_asset(&storage, asset_id)?;
+                    ensure!(asset.issuer == msg_sender, "Only issuer can mint");
+                    mint_balance(&mut storage, asset_id, to, amount)?;
+                }
+                AssetOp::Burn { asset_id, from, amount } => {
+                    let asset = get_asset(&storage, asset_id)?;
+                    ensure!(asset.issuer == msg_sender, "Only issuer can burn");
+                    burn_balance(&mut storage, asset_id, from, amount)?;
+                }
+                AssetOp::Register { name, symbol, decimals, policy } => {
+                    register_asset(&mut storage, msg_sender, name, symbol, decimals, policy)?;
+                }
             }
         }
-        PRECOMPILE_APPROVE => {
-            let (asset_id, spender, amount) = decoded.as_approve()?;
-            set_allowance(state, asset_id, msg_sender, spender, amount)?;
+        PRECOMPILE_AGENT => {
+            match decoded.agent_op()? {
+                AgentOp::Pay { agent_id, asset_id, to, amount } => {
+                    execute_agent_pay(&mut storage, agent_id, asset_id, to, amount)?;
+                }
+                AgentOp::BatchPay { agent_id, asset_id, payments } => {
+                    execute_agent_batch_pay(&mut storage, agent_id, asset_id, payments)?;
+                }
+                AgentOp::Call { agent_id, asset_id, contract, data, value } => {
+                    execute_agent_call(&mut storage, agent_id, asset_id, contract, data, value)?;
+                }
+            }
         }
-        PRECOMPILE_TRANSFER_FROM => {
-            let (asset_id, from, to, amount) = decoded.as_transfer_from()?;
-            spend_allowance(state, asset_id, from, msg_sender, to, amount)?;
+        PRECOMPILE_EXTERNAL_BRIDGE => {
+            match decoded.bridge_op()? {
+                BridgeOp::Deposit { asset_id, to, amount } => {
+                    execute_bridge_deposit(&mut storage, asset_id, msg_sender, to, amount)?;
+                }
+                BridgeOp::Withdraw { asset_id, to, amount } => {
+                    execute_bridge_withdraw(&mut storage, asset_id, msg_sender, to, amount)?;
+                }
+            }
         }
-        PRECOMPILE_MINT => {
-            let (asset_id, to, amount) = decoded.as_mint()?;
-            let asset = state.get_asset(asset_id)?;
-            ensure!(asset.issuer == msg_sender, "Only issuer can mint");
-            mint_balance(state, asset_id, to, amount)?;
-        }
-        PRECOMPILE_BURN => {
-            let (asset_id, from, amount) = decoded.as_burn()?;
-            let asset = state.get_asset(asset_id)?;
-            ensure!(asset.issuer == msg_sender, "Only issuer can burn");
-            burn_balance(state, asset_id, from, amount)?;
-        }
-        PRECOMPILE_AGENT_PAY => {
-            let (agent_id, asset_id, to, amount) = decoded.as_agent_pay()?;
-            execute_agent_pay(state, agent_id, asset_id, to, amount)?;
-        }
-        PRECOMPILE_AGENT_BATCH_PAY => {
-            let (agent_id, asset_id, payments) = decoded.as_agent_batch_pay()?;
-            execute_agent_batch_pay(state, agent_id, asset_id, payments)?;
-        }
-        PRECOMPILE_AGENT_CALL => {
-            let (agent_id, asset_id, contract, data, value) = decoded.as_agent_call()?;
-            execute_agent_call(state, agent_id, asset_id, contract, data, value)?;
-        }
-        PRECOMPILE_BRIDGE_DEPOSIT => {
-            let (asset_id, to, amount) = decoded.as_bridge_deposit()?;
-            execute_bridge_deposit(state, asset_id, msg_sender, to, amount)?;
-        }
-        PRECOMPILE_UPDATE_COMPLIANCE => {
+        PRECOMPILE_COMPLIANCE => {
             let (asset_id, target, status) = decoded.as_update_compliance()?;
-            let asset = state.get_asset(asset_id)?;
+            let asset = get_asset(&storage, asset_id)?;
             ensure!(asset.issuer == msg_sender, "Only issuer can update compliance");
-            update_compliance_status(state, target, asset_id, status)?;
+            update_compliance_status(&mut storage, target, asset_id, status)?;
         }
-        PRECOMPILE_SHIELDED_TRANSFER => {
-            let (asset_id, commitments, nullifiers, proof) = decoded.as_shielded_transfer()?;
-            verify_zk_proof(proof)?;
-            for nf in &nullifiers {
-                ensure!(!state.is_nullifier_spent(asset_id, *nf), "Nullifier already spent");
+        PRECOMPILE_SHIELDED => {
+            match decoded.shielded_op()? {
+                ShieldedOp::Transfer { asset_id, commitments, nullifiers, proof } => {
+                    verify_zk_proof(proof)?;
+                    for nf in &nullifiers {
+                        ensure!(!is_nullifier_spent(&storage, asset_id, *nf), "Nullifier already spent");
+                    }
+                    let asset = get_asset(&storage, asset_id)?;
+                    verify_shielded_balance(&asset, &nullifiers, &commitments, proof)?;
+                    for nf in nullifiers {
+                        mark_nullifier_spent(&mut storage, asset_id, nf);
+                    }
+                    for cm in commitments {
+                        append_commitment(&mut storage, asset_id, cm);
+                    }
+                }
+                ShieldedOp::Deposit { asset_id, from, commitment, amount } => {
+                    let balance = get_owner_balance(&storage, from, asset_id)?;
+                    ensure!(balance >= amount, "Insufficient transparent balance");
+                    deduct_owner_balance(&mut storage, from, asset_id, amount)?;
+                    append_commitment(&mut storage, asset_id, commitment);
+                }
+                ShieldedOp::Withdraw { asset_id, to, nullifier, proof } => {
+                    ensure!(!is_nullifier_spent(&storage, asset_id, nullifier), "Nullifier already spent");
+                    verify_zk_proof(proof)?;
+                    let amount = extract_amount_from_proof(proof)?;
+                    mark_nullifier_spent(&mut storage, asset_id, nullifier);
+                    credit_owner_balance(&mut storage, to, asset_id, amount)?;
+                }
             }
-            let asset = state.get_asset(asset_id)?;
-            verify_shielded_balance(&asset, &nullifiers, &commitments, proof)?;
-            for nf in nullifiers {
-                state.mark_nullifier_spent(asset_id, nf);
-            }
-            for cm in commitments {
-                state.append_commitment(asset_id, cm);
-            }
-        }
-        PRECOMPILE_SHIELDED_DEPOSIT => {
-            let (asset_id, from, commitment, amount) = decoded.as_shielded_deposit()?;
-            let balance = state.get_owner_balance(from, asset_id)?;
-            ensure!(balance >= amount, "Insufficient transparent balance");
-            state.deduct_owner_balance(from, asset_id, amount)?;
-            state.append_commitment(asset_id, commitment);
-        }
-        PRECOMPILE_SHIELDED_WITHDRAW => {
-            let (asset_id, to, nullifier, proof) = decoded.as_shielded_withdraw()?;
-            ensure!(!state.is_nullifier_spent(asset_id, nullifier), "Nullifier already spent");
-            verify_zk_proof(proof)?;
-            let amount = extract_amount_from_proof(proof)?;
-            state.mark_nullifier_spent(asset_id, nullifier);
-            state.credit_owner_balance(to, asset_id, amount)?;
         }
         _ => return Err(PrecompileError::NotFound),
     };
@@ -525,7 +520,7 @@ fn execute_precompile(
     ensure!(gas_used <= gas_limit, "Out of gas");
 
     // 6. 提交状态变更（revm 的 Journal 机制保证 EVM 状态原子性）
-    // 协议状态变更通过 StateHookGuard 直接写入，失败时由快照回滚
+    // 所有状态变更通过 StorageRef 写入 EVM 存储，失败时 Journal 自动回滚
     Ok(PrecompileOutput::new(gas_used, abi_encode(result)))
 }
 
@@ -551,38 +546,30 @@ impl ProtocolState {
 }
 ```
 
-**原子性保证：** 预编译执行使用两层保障：
-1. **EVM 层**：revm 的 Journal 机制保证单交易原子性（EVM 状态回滚）
-2. **协议层**：预编译内部保存状态快照，任何协议操作失败时回滚到快照状态
+**原子性保证：** 预编译执行的原子性由 revm 的 Journal 机制单一保障：
+1. **EVM 层**：revm 的 Journal 机制保证单交易原子性（所有状态回滚）
 
 预编译失败时返回 `PrecompileError`，revm 将该错误转换为 EVM revert，整笔交易回滚（已消耗的 gas 不退还）。
 
-**Thread-Local 状态共享：** `StateHookGuard` 使用线程本地存储（TLS）在 revm 执行期间共享协议状态引用，避免跨层状态拷贝：
+**StorageRef 安全存储引用：** `StorageRef` 分解胖指针避免别名可变引用，所有协议状态（余额、资产、验证者等）以预编译地址存储在 EVM 存储槽中：
 
 ```rust
-/// 状态钩子守卫 — 在 EVM 交易执行期间提供协议状态访问
-thread_local! {
-    static PROTOCOL_STATE: RefCell<Option<Rc<RefCell<ProtocolState>>>> = const { RefCell::new(None) };
-}
+/// 安全存储引用 — 在 EVM 交易执行期间提供协议状态访问
+struct StorageRef;
 
-struct StateHookGuard;
-
-impl StateHookGuard {
-    fn install(state: Rc<RefCell<ProtocolState>>) -> Self {
-        PROTOCOL_STATE.with(|s| *s.borrow_mut() = Some(state));
-        StateHookGuard
+impl StorageRef {
+    fn new() -> Self {
+        StorageRef
     }
 
-    fn current() -> Rc<RefCell<ProtocolState>> {
-        PROTOCOL_STATE.with(|s| {
-            s.borrow().as_ref().expect("StateHookGuard not installed").clone()
-        })
+    fn read(&self, address: Address, slot: U256) -> U256 {
+        // 通过 revm 的 Journal 读取 EVM 存储
+        revm_journal_read(address, slot)
     }
-}
 
-impl Drop for StateHookGuard {
-    fn drop(&mut self) {
-        PROTOCOL_STATE.with(|s| *s.borrow_mut() = None);
+    fn write(&mut self, address: Address, slot: U256, value: U256) {
+        // 通过 revm 的 Journal 写入 EVM 存储
+        revm_journal_write(address, slot, value);
     }
 }
 ```
@@ -595,52 +582,48 @@ impl Drop for StateHookGuard {
 
 | 预编译操作 | 基础 Gas | 动态 Gas | 说明 |
 |-----------|---------|---------|------|
-| Transfer (0x102) | 10,000 | 16 × calldata 字节 | 单笔转账 |
-| BatchTransfer (0x103) | 10,000 | 1,000 × 收款人数 | 批量转账 |
-| Approve (0x104) | 5,000 | 16 × calldata 字节 | 授权 |
-| TransferFrom (0x105) | 8,000 | 16 × calldata 字节 | 代授权转账 |
-| Mint (0x106) | 10,000 | 16 × calldata 字节 | 发行方增发 |
-| Burn (0x107) | 8,000 | 16 × calldata 字节 | 发行方销毁 |
-| BridgeDeposit (0x108) | 15,000 | 16 × calldata 字节 | 协议层 → EVM 层 |
-| AgentPay (0x10A) | 8,000 | 16 × calldata 字节 | Agent 代付 |
-| AgentBatchPay (0x10B) | 8,000 | 800 × 收款人数 | Agent 批量支付 |
-| ShieldedTransfer (0x10E) | 50,000 | 16 × calldata 字节 | 隐私转账（含 ZK 验证） |
-| ShieldedDeposit (0x10D) | 20,000 | 16 × calldata 字节 | 存入 Shielded Pool |
-| ShieldedWithdraw (0x10F) | 25,000 | 16 × calldata 字节 | 从 Shielded Pool 提取 |
+| Asset — transfer (0x201) | 5,000 | sloads×50 + sstores×500 | 单笔转账 |
+| Asset — batchTransfer (0x201) | 5,000 | sloads×50 + sstores×500 | 批量转账 |
+| Asset — approve (0x201) | 3,000 | sloads×50 + sstores×500 | 授权 |
+| Asset — transferFrom (0x201) | 5,000 | sloads×50 + sstores×500 | 代授权转账 |
+| Asset — mint (0x201) | 5,000 | sloads×50 + sstores×500 | 发行方增发 |
+| Asset — burn (0x201) | 5,000 | sloads×50 + sstores×500 | 发行方销毁 |
+| ExternalBridge — deposit/withdraw (0x103) | 10,000 | sloads×50 + sstores×500 | 外部桥接 |
+| Agent — pay (0x209) | 5,000 | sloads×50 + sstores×500 | Agent 代付 |
+| Agent — batchPay (0x209) | 5,000 | sloads×50 + sstores×500 | Agent 批量支付 |
+| Shielded — transfer (0x202) | 25,000 | sloads×50 + sstores×500 | 隐私转账（含 ZK 验证） |
+| Shielded — deposit (0x202) | 10,000 | sloads×50 + sstores×500 | 存入 Shielded Pool |
+| Shielded — withdraw (0x202) | 12,500 | sloads×50 + sstores×500 | 从 Shielded Pool 提取 |
 
 **费用计算示例（假设 base_fee = 1 wei/gas，priority_fee = 0）：**
 
 | 操作 | Gas 计算 | 总 Gas |
 |------|---------|--------|
-| 单笔转账 | 10,000 + 16 × 128 | 12,048 gas |
-| 批量支付 100 人 | 10,000 + 1,000 × 100 | 110,000 gas |
-| 100 笔独立转账 | 100 × 12,048 | 1,204,800 gas |
-| Shielded 转账 | 50,000 + 16 × 512 | 58,192 gas |
-| Agent 桥接 + 调用 | 15,000 + 16 × 128 + EVM 调用 gas | ~50,000 gas |
+| 单笔转账（2 sloads + 2 sstores） | 5,000 + 2×50 + 2×500 | 6,100 gas |
+| 批量支付 100 人（101 sloads + 200 sstores） | 5,000 + 101×50 + 200×500 | 110,050 gas |
+| 100 笔独立转账 | 100 × 6,100 | 610,000 gas |
+| Shielded 转账（10 sloads + 5 sstores） | 25,000 + 10×50 + 5×500 | 28,000 gas |
 
-100 人批量支付使用预编译批量操作节省 **~91%** gas（对比 100 笔独立转账）。
+100 人批量支付使用预编译批量操作节省 **~82%** gas（对比 100 笔独立转账）。
 
 **Gas 计算逻辑：**
 
 ```rust
-fn calculate_precompile_gas(address: Address, input_len: usize) -> u64 {
+fn calculate_precompile_gas(address: Address, sloads: u64, sstores: u64) -> u64 {
     let base_gas = match address {
-        PRECOMPILE_TRANSFER => 10_000,
-        PRECOMPILE_BATCH_TRANSFER => 10_000,
-        PRECOMPILE_APPROVE => 5_000,
-        PRECOMPILE_TRANSFER_FROM => 8_000,
-        PRECOMPILE_MINT => 10_000,
-        PRECOMPILE_BURN => 8_000,
-        PRECOMPILE_BRIDGE_DEPOSIT => 15_000,
-        PRECOMPILE_AGENT_PAY => 8_000,
-        PRECOMPILE_AGENT_BATCH_PAY => 8_000,
-        PRECOMPILE_SHIELDED_TRANSFER => 50_000,
-        PRECOMPILE_SHIELDED_DEPOSIT => 20_000,
-        PRECOMPILE_SHIELDED_WITHDRAW => 25_000,
+        PRECOMPILE_ASSET => 5_000,
+        PRECOMPILE_EXTERNAL_BRIDGE => 10_000,
+        PRECOMPILE_AGENT => 5_000,
+        PRECOMPILE_SHIELDED => 25_000,
+        PRECOMPILE_COMPLIANCE => 3_000,
+        PRECOMPILE_ORACLE => 2_000,
+        PRECOMPILE_GOVERNANCE => 5_000,
+        PRECOMPILE_VALIDATOR => 5_000,
+        PRECOMPILE_SWITCH => 3_000,
         _ => 0,
     };
 
-    let dynamic_gas = (input_len as u64).saturating_mul(16);
+    let dynamic_gas = sloads.saturating_mul(50).saturating_add(sstores.saturating_mul(500));
     base_gas.saturating_add(dynamic_gas)
 }
 ```
@@ -803,7 +786,7 @@ enum ShieldedComplianceMode {
 
 ### 3.9 智能账户 (Smart Accounts)
 
-Callchain 协议层原生支持三种身份认证方案，通过 `AuthScheme` 统一抽象。身份认证（谁有权签名）与 Gas 支付（谁来付费）是**两个独立维度**，可以自由组合。所有认证方案均通过标准 EVM 交易签名或授权机制实现。
+Callchain 原生支持三种身份认证方案，通过 `AuthScheme` 统一抽象。身份认证（谁有权签名）与 Gas 支付（谁来付费）是**两个独立维度**，可以自由组合。所有认证方案均通过标准 EVM 交易签名或授权机制实现。
 
 ```
 AuthScheme（谁签名）          Gas 支付（谁付费）
@@ -1225,7 +1208,7 @@ fn verify_session_key(account: Address, auth: &AuthScheme) -> Result<()> {
 #### 3.9.5 统一认证流程
 
 ```rust
-/// 协议层身份认证入口 — 替代原有单一签名验证
+/// 身份认证入口 — 替代原有单一签名验证
 fn verify_auth(account: Address, auth: &AuthScheme) -> Result<()> {
     match auth {
         AuthScheme::SingleSig { signature } => {
@@ -1309,26 +1292,20 @@ Session Key 和 Agent 账户是不同抽象层：
 
 ### 4.2 资产对应的 ERC-20 合约
 
-每个注册的协议资产在 EVM 层都有对应的 ERC-20 合约。该合约维护**独立的 EVM 层余额**，与协议层余额通过内部桥接转换。
+每个注册的协议资产在 EVM 层都有对应的 ERC-20 合约。该合约余额与预编译管理的余额**统一存储在 EVM 存储中**，通过 `StorageRef` 读写，不存在独立的协议层余额。
 
 ```solidity
 /// 协议资产对应的 ERC-20 合约
-/// 维护独立的 EVM 层余额，通过桥接与协议层转换
+/// 余额统一存储在 EVM 存储中，预编译通过 StorageRef 直接读写
 contract AssetToken is IERC20 {
     uint8 public immutable decimals;
     string public name;
     string public symbol;
     uint256 public totalSupply;
 
-    // EVM 层独立余额
+    // EVM 统一存储中的余额（预编译 0x201 也读写同一存储槽）
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
-
-    // 只有桥接合约可以铸造/销毁
-    modifier onlyBridge() {
-        require(msg.sender == BRIDGE_CONTRACT, "Only bridge");
-        _;
-    }
 
     function balanceOf(address account) external view returns (uint256) {
         return _balances[account];
@@ -1351,17 +1328,6 @@ contract AssetToken is IERC20 {
         _balances[to] += amount;
         return true;
     }
-
-    // 桥接接口
-    function bridgeMint(address to, uint256 amount) external onlyBridge {
-        _balances[to] += amount;
-        totalSupply += amount;
-    }
-
-    function bridgeBurn(address from, uint256 amount) external onlyBridge {
-        _balances[from] -= amount;
-        totalSupply -= amount;
-    }
 }
 ```
 
@@ -1377,44 +1343,39 @@ contract AssetToken is IERC20 {
 
 ---
 
-## 5. 内部桥接
+## 5. 外部桥接
 
 ### 5.1 设计
 
-协议层余额和 EVM 层余额是**两份独立的账本**，通过内部桥接合约进行转换。
+所有余额统一存储在 EVM 存储中，预编译通过 `StorageRef` 直接读写，不存在独立的协议层账本。
 
 ```
-协议层                    EVM 层
-─────────                ─────────
-Asset: USDX              ERC-20: USDX
-balances[A] = 100        balanceOf(A) = 0
-                         (独立余额)
+统一 EVM 存储
+─────────────────
+Asset: USDX
+balanceOf(A) = 100
 
-A 桥接到 EVM 层：
-  balances[A] = 0        balanceOf(A) = 100
-                         (锁仓释放)
-
-A 桥回协议层：
-  balances[A] = 100      balanceOf(A) = 0
+所有余额统一存储在 EVM 存储中，
+预编译 0x201 和 ERC-20 合约读写同一存储槽。
 ```
 
 ### 5.2 桥接操作
 
+桥接操作通过调用外部桥接预编译 `0x103` 实现，所有桥接状态存储在 EVM 存储中，不存在独立的协议层余额。
+
 ```rust
-enum BridgeOp {
-    /// 协议层 → EVM 层
-    /// 从协议余额中扣除，在 EVM 层铸造
-    DepositToEvm {
+/// 外部桥接预编译操作（通过 EVM 交易调用 0x103）
+enum ExternalBridgeOp {
+    /// 外部链 → Callchain（存款）
+    Deposit {
         asset_id: AssetId,
-        from: Address,
         to: Address,
         amount: u128,
+        signatures: Vec<Signature>,   // 14+ 个验证者签名
     },
-    /// EVM 层 → 协议层
-    /// 在 EVM 层销毁，恢复到协议余额
-    WithdrawToProtocol {
+    /// Callchain → 外部链（提款）
+    Withdraw {
         asset_id: AssetId,
-        from: Address,
         to: Address,
         amount: u128,
     },
@@ -1423,47 +1384,57 @@ enum BridgeOp {
 
 ### 5.3 桥接执行
 
-**Protocol → EVM（Deposit）：**
+**外部链 → Callchain（Deposit）：**
 
 ```rust
-fn execute_deposit(op: &BridgeOp) -> Result<()> {
-    let asset = get_asset(op.asset_id)?;
+fn execute_bridge_deposit(
+    storage: &mut StorageRef,
+    asset_id: AssetId,
+    sender: Address,
+    to: Address,
+    amount: u128,
+) -> Result<()> {
+    let asset = get_asset(storage, asset_id)?;
 
-    // 1. 协议层扣除余额
-    let balance = protocol_balances
-        .get_mut(&op.asset_id)
-        .ok_or(AssetNotFound)?;
-    let user_balance = balance.get_mut(&op.from).ok_or(InsufficientBalance)?;
-    ensure!(*user_balance >= op.amount, InsufficientBalance);
-    *user_balance -= op.amount;
+    // 1. 验证验证者签名（14+ 个签名）
+    verify_bridge_signatures(...)?;
 
-    // 2. EVM 层铸造
-    evm_call(
-        asset.evm_contract,
-        encode("bridgeMint(address,uint256)", op.to, op.amount),
-    )?;
+    // 2. 直接在 EVM 存储中铸造余额（所有状态统一在 EVM 层）
+    let current_balance = storage.read(asset.evm_contract, balance_slot(to));
+    let new_balance = current_balance + amount;
+    storage.write(asset.evm_contract, balance_slot(to), new_balance);
+
+    // 3. 更新总供应
+    let total_supply = storage.read(asset.evm_contract, total_supply_slot());
+    storage.write(asset.evm_contract, total_supply_slot(), total_supply + amount);
 
     Ok(())
 }
 ```
 
-**EVM → Protocol（Withdraw）：**
+**Callchain → 外部链（Withdraw）：**
 
 ```rust
-fn execute_withdraw(op: &BridgeOp) -> Result<()> {
-    let asset = get_asset(op.asset_id)?;
+fn execute_bridge_withdraw(
+    storage: &mut StorageRef,
+    asset_id: AssetId,
+    sender: Address,
+    to: Address,
+    amount: u128,
+) -> Result<()> {
+    let asset = get_asset(storage, asset_id)?;
 
-    // 1. EVM 层销毁
-    evm_call(
-        asset.evm_contract,
-        encode("bridgeBurn(address,uint256)", op.from, op.amount),
-    )?;
+    // 1. 从 EVM 存储中扣除余额
+    let current_balance = storage.read(asset.evm_contract, balance_slot(sender));
+    ensure!(current_balance >= amount, InsufficientBalance);
+    storage.write(asset.evm_contract, balance_slot(sender), current_balance - amount);
 
-    // 2. 协议层增加余额
-    let balance = protocol_balances
-        .entry(op.asset_id)
-        .or_default();
-    *balance.entry(op.to).or_insert(0) += op.amount;
+    // 2. 更新总供应
+    let total_supply = storage.read(asset.evm_contract, total_supply_slot());
+    storage.write(asset.evm_contract, total_supply_slot(), total_supply - amount);
+
+    // 3. 生成提款证明（验证者后续在以太坊合约上释放资产）
+    emit_withdrawal_request(asset_id, to, amount);
 
     Ok(())
 }
@@ -1472,21 +1443,18 @@ fn execute_withdraw(op: &BridgeOp) -> Result<()> {
 ### 5.4 桥接时机
 
 ```
-每个区块的执行顺序中，桥接操作在第二步执行：
+桥接操作作为标准 EVM 交易执行：
 
 1. EVM 交易执行
-   → 用户可能在 EVM 层触发 bridge_withdraw
-   → 这些请求被加入待处理桥接队列
-   → 协议操作通过预编译调用在同一交易中完成
+   → 用户调用外部桥接预编译 0x103
+   → 预编译直接读写 EVM 存储
+   → 所有状态变更在单笔 EVM 交易内完成
 
-2. 桥接操作执行
-   → 处理待处理队列中的桥接请求
-   → 保证在同一区块内完成
-
-3. 系统交易执行
+2. 计算状态根
+   → 状态根包含所有 EVM 存储变更（含桥接状态）
 ```
 
-这意味着 **Protocol → EVM 和 EVM → Protocol 的转换在同一个区块内完成**，无需等待。
+这意味着 **桥接操作与 EVM 交易在同一执行域内完成**，无需独立的桥接步骤。
 
 ### 5.5 用户体验
 
@@ -1494,16 +1462,13 @@ fn execute_withdraw(op: &BridgeOp) -> Result<()> {
 场景：用户 A 想参与 EVM 层 DeFi
 
 钱包自动处理：
-  1. 检测到 A 的 USDX 在协议层
-  2. 用户发起 swap 操作
-  3. 钱包自动附加 bridge_deposit 操作
-  4. 同一个交易中完成：桥接 → swap
-  5. 用户无需感知"我在哪一层"
+  1. 用户发起 swap 操作
+  2. 所有操作通过 EVM 交易完成
+  3. 用户无需感知"我在哪一层"
 
 前端展示统一余额：
   Total USDX: 100
-  ├── Protocol: 30 (快速支付可用)
-  └── EVM: 70 (DeFi 可用)
+  └── EVM: 100 (所有余额均在 EVM 层)
 ```
 
 ---
@@ -1519,7 +1484,7 @@ Callchain 通过**验证者共识子集签名**实现跨链桥接，不依赖第
     │
     ├── 2/3 阈值 = 14 个签名
     ├── 验证者使用 secp256k1 密钥签名
-    ├── 签名在 Callchain 协议层验证（存款方向）
+    ├── 签名在 Callchain EVM 层验证（存款方向，通过预编译 0x103）
     └── 签名在以太坊合约验证（提款方向）
 
 安全性：
@@ -1574,20 +1539,20 @@ Callchain 验证者操作：
   5. 确认后，每个验证者用 secp256k1 私钥对 deposit_hash 签名
   6. 签名通过 P2P 网络传播，收集到 14 个签名后聚合
   7. 任意节点提交 ExternalBridgeDeposit 交易到 Callchain
-     （包含 14 个签名 + deposit 数据）
-  8. Callchain 协议层验证 14 个签名，验证通过后铸造对应资产
+     （包含 14 个签名 + deposit 数据，调用预编译 0x103）
+  8. Callchain EVM 层验证 14 个签名，验证通过后铸造对应资产到 EVM 存储
 ```
 
 ### 5.6.4 提款流程（Callchain → 外部链）
 
 ```
 用户在 Callchain 操作：
-  1. 发起 ExternalBridgeWithdraw 指令
-  2. Callchain 销毁对应资产
-  3. 提款请求加入待处理队列
+  1. 发起 ExternalBridgeWithdraw 交易（调用预编译 0x103）
+  2. Callchain 在 EVM 存储中销毁对应资产
+  3. 提款请求记录在 EVM 存储中
 
 验证者操作：
-  4. 验证者区块打包时收集提款请求
+  4. 验证者监听 EVM 存储中的提款请求
   5. 每个验证者对提款数据签名
   6. 收集到 14 个签名后，聚合提交到以太坊桥接合约
   7. 以太坊合约验证 14 个签名，验证通过后释放资产
@@ -1842,18 +1807,15 @@ Agent 操作通过调用预编译地址实现：
 
 ```solidity
 // Agent 相关预编译地址：
-// 0x10A — AgentPay
-// 0x10B — AgentBatchPay
-// 0x10C — AgentCall
-// 0x10D — AgentBridgeDeposit
+// 0x209 — Agent（pay, batchPay, call）
 //
 // Agent 可以在单笔 EVM 交易中组合多个预编译调用（通过合约或 multicall）：
 //
 // bytes memory bridgeData = abi.encode(agent_id, asset_id, to, amount);
-// address(PRECOMPILE_AGENT_BRIDGE_DEPOSIT).call(bridgeData);
+// address(PRECOMPILE_EXTERNAL_BRIDGE).call(bridgeData);
 //
 // bytes memory callData = abi.encode(agent_id, asset_id, contract, data, value);
-// address(PRECOMPILE_AGENT_CALL).call(callData);
+// address(PRECOMPILE_AGENT).call(callData);
 ```
 
 Agent 交易签名与封装：
@@ -1932,7 +1894,7 @@ fn execute_agent_tx(tx: &SignedAgentTx) -> Result<()> {
     verify_agent_tx(tx)?;
 
     // EVM gas 已由 revm 在执行期间扣除
-    // 预编译内部通过 StateHookGuard 访问协议状态
+    // 预编译内部通过 StorageRef 访问 EVM 存储
 
     // 提取预编译调用并执行（原子性由 revm Journal 保证）
     let precompile_calls = decode_precompile_calls(&tx.evm_tx.data)?;
@@ -2013,8 +1975,6 @@ enum IssuerAction {
 
 ```
 EvmTx               → gossipsub, 标准优先级
-BridgeOp            → 打包在区块中，不单独传播
-SystemTx            → 仅验证者生成
 ```
 
 ---
@@ -2138,7 +2098,7 @@ let tx = EvmTx {
     nonce: 42,
     gas_price: 10_000_000_000,
     gas_limit: 21_000,
-    to: Some(PRECOMPILE_TRANSFER),  // 0x102
+    to: Some(PRECOMPILE_ASSET),  // 0x201 (transfer)
     value: U256::ZERO,
     data: Bytes::from(abi_encode_transfer(USDC_ID, recipient, amount)),
     signature: sig,
@@ -2148,7 +2108,7 @@ let decoded = EvmTx::decode(&mut &rlp_bytes[..])?;
 
 // JSON 编码（RPC 输出）
 let json = serde_json::to_string(&tx)?;
-// → {"nonce":"0x2a","gasPrice":"0x2540be400","to":"0x000...0102",...}
+// → {"nonce":"0x2a","gasPrice":"0x2540be400","to":"0x000...0201",...}
 ```
 
 ---
@@ -2165,7 +2125,7 @@ let json = serde_json::to_string(&tx)?;
 callchain/
 ├── protocol/
 │   ├── assets/{asset_id}/          # 资产元数据
-│   ├── balances/{asset_id}/{addr}  # 协议层余额
+│   ├── balances/{asset_id}/{addr}  # 资产余额（统一在 EVM 存储中，此处为逻辑视图）
 │   └── allowances/{asset_id}/{owner}/{spender}  # 允许度
 ├── shielded/
 │   ├── merkle_tree/{asset_id}/     # 每个资产的 Merkle Tree
@@ -2181,7 +2141,7 @@ callchain/
 │   ├── contracts/{addr}/           # 合约代码
 │   └── storage/{addr}/{slot}       # 合约存储
 ├── bridge/
-│   └── pending_ops/                # 待处理桥接操作
+│   └── pending_ops/                # 已废弃：桥接状态统一在 EVM 存储中
 ├── consensus/
 │   ├── blocks/{height}             # 区块数据
 │   └── state/{height}              # 状态快照
@@ -2203,8 +2163,7 @@ callchain/
 节点数据 = 当前状态 + 历史区块 + 中间状态 + 索引 + 归档数据
 
 必须保留（不可 prune）：
-  ✓ 当前协议层余额
-  ✓ 当前 EVM 状态
+  ✓ 当前 EVM 状态（包含所有资产余额）
   ✓ 当前 Shielded Pool 状态（nullifier 集合、Merkle 根）
   ✓ 当前 Agent 注册与余额
   ✓ 区块头（用于链验证）
@@ -2456,29 +2415,37 @@ calld run \
 }
 → { asset_id, name, symbol, decimals, issuer, total_supply, policy }
 
-// 协议层余额查询
+// EVM 余额查询
 {
-    "method": "call_protocolBalance",
+    "method": "eth_getBalance",
+    "params": ["0x...", "latest"],
+    "id": 1
+}
+→ { balance: "1000000000000000000" }
+
+// 资产预编译余额查询
+{
+    "method": "call_assetBalance",
     "params": [42, "0x..."],
     "id": 1
 }
 → { balance: "1000000000000000000" }
 
-// 发起协议支付交易
+// 发起资产转账交易（调用预编译 0x201）
 {
-    "method": "call_sendPayment",
-    "params": [{ asset_id, from, to, amount, signature }],
+    "method": "eth_sendRawTransaction",
+    "params": ["0x..."],
     "id": 1
 }
 → { tx_hash }
 
-// 资产注册
+// 资产注册（调用预编译 0x201）
 {
-    "method": "call_register",
-    "params": [{ name, symbol, decimals, policy, signature }],
+    "method": "eth_sendRawTransaction",
+    "params": ["0x..."],
     "id": 1
 }
-→ { asset_id, evm_contract }
+→ { tx_hash }
 
 // 合规策略查询
 {
@@ -2488,13 +2455,13 @@ calld run \
 }
 → { policy: "OfacBlacklist", details: {...} }
 
-// 统一余额查询
+// 总余额查询（统一在 EVM 层）
 {
     "method": "call_totalBalance",
     "params": [42, "0x..."],
     "id": 1
 }
-→ { protocol: "30", evm: "70", total: "100" }
+→ { evm: "100", total: "100" }
 
 // Agent 注册
 {
@@ -2580,9 +2547,9 @@ calld run \
 ### 11.3 WebSocket
 
 支持 WebSocket 订阅：
-- `call_newPaymentBlock` — 新区块
-- `call_paymentReceived` — 收到协议支付
-- `call_bridgeCompleted` — 桥接完成
+- `call_newBlock` — 新区块
+- `call_txReceived` — 收到交易
+- `call_bridgeCompleted` — 外部桥接完成
 - `call_assetRegistered` — 新资产注册
 - `call_agentExecuted` — Agent 交易执行
 - `call_agentRevoked` — Agent 被撤销
@@ -2615,22 +2582,21 @@ CALL 是 Callchain 的原生代币，承担 Gas、质押、治理三重功能。
 
 ### 12.2 Gas 支付（EIP-1559 动态费率）
 
-所有协议层交易的 Gas 以 CALL 支付。采用**类 EIP-1559 动态费率**：每条指令定义固定的 gas unit，网络基础费率每区块自动调整，拥堵时涨价、空闲时降价。
+所有 EVM 交易的 Gas 以 CALL 支付。采用**类 EIP-1559 动态费率**：每条指令定义固定的 gas unit，网络基础费率每区块自动调整，拥堵时涨价、空闲时降价。
 
 #### 12.2.1 指令 Gas Unit 表
 
 | 指令类型 | Gas Unit | 说明 |
 |----------|---------|------|
-| Transfer | 10,000 gas | 标准转账 |
-| Transfer（含 Memo） | 10,000 + memo_bytes × 1 gas | 带备注转账 |
+| Transfer | 5,000 gas | 标准转账 |
+| Transfer（含 Memo） | 5,000 + memo_bytes × 1 gas | 带备注转账 |
 | Approve / Mint / Burn | 5,000 gas | 授权/铸造/销毁 |
 | BatchTransfer 内每笔 | 1,000 gas | 批量支付每收款人 |
 | BatchTransfer Memo | memo_bytes × 1 gas | 批量备注附加费用 |
-| BridgeDeposit | 10,000 gas | 内部桥接存款 |
-| ShieldedDeposit / Withdraw | 20,000 gas | 含 ZK 证明验证 |
-| ShieldedTransfer | 50,000 gas | 含 ZK 证明验证 |
+| ExternalBridgeDeposit / Withdraw | 10,000 gas | 外部桥接（含签名验证） |
+| ShieldedDeposit / Withdraw | 10,000 gas | 含 ZK 证明验证 |
+| ShieldedTransfer | 25,000 gas | 含 ZK 证明验证 |
 | Agent 指令 | 上述 × 0.5 | Agent 专属折扣 |
-| ExternalBridgeDeposit | 30,000 gas | 外部桥接（含签名验证） |
 
 #### 12.2.2 费用计算公式
 
@@ -2699,19 +2665,19 @@ fn update_base_fee(current_base_fee: u128, block_gas_used: u64, params: &FeePara
 #### 12.2.4 费用计算示例
 
 ```rust
-// 示例：3 条指令的交易（Transfer + Approve + BridgeDeposit）
+// 示例：3 条指令的交易（Transfer + Approve + ExternalBridgeDeposit）
 // 参数：base_fee = 10 wei/gas, priority_fee = 50,000 wei
 
-let gas_units = vec![10_000, 5_000, 10_000];  // 三条指令的 gas
+let gas_units = vec![5_000, 5_000, 10_000];  // 三条指令的 gas
 let discounts = vec![1.0, 0.5, 0.5];           // 边际折扣
 
 let total_gas: u64 = gas_units.iter().zip(discounts.iter())
     .map(|(g, d)| (*g as f64 * d) as u64)
     .sum();
-// = 10,000 × 1.0 + 5,000 × 0.5 + 10,000 × 0.5 = 17,500 gas
+// = 5,000 × 1.0 + 5,000 × 0.5 + 10,000 × 0.5 = 12,500 gas
 
 let total_fee = base_fee * total_gas + priority_fee;
-// = 10 × 17,500 + 50,000 = 225,000 wei = 0.000000225 CALL
+// = 10 × 12,500 + 50,000 = 175,000 wei = 0.000000175 CALL
 ```
 
 #### 12.2.5 费用分配
@@ -2885,7 +2851,7 @@ fn convert_fee_to_stablecoin(asset_id: AssetId, fee_call: u128) -> Result<u128> 
 3. 查询 oracle: 1 USDC = 50 CALL
 4. 计算: fee_call = gas_used × base_fee
 5. 转换: fee_usdc = fee_call / 50（向上取整）
-6. 从 sender 协议层 USDC 余额扣除
+6. 从 sender EVM 存储中的 USDC 余额扣除
 7. USDC 计入区块费用汇总
 8. 验证者按比例获得 USDC 奖励
 ```
@@ -3444,7 +3410,7 @@ struct NetworkLimits {
 | TPS | 5,000+ |
 | 区块时间 | 250ms |
 | 最终性 | ~500ms |
-| 协议支付延迟 | < 10ms（协议层） |
+| 预编译调用延迟 | < 10ms（EVM 存储读取） |
 | 桥接延迟 | < 1 个区块（< 250ms） |
 | 节点硬件要求 | 4 核 / 8GB / 500GB SSD |
 
@@ -3459,15 +3425,15 @@ call-core/
 │   ├── primitives/        # 基础类型 (Address, Hash, AssetId, Balance)
 │   ├── crypto/            # 密码学 (secp256k1, ed25519, SHA-256)
 │   ├── serialization/     # 协议序列化
-│   ├── protocol/          # 协议支付层
+│   ├── protocol/          # 协议功能层（通过预编译实现）
 │   │   ├── registry/      # 资产注册表
-│   │   ├── balances/      # 余额管理
+│   │   ├── balances/      # 余额管理（EVM 存储读写）
 │   │   ├── compliance/    # 合规策略引擎
-│   │   └── payment/       # 支付交易执行
-│   ├── agent/             # Agent 支付层
+│   │   └── payment/       # 支付交易执行（预编译调用）
+│   ├── agent/             # Agent 层
 │   │   ├── registry/      # Agent 注册与身份验证
 │   │   ├── permissions/   # 权限与费用配置
-│   │   ├── balances/      # Agent 子账户余额
+│   │   ├── balances/      # Agent 子账户余额（EVM 存储）
 │   │   └── executor/      # Agent 交易执行与费用代付
 │   ├── shielded/          # Shielded Pool 隐私层
 │   │   ├── merkle/        # 增量 Merkle Tree 管理
@@ -3478,12 +3444,12 @@ call-core/
 │   │   └── compliance/    # 视图密钥管理与合规审计
 │   ├── evm/               # EVM 智能合约层
 │   │   ├── executor/      # EVM 执行器 (Revm)
-│   │   ├── precompiles/   # 预编译合约 (桥接、协议余额)
-│   │   └── contracts/     # 系统合约 (ERC-20 模板、桥接)
-│   ├── bridge/            # 内部桥接
-│   │   ├── deposit/       # Protocol → EVM
-│   │   ├── withdraw/      # EVM → Protocol
-│   │   └── sync/          # 跨层状态同步
+│   │   ├── precompiles/   # 预编译合约（资产、桥接、合规等）
+│   │   └── contracts/     # 系统合约 (ERC-20 模板)
+│   ├── bridge/            # 外部桥接
+│   │   ├── deposit/       # 外部链 → Callchain
+│   │   ├── withdraw/      # Callchain → 外部链
+│   │   └── sync/          # 签名收集与状态同步
 │   ├── consensus/         # 共识层 (Commonware Simplex)
 │   │   ├── simplex/       # Simplex 状态机集成
 │   │   ├── proposer/      # 提议者选择与子集轮换
@@ -3591,8 +3557,8 @@ struct ConsensusParams {
 
 ```
 1. 解析 genesis.json
-2. 初始化协议层余额：对每个 GenesisAsset，balances[issuer] = initial_supply
-3. 部署对应 ERC-20 合约到 EVM 层（初始供应为 0）
+2. 初始化 EVM 存储余额：对每个 GenesisAsset，在 EVM 存储中写入初始供应
+3. 部署对应 ERC-20 合约到 EVM 层（与预编译共享同一存储）
 4. 注册初始验证者集
 5. 注册初始 Gas 支付币种到 FeeCurrencyRegistry
 6. 创建创世区块（height=0, parent_hash=0x0）
@@ -3611,7 +3577,6 @@ struct ConsensusParams {
 ```rust
 struct Mempool {
     evm_pool: PriorityTxs<EvmTx>,                    // EVM 交易（含预编译调用）
-    pending_bridges: VecDeque<BridgeOp>,             // 待处理桥接
     known_txs: LruCache<TxHash, ()>,                 // 去重缓存
 }
 ```
@@ -3621,7 +3586,6 @@ struct Mempool {
 | 维度 | 策略 |
 |------|------|
 | EvmTx 排序 | 按 gas price 降序 + nonce 顺序 |
-| BridgeOp | 按到达顺序 FIFO，区块内批量处理 |
 
 **预编译交易与普通 EVM 交易统一排序：**
 
@@ -3655,12 +3619,11 @@ struct Mempool {
 ### 18.1 形式化定义
 
 ```
-State = (ProtocolBalances, EvmState, BridgeState, ShieldedState)
+State = EvmState  // 所有状态统一在 EVM 存储中
 
 apply_block(state, block) -> Result<State> {
     state = execute_evm_txs(state, block.evm_txs)?;
-    state = execute_bridge(state, block.bridge_operations)?;
-    state = execute_system_txs(state, block.system_txs)?;
+    state = compute_state_root(state)?;
     Ok(state)
 }
 ```
@@ -3676,11 +3639,6 @@ apply_block(state, block) -> Result<State> {
 - 涉及资产存在且状态为 Active
 - 预编译内部合规检查通过（`check_compliance`）
 
-**BridgeOp 验证：**
-- 对应 EVM 层桥接合约已触发（WithdrawToProtocol）
-- 或协议层桥接请求已记录（DepositToEvm）
-- 资产存在且桥接池余额充足
-
 **Shielded 指令验证：**
 - ZK 证明验证通过（Groth16/Halo2）
 - 所有 nullifier 未被花费（防双花）
@@ -3693,9 +3651,8 @@ apply_block(state, block) -> Result<State> {
 ### 18.3 原子性保证
 
 区块内所有操作要么全部成功，要么全部回滚：
-- EVM 交易（含预编译调用）：Revm 的 Journal 机制保证单 tx 原子性。预编译内部使用快照机制保证协议状态操作原子性
-- 桥接操作：两步操作（扣减+铸造 / 销毁+恢复）在同一函数内完成
-- 区块级别：状态根在所有操作后计算，不一致则拒绝区块
+- EVM 交易（含预编译调用）：Revm 的 Journal 机制保证单 tx 原子性。预编译通过 StorageRef 读写 EVM 存储，失败时 Journal 自动回滚
+- 区块级别：状态根在所有 EVM 交易执行后计算，不一致则拒绝区块
 
 ### 18.4 交易收据（Transaction Receipts）
 
@@ -3703,7 +3660,7 @@ apply_block(state, block) -> Result<State> {
 
 #### 18.4.1 预编译调用收据
 
-预编译调用生成标准 EVM 交易收据，额外附加协议层状态变更信息：
+预编译调用生成标准 EVM 交易收据，额外附加 EVM 存储变更信息：
 
 ```rust
 /// 预编译调用收据（扩展标准 EVM 收据）
@@ -3716,14 +3673,14 @@ struct PrecompileReceipt {
     logs: Vec<EvmLogEntry>,
     logs_bloom: Bloom,
 
-    /// 协议层扩展信息
+    /// EVM 存储扩展信息
     precompile_address: Address,    // 被调用的预编译地址
-    protocol_state_changes: Vec<ProtocolStateChange>,
+    evm_state_changes: Vec<EvmStateChange>,
     memos: Vec<MemoEntry>,          // 支付备注
 }
 
-/// 协议层状态变更摘要
-struct ProtocolStateChange {
+/// EVM 存储状态变更摘要
+struct EvmStateChange {
     asset_id: AssetId,
     address: Address,
     change_type: ChangeType,
@@ -3808,7 +3765,7 @@ struct ExternalBridgeReceipt {
     tx_hash: Hash,
     status: ExecutionStatus,
     gas_used: u128,
-    bridge_op: ExternalBridgeOp,
+    bridge_type: String,              // "deposit" 或 "withdraw"
 
     // 桥接特有信息
     source_tx_hash: Option<Hash>,     // 源链交易哈希
@@ -3977,11 +3934,6 @@ metrics: {
     call_transactions_processed_total: CounterVec, // 按类型/状态分
     call_transaction_execution_time_seconds: Histogram,
 
-    // 桥接
-    bridge_operations_processed_total: Counter,
-    bridge_deposit_total: CounterVec,      // 按资产分
-    bridge_withdraw_total: CounterVec,
-
     // P2P 网络
     call_p2p_peers: Gauge,
     call_p2p_messages_sent_total: CounterVec,
@@ -4007,7 +3959,6 @@ metrics: {
 - **Grafana Dashboards**: 预置仪表板
   - Consensus Overview: 轮次时间、投票率、验证者活性
   - Transaction Throughput: TPS、延迟、池大小
-  - Bridge Operations: 存款/提取量、延迟
   - System Health: CPU、内存、磁盘、网络
 
 ### 20.3 告警规则
@@ -4017,7 +3968,6 @@ metrics: {
 | 共识停滞 | 60 秒无新区块 | Critical |
 | 验证者离线 | 验证者 100 轮未投票 | Warning |
 | 交易池溢出 | 池使用率 > 90% | Warning |
-| 桥接延迟 | 待处理桥接 > 100 笔 | Warning |
 | 内存溢出 | RSS > 6GB | Critical |
 | 磁盘空间 | 可用空间 < 50GB | Warning |
 
@@ -4132,7 +4082,7 @@ file = "/var/log/callchain/node.log"
 
 **当前选择：无状态过期（初期）**
 
-理由：协议支付层的核心价值是确定性余额映射，状态过期会破坏这一保证。初期采用**无状态过期**，协议层余额和桥接状态永不过期。
+理由：EVM 存储中的余额映射是核心价值，状态过期会破坏这一保证。初期采用**无状态过期**，所有余额和桥接状态永不过期。
 
 ### 22.2 EVM 层状态管理
 
@@ -4170,7 +4120,7 @@ EVM 层遵循以太坊 EIP-161 规则：
 
 | 数据类型 | 状态过期策略 | Prune 策略 |
 |----------|------------|-----------|
-| 协议层余额 | 永不过期 | 当前值保留，历史版本 prune |
+| EVM 存储余额 | 永不过期 | 当前值保留，历史版本 prune |
 | Shielded nullifier | 永不过期 | 永不过期（防双花必需） |
 | Agent 注册信息 | 永不过期（除非 Revoke） | 当前值保留 |
 | EVM 空账户 | 自动清除（EIP-161） | 清除后自然释放存储 |
@@ -4657,16 +4607,16 @@ contract MyDEX {
 
 ## 26. 关键设计决策
 
-### 25.1 为什么双账本而非单一账本
+### 25.1 为什么统一 EVM 存储
 
-| 单一账本 | 双账本 |
-|----------|--------|
-| EVM 合约需要适配协议层 API | EVM 合约完全独立，无需适配 |
-| 实现复杂（锁仓感知、状态同步） | 实现简单（两层互不干扰） |
-| DeFi 合约需要修改 | DeFi 合约和以太坊一模一样 |
-| 用户体验无缝 | 需要桥接操作（但可自动化） |
+| 统一 EVM 存储 |
+|---------------|
+| 所有状态（余额、资产、合规等）统一存储在 EVM 存储槽中 |
+| 预编译通过 StorageRef 直接读写 EVM 存储，无需跨层同步 |
+| DeFi 合约和以太坊一模一样，无需适配 |
+| 用户体验无缝，所有操作均为标准 EVM 交易 |
 
-选择**双账本**：简单性 > 无缝体验。桥接操作可通过钱包自动化实现近乎无感的体验。
+选择**统一 EVM 存储**：简单性 + 安全性。revm 的 Journal 机制天然提供原子性和回滚能力。
 
 ### 25.2 为什么选择 Commonware Simplex
 
@@ -4690,18 +4640,16 @@ contract MyDEX {
 
 ```
 1. 用户发起操作
-   ├── 协议支付 → 签名 EvmTx（调用预编译地址）→ 广播到 mempool
+   ├── 预编译调用 → 签名 EvmTx（调用预编译地址）→ 广播到 mempool
    ├── EVM 交易 → 签名 EvmTx → 广播到 mempool
    └── 桥接操作 → 通过钱包自动创建 → 广播
 
 2. 验证者收集交易
-   ├── 标准优先级：EvmTx（含预编译调用）
-   └── 内部队列：BridgeOp
+   └── 标准优先级：EvmTx（含预编译调用）
 
 3. 验证者打包区块
    ├── 执行 EVM 交易 → 更新 EVM 状态（预编译调用同步更新协议状态）
-   ├── 执行桥接操作 → 同步两层余额
-   └── 执行系统交易 → 奖励/费用结算
+   └── 计算状态根 → 打包区块头
 
 4. Simplex 共识出块
    ├── 提议者打包 → 广播提议
@@ -4718,11 +4666,10 @@ contract MyDEX {
 
 | 术语 | 定义 |
 |------|------|
-| Protocol Payment Layer | 协议支付层，维护原生余额映射 |
+| Protocol Payment Layer | 协议支付层，通过预编译在 EVM 存储中维护原生余额映射 |
 | EVM Contract Layer | EVM 智能合约层，运行智能合约 |
-| Internal Bridge | 内部桥接，两层之间的资产转换机制 |
+| StorageRef | 安全存储引用，预编译通过其读写 EVM 存储 |
 | Asset Registry | 资产注册表，记录所有协议资产 |
 | CompliancePolicy | 合规策略，定义资产的转账限制 |
-| BridgeOp | 桥接操作，在两层之间转移资产 |
 | Simplex | 低延迟 BFT 共识算法，O(n) 通信复杂度 |
 | Commonware | Simplex 共识的 Rust 实现框架 |

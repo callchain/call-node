@@ -19,8 +19,8 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
                                                          |
                                                          v
 +---------------+      +------------------+      +------------------+
-|  EVM storage  |  <-  |  JournalBackend  |  <-  |  selector + args |
-|  slots        |      |  (StorageCtx)    |      |  ABI decode      |
+|  EVM storage  |  <-  |  StorageRef      |  <-  |  selector + args |
+|  slots        |      |  (safe wrapper)  |      |  ABI decode      |
 +---------------+      +------------------+      +------------------+
 ```
 
@@ -42,7 +42,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 
 ### State Access
 
-Precompiles access EVM storage slots via a thread-local `StorageCtx` that binds to revm's journal during transaction execution. All state (balances, asset metadata, validator stakes, governance proposals, etc.) is stored directly in EVM storage under precompile-specific addresses. No in-memory protocol state structs (`AccountState`, `AssetRegistry`, etc.) are accessed during precompile execution.
+Precompiles access EVM storage slots via `StorageRef`, a safe wrapper around revm's journal that decomposes the fat pointer without aliased mutable references. All state (balances, asset metadata, validator stakes, governance proposals, etc.) is stored directly in EVM storage under precompile-specific addresses. No in-memory protocol state structs (`AccountState`, `AssetRegistry`, etc.) are accessed during precompile execution.
 
 ```
 ┌──────────────┐     ┌─────────────────┐     ┌─────────────────────┐
@@ -50,7 +50,7 @@ Precompiles access EVM storage slots via a thread-local `StorageCtx` that binds 
 └──────────────┘     └─────────────────┘     └─────────────────────┘
                                                       │
                                           ┌───────────▼────────────┐
-                                          │ StorageCtx (TLS)        │
+                                          │ StorageRef (safe)       │
                                           │  ├─ sload(addr, slot)   │
                                           │  └─ sstore(addr, slot)  │
                                           └───────────┬────────────┘
@@ -475,7 +475,7 @@ interface IProtocolCompliance {
 Gas is computed at two layers:
 
 1. **Fixed base gas**: Deducted at the start of each precompile method via `dispatch::view` / `dispatch::mutate`. This covers decoding, validation, and business logic overhead.
-2. **Dynamic storage gas**: Automatically tracked by `EvmStorageProvider` on every `sload`/`sstore` call through `StorageCtx`. Warm/cold access and SSTORE refunds are applied per Cancun rules.
+2. **Dynamic storage gas**: Automatically tracked by `EvmStorageProvider` on every `sload`/`sstore` call through `StorageRef`. Warm/cold access and SSTORE refunds are applied per Cancun rules.
 
 | Function | Base Gas | Notes |
 |----------|----------|-------|
@@ -561,8 +561,7 @@ let precompiles = call_precompile::build_precompiles()
 | File | Role |
 |------|------|
 | `crates/precompile/src/lib.rs` | `StatefulPrecompile` trait, address constants, `CallPrecompiles` provider |
-| `crates/precompile/src/storage.rs` | `StorageCtx` (TLS), `StorageProvider` trait, `EvmStorageProvider`, `HashMapStorageProvider` |
-| `crates/precompile/src/journal_backend.rs` | `JournalBackend` — `StorageBackend` impl for precompile execution |
+| `crates/precompile/src/storage.rs` | `StorageRef` — safe wrapper around revm's journal, `StorageProvider` trait, `EvmStorageProvider`, `HashMapStorageProvider` |
 | `crates/precompile/src/dispatch.rs` | `view` / `view_void` / `mutate` / `mutate_void` — unified dispatch helpers |
 | `crates/precompile/src/helpers/` | ABI encode/decode utilities, `storage_slot()` helper, slot constants |
 
@@ -593,25 +592,27 @@ let precompiles = call_precompile::build_precompiles()
 
 ## Architecture Patterns
 
-### TLS-based `StorageCtx`
+### `StorageRef` — Safe Storage Access
 
-Precompiles use `scoped_thread_local!` to provide EVM storage access without threading `&mut EvmState` through every method signature.
+Precompiles receive a `StorageRef` that provides safe EVM storage access without aliased mutable references. `StorageRef` decomposes revm's journal fat pointer into separate load/store handles.
 
 ```rust
-scoped_thread_local!(static TL_STORAGE: RefCell<&mut (dyn StorageProvider + 'static)>);
+pub struct StorageRef {
+    pub load: StorageLoadFn,
+    pub store: StorageStoreFn,
+}
 
-pub struct StorageCtx;
-impl StorageCtx {
-    pub fn enter<R>(provider: &mut dyn StorageProvider, f: impl FnOnce() -> R) -> R { ... }
+impl StorageRef {
     pub fn sload(address: Address, key: U256) -> Option<U256> { ... }
     pub fn sstore(address: Address, key: U256, value: U256) -> Option<()> { ... }
 }
 ```
 
 **Benefits:**
-- Precompile methods stay clean: no `evm: &mut EvmState` parameter.
-- Nested precompile calls automatically share the same storage context.
-- Natural integration with revm's journal/checkpoint system.
+- No aliased mutability — `StorageRef` decomposes the fat pointer safely.
+- Precompile methods receive `&StorageRef` explicitly (no hidden TLS).
+- All state changes are subject to revm's Journal rollback on failure.
+- No `JournalBackend` or `StorageCtx` TLS indirection needed.
 
 ### Unified Dispatch Framework
 
@@ -619,13 +620,13 @@ All domain precompiles use `alloy_sol_types::sol!` to generate ABI types from So
 
 ```rust
 impl StatefulPrecompile for AssetPrecompile {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+    fn call(&mut self, calldata: &[u8], msg_sender: Address, storage: &StorageRef) -> PrecompileResult {
         let selector = &calldata[..4];
         match selector {
             IProtocolAsset::transfer::SELECTOR => {
                 dispatch::mutate_void::<IProtocolAsset::transferCall, _>(
-                    calldata, 5000, |call| {
-                        let mut store = AssetStorage::new(JournalBackend);
+                    calldata, 5000, storage, |call, storage| {
+                        let mut store = AssetStorage::new(storage);
                         store.transfer(call.assetId, msg_sender, call.to, call.amount)
                             .map_err(|e| PrecompileError::Other(e.to_string().into()))
                     }
@@ -669,7 +670,7 @@ Precompile developers do not manually calculate storage gas — it is deducted a
 
 ```
 call-precompile (shared infra)
-  ├── StorageCtx, JournalBackend, dispatch, helpers
+  ├── StorageRef, dispatch, helpers
   └── call-protocol (StorageBackend trait)
 
 Domain crates (each depends on call-precompile + call-protocol)
@@ -686,4 +687,4 @@ Domain crates (each depends on call-precompile + call-protocol)
 call-evm (registers all precompiles via with_custom())
 ```
 
-No circular dependencies exist. `call-precompile` and `call-protocol` form the base layer; all domain crates depend on them but not on each other (except for cross-domain reads via `StorageCtx::sload` to other precompile addresses).
+No circular dependencies exist. `call-precompile` and `call-protocol` form the base layer; all domain crates depend on them but not on each other (except for cross-domain reads via `StorageRef::sload` to other precompile addresses).

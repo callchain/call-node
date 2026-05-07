@@ -32,7 +32,7 @@ All four steps are atomic. If any step fails, the transaction reverts and no par
 
 ### Why an EVM Transaction Instead of Direct RPC
 
-Direct RPC state mutations (writing to `AssetRegistry` memory without an EVM transaction) would have the following issues:
+Direct RPC state mutations (writing to EVM storage without an EVM transaction) would have the following issues:
 
 - **No consensus ordering**: Each node would process the registration independently, leading to potential state divergence under concurrent registrations.
 - **No atomic rollback**: If the RPC handler crashed or was interrupted, the registry could be left in an inconsistent state.
@@ -83,7 +83,7 @@ pub struct Asset {
     pub name: String,
     pub decimals: u8,
     pub issuer: Address,                    // who registered the asset
-    pub protocol_supply: Balance,           // protocol-layer circulation
+    pub protocol_supply: Balance,           // EVM-tracked protocol-layer circulation
     pub evm_supply: Balance,                // EVM wrapped token circulation
     pub max_supply: Balance,                // 0 = uncapped
     pub status: AssetStatus,                // Active | Frozen | Delisted
@@ -95,7 +95,7 @@ pub struct Asset {
 
 | Field | Meaning | Source of truth |
 |-------|---------|-----------------|
-| `protocol_supply` | Total asset balance held in `AccountState` (protocol layer) | Protocol ledger |
+| `protocol_supply` | Total asset balance held in protocol accounts (tracked in EVM storage) | EVM storage under `0x201` |
 | `evm_supply` | Total wrapped ERC-20 supply on EVM (`WrappedToken.totalSupply`) | EVM contract |
 | `all_supply()` | Entire system circulation = protocol + EVM | Computed |
 | `max_supply` | Hard cap (0 = uncapped). Set at registration, immutable. | Registration tx |
@@ -111,22 +111,24 @@ if asset.would_exceed_cap(amount) {
 }
 ```
 
-The EVM `WrappedToken` contract does **not** enforce the cap — protocol layer is the single source of truth.
+The EVM `WrappedToken` contract does **not** enforce the cap — the asset precompile is the single source of truth.
 
 ## Bridge Invariants
 
 For any asset with an active EVM bridge:
 
 ```
-sum(protocol balance deductions via BridgeToEvm)
-  == sum(protocol balance credits via BridgeToProtocol)
+sum(wrapped tokens burned via switchToEvm)
+  == sum(wrapped tokens minted via switchToProtocol)
   == evm_wrapped_token.totalSupply()
 ```
 
 This invariant is maintained by the bridge precompile (`0x207`):
 
-- `switchToEvm`: Deduct protocol balance, then call `bridgeMint` on the EVM contract (via the bridge address).
-- `switchToProtocol`: Call `bridgeBurn` on the EVM contract (burning the sender's EVM balance), then credit protocol balance.
+- `switchToEvm`: Burns the caller's wrapped ERC-20 tokens (via `bridgeBurn`), then credits the corresponding EVM native balance.
+- `switchToProtocol`: Deducts EVM native balance, then mints wrapped ERC-20 tokens (via `bridgeMint`) to the recipient.
+
+There is no separate protocol-layer ledger. All balances — both wrapped token holdings and "protocol" native balances — are tracked in EVM storage.
 
 ## EVM Wrapped Token Reference Template
 
@@ -222,7 +224,7 @@ No protocol-layer balance is created. The minted tokens exist only on EVM and ca
 
 - Only the asset issuer can call `mint`.
 - The cap is enforced at the protocol layer, not in the EVM contract (the contract has no visibility into `protocol_supply`).
-- Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`, which has no private key. Therefore, no one can mint genesis assets. Supply changes for genesis assets happen only through `SystemTx` (block rewards).
+- Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`, which has no private key. Therefore, no one can mint genesis assets. Supply changes for genesis assets happen only through validator rewards in EVM storage.
 
 ## Governance Parameters
 
@@ -256,49 +258,23 @@ Governance can also pause the entire chain via `GovernanceEmergencyPause`.
 
 ## AssetRegistry Persistence
 
-`AssetRegistry` is both **persisted to reth-db** and **replay-reconstructed from block history** on startup:
+`AssetRegistry` state lives in **EVM storage** under the Asset precompile address (`0x201`). There is no separate protocol-layer database table for asset metadata. All registry fields — including `protocol_supply`, `evm_supply`, asset metadata, and status — are stored as EVM storage slots and committed atomically with the EVM state root.
 
-### Persistence Layer
-
-- **Save**: `persist_state_to_db` serializes the full registry via `serde_json` to the `CallProtocolAssets` DB table.
-- **Load**: `load_state_from_db` deserializes the registry from the same table.
-
-### Replay Layer (Correctness Fallback)
-
-If the DB snapshot is empty or missing (e.g., after unclean shutdown, or on a new node), `replay_asset_registry` scans `data_dir/blocks/*.json` in height order and re-executes every `register` precompile call to rebuild the registry deterministically:
-
-```rust
-for height in 1..=latest {
-    let block = load_block(data_dir, height)?;
-    for tx in &block.transactions {
-        if let Some(to) = tx.to {
-            if to == ASSET_PRECOMPILE {
-                if let Ok((selector, args)) = decode_asset_call(&tx.data) {
-                    if selector == REGISTER_SELECTOR {
-                        registry.register_asset(args.symbol, args.name, args.decimals, tx.from, 0, height, args.max_supply)?;
-                    }
-                }
-            }
-        }
-    }
-}
-```
-
-This guarantees that every node reconstructs the exact same registry from canonical block history, preserving `asset_id` assignment order and `next_id` consistency across restarts.
+On node startup, the registry is loaded directly from EVM storage via `StorageRef`. There is no replay reconstruction from block history.
 
 ### EVM Contract Address Consistency
 
-`RegisterAsset` auto-deploys a wrapped ERC-20 via `deploy_erc20_template`. The contract address depends on the deployer nonce. Replay produces the same contract addresses as the original execution because the nonce sequence is deterministic. However, the replay only reconstructs the registry metadata; the actual EVM state (including deployed contract code) is loaded separately from `CallEvmAccounts`.
+`RegisterAsset` auto-deploys a wrapped ERC-20 via `deploy_erc20_template`. The contract address depends on the deployer nonce. The deployed contract code and state are part of the EVM state and are loaded from the EVM state root on startup.
 
 ## Genesis Asset Supply Initialization
 
 Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`. This is an intentional security design:
 
 - **No one can issuer-mint**: `Address::ZERO` has no corresponding private key, so `mint`, `burn`, and `issuerMint` precompile calls are all impossible for genesis assets.
-- **Supply changes only via system path**: Block rewards, validator incentives, and other protocol-level issuance go through `SystemTx` in `Block::execute`, not through user-signed precompile calls.
+- **Supply changes only via system path**: Block rewards, validator incentives, and other protocol-level issuance update validator balances directly in EVM storage, not through user-signed precompile calls.
 - **Protocol-controlled monetary policy**: The chain itself controls how much CALL enters circulation.
 
-After genesis block execution, `protocol_supply` for CALL must be initialized to the total distributed amount. Subsequent block rewards update it via `account.mint` + `registry.mint_supply` system paths.
+After genesis block execution, `protocol_supply` for CALL must be initialized to the total distributed amount. Subsequent block rewards update it via validator reward paths in EVM storage.
 
 Genesis assets should use `max_supply = 0` (uncapped) because protocol-level issuance has its own economic rules.
 
@@ -312,8 +288,7 @@ Genesis assets should use `max_supply = 0` (uncapped) because protocol-level iss
 | Supply cap enforcement in `Block::execute` | ✅ Done |
 | EVM issuer mint (`issuerMint` precompile + `WrappedToken.issuerMint`) | ✅ Done |
 | Frozen/Delisted asset enforcement in transaction execution | ✅ Done |
-| AssetRegistry serde + DB persistence | ✅ Done |
-| AssetRegistry block replay reconstruction on startup | ✅ Done |
+| AssetRegistry in EVM storage under `0x201` | ✅ Done |
 | `RegisterEvmBridge` precompile removal | ✅ Done |
 | `WithdrawFromEvm` → `BridgeToProtocol` rename | ✅ Done |
 | `call_assetInfo` extended with supply fields | ✅ Done |

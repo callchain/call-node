@@ -47,10 +47,10 @@ The CallChain governance system enables decentralized decision-making for protoc
                        │
       ┌────────────────┼────────────────┬──────────────┬─────────────┬──────────────┐
       ▼                ▼                ▼              ▼             ▼              ▼
- ForkManager      ValidatorState    FeeCurrencyReg   AssetRegistry  OracleManager  ConsensusParams
- (upgrade)        (slash/remove)    (add/remove/cap) (compliance)   (config)       (params)
-                                    FeeParams        GovernanceConfig
-                                    (fee params)     (governance params)
+ ForkManager      ValidatorPrecompile FeeCurrencyReg   AssetRegistry   OracleStorage  ConsensusParams
+ (upgrade)        (slash/remove)      (add/remove/cap) (compliance)    (config)       (params)
+                                      FeeParams        GovernanceConfig
+                                      (fee params)     (governance params)
 ```
 
 ---
@@ -113,7 +113,7 @@ See [precompile.md](precompile.md) for the full ABI.
 ### Voting Weights
 
 - **Validator 1=1**: Each registered validator gets 1 vote. Used for `ParameterChange`, `ProtocolUpgrade`, `ValidatorSlash`, `EmergencyPause`, `FeeCurrency*`.
-- **CALL balance-weighted**: Voting power equals caller's real on-chain CALL balance + delegated power. Used for `TreasurySpend` (primary), and as max(1, balance) for `ParameterChange`/`ProtocolUpgrade`/`ValidatorSlash`. Balance is read via `get_voting_balance()` which checks `balance_source` (real `BalanceState`) first, falling back to `call_balances`.
+- **CALL balance-weighted**: Voting power equals caller's real on-chain CALL balance + delegated power. Used for `TreasurySpend` (primary), and as max(1, balance) for `ParameterChange`/`ProtocolUpgrade`/`ValidatorSlash`. Balance is read from EVM storage under the asset precompile (`0x201`).
 - **Joint (issuer + validator)**: Validators get 1 vote each; asset issuers get `TOTAL_SUPPLY / 10` weight. Used for `ComplianceUpdate`.
 
 ### Proposal State Machine
@@ -167,8 +167,8 @@ Pending ──(review period passes)──► Active ──(voting period passes
 |---|---|---|---|
 | `proposal_deposit` | 10,000 CALL | `GovernanceConfig` | `governance.proposal_deposit` |
 | `asset_registration_fee` | 10 CALL | `GovernanceConfig` | `governance.asset_registration_fee` |
-| `min_self_stake` | 1,000,000 CALL | `ValidatorStateManager` | `validator.min_self_stake` |
-| `offline_slash_rate_bps` | 10 (0.1%) | `ValidatorStateManager` | `validator.offline_slash_rate_bps` |
+| `min_self_stake` | 1,000,000 CALL | Validator EVM storage (`0x204`) | `validator.min_self_stake` |
+| `offline_slash_rate_bps` | 10 (0.1%) | Validator EVM storage (`0x204`) | `validator.offline_slash_rate_bps` |
 | `min_market_cap_usd` | 100,000,000 | `FeeCurrencyRegistry` | `fee_currency.min_market_cap_usd` |
 | `stablecoin_cap_bps` | 5000 (50%) | `FeeCurrencyRegistry` | `fee_currency.stablecoin_cap_bps` |
 | `validator_quorum_bps` | 6667 (2/3) | `GovernanceConfig` | `governance.validator_quorum_bps` |
@@ -231,7 +231,7 @@ Deposit checks and voting power calculations read CALL balances directly from EV
 let balance = AssetStorage::new(backend).read_balance(CALL_ASSET_ID, voter);
 ```
 
-For `GovernanceStorage<B>` used in precompiles, the `StorageBackend` (`JournalBackend`) provides access to the live EVM journal, so balance checks see the current block's state including any prior transactions. For `GovernanceAdvancer` used in consensus, the `EvmStateBackend` provides access to the committed `EvmState`.
+For `GovernanceStorage<B>` used in precompiles, the `StorageBackend` (`StorageRef`) provides access to the live EVM journal, so balance checks see the current block's state including any prior transactions. For `GovernanceAdvancer` used in consensus, it reads from committed EVM storage via `InMemoryStateProvider`.
 
 ### Execution Model
 
@@ -286,16 +286,18 @@ Validators are registered into governance from two sources:
        gov.register_validator(i as u32, parse_address(&val.address)?);
    }
    ```
-2. **Runtime sync**: Every block in the production loop (step 8c), all validators from `ValidatorStateManager` are synced idempotently into governance:
+2. **Runtime sync**: Every block in the production loop, all validators are read from EVM storage under the validator precompile (`0x204`) and synced idempotently into governance:
    ```rust
-   for (id, stake) in vs.get_all_validators().iter() {
-       gov.register_validator(*id, stake.address);
+   let count = read_validator_count(&provider);
+   for id in 1..=count {
+       let addr = read_validator_addr(&provider, id);
+       gov.register_validator(id as u32, addr);
    }
    ```
 
 ### Persistence
 
-Governance state lives entirely in EVM storage under `GOVERNANCE_ADDRESS` (`0x203`). No separate serialization or sidecar persistence is required — the state is saved and loaded automatically as part of `EvmState` via `CallEvmAccounts`.
+Governance state lives entirely in EVM storage under `GOVERNANCE_ADDRESS` (`0x203`). No separate serialization or sidecar persistence is required — the state is saved and loaded automatically as part of EVM state via `CallEvmAccounts`.
 
 | Table | Purpose |
 |---|---|
@@ -303,8 +305,8 @@ Governance state lives entirely in EVM storage under `GOVERNANCE_ADDRESS` (`0x20
 
 This means:
 - Governance state is committed atomically with every block's EVM state root
-- On node restart, governance state is restored from `EvmState` DB snapshot
-- No replay reconstruction is needed (unlike `AssetRegistry`, which replays from block history)
+- On node restart, governance state is restored from EVM state DB snapshot
+- No replay reconstruction is needed — all state lives in EVM storage
 
 `GovernanceAdvancer` is stateless; it scans EVM storage every block and has no persisted state of its own.
 
@@ -370,7 +372,7 @@ crates/governance/
     ├── config.rs       # GovernanceConfig
     ├── error.rs        # GovernanceError
     ├── precompile.rs   # GovernancePrecompile (selector dispatch)
-    └── tests.rs        # GovernanceStorage unit tests (JournalBackend)
+    └── tests.rs        # GovernanceStorage unit tests (StorageRef)
 ```
 
 ```

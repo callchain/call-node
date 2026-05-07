@@ -126,7 +126,6 @@ Single-pool structure for EVM transactions:
 | Pool | Type | Capacity | Sorting |
 |---|---|---|---|
 | `evm_pool` | `EvmTransaction` | 100K | Gas price desc |
-| `pending_bridges` | `BridgeOp` | 1K | FIFO |
 
 **Admission checks** (`submit_evm_tx`):
 1. Deduplication — reject duplicate tx hash
@@ -149,8 +148,8 @@ Single-pool structure for EVM transactions:
    - **Balance check** — verify sender can cover `gas_limit * max_fee_per_gas`
    - Execute via `revm`:
      - If `to` is a precompile address (`0x101`–`0x209`), the corresponding Rust precompile function is called
-     - Precompile write operations snapshot `BalanceState`, `ComplianceEngine`, and `ShieldedState` before mutating
-     - If a precompile call fails, the snapshot is restored and revm reverts the transaction
+     - Precompile write operations go through `StorageRef`, which reads/writes EVM storage slots directly
+     - If a precompile call fails, revm's Journal automatically reverts all state changes
      - Standard EVM gas deduction applies
 3. Block fees are allocated to validator reward pool / treasury / burn
 
@@ -169,25 +168,18 @@ pub struct TransactionResult {
 
 pub struct BlockExecutionResult {
     pub transaction_results: Vec<TransactionResult>,
-    pub payment_root: Hash,
-    pub evm_state_root: Hash,
-    pub bridge_root: Hash,
-    pub receipt_root: Hash,
     pub state_root: Hash,
     pub evm_tx_count: usize,
-    pub bridge_op_count: usize,
-    pub system_tx_count: usize,
     pub total_validator_reward: Balance,
     pub evm_gas_used: u64,
-    pub agent_events: Vec<call_agent::AgentEvent>,
-    pub pending_rollback: Option<RollbackPlan>,
+    pub evm_tx_results: Vec<TransactionResult>,
 }
 ```
 
 **Key properties**:
 - `transaction_results` is a 1:1 mapping with EVM transactions in the block — each entry represents the full outcome of one tx (atomic success/failure).
-- On tx failure, revm automatically reverts all state. Precompile-level snapshots (`BalanceState`, `ComplianceEngine`, `ShieldedState`) are also restored.
-- `compute_receipt_root()` hashes `transaction_results` (tx hash + success flag + gas + fee) plus `agent_events` into the block header's `receipt_root`, making receipt availability verifiable.
+- On tx failure, revm automatically reverts all state including precompile storage writes made via `StorageRef`.
+- `compute_receipt_root()` hashes `transaction_results` (tx hash + success flag + gas + fee) into the block header's `receipt_root`, making receipt availability verifiable.
 
 ### Receipts
 
@@ -223,7 +215,7 @@ The block-level index enables:
 
 ### Compliance Engine
 
-Policy enforcement via `ComplianceEngine` with five policy types:
+Policy enforcement via the Compliance precompile (`0x205`) with five policy types:
 
 | Policy | Behavior |
 |---|---|
@@ -233,15 +225,7 @@ Policy enforcement via `ComplianceEngine` with five policy types:
 | `Whitelist` (3) | Reject non-whitelisted addresses |
 | `Custom` (4) | Invoke registered `CustomComplianceHandler` |
 
-`Transfer`, `BatchTransfer`, and `TransferFrom` check compliance on both sender and recipient. `ComplianceEngine` supports serializable snapshots (`ComplianceEngineSnapshot`) with per-address status tracking keyed by `(address, policy_id)`. Custom handlers are runtime-only and must be re-registered after deserialization.
-
-### Smart Accounts (`smart_accounts.rs`)
-
-| Feature | Details |
-|---|---|
-| MultiSig | M-of-N with 2–10 signers, configurable threshold, versioned updates |
-| Social Recovery | 24–72h delay, 2+ guardians, guardian approval flow |
-| Session Keys | Per-key permissions (precompiles, targets, assets, per-tx/daily limits), expiry |
+`Transfer`, `BatchTransfer`, and `TransferFrom` check compliance on both sender and recipient by reading from EVM storage under `0x205`. All compliance state — sanctioned sets, KYC verified sets, whitelisted sets, and per-address compliance statuses — lives in EVM storage slots. Custom handlers are runtime-only and must be re-registered after node restart.
 
 ---
 
@@ -258,7 +242,7 @@ All components are production-ready with no open gaps.
 | **Fee allocation** | Ready | CALL burn + validator reward; stablecoin treasury + validator reward |
 | **Gas sponsors** | Ready | All three modes wired; `PoolSponsor`/`PerTxSponsor` rejected at mempool |
 | **Precompile execution** | Ready | All variants have execution arms; governance/bridge/oracle/shielded/validator wired |
-| **Atomic rollback** | Ready | BalanceState, ComplianceEngine, ShieldedState, EvmState, BridgeState, ValidatorState all snapshotted and restored |
+| **Atomic rollback** | Ready | Revm's Journal guarantees per-transaction atomicity; precompiles use StorageRef for safe EVM storage access |
 | **Compliance** | Ready | Dual-party checks, custom handlers, per-address status, serializable snapshots |
 | **Smart accounts** | Ready | MultiSig, social recovery, session keys with permissions and expiry |
 | **Transaction receipts** | Ready | Auto-generated from `TransactionResult` at block finalize; block-level index (`CallReceiptsByBlock`); incremental persistence |
@@ -275,7 +259,7 @@ All components are production-ready with no open gaps.
 | `crates/precompile/src/gas.rs` | Per-precompile gas cost table |
 | `crates/protocol/src/receipts.rs` | `ProtocolReceipt`, `PrecompileEvent`, `LogEntry`, `MemoEntry`, `StateChange` |
 | `crates/protocol/src/sponsor.rs` | `SponsorRegistry`, `GasSponsorAuth`, `GasSponsorPool`, daily usage tracking |
-| `crates/protocol/src/compliance.rs` | `ComplianceEngine`, `CompliancePolicy`, `CustomComplianceHandler`, snapshots |
+| `crates/protocol/src/compliance.rs` | `ComplianceStorage`, `CompliancePolicy`, `CustomComplianceHandler` |
 | `crates/protocol/src/smart_accounts.rs` | `SmartAccountRegistry`, MultiSig, social recovery, session keys |
 | `crates/consensus/src/block.rs` | `Block`, `BlockHeader`, `BlockExecutionResult`, `TransactionResult`, `compute_receipt_root`, `Block::execute()` |
 | `crates/consensus/src/exec/validator.rs` | `execute_validator_precompile()` — inline validator stake/unstake/claim execution |

@@ -35,8 +35,8 @@ The Upgrade/Fork Management system (`crates/consensus/src/fork.rs`) handles prot
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │ Protocol Feature Flags                                  ││
-│  │ - ShieldedPool, AgentPrecompiles, BridgeOperations      ││
-│  │ - SmartAccounts, ComplianceEngine, OracleIntegration    ││
+│  │ - ShieldedPool, AgentPrecompiles, BridgePrecompile      ││
+│  │ - SmartAccounts, CompliancePrecompile, OraclePrecompile ││
 │  └─────────────────────────────────────────────────────────┘│
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐│
