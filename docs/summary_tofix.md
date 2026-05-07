@@ -21,7 +21,7 @@
 |---|---------|-------|-----|
 | 1 | **No formal security audit** | Entire codebase | No third-party review of consensus, cryptography, or economic incentives |
 | 2 | ~~**No TLS/HTTPS tests**~~ ✅ | `crates/rpc` | Integration tests added: handshake success, plain HTTP rejection, expired cert rejection (`crates/rpc/tests/tls_integration.rs`) |
-| 3 | **No auth/authz tests** | `crates/rpc` | No API key, JWT, or IP allowlist coverage |
+| 3 | ~~**No auth/authz tests**~~ ❌ N/A | `crates/rpc` | Permissionless blockchain — all methods are state queries or signed-tx submission; no admin namespace exists to protect |
 | 4 | **No MDBX integration tests** | `crates/storage` | Table descriptors exist; no actual read/write/delete tests |
 | 5 | **No concurrent DB / corruption recovery tests** | `crates/storage`, `crates/node` | No crash recovery, WAL, or checkpoint tests |
 | 6 | **No network partition tests** | `crates/node/tests` | E2E uses local harness only; no Byzantine/equivocation tests |
