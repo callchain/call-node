@@ -19,6 +19,18 @@ use revm_precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 
 use crate::storage::{fill_precompile_output, StorageProvider};
 
+/// Extra gas charged per SLOAD observed during a precompile call.
+const SLOAD_DISPATCH_COST: u64 = 50;
+/// Extra gas charged per SSTORE observed during a precompile call.
+const SSTORE_DISPATCH_COST: u64 = 500;
+
+/// Compute dynamic overhead from base gas + observed storage ops.
+fn calculate_overhead(base_gas: u64, sloads: u64, sstores: u64) -> u64 {
+    base_gas
+        .saturating_add(sloads.saturating_mul(SLOAD_DISPATCH_COST))
+        .saturating_add(sstores.saturating_mul(SSTORE_DISPATCH_COST))
+}
+
 /// Decode ABI calldata into a typed [`SolCall`].
 ///
 /// `validate = true` checks that the calldata length is an exact multiple
@@ -34,11 +46,12 @@ pub fn encode_return<R: SolValue>(result: R) -> Bytes {
 
 /// Execute a **read-only** precompile method.
 ///
-/// 1. Deduct `gas` via `storage`.
+/// 1. Reset storage-operation counters.
 /// 2. Decode `calldata` into `T`.
 /// 3. Run `handler` (receives the decoded call).
-/// 4. Encode the return value.
-/// 5. Fill gas accounting into the output.
+/// 4. Compute dynamic overhead from `gas` + observed storage ops.
+/// 5. Deduct overhead; on failure the call is treated as out-of-gas.
+/// 6. Encode the return value and fill gas accounting.
 pub fn view<T, R, F>(
     calldata: &[u8],
     gas: u64,
@@ -50,9 +63,12 @@ where
     R: SolValue,
     F: FnOnce(T, &mut dyn StorageProvider) -> Result<R, PrecompileError>,
 {
-    storage.deduct_gas(gas)?;
+    storage.reset_gas_counters();
     let decoded = decode_call::<T>(calldata)?;
     let result = handler(decoded, storage)?;
+    let (sloads, sstores) = storage.gas_counters();
+    let overhead = calculate_overhead(gas, sloads, sstores);
+    storage.deduct_gas(overhead)?;
     let output = PrecompileOutput::new(0, encode_return(result));
     Ok(fill_precompile_output(output, storage))
 }
@@ -68,18 +84,21 @@ where
     T: SolCall,
     F: FnOnce(T, &mut dyn StorageProvider) -> Result<(), PrecompileError>,
 {
-    storage.deduct_gas(gas)?;
+    storage.reset_gas_counters();
     let decoded = decode_call::<T>(calldata)?;
     handler(decoded, storage)?;
+    let (sloads, sstores) = storage.gas_counters();
+    let overhead = calculate_overhead(gas, sloads, sstores);
+    storage.deduct_gas(overhead)?;
     let output = PrecompileOutput::new(0, Bytes::default());
     Ok(fill_precompile_output(output, storage))
 }
 
 /// Execute a **state-mutating** precompile method.
 ///
-/// Same as [`view`] but wraps the handler in a `storage.checkpoint()`:
+/// Same lifecycle as [`view`] but wraps the handler in a `storage.checkpoint()`:
 /// - On success the checkpoint is **committed**.
-/// - On error the checkpoint is **reverted**.
+/// - On error (or out-of-gas on overhead) the checkpoint is **reverted**.
 pub fn mutate<T, R, F>(
     calldata: &[u8],
     gas: u64,
@@ -91,15 +110,22 @@ where
     R: SolValue,
     F: FnOnce(T, &mut dyn StorageProvider) -> Result<R, PrecompileError>,
 {
-    storage.deduct_gas(gas)?;
+    storage.reset_gas_counters();
     let decoded = decode_call::<T>(calldata)?;
     let checkpoint = storage.checkpoint();
     let result = handler(decoded, storage);
+    let (sloads, sstores) = storage.gas_counters();
+    let overhead = calculate_overhead(gas, sloads, sstores);
     match result {
         Ok(value) => {
-            storage.checkpoint_commit(checkpoint);
-            let output = PrecompileOutput::new(0, encode_return(value));
-            Ok(fill_precompile_output(output, storage))
+            if storage.deduct_gas(overhead).is_ok() {
+                storage.checkpoint_commit(checkpoint);
+                let output = PrecompileOutput::new(0, encode_return(value));
+                Ok(fill_precompile_output(output, storage))
+            } else {
+                storage.checkpoint_revert(checkpoint);
+                Err(PrecompileError::OutOfGas)
+            }
         }
         Err(e) => {
             storage.checkpoint_revert(checkpoint);
@@ -121,15 +147,22 @@ where
     T: SolCall,
     F: FnOnce(T, &mut dyn StorageProvider) -> Result<(), PrecompileError>,
 {
-    storage.deduct_gas(gas)?;
+    storage.reset_gas_counters();
     let decoded = decode_call::<T>(calldata)?;
     let checkpoint = storage.checkpoint();
     let result = handler(decoded, storage);
+    let (sloads, sstores) = storage.gas_counters();
+    let overhead = calculate_overhead(gas, sloads, sstores);
     match result {
         Ok(()) => {
-            storage.checkpoint_commit(checkpoint);
-            let output = PrecompileOutput::new(0, Bytes::default());
-            Ok(fill_precompile_output(output, storage))
+            if storage.deduct_gas(overhead).is_ok() {
+                storage.checkpoint_commit(checkpoint);
+                let output = PrecompileOutput::new(0, Bytes::default());
+                Ok(fill_precompile_output(output, storage))
+            } else {
+                storage.checkpoint_revert(checkpoint);
+                Err(PrecompileError::OutOfGas)
+            }
         }
         Err(e) => {
             storage.checkpoint_revert(checkpoint);

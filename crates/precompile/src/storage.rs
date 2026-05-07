@@ -74,6 +74,12 @@ pub trait StorageProvider {
     /// Current block beneficiary (coinbase).
     fn beneficiary(&self) -> Address;
 
+    /// Reset storage-operation counters to zero.
+    fn reset_gas_counters(&mut self);
+
+    /// Returns `(sload_count, sstore_count)`.
+    fn gas_counters(&self) -> (u64, u64);
+
     /// Add to the native EVM balance of an address.
     fn balance_add(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError>;
 
@@ -97,6 +103,8 @@ pub struct EvmStorageProvider<'a, J: JournalTr> {
     timestamp: U256,
     block_number: u64,
     beneficiary: Address,
+    sload_count: u64,
+    sstore_count: u64,
 }
 
 impl<'a, J: JournalTr> EvmStorageProvider<'a, J> {
@@ -119,6 +127,8 @@ impl<'a, J: JournalTr> EvmStorageProvider<'a, J> {
             timestamp,
             block_number,
             beneficiary,
+            sload_count: 0,
+            sstore_count: 0,
         }
     }
 }
@@ -128,6 +138,7 @@ where
     <J::Database as Database>::Error: core::fmt::Debug,
 {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
+        self.sload_count += 1;
         // Ensure account is loaded into journal before accessing storage.
         let _ = self
             .journal
@@ -145,6 +156,7 @@ where
     }
 
     fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
+        self.sstore_count += 1;
         if self.is_static {
             return Err(PrecompileError::Other(
                 "static call cannot mutate state".into(),
@@ -300,6 +312,15 @@ where
         self.deduct_gas(100)?;
         Ok(balance)
     }
+
+    fn reset_gas_counters(&mut self) {
+        self.sload_count = 0;
+        self.sstore_count = 0;
+    }
+
+    fn gas_counters(&self) -> (u64, u64) {
+        (self.sload_count, self.sstore_count)
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -352,6 +373,8 @@ pub struct HashMapStorageProvider {
     block_number: u64,
     beneficiary: Address,
     accessed_slots: HashMap<(Address, U256), U256>,
+    sload_count: u64,
+    sstore_count: u64,
     checkpoints: Vec<(
         HashMap<(Address, U256), U256>,
         HashMap<(Address, U256), U256>,
@@ -360,6 +383,8 @@ pub struct HashMapStorageProvider {
         HashMap<(Address, U256), U256>,
         u64,
         i64,
+        u64,
+        u64,
     )>,
 }
 
@@ -368,6 +393,8 @@ impl HashMapStorageProvider {
         Self {
             gas_limit,
             gas_remaining: gas_limit,
+            sload_count: 0,
+            sstore_count: 0,
             ..Default::default()
         }
     }
@@ -378,6 +405,8 @@ impl HashMapStorageProvider {
             gas_remaining: gas_limit,
             chain_id,
             block_number,
+            sload_count: 0,
+            sstore_count: 0,
             ..Default::default()
         }
     }
@@ -424,6 +453,7 @@ impl HashMapStorageProvider {
 
 impl StorageProvider for HashMapStorageProvider {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
+        self.sload_count += 1;
         let is_warm = self.is_warm(address, key);
         let gas = if is_warm { 100 } else { 2100 };
         self.deduct_gas(gas)?;
@@ -436,6 +466,7 @@ impl StorageProvider for HashMapStorageProvider {
     }
 
     fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
+        self.sstore_count += 1;
         if self.is_static {
             return Err(PrecompileError::Other("static call".into()));
         }
@@ -500,6 +531,8 @@ impl StorageProvider for HashMapStorageProvider {
             self.accessed_slots.clone(),
             self.gas_remaining,
             self.gas_refunded,
+            self.sload_count,
+            self.sstore_count,
         ));
         JournalCheckpoint::default()
     }
@@ -517,6 +550,8 @@ impl StorageProvider for HashMapStorageProvider {
             accessed_slots,
             gas_remaining,
             gas_refunded,
+            sload_count,
+            sstore_count,
         )) = self.checkpoints.pop()
         {
             self.persistent = persistent;
@@ -526,6 +561,8 @@ impl StorageProvider for HashMapStorageProvider {
             self.accessed_slots = accessed_slots;
             self.gas_remaining = gas_remaining;
             self.gas_refunded = gas_refunded;
+            self.sload_count = sload_count;
+            self.sstore_count = sstore_count;
         }
     }
 
@@ -600,6 +637,15 @@ impl StorageProvider for HashMapStorageProvider {
     fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
         self.deduct_gas(100)?;
         Ok(self.balances.get(&address).copied().unwrap_or_default())
+    }
+
+    fn reset_gas_counters(&mut self) {
+        self.sload_count = 0;
+        self.sstore_count = 0;
+    }
+
+    fn gas_counters(&self) -> (u64, u64) {
+        (self.sload_count, self.sstore_count)
     }
 }
 
