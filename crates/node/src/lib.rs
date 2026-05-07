@@ -304,7 +304,7 @@ impl CallNode {
         let module = build_rpc_module(Arc::clone(&self.state))
             .map_err(|e| format!("failed to build RPC module: {e}"))?;
 
-        let handle = call_rpc::start_http_server(config, module)
+        let (handle, _addr) = call_rpc::start_http_server(config, module)
             .await
             .map_err(|e| format!("HTTP server start failed: {e}"))?;
 
@@ -319,7 +319,7 @@ impl CallNode {
         let module = build_rpc_module(Arc::clone(&self.state))
             .map_err(|e| format!("failed to build WS module: {e}"))?;
 
-        let handle = call_rpc::start_ws_server(config, module)
+        let (handle, _addr) = call_rpc::start_ws_server(config, module)
             .await
             .map_err(|e| format!("WS server start failed: {e}"))?;
 

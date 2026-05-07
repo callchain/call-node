@@ -223,6 +223,9 @@ test-case = "3"
 insta = "1.43"
 indexmap = "2"
 p256 = "0.13"
+rcgen = "0.13"
+tempfile = "3"
+time = "0.3"
 
 # Benchmarks
 criterion = "0.5"

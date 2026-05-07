@@ -40,6 +40,9 @@ call-light-client = { workspace = true, optional = true }
 
 [dev-dependencies]
 call-storage.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+time.workspace = true
 
 [features]
 light-client-bridge = ["call-light-client", "call-bridge/light-client-bridge"]

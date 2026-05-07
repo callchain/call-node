@@ -78,24 +78,24 @@ pub fn build_rpc_module(
 pub async fn start_http_server<Context>(
     config: RpcConfig,
     module: RpcModule<Context>,
-) -> Result<ServerHandle, ErrorObjectOwned>
+) -> Result<(ServerHandle, SocketAddr), ErrorObjectOwned>
 where
     Context: Send + Sync + 'static,
 {
-    let handle = start_rpc_server(config.http_addr, &config, module, "HTTP").await?;
-    Ok(handle)
+    let (handle, addr) = start_rpc_server(config.http_addr, &config, module, "HTTP").await?;
+    Ok((handle, addr))
 }
 
 /// Start a WebSocket/WSS JSON-RPC server.
 pub async fn start_ws_server<Context>(
     config: RpcConfig,
     module: RpcModule<Context>,
-) -> Result<ServerHandle, ErrorObjectOwned>
+) -> Result<(ServerHandle, SocketAddr), ErrorObjectOwned>
 where
     Context: Send + Sync + 'static,
 {
-    let handle = start_rpc_server(config.ws_addr, &config, module, "WebSocket").await?;
-    Ok(handle)
+    let (handle, addr) = start_rpc_server(config.ws_addr, &config, module, "WebSocket").await?;
+    Ok((handle, addr))
 }
 
 async fn start_rpc_server<Context>(
@@ -103,13 +103,17 @@ async fn start_rpc_server<Context>(
     config: &RpcConfig,
     module: RpcModule<Context>,
     label: &str,
-) -> Result<ServerHandle, ErrorObjectOwned>
+) -> Result<(ServerHandle, SocketAddr), ErrorObjectOwned>
 where
     Context: Send + Sync + 'static,
 {
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| ErrorObjectOwned::owned(-32603, format!("bind failed: {}", e), None::<()>))?;
+
+    let bound_addr = listener.local_addr().map_err(|e| {
+        ErrorObjectOwned::owned(-32603, format!("local_addr failed: {}", e), None::<()>)
+    })?;
 
     let (stop_handle, server_handle) = stop_channel();
 
@@ -200,7 +204,7 @@ where
         }
     });
 
-    Ok(server_handle)
+    Ok((server_handle, bound_addr))
 }
 
 fn build_tls_acceptor(

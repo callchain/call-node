@@ -20,7 +20,7 @@
 | # | Blocker | Scope | Why |
 |---|---------|-------|-----|
 | 1 | **No formal security audit** | Entire codebase | No third-party review of consensus, cryptography, or economic incentives |
-| 2 | **No TLS/HTTPS tests** | `crates/rpc` | RPC binds plain HTTP; TLS config untested |
+| 2 | ~~**No TLS/HTTPS tests**~~ ✅ | `crates/rpc` | Integration tests added: handshake success, plain HTTP rejection, expired cert rejection (`crates/rpc/tests/tls_integration.rs`) |
 | 3 | **No auth/authz tests** | `crates/rpc` | No API key, JWT, or IP allowlist coverage |
 | 4 | **No MDBX integration tests** | `crates/storage` | Table descriptors exist; no actual read/write/delete tests |
 | 5 | **No concurrent DB / corruption recovery tests** | `crates/storage`, `crates/node` | No crash recovery, WAL, or checkpoint tests |
