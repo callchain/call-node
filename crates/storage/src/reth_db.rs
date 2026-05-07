@@ -283,6 +283,19 @@ impl Table for CallBytecodes {
     type Value = Vec<u8>;
 }
 
+/// Schema version tracking: single entry b"version" -> u64 BE
+///
+/// Stores the current database schema version so migrations can be
+/// applied incrementally on node startup.
+#[derive(Debug)]
+pub struct CallSchemaVersion;
+impl Table for CallSchemaVersion {
+    const NAME: &'static str = "call_schema_version";
+    const DUPSORT: bool = false;
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+}
+
 /// All Callchain tables
 pub struct CallTables;
 impl TableSet for CallTables {
@@ -314,6 +327,7 @@ impl TableSet for CallTables {
                 box_info::<CallBlockHashByHeight>,
                 box_info::<CallRpcFilters>,
                 box_info::<CallBytecodes>,
+                box_info::<CallSchemaVersion>,
             ]
             .into_iter()
             .map(|f| f()),
