@@ -780,4 +780,78 @@ mod tests {
             "IVK derivation must be deterministic"
         );
     }
+
+    #[test]
+    fn test_transfer_circuit_wrong_merkle_root_rejected() {
+        let circuit = make_1in_1out_data(1000, 900, 1);
+
+        // Rebuild with corrupted merkle root
+        let mut bad_circuit = circuit.clone();
+        bad_circuit.merkle_root = {
+            let mut r = bad_circuit.merkle_root;
+            r[0] ^= 0xFF;
+            r
+        };
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        bad_circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "circuit should reject wrong merkle root"
+        );
+    }
+
+    #[test]
+    fn test_transfer_circuit_wrong_spending_key_rejected() {
+        let sk = test_spending_key(1);
+        let rho_in = test_hash(10).0;
+        let (input_witness, nullifier, input_cm) =
+            make_input_note(1000, 1, &sk, rho_in);
+
+        let mut tree = PoseidonMerkleTree::new(32);
+        tree.insert(&input_cm);
+        let merkle_root = tree.root();
+        let merkle_path = tree.proof_for_last();
+
+        let out_vk = ViewingKey::generate(&test_spending_key(2));
+        let rho_out = test_hash(20).0;
+        let (output_witness, output_cm) =
+            make_output_note(900, 1, out_vk.incoming_view_key, rho_out);
+
+        // Corrupt the spending key in the input witness
+        let mut bad_input = input_witness.clone();
+        bad_input.spending_key[0] ^= 0xFF;
+
+        let bad_circuit = TransferCircuit::new(
+            vec![nullifier],
+            vec![output_cm],
+            1,
+            merkle_root,
+            vec![bad_input],
+            vec![output_witness],
+            vec![merkle_path],
+        );
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        bad_circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "circuit should reject wrong spending key"
+        );
+    }
+
+    #[test]
+    fn test_transfer_circuit_constraint_count_stable() {
+        let circuit = make_1in_1out_data(1000, 900, 1);
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        let num_constraints = cs.num_constraints();
+        // 1-in, 1-out transfer should have a stable, reasonable constraint count
+        assert!(
+            num_constraints > 0 && num_constraints < 15000,
+            "transfer constraint count should be stable and reasonable, got {}",
+            num_constraints
+        );
+    }
 }

@@ -454,4 +454,71 @@ mod tests {
         let result = circuit.generate_constraints(cs.clone());
         assert!(result.is_err() || !cs.is_satisfied().unwrap());
     }
+
+    #[test]
+    fn test_withdraw_circuit_wrong_merkle_root_rejected() {
+        let (nullifier, asset_id, value, target_address, _merkle_root, witness) =
+            make_withdraw_data(1000, 1, 1);
+
+        // Corrupt the merkle root by flipping a byte
+        let mut bad_root = witness.merkle_path[0].0;
+        bad_root[0] ^= 0xFF;
+
+        let circuit = WithdrawCircuit::new(
+            nullifier,
+            asset_id,
+            value,
+            target_address,
+            bad_root,
+            witness,
+        );
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn test_withdraw_circuit_wrong_value_rejected() {
+        let (nullifier, asset_id, value, target_address, merkle_root, witness) =
+            make_withdraw_data(1000, 1, 1);
+
+        // Public value doesn't match witness note_value
+        let bad_value = value + 1;
+
+        let circuit = WithdrawCircuit::new(
+            nullifier,
+            asset_id,
+            bad_value,
+            target_address,
+            merkle_root,
+            witness,
+        );
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn test_withdraw_circuit_wrong_asset_id_rejected() {
+        let (nullifier, _asset_id, value, target_address, merkle_root, witness) =
+            make_withdraw_data(1000, 1, 1);
+
+        // Public asset_id doesn't match witness
+        let bad_asset_id = 999u64;
+
+        let circuit = WithdrawCircuit::new(
+            nullifier,
+            bad_asset_id,
+            value,
+            target_address,
+            merkle_root,
+            witness,
+        );
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+    }
 }

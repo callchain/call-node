@@ -281,4 +281,48 @@ mod tests {
         let result = circuit.generate_constraints(cs.clone());
         assert!(result.is_err() || !cs.is_satisfied().unwrap());
     }
+
+    #[test]
+    fn test_deposit_circuit_wrong_asset_id_rejected() {
+        let witness = make_deposit_witness(1000, 1);
+        let commitment = make_commitment_plain(&witness, 1);
+
+        // Public asset_id=2, but witness was built for asset_id=1
+        let circuit = DepositCircuit::new(commitment, 2, witness);
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn test_deposit_circuit_wrong_rcm_rejected() {
+        let witness = make_deposit_witness(1000, 1);
+        let commitment = make_commitment_plain(&witness, 1);
+
+        // Corrupt the RCM — commitment was computed with the original rcm
+        let mut bad_witness = witness;
+        bad_witness.rcm[0] ^= 0xFF;
+
+        let circuit = DepositCircuit::new(commitment, 1, bad_witness);
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        let result = circuit.generate_constraints(cs.clone());
+        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn test_deposit_circuit_constraint_count_stable() {
+        let witness = make_deposit_witness(1000, 1);
+        let commitment = make_commitment_plain(&witness, 1);
+        let circuit = DepositCircuit::new(commitment, 1, witness);
+
+        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        let num_constraints = cs.num_constraints();
+        // Deposit circuit should have a small, stable constraint count
+        assert!(
+            num_constraints > 0 && num_constraints < 2000,
+            "deposit constraint count should be stable and reasonable, got {}",
+            num_constraints
+        );
+    }
 }
