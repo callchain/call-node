@@ -96,6 +96,10 @@ pub fn slot_unbonding(index: u64) -> U256 {
     storage_slot(&[b"unbonding"]) + U256::from(index)
 }
 
+pub fn slot_active_validator_count() -> U256 {
+    U256::from(2)
+}
+
 // ── ValidatorStorage ──────────────────────────────────────────────────
 
 /// Business logic for validator operations backed by any StorageBackend.
@@ -164,6 +168,14 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         u256_to_u64(self.backend.load(VALIDATOR_ADDRESS, slot_unbonding_count()))
     }
 
+    pub fn read_active_validator_count(&self) -> u64 {
+        self.backend
+            .load(VALIDATOR_ADDRESS, slot_active_validator_count())
+            .try_into()
+            .map(|v: u128| v as u64)
+            .unwrap_or(0)
+    }
+
     // ── Write operations ──────────────────────────────────────────────
 
     pub fn stake(
@@ -224,6 +236,14 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             U256::from(1u8),
         );
 
+        // Increment active validator count
+        let active = self.read_active_validator_count();
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_active_validator_count(),
+            u64_to_u256(active + 1),
+        );
+
         Ok(())
     }
 
@@ -281,33 +301,10 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         Ok(())
     }
 
+    /// Remove a validator from the unbonding queue by its ID.
+    /// Returns the staked amount from the queue entry.
     #[allow(clippy::expect_used)]
-    pub fn claim_unbonded(
-        &mut self,
-        asset_store: &mut AssetStorage<B>,
-        validator_id: u64,
-        caller: Address,
-        current_block: u64,
-    ) -> Result<(), ValidatorError> {
-        let stored_id = self.read_validator_id(caller);
-        if stored_id == 0 {
-            return Err(ValidatorError::NotAValidator);
-        }
-        if stored_id != validator_id {
-            return Err(ValidatorError::IdMismatch);
-        }
-
-        let status = self.read_status(caller);
-        if status != 2 {
-            return Err(ValidatorError::NotUnbonding);
-        }
-
-        let unbond_height = self.read_unbond_height(caller);
-        if current_block < unbond_height + UNBONDING_PERIOD_BLOCKS {
-            return Err(ValidatorError::UnbondingPeriodNotElapsed);
-        }
-
-        // Find and remove unbonding request from queue
+    fn remove_from_unbonding_queue(&mut self, validator_id: u64) -> Result<u128, ValidatorError> {
         let unbonding_count = self.read_unbonding_count();
         let mut amount = 0u128;
         let mut found_idx = None;
@@ -317,7 +314,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
                 .load(VALIDATOR_ADDRESS, slot_unbonding(i))
                 .to_be_bytes::<32>();
             let entry_id = u64::from_be_bytes(packed[8..16].try_into().expect("fixed slice"));
-            if entry_id == stored_id {
+            if entry_id == validator_id {
                 amount = u128::from_be_bytes(packed[16..32].try_into().expect("fixed slice"));
                 found_idx = Some(i);
                 break;
@@ -344,6 +341,63 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             u64_to_u256(unbonding_count - 1),
         );
 
+        Ok(amount)
+    }
+
+    /// Clear all per-address validator state and the reverse index slot.
+    fn clear_validator_state(&mut self, addr: Address, validator_id: u64) {
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(addr),
+            U256::ZERO,
+        );
+        self.backend
+            .store(VALIDATOR_ADDRESS, slot_validator_stake(addr), U256::ZERO);
+        self.backend
+            .store(VALIDATOR_ADDRESS, slot_validator_status(addr), U256::ZERO);
+        self.backend
+            .store(VALIDATOR_ADDRESS, slot_validator_pubkey(addr), U256::ZERO);
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_validator_unbond_height(addr),
+            U256::ZERO,
+        );
+        // Clear the reverse index so iteration can identify freed slots
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_validator_addr(validator_id),
+            U256::ZERO,
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    pub fn claim_unbonded(
+        &mut self,
+        asset_store: &mut AssetStorage<B>,
+        validator_id: u64,
+        caller: Address,
+        current_block: u64,
+    ) -> Result<(), ValidatorError> {
+        let stored_id = self.read_validator_id(caller);
+        if stored_id == 0 {
+            return Err(ValidatorError::NotAValidator);
+        }
+        if stored_id != validator_id {
+            return Err(ValidatorError::IdMismatch);
+        }
+
+        let status = self.read_status(caller);
+        if status != 2 {
+            return Err(ValidatorError::NotUnbonding);
+        }
+
+        let unbond_height = self.read_unbond_height(caller);
+        if current_block < unbond_height + UNBONDING_PERIOD_BLOCKS {
+            return Err(ValidatorError::UnbondingPeriodNotElapsed);
+        }
+
+        let amount = self.remove_from_unbonding_queue(stored_id)?;
+
         // Return stake from escrow to sender
         asset_store
             .deduct_balance(CALL_ASSET_ID, STAKING_ESCROW, amount)
@@ -352,22 +406,14 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             .add_balance(CALL_ASSET_ID, caller, amount)
             .map_err(|_| ValidatorError::BalanceOverflow)?;
 
-        // Clear validator state
+        self.clear_validator_state(caller, stored_id);
+
+        // Decrement active validator count
+        let active = self.read_active_validator_count();
         self.backend.store(
             VALIDATOR_ADDRESS,
-            call_precompile::slot_validator_by_addr(caller),
-            U256::ZERO,
-        );
-        self.backend
-            .store(VALIDATOR_ADDRESS, slot_validator_stake(caller), U256::ZERO);
-        self.backend
-            .store(VALIDATOR_ADDRESS, slot_validator_status(caller), U256::ZERO);
-        self.backend
-            .store(VALIDATOR_ADDRESS, slot_validator_pubkey(caller), U256::ZERO);
-        self.backend.store(
-            VALIDATOR_ADDRESS,
-            slot_validator_unbond_height(caller),
-            U256::ZERO,
+            slot_active_validator_count(),
+            u64_to_u256(active.saturating_sub(1)),
         );
 
         Ok(())
@@ -393,31 +439,17 @@ impl<B: StorageBackend> ValidatorStorage<B> {
                 .map_err(|_| ValidatorError::EscrowUnderflow)?;
         }
 
-        // Clear validator state
+        // Remove from unbonding queue if present (ignore errors — may not be unbonding)
+        let _ = self.remove_from_unbonding_queue(validator_id);
+
+        self.clear_validator_state(validator, validator_id);
+
+        // Decrement active validator count
+        let active = self.read_active_validator_count();
         self.backend.store(
             VALIDATOR_ADDRESS,
-            call_precompile::slot_validator_by_addr(validator),
-            U256::ZERO,
-        );
-        self.backend.store(
-            VALIDATOR_ADDRESS,
-            slot_validator_stake(validator),
-            U256::ZERO,
-        );
-        self.backend.store(
-            VALIDATOR_ADDRESS,
-            slot_validator_status(validator),
-            U256::ZERO,
-        );
-        self.backend.store(
-            VALIDATOR_ADDRESS,
-            slot_validator_pubkey(validator),
-            U256::ZERO,
-        );
-        self.backend.store(
-            VALIDATOR_ADDRESS,
-            slot_validator_unbond_height(validator),
-            U256::ZERO,
+            slot_active_validator_count(),
+            u64_to_u256(active.saturating_sub(1)),
         );
 
         Ok(stake)
@@ -467,6 +499,7 @@ mod tests {
         assert_eq!(validator_store.read_status(caller), 1);
         assert_eq!(validator_store.read_validator_id(caller), 1);
         assert_eq!(validator_store.read_validator_count(), 1);
+        assert_eq!(validator_store.read_active_validator_count(), 1);
         assert_eq!(validator_store.read_validator_by_index(1), caller);
         assert_eq!(validator_store.read_pubkey(caller), [0xAAu8; 32]);
     }
@@ -650,6 +683,8 @@ mod tests {
         assert_eq!(validator_store.read_status(caller), 0);
         assert_eq!(validator_store.read_validator_id(caller), 0);
         assert_eq!(validator_store.read_unbonding_count(), 0);
+        assert_eq!(validator_store.read_active_validator_count(), 0);
+        assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
         // Balance restored
         assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 10_000_000);
     }
@@ -732,6 +767,8 @@ mod tests {
         assert_eq!(validator_store.read_stake(caller), 0);
         assert_eq!(validator_store.read_status(caller), 0);
         assert_eq!(validator_store.read_validator_id(caller), 0);
+        assert_eq!(validator_store.read_active_validator_count(), 0);
+        assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
     }
 
     #[test]
@@ -757,5 +794,98 @@ mod tests {
         let validator_store = ValidatorStorage::new(backend);
 
         assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
+    }
+
+    #[test]
+    fn test_active_validator_count_tracks_stake_claim_slash() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let v1 = test_addr(0x11);
+        let v2 = test_addr(0x22);
+        seed_balance(&mut provider, v1, 10_000_000);
+        seed_balance(&mut provider, v2, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        assert_eq!(validator_store.read_active_validator_count(), 0);
+
+        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 1);
+
+        validator_store.stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2).unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 2);
+
+        validator_store.unstake(1, v1, 100).unwrap();
+        validator_store
+            .claim_unbonded(&mut asset_store, 1, v1, 100 + UNBONDING_PERIOD_BLOCKS)
+            .unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 1);
+
+        validator_store.slash_stake(&mut asset_store, v2).unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 0);
+    }
+
+    #[test]
+    fn test_slash_while_unbonding_clears_queue() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        assert_eq!(validator_store.read_unbonding_count(), 1);
+
+        // Slash while unbonding
+        let slashed = validator_store.slash_stake(&mut asset_store, caller).unwrap();
+        assert_eq!(slashed, 5_000_000);
+
+        // Queue entry should be removed
+        assert_eq!(validator_store.read_unbonding_count(), 0);
+        // Active count should be 0
+        assert_eq!(validator_store.read_active_validator_count(), 0);
+        // Address slot should be zeroed
+        assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
+    }
+
+    #[test]
+    fn test_re_stake_after_claim_gets_new_id() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        assert_eq!(validator_store.read_validator_id(caller), 1);
+
+        validator_store.unstake(1, caller, 100).unwrap();
+        validator_store
+            .claim_unbonded(&mut asset_store, 1, caller, 100 + UNBONDING_PERIOD_BLOCKS)
+            .unwrap();
+
+        // Re-stake after claim
+        seed_balance(&mut provider, caller, 5_000_000);
+        validator_store
+            .stake(&mut asset_store, [0xCCu8; 32], 5_000_000, caller)
+            .unwrap();
+        // New validator gets id 2 (count monotonically increases)
+        assert_eq!(validator_store.read_validator_id(caller), 2);
+        assert_eq!(validator_store.read_validator_count(), 2);
+        assert_eq!(validator_store.read_active_validator_count(), 1);
+        // Old slot should be zeroed, new slot should have the address
+        assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
+        assert_eq!(validator_store.read_validator_by_index(2), caller);
     }
 }
