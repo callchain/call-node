@@ -2,7 +2,93 @@
 
 ## Overview
 
-The Light Client (`crates/light-client`) provides trustless verification of Ethereum block headers and transaction/receipt inclusion proofs. It enables the Callchain bridge to validate cross-chain deposits without relying on validator multi-signatures.
+Callchain maintains **two** light clients:
+
+1. **Protocol Light Client** (`crates/node/src/light_client.rs`) — verifies Callchain's own block headers using validator BLS aggregate signatures and parent-hash chain. Runs as an independent tokio task (`LightClientService`) that actively gossips verified headers across the P2P network.
+2. **Ethereum Light Client** (`crates/light-client`) — verifies Ethereum block headers and transaction/receipt inclusion proofs via MPT proofs. Enables the Callchain bridge to validate cross-chain deposits.
+
+---
+
+## Protocol Light Client (`crates/node/src/light_client.rs`)
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  LightClientService (independent tokio task)                 │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ LightClient                                          │   │
+│  │  • chain_id, trusted_validators, total_validators   │   │
+│  │  • bls_pubkeys: HashMap<ValidatorId, [u8; 48]>      │   │
+│  │  • verified_headers: HashMap<u64, BlockHash>        │   │
+│  │  • latest_block_header: Option<BlockHeader>         │   │
+│  │  • db: Option<Arc<DatabaseEnv>>  (persistent)       │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                          ▲                                  │
+│           ┌──────────────┴──────────────┐                  │
+│           │                             │                  │
+│    LocalBlock event              PeerAnnouncement event     │
+│    (from block producer)       (from P2P LIGHT_CLIENT_CH)  │
+│           │                             │                  │
+│           └──────────────┬──────────────┘                  │
+│                          │                                  │
+│              sync_incremental(header, signatures)           │
+│                          │                                  │
+│           ┌──────────────┼──────────────┐                  │
+│           ▼              ▼              ▼                  │
+│      verify_header()  persist()    if epoch boundary:      │
+│      • parent_hash    to MDBX       refresh_validator_set()│
+│      • BLS aggregate                re-read from EVM state │
+│      • quorum check                                         │
+│      • basic checks                                         │
+│                                                             │
+│    On LocalBlock success ──► broadcast HeaderAnnouncement  │
+│    On PeerAnnouncement ──► verify only (no rebroadcast)    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Features
+
+| Feature | Implementation |
+|---------|----------------|
+| **BLS aggregate signature verification** | `bls_verify_aggregate()` over block hash using validator subset bitmap |
+| **Parent-hash chain** | Each header's `parent_hash` must match the previously verified header at `height-1` |
+| **Reorg handling** | `handle_reorg()` removes all verified headers at or above the fork height (memory + MDBX) |
+| **Persistent storage** | Verified headers saved to MDBX via `save_light_client_header()` on every `sync_incremental()` |
+| **Validator set refresh** | `refresh_validator_set()` re-reads validator count, addresses, pubkeys, and BLS pubkeys from EVM state |
+| **Active header gossip** | `LightClientService` broadcasts `HeaderAnnouncement` to peers on `LIGHT_CLIENT_CHANNEL` (6) after local block finalization |
+| **No amplification** | Peer announcements are verified but never re-broadcast, preventing gossip amplification |
+
+### Wire Format
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeaderAnnouncement {
+    pub header: BlockHeader,
+    pub signatures: BlockSignatures,
+}
+```
+
+Serialized with **bincode** (not wrapped in `NetworkMessage`) and sent on `LIGHT_CLIENT_CHANNEL = 6`.
+
+### Boot Sequence
+
+```
+1. open DB / load genesis
+2. start_network()     ← network receive loop dispatches LIGHT_CLIENT_CHANNEL
+3. start_light_client_service()
+   └─ reads validator set from EVM state
+   └─ spawns LightClientService tokio task
+4. start consensus (solo/BFT)
+   └─ block producer / BFT finalize sends LocalBlock events to service
+```
+
+---
+
+## Ethereum Light Client (`crates/light-client`)
+
+Provides trustless verification of Ethereum block headers and transaction/receipt inclusion proofs. Enables the Callchain bridge to validate cross-chain deposits without relying on validator multi-signatures.
 
 **Security model:**
 - Starts from a trusted anchor (known-good finalized Ethereum block)
@@ -18,7 +104,7 @@ The Light Client (`crates/light-client`) provides trustless verification of Ethe
 
 ---
 
-## Architecture
+## Ethereum Light Client Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -114,17 +200,44 @@ The `call_lightClientBridgeDeposit` RPC endpoint (feature-gated by `light-client
 
 ## File Map
 
+### Protocol Light Client
+
 | File | Role |
 |------|------|
-| `lib.rs` | Crate root, re-exports |
-| `ethereum.rs` | `EthLightClient`, header verification with gap buffer and reorg, tx/receipt verification, bridge event parsing, anchor advancement |
-| `verifier.rs` | `verify_mpt_proof()`, compact encode/decode, RLP parsing |
-| `types.rs` | `EthHeader`, `TxInclusionProof`, `ReceiptProof`, `BridgeEvent`, `GenesisState`, `LightClientError` |
-| `sync.rs` | Ethereum header sync (feature `eth-sync`) |
+| `crates/node/src/light_client.rs` | `LightClient` — BLS aggregate verification, parent-hash chain, reorg handling, persistent header storage, Merkle/ZK proof verification |
+| `crates/node/src/light_client_service.rs` | `LightClientService` — independent tokio task, event loop, header gossip broadcast, peer announcement verification |
+| `crates/node/src/network_handler.rs` | `LIGHT_CLIENT_CHANNEL = 6` constant |
+| `crates/node/src/lib.rs` | `start_light_client_service()` method, network receive loop dispatch |
+| `crates/node/src/boot.rs` | Boot sequence wiring |
+
+### Ethereum Light Client
+
+| File | Role |
+|------|------|
+| `crates/light-client/src/lib.rs` | Crate root, re-exports |
+| `crates/light-client/src/ethereum.rs` | `EthLightClient`, header verification with gap buffer and reorg, tx/receipt verification, bridge event parsing, anchor advancement |
+| `crates/light-client/src/verifier.rs` | `verify_mpt_proof()`, compact encode/decode, RLP parsing |
+| `crates/light-client/src/types.rs` | `EthHeader`, `TxInclusionProof`, `ReceiptProof`, `BridgeEvent`, `GenesisState`, `LightClientError` |
+| `crates/light-client/src/sync.rs` | Ethereum header sync (feature `eth-sync`) |
 
 ---
 
 ## Production Readiness Assessment
+
+### Protocol Light Client
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| BLS aggregate signature verification | 🟢 Ready | `bls_verify_aggregate()` with validator subset bitmap |
+| Parent-hash chain | 🟢 Ready | `verify_header()` checks `parent_hash` against verified headers |
+| Reorg handling | 🟢 Ready | `handle_reorg()` removes orphaned headers from memory + MDBX |
+| Persistent storage | 🟢 Ready | `CallLightClientHeaders` MDBX table, load on startup, save on sync |
+| Validator set refresh | 🟢 Ready | `refresh_validator_set()` re-reads from EVM state at epoch boundaries |
+| Independent service | 🟢 Ready | `LightClientService` runs as standalone tokio task |
+| Active header gossip | 🟢 Ready | Broadcasts `HeaderAnnouncement` after local block finalization |
+| No amplification | 🟢 Ready | Peer announcements verified but not re-broadcast |
+
+### Ethereum Light Client
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -136,13 +249,21 @@ The `call_lightClientBridgeDeposit` RPC endpoint (feature-gated by `light-client
 | Memory management | 🟢 Ready | Anchor advancement with pruning, finalized block protection |
 | Gap tolerance | 🟢 Ready | Out-of-order headers buffered and flushed |
 | Ethereum sync | 🟢 Ready | `eth-sync` feature for automated header fetch |
-| Integration | 🟢 Ready | `call_lightClientBridgeDeposit` RPC fully wired |
+| Integration | 🔴 BLOCKED | `call_lightClientBridgeDeposit` RPC disabled (see Known Issues) |
 
 ---
 
 ## Production Readiness Gaps
 
-### Resolved Gaps
+### Resolved Gaps — Protocol Light Client
+
+| # | Fix | Details |
+|---|-----|---------|
+| 10 | **Independent service** | `LightClientService` is a standalone tokio task, not tied to sync. Receives local blocks from producer/BFT and peer announcements from P2P. |
+| 11 | **Active header broadcast** | After local block verification, service broadcasts `HeaderAnnouncement` on `LIGHT_CLIENT_CHANNEL`. |
+| 12 | **Validator set refresh** | `refresh_validator_set()` re-reads validator count, addresses, pubkeys, and BLS pubkeys from EVM state. Triggered at epoch boundaries. |
+
+### Resolved Gaps — Ethereum Light Client
 
 | # | Fix | Details |
 |---|-----|---------|
