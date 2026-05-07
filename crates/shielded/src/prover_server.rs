@@ -1,5 +1,7 @@
 //! HTTP prover server — accepts shielded proving requests over JSON/HTTP.
 //!
+//! Available when the `prover-server` feature is enabled.
+//!
 //! Endpoints:
 //! - `POST /prove/deposit` — generate a deposit proof (auth + rate limit)
 //! - `POST /prove/transfer` — generate a transfer proof (auth + rate limit)
@@ -14,15 +16,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use call_crypto::keccak256;
-use call_shielded::{
-    circuit_deposit::{DepositCircuit, DepositWitness},
-    circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit},
-    circuit_withdraw::{WithdrawCircuit, WithdrawWitness},
-    poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash},
-    prover::RealProver,
-    ViewingKey,
-};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -34,10 +27,19 @@ use std::{
 };
 use tracing::{info, warn};
 
+use crate::{
+    circuit_deposit::{DepositCircuit, DepositWitness},
+    circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit},
+    circuit_withdraw::{WithdrawCircuit, WithdrawWitness},
+    poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash},
+    prover::RealProver,
+    ViewingKey,
+};
+
 // ── Server State ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub(crate) struct ProverState {
+pub struct ProverState {
     pub prover: &'static RealProver,
     pub mode: ProverMode,
     pub api_keys: Arc<HashSet<String>>,
@@ -50,13 +52,13 @@ pub(crate) struct ProverState {
 
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
-pub(crate) enum ProverMode {
+pub enum ProverMode {
     Production,
     Dev,
 }
 
 impl ProverMode {
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             ProverMode::Production => "production",
             ProverMode::Dev => "dev",
@@ -66,14 +68,14 @@ impl ProverMode {
 
 // ── Token Bucket Rate Limiter ─────────────────────────────────────────────
 
-pub(crate) struct TokenBucket {
+pub struct TokenBucket {
     tokens: f64,
     last_update: Instant,
     max_qps: f64,
 }
 
 impl TokenBucket {
-    fn new(max_qps: f64) -> Self {
+    pub fn new(max_qps: f64) -> Self {
         Self {
             tokens: max_qps * 2.0, // burst capacity = 2x max_qps
             last_update: Instant::now(),
@@ -81,7 +83,7 @@ impl TokenBucket {
         }
     }
 
-    fn try_consume(&mut self) -> bool {
+    pub fn try_consume(&mut self) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.max_qps).min(self.max_qps * 2.0);
@@ -145,7 +147,7 @@ async fn auth_and_rate_limit(
 // ── Request/Response Types ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub(crate) struct DepositRequest {
+pub struct DepositRequest {
     pub value: u128,
     #[serde(rename = "assetId")]
     pub asset_id: u64,
@@ -155,7 +157,7 @@ pub(crate) struct DepositRequest {
 }
 
 #[derive(Serialize)]
-pub(crate) struct DepositResponse {
+pub struct DepositResponse {
     pub proof: String,
     pub commitment: String,
     #[serde(rename = "assetId")]
@@ -163,7 +165,7 @@ pub(crate) struct DepositResponse {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct TransferRequest {
+pub struct TransferRequest {
     pub inputs: Vec<InputNoteRequest>,
     pub outputs: Vec<OutputNoteRequest>,
     #[serde(rename = "assetId")]
@@ -173,7 +175,7 @@ pub(crate) struct TransferRequest {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct InputNoteRequest {
+pub struct InputNoteRequest {
     pub value: u128,
     pub rcm: String,
     #[serde(rename = "recipientIvk")]
@@ -186,7 +188,7 @@ pub(crate) struct InputNoteRequest {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct OutputNoteRequest {
+pub struct OutputNoteRequest {
     pub value: u128,
     pub rcm: String,
     #[serde(rename = "recipientIvk")]
@@ -195,21 +197,21 @@ pub(crate) struct OutputNoteRequest {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct MerklePathEntry {
+pub struct MerklePathEntry {
     pub sibling: String,
     #[serde(rename = "isRight")]
     pub is_right: bool,
 }
 
 #[derive(Serialize)]
-pub(crate) struct TransferResponse {
+pub struct TransferResponse {
     pub proof: String,
     pub nullifiers: Vec<String>,
     pub commitments: Vec<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct WithdrawRequest {
+pub struct WithdrawRequest {
     pub value: u128,
     #[serde(rename = "assetId")]
     pub asset_id: u64,
@@ -225,13 +227,13 @@ pub(crate) struct WithdrawRequest {
 }
 
 #[derive(Serialize)]
-pub(crate) struct WithdrawResponse {
+pub struct WithdrawResponse {
     pub proof: String,
     pub nullifier: String,
 }
 
 #[derive(Serialize)]
-pub(crate) struct HealthResponse {
+pub struct HealthResponse {
     pub status: &'static str,
     pub mode: &'static str,
     pub proving_key_loaded: bool,
@@ -241,7 +243,7 @@ pub(crate) struct HealthResponse {
 
 // ── Router ─────────────────────────────────────────────────────────────────
 
-pub(crate) fn build_router(state: ProverState) -> Router {
+pub fn build_router(state: ProverState) -> Router {
     let protected = Router::new()
         .route("/prove/deposit", post(handle_deposit))
         .route("/prove/transfer", post(handle_transfer))
@@ -273,7 +275,7 @@ async fn health_check(State(state): State<ProverState>) -> Json<HealthResponse> 
 
 // ── Proof Cache Helpers ───────────────────────────────────────────────────
 
-fn cache_get(
+pub fn cache_get(
     cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>,
     key: &[u8; 32],
     ttl_secs: u64,
@@ -287,7 +289,7 @@ fn cache_get(
     None
 }
 
-fn cache_insert(cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>, key: [u8; 32], proof: Vec<u8>) {
+pub fn cache_insert(cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>, key: [u8; 32], proof: Vec<u8>) {
     cache.insert(key, (proof, Instant::now()));
 }
 
@@ -438,7 +440,7 @@ async fn handle_transfer(
             key_data.extend_from_slice(cm);
         }
         key_data.extend_from_slice(&merkle_root);
-        keccak256(&key_data).0
+        alloy_primitives::keccak256(&key_data).0
     };
     {
         let mut cache = state.proof_cache.lock().unwrap();
@@ -591,7 +593,7 @@ async fn handle_withdraw(
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn decode_hex_32(s: &str, field: &str) -> Result<[u8; 32], (StatusCode, String)> {
+pub fn decode_hex_32(s: &str, field: &str) -> Result<[u8; 32], (StatusCode, String)> {
     let cleaned = s.trim_start_matches("0x");
     let bytes = hex::decode(cleaned)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid {field}: {e}")))?;
@@ -606,7 +608,7 @@ fn decode_hex_32(s: &str, field: &str) -> Result<[u8; 32], (StatusCode, String)>
     Ok(arr)
 }
 
-fn decode_hex_20(s: &str, field: &str) -> Result<[u8; 20], (StatusCode, String)> {
+pub fn decode_hex_20(s: &str, field: &str) -> Result<[u8; 20], (StatusCode, String)> {
     let cleaned = s.trim_start_matches("0x");
     let bytes = hex::decode(cleaned)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid {field}: {e}")))?;
@@ -622,15 +624,15 @@ fn decode_hex_20(s: &str, field: &str) -> Result<[u8; 20], (StatusCode, String)>
 }
 
 /// Derive FVK from IVK using keccak256 (matching ViewingKey::generate).
-fn derive_fvk_from_ivk(ivk: &[u8; 32]) -> [u8; 32] {
+pub fn derive_fvk_from_ivk(ivk: &[u8; 32]) -> [u8; 32] {
     let mut fvk_data = Vec::with_capacity(36);
     fvk_data.extend_from_slice(b"fvk");
     fvk_data.extend_from_slice(ivk);
-    keccak256(&fvk_data).0
+    alloy_primitives::keccak256(&fvk_data).0
 }
 
 /// Compute RCM using Poseidon hash (matching circuit D3 constraint).
-fn compute_rcm_poseidon(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
+pub fn compute_rcm_poseidon(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
     let rcm_tag = domain_tag_to_fr("rcm");
     let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
     let value_fr = value_to_fr_bytes(value);
@@ -641,7 +643,7 @@ fn compute_rcm_poseidon(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 
 }
 
 /// Compute note commitment using Poseidon hash.
-fn compute_commitment_poseidon(
+pub fn compute_commitment_poseidon(
     value: u128,
     asset_id: u64,
     rcm: &[u8; 32],
@@ -656,7 +658,7 @@ fn compute_commitment_poseidon(
 }
 
 /// Compute nullifier using Poseidon hash (matching ViewingKey::derive_nullifier).
-fn compute_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
+pub fn compute_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
     let domain_bytes = domain_tag_to_fr_bytes(domain::FVK_FROM_IVK);
     let fvk_tag = bytes_to_fr(&domain_bytes);
     let ivk_fr = bytes_to_fr(ivk);
@@ -666,19 +668,19 @@ fn compute_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
     fr_to_bytes(&nf_fr)
 }
 
-fn value_to_fr_bytes(value: u128) -> ark_bn254::Fr {
+pub fn value_to_fr_bytes(value: u128) -> ark_bn254::Fr {
     let mut bytes = [0u8; 32];
     bytes[..16].copy_from_slice(&value.to_le_bytes());
     bytes_to_fr(&bytes)
 }
 
-fn asset_id_to_fr_bytes(asset_id: u64) -> ark_bn254::Fr {
+pub fn asset_id_to_fr_bytes(asset_id: u64) -> ark_bn254::Fr {
     let mut bytes = [0u8; 32];
     bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
     bytes_to_fr(&bytes)
 }
 
-fn domain_tag_to_fr(tag: &str) -> ark_bn254::Fr {
+pub fn domain_tag_to_fr(tag: &str) -> ark_bn254::Fr {
     let mut bytes = [0u8; 32];
     let tag_bytes = tag.as_bytes();
     let len = tag_bytes.len().min(32);
@@ -686,7 +688,7 @@ fn domain_tag_to_fr(tag: &str) -> ark_bn254::Fr {
     bytes_to_fr(&bytes)
 }
 
-fn domain_tag_to_fr_bytes(tag: &str) -> [u8; 32] {
+pub fn domain_tag_to_fr_bytes(tag: &str) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     let tag_bytes = tag.as_bytes();
     let len = tag_bytes.len().min(32);

@@ -48,6 +48,8 @@ pub mod poseidon;
 pub mod precompile;
 #[cfg(feature = "real-prover")]
 pub mod proof_ser;
+#[cfg(feature = "prover-server")]
+pub mod prover_server;
 
 /// Whether the `real-prover` feature is enabled at compile time.
 /// Tests in downstream crates can use this to skip mock-proof tests

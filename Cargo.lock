@@ -2108,14 +2108,9 @@ dependencies = [
 name = "call-prover"
 version = "0.1.0"
 dependencies = [
- "ark-bn254 0.4.0",
  "axum",
- "call-crypto",
  "call-shielded",
  "clap",
- "hex",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
@@ -2183,19 +2178,25 @@ dependencies = [
  "ark-serialize 0.4.2",
  "ark-snark",
  "ark-std 0.4.0",
+ "axum",
  "call-crypto",
  "call-precompile",
  "call-primitives",
  "call-protocol",
  "chacha20poly1305",
+ "clap",
  "criterion 0.5.1",
+ "hex",
  "poseidon-ark-no-std",
  "rand 0.8.5",
  "revm-precompile",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

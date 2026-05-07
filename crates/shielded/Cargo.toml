@@ -41,6 +41,14 @@ ark-crypto-primitives = { version = "0.4", features = ["crh", "merkle_tree", "sp
 sha2 = { version = "0.10", optional = true }
 tokio = { workspace = true, optional = true }
 
+# Prover server dependencies (gated behind prover-server feature)
+axum = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+
 [features]
 default = ["poseidon"]
 poseidon = []
@@ -58,6 +66,7 @@ real-prover = [
     "tokio",
 ]
 production-keys = ["real-prover", "sha2"]
+prover-server = ["real-prover", "axum", "serde_json", "tracing", "tracing-subscriber", "clap", "hex"]
 
 [[bin]]
 name = "export_r1cs"

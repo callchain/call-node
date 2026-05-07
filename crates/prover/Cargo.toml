@@ -13,16 +13,9 @@ name = "call-prover"
 path = "src/main.rs"
 
 [dependencies]
-call-shielded = { workspace = true, features = ["real-prover"] }
-call-crypto.workspace = true
-axum.workspace = true
+call-shielded = { workspace = true, features = ["prover-server"] }
 tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-hex.workspace = true
-
-# ZK proving
-ark-bn254 = "0.4"
+axum.workspace = true
