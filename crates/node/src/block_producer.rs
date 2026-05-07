@@ -4,6 +4,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::governance_advancer::GovernanceAdvancer;
+use crate::light_client::{BlockSignatures, PubKeyBytes, SigBytes};
+use crate::light_client_service::LightClientEvent;
 use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL};
 use crate::{persist_block, persist_state_incremental, persist_state_to_db};
 use call_bridge::BridgeConfig;
@@ -34,6 +36,7 @@ pub(crate) async fn block_production_loop(
     oracle_tracker: Arc<RwLock<OracleTracker>>,
     governance_advancer: GovernanceAdvancer,
     snapshot_retention_blocks: u64,
+    light_client_tx: Option<tokio::sync::mpsc::UnboundedSender<LightClientEvent>>,
 ) {
     let mut parent_hash = initial_parent_hash;
     let prune_config = call_storage::PruneConfig::default();
@@ -435,6 +438,22 @@ pub(crate) async fn block_production_loop(
         // 12. Persist block to MDBX
         if let Err(ref e) = persist_block(&db.db, height, &block) {
             tracing::warn!(error = %e, "failed to persist block");
+        }
+
+        // 12a. Send to light client service for header gossip
+        if let Some(ref tx) = light_client_tx {
+            let signatures = BlockSignatures {
+                block_hash: block.header.hash(),
+                signatures: vec![(
+                    proposer,
+                    PubKeyBytes([0u8; 32]),
+                    SigBytes(block.header.signature.0),
+                )],
+            };
+            let _ = tx.send(LightClientEvent::LocalBlock {
+                header: block.header.clone(),
+                signatures,
+            });
         }
 
         // 12. Update prune tracking state

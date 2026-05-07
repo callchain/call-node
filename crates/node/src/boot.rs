@@ -270,7 +270,10 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         limits: NetworkLimits::default(),
         ..Default::default()
     };
-    node.start_network(p2p_config, identity_key).await?;
+    let (_light_client_handle, light_client_tx) = node.start_light_client_service();
+    info!("light client service started");
+
+    node.start_network(p2p_config, identity_key, Some(light_client_tx.clone())).await?;
 
     // Step 5: Init consensus (validator or full node)
     match config.mode {
@@ -305,7 +308,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         NodeMode::Validator => {
             if config.solo {
                 info!("step 7: solo validator mode — starting local block production (no BFT)");
-                let _handle = node.start_consensus_loop();
+                let _handle = node.start_consensus_loop(Some(light_client_tx.clone()));
             } else {
                 info!("step 7: starting BFT consensus engine");
                 let ed25519_key = load_ed25519_key(&config.keys)?;
@@ -384,7 +387,7 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 );
 
                 let _handle =
-                    node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers);
+                    node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers, Some(light_client_tx.clone()));
             }
         }
         NodeMode::Full | NodeMode::Archive => {

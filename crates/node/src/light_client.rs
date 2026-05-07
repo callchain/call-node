@@ -119,6 +119,13 @@ pub struct EncryptedNote {
 
 // ── Validator Signature Verification ────────────────────────────────
 
+/// Wire-format header announcement for light client gossip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeaderAnnouncement {
+    pub header: BlockHeader,
+    pub signatures: BlockSignatures,
+}
+
 /// Aggregated validator signatures for a block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockSignatures {
@@ -502,6 +509,35 @@ impl LightClient {
         std::mem::size_of::<Self>()
             + self.verified_headers.len() * (8 + 32) // height + hash
             + self.trusted_validators.len() * (4 + 32) // validator id + pubkey
+    }
+
+    /// Re-read validator set from EVM state.
+    pub fn refresh_validator_set(
+        &mut self,
+        db_env: &Arc<DatabaseEnv>,
+    ) -> Result<(), String> {
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env)
+            .map_err(|e| format!("db load: {e}"))?;
+        let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
+        let mut ed25519_map = HashMap::new();
+        let mut bls_map = HashMap::new();
+        for id in 1..=count {
+            let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
+            if addr == call_primitives::Address::ZERO {
+                continue;
+            }
+            let pk = call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
+            let bls_pk =
+                call_consensus::exec::state_accessors::read_validator_bls_pubkey(&provider, addr);
+            ed25519_map.insert(id as u32, pk);
+            if bls_pk != [0u8; 48] {
+                bls_map.insert(id as u32, bls_pk);
+            }
+        }
+        self.trusted_validators = ed25519_map;
+        self.total_validators = count as u32;
+        self.bls_pubkeys = bls_map;
+        Ok(())
     }
 }
 

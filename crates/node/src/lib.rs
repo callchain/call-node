@@ -15,17 +15,20 @@ pub mod wallet;
 pub mod bft_loop;
 pub mod block_producer;
 pub mod governance_advancer;
+pub mod light_client_service;
 pub mod network_handler;
 pub mod sync;
 
 pub(crate) use bft_loop::bft_event_loop;
 pub(crate) use block_producer::block_production_loop;
 pub(crate) use network_handler::{
-    handle_network_message, SyncInflight, BLOCK_CHANNEL, SYNC_CHANNEL, SYNC_REQUEST_BATCH,
+    handle_network_message, SyncInflight, BLOCK_CHANNEL, LIGHT_CLIENT_CHANNEL, SYNC_CHANNEL,
+    SYNC_REQUEST_BATCH,
 };
 pub(crate) use sync::{apply_synced_blocks, handle_sync_request};
 
 use crate::light_client::{BlockSignatures, LightClient, PubKeyBytes, SigBytes};
+use crate::light_client_service::{LightClientEvent, LightClientService};
 use crate::state_persist::{
     check_recovery_needed, clear_checkpoint, load_consensus_state_inner, load_fork_state,
     load_receipts, load_state_from_db, persist_state_incremental, persist_state_to_db,
@@ -329,6 +332,7 @@ impl CallNode {
         &mut self,
         config: CommonwareConfig,
         identity_key: ed25519::PrivateKey,
+        light_client_tx: Option<mpsc::UnboundedSender<LightClientEvent>>,
     ) -> Result<(), String> {
         let network = CommonwareNetwork::new(&config, identity_key)
             .await
@@ -351,6 +355,7 @@ impl CallNode {
         let net_clone = Arc::clone(&network);
         let telemetry = Arc::clone(&self.telemetry);
         let oracle_tracker = Arc::clone(&self.oracle_tracker);
+        let light_client_tx = light_client_tx.clone();
         let p2p_defense = tokio::sync::Mutex::new(P2PDefense::new(10000, 1000, 10 * 1024 * 1024));
         // Tracks SyncRequests we've sent recently. Both the announcement
         // handler (BLOCK_CHANNEL) and the response handler (SYNC_CHANNEL)
@@ -509,6 +514,17 @@ impl CallNode {
                     } else {
                         tracing::debug!(peer_id, "BLOCK_CHANNEL: unknown message format");
                     }
+                } else if channel == LIGHT_CLIENT_CHANNEL {
+                    if let Ok(announcement) =
+                        bincode::deserialize::<crate::light_client::HeaderAnnouncement>(&data)
+                    {
+                        if let Some(ref tx) = light_client_tx {
+                            let _ = tx.send(LightClientEvent::PeerAnnouncement {
+                                header: announcement.header,
+                                signatures: announcement.signatures,
+                            });
+                        }
+                    }
                 } else {
                     handle_network_message(
                         &peer_id,
@@ -528,8 +544,71 @@ impl CallNode {
         Ok(())
     }
 
+    /// Start the independent light client header gossip service.
+    pub fn start_light_client_service(
+        &self,
+    ) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedSender<LightClientEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel::<LightClientEvent>();
+        let network = self.network.clone().expect("network must be started first");
+        let db_env = Arc::clone(&self.state.db_env);
+        let chain_id = self.state.chain_id;
+
+        let (trusted_validators, total_validators, bls_pubkeys) = {
+            let provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&db_env).unwrap();
+            let count =
+                call_consensus::exec::state_accessors::read_validator_count(&provider);
+            let mut ed25519_map = std::collections::HashMap::new();
+            let mut bls_map = std::collections::HashMap::new();
+            for id in 1..=count {
+                let addr = call_consensus::exec::state_accessors::read_validator_addr(
+                    &provider, id,
+                );
+                if addr == call_primitives::Address::ZERO {
+                    continue;
+                }
+                let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
+                    &provider, addr,
+                );
+                let bls_pk =
+                    call_consensus::exec::state_accessors::read_validator_bls_pubkey(
+                        &provider, addr,
+                    );
+                ed25519_map.insert(id as u32, pk);
+                if bls_pk != [0u8; 48] {
+                    bls_map.insert(id as u32, bls_pk);
+                }
+            }
+            (ed25519_map, count as u32, bls_map)
+        };
+
+        let mut light_client = LightClient::new_with_db(
+            chain_id,
+            trusted_validators,
+            total_validators,
+            Arc::clone(&db_env),
+        );
+        light_client.set_bls_pubkeys(bls_pubkeys);
+
+        let epoch_length = self.state.consensus_params.read().unwrap().epoch_length;
+
+        let service = LightClientService {
+            event_rx: rx,
+            network,
+            light_client,
+            db_env,
+            epoch_length,
+        };
+
+        let handle = tokio::spawn(service.run());
+        (handle, tx)
+    }
+
     /// Start the consensus block production loop
-    pub fn start_consensus_loop(&self) -> tokio::task::JoinHandle<()> {
+    pub fn start_consensus_loop(
+        &self,
+        light_client_tx: Option<mpsc::UnboundedSender<LightClientEvent>>,
+    ) -> tokio::task::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let mempool = Arc::clone(&self.mempool);
         let consensus = Arc::clone(&self.consensus);
@@ -559,6 +638,7 @@ impl CallNode {
             oracle_tracker,
             governance_advancer,
             snapshot_retention_blocks,
+            light_client_tx,
         ))
     }
 
@@ -572,6 +652,7 @@ impl CallNode {
         ed25519_private_key: ed25519::PrivateKey,
         consensus_p2p_port: u16,
         bft_bootstrap_peers: Vec<(ed25519::PublicKey, std::net::SocketAddr)>,
+        light_client_tx: Option<mpsc::UnboundedSender<LightClientEvent>>,
     ) -> std::thread::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let mempool = Arc::clone(&self.mempool);
@@ -829,6 +910,7 @@ impl CallNode {
                             oracle_tracker.clone(),
                             governance_advancer,
                             snapshot_retention_blocks,
+                            light_client_tx.clone(),
                         ));
 
                         let reason = exit_rx.await;

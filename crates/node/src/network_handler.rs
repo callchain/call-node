@@ -20,6 +20,8 @@ pub(crate) const SYNC_CHANNEL: u64 = 3;
 pub(crate) const ORACLE_CHANNEL: u64 = 4;
 /// P2P channel for upgrade announcements.
 pub(crate) const UPGRADE_CHANNEL: u64 = 5;
+/// P2P channel for light client header announcements.
+pub(crate) const LIGHT_CLIENT_CHANNEL: u64 = 6;
 
 /// How many blocks to request per sync batch.
 /// 100 blocks is a safe default: at ~1 KB per block it stays well under the

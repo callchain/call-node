@@ -143,6 +143,7 @@ pub(crate) async fn bft_event_loop(
     oracle_tracker: Arc<RwLock<OracleTracker>>,
     governance_advancer: crate::governance_advancer::GovernanceAdvancer,
     snapshot_retention_blocks: u64,
+    light_client_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::light_client_service::LightClientEvent>>,
 ) {
     let mut execution_results: std::collections::HashMap<ConsensusDigest, BlockExecutionResult> =
         std::collections::HashMap::new();
@@ -687,6 +688,22 @@ pub(crate) async fn bft_event_loop(
                     let db_env = Arc::clone(&db.db);
                     if let Err(e) = persist_block(&db_env, height, &block) {
                         tracing::warn!(error = %e, height, "BFT finalize: persist block failed");
+                    }
+
+                    // Send to light client service for header gossip
+                    if let Some(ref tx) = light_client_tx {
+                        let signatures = crate::light_client::BlockSignatures {
+                            block_hash: block.header.hash(),
+                            signatures: vec![(
+                                block.header.proposer,
+                                crate::light_client::PubKeyBytes([0u8; 32]),
+                                crate::light_client::SigBytes(block.header.signature.0),
+                            )],
+                        };
+                        let _ = tx.send(crate::light_client_service::LightClientEvent::LocalBlock {
+                            header: block.header.clone(),
+                            signatures,
+                        });
                     }
 
                     // Update prune tracking
