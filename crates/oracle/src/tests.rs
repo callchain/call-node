@@ -179,6 +179,143 @@ fn test_oracle_submission_duplicate() {
         .is_ok());
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Negative signature tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_oracle_invalid_signature_wrong_key() {
+    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let pair = PricePair::new(1, 0);
+    let block = 1000u64;
+    let timestamp = block * 1000;
+
+    // Sign with a completely unrelated keypair
+    let (_, wrong_signing_key) = ed25519_generate_keypair();
+    let bad_sig = sign_oracle_submission(
+        &wrong_signing_key, validators[0].0, pair, 2_000_000, block, timestamp);
+
+    let submission = OracleSubmission {
+        validator_id: validators[0].0,
+        pair,
+        price: 2_000_000,
+        block_number: block,
+        timestamp,
+        signature: bad_sig,
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        tracker.submit_price(submission, &config, &validator_map),
+        Err(OracleError::InvalidSignature)
+    ));
+}
+
+#[test]
+fn test_oracle_invalid_signature_tampered_price() {
+    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (vid, _, signing_key) = &validators[0];
+    let pair = PricePair::new(1, 0);
+    let block = 1000u64;
+    let timestamp = block * 1000;
+
+    // Sign with the correct price
+    let sig = sign_oracle_submission(signing_key, *vid, pair, 2_000_000, block, timestamp);
+
+    // But submit a different price
+    let submission = OracleSubmission {
+        validator_id: *vid,
+        pair,
+        price: 9_999_999, // tampered
+        block_number: block,
+        timestamp,
+        signature: sig,
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        tracker.submit_price(submission, &config, &validator_map),
+        Err(OracleError::InvalidSignature)
+    ));
+}
+
+#[test]
+fn test_oracle_invalid_signature_tampered_block() {
+    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (vid, _, signing_key) = &validators[0];
+    let pair = PricePair::new(1, 0);
+    let block = 1000u64;
+    let timestamp = block * 1000;
+
+    // Sign for block 1000
+    let sig = sign_oracle_submission(signing_key, *vid, pair, 2_000_000, block, timestamp);
+
+    // But claim block 2000 (still on interval, so only signature fails)
+    let tampered_timestamp = 2000 * 1000;
+    let submission = OracleSubmission {
+        validator_id: *vid,
+        pair,
+        price: 2_000_000,
+        block_number: 2000, // tampered
+        timestamp: tampered_timestamp,
+        signature: sig,
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        tracker.submit_price(submission, &config, &validator_map),
+        Err(OracleError::InvalidSignature)
+    ));
+}
+
+#[test]
+fn test_oracle_invalid_signature_all_zeros() {
+    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (vid, _, _) = &validators[0];
+    let pair = PricePair::new(1, 0);
+    let block = 1000u64;
+    let timestamp = block * 1000;
+
+    let submission = OracleSubmission {
+        validator_id: *vid,
+        pair,
+        price: 2_000_000,
+        block_number: block,
+        timestamp,
+        signature: [0u8; 64],
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        tracker.submit_price(submission, &config, &validator_map),
+        Err(OracleError::InvalidSignature)
+    ));
+}
+
+#[test]
+fn test_oracle_invalid_signature_random_bytes() {
+    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (vid, _, _) = &validators[0];
+    let pair = PricePair::new(1, 0);
+    let block = 1000u64;
+    let timestamp = block * 1000;
+
+    let mut bad_sig = [0u8; 64];
+    for i in 0..64 {
+        bad_sig[i] = (i * 7 + 13) as u8; // deterministic pseudo-random
+    }
+
+    let submission = OracleSubmission {
+        validator_id: *vid,
+        pair,
+        price: 2_000_000,
+        block_number: block,
+        timestamp,
+        signature: bad_sig,
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        tracker.submit_price(submission, &config, &validator_map),
+        Err(OracleError::InvalidSignature)
+    ));
+}
+
 #[test]
 fn test_oracle_aggregation_median() {
     let (mut tracker, validators, config, validator_map) = make_tracker();
