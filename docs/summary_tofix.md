@@ -25,7 +25,7 @@
 | 4 | ~~**No MDBX integration tests**~~ ✅ | `crates/storage` | 30 integration tests added covering all 22 tables: put/get/delete roundtrips, batch writes, iteration, sorted order, large values, overwrite, clear, and convenience helpers (`crates/storage/tests/mdbx_integration.rs`) |
 | 5 | ~~**No concurrent DB / corruption recovery tests**~~ ✅ | `crates/storage`, `crates/node` | Concurrency tests added: same-key writes, same-table writes, read-during-write, batch atomicity, close-reopen durability. Crash recovery test added: checkpoint detected on restart, in-memory state reset, EVM state preserved |
 | 6 | ~~**No network partition tests**~~ ✅ | `crates/network`, `crates/node/tests` | `PartitionableNetwork` + `PartitionSimulator` added. Phase 1: partition groups, drop rates, isolation/heal. Phase 2: block gossip stops across partitions and resumes after heal. Phase 3: equivocating proposer across partitions, withholding proposer round advance, malicious message flood, invalid block rejection (`crates/network/src/p2p/partitionable.rs`, `crates/node/tests/test_network_partition.rs`, `crates/node/tests/test_byzantine_faults.rs`) |
-| 7 | **No light client consensus verification** | `crates/light-client` | No Ethereum BLS signature verification; no malicious fork tests |
+| 7 | ~~**No light client malicious fork tests**~~ ✅ | `crates/light-client` | Malicious fork tests added: reorg below finalized rejected, tampered block hash rejected, duplicate header rejected, before-anchor rejected, gap attack rejected, side-chain fork resolution, buffer overflow rejected, parent-hash chain break detected. Ethereum BLS consensus signature verification remains deferred (see #32) |
 | 8 | **No oracle signature negative tests** | `crates/oracle` | Submissions accept any 64-byte signature without validation |
 | 9 | **No database migration framework** | `crates/storage` | Schema changes require manual migration or full resync |
 | 10 | **No formal verification for shielded circuits** | `crates/shielded` | Groth16 tested but not formally verified |
@@ -80,7 +80,7 @@
 
 ## What's Working Well
 
-- **~1,693 tests** across 101 files, spanning unit, integration, and E2E
+- **~1,700 tests** across 101 files, spanning unit, integration, and E2E
 - **EVM-only architecture**: all state in MDBX (`CallEvmAccounts` / `CallEvmStorage`)
 - **Commonware Simplex BFT** consensus with VRF proposer rotation
 - **Dynamic gas metering** (`base + sloads*50 + sstores*500`) via revm Journal
