@@ -744,6 +744,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_claim_unbonded_wrong_id() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        let result = validator_store.claim_unbonded(
+            &mut asset_store,
+            99, // wrong id
+            caller,
+            100 + UNBONDING_PERIOD_BLOCKS,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::IdMismatch)),
+            "expected IdMismatch, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_claim_unbonded_not_validator() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        let result = validator_store.claim_unbonded(
+            &mut asset_store,
+            1,
+            caller,
+            100 + UNBONDING_PERIOD_BLOCKS,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::NotAValidator)),
+            "expected NotAValidator, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_double_claim_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let backend = JournalBackend::new(&mut provider);
+        let mut asset_store = AssetStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(backend);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        // First claim succeeds
+        let result = validator_store.claim_unbonded(
+            &mut asset_store,
+            1,
+            caller,
+            100 + UNBONDING_PERIOD_BLOCKS,
+        );
+        assert!(result.is_ok(), "first claim failed: {:?}", result.err());
+
+        // Second claim should fail — validator state is cleared
+        let result = validator_store.claim_unbonded(
+            &mut asset_store,
+            1,
+            caller,
+            100 + UNBONDING_PERIOD_BLOCKS,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::NotAValidator)),
+            "expected NotAValidator on double claim, got {:?}",
+            result
+        );
+    }
+
     // ── Slash tests ────────────────────────────────────────────────────
 
     #[test]
