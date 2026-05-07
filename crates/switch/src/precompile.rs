@@ -885,4 +885,208 @@ mod tests {
             Err(SwitchError::EvmContractNotRegistered)
         ));
     }
+
+    #[test]
+    fn test_switch_to_evm_amount_zero_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, sender), u128_to_u256(1000))
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToEvmCall::SELECTOR);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&0u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "amount=0 should fail");
+    }
+
+    #[test]
+    fn test_switch_to_evm_to_zero_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, sender), u128_to_u256(1000))
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToEvmCall::SELECTOR);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..68].copy_from_slice(Address::ZERO.as_slice());
+        input[84..100].copy_from_slice(&100u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "to=ZERO should fail");
+    }
+
+    #[test]
+    fn test_switch_to_evm_asset_not_active_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+        let asset_id = 9u64;
+
+        // Seed balance but asset status is not set (defaults to 0? actually defaults to 0 which means active)
+        // Set status to 1 (inactive)
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(asset_id, sender),
+                u128_to_u256(1000),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToEvmCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&100u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "inactive asset should fail");
+    }
+
+    #[test]
+    fn test_switch_storage_erc20_burn_underflow_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let contract = addr(0xAA);
+        let holder = addr(0xBB);
+        let asset_id = 2u64;
+
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
+
+        // Mint some tokens first
+        store.erc20_mint(asset_id, contract, holder, 100).unwrap();
+
+        // Manually reduce holder balance so totalSupply is fine but balance underflows
+        let mut padded = [0u8; 32];
+        padded[12..32].copy_from_slice(holder.as_slice());
+        provider
+            .sstore(contract, mapping_slot(&padded, 4), u128_to_u256(50))
+            .unwrap();
+
+        // Burn more than balance (totalSupply=100 is fine, balance=50 is not)
+        let result = store.erc20_burn(asset_id, contract, holder, 100);
+        assert!(
+            matches!(result, Err(SwitchError::Erc20BalanceUnderflow)),
+            "expected Erc20BalanceUnderflow, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_switch_storage_protocol_bal_overflow_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let addr = addr(0x33);
+        let asset_id = 7u64;
+
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(asset_id, addr),
+                u128_to_u256(u128::MAX),
+            )
+            .unwrap();
+
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
+
+        let result = store.add_protocol_bal(asset_id, addr, 1);
+        assert!(
+            matches!(result, Err(SwitchError::ProtocolBalanceOverflow)),
+            "expected ProtocolBalanceOverflow, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_switch_storage_protocol_bal_underflow_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let addr = addr(0x33);
+        let asset_id = 7u64;
+
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(10))
+            .unwrap();
+
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
+
+        let result = store.sub_protocol_bal(asset_id, addr, 20);
+        assert!(
+            matches!(result, Err(SwitchError::InsufficientProtocolBalance)),
+            "expected InsufficientProtocolBalance, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_switch_to_protocol_insufficient_evm_balance_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+
+        // Only 100 native EVM balance
+        provider.balance_add(sender, U256::from(100)).unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&200u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "insufficient EVM balance should fail");
+
+        // Balance unchanged
+        let evm_bal = provider.balance_get(sender).ok();
+        assert_eq!(evm_bal, Some(U256::from(100)));
+    }
+
+    #[test]
+    fn test_switch_storage_erc20_total_supply_underflow_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let contract = addr(0xAA);
+        let holder = addr(0xBB);
+        let asset_id = 2u64;
+
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
+
+        // Mint
+        store.erc20_mint(asset_id, contract, holder, 100).unwrap();
+
+        // Burn more than total supply (impossible in normal flow but test the check)
+        // First, manually increase holder balance without touching total supply
+        let mut padded = [0u8; 32];
+        padded[12..32].copy_from_slice(holder.as_slice());
+        provider
+            .sstore(
+                contract,
+                mapping_slot(&padded, 4),
+                u128_to_u256(200),
+            )
+            .unwrap();
+
+        let result = store.erc20_burn(asset_id, contract, holder, 200);
+        assert!(
+            matches!(result, Err(SwitchError::Erc20TotalSupplyUnderflow)),
+            "expected Erc20TotalSupplyUnderflow, got {:?}",
+            result
+        );
+    }
 }

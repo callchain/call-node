@@ -197,21 +197,23 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
   - Execution data stored in chunked slots for retrieval
   - `governance_advancer.rs` (node layer) mirrors all precompile side effects and is kept in sync.
 
-#### `crates/validator` (786 LOC, 4 tests)
+#### `crates/validator` (786 LOC, 24 tests)
 - **Address:** 0x204
 - **Status:** Complete
 - **Functions:** stake, unstake, claimUnbonded, getValidator, getValidatorList, getValidatorCount
 - **Issues:**
-  - Only 4 tests — edge cases (slashing, below-minimum stake, overflow) not covered
+  - ~~Only 4 tests — edge cases not covered~~ — **FIXED**: 20 lib-layer tests covering stake/unstake/claim/slash edge cases (below-minimum stake, already staked, insufficient balance, ID mismatch, double claim, slash while unbonding, re-stake after claim, active count tracking)
   - No delegation support (self-stake only)
   - ~~Hardcoded gas costs~~ — **FIXED**: Dynamic gas metering based on sload/sstore counters
 - **Assessment:** Full validator lifecycle. Staking escrow, unbonding period, claims. Tests in both validator and consensus crates.
 
-#### `crates/compliance` (294 LOC, 2 tests)
+#### `crates/compliance` (294 LOC, 11 tests)
 - **Address:** 0x205
 - **Status:** Minimal
 - **Functions:** addToAllowlist, removeFromAllowlist, isAllowed, addToSanctionsList, removeFromSanctionsList, isSanctioned
-- **Assessment:** Basic allowlist/sanctions. Only 2 tests. Functional but minimal.
+- **Issues:**
+  - ~~Only 2 tests~~ — **FIXED**: 11 tests (2 precompile + 9 lib) covering multiple targets, various status values, different policy IDs, default status, unauthorized updates
+- **Assessment:** Basic allowlist/sanctions. Functional but minimal.
 
 #### `crates/oracle` (1213 LOC, 13 tests)
 - **Address:** 0x101
@@ -234,11 +236,13 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 - **Functions:** register, grantPermission, revokePermission, checkPermission, payFee
 - **Assessment:** Basic agent registry. Only 3 tests.
 
-#### `crates/switch` (624 LOC, 0 lib tests visible)
+#### `crates/switch` (624 LOC, 20 tests)
 - **Address:** 0x207
-- **Status:** Minimal
-- **Functions:** lock, unlock, getStatus, getLockInfo
-- **Assessment:** Cross-chain message routing. Minimal implementation and test coverage.
+- **Status:** Functional
+- **Functions:** switchToEvm, switchToProtocol
+- **Issues:**
+  - ~~0 lib tests visible~~ — **FIXED**: 20 tests (8 precompile + 12 lib) covering native CALL/ERC-20 paths, amount=0, to=ZERO, asset inactive, insufficient balance, EVM contract not registered, ERC-20 mint/burn, overflow/underflow guards
+- **Assessment:** Cross-chain asset switching between protocol and EVM. Native CALL balance and ERC-20 mint/burn both tested with edge cases.
 
 ### 3.5 Specialized Crates
 
@@ -273,7 +277,7 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 | asset | 11 | Pass | Good |
 | bridge | 13 | Pass | Good |
 | chainspec | 12 | Pass | Good |
-| compliance | 9 | Pass | Good (2 precompile + 7 lib) |
+| compliance | 11 | Pass | Good (2 precompile + 9 lib) |
 | consensus | 62 | Pass | Excellent |
 | crypto | 25 | Pass | Good |
 | evm | 31 | Pass | Good |
@@ -289,10 +293,10 @@ Callchain is a Layer-1 blockchain with EVM compatibility, BFT consensus (Simplex
 | rpc | 18 | Pass | Good |
 | serialization | 10 | Pass | Good |
 | shielded | 123 | Pass | Excellent (slow) |
-| validator | 18 | Pass | Good (4 precompile + 14 lib) |
-| switch | 12 | Pass | Good (7 precompile + 5 lib) |
+| validator | 24 | Pass | Good (4 precompile + 20 lib) |
+| switch | 20 | Pass | Good (8 precompile + 12 lib) |
 | prover | 9 | Pass | Good |
-| **TOTAL** | **596** | **ALL PASS** | |
+| **TOTAL** | **610** | **ALL PASS** | |
 
 ### Integration Tests
 
@@ -357,8 +361,8 @@ None remaining.
 13. ~~Prover health endpoint minimal~~ — **FIXED**: Returns `proving_key_loaded`, `queue_depth`, `cache_size`
 14. ~~EvmDb `code_by_hash_ref` stub~~ — **FIXED**: `CallBytecodes` MDBX table with save/load via `apply_revm_state_to_mdbx` and `InMemoryStateProvider::save_to_db`
 15. ~~Compliance/agent/prover minimal tests~~ — **FIXED**: 7+ compliance lib tests, 15+ agent lib tests, 9 prover server tests
-16. ~~Validator no standalone tests~~ — **FIXED**: 14 lib-layer tests for stake/unstake/claim/slash
-17. ~~Switch no lib tests~~ — **FIXED**: 5 lib-layer tests for SwitchStorage business logic
+16. ~~Validator no standalone tests~~ — **FIXED**: 20 lib-layer tests for stake/unstake/claim/slash edge cases
+17. ~~Switch no lib tests~~ — **FIXED**: 20 tests covering native CALL/ERC-20 paths, overflow/underflow, inactive asset, zero amount
 
 ### Warnings
 
@@ -366,8 +370,7 @@ None remaining.
 
 5. ~~**Unused imports in `shielded/src/lib.rs`**~~ — **FIXED**: removed `setup_deposit_circuit` and `setup_transfer_circuit` exports; `setup_withdraw_circuit` gated behind `test` cfg only
 
-6. **Unsafe block in `evm/src/trie.rs`** (1 warning)
-   - Raw pointer dereference
+6. ~~**Unsafe block in `evm/src/trie.rs`**~~ — **FIXED**: All unsafe code eliminated from the module; `ProviderHashedCursorFactory` and `MdbxTrieCursorFactory` use only safe Rust
 
 ### Architecture Concerns
 
@@ -401,15 +404,15 @@ None remaining.
 
 ### High Priority
 
-1. **Add standalone validator tests** — The validator crate deserves its own test suite independent of consensus integration tests.
+1. ~~**Add standalone validator tests**~~ — **FIXED**: 20 lib-layer tests covering all major edge cases.
 
-2. **Clean up warnings** — Run `cargo fix` for shielded unused imports. Consider documenting the intentional unsafe blocks.
+2. **Clean up warnings** — Run `cargo fix` for shielded unused imports.
 
 ### Medium Priority
 
-4. **Expand switch/compliance tests** — These crates have minimal coverage. Add edge case tests.
+3. ~~**Expand switch/compliance tests**~~ — **FIXED**: Switch has 20 tests (native CALL + ERC-20 + edge cases); Compliance has 11 tests (multiple targets, status values, policy IDs).
 
-5. ~~**Light client hardening**~~ — **FIXED**: Protocol `LightClientService` is an independent tokio task with active header gossip, persistent MDBX storage, and validator set refresh. EthLightClient BLS sync-committee verification remains deferred.
+4. ~~**Light client hardening**~~ — **FIXED**: Protocol `LightClientService` is an independent tokio task with active header gossip, persistent MDBX storage, and validator set refresh. EthLightClient BLS sync-committee verification remains deferred.
 
 ### Low Priority
 
@@ -426,7 +429,6 @@ None remaining.
 Callchain is a well-architected, modular blockchain codebase with strong test coverage and clean separation of concerns. The reth migration is complete and solid. Most protocol features are implemented and tested.
 
 The main gaps are:
-- Switch and compliance crates remain thin/minimal
 - EthLightClient sync-committee BLS verification not yet implemented (deferred)
 
 The codebase is in good shape for continued development. All tests pass, the architecture is sound, and the documentation is comprehensive.

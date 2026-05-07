@@ -228,4 +228,115 @@ mod tests {
         let mut store = ComplianceStorage::new(backend);
         assert_eq!(store.read_asset_policy_id(42), 7);
     }
+
+    #[test]
+    fn test_check_compliance_multiple_targets() {
+        let mut backend = TestBackend::new();
+        let issuer = Address::repeat_byte(0x11);
+        let target_a = Address::repeat_byte(0x22);
+        let target_b = Address::repeat_byte(0x33);
+
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            address_to_u256_word(issuer),
+        );
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
+            u8_to_u256(1),
+        );
+
+        let mut store = ComplianceStorage::new(backend.clone());
+        // Both start clear (status=0)
+        assert!(store.check_compliance(1, target_a));
+        assert!(store.check_compliance(1, target_b));
+
+        // Restrict target_a only
+        let mut store = ComplianceStorage::new(backend.clone());
+        store.update_compliance(1, target_a, 3, issuer).unwrap();
+
+        let mut store = ComplianceStorage::new(backend);
+        assert!(!store.check_compliance(1, target_a));
+        assert!(store.check_compliance(1, target_b));
+    }
+
+    #[test]
+    fn test_update_compliance_various_status_values() {
+        let mut backend = TestBackend::new();
+        let issuer = Address::repeat_byte(0x11);
+        let target = Address::repeat_byte(0x22);
+
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            address_to_u256_word(issuer),
+        );
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
+            u8_to_u256(1),
+        );
+
+        // Status 0 = clear (compliant)
+        let mut store = ComplianceStorage::new(backend.clone());
+        store.update_compliance(1, target, 0, issuer).unwrap();
+        let mut store = ComplianceStorage::new(backend.clone());
+        assert!(store.check_compliance(1, target));
+
+        // Status 1 = fail
+        let mut store = ComplianceStorage::new(backend.clone());
+        store.update_compliance(1, target, 1, issuer).unwrap();
+        let mut store = ComplianceStorage::new(backend.clone());
+        assert!(!store.check_compliance(1, target));
+
+        // Status 255 = fail (any non-zero)
+        let mut store = ComplianceStorage::new(backend.clone());
+        store.update_compliance(1, target, 255, issuer).unwrap();
+        let mut store = ComplianceStorage::new(backend);
+        assert!(!store.check_compliance(1, target));
+    }
+
+    #[test]
+    fn test_check_compliance_different_policy_ids() {
+        let mut backend = TestBackend::new();
+        let issuer = Address::repeat_byte(0x11);
+        let target = Address::repeat_byte(0x22);
+
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            address_to_u256_word(issuer),
+        );
+        backend.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
+            u8_to_u256(1),
+        );
+
+        // Set status under policy_id=1
+        let mut store = ComplianceStorage::new(backend.clone());
+        store.update_compliance(1, target, 3, issuer).unwrap();
+
+        // If asset's policy_id changes to 2, old restrictions don't apply
+        let mut backend2 = backend.clone();
+        backend2.store(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
+            u8_to_u256(2),
+        );
+        let mut store = ComplianceStorage::new(backend2);
+        // target has no entry under policy_id=2, so defaults to 0 (clear)
+        assert!(store.check_compliance(1, target));
+    }
+
+    #[test]
+    fn test_read_status_default_zero() {
+        let backend = TestBackend::new();
+        let target = Address::repeat_byte(0x22);
+
+        let mut store = ComplianceStorage::new(backend);
+        // Unset status defaults to 0 (clear/compliant)
+        assert_eq!(store.read_status(target, 1), 0);
+    }
 }
