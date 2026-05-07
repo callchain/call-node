@@ -7,6 +7,7 @@ pub mod config;
 pub mod event;
 pub mod memory;
 pub mod message;
+pub mod partitionable;
 pub mod trait_;
 pub mod wire;
 
@@ -19,4 +20,5 @@ pub use config::{load_or_generate_identity_key, CommonwareConfig};
 pub use event::NetworkEvent;
 pub use memory::InMemoryNetwork;
 pub use message::*;
+pub use partitionable::{PartitionRouter, PartitionableNetwork};
 pub use trait_::Network;

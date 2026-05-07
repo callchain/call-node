@@ -12,6 +12,7 @@ pub use limits::*;
 pub use p2p::{
     load_or_generate_identity_key, BlockAnnouncement, CommonwareConfig, CommonwareNetwork,
     EngineRestartReason, EngineRestartRequest, EpochBoundarySignal, InMemoryNetwork, Network,
-    NetworkMessage, OraclePriceRequest, OraclePriceSubmission, PeerExchange, SyncRequest,
-    SyncResponse, TransactionMessage, UpgradeAnnouncement,
+    NetworkMessage, OraclePriceRequest, OraclePriceSubmission, PartitionRouter,
+    PartitionableNetwork, PeerExchange, SyncRequest, SyncResponse, TransactionMessage,
+    UpgradeAnnouncement,
 };

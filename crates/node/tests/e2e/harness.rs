@@ -7,7 +7,10 @@
 
 use call_consensus::{Block, BlockExecutionResult, ConsensusParams, SimplexConsensus};
 use call_mempool::Mempool;
-use call_network::{BlockAnnouncement, InMemoryNetwork, Network, NetworkMessage};
+use call_network::{
+    BlockAnnouncement, InMemoryNetwork, Network, NetworkMessage, PartitionRouter,
+    PartitionableNetwork,
+};
 use call_node::governance_advancer::GovernanceAdvancer;
 use call_primitives::{Address, BlockHash, Ed25519PublicKey, TxHash};
 use call_rpc::RpcState;
@@ -439,6 +442,123 @@ impl DeterministicRuntime {
             }
         }
         blocks
+    }
+}
+
+// ── PartitionSimulator ────────────────────────────────────────────────
+
+/// Simulates a P2P network with configurable partitions and drop rates.
+///
+/// Each node gets its own `PartitionableNetwork` handle.  Messages are
+/// routed through a shared `PartitionRouter` that respects group
+/// boundaries and drop probabilities.
+pub struct PartitionSimulator {
+    router: Arc<PartitionRouter>,
+    nodes: Vec<Arc<RwLock<TestNode>>>,
+    networks: Vec<Arc<PartitionableNetwork>>,
+}
+
+impl PartitionSimulator {
+    pub fn new() -> Self {
+        Self {
+            router: Arc::new(PartitionRouter::new()),
+            nodes: Vec::new(),
+            networks: Vec::new(),
+        }
+    }
+
+    /// Add a node to the simulated network, assigning it a unique node ID.
+    pub fn add_node(&mut self, mut node: TestNode) -> Arc<RwLock<TestNode>> {
+        let idx = self.nodes.len();
+        let node_id = format!("node-{}", idx);
+        let net = Arc::new(PartitionableNetwork::new(node_id.clone(), Arc::clone(&self.router)));
+
+        // Register all existing peers on this new network handle
+        for existing in &self.networks {
+            net.add_peer(existing.node_id.clone());
+            existing.add_peer(node_id.clone());
+        }
+
+        node.inject_network(Arc::clone(&net) as Arc<dyn Network>);
+        let wrapped = Arc::new(RwLock::new(node));
+        self.nodes.push(Arc::clone(&wrapped));
+        self.networks.push(net);
+        wrapped
+    }
+
+    /// Get a node by index.
+    pub fn node(&self, idx: usize) -> Arc<RwLock<TestNode>> {
+        Arc::clone(&self.nodes[idx])
+    }
+
+    /// Get the network handle for a node.
+    pub fn network(&self, idx: usize) -> Arc<PartitionableNetwork> {
+        Arc::clone(&self.networks[idx])
+    }
+
+    /// Get the number of connected nodes.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Place nodes into a partition group.  Nodes in different groups
+    /// cannot exchange messages.
+    pub fn partition_group(&self, node_indices: &[usize], group: &str) {
+        for &idx in node_indices {
+            if let Some(net) = self.networks.get(idx) {
+                self.router.set_partition_group(&net.node_id, group);
+            }
+        }
+    }
+
+    /// Set the global message drop rate (0.0 .. 1.0).
+    pub fn set_drop_rate(&self, rate: f64) {
+        self.router.set_drop_rate(rate);
+    }
+
+    /// Produce a block on `node_idx`.
+    pub fn produce_block(&mut self, node_idx: usize, timestamp: u64) -> Option<Block> {
+        if let Ok(mut node) = self.nodes[node_idx].write() {
+            node.produce_block(timestamp)
+        } else {
+            None
+        }
+    }
+
+    /// Return the number of pending messages for a node.
+    pub fn pending_messages(&self, node_idx: usize) -> usize {
+        self.networks
+            .get(node_idx)
+            .map(|n| self.router.pending_count(&n.node_id))
+            .unwrap_or(0)
+    }
+
+    /// Drain all pending messages for a node.
+    pub fn drain_messages(&self, node_idx: usize) -> Vec<(String, u64, Vec<u8>)> {
+        self.networks
+            .get(node_idx)
+            .map(|n| self.router.drain(&n.node_id))
+            .unwrap_or_default()
+    }
+
+    /// Drain pending messages from *all* nodes and return them.
+    pub fn drain_all_messages(&self) -> Vec<(String, u64, Vec<u8>)> {
+        self.router.drain_all()
+    }
+
+    /// Heal all partitions by placing every node in the same group.
+    pub fn heal_all_partitions(&self) {
+        for net in &self.networks {
+            self.router.set_partition_group(&net.node_id, "default");
+        }
+    }
+
+    /// Completely isolate a node (place it in a private group).
+    pub fn isolate_node(&self, node_idx: usize) {
+        if let Some(net) = self.networks.get(node_idx) {
+            self.router
+                .set_partition_group(&net.node_id, &format!("isolated-{}", net.node_id));
+        }
     }
 }
 
