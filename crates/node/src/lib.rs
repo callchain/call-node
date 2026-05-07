@@ -50,7 +50,7 @@ use call_primitives::BlockHash;
 use call_protocol::{security::P2PDefense, FeeParams};
 use call_rpc::{build_rpc_module, RpcConfig, RpcState};
 use call_storage::reth_db::save_prune_state as db_save_prune;
-use call_storage::{open_db, CallDb, PruneState};
+use call_storage::{open_db, CallDb, MigrationRunner, PruneState};
 use commonware_codec::extensions::DecodeExt;
 use jsonrpsee::server::ServerHandle;
 use reth_db::DatabaseEnv;
@@ -125,6 +125,11 @@ impl CallNode {
     pub fn new_with_chain_id(data_dir: PathBuf, chain_id: Option<u64>) -> Result<Self, String> {
         let mempool = Arc::new(RwLock::new(Mempool::new()));
         let db = open_db(data_dir.clone()).map_err(|e| format!("failed to open db: {e}"))?;
+
+        // Run database migrations (empty runner = no-op until migrations are registered)
+        let migration_runner = MigrationRunner::new();
+        db.run_migrations(&migration_runner)
+            .map_err(|e| format!("db migration failed: {e}"))?;
 
         // Restore prune state from disk if previously persisted
         let prune_state = db

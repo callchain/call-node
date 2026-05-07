@@ -33,6 +33,11 @@ impl CallDb {
     pub fn load_prune_state(&self) -> Result<PruneState, StorageError> {
         db_load_prune(&self.db)
     }
+
+    /// Run pending database migrations.
+    pub fn run_migrations(&self, runner: &MigrationRunner) -> Result<(), StorageError> {
+        runner.run(&self.db)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
