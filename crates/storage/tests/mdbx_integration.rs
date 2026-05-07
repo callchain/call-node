@@ -478,3 +478,157 @@ fn test_get_nonexistent_key_returns_none() {
     let db = temp_db();
     assert!(db_get::<CallBytecodes>(&db.db, b"nope").unwrap().is_none());
 }
+
+// ── Concurrency tests ────────────────────────────────────────────────
+
+#[test]
+fn test_concurrent_writes_same_key() {
+    let db = temp_db();
+    let db_arc = std::sync::Arc::clone(&db.db);
+    let key = b"shared_key".to_vec();
+
+    let mut handles = Vec::new();
+    for t in 0..10 {
+        let db_clone = std::sync::Arc::clone(&db_arc);
+        let key_clone = key.clone();
+        handles.push(std::thread::spawn(move || {
+            for i in 0..20 {
+                let value = format!("thread_{}_iter_{}", t, i).into_bytes();
+                db_put::<CallEvmAccounts>(&db_clone, key_clone.clone(), value).unwrap();
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Value should be the last successful write (any thread's last iteration)
+    let loaded = db_get::<CallEvmAccounts>(&db.db, &key).unwrap();
+    assert!(loaded.is_some());
+    let s = String::from_utf8(loaded.unwrap()).unwrap();
+    assert!(s.starts_with("thread_"));
+    assert!(s.contains("_iter_19"));
+}
+
+#[test]
+fn test_concurrent_writes_same_table_different_keys() {
+    let db = temp_db();
+    let db_arc = std::sync::Arc::clone(&db.db);
+
+    let mut handles = Vec::new();
+    for t in 0..5 {
+        let db_clone = std::sync::Arc::clone(&db_arc);
+        handles.push(std::thread::spawn(move || {
+            for i in 0..50 {
+                let key = format!("t{}_k{}", t, i).into_bytes();
+                let value = serde_json::to_vec(&(t * 100 + i)).unwrap();
+                db_put::<CallReceipts>(&db_clone, key, value).unwrap();
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let all = db_iter_all::<CallReceipts>(&db.db).unwrap();
+    assert_eq!(all.len(), 250);
+}
+
+#[test]
+fn test_read_during_batch_write() {
+    let db = temp_db();
+    let db_arc = std::sync::Arc::clone(&db.db);
+
+    // Pre-populate
+    for i in 0..100 {
+        let key = format!("pre_{}", i).into_bytes();
+        db_put::<CallConsensusBlocks>(&db.db, key, vec![i as u8]).unwrap();
+    }
+
+    // Writer thread: batch write 500 more entries
+    let writer = {
+        let db_clone = std::sync::Arc::clone(&db_arc);
+        std::thread::spawn(move || {
+            let mut pairs = Vec::new();
+            for i in 0..500 {
+                pairs.push((format!("batch_{}", i).into_bytes(), vec![i as u8]));
+            }
+            db_batch_put::<CallConsensusBlocks>(&db_clone, pairs).unwrap();
+        })
+    };
+
+    // Reader thread: iterate while writer is active
+    let reader = {
+        let db_clone = std::sync::Arc::clone(&db_arc);
+        std::thread::spawn(move || {
+            // Read multiple times; each read sees a consistent snapshot
+            for _ in 0..10 {
+                let all = db_iter_all::<CallConsensusBlocks>(&db_clone).unwrap();
+                // Should see at least the pre-populated entries
+                assert!(
+                    all.len() >= 100,
+                    "Reader saw only {} entries during batch write",
+                    all.len()
+                );
+            }
+        })
+    };
+
+    writer.join().unwrap();
+    reader.join().unwrap();
+
+    // After writer completes, all 600 entries should be visible
+    let all = db_iter_all::<CallConsensusBlocks>(&db.db).unwrap();
+    assert_eq!(all.len(), 600);
+}
+
+#[test]
+fn test_batch_write_atomicity() {
+    let db = temp_db();
+    // Write some initial data
+    db_put::<CallFeeParams>(&db.db, b"a".to_vec(), b"1".to_vec()).unwrap();
+    db_put::<CallFeeParams>(&db.db, b"b".to_vec(), b"2".to_vec()).unwrap();
+
+    // Batch overwrite with new values
+    let batch = vec![
+        (b"a".to_vec(), b"10".to_vec()),
+        (b"b".to_vec(), b"20".to_vec()),
+        (b"c".to_vec(), b"30".to_vec()),
+    ];
+    db_batch_put::<CallFeeParams>(&db.db, batch).unwrap();
+
+    // All entries should be updated consistently
+    assert_eq!(db_get::<CallFeeParams>(&db.db, b"a").unwrap(), Some(b"10".to_vec()));
+    assert_eq!(db_get::<CallFeeParams>(&db.db, b"b").unwrap(), Some(b"20".to_vec()));
+    assert_eq!(db_get::<CallFeeParams>(&db.db, b"c").unwrap(), Some(b"30".to_vec()));
+}
+
+#[test]
+fn test_durability_close_reopen() {
+    let path = {
+        let db = temp_db();
+        let path = db.data_dir.clone();
+
+        // Write data
+        db_put::<CallMetadataChainId>(&db.db, vec![0], 9999u64.to_be_bytes().to_vec()).unwrap();
+        db_put::<CallEvmAccounts>(&db.db, b"addr1".to_vec(), b"balance_100".to_vec()).unwrap();
+
+        // db is dropped here, closing MDBX
+        path
+    };
+
+    // Reopen the same database
+    let db = call_storage::open_db(path).unwrap();
+
+    // Verify data survived
+    assert_eq!(
+        db_get::<CallMetadataChainId>(&db.db, &[0]).unwrap(),
+        Some(9999u64.to_be_bytes().to_vec())
+    );
+    assert_eq!(
+        db_get::<CallEvmAccounts>(&db.db, b"addr1").unwrap(),
+        Some(b"balance_100".to_vec())
+    );
+}

@@ -591,6 +591,140 @@ async fn test_e2e_state_persistence_restart() {
     }
 }
 
+#[tokio::test]
+async fn test_crash_recovery_checkpoint_detected() {
+    let tmp = std::env::temp_dir().join(format!(
+        "call-node-crash-recovery-{}",
+        std::process::id()
+    ));
+
+    // Phase 1: Create node, persist state cleanly, then simulate crash
+    {
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Stake validator
+        {
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            let mut consensus = node.consensus.write().unwrap();
+            consensus
+                .stake_validator(
+                    &mut provider,
+                    test_addr(1),
+                    test_pubkey(1),
+                    one_million_call(),
+                )
+                .expect("stake");
+            consensus.refresh_proposer_subset(&provider);
+            provider.state().save_to_db(&node.state.db_env).unwrap();
+        }
+
+        // Fund sender
+        {
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            state_accessors::seed_balance(
+                provider.state_mut(),
+                call_protocol::CALL_ASSET_ID,
+                *test_sender(),
+                10_000_000,
+            );
+            provider.state_mut().set_balance(
+                *test_sender(),
+                call_primitives::U256::from(100_000_000_000u128),
+            );
+            provider.state().save_to_db(&node.state.db_env).unwrap();
+        }
+
+        // Produce and commit block
+        let tx = make_evm_tx(0);
+        {
+            let mut mempool = node.mempool.write().unwrap();
+            let _ = mempool.insert_evm_tx(tx);
+        }
+
+        let selection = { node.mempool.write().unwrap().select_transactions() };
+        let proposer = node
+            .consensus
+            .read()
+            .unwrap()
+            .current_proposer()
+            .expect("proposer");
+        let height = node.consensus.read().unwrap().current_height();
+        let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
+        let version = node.state.fork_manager.read().unwrap().current_version();
+        let mut block = Block::new(height, node.parent_hash, 5_000, proposer, version, evm_txs);
+
+        let result = {
+            let mut s = node.state.write_all();
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            let result = block
+                .execute(&mut provider, &mut s.fee_params, height, Some(&node.state.db_env))
+                .expect("execution");
+            provider.state().save_to_db(&node.state.db_env).unwrap();
+            result
+        };
+        block.finalize(&result);
+
+        {
+            let mut consensus = node.consensus.write().unwrap();
+            consensus.commit_block(&block, &result).expect("commit");
+            let mut provider =
+                call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+            consensus.advance_round(&mut provider);
+        }
+
+        // Clean persist
+        persist_state_to_db(&node.db.db, &node.state, &node.consensus).expect("persist state");
+
+        // Simulate crash: write checkpoint marker without clearing it
+        // This represents a crash during a subsequent persist
+        crate::state_persist::write_checkpoint_pending(
+            &node.db.db,
+            block.header.hash().0,
+        )
+        .expect("write checkpoint");
+
+        // Node dropped here
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Phase 2: Create new node — should detect checkpoint and recover
+    {
+        let node2 = CallNode::new(tmp.clone()).expect("node creation after crash");
+
+        // Recovery should have reset fork_manager to default
+        let fm = node2.state.fork_manager.read().unwrap();
+        assert_eq!(fm.current_version, call_primitives::ProtocolVersion::new(1, 0, 0));
+        assert!(fm.scheduled_upgrades().is_empty());
+        drop(fm);
+
+        // Receipts should be empty (reset by recovery)
+        let receipts = node2.state.receipts.read().unwrap();
+        assert!(receipts.is_empty(), "receipts should be empty after recovery");
+        drop(receipts);
+
+        // Checkpoint should be cleared
+        assert!(
+            !crate::state_persist::check_recovery_needed(&node2.db.db).unwrap(),
+            "checkpoint should be cleared after recovery"
+        );
+
+        // EVM state should still exist (recovery only resets in-memory state)
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node2.state.db_env).unwrap();
+        let balance = provider.state().get_balance(test_sender());
+        assert!(
+            balance > call_primitives::U256::ZERO,
+            "EVM state should survive recovery, got {balance}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
 // ── State isolation tests (Phase 1) ─────────────────────────────────
 
 #[tokio::test]

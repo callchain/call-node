@@ -259,3 +259,109 @@ pub(crate) fn persist_state_incremental(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use call_primitives::FeeCurrency;
+    use call_protocol::InstructionExecResult;
+
+    fn temp_db() -> Arc<DatabaseEnv> {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        std::thread::current().id().hash(&mut h);
+        let tmp = std::env::temp_dir().join(format!(
+            "call-state-persist-test-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            h.finish(),
+        ));
+        call_storage::init_call_db(&tmp).expect("init temp db")
+    }
+
+    #[test]
+    fn test_checkpoint_pending_detected() {
+        let db = temp_db();
+        assert!(!check_recovery_needed(&db).unwrap());
+
+        write_checkpoint_pending(&db, [0xABu8; 32]).unwrap();
+        assert!(check_recovery_needed(&db).unwrap());
+
+        clear_checkpoint(&db).unwrap();
+        assert!(!check_recovery_needed(&db).unwrap());
+    }
+
+    #[test]
+    fn test_fee_params_roundtrip() {
+        let db = temp_db();
+        let mut params = FeeParams::default();
+        params.base_fee = 42;
+
+        save_fee_params(&db, &params).unwrap();
+        let loaded = load_fee_params(&db).unwrap();
+        assert_eq!(loaded.base_fee, 42);
+    }
+
+    #[test]
+    fn test_fee_params_missing_returns_default() {
+        let db = temp_db();
+        let loaded = load_fee_params(&db).unwrap();
+        assert_eq!(loaded.base_fee, FeeParams::default().base_fee);
+    }
+
+    #[test]
+    fn test_receipts_roundtrip() {
+        let db = temp_db();
+        let mut receipts = std::collections::HashMap::new();
+        let tx_hash = call_primitives::TxHash::from([0xCCu8; 32]);
+        let receipt = call_protocol::ProtocolReceipt {
+            tx_hash,
+            block_number: 100,
+            block_hash: call_primitives::BlockHash::from([0xDDu8; 32]),
+            transaction_index: 0,
+            status: call_primitives::ExecutionStatus::Success,
+            gas_used: 21_000,
+            gas_payer: call_primitives::Address::ZERO,
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 0,
+            cumulative_gas_used: 21_000,
+            effective_gas_price: 10,
+            to: None,
+            contract_address: None,
+            logs: Vec::new(),
+            logs_bloom: vec![0u8; 256],
+            instruction_results: vec![InstructionExecResult {
+                success: true,
+                gas_used: 21_000,
+                revert_reason: None,
+            }],
+            memos: Vec::new(),
+            state_changes: Vec::new(),
+        };
+        receipts.insert(tx_hash, receipt);
+
+        save_receipts(&db, &receipts).unwrap();
+        let loaded = load_receipts(&db).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.get(&tx_hash).unwrap().block_number, 100);
+    }
+
+    #[test]
+    fn test_fork_state_roundtrip() {
+        let db = temp_db();
+        let fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 2, 3), 1);
+
+        save_fork_state(&db, &fm).unwrap();
+        let loaded = load_fork_state(&db).unwrap().unwrap();
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 2, 3));
+    }
+
+    #[test]
+    fn test_fork_state_missing_returns_none() {
+        let db = temp_db();
+        assert!(load_fork_state(&db).unwrap().is_none());
+    }
+}

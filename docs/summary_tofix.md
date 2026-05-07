@@ -23,7 +23,7 @@
 | 2 | ~~**No TLS/HTTPS tests**~~ ✅ | `crates/rpc` | Integration tests added: handshake success, plain HTTP rejection, expired cert rejection (`crates/rpc/tests/tls_integration.rs`) |
 | 3 | ~~**No auth/authz tests**~~ ❌ N/A | `crates/rpc` | Permissionless blockchain — all methods are state queries or signed-tx submission; no admin namespace exists to protect |
 | 4 | ~~**No MDBX integration tests**~~ ✅ | `crates/storage` | 30 integration tests added covering all 22 tables: put/get/delete roundtrips, batch writes, iteration, sorted order, large values, overwrite, clear, and convenience helpers (`crates/storage/tests/mdbx_integration.rs`) |
-| 5 | **No concurrent DB / corruption recovery tests** | `crates/storage`, `crates/node` | No crash recovery, WAL, or checkpoint tests |
+| 5 | ~~**No concurrent DB / corruption recovery tests**~~ ✅ | `crates/storage`, `crates/node` | Concurrency tests added: same-key writes, same-table writes, read-during-write, batch atomicity, close-reopen durability. Crash recovery test added: checkpoint detected on restart, in-memory state reset, EVM state preserved |
 | 6 | **No network partition tests** | `crates/node/tests` | E2E uses local harness only; no Byzantine/equivocation tests |
 | 7 | **No light client consensus verification** | `crates/light-client` | No Ethereum BLS signature verification; no malicious fork tests |
 | 8 | **No oracle signature negative tests** | `crates/oracle` | Submissions accept any 64-byte signature without validation |
