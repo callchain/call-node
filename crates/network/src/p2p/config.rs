@@ -36,6 +36,8 @@ pub struct CommonwareConfig {
     pub max_known_peers: usize,
     /// Maximum number of peers to advertise in a single PEX message.
     pub max_pex_peers_per_msg: usize,
+    /// TTL for PEX-discovered peers in seconds. 0 = no expiry.
+    pub pex_peer_ttl_seconds: u64,
 }
 
 impl Default for CommonwareConfig {
@@ -53,6 +55,7 @@ impl Default for CommonwareConfig {
             auto_connect_discovered: false,
             max_known_peers: 1000,
             max_pex_peers_per_msg: 50,
+            pex_peer_ttl_seconds: 600,
         }
     }
 }
@@ -73,6 +76,7 @@ impl CommonwareConfig {
             auto_connect_discovered: false,
             max_known_peers: 1000,
             max_pex_peers_per_msg: 50,
+            pex_peer_ttl_seconds: 600,
         }
     }
 }

@@ -14,10 +14,49 @@ use commonware_p2p::{
 };
 use commonware_runtime::{IoBuf, Metrics, Quota, Runner, Spawner};
 use commonware_utils::ordered::Map;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Validate a peer ID advertised in a PEX message.
+/// Must be a valid hex-encoded Ed25519 public key (64 hex chars = 32 bytes).
+fn validate_pex_peer_id(peer_id: &str) -> bool {
+    if peer_id.len() != 64 {
+        return false;
+    }
+    hex::decode(peer_id).is_ok()
+}
+
+/// Validate a socket address advertised in a PEX message.
+/// Rejects loopback, multicast, unspecified, and link-local addresses.
+/// Private IPs are rejected unless `allow_private` is true.
+fn validate_pex_address(addr: SocketAddr, allow_private: bool) -> bool {
+    let ip = addr.ip();
+    if ip.is_multicast() || ip.is_unspecified() {
+        return false;
+    }
+    if ip.is_loopback() && !allow_private {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_link_local() {
+                return false;
+            }
+            if !allow_private && v4.is_private() {
+                return false;
+            }
+        }
+        IpAddr::V6(v6) => {
+            // Link-local IPv6: fe80::/10
+            if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 /// Real P2P network adapter backed by commonware-p2p.
 ///
@@ -70,6 +109,14 @@ pub struct CommonwareNetwork {
     auto_connect_discovered: bool,
     max_known_peers: usize,
     max_pex_peers_per_msg: usize,
+    /// Whether to allow private IP addresses (for devnet/testing)
+    allow_private_ips: bool,
+    /// TTL for PEX-discovered peers (seconds). 0 = no expiry.
+    pex_peer_ttl_seconds: u64,
+    /// PEX-discovered peers with timestamps (separate from trusted bootstrap peers)
+    pex_entries: Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, (SocketAddr, Instant)>>,
+    >,
 }
 
 struct InitComponents {
@@ -263,6 +310,9 @@ impl CommonwareNetwork {
             auto_connect_discovered: config.auto_connect_discovered,
             max_known_peers: config.max_known_peers,
             max_pex_peers_per_msg: config.max_pex_peers_per_msg,
+            allow_private_ips: config.allow_private_ips,
+            pex_peer_ttl_seconds: config.pex_peer_ttl_seconds,
+            pex_entries: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         })
     }
 
@@ -294,11 +344,12 @@ impl CommonwareNetwork {
         }
 
         let peers_to_advertise = {
-            let guard = self.known_peers.read().await;
-            let mut list: Vec<(String, SocketAddr)> = guard
-                .iter()
-                .filter(|(id, _)| **id != self.our_peer_id)
-                .map(|(id, addr)| (id.clone(), *addr))
+            let bootstrap = self.known_peers.read().await;
+            let pex = self.pex_entries.read().await;
+            let mut list: Vec<(String, SocketAddr)> = self
+                .merge_peers(&bootstrap, &pex)
+                .into_iter()
+                .filter(|(id, _)| id != &self.our_peer_id)
                 .collect();
             // Shuffle to avoid always advertising the same subset
             use rand::seq::SliceRandom;
@@ -325,7 +376,7 @@ impl CommonwareNetwork {
     }
 
     /// Process an incoming PeerExchange message.
-    /// Adds new peers to the known_peers address book and optionally auto-connects.
+    /// Validates peer IDs and addresses before adding to the pending PEX entries.
     async fn process_peer_exchange(&self, pex: PeerExchange, from_peer: &str) {
         if !self.enable_peer_exchange {
             return;
@@ -334,7 +385,7 @@ impl CommonwareNetwork {
         // Rate limit: max 1 PEX per peer per 30 seconds
         {
             let mut guard = self.pex_last_received.lock().await;
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             if let Some(last) = guard.get(from_peer) {
                 if now.duration_since(*last).as_secs() < 30 {
                     tracing::debug!(peer = %from_peer, "PEX rate limit hit");
@@ -344,31 +395,32 @@ impl CommonwareNetwork {
             guard.insert(from_peer.to_string(), now);
         }
 
-        // Also add the sender's advertised address (they know best)
         let mut new_peers: Vec<(String, SocketAddr)> = Vec::new();
 
         {
-            let mut guard = self.known_peers.write().await;
+            let mut guard = self.pex_entries.write().await;
 
-            // Add sender's own address
-            let sender_id = from_peer.to_string();
-            if !guard.contains_key(&sender_id) && sender_id != self.our_peer_id {
-                guard.insert(sender_id.clone(), pex.sender_addr);
-                new_peers.push((sender_id, pex.sender_addr));
-            }
-
-            // Add advertised peers
+            // Validate and add advertised peers (NOT the sender's address —
+            // that comes from the authenticated transport layer, not the PEX payload)
             for (peer_id, addr) in pex.peers {
                 if peer_id == self.our_peer_id {
                     continue;
                 }
+                if !validate_pex_peer_id(&peer_id) {
+                    tracing::debug!(peer = %peer_id, "PEX rejected: invalid peer_id format");
+                    continue;
+                }
+                if !validate_pex_address(addr, self.allow_private_ips) {
+                    tracing::debug!(%addr, "PEX rejected: invalid address");
+                    continue;
+                }
                 if !guard.contains_key(&peer_id) {
-                    guard.insert(peer_id.clone(), addr);
+                    guard.insert(peer_id.clone(), (addr, Instant::now()));
                     new_peers.push((peer_id, addr));
                 }
             }
 
-            // Trim if over capacity (oldest entries first — BTreeMap preserves order)
+            // Trim if over capacity
             while guard.len() > self.max_known_peers {
                 if let Some(oldest) = guard.keys().next().cloned() {
                     guard.remove(&oldest);
@@ -378,10 +430,10 @@ impl CommonwareNetwork {
             }
         }
 
-        let known_count = self.known_peers.read().await.len();
+        let pex_count = self.pex_entries.read().await.len();
         tracing::info!(
             count = new_peers.len(),
-            total = known_count,
+            total = pex_count,
             "added peers from PEX"
         );
 
@@ -402,10 +454,43 @@ impl CommonwareNetwork {
         }
     }
 
+    /// Merge bootstrap peers with non-expired PEX-discovered peers.
+    fn merge_peers(
+        &self,
+        bootstrap: &std::collections::BTreeMap<String, SocketAddr>,
+        pex: &std::collections::HashMap<String, (SocketAddr, Instant)>,
+    ) -> Vec<(String, SocketAddr)> {
+        let ttl = if self.pex_peer_ttl_seconds > 0 {
+            Some(Duration::from_secs(self.pex_peer_ttl_seconds))
+        } else {
+            None
+        };
+        let now = Instant::now();
+
+        let mut result: Vec<(String, SocketAddr)> = bootstrap
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        for (peer_id, (addr, added)) in pex {
+            if let Some(ttl) = ttl {
+                if now.duration_since(*added) > ttl {
+                    continue; // expired
+                }
+            }
+            if !bootstrap.contains_key(peer_id) {
+                result.push((peer_id.clone(), *addr));
+            }
+        }
+        result
+    }
+
     /// Get a snapshot of the known peers address book.
+    /// Includes bootstrap peers and non-expired PEX-discovered peers.
     pub async fn known_peers(&self) -> Vec<(String, SocketAddr)> {
-        let guard = self.known_peers.read().await;
-        guard.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        let bootstrap = self.known_peers.read().await;
+        let pex = self.pex_entries.read().await;
+        self.merge_peers(&bootstrap, &pex)
     }
 }
 
@@ -591,5 +676,97 @@ impl Network for CommonwareNetwork {
     fn is_healthy(&self) -> bool {
         let peer_count = self.peer_count();
         (peer_count as u32) >= self.min_healthy_peers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_pex_peer_id_valid() {
+        let valid = "aabbccdd".repeat(8); // 64 hex chars
+        assert!(validate_pex_peer_id(&valid));
+    }
+
+    #[test]
+    fn test_validate_pex_peer_id_too_short() {
+        assert!(!validate_pex_peer_id("aabbccdd"));
+    }
+
+    #[test]
+    fn test_validate_pex_peer_id_too_long() {
+        assert!(!validate_pex_peer_id(&"aa".repeat(40))); // 80 chars
+    }
+
+    #[test]
+    fn test_validate_pex_peer_id_invalid_hex() {
+        assert!(!validate_pex_peer_id(&"gggg".repeat(16))); // 64 chars but invalid hex
+    }
+
+    #[test]
+    fn test_validate_pex_address_public_ip() {
+        let addr: SocketAddr = "8.8.8.8:1234".parse().unwrap();
+        assert!(validate_pex_address(addr, false));
+        assert!(validate_pex_address(addr, true));
+    }
+
+    #[test]
+    fn test_validate_pex_address_loopback_rejected_in_production() {
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        assert!(!validate_pex_address(addr, false));
+    }
+
+    #[test]
+    fn test_validate_pex_address_loopback_allowed_in_devnet() {
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        assert!(validate_pex_address(addr, true));
+    }
+
+    #[test]
+    fn test_validate_pex_address_private_ip_rejected_in_production() {
+        let addr: SocketAddr = "192.168.1.1:1234".parse().unwrap();
+        assert!(!validate_pex_address(addr, false));
+    }
+
+    #[test]
+    fn test_validate_pex_address_private_ip_allowed_in_devnet() {
+        let addr: SocketAddr = "192.168.1.1:1234".parse().unwrap();
+        assert!(validate_pex_address(addr, true));
+    }
+
+    #[test]
+    fn test_validate_pex_address_multicast_rejected() {
+        let addr: SocketAddr = "224.0.0.1:1234".parse().unwrap();
+        assert!(!validate_pex_address(addr, false));
+        assert!(!validate_pex_address(addr, true));
+    }
+
+    #[test]
+    fn test_validate_pex_address_unspecified_rejected() {
+        let addr: SocketAddr = "0.0.0.0:1234".parse().unwrap();
+        assert!(!validate_pex_address(addr, false));
+        assert!(!validate_pex_address(addr, true));
+    }
+
+    #[test]
+    fn test_validate_pex_address_link_local_rejected() {
+        let addr: SocketAddr = "169.254.1.1:1234".parse().unwrap();
+        assert!(!validate_pex_address(addr, false));
+        assert!(!validate_pex_address(addr, true));
+    }
+
+    #[test]
+    fn test_validate_pex_address_ipv6_link_local_rejected() {
+        let addr: SocketAddr = "[fe80::1]:1234".parse().unwrap();
+        assert!(!validate_pex_address(addr, false));
+        assert!(!validate_pex_address(addr, true));
+    }
+
+    #[test]
+    fn test_validate_pex_address_ipv6_public_allowed() {
+        let addr: SocketAddr = "[2001:db8::1]:1234".parse().unwrap();
+        assert!(validate_pex_address(addr, false));
+        assert!(validate_pex_address(addr, true));
     }
 }

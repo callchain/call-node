@@ -162,7 +162,7 @@ async fn test_two_node_connection_and_message() {
 /// Test network health check with minimum peer requirements
 #[tokio::test]
 async fn test_network_health_check() {
-    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
+    let _guard = network_test_lock();
     let ports = find_available_ports(2);
 
     let key1 = test_key();
@@ -221,7 +221,7 @@ async fn test_network_health_check() {
 /// Test peer disconnect removes from peer tracking
 #[tokio::test]
 async fn test_disconnect_removes_peer() {
-    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
+    let _guard = network_test_lock();
     let ports = find_available_ports(2);
 
     let key1 = test_key();
@@ -288,7 +288,7 @@ async fn test_disconnect_removes_peer() {
 /// Test identity key persistence across restarts
 #[tokio::test]
 async fn test_identity_key_persistence() {
-    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
+    let _guard = network_test_lock();
     let dir = temp_data_dir("identity");
 
     // First run: generate and persist key
@@ -311,7 +311,7 @@ async fn test_identity_key_persistence() {
 /// Test Peer Exchange (PEX) — a node discovers peers via PEX from a connected peer.
 #[tokio::test]
 async fn test_peer_exchange_discovery() {
-    let _guard = NETWORK_TEST_LOCK.lock().unwrap();
+    let _guard = network_test_lock();
     let ports = find_available_ports(3);
     let node1_addr = ports[0];
     let node2_addr = ports[1];
