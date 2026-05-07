@@ -1,15 +1,15 @@
 //! Shielded precompile entry point (0x202).
 //!
 //! Thin wrapper that routes EVM calls to [`ShieldedStorage`] backed by
-//! [`JournalBackend`]. Business logic lives in [`ShieldedStorage`]; this
+//! EVM storage. Business logic lives in [`ShieldedStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
 use alloy_primitives::{address, Address, U256};
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
-    dispatch, journal_backend::JournalBackend, slot_balance, storage::storage_slot, u128_to_u256,
-    u256_to_u128, u256_to_u64, u64_to_u256, ASSET_ADDRESS,
+    dispatch, slot_balance, storage::storage_slot, u128_to_u256,
+    u256_to_u128, u256_to_u64, u64_to_u256, StorageRef, ASSET_ADDRESS,
 };
 use call_primitives::Hash;
 use call_protocol::storage_backend::StorageBackend;
@@ -95,7 +95,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         Self { backend }
     }
 
-    fn load_bal(&self, asset_id: u64, addr: Address) -> u128 {
+    fn load_bal(&mut self, asset_id: u64, addr: Address) -> u128 {
         u256_to_u128(
             self.backend
                 .load(ASSET_ADDRESS, slot_balance(asset_id, addr)),
@@ -110,7 +110,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         );
     }
 
-    fn sload_shielded(&self, slot: U256) -> U256 {
+    fn sload_shielded(&mut self, slot: U256) -> U256 {
         self.backend.load(SHIELDED_ADDRESS, slot)
     }
 
@@ -118,7 +118,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         self.backend.store(SHIELDED_ADDRESS, slot, value);
     }
 
-    fn check_nullifier_spent(&self, nullifier: [u8; 32]) -> bool {
+    fn check_nullifier_spent(&mut self, nullifier: [u8; 32]) -> bool {
         self.sload_shielded(slot_shielded_nullifier(nullifier))
             .to_be_bytes::<32>()[31]
             == 1
@@ -300,21 +300,21 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         Ok(())
     }
 
-    pub fn get_merkle_root(&self) -> [u8; 32] {
+    pub fn get_merkle_root(&mut self) -> [u8; 32] {
         self.sload_shielded(slot_shielded_merkle_root())
             .to_be_bytes::<32>()
     }
 
-    pub fn get_commitment_count(&self) -> u64 {
+    pub fn get_commitment_count(&mut self) -> u64 {
         u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()))
     }
 
-    pub fn get_commitment(&self, index: u64) -> [u8; 32] {
+    pub fn get_commitment(&mut self, index: u64) -> [u8; 32] {
         self.sload_shielded(slot_shielded_commitment(index))
             .to_be_bytes::<32>()
     }
 
-    pub fn is_nullifier_spent(&self, nullifier: [u8; 32]) -> bool {
+    pub fn is_nullifier_spent(&mut self, nullifier: [u8; 32]) -> bool {
         self.check_nullifier_spent(nullifier)
     }
 }
@@ -348,7 +348,7 @@ impl ShieldedPrecompile {
             50000,
             storage,
             |call, storage| {
-                let mut store = ShieldedStorage::new(JournalBackend::new(storage));
+                let mut store = ShieldedStorage::new(StorageRef::new(storage));
                 store
                     .deposit(
                         call.assetId,
@@ -373,7 +373,7 @@ impl ShieldedPrecompile {
             50000,
             storage,
             |call, storage| {
-                let mut store = ShieldedStorage::new(JournalBackend::new(storage));
+                let mut store = ShieldedStorage::new(StorageRef::new(storage));
                 store
                     .withdraw(
                         call.assetId,
@@ -400,7 +400,7 @@ impl ShieldedPrecompile {
             50000,
             storage,
             |call, storage| {
-                let mut store = ShieldedStorage::new(JournalBackend::new(storage));
+                let mut store = ShieldedStorage::new(StorageRef::new(storage));
                 let nullifiers: Vec<[u8; 32]> =
                     call.nullifiers.iter().map(|n| (*n).into()).collect();
                 let commitments: Vec<[u8; 32]> =
@@ -423,7 +423,7 @@ impl ShieldedPrecompile {
             1000,
             storage,
             |_call, storage| {
-                let store = ShieldedStorage::new(JournalBackend::new(storage));
+                let mut store = ShieldedStorage::new(StorageRef::new(storage));
                 Ok(store.get_merkle_root())
             },
         )
@@ -439,7 +439,7 @@ impl ShieldedPrecompile {
             1000,
             storage,
             |_call, storage| {
-                let store = ShieldedStorage::new(JournalBackend::new(storage));
+                let mut store = ShieldedStorage::new(StorageRef::new(storage));
                 Ok(store.get_commitment_count())
             },
         )
@@ -455,7 +455,7 @@ impl ShieldedPrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = ShieldedStorage::new(JournalBackend::new(storage));
+                let mut store = ShieldedStorage::new(StorageRef::new(storage));
                 Ok(store.get_commitment(call.index))
             },
         )
@@ -471,7 +471,7 @@ impl ShieldedPrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = ShieldedStorage::new(JournalBackend::new(storage));
+                let mut store = ShieldedStorage::new(StorageRef::new(storage));
                 Ok(store.is_nullifier_spent(call.nullifier.into()))
             },
         )

@@ -46,25 +46,25 @@ impl<B: StorageBackend> ComplianceStorage<B> {
 
     // ── Read operations ───────────────────────────────────────────────
 
-    pub fn read_status(&self, addr: Address, policy_id: u8) -> u8 {
+    pub fn read_status(&mut self, addr: Address, policy_id: u8) -> u8 {
         self.backend
             .load(COMPLIANCE_ADDRESS, slot_compliance(addr, policy_id))
             .to_be_bytes::<32>()[31]
     }
 
-    pub fn read_asset_policy_id(&self, asset_id: u64) -> u8 {
+    pub fn read_asset_policy_id(&mut self, asset_id: u64) -> u8 {
         let policy_slot = storage_slot(&[&asset_id.to_be_bytes()[..], b"compliance"]);
         self.backend
             .load(ASSET_ADDRESS, policy_slot)
             .to_be_bytes::<32>()[31]
     }
 
-    pub fn read_asset_issuer(&self, asset_id: u64) -> Address {
+    pub fn read_asset_issuer(&mut self, asset_id: u64) -> Address {
         let issuer_slot = storage_slot(&[&asset_id.to_be_bytes()[..], b"issuer"]);
         u256_to_address(self.backend.load(ASSET_ADDRESS, issuer_slot))
     }
 
-    pub fn check_compliance(&self, asset_id: u64, target: Address) -> bool {
+    pub fn check_compliance(&mut self, asset_id: u64, target: Address) -> bool {
         let policy_id = self.read_asset_policy_id(asset_id);
         if policy_id == 0 {
             return true;
@@ -121,7 +121,7 @@ mod tests {
     }
 
     impl StorageBackend for TestBackend {
-        fn load(&self, address: Address, slot: U256) -> U256 {
+        fn load(&mut self, address: Address, slot: U256) -> U256 {
             self.storage
                 .borrow()
                 .get(&(address, slot))
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_check_compliance_no_policy() {
         let backend = TestBackend::new();
-        let store = ComplianceStorage::new(backend);
+        let mut store = ComplianceStorage::new(backend);
         // No policy registered for asset_id=999 => always compliant
         assert!(store.check_compliance(999, Address::repeat_byte(0x22)));
     }
@@ -165,7 +165,7 @@ mod tests {
             u8_to_u256(1),
         );
 
-        let store = ComplianceStorage::new(backend.clone());
+        let mut store = ComplianceStorage::new(backend.clone());
 
         // Default status = 0 (clear) => compliant
         assert!(store.check_compliance(1, target));
@@ -174,7 +174,7 @@ mod tests {
         let mut store = ComplianceStorage::new(backend.clone());
         store.update_compliance(1, target, 3, issuer).unwrap();
 
-        let store = ComplianceStorage::new(backend);
+        let mut store = ComplianceStorage::new(backend);
         assert!(!store.check_compliance(1, target));
     }
 
@@ -211,7 +211,7 @@ mod tests {
             address_to_u256_word(issuer),
         );
 
-        let store = ComplianceStorage::new(backend);
+        let mut store = ComplianceStorage::new(backend);
         assert_eq!(store.read_asset_issuer(42), issuer);
     }
 
@@ -225,7 +225,7 @@ mod tests {
             u8_to_u256(7),
         );
 
-        let store = ComplianceStorage::new(backend);
+        let mut store = ComplianceStorage::new(backend);
         assert_eq!(store.read_asset_policy_id(42), 7);
     }
 }

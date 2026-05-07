@@ -114,7 +114,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
     // ── Read operations ───────────────────────────────────────────────
 
-    pub fn read_validator_count(&self) -> u64 {
+    pub fn read_validator_count(&mut self) -> u64 {
         self.backend
             .load(VALIDATOR_ADDRESS, slot_validator_count())
             .try_into()
@@ -122,7 +122,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             .unwrap_or(0)
     }
 
-    pub fn read_validator_id(&self, addr: Address) -> u64 {
+    pub fn read_validator_id(&mut self, addr: Address) -> u64 {
         let slot = call_precompile::slot_validator_by_addr(addr);
         self.backend
             .load(VALIDATOR_ADDRESS, slot)
@@ -131,44 +131,44 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             .unwrap_or(0)
     }
 
-    pub fn read_validator_by_index(&self, index: u64) -> Address {
+    pub fn read_validator_by_index(&mut self, index: u64) -> Address {
         u256_to_address(
             self.backend
                 .load(VALIDATOR_ADDRESS, slot_validator_addr(index)),
         )
     }
 
-    pub fn read_stake(&self, addr: Address) -> u128 {
+    pub fn read_stake(&mut self, addr: Address) -> u128 {
         u256_to_u128(
             self.backend
                 .load(VALIDATOR_ADDRESS, slot_validator_stake(addr)),
         )
     }
 
-    pub fn read_status(&self, addr: Address) -> u8 {
+    pub fn read_status(&mut self, addr: Address) -> u8 {
         self.backend
             .load(VALIDATOR_ADDRESS, slot_validator_status(addr))
             .to_be_bytes::<32>()[31]
     }
 
-    pub fn read_pubkey(&self, addr: Address) -> [u8; 32] {
+    pub fn read_pubkey(&mut self, addr: Address) -> [u8; 32] {
         self.backend
             .load(VALIDATOR_ADDRESS, slot_validator_pubkey(addr))
             .to_be_bytes::<32>()
     }
 
-    pub fn read_unbond_height(&self, addr: Address) -> u64 {
+    pub fn read_unbond_height(&mut self, addr: Address) -> u64 {
         u256_to_u64(
             self.backend
                 .load(VALIDATOR_ADDRESS, slot_validator_unbond_height(addr)),
         )
     }
 
-    pub fn read_unbonding_count(&self) -> u64 {
+    pub fn read_unbonding_count(&mut self) -> u64 {
         u256_to_u64(self.backend.load(VALIDATOR_ADDRESS, slot_unbonding_count()))
     }
 
-    pub fn read_active_validator_count(&self) -> u64 {
+    pub fn read_active_validator_count(&mut self) -> u64 {
         self.backend
             .load(VALIDATOR_ADDRESS, slot_active_validator_count())
             .try_into()
@@ -461,8 +461,8 @@ mod tests {
     use super::*;
     use call_asset::AssetStorage;
     use call_precompile::storage::{HashMapStorageProvider, StorageProvider};
-    use call_precompile::{
-        journal_backend::JournalBackend, slot_balance, u128_to_u256, ASSET_ADDRESS,
+    use call_precompile::{StorageRef,
+        slot_balance, u128_to_u256, ASSET_ADDRESS,
     };
     use call_primitives::Address;
 
@@ -488,9 +488,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         let result = validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller);
         assert!(result.is_ok(), "stake failed: {:?}", result.err());
@@ -510,9 +509,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         let result = validator_store.stake(
             &mut asset_store,
@@ -533,9 +531,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -555,9 +552,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 500); // less than MIN_SELF_STAKE
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         let result = validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller);
         assert!(
@@ -575,9 +571,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -596,9 +591,8 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let caller = test_addr(0x11);
 
-        let backend = JournalBackend::new(&mut provider);
-        let _asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         let result = validator_store.unstake(1, caller, 100);
         assert!(
@@ -614,9 +608,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -637,9 +630,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -661,9 +653,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -695,9 +686,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -723,9 +713,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -750,9 +739,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -777,9 +765,8 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let caller = test_addr(0x11);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         let result = validator_store.claim_unbonded(
             &mut asset_store,
@@ -800,9 +787,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -840,9 +826,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -864,9 +849,8 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let caller = test_addr(0x11);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         let result = validator_store.slash_stake(&mut asset_store, caller);
         assert_eq!(result.unwrap(), 0);
@@ -878,8 +862,7 @@ mod tests {
     fn test_read_validator_by_index_out_of_range() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let validator_store = ValidatorStorage::new(backend);
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
     }
@@ -892,9 +875,8 @@ mod tests {
         seed_balance(&mut provider, v1, 10_000_000);
         seed_balance(&mut provider, v2, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         assert_eq!(validator_store.read_active_validator_count(), 0);
 
@@ -920,9 +902,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -949,9 +930,8 @@ mod tests {
         let caller = test_addr(0x11);
         seed_balance(&mut provider, caller, 10_000_000);
 
-        let backend = JournalBackend::new(&mut provider);
-        let mut asset_store = AssetStorage::new(backend);
-        let mut validator_store = ValidatorStorage::new(backend);
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)

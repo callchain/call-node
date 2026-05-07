@@ -345,7 +345,7 @@ pub fn read_allowance(
     owner: Address,
     spender: Address,
 ) -> u128 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_allowance(asset_id, owner, spender)
 }
 
@@ -391,25 +391,25 @@ pub fn seed_asset(
 
 /// Read an asset balance from EVM storage.
 pub fn read_balance(evm_state: &dyn ProtocolStorage, asset_id: u64, addr: Address) -> u128 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_balance(asset_id, addr)
 }
 
 /// Read asset info from EVM storage.
 pub fn read_asset_symbol(evm_state: &dyn ProtocolStorage, asset_id: u64) -> String {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_meta(asset_id).symbol
 }
 
 /// Read asset issuer from EVM storage.
 pub fn read_asset_issuer(evm_state: &dyn ProtocolStorage, asset_id: u64) -> Address {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_meta(asset_id).issuer
 }
 
 /// Read asset status from EVM storage.
 pub fn read_asset_status(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u8 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_meta(asset_id).status
 }
 
@@ -728,31 +728,31 @@ pub fn finalize_pending_external_deposits_evm(
 
 /// Read asset name from EVM storage.
 pub fn read_asset_name(evm_state: &dyn ProtocolStorage, asset_id: u64) -> String {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_meta(asset_id).name
 }
 
 /// Read asset decimals from EVM storage.
 pub fn read_asset_decimals(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u8 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_meta(asset_id).decimals
 }
 
 /// Read asset supply from EVM storage.
 pub fn read_asset_supply(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u128 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_meta(asset_id).supply
 }
 
 /// Read asset max supply from EVM storage.
 pub fn read_asset_max_supply(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u128 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.read_meta(asset_id).max_supply
 }
 
 /// Read asset compliance policy from EVM storage.
 pub fn read_asset_compliance(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u8 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store.load_meta_u8(asset_id, b"compliance")
 }
 
@@ -767,7 +767,7 @@ pub fn read_asset_contract_address(
     evm_state: &dyn ProtocolStorage,
     asset_id: u64,
 ) -> Option<Address> {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     let val = store.load_meta_u256(asset_id, b"contract");
     if val.is_zero() {
         None
@@ -788,7 +788,7 @@ pub fn seed_asset_contract_address(
 
 /// Read asset registered_at from EVM storage.
 pub fn read_asset_registered_at(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u64 {
-    let store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
+    let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
     store
         .load_meta_u256(asset_id, b"registered_at")
         .try_into()

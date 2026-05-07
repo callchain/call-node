@@ -66,23 +66,23 @@ fn slot_bridge_external_paused() -> U256 {
     call_precompile::storage::storage_slot(&[b"external_paused"])
 }
 
-fn read_bridge_processed<B: StorageBackend>(backend: &B, tx_hash: [u8; 32]) -> bool {
+fn read_bridge_processed<B: StorageBackend>(backend: &mut B, tx_hash: [u8; 32]) -> bool {
     backend.load(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash)) != U256::ZERO
 }
 
-fn read_bridge_pending_count<B: StorageBackend>(backend: &B) -> u64 {
+fn read_bridge_pending_count<B: StorageBackend>(backend: &mut B) -> u64 {
     call_precompile::u256_to_u64(backend.load(BRIDGE_ADDRESS, slot_bridge_pending_count()))
 }
 
-fn read_bridge_daily_used<B: StorageBackend>(backend: &B, asset_id: u64) -> u128 {
+fn read_bridge_daily_used<B: StorageBackend>(backend: &mut B, asset_id: u64) -> u128 {
     call_precompile::u256_to_u128(backend.load(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id)))
 }
 
-fn read_bridge_daily_day<B: StorageBackend>(backend: &B, asset_id: u64) -> u64 {
+fn read_bridge_daily_day<B: StorageBackend>(backend: &mut B, asset_id: u64) -> u64 {
     call_precompile::u256_to_u64(backend.load(BRIDGE_ADDRESS, slot_bridge_daily_day(asset_id)))
 }
 
-fn read_bridge_external_paused<B: StorageBackend>(backend: &B) -> bool {
+fn read_bridge_external_paused<B: StorageBackend>(backend: &mut B) -> bool {
     backend.load(BRIDGE_ADDRESS, slot_bridge_external_paused()) != U256::ZERO
 }
 

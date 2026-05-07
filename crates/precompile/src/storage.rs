@@ -604,7 +604,7 @@ impl StorageProvider for HashMapStorageProvider {
 }
 
 impl call_protocol::storage_backend::StorageBackend for HashMapStorageProvider {
-    fn load(&self, address: Address, slot: U256) -> U256 {
+    fn load(&mut self, address: Address, slot: U256) -> U256 {
         self.persistent
             .get(&(address, slot))
             .copied()
@@ -613,6 +613,72 @@ impl call_protocol::storage_backend::StorageBackend for HashMapStorageProvider {
 
     fn store(&mut self, address: Address, slot: U256, value: U256) {
         self.persistent.insert((address, slot), value);
+    }
+}
+
+/// Implement `StorageBackend` for the trait object directly so precompiles
+/// can pass `&mut dyn StorageProvider` to domain storage structs without
+/// needing the unsafe `JournalBackend` wrapper.
+impl call_protocol::storage_backend::StorageBackend for dyn StorageProvider {
+    fn load(&mut self, address: Address, slot: U256) -> U256 {
+        self.sload(address, slot).unwrap_or_default()
+    }
+
+    fn store(&mut self, address: Address, slot: U256, value: U256) {
+        let _ = self.sstore(address, slot, value);
+    }
+}
+
+// ── StorageRef ────────────────────────────────────────────────────────
+
+/// Safe wrapper around `&mut dyn StorageProvider` that implements
+/// [`StorageBackend`].
+///
+/// This replaces the unsafe `JournalBackend`.  Key differences from the old
+/// `JournalBackend`:
+///
+/// * `load` takes `&mut self` (not `&self`) — no `mut_from_ref` anti-pattern.
+/// * No `as_mut(&self) -> &mut dyn StorageProvider` — impossible to fabricate
+///   a long-lived `&mut` alias from a shared `&StorageRef`.
+/// * The temporary `&mut dyn StorageProvider` created inside each `load`/`store`
+///   call lives only for the duration of that single call, so two copies of
+/// `StorageRef` can safely be held by different domain storage structs as long
+///   as their `&mut self` methods are not invoked concurrently.
+pub struct StorageRef {
+    ptr: *mut (),
+    vtable: *mut (),
+}
+
+impl StorageRef {
+    pub fn new(storage: &mut dyn StorageProvider) -> Self {
+        let fat: *mut dyn StorageProvider = storage;
+        // SAFETY: `*mut dyn Trait` is a fat pointer (data ptr + vtable ptr).
+        // We decompose it so `StorageRef` can be `Copy`.  This is sound as long
+        // as the original `&mut dyn StorageProvider` remains valid for the
+        // duration of the precompile call, which it does by construction.
+        let (ptr, vtable): (*mut (), *mut ()) = unsafe { std::mem::transmute(fat) };
+        Self { ptr, vtable }
+    }
+}
+
+impl Copy for StorageRef {}
+impl Clone for StorageRef {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl call_protocol::storage_backend::StorageBackend for StorageRef {
+    fn load(&mut self, address: Address, slot: U256) -> U256 {
+        let fat: *mut dyn StorageProvider = unsafe { std::mem::transmute((self.ptr, self.vtable)) };
+        unsafe { (*fat).sload(address, slot).unwrap_or_default() }
+    }
+
+    fn store(&mut self, address: Address, slot: U256, value: U256) {
+        let fat: *mut dyn StorageProvider = unsafe { std::mem::transmute((self.ptr, self.vtable)) };
+        unsafe {
+            let _ = (*fat).sstore(address, slot, value);
+        }
     }
 }
 

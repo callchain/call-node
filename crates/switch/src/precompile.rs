@@ -11,10 +11,9 @@
 
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
-    dispatch, journal_backend::JournalBackend, require_caller, slot_asset_meta, slot_balance,
-    slot_erc20_balance_of_base, slot_erc20_total_supply, slot_evm_contract,
-    storage::StorageProvider, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64,
-    ASSET_ADDRESS,
+    dispatch, require_caller, slot_asset_meta, slot_balance, slot_erc20_balance_of_base,
+    slot_erc20_total_supply, slot_evm_contract, storage::StorageProvider, u128_to_u256,
+    u256_to_address, u256_to_u128, u256_to_u64, StorageRef, ASSET_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -78,18 +77,18 @@ fn mapping_slot(key_bytes: &[u8; 32], base_slot: u64) -> U256 {
 
 // ── SwitchStorage ─────────────────────────────────────────────────────
 
-pub struct SwitchStorage {
-    backend: JournalBackend,
+pub struct SwitchStorage<B: StorageBackend> {
+    backend: B,
 }
 
-impl SwitchStorage {
-    pub fn new(backend: JournalBackend) -> Self {
+impl<B: StorageBackend> SwitchStorage<B> {
+    pub fn new(backend: B) -> Self {
         Self { backend }
     }
 
     // ── Protocol balance helpers ────────────────────────────────────
 
-    fn load_protocol_bal(&self, asset_id: u64, addr: Address) -> u128 {
+    fn load_protocol_bal(&mut self, asset_id: u64, addr: Address) -> u128 {
         u256_to_u128(
             self.backend
                 .load(ASSET_ADDRESS, slot_balance(asset_id, addr)),
@@ -134,7 +133,7 @@ impl SwitchStorage {
 
     // ── Protocol supply helpers ─────────────────────────────────────
 
-    fn load_protocol_supply(&self, asset_id: u64) -> u128 {
+    fn load_protocol_supply(&mut self, asset_id: u64) -> u128 {
         u256_to_u128(
             self.backend
                 .load(ASSET_ADDRESS, slot_asset_meta(asset_id, b"supply")),
@@ -151,7 +150,7 @@ impl SwitchStorage {
 
     // ── EVM contract lookup ─────────────────────────────────────────
 
-    fn read_evm_contract(&self, asset_id: u64) -> Result<Address, SwitchError> {
+    fn read_evm_contract(&mut self, asset_id: u64) -> Result<Address, SwitchError> {
         let addr = u256_to_address(
             self.backend
                 .load(ASSET_ADDRESS, slot_evm_contract(asset_id)),
@@ -162,7 +161,7 @@ impl SwitchStorage {
         Ok(addr)
     }
 
-    fn check_asset_active(&self, asset_id: u64) -> Result<(), SwitchError> {
+    fn check_asset_active(&mut self, asset_id: u64) -> Result<(), SwitchError> {
         let status = self
             .backend
             .load(ASSET_ADDRESS, slot_asset_meta(asset_id, b"status"))
@@ -177,7 +176,7 @@ impl SwitchStorage {
 
     /// Read the ERC-20 `balanceOf` mapping base slot for an asset from ASSET_ADDRESS metadata.
     /// Falls back to default 4 if not set.
-    fn erc20_balance_of_base(&self, asset_id: u64) -> u64 {
+    fn erc20_balance_of_base(&mut self, asset_id: u64) -> u64 {
         let slot = self
             .backend
             .load(ASSET_ADDRESS, slot_erc20_balance_of_base(asset_id));
@@ -191,7 +190,7 @@ impl SwitchStorage {
 
     /// Read the ERC-20 `totalSupply` slot for an asset from ASSET_ADDRESS metadata.
     /// Falls back to default 3 if not set.
-    fn erc20_total_supply_slot(&self, asset_id: u64) -> U256 {
+    fn erc20_total_supply_slot(&mut self, asset_id: u64) -> U256 {
         let slot = self
             .backend
             .load(ASSET_ADDRESS, slot_erc20_total_supply(asset_id));
@@ -204,7 +203,7 @@ impl SwitchStorage {
     }
 
     /// Compute the storage slot for `balanceOf[holder]` using the asset's registered base slot.
-    fn erc20_balance_of_slot(&self, asset_id: u64, holder: Address) -> U256 {
+    fn erc20_balance_of_slot(&mut self, asset_id: u64, holder: Address) -> U256 {
         let base = self.erc20_balance_of_base(asset_id);
         let mut padded = [0u8; 32];
         padded[12..32].copy_from_slice(holder.as_slice());
@@ -379,7 +378,7 @@ impl SwitchPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = SwitchStorage::new(JournalBackend::new(storage));
+                let mut store = SwitchStorage::new(StorageRef::new(&mut *storage));
                 store
                     .switch_to_evm(call.assetId, call.to, call.amount, caller, storage)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -400,7 +399,7 @@ impl SwitchPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = SwitchStorage::new(JournalBackend::new(storage));
+                let mut store = SwitchStorage::new(StorageRef::new(&mut *storage));
                 store
                     .switch_to_protocol(call.assetId, call.to, call.amount, caller, storage)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -443,7 +442,7 @@ mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
     use call_precompile::{
-        address_to_u256, slot_asset_meta, u128_to_u256, u256_to_u128, StatefulPrecompile,
+        address_to_u256, slot_asset_meta, u128_to_u256, u256_to_u128, StatefulPrecompile, StorageRef,
     };
 
     fn addr(n: u8) -> Address {
@@ -780,7 +779,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
 
         store.sub_protocol_bal(asset_id, addr, 300).unwrap();
         assert_eq!(store.load_protocol_bal(asset_id, addr), 700);
@@ -797,7 +796,7 @@ mod tests {
         let asset_id = 2u64;
 
         // Default totalSupply slot = 3, balanceOf base = 4
-        let mut store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
 
         store.erc20_mint(asset_id, contract, holder, 500).unwrap();
 
@@ -838,7 +837,7 @@ mod tests {
             )
             .unwrap();
 
-        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
         assert!(store.check_asset_active(asset_id).is_ok());
 
         // status != 0 means inactive
@@ -849,7 +848,7 @@ mod tests {
                 U256::from(1),
             )
             .unwrap();
-        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
         assert!(matches!(
             store.check_asset_active(asset_id),
             Err(SwitchError::AssetNotActive)
@@ -870,7 +869,7 @@ mod tests {
             )
             .unwrap();
 
-        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
         assert_eq!(store.read_evm_contract(asset_id).unwrap(), contract);
     }
 
@@ -880,7 +879,7 @@ mod tests {
         let asset_id = 3u64;
 
         // evm_contract NOT set (remains zero)
-        let store = SwitchStorage::new(JournalBackend::new(&mut provider));
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
         assert!(matches!(
             store.read_evm_contract(asset_id),
             Err(SwitchError::EvmContractNotRegistered)

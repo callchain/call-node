@@ -1,14 +1,14 @@
 //! Validator precompile entry point (0x204).
 //!
 //! Thin wrapper that routes EVM calls to [`ValidatorStorage`] backed by
-//! [`JournalBackend`].  Business logic lives in [`ValidatorStorage`]; this
+//! [`StorageProvider`].  Business logic lives in [`ValidatorStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
 use crate::ValidatorStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    dispatch, journal_backend::JournalBackend, require_caller, storage::StorageProvider,
+    dispatch, require_caller, storage::StorageProvider, StorageRef,
 };
 use call_primitives::{Address, U256};
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -43,9 +43,8 @@ impl ValidatorPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut validator_store = ValidatorStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 validator_store
                     .stake(&mut asset_store, call.pubkey.into(), call.amount, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -66,7 +65,7 @@ impl ValidatorPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut validator_store = ValidatorStorage::new(JournalBackend::new(storage));
+                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 validator_store
                     .unstake(call.validatorId, caller, block_number)
@@ -88,9 +87,8 @@ impl ValidatorPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut validator_store = ValidatorStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 validator_store
                     .claim_unbonded(&mut asset_store, call.validatorId, caller, block_number)
@@ -110,7 +108,7 @@ impl ValidatorPrecompile {
             1000,
             storage,
             |call, storage| {
-                let store = ValidatorStorage::new(JournalBackend::new(storage));
+                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_stake(call.validator))
             },
         )
@@ -126,7 +124,7 @@ impl ValidatorPrecompile {
             1000,
             storage,
             |call, storage| {
-                let store = ValidatorStorage::new(JournalBackend::new(storage));
+                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
                 Ok(U256::from(store.read_status(call.validator)))
             },
         )
@@ -142,7 +140,7 @@ impl ValidatorPrecompile {
             1000,
             storage,
             |call, storage| {
-                let store = ValidatorStorage::new(JournalBackend::new(storage));
+                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_pubkey(call.validator))
             },
         )
@@ -158,7 +156,7 @@ impl ValidatorPrecompile {
             1000,
             storage,
             |call, storage| {
-                let store = ValidatorStorage::new(JournalBackend::new(storage));
+                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_unbond_height(call.validator))
             },
         )
@@ -174,7 +172,7 @@ impl ValidatorPrecompile {
             1000,
             storage,
             |call, storage| {
-                let store = ValidatorStorage::new(JournalBackend::new(storage));
+                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_validator_by_index(call.index))
             },
         )

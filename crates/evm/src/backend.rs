@@ -95,7 +95,7 @@ impl<S: ProtocolStorage + ?Sized> ProtocolStorage for &mut S {
 pub struct ProtocolStateBackend<'a, S: ProtocolStorage + ?Sized>(pub &'a mut S);
 
 impl<'a, S: ProtocolStorage + ?Sized> StorageBackend for ProtocolStateBackend<'a, S> {
-    fn load(&self, address: Address, slot: U256) -> U256 {
+    fn load(&mut self, address: Address, slot: U256) -> U256 {
         self.0.get_storage(&address, slot)
     }
     fn store(&mut self, address: Address, slot: U256, value: U256) {
@@ -109,7 +109,7 @@ impl<'a, S: ProtocolStorage + ?Sized> StorageBackend for ProtocolStateBackend<'a
 pub struct ProtocolStateRefBackend<'a, S: ProtocolStorage + ?Sized>(pub &'a S);
 
 impl<'a, S: ProtocolStorage + ?Sized> StorageBackend for ProtocolStateRefBackend<'a, S> {
-    fn load(&self, address: Address, slot: U256) -> U256 {
+    fn load(&mut self, address: Address, slot: U256) -> U256 {
         self.0.get_storage(&address, slot)
     }
     fn store(&mut self, _address: Address, _slot: U256, _value: U256) {

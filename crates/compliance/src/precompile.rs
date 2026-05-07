@@ -1,13 +1,13 @@
 //! Compliance precompile entry point (0x205).
 //!
 //! Thin wrapper that routes EVM calls to [`ComplianceStorage`] backed by
-//! [`JournalBackend`]. Business logic lives in [`ComplianceStorage`]; this
+//! EVM storage. Business logic lives in [`ComplianceStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
 use crate::ComplianceStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
-    dispatch, journal_backend::JournalBackend, require_caller, storage::StorageProvider,
+    dispatch, require_caller, storage::StorageProvider, StorageRef,
 };
 use call_primitives::Address;
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -36,7 +36,7 @@ impl CompliancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = ComplianceStorage::new(JournalBackend::new(storage));
+                let mut store = ComplianceStorage::new(StorageRef::new(storage));
                 store
                     .update_compliance(call.assetId, call.target, call.status, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -55,7 +55,7 @@ impl CompliancePrecompile {
             1000,
             storage,
             |call, storage| {
-                let store = ComplianceStorage::new(JournalBackend::new(storage));
+                let mut store = ComplianceStorage::new(StorageRef::new(storage));
                 Ok(store.check_compliance(call.assetId, call.target))
             },
         )

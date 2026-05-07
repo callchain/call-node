@@ -12,9 +12,10 @@
 //! - `0x209` Agent: register, grant, revoke
 
 pub mod dispatch;
-pub mod journal_backend;
 pub mod storage;
 pub mod utils;
+
+pub use storage::StorageRef;
 
 pub use utils::*;
 

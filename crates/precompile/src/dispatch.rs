@@ -7,7 +7,7 @@
 //! ```ignore
 //! fn get_balance(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
 //!     dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(calldata, 800, storage, |call, storage| {
-//!         let store = AssetStorage::new(JournalBackend::new(storage));
+//!         let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
 //!         Ok(store.read_balance(call.assetId, call.account))
 //!     })
 //! }

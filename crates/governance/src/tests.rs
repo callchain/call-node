@@ -1,9 +1,8 @@
 use call_asset::AssetStorage;
 use call_precompile::{
-    journal_backend::JournalBackend,
     slot_balance,
     storage::{HashMapStorageProvider, StorageProvider},
-    u128_to_u256,
+    u128_to_u256, StorageRef,
 };
 use call_primitives::Address;
 
@@ -32,9 +31,8 @@ fn seed_balance(storage: &mut dyn StorageProvider, addr: Address, amount: u128) 
 #[test]
 fn test_submit_proposal_success() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -69,9 +67,8 @@ fn test_submit_proposal_success() {
 #[test]
 fn test_submit_proposal_insufficient_balance() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT - 1);
@@ -92,9 +89,8 @@ fn test_submit_proposal_insufficient_balance() {
 #[test]
 fn test_rate_limiting() {
     with_storage(100, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 10);
@@ -134,9 +130,8 @@ fn test_rate_limiting_expires_after_cooldown() {
     let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, 0);
     {
         let storage = &mut provider;
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 10);
@@ -160,9 +155,8 @@ fn test_rate_limiting_expires_after_cooldown() {
     provider.set_block_number(51);
     {
         let storage = &mut provider;
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 10);
@@ -190,9 +184,8 @@ fn test_rate_limiting_expires_after_cooldown() {
 #[test]
 fn test_vote_yes_and_tally() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
         let voter = test_addr(2);
 
@@ -224,9 +217,8 @@ fn test_vote_yes_and_tally() {
 #[test]
 fn test_vote_before_start_rejected() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
         let voter = test_addr(2);
 
@@ -259,9 +251,8 @@ fn test_vote_after_end_rejected() {
     let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, 0);
     let id = {
         let storage = &mut provider;
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -286,8 +277,7 @@ fn test_vote_after_end_rejected() {
     provider.set_block_number(101);
     {
         let storage = &mut provider;
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
         let voter = test_addr(2);
         seed_balance(storage, voter, 500_000);
 
@@ -299,9 +289,8 @@ fn test_vote_after_end_rejected() {
 #[test]
 fn test_duplicate_vote_rejected() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
         let voter = test_addr(2);
 
@@ -333,9 +322,8 @@ fn test_duplicate_vote_rejected() {
 #[test]
 fn test_vote_no_and_abstain() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
         let voter_a = test_addr(2);
         let voter_b = test_addr(3);
@@ -375,9 +363,8 @@ fn test_vote_no_and_abstain() {
 #[test]
 fn test_queue_with_quorum() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -410,9 +397,8 @@ fn test_queue_with_quorum() {
 #[test]
 fn test_queue_without_quorum_defeated() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -444,9 +430,8 @@ fn test_queue_without_quorum_defeated() {
 #[test]
 fn test_queue_more_against_than_for_defeated() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -477,9 +462,8 @@ fn test_queue_more_against_than_for_defeated() {
 #[test]
 fn test_queue_emergency_pause_skips_timelock() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -514,9 +498,8 @@ fn test_queue_emergency_pause_skips_timelock() {
 #[test]
 fn test_execute_after_timelock() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -562,9 +545,8 @@ fn test_execute_after_timelock() {
 #[test]
 fn test_execute_deposit_refunded() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -598,9 +580,8 @@ fn test_execute_deposit_refunded() {
 #[test]
 fn test_execute_emergency_pause_sets_paused() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -633,8 +614,7 @@ fn test_execute_emergency_pause_sets_paused() {
 #[test]
 fn test_emergency_pause_and_resume() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
 
         assert!(!gov.is_paused());
 
@@ -651,9 +631,8 @@ fn test_emergency_pause_and_resume() {
 #[test]
 fn test_proposal_types_stored_correctly() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 20);
@@ -683,9 +662,8 @@ fn test_proposal_types_stored_correctly() {
 #[test]
 fn test_custom_review_and_voting_periods() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -717,9 +695,8 @@ fn test_custom_review_and_voting_periods() {
 #[test]
 fn test_deposit_confiscated_on_defeat() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
@@ -752,9 +729,8 @@ fn test_deposit_confiscated_on_defeat() {
 #[test]
 fn test_full_lifecycle_submit_vote_queue_execute() {
     with_storage(0, |storage| {
-        let backend = JournalBackend::new(storage);
-        let mut gov = GovernanceStorage::new(backend);
-        let mut asset = AssetStorage::new(backend);
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
         seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);

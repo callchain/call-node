@@ -1,16 +1,15 @@
 //! Oracle precompile entry point (0x101).
 //!
 //! Thin wrapper that routes EVM calls to [`OracleStorage`] backed by
-//! [`JournalBackend`].  Business logic lives in [`OracleStorage`]; this
+//! EVM storage.  Business logic lives in [`OracleStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
     dispatch,
-    journal_backend::JournalBackend,
     require_caller,
     storage::{storage_slot, StorageProvider},
-    u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256,
+    u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -64,54 +63,54 @@ impl<B: StorageBackend> OracleStorage<B> {
         Self { backend }
     }
 
-    pub fn read_price(&self, asset_id: u64) -> u128 {
+    pub fn read_price(&mut self, asset_id: u64) -> u128 {
         u256_to_u128(
             self.backend
                 .load(ORACLE_ADDRESS, slot_oracle_price(asset_id)),
         )
     }
 
-    pub fn read_twap(&self, asset_id: u64) -> u128 {
+    pub fn read_twap(&mut self, asset_id: u64) -> u128 {
         u256_to_u128(
             self.backend
                 .load(ORACLE_ADDRESS, slot_oracle_twap(asset_id)),
         )
     }
 
-    pub fn read_timestamp(&self, asset_id: u64) -> u64 {
+    pub fn read_timestamp(&mut self, asset_id: u64) -> u64 {
         u256_to_u64(
             self.backend
                 .load(ORACLE_ADDRESS, slot_oracle_timestamp(asset_id)),
         )
     }
 
-    pub fn read_block(&self, asset_id: u64) -> u64 {
+    pub fn read_block(&mut self, asset_id: u64) -> u64 {
         u256_to_u64(
             self.backend
                 .load(ORACLE_ADDRESS, slot_oracle_block(asset_id)),
         )
     }
 
-    pub fn read_count(&self, asset_id: u64) -> u64 {
+    pub fn read_count(&mut self, asset_id: u64) -> u64 {
         u256_to_u64(
             self.backend
                 .load(ORACLE_ADDRESS, slot_oracle_count(asset_id)),
         )
     }
 
-    pub fn is_stale(&self, asset_id: u64, current_ts: u64) -> bool {
+    pub fn is_stale(&mut self, asset_id: u64, current_ts: u64) -> bool {
         let stored_ts = self.read_timestamp(asset_id);
         stored_ts + STALE_THRESHOLD_SECS < current_ts
     }
 
-    pub fn read_tracked_count(&self) -> u64 {
+    pub fn read_tracked_count(&mut self) -> u64 {
         u256_to_u64(
             self.backend
                 .load(ORACLE_ADDRESS, slot_oracle_tracked_count()),
         )
     }
 
-    pub fn read_tracked_asset(&self, index: u64) -> u64 {
+    pub fn read_tracked_asset(&mut self, index: u64) -> u64 {
         u256_to_u64(
             self.backend
                 .load(ORACLE_ADDRESS, slot_oracle_tracked_asset(index)),
@@ -195,26 +194,23 @@ pub struct OraclePrecompile;
 
 impl OraclePrecompile {
     fn get_price(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        let backend = JournalBackend::new(storage);
-        dispatch::view::<IProtocolOracle::getPriceCall, _, _>(calldata, 1000, storage, |call, _| {
-            let store = OracleStorage::new(backend);
+        dispatch::view::<IProtocolOracle::getPriceCall, _, _>(calldata, 1000, storage, |call, storage| {
+            let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
             Ok(store.read_price(call.assetId))
         })
     }
 
     fn get_twap(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        let backend = JournalBackend::new(storage);
-        dispatch::view::<IProtocolOracle::getTWAPCall, _, _>(calldata, 1000, storage, |call, _| {
-            let store = OracleStorage::new(backend);
+        dispatch::view::<IProtocolOracle::getTWAPCall, _, _>(calldata, 1000, storage, |call, storage| {
+            let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
             Ok(store.read_twap(call.assetId))
         })
     }
 
     fn is_stale(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        let backend = JournalBackend::new(storage);
         let current_ts = storage.timestamp().to::<u64>();
-        dispatch::view::<IProtocolOracle::isStaleCall, _, _>(calldata, 1000, storage, |call, _| {
-            let store = OracleStorage::new(backend);
+        dispatch::view::<IProtocolOracle::isStaleCall, _, _>(calldata, 1000, storage, |call, storage| {
+            let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
             Ok(U256::from(if store.is_stale(call.assetId, current_ts) {
                 1u8
             } else {
@@ -237,15 +233,17 @@ impl OraclePrecompile {
                 let caller = require_caller(msg_sender)?;
 
                 // Verify caller is a registered validator
-                let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
-                let validator_id = validator_store.read_validator_id(caller);
+                let validator_id = {
+                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    validator_store.read_validator_id(caller)
+                };
                 if validator_id == 0 {
                     return Err(PrecompileError::Other(
                         "oracle submit: caller is not a validator".into(),
                     ));
                 }
 
-                let mut store = OracleStorage::new(JournalBackend::new(storage));
+                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
                 store.submit_price(call.assetId, call.price, call.timestamp, call.blockNumber);
 
                 // Emit PriceSubmitted event
@@ -282,15 +280,17 @@ impl OraclePrecompile {
                 let caller = require_caller(msg_sender)?;
 
                 // Verify caller is a registered validator
-                let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
-                let validator_id = validator_store.read_validator_id(caller);
+                let validator_id = {
+                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    validator_store.read_validator_id(caller)
+                };
                 if validator_id == 0 {
                     return Err(PrecompileError::Other(
                         "oracle setTrackedAssets: caller is not a validator".into(),
                     ));
                 }
 
-                let mut store = OracleStorage::new(JournalBackend::new(storage));
+                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
                 store.set_tracked_assets(call.assetIds.to_vec());
 
                 Ok(())

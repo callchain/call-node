@@ -1,7 +1,7 @@
 //! Asset precompile entry point (0x201).
 //!
 //! Thin wrapper that routes EVM calls to [`AssetStorage`] backed by
-//! [`JournalBackend`].  Business logic lives in [`AssetStorage`]; this file
+//! EVM storage.  Business logic lives in [`AssetStorage`]; this file
 //! only handles ABI decode/encode, gas accounting, selector dispatch and
 //! cross-domain concerns (compliance).
 
@@ -9,8 +9,8 @@ use crate::AssetStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
-    dispatch, journal_backend::JournalBackend, ok_empty, require_caller, slot_asset_meta,
-    slot_compliance, write_string32, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
+    dispatch, ok_empty, require_caller, slot_asset_meta,
+    slot_compliance, write_string32, StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::CALL_ASSET_ID;
@@ -69,7 +69,7 @@ impl AssetPrecompile {
             800,
             storage,
             |call, storage| {
-                let store = AssetStorage::new(JournalBackend::new(storage));
+                let mut store = AssetStorage::new(StorageRef::new(storage));
                 let balance = store.read_balance(call.assetId, call.account);
                 Ok(balance)
             },
@@ -83,7 +83,7 @@ impl AssetPrecompile {
     ) -> PrecompileResult {
         storage.deduct_gas(1000)?;
         let call = dispatch::decode_call::<IProtocolAsset::getAssetInfoCall>(calldata)?;
-        let store = AssetStorage::new(JournalBackend::new(storage));
+        let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
         let meta = store.read_meta(call.assetId);
 
         let mut out = [0u8; 192];
@@ -114,7 +114,7 @@ impl AssetPrecompile {
                 let from = require_caller(msg_sender)?;
                 Self::check_compliance(call.assetId, &from, storage)?;
                 Self::check_compliance(call.assetId, &call.to, storage)?;
-                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                let mut store = AssetStorage::new(StorageRef::new(storage));
                 store
                     .transfer(call.assetId, from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -161,7 +161,7 @@ impl AssetPrecompile {
         }
 
         let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts).collect();
-        let mut store = AssetStorage::new(JournalBackend::new(storage));
+        let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
         let cp = storage.checkpoint();
         store
             .batch_transfer(call.assetId, from, &pairs)
@@ -195,7 +195,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let owner = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                let mut store = AssetStorage::new(StorageRef::new(storage));
                 store.approve(call.assetId, owner, call.spender, call.amount);
                 Ok(())
             },
@@ -216,7 +216,7 @@ impl AssetPrecompile {
                 let spender = require_caller(msg_sender)?;
                 Self::check_compliance(call.assetId, &call.from, storage)?;
                 Self::check_compliance(call.assetId, &call.to, storage)?;
-                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                let mut store = AssetStorage::new(StorageRef::new(storage));
                 store
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -250,7 +250,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                let mut store = AssetStorage::new(StorageRef::new(storage));
                 store
                     .mint(call.assetId, caller, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -271,7 +271,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                let mut store = AssetStorage::new(StorageRef::new(storage));
                 store
                     .burn(call.assetId, caller, call.from, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -292,7 +292,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(JournalBackend::new(storage));
+                let mut store = AssetStorage::new(StorageRef::new(storage));
                 let asset_id = store
                     .register(
                         &call.symbol,
@@ -346,7 +346,7 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
 mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
-    use call_precompile::{slot_balance, u128_to_u256, StatefulPrecompile};
+    use call_precompile::{slot_balance, u128_to_u256, StatefulPrecompile, StorageRef};
     use call_primitives::Address;
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
         let result = precompile.call(&input, from, &mut provider);
         assert!(result.is_ok(), "transfer failed: {:?}", result.err());
 
-        let store = AssetStorage::new(JournalBackend::new(&mut provider));
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
         assert_eq!(store.read_balance(1, from), 500);
         assert_eq!(store.read_balance(1, to), 500);
     }
@@ -442,9 +442,11 @@ mod tests {
         let result = precompile.call(&input, issuer, &mut provider);
         assert!(result.is_ok(), "mint failed: {:?}", result.err());
 
-        let store = AssetStorage::new(JournalBackend::new(&mut provider));
-        assert_eq!(store.read_balance(1, recipient), 500);
-        assert_eq!(store.read_meta(1).supply, 500);
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            assert_eq!(store.read_balance(1, recipient), 500);
+            assert_eq!(store.read_meta(1).supply, 500);
+        }
 
         // Mint to issuer
         let input = IProtocolAsset::mintCall {
@@ -467,8 +469,11 @@ mod tests {
         let result = precompile.call(&input, issuer, &mut provider);
         assert!(result.is_ok(), "burn failed: {:?}", result.err());
 
-        assert_eq!(store.read_balance(1, issuer), 200);
-        assert_eq!(store.read_meta(1).supply, 700);
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            assert_eq!(store.read_balance(1, issuer), 200);
+            assert_eq!(store.read_meta(1).supply, 700);
+        }
     }
 
     #[test]
@@ -509,7 +514,7 @@ mod tests {
         let result = precompile.call(&input, spender, &mut provider);
         assert!(result.is_ok(), "transfer_from failed: {:?}", result.err());
 
-        let store = AssetStorage::new(JournalBackend::new(&mut provider));
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
         assert_eq!(store.read_balance(1, owner), 950);
         assert_eq!(store.read_balance(1, recipient), 50);
         assert_eq!(store.read_allowance(1, owner, spender), 50);

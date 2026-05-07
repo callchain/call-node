@@ -63,7 +63,7 @@ impl<B: StorageBackend> AssetStorage<B> {
 
     // ── Balance operations ────────────────────────────────────────────
 
-    pub fn read_balance(&self, asset_id: u64, addr: Address) -> Balance {
+    pub fn read_balance(&mut self, asset_id: u64, addr: Address) -> Balance {
         let slot = slot_balance(asset_id, addr);
         self.backend
             .load(ASSET_ADDRESS, slot)
@@ -108,7 +108,7 @@ impl<B: StorageBackend> AssetStorage<B> {
 
     // ── Allowance operations ──────────────────────────────────────────
 
-    pub fn read_allowance(&self, asset_id: u64, owner: Address, spender: Address) -> Balance {
+    pub fn read_allowance(&mut self, asset_id: u64, owner: Address, spender: Address) -> Balance {
         let slot = slot_allowance(asset_id, owner, spender);
         u256_to_u128(self.backend.load(ASSET_ADDRESS, slot))
     }
@@ -127,25 +127,25 @@ impl<B: StorageBackend> AssetStorage<B> {
 
     // ── Metadata operations ───────────────────────────────────────────
 
-    pub fn load_meta_u256(&self, asset_id: u64, key: &[u8]) -> U256 {
+    pub fn load_meta_u256(&mut self, asset_id: u64, key: &[u8]) -> U256 {
         self.backend
             .load(ASSET_ADDRESS, slot_asset_meta(asset_id, key))
     }
 
-    pub fn load_meta_u128(&self, asset_id: u64, key: &[u8]) -> u128 {
+    pub fn load_meta_u128(&mut self, asset_id: u64, key: &[u8]) -> u128 {
         u256_to_u128(self.load_meta_u256(asset_id, key))
     }
 
-    pub fn load_meta_u8(&self, asset_id: u64, key: &[u8]) -> u8 {
+    pub fn load_meta_u8(&mut self, asset_id: u64, key: &[u8]) -> u8 {
         self.load_meta_u256(asset_id, key).to_be_bytes::<32>()[31]
     }
 
-    pub fn load_meta_address(&self, asset_id: u64, key: &[u8]) -> Address {
+    pub fn load_meta_address(&mut self, asset_id: u64, key: &[u8]) -> Address {
         let v = self.load_meta_u256(asset_id, key);
         Address::from_slice(&v.to_be_bytes::<32>()[12..32])
     }
 
-    pub fn load_meta_string(&self, asset_id: u64, key: &[u8]) -> String {
+    pub fn load_meta_string(&mut self, asset_id: u64, key: &[u8]) -> String {
         let v = self.load_meta_u256(asset_id, key);
         let bytes = v.to_be_bytes::<32>();
         // Trim trailing nulls
@@ -158,7 +158,7 @@ impl<B: StorageBackend> AssetStorage<B> {
             .store(ASSET_ADDRESS, slot_asset_meta(asset_id, key), value);
     }
 
-    pub fn read_meta(&self, asset_id: u64) -> AssetMeta {
+    pub fn read_meta(&mut self, asset_id: u64) -> AssetMeta {
         AssetMeta {
             symbol: self.load_meta_string(asset_id, b"symbol"),
             name: self.load_meta_string(asset_id, b"name"),
@@ -347,7 +347,7 @@ mod tests {
     }
 
     impl StorageBackend for TestBackend {
-        fn load(&self, address: Address, slot: U256) -> U256 {
+        fn load(&mut self, address: Address, slot: U256) -> U256 {
             self.storage
                 .get(&(address, slot))
                 .copied()
@@ -366,7 +366,7 @@ mod tests {
             let mut store = AssetStorage::new(&mut backend);
             store.write_balance(1, addr, 5000);
         }
-        let store = AssetStorage::new(&backend);
+        let mut store = AssetStorage::new(&mut backend);
         assert_eq!(store.read_balance(1, addr), 5000);
         assert_eq!(store.read_balance(1, Address::ZERO), 0);
     }
@@ -381,7 +381,7 @@ mod tests {
             store.write_balance(1, from, 1000);
             store.transfer(1, from, to, 500).unwrap();
         }
-        let store = AssetStorage::new(&backend);
+        let mut store = AssetStorage::new(&mut backend);
         assert_eq!(store.read_balance(1, from), 500);
         assert_eq!(store.read_balance(1, to), 500);
     }

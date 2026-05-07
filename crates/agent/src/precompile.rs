@@ -1,14 +1,14 @@
 //! Agent precompile entry point (0x209).
 //!
 //! Thin wrapper that routes EVM calls to [`AgentStorage`] backed by
-//! [`JournalBackend`]. Business logic lives in [`AgentStorage`]; this
+//! [`StorageProvider`]. Business logic lives in [`AgentStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
-use crate::AgentStorage;
+use crate::{slot_agent_balance, AgentError, AgentStorage};
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::storage::StorageProvider;
-use call_precompile::{dispatch, journal_backend::JournalBackend, require_caller};
+use call_precompile::{dispatch, require_caller, u128_to_u256, StorageRef, AGENT_ADDRESS};
 use call_primitives::Address;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
@@ -46,7 +46,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 store
                     .register_agent(
@@ -74,17 +74,44 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut agent_store = AgentStorage::new(JournalBackend::new(storage));
-                let mut asset_store = AssetStorage::new(JournalBackend::new(storage));
-                agent_store
-                    .grant_balance(
-                        &mut asset_store,
-                        call.agentId,
-                        call.assetId,
-                        call.amount,
-                        caller,
-                    )
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                // Step 1: validate agent exists and caller is owner
+                {
+                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    if !agent_store.agent_exists(call.agentId) {
+                        return Err(PrecompileError::Other(
+                            AgentError::NotFound.to_string().into(),
+                        ));
+                    }
+                    agent_store
+                        .check_owner(call.agentId, caller)
+                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                }
+
+                // Step 2: deduct balance from caller
+                {
+                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    asset_store
+                        .deduct_balance(call.assetId, caller, call.amount)
+                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                }
+
+                // Step 3: add balance to agent
+                {
+                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    let agent_bal = agent_store
+                        .read_agent_balance(call.agentId, call.assetId)
+                        .checked_add(call.amount)
+                        .ok_or_else(|| {
+                            PrecompileError::Other(AgentError::BalanceOverflow.to_string().into())
+                        })?;
+                    storage.sstore(
+                        AGENT_ADDRESS,
+                        slot_agent_balance(call.agentId, call.assetId),
+                        u128_to_u256(agent_bal),
+                    )?;
+                }
+
                 Ok(())
             },
         )
@@ -102,7 +129,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 store
                     .revoke_balance(call.agentId, call.assetId, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -123,20 +150,52 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut agent_store = AgentStorage::new(JournalBackend::new(storage));
-                let mut asset_store = AssetStorage::new(JournalBackend::new(storage));
                 let block_number = storage.block_number();
-                agent_store
-                    .pay(
-                        &mut asset_store,
-                        call.agentId,
-                        call.assetId,
-                        call.to,
-                        call.amount,
-                        caller,
-                        block_number,
-                    )
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                // Step 1: validate, check perms, compute new agent balance
+                let new_agent_bal = {
+                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    if !agent_store.agent_exists(call.agentId) {
+                        return Err(PrecompileError::Other(
+                            AgentError::NotFound.to_string().into(),
+                        ));
+                    }
+                    agent_store
+                        .check_owner(call.agentId, caller)
+                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                    let (per_tx_limit, _, _) = agent_store
+                        .require_perms(call.agentId, call.assetId, block_number)
+                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                    if call.amount > per_tx_limit {
+                        return Err(PrecompileError::Other(
+                            AgentError::AmountExceedsLimit.to_string().into(),
+                        ));
+                    }
+                    agent_store
+                        .read_agent_balance(call.agentId, call.assetId)
+                        .checked_sub(call.amount)
+                        .ok_or_else(|| {
+                            PrecompileError::Other(
+                                AgentError::InsufficientBalance.to_string().into(),
+                            )
+                        })?
+                };
+
+                // Step 2: add balance to recipient
+                {
+                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    asset_store
+                        .add_balance(call.assetId, call.to, call.amount)
+                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                }
+
+                // Step 3: update agent balance
+                storage.sstore(
+                    AGENT_ADDRESS,
+                    slot_agent_balance(call.agentId, call.assetId),
+                    u128_to_u256(new_agent_bal),
+                )?;
+
                 Ok(())
             },
         )
@@ -154,20 +213,69 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut agent_store = AgentStorage::new(JournalBackend::new(storage));
-                let mut asset_store = AssetStorage::new(JournalBackend::new(storage));
                 let block_number = storage.block_number();
-                agent_store
-                    .batch_pay(
-                        &mut asset_store,
-                        call.agentId,
-                        call.assetId,
-                        &call.to,
-                        &call.amounts,
-                        caller,
-                        block_number,
-                    )
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                if call.to.len() != call.amounts.len() {
+                    return Err(PrecompileError::Other(
+                        AgentError::ArrayLengthMismatch.to_string().into(),
+                    ));
+                }
+                if call.to.is_empty() {
+                    return Err(PrecompileError::Other(
+                        AgentError::EmptyBatch.to_string().into(),
+                    ));
+                }
+
+                let total_amount: u128 = call.amounts.iter().copied().sum();
+
+                // Step 1: validate, check perms, compute new agent balance
+                let new_agent_bal = {
+                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    if !agent_store.agent_exists(call.agentId) {
+                        return Err(PrecompileError::Other(
+                            AgentError::NotFound.to_string().into(),
+                        ));
+                    }
+                    agent_store
+                        .check_owner(call.agentId, caller)
+                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                    let (per_tx_limit, _, _) = agent_store
+                        .require_perms(call.agentId, call.assetId, block_number)
+                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                    for amount in call.amounts.iter() {
+                        if *amount > per_tx_limit {
+                            return Err(PrecompileError::Other(
+                                AgentError::AmountExceedsLimit.to_string().into(),
+                            ));
+                        }
+                    }
+                    agent_store
+                        .read_agent_balance(call.agentId, call.assetId)
+                        .checked_sub(total_amount)
+                        .ok_or_else(|| {
+                            PrecompileError::Other(
+                                AgentError::InsufficientBalance.to_string().into(),
+                            )
+                        })?
+                };
+
+                // Step 2: add balances to recipients
+                {
+                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    for (recipient, amount) in call.to.iter().zip(call.amounts.iter()) {
+                        asset_store
+                            .add_balance(call.assetId, *recipient, *amount)
+                            .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                    }
+                }
+
+                // Step 3: update agent balance
+                storage.sstore(
+                    AGENT_ADDRESS,
+                    slot_agent_balance(call.agentId, call.assetId),
+                    u128_to_u256(new_agent_bal),
+                )?;
+
                 Ok(())
             },
         )
@@ -185,7 +293,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 store
                     .withdraw_balance(
@@ -213,7 +321,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 store
                     .revoke_agent(call.agentId, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -232,7 +340,7 @@ impl AgentPrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_owner(call.agentId))
             },
         )
@@ -248,7 +356,7 @@ impl AgentPrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_agent_balance(call.agentId, call.assetId))
             },
         )
@@ -264,7 +372,7 @@ impl AgentPrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_name(call.agentId))
             },
         )
@@ -280,7 +388,7 @@ impl AgentPrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_url(call.agentId))
             },
         )
@@ -296,7 +404,7 @@ impl AgentPrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = AgentStorage::new(JournalBackend::new(storage));
+                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_perms(call.agentId))
             },
         )

@@ -1,15 +1,15 @@
 //! Bridge precompile entry point (0x103).
 //!
-//! Thin wrapper that routes EVM calls to [`BridgeStorage`] backed by
-//! [`JournalBackend`].  Business logic lives in [`BridgeStorage`]; this
-//! file only handles ABI decode/encode, gas accounting and selector dispatch.
+//! Thin wrapper that routes EVM calls to [`BridgeStorage`].
+//! Business logic lives in [`BridgeStorage`]; this file only handles
+//! ABI decode/encode, gas accounting and selector dispatch.
 
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, dispatch, journal_backend::JournalBackend, require_caller, slot_asset_meta,
+    address_to_u256, dispatch, require_caller, slot_asset_meta,
     storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
-    ASSET_ADDRESS,
+    StorageRef, ASSET_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -184,34 +184,34 @@ impl<B: StorageBackend> BridgeStorage<B> {
 
     // ── Read operations ───────────────────────────────────────────────
 
-    pub fn get_total_deposits(&self) -> u128 {
+    pub fn get_total_deposits(&mut self) -> u128 {
         u256_to_u128(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_total_deposits()),
         )
     }
 
-    pub fn get_total_withdrawals(&self) -> u128 {
+    pub fn get_total_withdrawals(&mut self) -> u128 {
         u256_to_u128(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_total_withdrawals()),
         )
     }
 
-    pub fn is_paused(&self) -> bool {
+    pub fn is_paused(&mut self) -> bool {
         self.backend
             .load(BRIDGE_ADDRESS, slot_bridge_paused())
             .to_be_bytes::<32>()[31]
             != 0
     }
 
-    pub fn is_processed(&self, tx_hash: [u8; 32]) -> bool {
+    pub fn is_processed(&mut self, tx_hash: [u8; 32]) -> bool {
         self.backend
             .load(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash))
             != U256::ZERO
     }
 
-    pub fn read_challenge_status(&self, tx_hash: [u8; 32]) -> ChallengeStatus {
+    pub fn read_challenge_status(&mut self, tx_hash: [u8; 32]) -> ChallengeStatus {
         let status = self
             .backend
             .load(BRIDGE_ADDRESS, slot_bridge_challenge_status(tx_hash))
@@ -225,56 +225,56 @@ impl<B: StorageBackend> BridgeStorage<B> {
         }
     }
 
-    pub fn read_challenge_deadline(&self, tx_hash: [u8; 32]) -> u64 {
+    pub fn read_challenge_deadline(&mut self, tx_hash: [u8; 32]) -> u64 {
         u256_to_u64(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_challenge_deadline(tx_hash)),
         )
     }
 
-    pub fn read_challenge_bond_for_tx(&self, tx_hash: [u8; 32]) -> u128 {
+    pub fn read_challenge_bond_for_tx(&mut self, tx_hash: [u8; 32]) -> u128 {
         u256_to_u128(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_challenge_bond(tx_hash)),
         )
     }
 
-    pub fn read_challenge_challenger(&self, tx_hash: [u8; 32]) -> Address {
+    pub fn read_challenge_challenger(&mut self, tx_hash: [u8; 32]) -> Address {
         u256_to_address(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_challenge_challenger(tx_hash)),
         )
     }
 
-    pub fn read_deposit_asset_id(&self, tx_hash: [u8; 32]) -> u64 {
+    pub fn read_deposit_asset_id(&mut self, tx_hash: [u8; 32]) -> u64 {
         u256_to_u64(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_deposit_asset_id(tx_hash)),
         )
     }
 
-    pub fn read_deposit_recipient(&self, tx_hash: [u8; 32]) -> Address {
+    pub fn read_deposit_recipient(&mut self, tx_hash: [u8; 32]) -> Address {
         u256_to_address(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_deposit_recipient(tx_hash)),
         )
     }
 
-    pub fn read_deposit_amount(&self, tx_hash: [u8; 32]) -> u128 {
+    pub fn read_deposit_amount(&mut self, tx_hash: [u8; 32]) -> u128 {
         u256_to_u128(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_deposit_amount(tx_hash)),
         )
     }
 
-    pub fn read_deposit_block_height(&self, tx_hash: [u8; 32]) -> u64 {
+    pub fn read_deposit_block_height(&mut self, tx_hash: [u8; 32]) -> u64 {
         u256_to_u64(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_deposit_block_height(tx_hash)),
         )
     }
 
-    pub fn read_challenge_period(&self) -> u64 {
+    pub fn read_challenge_period(&mut self) -> u64 {
         let stored = u256_to_u64(self.backend.load(BRIDGE_ADDRESS, slot_challenge_period()));
         if stored == 0 {
             DEFAULT_CHALLENGE_PERIOD
@@ -283,7 +283,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         }
     }
 
-    pub fn read_global_challenge_bond(&self) -> u128 {
+    pub fn read_global_challenge_bond(&mut self) -> u128 {
         let stored = u256_to_u128(
             self.backend
                 .load(BRIDGE_ADDRESS, slot_challenge_bond_amount()),
@@ -297,7 +297,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
 
     // ── Validation ────────────────────────────────────────────────────
 
-    fn asset_registered(&self, asset_id: u64) -> bool {
+    fn asset_registered(&mut self, asset_id: u64) -> bool {
         let issuer = u256_to_address(
             self.backend
                 .load(ASSET_ADDRESS, slot_asset_meta(asset_id, b"issuer")),
@@ -305,7 +305,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         issuer != Address::ZERO
     }
 
-    fn validate_asset(&self, asset_id: u64) -> Result<(), BridgeError> {
+    fn validate_asset(&mut self, asset_id: u64) -> Result<(), BridgeError> {
         if asset_id == 0 {
             return Err(BridgeError::AssetZeroNotBridgeable);
         }
@@ -325,7 +325,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         Ok(())
     }
 
-    fn validate_basic(&self, asset_id: u64) -> Result<(), BridgeError> {
+    fn validate_basic(&mut self, asset_id: u64) -> Result<(), BridgeError> {
         if !self.asset_registered(asset_id) {
             return Err(BridgeError::AssetNotRegistered);
         }
@@ -640,7 +640,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         );
     }
 
-    fn verify_fraud_proof(&self, source_tx_hash: [u8; 32]) -> bool {
+    fn verify_fraud_proof(&mut self, source_tx_hash: [u8; 32]) -> bool {
         let proof_hash = self.backend.load(
             BRIDGE_ADDRESS,
             slot_bridge_challenge_proof_hash(source_tx_hash),
@@ -690,7 +690,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
     /// Cryptographic fraud-proof verification using MPT proofs.
     #[cfg(feature = "light-client-bridge")]
     fn verify_fraud_proof_cryptographic(
-        &self,
+        &mut self,
         source_tx_hash: [u8; 32],
         proof_bytes: &[u8],
     ) -> bool {
@@ -784,8 +784,7 @@ impl BridgePrecompile {
             1500,
             storage,
             |_call, storage| {
-                let backend = JournalBackend::new(storage);
-                let store = BridgeStorage::new(backend);
+                let mut store = BridgeStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.get_total_deposits())
             },
         )
@@ -801,8 +800,7 @@ impl BridgePrecompile {
             1500,
             storage,
             |_call, storage| {
-                let backend = JournalBackend::new(storage);
-                let store = BridgeStorage::new(backend);
+                let mut store = BridgeStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.get_total_withdrawals())
             },
         )
@@ -820,9 +818,8 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 bridge_store
                     .bridge_to_evm(&mut asset_store, call.assetId, call.to, call.amount, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -842,9 +839,8 @@ impl BridgePrecompile {
             30000,
             storage,
             |call, storage| {
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 bridge_store
                     .bridge_to_protocol(&mut asset_store, call.assetId, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -865,9 +861,8 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let validator = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 let block_height = storage.block_number();
                 bridge_store
                     .external_deposit(
@@ -897,9 +892,8 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 bridge_store
                     .external_withdraw(&mut asset_store, call.assetId, call.amount, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -919,9 +913,8 @@ impl BridgePrecompile {
             30000,
             storage,
             |call, storage| {
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 bridge_store
                     .deposit(
                         &mut asset_store,
@@ -949,9 +942,8 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let challenger = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 bridge_store
                     .initiate_challenge(
@@ -978,10 +970,9 @@ impl BridgePrecompile {
             100000,
             storage,
             |call, storage| {
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
-                let mut validator_store = ValidatorStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 bridge_store
                     .resolve_challenge(
@@ -1006,8 +997,7 @@ impl BridgePrecompile {
             1500,
             storage,
             |call, storage| {
-                let backend = JournalBackend::new(storage);
-                let store = BridgeStorage::new(backend);
+                let mut store = BridgeStorage::new(StorageRef::new(&mut *storage));
                 let status = store.read_challenge_status(call.sourceTxHash.into());
                 let deadline = store.read_challenge_deadline(call.sourceTxHash.into());
                 let bond = store.read_challenge_bond_for_tx(call.sourceTxHash.into());
@@ -1029,9 +1019,8 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut bridge_store = BridgeStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 bridge_store
                     .withdraw_challenge_bond(&mut asset_store, call.sourceTxHash.into(), caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;

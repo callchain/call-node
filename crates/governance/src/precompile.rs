@@ -1,18 +1,17 @@
 //! Governance precompile entry point (0x203).
 //!
 //! Thin wrapper that routes EVM calls to [`GovernanceStorage`] backed by
-//! [`JournalBackend`].  Business logic lives in [`GovernanceStorage`]; this
+//! any [`StorageProvider`].  Business logic lives in [`GovernanceStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
     address_to_u256, dispatch,
-    journal_backend::JournalBackend,
     require_caller,
     storage::{storage_slot, StorageProvider},
-    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, COMPLIANCE_ADDRESS,
-    VALIDATOR_ADDRESS,
+    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
+    COMPLIANCE_ADDRESS, VALIDATOR_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -101,14 +100,14 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         Self { backend }
     }
 
-    pub fn read_proposal_count(&self) -> u64 {
+    pub fn read_proposal_count(&mut self) -> u64 {
         u256_to_u64(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal_count()),
         )
     }
 
-    pub fn read_proposal_status(&self, proposal_id: u64) -> u8 {
+    pub fn read_proposal_status(&mut self, proposal_id: u64) -> u8 {
         self.backend
             .load(
                 GOVERNANCE_ADDRESS,
@@ -117,27 +116,27 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             .to_be_bytes::<32>()[31]
     }
 
-    pub fn read_proposal_u64(&self, proposal_id: u64, suffix: &[u8]) -> u64 {
+    pub fn read_proposal_u64(&mut self, proposal_id: u64, suffix: &[u8]) -> u64 {
         u256_to_u64(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix)),
         )
     }
 
-    pub fn read_proposal_u8(&self, proposal_id: u64, suffix: &[u8]) -> u8 {
+    pub fn read_proposal_u8(&mut self, proposal_id: u64, suffix: &[u8]) -> u8 {
         self.backend
             .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix))
             .to_be_bytes::<32>()[31]
     }
 
-    pub fn read_proposal_u128(&self, proposal_id: u64, suffix: &[u8]) -> u128 {
+    pub fn read_proposal_u128(&mut self, proposal_id: u64, suffix: &[u8]) -> u128 {
         u256_to_u128(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix)),
         )
     }
 
-    pub fn read_proposal_proposer(&self, proposal_id: u64) -> Address {
+    pub fn read_proposal_proposer(&mut self, proposal_id: u64) -> Address {
         u256_to_address(self.backend.load(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"proposer"),
@@ -145,7 +144,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     }
 
     /// Read back the execution_data stored in chunked slots.
-    pub fn read_proposal_execution_data(&self, proposal_id: u64) -> Vec<u8> {
+    pub fn read_proposal_execution_data(&mut self, proposal_id: u64) -> Vec<u8> {
         let data_len = u256_to_u64(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal_data_len(proposal_id)),
@@ -170,7 +169,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     }
 
     pub fn require_proposal_status(
-        &self,
+        &mut self,
         proposal_id: u64,
         expected: u8,
         err: &str,
@@ -181,7 +180,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         Ok(())
     }
 
-    pub fn read_vote_tally(&self, proposal_id: u64, suffix: &[u8]) -> u128 {
+    pub fn read_vote_tally(&mut self, proposal_id: u64, suffix: &[u8]) -> u128 {
         u256_to_u128(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal(proposal_id, suffix)),
@@ -190,21 +189,21 @@ impl<B: StorageBackend> GovernanceStorage<B> {
 
     // ── Config read helpers ─────────────────────────────────────────────
 
-    pub fn read_config_u64(&self, suffix: &[u8]) -> u64 {
+    pub fn read_config_u64(&mut self, suffix: &[u8]) -> u64 {
         u256_to_u64(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)),
         )
     }
 
-    pub fn read_config_u128(&self, suffix: &[u8]) -> u128 {
+    pub fn read_config_u128(&mut self, suffix: &[u8]) -> u128 {
         u256_to_u128(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)),
         )
     }
 
-    pub fn read_config_u32(&self, suffix: &[u8]) -> u32 {
+    pub fn read_config_u32(&mut self, suffix: &[u8]) -> u32 {
         u256_to_u64(
             self.backend
                 .load(GOVERNANCE_ADDRESS, slot_gov_config(suffix)),
@@ -236,7 +235,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         );
     }
 
-    pub fn is_paused(&self) -> bool {
+    pub fn is_paused(&mut self) -> bool {
         self.backend
             .load(GOVERNANCE_ADDRESS, slot_gov_paused())
             .to_be_bytes::<32>()[31]
@@ -841,9 +840,8 @@ impl GovernancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut gov_store = GovernanceStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 let proposal_id = gov_store
                     .submit_proposal(
@@ -886,21 +884,24 @@ impl GovernancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut gov_store = GovernanceStorage::new(backend);
+                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
 
                 // Compute voting power based on proposal type
                 let proposal_type = gov_store.read_proposal_u8(call.proposalId, b"proposal_type");
                 let mut voting_power: u128 = 0;
 
                 // Validator check (1=1 for validator proposals, joint voting)
-                let validator_store = ValidatorStorage::new(backend);
-                let validator_id = validator_store.read_validator_id(caller);
+                let validator_id = {
+                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    validator_store.read_validator_id(caller)
+                };
                 let is_validator = validator_id != 0;
 
                 // CALL balance check
-                let asset_store = AssetStorage::new(backend);
-                let call_balance = asset_store.read_balance(CALL_ASSET_ID, caller);
+                let call_balance = {
+                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    asset_store.read_balance(CALL_ASSET_ID, caller)
+                };
 
                 match proposal_type {
                     0 | 1 | 3 => {
@@ -983,7 +984,7 @@ impl GovernancePrecompile {
             20_000,
             storage,
             |call, storage| {
-                let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
+                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
                 let block_number = storage.block_number();
                 gov_store
                     .queue(call.proposalId, block_number)
@@ -1018,15 +1019,16 @@ impl GovernancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let backend = JournalBackend::new(storage);
-                let mut gov_store = GovernanceStorage::new(backend);
-                let mut asset_store = AssetStorage::new(backend);
+                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
 
                 // Authorization check: proposer or validator
                 let proposer = gov_store.read_proposal_proposer(call.proposalId);
                 let is_proposer = caller == proposer;
-                let validator_store = ValidatorStorage::new(backend);
-                let is_validator = validator_store.read_validator_id(caller) != 0;
+                let is_validator = {
+                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    validator_store.read_validator_id(caller) != 0
+                };
                 if !is_proposer && !is_validator {
                     return Err(PrecompileError::Other(
                         "governance: unauthorized executor".into(),
@@ -1068,15 +1070,17 @@ impl GovernancePrecompile {
                 let caller = require_caller(msg_sender)?;
 
                 // Verify caller is a registered validator
-                let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
-                let validator_id = validator_store.read_validator_id(caller);
+                let validator_id = {
+                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    validator_store.read_validator_id(caller)
+                };
                 if validator_id == 0 {
                     return Err(PrecompileError::Other(
                         "sender not a registered validator".into(),
                     ));
                 }
 
-                let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
+                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
                 gov_store.emergency_pause(call.reason.into(), caller);
 
                 // Emit EmergencyPaused(pauser, reason)
@@ -1110,15 +1114,17 @@ impl GovernancePrecompile {
                 let caller = require_caller(msg_sender)?;
 
                 // Verify caller is a registered validator
-                let validator_store = ValidatorStorage::new(JournalBackend::new(storage));
-                let validator_id = validator_store.read_validator_id(caller);
+                let validator_id = {
+                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    validator_store.read_validator_id(caller)
+                };
                 if validator_id == 0 {
                     return Err(PrecompileError::Other(
                         "sender not a registered validator".into(),
                     ));
                 }
 
-                let mut gov_store = GovernanceStorage::new(JournalBackend::new(storage));
+                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
                 gov_store.emergency_resume();
 
                 // Emit EmergencyResumed(resumer)
@@ -1147,7 +1153,7 @@ impl GovernancePrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
                 Ok(U256::from(store.read_proposal_status(call.proposalId)))
             },
         )
@@ -1163,7 +1169,7 @@ impl GovernancePrecompile {
             2000,
             storage,
             |call, storage| {
-                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
                 let votes_for = store.read_vote_tally(call.proposalId, b"votes_for");
                 let votes_against = store.read_vote_tally(call.proposalId, b"votes_against");
                 let votes_abstain = store.read_vote_tally(call.proposalId, b"votes_abstain");
@@ -1178,7 +1184,7 @@ impl GovernancePrecompile {
             1000,
             storage,
             |_call, storage| {
-                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
                 Ok(U256::from(if store.is_paused() { 1u8 } else { 0u8 }))
             },
         )
@@ -1194,7 +1200,7 @@ impl GovernancePrecompile {
             1000,
             storage,
             |_call, storage| {
-                let store = GovernanceStorage::new(JournalBackend::new(storage));
+                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
                 Ok(store.read_proposal_count())
             },
         )

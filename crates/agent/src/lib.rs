@@ -120,57 +120,57 @@ impl<B: StorageBackend> AgentStorage<B> {
 
     // ── Read operations ───────────────────────────────────────────────
 
-    pub fn read_count(&self) -> u64 {
+    pub fn read_count(&mut self) -> u64 {
         u256_to_u64(self.backend.load(AGENT_ADDRESS, slot_agent_count()))
     }
 
-    pub fn read_owner(&self, agent_id: u64) -> Address {
+    pub fn read_owner(&mut self, agent_id: u64) -> Address {
         u256_to_address(self.backend.load(AGENT_ADDRESS, slot_agent_owner(agent_id)))
     }
 
-    pub fn read_pubkey(&self, agent_id: u64) -> [u8; 32] {
+    pub fn read_pubkey(&mut self, agent_id: u64) -> [u8; 32] {
         self.backend
             .load(AGENT_ADDRESS, slot_agent_pubkey(agent_id))
             .to_be_bytes::<32>()
     }
 
-    pub fn read_name(&self, agent_id: u64) -> [u8; 32] {
+    pub fn read_name(&mut self, agent_id: u64) -> [u8; 32] {
         self.backend
             .load(AGENT_ADDRESS, slot_agent_name(agent_id))
             .to_be_bytes::<32>()
     }
 
-    pub fn read_url(&self, agent_id: u64) -> [u8; 32] {
+    pub fn read_url(&mut self, agent_id: u64) -> [u8; 32] {
         self.backend
             .load(AGENT_ADDRESS, slot_agent_url(agent_id))
             .to_be_bytes::<32>()
     }
 
-    pub fn read_perms(&self, agent_id: u64) -> U256 {
+    pub fn read_perms(&mut self, agent_id: u64) -> U256 {
         self.backend.load(AGENT_ADDRESS, slot_agent_perms(agent_id))
     }
 
-    pub fn read_registered_at(&self, agent_id: u64) -> u64 {
+    pub fn read_registered_at(&mut self, agent_id: u64) -> u64 {
         u256_to_u64(
             self.backend
                 .load(AGENT_ADDRESS, slot_agent_registered_at(agent_id)),
         )
     }
 
-    pub fn read_agent_balance(&self, agent_id: u64, asset_id: u64) -> u128 {
+    pub fn read_agent_balance(&mut self, agent_id: u64, asset_id: u64) -> u128 {
         u256_to_u128(
             self.backend
                 .load(AGENT_ADDRESS, slot_agent_balance(agent_id, asset_id)),
         )
     }
 
-    pub fn agent_exists(&self, agent_id: u64) -> bool {
+    pub fn agent_exists(&mut self, agent_id: u64) -> bool {
         self.read_owner(agent_id) != Address::ZERO
     }
 
     // ── Permission checks ─────────────────────────────────────────────
 
-    pub fn check_owner(&self, agent_id: u64, caller: Address) -> Result<(), AgentError> {
+    pub fn check_owner(&mut self, agent_id: u64, caller: Address) -> Result<(), AgentError> {
         if self.read_owner(agent_id) != caller {
             return Err(AgentError::NotOwner);
         }
@@ -178,7 +178,7 @@ impl<B: StorageBackend> AgentStorage<B> {
     }
 
     pub fn require_perms(
-        &self,
+        &mut self,
         agent_id: u64,
         asset_id: u64,
         current_block: u64,
@@ -444,7 +444,7 @@ mod tests {
     }
 
     impl StorageBackend for TestBackend {
-        fn load(&self, address: Address, slot: U256) -> U256 {
+        fn load(&mut self, address: Address, slot: U256) -> U256 {
             self.storage
                 .borrow()
                 .get(&(address, slot))
