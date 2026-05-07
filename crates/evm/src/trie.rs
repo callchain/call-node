@@ -3,7 +3,7 @@
 //! Replaces the O(n) `HashBuilder` full aggregation in `EvmState::compute_state_root()`
 //! with reth-trie's `StateRoot` which supports incremental updates via `TrieUpdates`.
 
-#![allow(unsafe_code)]
+// All unsafe code has been eliminated from this module.
 
 use std::collections::BTreeMap;
 
@@ -314,10 +314,7 @@ impl TrieCursorFactory for MdbxTrieCursorFactory {
         &self,
         hashed_address: B256,
     ) -> Result<Self::StorageTrieCursor<'_>, DatabaseError> {
-        let nodes = self
-            .storage_nodes
-            .get(&hashed_address)
-            .map(|m| m as *const _);
+        let nodes = self.storage_nodes.get(&hashed_address);
         Ok(BTreeStorageTrieCursor::new(hashed_address, nodes))
     }
 }
@@ -392,11 +389,8 @@ pub struct BTreeStorageTrieCursor<'a> {
 impl<'a> BTreeStorageTrieCursor<'a> {
     fn new(
         hashed_address: B256,
-        data: Option<*const BTreeMap<Nibbles, BranchNodeCompact>>,
+        data: Option<&'a BTreeMap<Nibbles, BranchNodeCompact>>,
     ) -> Self {
-        // SAFETY: The pointer is valid as long as the MdbxTrieCursorFactory lives,
-        // and the cursor borrows from the factory via the TrieCursorFactory trait.
-        let data = data.map(|ptr| unsafe { &*ptr });
         Self {
             hashed_address,
             data,
