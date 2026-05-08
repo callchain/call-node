@@ -160,7 +160,7 @@ Open a **private** GitHub Security Advisory or email security@callchain.cc
 
 Use freely available tools on the most critical components.
 
-### Kani Model Checker
+### Kani Model Checker ✅
 
 ```bash
 cargo install --locked kani-verifier
@@ -182,6 +182,23 @@ cargo kani --crate call-protocol
 | `verify_allowance_decrease_exact` | Allowance decrease is exact, never underflows |
 
 Run: `cargo kani --crate call-protocol`
+
+### Theorem-Prover Formal Verification (Shielded Circuits) 🔄 In Progress
+
+Beyond Kani (which verifies Rust-level properties), we are pursuing **theorem-prover level proofs of completeness and soundness** for the shielded ZK circuits using **Lean 4**.
+
+**Why Lean 4**: General-purpose theorem prover with strong finite field support (`mathlib4`), used by Ethereum Foundation and other blockchain projects. The circuits are written in arkworks R1CS (not Circom), so off-the-shelf tools like Picus/Ecne do not apply.
+
+**Status**:
+- ✅ Mathematical specification: `docs/formal_verification/spec.md` defines BN254 Fr, Poseidon hash, R1CS satisfaction, and validity predicates for all 3 circuits
+- ✅ Lean 4 core infrastructure: `formal_verification/lean/` with field definition, R1CS model, Poseidon hash skeleton
+- ✅ DepositCircuit theorems stated: completeness and soundness theorems in `DepositCircuit.lean`
+- 🔄 Proofs incomplete: require Poseidon constant extraction from `poseidon-ark-no-std` and tactic completion
+- ⏳ TransferCircuit + WithdrawCircuit: deferred to Phase 5
+
+**Timeline**: ~4 weeks for DepositCircuit completeness + soundness proofs; ~12 weeks for all 3 circuits.
+
+**Verification**: `lake build` and `lake test` in `formal_verification/lean/` (CI: `.github/workflows/formal-verification.yml`).
 
 ---
 

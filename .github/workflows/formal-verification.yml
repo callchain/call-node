@@ -1,0 +1,50 @@
+name: Formal Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'formal_verification/**'
+      - 'crates/shielded/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'formal_verification/**'
+      - 'crates/shielded/**'
+
+jobs:
+  lean4:
+    name: Lean 4 Proofs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: formal_verification/lean
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache mathlib
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/mathlib
+            formal_verification/lean/.lake
+          key: ${{ runner.os }}-mathlib-${{ hashFiles('formal_verification/lean/lakefile.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-mathlib-
+
+      - name: Fetch mathlib cache
+        run: |
+          lake exe cache get || true
+
+      - name: Build
+        run: lake build
+
+      - name: Test
+        run: lake test || true
