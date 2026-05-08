@@ -38,3 +38,30 @@ code). This is a mainnet-readiness procedure, not a devnet/testnet concern.
 2. Ceremony coordination (offline MPC)
 3. Service hot-reload of new verification key
 4. Old key sunset period for in-flight proofs
+
+---
+
+## Shielded Circuit Formal Verification
+
+**Context:** `crates/shielded` deposit, transfer, and withdraw circuits are
+exercised by comprehensive R1CS constraint-level negative tests (132 tests,
+`real-prover` feature). These prove the circuits reject invalid witnesses,
+but they do not constitute a mathematical proof of completeness or soundness.
+
+**What is missing:** A theorem-prover-level formal specification and proof
+(e.g., in Coq, Isabelle/HOL, or a ZK-specific framework) that:
+1. The R1CS constraint system exactly captures the intended relation
+2. Every valid witness satisfies all constraints (completeness)
+3. No invalid witness satisfies all constraints (soundness)
+4. The Merkle tree gadget is collision-resistant under Poseidon
+5. The nullifier derivation is a pseudo-random function
+
+**Why deferred:** Formal verification of a non-trivial ZK circuit is
+research-grade work requiring months of specialist effort. The pragmatic
+constraint-level tests are sufficient for devnet and testnet where the
+economic value at risk is low.
+
+**When to revisit:** Before mainnet shielded pool launch. At that point a
+third-party audit should include either:
+- A full formal verification engagement, or
+- A rigorous pen-and-paper security proof reviewed by domain experts

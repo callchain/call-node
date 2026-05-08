@@ -350,6 +350,181 @@ mod tests {
     }
 
     #[test]
+    fn test_receipts_multi_block_roundtrip() {
+        let db = temp_db();
+        let mut receipts = std::collections::HashMap::new();
+
+        // Block 10: 2 receipts
+        let tx1 = call_primitives::TxHash::from([0x01u8; 32]);
+        let tx2 = call_primitives::TxHash::from([0x02u8; 32]);
+        receipts.insert(
+            tx1,
+            make_receipt(tx1, 10, call_primitives::ExecutionStatus::Success),
+        );
+        receipts.insert(
+            tx2,
+            make_receipt(tx2, 10, call_primitives::ExecutionStatus::Success),
+        );
+
+        // Block 20: 1 receipt
+        let tx3 = call_primitives::TxHash::from([0x03u8; 32]);
+        receipts.insert(
+            tx3,
+            make_receipt(tx3, 20, call_primitives::ExecutionStatus::Reverted {
+                reason: "out of gas".into(),
+            }),
+        );
+
+        save_receipts(&db, &receipts).unwrap();
+        let loaded = load_receipts(&db).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.get(&tx1).unwrap().block_number, 10);
+        assert_eq!(loaded.get(&tx3).unwrap().block_number, 20);
+
+        // Verify CallReceiptsByBlock index was built correctly
+        let by_block_10 = loaded.values().filter(|r| r.block_number == 10).count();
+        let by_block_20 = loaded.values().filter(|r| r.block_number == 20).count();
+        assert_eq!(by_block_10, 2);
+        assert_eq!(by_block_20, 1);
+    }
+
+    #[test]
+    fn test_receipts_field_integrity() {
+        let db = temp_db();
+        let mut receipts = std::collections::HashMap::new();
+        let tx_hash = call_primitives::TxHash::from([0xABu8; 32]);
+        let addr = call_primitives::Address::repeat_byte(0x42);
+        let topic = call_primitives::Hash::repeat_byte(0x11);
+
+        let receipt = call_protocol::ProtocolReceipt {
+            tx_hash,
+            block_number: 42,
+            block_hash: call_primitives::Hash::repeat_byte(0xBB),
+            transaction_index: 7,
+            status: call_primitives::ExecutionStatus::Success,
+            gas_used: 55_000,
+            gas_payer: addr,
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 1_000_000,
+            cumulative_gas_used: 55_000,
+            effective_gas_price: 18,
+            to: Some(addr),
+            contract_address: None,
+            logs: vec![call_protocol::LogEntry {
+                address: addr,
+                topics: vec![topic],
+                data: vec![0x01, 0x02, 0x03],
+            }],
+            logs_bloom: vec![0u8; 256],
+            instruction_results: vec![InstructionExecResult {
+                success: true,
+                gas_used: 55_000,
+                revert_reason: None,
+            }],
+            memos: vec![call_protocol::MemoEntry {
+                content: "test memo".into(),
+                reference: Some("ref-1".into()),
+            }],
+            state_changes: vec![call_protocol::StateChange {
+                change_type: call_protocol::ChangeType::Balance,
+                key: vec![0x01],
+                old_value: vec![0x00],
+                new_value: vec![0x64],
+            }],
+        };
+        receipts.insert(tx_hash, receipt);
+
+        save_receipts(&db, &receipts).unwrap();
+        let loaded = load_receipts(&db).unwrap();
+        let r = loaded.get(&tx_hash).unwrap();
+
+        assert_eq!(r.block_number, 42);
+        assert_eq!(r.transaction_index, 7);
+        assert_eq!(r.gas_used, 55_000);
+        assert_eq!(r.fee_amount, 1_000_000);
+        assert_eq!(r.effective_gas_price, 18);
+        assert_eq!(r.gas_payer, addr);
+        assert_eq!(r.to, Some(addr));
+        assert_eq!(r.logs.len(), 1);
+        assert_eq!(r.logs[0].address, addr);
+        assert_eq!(r.logs[0].topics.len(), 1);
+        assert_eq!(r.logs[0].topics[0], topic);
+        assert_eq!(r.logs[0].data, vec![0x01, 0x02, 0x03]);
+        assert_eq!(r.instruction_results.len(), 1);
+        assert!(r.instruction_results[0].success);
+        assert_eq!(r.memos.len(), 1);
+        assert_eq!(r.memos[0].content, "test memo");
+        assert_eq!(r.state_changes.len(), 1);
+        assert_eq!(r.state_changes[0].new_value, vec![0x64]);
+    }
+
+    #[test]
+    fn test_receipts_empty_save_load() {
+        let db = temp_db();
+        let receipts: std::collections::HashMap<
+            call_primitives::TxHash,
+            call_protocol::ProtocolReceipt,
+        > = std::collections::HashMap::new();
+
+        save_receipts(&db, &receipts).unwrap();
+        let loaded = load_receipts(&db).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn test_receipts_overwrite() {
+        let db = temp_db();
+        let tx_hash = call_primitives::TxHash::from([0xCCu8; 32]);
+
+        let mut receipts1 = std::collections::HashMap::new();
+        receipts1.insert(tx_hash, make_receipt(tx_hash, 10, call_primitives::ExecutionStatus::Success));
+        save_receipts(&db, &receipts1).unwrap();
+
+        let mut receipts2 = std::collections::HashMap::new();
+        receipts2.insert(tx_hash, make_receipt(tx_hash, 20, call_primitives::ExecutionStatus::Reverted { reason: "fail".into() }));
+        save_receipts(&db, &receipts2).unwrap();
+
+        let loaded = load_receipts(&db).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let r = loaded.get(&tx_hash).unwrap();
+        assert_eq!(r.block_number, 20);
+        assert!(
+            matches!(&r.status, call_primitives::ExecutionStatus::Reverted { reason } if reason == "fail")
+        );
+    }
+
+    fn make_receipt(
+        tx_hash: call_primitives::TxHash,
+        block_number: u64,
+        status: call_primitives::ExecutionStatus,
+    ) -> call_protocol::ProtocolReceipt {
+        call_protocol::ProtocolReceipt {
+            tx_hash,
+            block_number,
+            block_hash: call_primitives::Hash::repeat_byte(block_number as u8),
+            transaction_index: 0,
+            status,
+            gas_used: 21_000,
+            gas_payer: call_primitives::Address::ZERO,
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 0,
+            cumulative_gas_used: 21_000,
+            effective_gas_price: 10,
+            to: None,
+            contract_address: None,
+            logs: Vec::new(),
+            logs_bloom: vec![0u8; 256],
+            instruction_results: vec![InstructionExecResult {
+                success: true,
+                gas_used: 21_000,
+                revert_reason: None,
+            }],
+            memos: Vec::new(),
+            state_changes: Vec::new(),
+        }
+    }
+
+    #[test]
     fn test_fork_state_roundtrip() {
         let db = temp_db();
         let fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 2, 3), 1);

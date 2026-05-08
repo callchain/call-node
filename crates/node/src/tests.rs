@@ -1285,3 +1285,186 @@ async fn test_sync_within_same_epoch_does_not_set_restart_signal() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[tokio::test]
+async fn test_receipt_persistence_restart() {
+    let tmp = std::env::temp_dir().join(format!(
+        "call-node-receipt-persist-{}",
+        std::process::id()
+    ));
+    let log_addr = test_addr(0x42);
+    let topic = call_primitives::Hash::repeat_byte(0x11);
+
+    // === Phase 1: Create node, store receipts, persist state ===
+    {
+        let node = CallNode::new(tmp.clone()).expect("node creation");
+
+        // Store receipts with logs across multiple blocks
+        let tx1 = call_primitives::TxHash::repeat_byte(1);
+        let receipt1 = call_protocol::ProtocolReceipt {
+            tx_hash: tx1,
+            block_number: 10,
+            block_hash: call_primitives::Hash::repeat_byte(10),
+            transaction_index: 0,
+            status: call_primitives::ExecutionStatus::Success,
+            gas_used: 21_000,
+            gas_payer: test_addr(1),
+            fee_currency: call_primitives::FeeCurrency::Call,
+            fee_amount: 1_000,
+            cumulative_gas_used: 21_000,
+            effective_gas_price: 10,
+            to: Some(test_addr(2)),
+            contract_address: None,
+            logs: vec![call_protocol::LogEntry {
+                address: log_addr,
+                topics: vec![topic],
+                data: vec![0x01, 0x02],
+            }],
+            logs_bloom: vec![0u8; 256],
+            instruction_results: vec![call_protocol::InstructionExecResult {
+                success: true,
+                gas_used: 21_000,
+                revert_reason: None,
+            }],
+            memos: vec![],
+            state_changes: vec![],
+        };
+        node.state.store_receipt(tx1, receipt1);
+
+        let tx2 = call_primitives::TxHash::repeat_byte(2);
+        let receipt2 = call_protocol::ProtocolReceipt {
+            tx_hash: tx2,
+            block_number: 10,
+            block_hash: call_primitives::Hash::repeat_byte(10),
+            transaction_index: 1,
+            status: call_primitives::ExecutionStatus::Success,
+            gas_used: 21_000,
+            gas_payer: test_addr(1),
+            fee_currency: call_primitives::FeeCurrency::Call,
+            fee_amount: 1_000,
+            cumulative_gas_used: 42_000,
+            effective_gas_price: 10,
+            to: Some(test_addr(3)),
+            contract_address: None,
+            logs: vec![call_protocol::LogEntry {
+                address: log_addr,
+                topics: vec![],
+                data: vec![0x03],
+            }],
+            logs_bloom: vec![0u8; 256],
+            instruction_results: vec![call_protocol::InstructionExecResult {
+                success: true,
+                gas_used: 21_000,
+                revert_reason: None,
+            }],
+            memos: vec![],
+            state_changes: vec![],
+        };
+        node.state.store_receipt(tx2, receipt2);
+
+        let tx3 = call_primitives::TxHash::repeat_byte(3);
+        let receipt3 = call_protocol::ProtocolReceipt {
+            tx_hash: tx3,
+            block_number: 20,
+            block_hash: call_primitives::Hash::repeat_byte(20),
+            transaction_index: 0,
+            status: call_primitives::ExecutionStatus::Reverted {
+                reason: "insufficient gas".into(),
+            },
+            gas_used: 5_000,
+            gas_payer: test_addr(1),
+            fee_currency: call_primitives::FeeCurrency::Call,
+            fee_amount: 500,
+            cumulative_gas_used: 5_000,
+            effective_gas_price: 10,
+            to: Some(test_addr(4)),
+            contract_address: None,
+            logs: vec![],
+            logs_bloom: vec![0u8; 256],
+            instruction_results: vec![call_protocol::InstructionExecResult {
+                success: false,
+                gas_used: 5_000,
+                revert_reason: Some("insufficient gas".into()),
+            }],
+            memos: vec![],
+            state_changes: vec![],
+        };
+        node.state.store_receipt(tx3, receipt3);
+
+        // Persist state (including receipts)
+        persist_state_to_db(
+            &node.db.db, &node.state, &node.consensus)
+            .expect("persist state");
+
+        // Verify in-memory state before restart
+        let receipts_block_10 = node.state.get_receipts_by_block(10);
+        assert_eq!(receipts_block_10.len(), 2, "should have 2 receipts in block 10");
+
+        let receipts_block_20 = node.state.get_receipts_by_block(20);
+        assert_eq!(receipts_block_20.len(), 1, "should have 1 receipt in block 20");
+
+        // Verify log_index was built
+        let log_entries = node.state.lookup_logs_by_address(&[log_addr]);
+        assert!(log_entries.is_some(), "log_index should contain entries for log_addr");
+        assert_eq!(log_entries.unwrap().len(), 2, "should have 2 log entries indexed");
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // === Phase 2: Restart node, verify receipts recovered ===
+    {
+        let node2 = CallNode::new(tmp.clone()).expect("node creation (restart)");
+
+        // Receipts should be recovered from DB
+        let receipts_block_10 = node2.state.get_receipts_by_block(10);
+        assert_eq!(
+            receipts_block_10.len(),
+            2,
+            "block 10 receipts should survive restart"
+        );
+
+        let receipts_block_20 = node2.state.get_receipts_by_block(20);
+        assert_eq!(
+            receipts_block_20.len(),
+            1,
+            "block 20 receipt should survive restart"
+        );
+
+        // Verify individual receipt fields
+        let tx1 = call_primitives::TxHash::repeat_byte(1);
+        let r1 = node2.state.get_receipt(&tx1).expect("tx1 receipt should exist");
+        assert_eq!(r1.block_number, 10);
+        assert!(matches!(r1.status, call_primitives::ExecutionStatus::Success));
+        assert_eq!(r1.logs.len(), 1);
+        assert_eq!(r1.logs[0].address, log_addr);
+        assert_eq!(r1.logs[0].topics.len(), 1);
+        assert_eq!(r1.logs[0].topics[0], topic);
+
+        let tx3 = call_primitives::TxHash::repeat_byte(3);
+        let r3 = node2.state.get_receipt(&tx3).expect("tx3 receipt should exist");
+        assert_eq!(r3.block_number, 20);
+        assert!(
+            matches!(
+                &r3.status, call_primitives::ExecutionStatus::Reverted { reason } if reason == "insufficient gas"
+            )
+        );
+
+        // Verify log_index was rebuilt from loaded receipts
+        let log_entries = node2.state.lookup_logs_by_address(&[log_addr]);
+        assert!(
+            log_entries.is_some(),
+            "log_index should be rebuilt after restart"
+        );
+        assert_eq!(
+            log_entries.unwrap().len(),
+            2,
+            "log_index should contain 2 entries after restart"
+        );
+
+        // Verify empty block returns empty
+        let receipts_block_99 = node2.state.get_receipts_by_block(99);
+        assert!(receipts_block_99.is_empty(), "block 99 should have no receipts");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
