@@ -1,0 +1,78 @@
+[package]
+name = "call-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+alloy-primitives = { version = "0.8", default-features = false, features = ["rlp"] }
+alloy-rlp = { version = "0.3", default-features = false }
+
+[dependencies.call-primitives]
+path = "../crates/primitives"
+
+[dependencies.call-protocol]
+path = "../crates/protocol"
+
+[dependencies.call-consensus]
+path = "../crates/consensus"
+
+[dependencies.call-evm]
+path = "../crates/evm"
+
+[dependencies.call-light-client]
+path = "../crates/light-client"
+
+[dependencies.call-precompile]
+path = "../crates/precompile"
+
+[dependencies.call-asset]
+path = "../crates/asset"
+
+[dependencies.call-validator]
+path = "../crates/validator"
+
+[dependencies.call-crypto]
+path = "../crates/crypto"
+
+bincode = "1"
+
+[[bin]]
+name = "tx_rlp_decode"
+path = "fuzz_targets/tx_rlp_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "precompile_dispatch"
+path = "fuzz_targets/precompile_dispatch.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "balance_arithmetic"
+path = "fuzz_targets/balance_arithmetic.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mpt_proof_verify"
+path = "fuzz_targets/mpt_proof_verify.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "signature_recovery"
+path = "fuzz_targets/signature_recovery.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "block_header_validate"
+path = "fuzz_targets/block_header_validate.rs"
+test = false
+doc = false

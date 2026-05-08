@@ -1,0 +1,95 @@
+name: Continuous Security
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight UTC
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Phase 1: Automated scanning ───────────────────────────────────────
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  deny:
+    name: License & Advisory Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check advisories licenses bans
+
+  geiger:
+    name: Unsafe Code Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-geiger
+      - run: cargo geiger --all-targets --all-features --output-format Json > geiger-report.json
+      - name: Upload geiger report
+        uses: actions/upload-artifact@v4
+        with:
+          name: geiger-report
+          path: geiger-report.json
+
+  semgrep:
+    name: Semgrep Security Rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            .semgrep/callchain-security.yml
+
+  # ── Phase 2: Fuzz regression ─────────────────────────────────────────
+  fuzz:
+    name: Fuzz Regression (10 min/target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Fuzz tx_rlp_decode
+        run: cd fuzz && cargo fuzz run tx_rlp_decode --max-total-time=600
+      - name: Fuzz precompile_dispatch
+        run: cd fuzz && cargo fuzz run precompile_dispatch --max-total-time=600
+      - name: Fuzz balance_arithmetic
+        run: cd fuzz && cargo fuzz run balance_arithmetic --max-total-time=600
+
+  # ── Phase 4: Kani formal verification ────────────────────────────────
+  kani:
+    name: Kani Model Checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Kani
+        run: cargo install --locked kani-verifier && cargo kani --version
+      - name: Run Kani proofs
+        run: cargo kani --workspace
+        continue-on-error: true

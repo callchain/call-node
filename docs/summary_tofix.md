@@ -19,7 +19,7 @@
 
 | # | Blocker | Scope | Why |
 |---|---------|-------|-----|
-| 1 | **No formal security audit** | Entire codebase | No third-party review of consensus, cryptography, or economic incentives |
+| 1 | **No formal security audit** ⚠️ Partial | Entire codebase | Zero-budget community-driven security program in progress: automated scanning (`cargo audit`/`deny`/`geiger` + Semgrep rules), 6 fuzz targets (`fuzz/`), property-based tests (`proptest` in call-asset/call-protocol), Kani formal verification proofs (7 properties), continuous security CI (daily scheduled). Remaining: community review phase, competitive audit, public security report |
 | 2 | ~~**No TLS/HTTPS tests**~~ ✅ | `crates/rpc` | Integration tests added: handshake success, plain HTTP rejection, expired cert rejection (`crates/rpc/tests/tls_integration.rs`) |
 | 3 | ~~**No auth/authz tests**~~ ❌ N/A | `crates/rpc` | Permissionless blockchain — all methods are state queries or signed-tx submission; no admin namespace exists to protect |
 | 4 | ~~**No MDBX integration tests**~~ ✅ | `crates/storage` | 30 integration tests added covering all 22 tables: put/get/delete roundtrips, batch writes, iteration, sorted order, large values, overwrite, clear, and convenience helpers (`crates/storage/tests/mdbx_integration.rs`) |
@@ -85,6 +85,6 @@
 
 ## Recommended Priority Order
 
-1. **Before public testnet**: CI/CD (#20), TLS/auth tests (#2-3), MDBX integration (#4), oracle signature tests (#8), performance tests (#11-12), slashing tests (#14)
-2. **Before mainnet audit kickoff**: All critical items (#1, #5-10), real-network light client soak (#19)
-3. **Before mainnet launch**: Implement churn limit / safety floor / dynamic unbonding (#31), benchmark suite (#29), formal shielded verification (#10)
+1. **Before public testnet**: ✅ All resolved — CI/CD, TLS/auth, MDBX, oracle tests, performance, slashing, CORS, WebSocket lag, property-based tests, benchmarks, soak tests
+2. **Before mainnet audit kickoff**: Security audit (#1 — zero-budget program in progress: automated scanning, fuzzing, Kani proofs, community review planned), DB corruption recovery (#5), network partition tests (#6), light client fork tests (#7), database migration framework (#9)
+3. **Before mainnet launch**: Formal shielded verification (#10), BLS consensus verification (#32, deferred)

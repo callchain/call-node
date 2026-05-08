@@ -7,6 +7,9 @@ pub mod receipts;
 pub mod security;
 pub mod storage_backend;
 
+#[cfg(kani)]
+pub mod kani_proofs;
+
 pub use compliance::*;
 pub use economics::*;
 pub use gas::*;

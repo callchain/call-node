@@ -1,0 +1,75 @@
+rules:
+  - id: unchecked-arithmetic
+    pattern-either:
+      - pattern: |
+          $X + $Y
+      - pattern: |
+          $X - $Y
+      - pattern: |
+          $X * $Y
+    languages: [rust]
+    message: "Use checked_add/checked_sub/checked_mul for balance or token arithmetic"
+    severity: ERROR
+    paths:
+      include:
+        - crates/asset/src/*.rs
+        - crates/bridge/src/*.rs
+        - crates/validator/src/*.rs
+        - crates/protocol/src/*.rs
+        - crates/precompile/src/*.rs
+    fix: |
+      $X.checked_add($Y).unwrap()
+
+  - id: unsafe-storage-access
+    pattern: |
+      unsafe { ... }
+    languages: [rust]
+    message: "Avoid unsafe blocks in storage/precompile code; use StorageRef"
+    severity: WARNING
+    paths:
+      include:
+        - crates/precompile/src/*.rs
+        - crates/storage/src/*.rs
+        - crates/validator/src/*.rs
+
+  - id: todo-in-consensus
+    pattern-regex: (TODO|FIXME|HACK|XXX)[^\w]
+    languages: [rust]
+    message: "Unresolved TODO/FIXME in consensus-critical code"
+    severity: WARNING
+    paths:
+      include:
+        - crates/consensus/src/*.rs
+        - crates/validator/src/*.rs
+        - crates/protocol/src/*.rs
+
+  - id: panic-in-consensus
+    pattern: |
+      panic!(...)
+    languages: [rust]
+    message: "Avoid panic! in consensus code; return Result or use checked operations"
+    severity: WARNING
+    paths:
+      include:
+        - crates/consensus/src/*.rs
+        - crates/validator/src/*.rs
+        - crates/protocol/src/*.rs
+
+  - id: unwrap-in-balance
+    pattern: |
+      $X.unwrap()
+    languages: [rust]
+    message: "Avoid unwrap in balance/token code; propagate errors explicitly"
+    severity: WARNING
+    paths:
+      include:
+        - crates/asset/src/*.rs
+        - crates/bridge/src/*.rs
+        - crates/validator/src/*.rs
+        - crates/precompile/src/*.rs
+
+  - id: hardcoded-secret
+    pattern-regex: (password|secret|key|token|api_key)\s*=\s*["'][^"']{8,}["']
+    languages: [rust]
+    message: "Possible hardcoded secret — move to config or env var"
+    severity: ERROR

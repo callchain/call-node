@@ -473,4 +473,127 @@ mod tests {
             assert!(matches!(err, AssetError::InsufficientAllowance));
         }
     }
+
+    // ── Property-based tests (proptest) ───────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_transfer_preserves_total_balance(
+            sender_bal in 0u128..10_000u128,
+            recipient_bal in 0u128..10_000u128,
+            amount in 0u128..10_000u128,
+        ) {
+            let mut backend = TestBackend::new();
+            let sender = Address::repeat_byte(0xAB);
+            let recipient = Address::repeat_byte(0xCD);
+            {
+                let mut store = AssetStorage::new(&mut backend);
+                store.write_balance(1, sender, sender_bal);
+                store.write_balance(1, recipient, recipient_bal);
+
+                let old_total = sender_bal + recipient_bal;
+
+                if store.transfer(1, sender, recipient, amount).is_ok() {
+                    let new_sender = store.read_balance(1, sender);
+                    let new_recipient = store.read_balance(1, recipient);
+                    let new_total = new_sender + new_recipient;
+                    prop_assert_eq!(old_total, new_total,
+                        "transfer must preserve total balance: old={}, new={}",
+                        old_total, new_total);
+                }
+            }
+        }
+
+        #[test]
+        fn prop_mint_increases_supply(
+            initial_supply in 0u128..5_000u128,
+            mint_amount in 0u128..5_000u128,
+            max_supply in 5_000u128..10_000u128,
+        ) {
+            let mut backend = TestBackend::new();
+            let issuer = Address::repeat_byte(0x11);
+            let recipient = Address::repeat_byte(0x22);
+            {
+                let mut store = AssetStorage::new(&mut backend);
+                let asset_id = store
+                    .register("GOLD", "Gold Token", 18, max_supply, issuer)
+                    .unwrap();
+
+                // Pre-seed supply
+                if initial_supply > 0 {
+                    store.mint(asset_id, issuer, recipient, initial_supply).unwrap();
+                }
+
+                let supply_before = store.read_meta(asset_id).supply;
+
+                match store.mint(asset_id, issuer, recipient, mint_amount) {
+                    Ok(()) => {
+                        let supply_after = store.read_meta(asset_id).supply;
+                        prop_assert_eq!(supply_after, supply_before + mint_amount,
+                            "mint must increase supply by exact amount");
+                    }
+                    Err(AssetError::MaxSupplyExceeded) => {
+                        prop_assert!(supply_before + mint_amount > max_supply,
+                            "MaxSupplyExceeded only when exceeding max_supply");
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
+        #[test]
+        fn prop_burn_decreases_supply(
+            initial_supply in 100u128..5_000u128,
+            burn_amount in 0u128..100u128,
+        ) {
+            let mut backend = TestBackend::new();
+            let issuer = Address::repeat_byte(0x11);
+            let holder = Address::repeat_byte(0x22);
+            {
+                let mut store = AssetStorage::new(&mut backend);
+                let asset_id = store
+                    .register("GOLD", "Gold Token", 18, 10_000, issuer)
+                    .unwrap();
+
+                store.mint(asset_id, issuer, holder, initial_supply).unwrap();
+                let supply_before = store.read_meta(asset_id).supply;
+
+                match store.burn(asset_id, holder, holder, burn_amount) {
+                    Ok(()) => {
+                        let supply_after = store.read_meta(asset_id).supply;
+                        prop_assert_eq!(supply_after, supply_before - burn_amount,
+                            "burn must decrease supply by exact amount");
+                    }
+                    Err(AssetError::SupplyUnderflow) => {
+                        prop_assert!(burn_amount > supply_before,
+                            "SupplyUnderflow only when burning more than supply");
+                    }
+                    Err(AssetError::InsufficientBalance) => {
+                        prop_assert!(burn_amount > initial_supply,
+                            "InsufficientBalance only when burning more than balance");
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
+        #[test]
+        fn prop_balance_never_negative(
+            initial in 0u128..10_000u128,
+            deduct in 0u128..10_000u128,
+        ) {
+            let mut backend = TestBackend::new();
+            let addr = Address::repeat_byte(0xAB);
+            {
+                let mut store = AssetStorage::new(&mut backend);
+                store.write_balance(1, addr, initial);
+
+                let _ = store.deduct_balance(1, addr, deduct);
+                let bal = store.read_balance(1, addr);
+                prop_assert!(bal <= initial, "balance must not exceed initial after deduct");
+            }
+        }
+    }
 }

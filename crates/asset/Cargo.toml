@@ -15,3 +15,6 @@ call-precompile.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 revm-precompile.workspace = true
+
+[dev-dependencies]
+proptest = "1"
