@@ -1951,6 +1951,7 @@ dependencies = [
  "call-network",
  "call-primitives",
  "call-protocol",
+ "criterion 0.5.1",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
