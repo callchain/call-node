@@ -54,6 +54,19 @@ jobs:
       - name: Run cargo-deny
         run: cargo deny check
 
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Run cargo-audit
+        # --ignore RUSTSEC-2024-0000  # add specific ignores here if needed
+        run: cargo audit
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -87,9 +100,10 @@ jobs:
       - name: Run tests
         env:
           CARGO_BUILD_JOBS: 2
-        run: cargo test --workspace --all-features --release
+        # --test-threads=1 prevents MDBX "Resource temporarily unavailable" lock contention
+        run: cargo test --workspace --all-features -- --test-threads=1
       - name: Run doctests
-        run: cargo test --workspace --doc --release
+        run: cargo test --workspace --doc -- --test-threads=1
 
   build:
     name: Build
@@ -144,7 +158,8 @@ jobs:
       - name: Generate coverage
         env:
           CARGO_BUILD_JOBS: 2
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+        # --test-threads=1 prevents MDBX lock contention during coverage runs
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info -- --test-threads=1
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
