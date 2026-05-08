@@ -67,3 +67,4 @@ rand.workspace = true
 
 [dev-dependencies]
 alloy-sol-types.workspace = true
+call-agent.workspace = true

@@ -5,6 +5,9 @@ use call_network::{BlockAnnouncement, EpochBoundarySignal, InMemoryNetwork, Sync
 use call_primitives::{Address, Ed25519PublicKey};
 use std::sync::OnceLock;
 
+use alloy_sol_types::SolCall;
+use call_precompile::AGENT_ADDRESS;
+
 fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
 }
@@ -38,6 +41,19 @@ fn make_evm_tx(nonce: u64) -> call_evm::EvmTransaction {
         to: Some(test_addr(2)),
         value: call_primitives::U256::from(100),
         data: call_evm::Bytes::default(),
+        chain_id: 1,
+    }
+}
+
+fn make_agent_evm_tx(nonce: u64, gas_price: u64, calldata: Vec<u8>) -> call_evm::EvmTransaction {
+    call_evm::EvmTransaction {
+        caller: *test_sender(),
+        nonce,
+        gas_limit: 300_000,
+        gas_price: gas_price.into(),
+        to: Some(AGENT_ADDRESS),
+        value: call_primitives::U256::ZERO,
+        data: call_evm::Bytes::from(calldata),
         chain_id: 1,
     }
 }
@@ -1467,4 +1483,237 @@ async fn test_receipt_persistence_restart() {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+}
+
+#[tokio::test]
+async fn test_agent_register_in_block() {
+    let tmp = std::env::temp_dir().join(format!("call-node-agent-reg-test-{}", std::process::id()));
+    let node = CallNode::new(tmp.clone()).expect("node creation");
+
+    // Stake validator
+    {
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut consensus = node.consensus.write().unwrap();
+        consensus
+            .stake_validator(
+                &mut provider,
+                test_addr(1),
+                test_pubkey(1),
+                one_million_call(),
+            )
+            .expect("stake");
+        consensus.refresh_proposer_subset(&provider);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
+    }
+
+    // Fund sender EVM balance for gas
+    {
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        provider.state_mut().set_balance(
+            *test_sender(),
+            call_primitives::U256::from(10_000_000_000_000u128),
+        );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
+    }
+
+    // Build and insert registerAgent tx
+    let register_call = call_agent::precompile::IProtocolAgent::registerAgentCall {
+        name: "TestAgent".into(),
+        url: "http://test.com".into(),
+        pubkeyHash: [0xBBu8; 32].into(),
+    };
+    let tx = make_agent_evm_tx(0, 10, register_call.abi_encode());
+    {
+        let mut mempool = node.mempool.write().unwrap();
+        let _ = mempool.insert_evm_tx(tx);
+    }
+
+    // Build block
+    let selection = { node.mempool.write().unwrap().select_transactions() };
+    let proposer = node
+        .consensus
+        .read()
+        .unwrap()
+        .current_proposer()
+        .expect("proposer");
+    let height = node.consensus.read().unwrap().current_height();
+    let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
+    let version = node.state.fork_manager.read().unwrap().current_version();
+    let mut block = Block::new(height, node.parent_hash, 1_000, proposer, version, evm_txs);
+
+    // Execute
+    let result = node
+        .state
+        .write_all()
+        .execute_block_no_subsystems(&block, height)
+        .expect("execution");
+    block.finalize(&result);
+
+    // Commit
+    {
+        let mut consensus = node.consensus.write().unwrap();
+        consensus.commit_block(&block, &result).expect("commit");
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        consensus.advance_round(&mut provider);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
+    }
+
+    // Verify tx succeeded
+    assert_eq!(result.evm_tx_results.len(), 1);
+    assert!(result.evm_tx_results[0].status, "agent register tx should succeed");
+
+    // Verify agent state in DB
+    let provider =
+        call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+    assert_eq!(state_accessors::read_agent_count(provider.state()), 1);
+    assert_eq!(state_accessors::agent_get_owner(provider.state(), 0), *test_sender());
+    assert_eq!(state_accessors::agent_get_name(provider.state(), 0), "TestAgent");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn test_agent_grant_and_pay_in_block() {
+    let tmp =
+        std::env::temp_dir().join(format!("call-node-agent-pay-test-{}", std::process::id()));
+    let node = CallNode::new(tmp.clone()).expect("node creation");
+
+    // Stake validator
+    {
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let mut consensus = node.consensus.write().unwrap();
+        consensus
+            .stake_validator(
+                &mut provider,
+                test_addr(1),
+                test_pubkey(1),
+                one_million_call(),
+            )
+            .expect("stake");
+        consensus.refresh_proposer_subset(&provider);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
+    }
+
+    // Fund sender EVM balance for gas and protocol asset balance for grant
+    {
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        provider.state_mut().set_balance(
+            *test_sender(),
+            call_primitives::U256::from(10_000_000_000_000u128),
+        );
+        state_accessors::seed_balance(
+            provider.state_mut(),
+            call_agent::CALL_ASSET_ID,
+            *test_sender(),
+            10_000,
+        );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
+    }
+
+    let recipient = test_addr(0x44);
+
+    // Build 3 agent txs with descending gas prices so mempool drain order
+    // is deterministic (higher gas_price = higher priority).
+    let tx0 = make_agent_evm_tx(
+        0,
+        30,
+        call_agent::precompile::IProtocolAgent::registerAgentCall {
+            name: "PayAgent".into(),
+            url: "http://pay.com".into(),
+            pubkeyHash: [0xCCu8; 32].into(),
+        }
+        .abi_encode(),
+    );
+    let tx1 = make_agent_evm_tx(
+        1,
+        20,
+        call_agent::precompile::IProtocolAgent::grantBalanceCall {
+            agentId: 0,
+            assetId: call_agent::CALL_ASSET_ID,
+            amount: 5_000,
+        }
+        .abi_encode(),
+    );
+    let tx2 = make_agent_evm_tx(
+        2,
+        10,
+        call_agent::precompile::IProtocolAgent::payCall {
+            agentId: 0,
+            assetId: call_agent::CALL_ASSET_ID,
+            to: recipient,
+            amount: 1_000,
+        }
+        .abi_encode(),
+    );
+
+    {
+        let mut mempool = node.mempool.write().unwrap();
+        let _ = mempool.insert_evm_tx(tx0);
+        let _ = mempool.insert_evm_tx(tx1);
+        let _ = mempool.insert_evm_tx(tx2);
+    }
+
+    // Build block
+    let selection = { node.mempool.write().unwrap().select_transactions() };
+    let proposer = node
+        .consensus
+        .read()
+        .unwrap()
+        .current_proposer()
+        .expect("proposer");
+    let height = node.consensus.read().unwrap().current_height();
+    let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
+    let version = node.state.fork_manager.read().unwrap().current_version();
+    let mut block = Block::new(height, node.parent_hash, 2_000, proposer, version, evm_txs);
+
+    // Execute
+    let result = node
+        .state
+        .write_all()
+        .execute_block_no_subsystems(&block, height)
+        .expect("execution");
+    block.finalize(&result);
+
+    // Commit
+    {
+        let mut consensus = node.consensus.write().unwrap();
+        consensus.commit_block(&block, &result).expect("commit");
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        consensus.advance_round(&mut provider);
+        provider.state().save_to_db(&node.state.db_env).unwrap();
+    }
+
+    // Verify all 3 txs succeeded
+    assert_eq!(result.evm_tx_results.len(), 3);
+    assert!(result.evm_tx_results[0].status, "register should succeed");
+    assert!(result.evm_tx_results[1].status, "grant should succeed");
+    assert!(result.evm_tx_results[2].status, "pay should succeed");
+
+    // Verify agent state in DB
+    let provider =
+        call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+    assert_eq!(state_accessors::read_agent_count(provider.state()), 1);
+    assert_eq!(state_accessors::agent_get_owner(provider.state(), 0), *test_sender());
+    // Agent balance should be 5_000 - 1_000 = 4_000
+    assert_eq!(
+        state_accessors::agent_get_balance(
+            provider.state(),
+            0,
+            call_agent::CALL_ASSET_ID
+        ),
+        4_000
+    );
+    // Recipient should have received 1_000
+    assert_eq!(
+        state_accessors::read_balance(provider.state(), call_agent::CALL_ASSET_ID, recipient),
+        1_000
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
