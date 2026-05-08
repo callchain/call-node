@@ -1,17 +1,17 @@
 # Callchain Production Readiness Summary
 
-> Generated: 2026-05-07
+> Generated: 2026-05-08
 > Based on: docs/unready.md, docs/testing.md, docs/security.md, docs/future.md
 
 ---
 
 ## Bottom Line
 
-**Devnet / internal testnet:** Ready. Code runs, ~1,682 tests pass, blocks produce.
+**Devnet / internal testnet:** Ready. Code runs, ~1,700 tests pass, blocks produce.
 
-**Public testnet:** Not ready. Missing security hardening, performance validation, TLS/auth, and CI/CD.
+**Public testnet:** Ready. All blockers resolved: security hardening (automated scanning, fuzzing, property tests), performance validation (`eth_getLogs` O(1) lookup, benchmark suite), TLS/auth integration tests, soak tests, CI/CD pipeline operational.
 
-**Mainnet:** Not ready. Missing formal audit, DB migration framework, light client BLS verification, and long-running testnet validation.
+**Mainnet:** Not ready. Missing community security review, competitive audit, public security report, and shielded circuit theorem-prover formal verification.
 
 ---
 
@@ -86,5 +86,5 @@
 ## Recommended Priority Order
 
 1. **Before public testnet**: ✅ All resolved — CI/CD, TLS/auth, MDBX, oracle tests, performance, slashing, CORS, WebSocket lag, property-based tests, benchmarks, soak tests
-2. **Before mainnet audit kickoff**: Security audit (#1 — zero-budget program in progress: automated scanning, fuzzing, Kani proofs, community review planned), DB corruption recovery (#5), network partition tests (#6), light client fork tests (#7), database migration framework (#9)
-3. **Before mainnet launch**: Formal shielded verification (#10), BLS consensus verification (#32, deferred)
+2. **Before mainnet audit kickoff**: Security audit (#1 — tooling done: automated scanning, fuzzing, Kani proofs; remaining: community review + competitive audit + public report, requires CALL token budget)
+3. **Before mainnet launch**: Formal shielded verification (#10 — theorem-prover level, not constraint tests), BLS consensus verification (#32, deferred)
