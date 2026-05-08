@@ -324,6 +324,105 @@ mod tests {
     }
 
     #[test]
+    fn test_replay_protector_evicts_25_percent_when_over_capacity() {
+        let max_seen = 100;
+        let mut protector = ReplayProtector::new(max_seen);
+
+        // Fill exactly to max_seen
+        for i in 0..max_seen {
+            let hash = TxHash::repeat_byte(i as u8);
+            assert!(protector.check_and_record(hash), "first insert #{i} should succeed");
+        }
+        assert_eq!(protector.seen_hashes.len(), max_seen);
+
+        // Insert one more — should trigger eviction of ~25% (max_seen / 4 = 25)
+        let overflow_hash = TxHash::repeat_byte(255);
+        assert!(
+            protector.check_and_record(overflow_hash),
+            "overflow insert should succeed"
+        );
+
+        let expected_remaining = max_seen + 1 - (max_seen / 4);
+        assert_eq!(
+            protector.seen_hashes.len(),
+            expected_remaining,
+            "expected ~75% of max_seen + 1 to remain after eviction"
+        );
+    }
+
+    #[test]
+    fn test_replay_protector_evicted_hash_can_be_re_inserted() {
+        let max_seen = 8;
+        let mut protector = ReplayProtector::new(max_seen);
+
+        // Fill to capacity with unique hashes
+        for i in 0..max_seen {
+            protector.check_and_record(TxHash::repeat_byte(i as u8));
+        }
+
+        // Trigger eviction (removes max_seen / 4 = 2 arbitrary hashes)
+        let new_hash = TxHash::repeat_byte(255);
+        assert!(protector.check_and_record(new_hash));
+
+        // After eviction, total should be max_seen + 1 - 2 = 7
+        assert_eq!(protector.seen_hashes.len(), 7);
+
+        // The new hash must still be present (it was just inserted)
+        assert!(!protector.check_and_record(new_hash), "new hash should still be a replay");
+
+        // At least one of the original 8 hashes should have been evicted
+        // (since we only have room for 7 and the new hash is one of them)
+        let mut evicted_count = 0;
+        for i in 0..max_seen {
+            if protector.check_and_record(TxHash::repeat_byte(i as u8)) {
+                evicted_count += 1;
+            }
+        }
+        assert!(
+            evicted_count >= 2,
+            "expected at least 2 evicted hashes, got {}",
+            evicted_count
+        );
+
+        // Some original hashes should still be present (not all evicted)
+        let remaining_original = max_seen - evicted_count;
+        assert!(
+            remaining_original >= 1,
+            "expected at least 1 original hash to survive eviction"
+        );
+    }
+
+    #[test]
+    fn test_replay_protector_stays_bounded_under_pressure() {
+        let max_seen = 50;
+        let mut protector = ReplayProtector::new(max_seen);
+
+        // Simulate sustained pressure: insert 10x capacity
+        for i in 0..(max_seen * 10) {
+            let hash = TxHash::repeat_byte((i % 256) as u8);
+            protector.check_and_record(hash);
+            assert!(
+                protector.seen_hashes.len() <= max_seen + 1,
+                "set should never exceed max_seen + 1, got {} at i={}",
+                protector.seen_hashes.len(),
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_replay_protector_remove_hash_manually() {
+        let mut protector = ReplayProtector::new(100);
+        let hash = TxHash::repeat_byte(42);
+
+        assert!(protector.check_and_record(hash));
+        assert!(!protector.check_and_record(hash)); // replay
+
+        protector.remove_hash(&hash);
+        assert!(protector.check_and_record(hash)); // now accepted again
+    }
+
+    #[test]
     fn test_p2p_rate_limiting() {
         let mut p2p = P2PDefense::new(3, 1000, 1024 * 1024);
 
