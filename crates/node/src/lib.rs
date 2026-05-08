@@ -505,6 +505,7 @@ impl CallNode {
                             &net_clone,
                             &sync_inflight,
                             &oracle_tracker,
+                            &telemetry,
                         )
                         .await;
                     } else if let Ok(block) = serde_json::from_slice::<Block>(&data) {
@@ -540,6 +541,7 @@ impl CallNode {
                         &net_clone,
                         &sync_inflight,
                         &oracle_tracker,
+                        &telemetry,
                     )
                     .await;
                 }

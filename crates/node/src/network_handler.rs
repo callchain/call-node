@@ -48,9 +48,11 @@ pub(crate) async fn handle_network_message(
     network: &Arc<dyn Network>,
     sync_inflight: &SyncInflight,
     oracle_tracker: &Arc<RwLock<OracleTracker>>,
+    telemetry: &Arc<crate::telemetry::TelemetryRegistry>,
 ) {
     match channel {
         TX_CHANNEL => {
+            crate::telemetry::record_p2p_span(telemetry, "received", "transaction", data.len());
             if let Ok(tx_msg) = serde_json::from_slice::<TransactionMessage>(data) {
                 if tx_msg.verify_checksum() {
                     if let Ok(evm_tx) =
@@ -76,6 +78,7 @@ pub(crate) async fn handle_network_message(
             }
         }
         BLOCK_CHANNEL => {
+            crate::telemetry::record_p2p_span(telemetry, "received", "block_announcement", data.len());
             // Handle block announcements (post-commit) — trigger sync if behind.
             // The sender wraps the announcement in `NetworkMessage::BlockAnnouncement`
             // and uses bincode (see the BFT event-loop broadcast path); the
@@ -158,6 +161,7 @@ pub(crate) async fn handle_network_message(
             // SyncRequest / SyncResponse are handled by the sync task separately
         }
         ORACLE_CHANNEL => {
+            crate::telemetry::record_p2p_span(telemetry, "received", "oracle", data.len());
             if let Ok(request) = serde_json::from_slice::<OraclePriceRequest>(data) {
                 // Validator received a price request from proposer.
                 // If this node is a registered validator, fetch prices and submit them back.
@@ -317,6 +321,7 @@ pub(crate) async fn handle_network_message(
             }
         }
         UPGRADE_CHANNEL => {
+            crate::telemetry::record_p2p_span(telemetry, "received", "upgrade_announcement", data.len());
             if let Ok(announcement) = serde_json::from_slice::<UpgradeAnnouncement>(data) {
                 tracing::info!(
                     peer_id,

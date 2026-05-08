@@ -60,17 +60,18 @@ pub fn init_opentelemetry_tracing(
     Ok(())
 }
 
-/// Get a named tracer for a subsystem
-fn get_tracer(name: &'static str) -> opentelemetry_sdk::trace::Tracer {
-    let provider = GLOBAL_PROVIDER.get().expect("OTel not initialized");
-    opentelemetry::trace::TracerProvider::tracer(provider, name)
+/// Get a named tracer for a subsystem (returns None if OTel not initialized).
+fn get_tracer(name: &'static str) -> Option<opentelemetry_sdk::trace::Tracer> {
+    GLOBAL_PROVIDER.get().map(|provider| {
+        opentelemetry::trace::TracerProvider::tracer(provider, name)
+    })
 }
 
 /// Record a span for a block production event via OpenTelemetry.
+/// Caller is responsible for updating `registry.record_block_produced()` /
+/// `record_block_committed()` to avoid double-counting in BFT paths.
 pub fn record_block_span(registry: &TelemetryRegistry, height: u64, duration_ms: u64) {
-    registry.record_block_produced();
-
-    let tracer = get_tracer("call-node/consensus");
+    let Some(tracer) = get_tracer("call-node/consensus") else { return };
     let mut span = tracer.start("block_produced");
     span.set_attribute(KeyValue::new("block.height", height as i64));
     span.set_attribute(KeyValue::new("block.duration_ms", duration_ms as i64));
@@ -88,7 +89,11 @@ pub fn record_tx_span(
     duration_ms: u64,
     accepted: bool,
 ) {
-    let tracer = get_tracer("call-node/mempool");
+    if !accepted {
+        registry.record_tx_rejected();
+    }
+
+    let Some(tracer) = get_tracer("call-node/mempool") else { return };
 
     if accepted {
         let mut span = tracer.start("tx_processed");
@@ -101,7 +106,6 @@ pub fn record_tx_span(
         ));
         span.end();
     } else {
-        registry.record_tx_rejected();
         let mut span = tracer.start("tx_rejected");
         span.set_attribute(KeyValue::new("tx.type", tx_type.to_string()));
         span.set_attribute(KeyValue::new("tx.duration_ms", duration_ms as i64));
@@ -111,19 +115,15 @@ pub fn record_tx_span(
 }
 
 /// Record a span for a P2P message event via OpenTelemetry.
+/// Caller is responsible for updating bytes-sent/received counters to avoid
+/// double-counting (those are already emitted in the network receive loop).
 pub fn record_p2p_span(
     registry: &TelemetryRegistry,
     direction: &str,
     message_type: &str,
     bytes: usize,
 ) {
-    if direction == "sent" {
-        registry.record_p2p_bytes_sent(bytes);
-    } else {
-        registry.record_p2p_bytes_received(bytes);
-    }
-
-    let tracer = get_tracer("call-node/p2p");
+    let Some(tracer) = get_tracer("call-node/p2p") else { return };
     let mut span = tracer.start("p2p_message");
     span.set_attribute(KeyValue::new("p2p.direction", direction.to_string()));
     span.set_attribute(KeyValue::new("p2p.message_type", message_type.to_string()));

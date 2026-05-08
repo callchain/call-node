@@ -7,6 +7,7 @@ use crate::governance_advancer::GovernanceAdvancer;
 use crate::light_client::{BlockSignatures, PubKeyBytes, SigBytes};
 use crate::light_client_service::LightClientEvent;
 use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, UPGRADE_CHANNEL};
+use crate::telemetry::{record_block_span, record_p2p_span, record_tx_span};
 use crate::{persist_block, persist_state_incremental, persist_state_to_db};
 use call_bridge::BridgeConfig;
 use call_consensus::{Block, SimplexConsensus};
@@ -90,6 +91,7 @@ pub(crate) async fn block_production_loop(
         let result = state.write_all().execute_block(&block, height);
         let exec_duration = exec_start.elapsed().as_millis() as u64;
         telemetry.record_tx_latency(exec_duration);
+        record_tx_span(&telemetry, "block_execute", exec_duration, true);
         let result = match result {
             Ok(r) => r,
             Err(e) => {
@@ -271,6 +273,7 @@ pub(crate) async fn block_production_loop(
         telemetry.record_block_committed();
         let block_duration = block_start.elapsed().as_millis() as u64;
         telemetry.record_block_latency(block_duration);
+        record_block_span(&telemetry, height, block_duration);
 
         // 7a. Check and apply any scheduled protocol upgrades at this height
         {
@@ -615,6 +618,7 @@ pub(crate) async fn block_production_loop(
             net.broadcast(BLOCK_CHANNEL, msg.clone()).await;
             telemetry.record_p2p_latency(broadcast_start.elapsed().as_millis() as u64);
             telemetry.record_p2p_bytes_sent(msg.len());
+            record_p2p_span(&telemetry, "sent", "block_announcement", msg.len());
 
             // 17a. Gossip scheduled upgrade announcement if one exists
             let upgrade = {
@@ -633,6 +637,7 @@ pub(crate) async fn block_production_loop(
                 net.broadcast(UPGRADE_CHANNEL, msg.clone()).await;
                 telemetry.record_p2p_latency(broadcast_start.elapsed().as_millis() as u64);
                 telemetry.record_p2p_bytes_sent(msg.len());
+                record_p2p_span(&telemetry, "sent", "upgrade_announcement", msg.len());
             }
         }
     }

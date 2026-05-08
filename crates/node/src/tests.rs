@@ -1118,6 +1118,7 @@ async fn test_epoch_boundary_signal_updates_peer_heights() {
         &network,
         &sync_inflight,
         &node.oracle_tracker,
+        &node.telemetry,
     )
     .await;
 

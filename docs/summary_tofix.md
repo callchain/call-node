@@ -53,7 +53,7 @@
 
 | # | Blocker | Scope | Why |
 |---|---------|-------|-----|
-| 21 | **OTel spans not called in production paths** | `crates/node` | `record_block_span()` etc. defined but unused in hot paths |
+| 21 | ~~**OTel spans not called in production paths**~~ ✅ | `crates/node` | `record_block_span()`, `record_tx_span()`, `record_p2p_span()` wired into block production (`block_producer.rs`), BFT finalize (`bft_loop.rs`), and P2P receive (`network_handler.rs`). `get_tracer()` made safe (returns `Option`) so unit tests without global OTel init don't panic. Added `test_otel_spans_safe_without_global_init` verifying no-op behavior in test context |
 | 22 | **No Grafana dashboards** | `docs/observability.md` | No pre-built JSON dashboard files |
 | 23 | **Structured error codes missing** | `crates/rpc` | Errors are strings; no machine-readable codes |
 | 24 | **No WebSocket lag handling tests** | `crates/rpc` | Lagged subscribers silently drop events |

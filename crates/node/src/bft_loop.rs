@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::network_handler::{BLOCK_CHANNEL, ORACLE_CHANNEL, SYNC_CHANNEL};
 use crate::state_persist::save_fork_state;
+use crate::telemetry::{record_block_span, record_p2p_span, record_tx_span};
 use crate::EpochRotationReason;
 use crate::{
     current_timestamp_millis, load_block, persist_block, persist_state_incremental,
@@ -315,12 +316,15 @@ pub(crate) async fn bft_event_loop(
                 // State changes are only applied after BFT finalization.
                 let exec_start = Instant::now();
                 let result = state.read_all().execute_block_cloned(&block, height);
-                telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
+                let exec_dur = exec_start.elapsed().as_millis() as u64;
+                telemetry.record_tx_latency(exec_dur);
+                record_tx_span(&telemetry, "block_execute", exec_dur, true);
 
                 match result {
                     Ok(result) => {
                         block.finalize(&result);
                         telemetry.record_block_produced();
+                        record_block_span(&telemetry, height, exec_dur);
 
                         let digest = ConsensusDigest::from(block.header.hash());
 
@@ -369,7 +373,9 @@ pub(crate) async fn bft_event_loop(
                     // Verify on cloned state — do NOT modify shared state.
                     // State root check ensures the proposer computed roots honestly.
                     let result = state.read_all().execute_block_cloned(&block, height);
-                    telemetry.record_tx_latency(exec_start.elapsed().as_millis() as u64);
+                    let verify_dur = exec_start.elapsed().as_millis() as u64;
+                    telemetry.record_tx_latency(verify_dur);
+                    record_tx_span(&telemetry, "block_verify", verify_dur, true);
 
                     match result {
                         Ok(result) => {
@@ -435,6 +441,7 @@ pub(crate) async fn bft_event_loop(
                 }
 
                 if let Some(block) = block {
+                    let block_start = Instant::now();
                     let height = block.header.height;
 
                     // Height replay protection
@@ -540,6 +547,7 @@ pub(crate) async fn bft_event_loop(
                         }
                     }
                     telemetry.record_block_committed();
+                    record_block_span(&telemetry, height, block_start.elapsed().as_millis() as u64);
 
                     // Advance state
                     let new_height = height + 1;
@@ -826,6 +834,7 @@ pub(crate) async fn bft_event_loop(
                         };
                         let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
                             .expect("serialize block announcement");
+                        record_p2p_span(&telemetry, "sent", "block_announcement", msg.len());
                         let net_clone = Arc::clone(net);
                         tokio::spawn(async move {
                             net_clone.broadcast(BLOCK_CHANNEL, msg).await;
@@ -862,6 +871,7 @@ pub(crate) async fn bft_event_loop(
                             };
                             let msg = bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal))
                                 .expect("serialize epoch boundary signal");
+                            record_p2p_span(&telemetry, "sent", "epoch_boundary", msg.len());
                             let net_clone = Arc::clone(net);
                             tokio::spawn(async move {
                                 net_clone.broadcast(BLOCK_CHANNEL, msg).await;

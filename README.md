@@ -80,8 +80,8 @@ Callchain features a dual-domain architecture with a single consensus validator 
 ## Development
 
 ```bash
-# Run all tests
-cargo test --workspace
+# Run all tests (single thread avoids MDBX lock contention in test mode)
+cargo test --workspace -- --test-threads=1
 
 # Run clippy
 cargo clippy --workspace -- -D warnings

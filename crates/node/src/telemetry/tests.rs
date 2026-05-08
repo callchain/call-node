@@ -303,3 +303,19 @@ fn test_opentelemetry_span_recording() {
     registry.set_p2p_peers(10);
     assert_eq!(registry.p2p_peers.load(Ordering::Relaxed), 10);
 }
+
+#[test]
+fn test_otel_spans_safe_without_global_init() {
+    // Ensure OTel span functions are no-ops (not panics) when the global
+    // tracer provider has not been initialized (unit-test context).
+    let registry = TelemetryRegistry::new(std::env::temp_dir());
+
+    super::record_block_span(&registry, 42, 150);
+    super::record_tx_span(&registry, "evm", 25, true);
+    super::record_tx_span(&registry, "evm", 30, false);
+    super::record_p2p_span(&registry, "sent", "block_announcement", 1024);
+    super::record_p2p_span(&registry, "received", "transaction", 512);
+
+    // Rejected tx should still increment the registry counter
+    assert_eq!(registry.mempool_tx_rejected.load(Ordering::Relaxed), 1);
+}
