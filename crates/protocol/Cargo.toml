@@ -30,3 +30,7 @@ proptest.workspace = true
 criterion = { workspace = true }
 call-bridge.workspace = true
 call-consensus.workspace = true
+
+[[bench]]
+name = "security"
+harness = false
