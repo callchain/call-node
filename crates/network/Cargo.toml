@@ -35,3 +35,4 @@ commonware-codec.workspace = true
 hex.workspace = true
 bincode.workspace = true
 call-primitives.workspace = true
+proptest.workspace = true

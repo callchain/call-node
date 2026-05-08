@@ -229,6 +229,7 @@ p256 = "0.13"
 rcgen = "0.13"
 tempfile = "3"
 time = "0.3"
+proptest = "1"
 
 # Benchmarks
 criterion = "0.5"

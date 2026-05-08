@@ -624,6 +624,75 @@ mod tests {
         assert_eq!(drained[3].priority, TxPriority::Standard);
     }
 
+    // ── Property-based tests (proptest) ───────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_known_txs_cache_never_exceeds_capacity(
+            capacity in 1usize..100usize,
+            ops in prop::collection::vec(any::<u8>(), 50..500),
+        ) {
+            let mut cache = KnownTxsCache::new(capacity);
+            for byte in &ops {
+                let hash = TxHash::repeat_byte(*byte);
+                cache.insert(hash);
+                prop_assert!(
+                    cache.len() <= capacity,
+                    "cache len {} exceeded capacity {} after inserting hash {:02x}",
+                    cache.len(),
+                    capacity,
+                    byte
+                );
+            }
+        }
+
+        #[test]
+        fn prop_known_txs_cache_inserted_item_found(
+            capacity in 10usize..50usize,
+            inserts in prop::collection::vec(any::<u8>(), 1..30),
+        ) {
+            let mut cache = KnownTxsCache::new(capacity);
+            let mut inserted = Vec::new();
+            for byte in &inserts {
+                let hash = TxHash::repeat_byte(*byte);
+                let was_new = cache.insert(hash);
+                if was_new {
+                    inserted.push(hash);
+                }
+            }
+
+            // All recently inserted items (within capacity) should still be found
+            // We check the last `capacity` unique inserts
+            let recent: Vec<_> = inserted.iter().rev().take(capacity).copied().collect();
+            for hash in &recent {
+                prop_assert!(
+                    cache.contains(hash),
+                    "recently inserted hash {:?} should still be in cache",
+                    hash
+                );
+            }
+        }
+
+        #[test]
+        fn prop_rate_limiter_never_exceeds_max_tokens(max_tokens in 1u32..500u32) {
+            let mut limiter = RateLimiter::new(max_tokens);
+            for _ in 0..(max_tokens * 3) as usize {
+                limiter.try_consume();
+                // Tokens can go negative temporarily if we consume more than available,
+                // but after refill they should be capped at max_tokens
+                limiter.refill();
+                prop_assert!(
+                    limiter.tokens >= 0.0 && limiter.tokens <= max_tokens as f64,
+                    "tokens {} out of bounds [0, {}]",
+                    limiter.tokens,
+                    max_tokens
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_gossip_manager_peer_removal() {
         let limits = NetworkLimits::default();

@@ -247,4 +247,43 @@ mod tests {
         let decoded: PricePair = serde_json::from_str(&json).unwrap();
         assert_eq!(pair, decoded);
     }
+
+    // ── Property-based tests (proptest) ───────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_price_pair_json_roundtrip(base in any::<u64>(), quote in any::<u64>()) {
+            let pair = PricePair::new(base, quote);
+            let json = serde_json::to_string(&pair).unwrap();
+            let decoded: PricePair = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(pair, decoded);
+        }
+
+        #[test]
+        fn prop_protocol_version_rlp_roundtrip(
+            major in any::<u16>(),
+            minor in any::<u16>(),
+            patch in any::<u16>(),
+        ) {
+            let version = ProtocolVersion::new(major, minor, patch);
+            let mut buf = Vec::new();
+            version.encode(&mut buf);
+            let decoded = ProtocolVersion::decode(&mut buf.as_slice()).unwrap();
+            prop_assert_eq!(version, decoded);
+        }
+
+        #[test]
+        fn prop_protocol_version_json_roundtrip(
+            major in any::<u16>(),
+            minor in any::<u16>(),
+            patch in any::<u16>(),
+        ) {
+            let version = ProtocolVersion::new(major, minor, patch);
+            let json = serde_json::to_string(&version).unwrap();
+            let decoded: ProtocolVersion = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(version, decoded);
+        }
+    }
 }

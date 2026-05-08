@@ -422,6 +422,98 @@ mod tests {
         assert!(protector.check_and_record(hash)); // now accepted again
     }
 
+    // ── Property-based tests (proptest) ───────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_replay_protector_stays_bounded(
+            max_seen in 10usize..500usize,
+            ops in prop::collection::vec(any::<u8>(), 100..1000),
+        ) {
+            let mut protector = ReplayProtector::new(max_seen);
+            for (i, byte) in ops.iter().enumerate() {
+                let hash = TxHash::repeat_byte(*byte);
+                protector.check_and_record(hash);
+                prop_assert!(
+                    protector.seen_hashes.len() <= max_seen + 1,
+                    "len {} exceeded max_seen + 1 {} at step {}",
+                    protector.seen_hashes.len(),
+                    max_seen + 1,
+                    i
+                );
+            }
+        }
+
+        #[test]
+        fn prop_rate_limiter_allows_at_most_max_per_window(
+            max_requests in 1u32..100u32,
+            window_ms in 100u64..5000u64,
+        ) {
+            let mut limiter = RateLimiter::new(max_requests, window_ms);
+            let addr = Address::repeat_byte(1);
+            let mut allowed_count = 0u32;
+
+            // Burst within a single window
+            for i in 0..(max_requests * 2) {
+                let time_ms = i as u64;
+                if limiter.allow(addr, time_ms) {
+                    allowed_count += 1;
+                }
+            }
+
+            prop_assert!(
+                allowed_count <= max_requests,
+                "allowed {} requests but max_requests is {} within a single window",
+                allowed_count,
+                max_requests
+            );
+        }
+
+        #[test]
+        fn prop_rate_limiter_new_window_resets(
+            max_requests in 1u32..100u32,
+            window_ms in 100u64..5000u64,
+        ) {
+            let mut limiter = RateLimiter::new(max_requests, window_ms);
+            let addr = Address::repeat_byte(1);
+
+            // Fill the window
+            for i in 0..max_requests {
+                prop_assert!(limiter.allow(addr, i as u64));
+            }
+            // Next request in same window should fail
+            prop_assert!(!limiter.allow(addr, max_requests as u64));
+
+            // Request after window expiry should succeed
+            let new_time = window_ms + 1;
+            prop_assert!(limiter.allow(addr, new_time), "new window should reset counter");
+        }
+
+        #[test]
+        fn prop_mempool_defense_rate_limit(
+            rate_limit in 1u32..50u32,
+            window_ms in 100u64..5000u64,
+            num_txs in 1usize..200usize,
+        ) {
+            let mut defense = MempoolDefense::new(rate_limit, window_ms, 10000, 1000);
+            let sender = Address::repeat_byte(1);
+
+            for i in 0..num_txs {
+                let time_ms = i as u64 * (window_ms / rate_limit as u64 + 1);
+                let hash = TxHash::repeat_byte((i % 256) as u8);
+                let result = defense.validate_tx_submission(sender, hash, time_ms);
+
+                // Within rate limit should pass; exceeding should fail with RateLimited
+                if i < rate_limit as usize {
+                    prop_assert!(result.is_ok(), "tx {} should pass within rate limit", i);
+                }
+                // We don't assert failure beyond rate_limit because time spacing may vary
+            }
+        }
+    }
+
     #[test]
     fn test_p2p_rate_limiting() {
         let mut p2p = P2PDefense::new(3, 1000, 1024 * 1024);

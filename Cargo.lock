@@ -1972,6 +1972,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "hex",
+ "proptest",
  "rand 0.8.5",
  "serde",
  "serde_bytes",
@@ -2076,6 +2077,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
+ "proptest",
  "serde",
  "serde_json",
 ]
