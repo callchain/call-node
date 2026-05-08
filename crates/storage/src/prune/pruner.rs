@@ -360,3 +360,179 @@ impl FastSyncFlow {
         Ok(synced_to)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prune::config::ValidatorSignature;
+    use call_crypto::{ed25519_generate_keypair, ed25519_sign};
+    use call_primitives::Hash;
+    use std::collections::HashMap;
+
+    fn make_snapshot(height: u64) -> StateSnapshot {
+        StateSnapshot {
+            height,
+            protocol_root: Hash::repeat_byte(0xA1),
+            evm_root: Hash::repeat_byte(0xB2),
+            shielded_root: Hash::repeat_byte(0xC3),
+            agent_root: Hash::repeat_byte(0xD4),
+            consensus_root: Hash::repeat_byte(0xE5),
+            total_size: 0,
+            validator_signatures: Vec::new(),
+        }
+    }
+
+    fn sign_snapshot(
+        snapshot: &mut StateSnapshot,
+        validator_id: u32,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) {
+        let message = snapshot_message_hash(snapshot);
+        let sig = ed25519_sign(signing_key, &message);
+        snapshot.validator_signatures.push(ValidatorSignature {
+            validator_id,
+            signature: sig,
+        });
+    }
+
+    #[test]
+    fn test_verify_snapshot_valid_quorum() {
+        let mut snapshot = make_snapshot(100);
+        let mut pubkeys = HashMap::new();
+
+        // 3 validators, need 2 signatures for quorum
+        for id in 0..3 {
+            let (pk, sk) = ed25519_generate_keypair();
+            pubkeys.insert(id, pk);
+            if id < 2 {
+                sign_snapshot(&mut snapshot, id, &sk);
+            }
+        }
+
+        assert!(verify_snapshot(&snapshot, 3, &pubkeys));
+    }
+
+    #[test]
+    fn test_verify_snapshot_tampered_data_rejected() {
+        let mut snapshot = make_snapshot(100);
+        let mut pubkeys = HashMap::new();
+
+        for id in 0..3 {
+            let (pk, sk) = ed25519_generate_keypair();
+            pubkeys.insert(id, pk);
+            sign_snapshot(&mut snapshot, id, &sk);
+        }
+
+        // Tamper with snapshot data after signing
+        snapshot.evm_root = Hash::repeat_byte(0xFF);
+
+        assert!(
+            !verify_snapshot(&snapshot, 3, &pubkeys),
+            "tampered snapshot should fail verification"
+        );
+    }
+
+    #[test]
+    fn test_verify_snapshot_below_quorum() {
+        let mut snapshot = make_snapshot(100);
+        let mut pubkeys = HashMap::new();
+
+        for id in 0..3 {
+            let (pk, sk) = ed25519_generate_keypair();
+            pubkeys.insert(id, pk);
+        }
+        // Only 1 signature — below quorum of 2
+        let (_, sk) = ed25519_generate_keypair();
+        pubkeys.insert(99, sk.verifying_key().to_bytes());
+        sign_snapshot(&mut snapshot, 0, &sk);
+
+        assert!(
+            !verify_snapshot(&snapshot, 3, &pubkeys),
+            "below quorum should fail"
+        );
+    }
+
+    #[test]
+    fn test_verify_snapshot_unknown_validator_ignored() {
+        let mut snapshot = make_snapshot(100);
+        let mut pubkeys = HashMap::new();
+
+        // 3 known validators
+        for id in 0..3 {
+            let (pk, sk) = ed25519_generate_keypair();
+            pubkeys.insert(id, pk);
+            if id < 2 {
+                sign_snapshot(&mut snapshot, id, &sk);
+            }
+        }
+
+        // Add a signature from an unknown validator (id 999)
+        let (_, sk_unknown) = ed25519_generate_keypair();
+        sign_snapshot(&mut snapshot, 999, &sk_unknown);
+
+        // Should still pass because the 2 known validators form quorum
+        assert!(
+            verify_snapshot(&snapshot, 3, &pubkeys),
+            "unknown validator sig should be ignored, known quorum should pass"
+        );
+
+        // But if we only had the unknown sig, it should fail
+        let mut snapshot_bad = make_snapshot(100);
+        sign_snapshot(&mut snapshot_bad, 999, &sk_unknown);
+        assert!(
+            !verify_snapshot(&snapshot_bad, 3, &pubkeys),
+            "only unknown sig should fail"
+        );
+    }
+
+    #[test]
+    fn test_verify_snapshot_empty_pubkeys_fallback() {
+        let mut snapshot = make_snapshot(100);
+
+        // 3 signatures but no pubkeys provided — falls back to count-only
+        for id in 0..3 {
+            let (_, sk) = ed25519_generate_keypair();
+            sign_snapshot(&mut snapshot, id, &sk);
+        }
+
+        let empty_pubkeys: HashMap<u32, call_primitives::Ed25519PublicKey> = HashMap::new();
+        assert!(
+            verify_snapshot(&snapshot, 3, &empty_pubkeys),
+            "count-only fallback should pass with 3 of 3 signatures"
+        );
+
+        // Below quorum even in count-only mode
+        let mut snapshot_low = make_snapshot(100);
+        let (_, sk) = ed25519_generate_keypair();
+        sign_snapshot(&mut snapshot_low, 0, &sk);
+        assert!(
+            !verify_snapshot(&snapshot_low, 3, &empty_pubkeys),
+            "count-only fallback should still require quorum"
+        );
+    }
+
+    #[test]
+    fn test_verify_snapshot_invalid_signature_bytes_rejected() {
+        let mut snapshot = make_snapshot(100);
+        let mut pubkeys = HashMap::new();
+
+        let (pk, sk) = ed25519_generate_keypair();
+        pubkeys.insert(0, pk);
+        sign_snapshot(&mut snapshot, 0, &sk);
+
+        // Add a second signature with tampered bytes
+        snapshot.validator_signatures.push(ValidatorSignature {
+            validator_id: 1,
+            signature: [0xFFu8; 64],
+        });
+        // We need to give a pubkey for validator 1 so it attempts verification
+        let (pk1, _) = ed25519_generate_keypair();
+        pubkeys.insert(1, pk1);
+
+        // Only 1 valid signature out of 3 needed for quorum (ceil(2*3/3)=2)
+        assert!(
+            !verify_snapshot(&snapshot, 3, &pubkeys),
+            "invalid signature bytes should not count toward quorum"
+        );
+    }
+}

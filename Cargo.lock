@@ -2211,6 +2211,7 @@ dependencies = [
  "call-primitives",
  "call-serialization",
  "criterion 0.5.1",
+ "ed25519-dalek",
  "reth-codecs",
  "reth-codecs-derive",
  "reth-db",

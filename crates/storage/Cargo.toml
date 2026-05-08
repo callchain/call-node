@@ -24,6 +24,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [[bench]]
 name = "mdbx_read_write"
