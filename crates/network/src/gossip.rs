@@ -4,7 +4,7 @@
 
 use call_primitives::TxHash;
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::limits::{NetworkError, NetworkLimits};
 
@@ -211,6 +211,8 @@ pub struct PeerState {
     pub banned: bool,
     /// Reason for ban (if banned)
     pub ban_reason: Option<String>,
+    /// When the peer was banned (for duration enforcement)
+    pub banned_at: Option<Instant>,
 }
 
 impl PeerState {
@@ -222,6 +224,7 @@ impl PeerState {
             messages_received: 0,
             banned: false,
             ban_reason: None,
+            banned_at: None,
         }
     }
 
@@ -229,13 +232,24 @@ impl PeerState {
     pub fn ban(&mut self, reason: String) {
         self.banned = true;
         self.ban_reason = Some(reason);
+        self.banned_at = Some(Instant::now());
     }
 
     /// Unban this peer
     pub fn unban(&mut self) {
         self.banned = false;
         self.ban_reason = None;
+        self.banned_at = None;
         self.rate_limiter.reset();
+    }
+
+    /// Check if the ban has expired and auto-unban if so.
+    pub fn check_ban_expiry(&mut self, ban_duration: Duration) {
+        if let Some(banned_at) = self.banned_at {
+            if banned_at.elapsed() >= ban_duration {
+                self.unban();
+            }
+        }
     }
 
     /// Record an incoming message, checking rate limit
@@ -305,13 +319,15 @@ impl GossipManager {
         hash: TxHash,
         priority: TxPriority,
     ) -> Result<Option<PropagatedTx>, NetworkError> {
-        // Check peer exists and is not banned
+        // Check peer exists and auto-unban if ban duration expired
         let peer = self
             .peers
             .get_mut(peer_id)
             .ok_or_else(|| NetworkError::PeerNotFound {
                 peer_id: peer_id.to_string(),
             })?;
+        let ban_duration = Duration::from_secs(self.limits.ban_duration_seconds);
+        peer.check_ban_expiry(ban_duration);
         peer.record_message()?;
 
         // Check message size
@@ -457,6 +473,81 @@ mod tests {
         // Unban
         peer.unban();
         assert!(peer.record_message().is_ok());
+    }
+
+    #[test]
+    fn test_peer_state_ban_reason_preserved() {
+        let limits = NetworkLimits::default();
+        let mut peer = PeerState::new("peer_1".into(), &limits);
+
+        peer.ban("rate_limit_exceeded".into());
+        assert_eq!(peer.ban_reason, Some("rate_limit_exceeded".into()));
+        assert!(peer.banned_at.is_some());
+
+        let err = peer.record_message().unwrap_err();
+        assert!(
+            matches!(err, NetworkError::PeerBanned { reason } if reason == "rate_limit_exceeded")
+        );
+    }
+
+    #[test]
+    fn test_peer_state_ban_expiry_auto_unban() {
+        let limits = NetworkLimits::default();
+        let mut peer = PeerState::new("peer_1".into(), &limits);
+
+        peer.ban("spam".into());
+        assert!(peer.banned);
+
+        // Immediately check with long duration — should still be banned
+        peer.check_ban_expiry(Duration::from_secs(3600));
+        assert!(peer.banned, "peer should still be banned immediately after ban");
+
+        // Simulate expiry by setting banned_at far in the past
+        peer.banned_at = Some(Instant::now() - Duration::from_secs(7200));
+        peer.check_ban_expiry(Duration::from_secs(3600));
+        assert!(!peer.banned, "peer should be auto-unbanned after duration expires");
+        assert!(peer.ban_reason.is_none());
+    }
+
+    #[test]
+    fn test_gossip_manager_banned_peer_rejected() {
+        let limits = NetworkLimits::new(10, 100, 1024, 1000, 3600);
+        let mut manager = GossipManager::new(limits);
+        manager.add_peer("peer_1".into()).unwrap();
+
+        // Ban the peer
+        if let Some(peer) = manager.peers.get_mut("peer_1") {
+            peer.ban("malicious".into());
+        }
+
+        let result = manager.process_incoming_tx("peer_1", vec![1], test_hash(1), TxPriority::High);
+        assert!(
+            matches!(result, Err(NetworkError::PeerBanned { reason }) if reason == "malicious")
+        );
+    }
+
+    #[test]
+    fn test_gossip_manager_ban_expiry_allows_messages() {
+        let limits = NetworkLimits::new(10, 100, 1024, 1000, 3600);
+        let mut manager = GossipManager::new(limits);
+        manager.add_peer("peer_1".into()).unwrap();
+
+        // Ban the peer with a very short duration
+        if let Some(peer) = manager.peers.get_mut("peer_1") {
+            peer.ban("test_ban".into());
+            // Simulate ban that expired 1 second ago
+            peer.banned_at = Some(Instant::now() - Duration::from_secs(3601));
+        }
+
+        // Process incoming tx — ban should have auto-expired
+        let tx = manager
+            .process_incoming_tx("peer_1", vec![1], test_hash(1), TxPriority::High)
+            .unwrap();
+        assert!(tx.is_some(), "tx should be accepted after ban expiry");
+        assert!(
+            !manager.peers.get("peer_1").unwrap().banned,
+            "peer should be auto-unbanned"
+        );
     }
 
     #[test]
