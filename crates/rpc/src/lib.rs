@@ -23,6 +23,8 @@ use jsonrpsee::RpcModule;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower::Layer;
+use tower_http::cors::{Any, CorsLayer};
 
 /// RPC server configuration
 #[derive(Debug, Clone)]
@@ -123,6 +125,8 @@ where
 
     let methods: Methods = module.into();
 
+    let cors_layer = build_cors_layer(&config.cors_allowed_origins);
+
     // Optional TLS
     let tls_acceptor =
         if let (Some(ref cert), Some(ref key)) = (&config.tls_cert_path, &config.tls_key_path) {
@@ -175,6 +179,7 @@ where
             let stop_handle2 = stop_handle.clone();
             let svc_builder2 = svc_builder.clone();
             let methods2 = methods.clone();
+            let cors_conn = cors_layer.clone();
 
             if let Some(ref acceptor) = tls_acceptor {
                 let acceptor = acceptor.clone();
@@ -182,6 +187,7 @@ where
                     match acceptor.accept(stream).await {
                         Ok(tls_stream) => {
                             let svc = svc_builder2.build(methods2, stop_handle2.clone());
+                            let svc = cors_conn.layer(svc);
                             let _ = serve_with_graceful_shutdown(
                                 tls_stream,
                                 svc,
@@ -197,6 +203,7 @@ where
             } else {
                 tokio::spawn(async move {
                     let svc = svc_builder2.build(methods2, stop_handle2.clone());
+                    let svc = cors_conn.layer(svc);
                     let _ =
                         serve_with_graceful_shutdown(stream, svc, stop_handle2.shutdown()).await;
                 });
@@ -254,4 +261,44 @@ fn build_tls_acceptor(
         .map_err(|e| format!("invalid cert/key: {}", e))?;
 
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Build a `CorsLayer` from the configured allowed origins.
+///
+/// - `["*"]` allows any origin.
+/// - Empty allows only localhost / 127.x.x.x origins.
+/// - Specific origins are matched exactly.
+fn build_cors_layer(origins: &[String]) -> CorsLayer {
+    use http::header::{self, HeaderValue};
+    use tower_http::cors::AllowOrigin;
+
+    if origins.iter().any(|o| o == "*") {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([http::Method::POST, http::Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE])
+    } else if origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
+                if let Some(s) = origin.to_str().ok() {
+                    s.starts_with("http://localhost")
+                        || s.starts_with("https://localhost")
+                        || s.starts_with("http://127.")
+                        || s.starts_with("https://127.")
+                } else {
+                    false
+                }
+            }))
+            .allow_methods([http::Method::POST, http::Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE])
+    } else {
+        let allowed: Vec<HeaderValue> = origins
+            .iter()
+            .filter_map(|o| HeaderValue::from_str(o).ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(allowed)
+            .allow_methods([http::Method::POST, http::Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE])
+    }
 }

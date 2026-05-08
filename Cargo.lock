@@ -2139,6 +2139,7 @@ dependencies = [
  "call-storage",
  "dashmap",
  "hex",
+ "http 1.4.0",
  "jsonrpsee",
  "rcgen",
  "reth-db",
@@ -2151,6 +2152,8 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls 0.24.1",
+ "tower 0.4.13",
+ "tower-http",
  "tracing",
 ]
 
