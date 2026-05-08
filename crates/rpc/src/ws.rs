@@ -200,6 +200,12 @@ impl SubscriptionManager {
             .eth_pending_tx_tx
             .send(serde_json::Value::String(tx_hash));
     }
+
+    /// Subscribe to block events (for testing lag handling).
+    #[cfg(test)]
+    pub fn subscribe_blocks(&self) -> broadcast::Receiver<WsEvent> {
+        self.block_tx.subscribe()
+    }
 }
 
 impl Default for SubscriptionManager {
@@ -363,8 +369,18 @@ pub fn register_ws_subscriptions(
                                         tracing::warn!(
                                             subscription = "eth_subscribe:newHeads",
                                             lagged = n,
-                                            "subscriber lagged"
+                                            "subscriber lagged, sending lag notification"
                                         );
+                                        let lag = serde_json::json!({
+                                            "subscription": "newHeads",
+                                            "lagged": n,
+                                            "error": "subscriber lagged",
+                                        });
+                                        let msg = SubscriptionMessage::from_json(&lag)
+                                            .map_err(|e| format!("json serialize failed: {e}"))?;
+                                        if sink.send(msg).await.is_err() {
+                                            break;
+                                        }
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }
@@ -470,8 +486,18 @@ pub fn register_ws_subscriptions(
                                         tracing::warn!(
                                             subscription = "eth_subscribe:logs",
                                             lagged = n,
-                                            "subscriber lagged"
+                                            "subscriber lagged, sending lag notification"
                                         );
+                                        let lag = serde_json::json!({
+                                            "subscription": "logs",
+                                            "lagged": n,
+                                            "error": "subscriber lagged",
+                                        });
+                                        let msg = SubscriptionMessage::from_json(&lag)
+                                            .map_err(|e| format!("json serialize failed: {e}"))?;
+                                        if sink.send(msg).await.is_err() {
+                                            break;
+                                        }
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }
@@ -492,8 +518,18 @@ pub fn register_ws_subscriptions(
                                         tracing::warn!(
                                             subscription = "eth_subscribe:newPendingTransactions",
                                             lagged = n,
-                                            "subscriber lagged"
+                                            "subscriber lagged, sending lag notification"
                                         );
+                                        let lag = serde_json::json!({
+                                            "subscription": "newPendingTransactions",
+                                            "lagged": n,
+                                            "error": "subscriber lagged",
+                                        });
+                                        let msg = SubscriptionMessage::from_json(&lag)
+                                            .map_err(|e| format!("json serialize failed: {e}"))?;
+                                        if sink.send(msg).await.is_err() {
+                                            break;
+                                        }
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }

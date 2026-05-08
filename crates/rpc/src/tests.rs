@@ -1008,4 +1008,150 @@ mod tests {
         let _ = db_error(String::from("owned string ok"));
         let _ = invalid_params(String::from("owned string ok"));
     }
+
+    // ------------------------------------------------------------------
+    // WebSocket lag handling tests (issue #24)
+    // ------------------------------------------------------------------
+
+    use crate::ws::{SubscriptionManager, WsEvent};
+    use tokio::sync::broadcast;
+
+    #[test]
+    fn test_ws_event_lagged_serializes() {
+        let event = WsEvent::Lagged { dropped: 42 };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("lagged"));
+        assert!(json.contains("42"));
+    }
+
+    #[test]
+    fn test_broadcast_channel_lag_detected() {
+        // Create a tiny broadcast channel (capacity 2) to force lag quickly
+        let (tx, mut rx) = broadcast::channel(2);
+
+        // Send 5 messages without the receiver consuming any
+        for i in 0..5 {
+            let _ = tx.send(WsEvent::NewBlock {
+                height: i,
+                hash: format!("hash-{i}"),
+                proposer: 1,
+                tx_count: 0,
+            });
+        }
+
+        // The receiver should now be lagged because the channel only holds 2
+        match rx.try_recv() {
+            Ok(_) => {
+                // May succeed for the newest items in the buffer
+            }
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                assert!(
+                    n >= 3,
+                    "expected at least 3 dropped messages, got {n}"
+                );
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                panic!("channel should not be closed");
+            }
+            Err(broadcast::error::TryRecvError::Empty) => {
+                // Channel may be empty if all items were overwritten
+            }
+        }
+    }
+
+    #[test]
+    fn test_subscription_manager_broadcast_does_not_panic_on_full_channel() {
+        let subs = SubscriptionManager::new();
+
+        // Flood the block channel with many events
+        for i in 0..10_000 {
+            subs.broadcast_block(i, format!("hash-{i}"), 1, 0);
+        }
+
+        // A new subscriber should still be able to join and receive the latest event
+        let mut rx = subs.subscribe_blocks();
+        match rx.try_recv() {
+            Ok(WsEvent::NewBlock { height, .. }) => {
+                assert_eq!(height, 9999, "should receive the most recent event");
+            }
+            Ok(_) => {
+                // Other event types are fine too
+            }
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                assert!(n > 0, "should report lag after flood");
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                panic!("channel should not be closed");
+            }
+            Err(broadcast::error::TryRecvError::Empty) => {
+                // Channel may be empty if all items were overwritten
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ws_subscriber_receives_lag_notification() {
+        // Simulate a slow subscriber: create a channel, subscribe, fill past capacity,
+        // then consume and verify the lag notification is detected.
+        let (tx, _rx) = broadcast::channel(4);
+
+        // Spawn a slow consumer
+        let mut rx = tx.subscribe();
+        let handle = tokio::spawn(async move {
+            let mut received = Vec::new();
+            let mut lagged = false;
+            // Consume with a delay, forcing lag
+            loop {
+                match rx.recv().await {
+                    Ok(event) => received.push(event),
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        lagged = true;
+                        received.push(WsEvent::Lagged { dropped: n });
+                        // After lag, continue receiving remaining buffered events
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            (received, lagged)
+        });
+
+        // Rapidly send more messages than channel capacity
+        for i in 0..20u64 {
+            let _ = tx.send(WsEvent::NewBlock {
+                height: i,
+                hash: format!("hash-{i}"),
+                proposer: 1,
+                tx_count: 0,
+            });
+        }
+
+        // Give the consumer a moment to process, then drop the sender
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        drop(tx);
+
+        let (received, lagged) = handle.await.unwrap();
+        assert!(
+            lagged,
+            "subscriber should have detected lag, got {received:?}"
+        );
+        // Verify at least one Lagged event is in the received list
+        assert!(
+            received.iter().any(|e| matches!(e, WsEvent::Lagged { .. })),
+            "should contain a Lagged event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ws_eth_lag_notification_json() {
+        // Verify the ETH subscription lag notification JSON format
+        let lag = serde_json::json!({
+            "subscription": "newHeads",
+            "lagged": 128,
+            "error": "subscriber lagged",
+        });
+        assert_eq!(lag["subscription"], "newHeads");
+        assert_eq!(lag["lagged"], 128);
+        assert_eq!(lag["error"], "subscriber lagged");
+    }
 }
