@@ -321,4 +321,53 @@ The original direct-execution code has been removed from `crates/rpc/src/handler
 
 - `cargo test -p call-light-client` — 26 tests covering MPT compact encode/decode roundtrip, single leaf proof, extension+leaf proof, branch proof, key not found, tampered hash rejection, header chain submission (valid, wrong parent, before anchor, duplicate, gap with buffer flush, multi-block chain), gap buffer flush, buffer full rejection, consensus verification, reorg unwind, anchor advancement, header pruning
 - `cargo check --workspace --features eth-sync` — compiles with sync feature
-- Missing: real-network sync tests, long-running memory pressure tests
+- `cargo test -p call-light-client --features eth-sync --test eth_sync_e2e` — real-network E2E tests (see below)
+
+### Running Real-Network E2E Tests
+
+The `eth_sync_e2e` integration tests exercise the light client against a **live Ethereum RPC** and optionally a **beacon node**. They are gated behind the `eth-sync` feature and require environment variables.
+
+**Required environment variables:**
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `ETH_RPC_URL` | Ethereum execution layer JSON-RPC endpoint | `https://ethereum-rpc.publicnode.com` |
+| `BEACON_URL` | Ethereum consensus layer (beacon) API endpoint | `https://ethereum-beacon-api.publicnode.com` |
+
+**Public node options (no API key required):**
+
+```bash
+export ETH_RPC_URL=https://ethereum-rpc.publicnode.com
+export BEACON_URL=https://ethereum-beacon-api.publicnode.com
+```
+
+**Commercial providers (require API key):**
+
+```bash
+# Alchemy
+export ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+
+# Infura
+export ETH_RPC_URL=https://mainnet.infura.io/v3/YOUR_KEY
+```
+
+**Run the tests:**
+
+```bash
+cargo test -p call-light-client --features eth-sync --test eth_sync_e2e
+```
+
+**What is tested:**
+
+| Test | What it does | Required env |
+|------|-------------|--------------|
+| `test_light_client_real_network_header_sync` | Sync 5 consecutive headers | `ETH_RPC_URL` |
+| `test_light_client_real_network_epoch_sync` | Sync 32 headers (one epoch) via `sync_header_range` | `ETH_RPC_URL` |
+| `test_light_client_real_network_parent_chain` | Verify parent-hash chain integrity across 16 headers | `ETH_RPC_URL` |
+| `test_light_client_real_network_gap_sync` | Submit every-other header then fill gaps | `ETH_RPC_URL` |
+| `test_light_client_real_network_finalized_checkpoint` | Fetch finalized checkpoint from beacon API | `BEACON_URL` |
+
+**Notes:**
+- Tests automatically skip with a message if the required environment variable is not set.
+- Tests use `current_block - 128` as the anchor to avoid reorgs during execution.
+- No long-running soak test is included in the suite; run the tests periodically or in CI to validate over time.
