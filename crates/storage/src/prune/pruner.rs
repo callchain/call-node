@@ -535,4 +535,123 @@ mod tests {
             "invalid signature bytes should not count toward quorum"
         );
     }
+
+    #[test]
+    fn test_incremental_sync_no_op_returns_zero() {
+        // incremental_sync is intentionally a no-op in the storage crate
+        assert_eq!(FastSyncFlow::incremental_sync(0, 0).unwrap(), 0);
+        assert_eq!(FastSyncFlow::incremental_sync(100, 200).unwrap(), 0);
+        assert_eq!(FastSyncFlow::incremental_sync(1000, 5000).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_fast_sync_run_full_pipeline() {
+        let tmp = std::env::temp_dir().join(format!("call-fast-sync-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Create a snapshot with valid validator signatures
+        let mut snapshot = make_snapshot(500);
+        let mut pubkeys = HashMap::new();
+        for id in 0..3 {
+            let (pk, sk) = ed25519_generate_keypair();
+            pubkeys.insert(id, pk);
+            if id < 2 {
+                sign_snapshot(&mut snapshot, id, &sk);
+            }
+        }
+
+        // Save snapshot to disk
+        FastSyncFlow::save_snapshot(&snapshot, &tmp).unwrap();
+
+        // Run the full fast sync pipeline
+        let peers = vec!["peer1".to_string()];
+        let result = FastSyncFlow::run(&tmp, &peers, &pubkeys);
+        assert!(result.is_ok(), "fast sync pipeline should complete: {:?}", result.err());
+        assert_eq!(result.unwrap(), 0, "catch-up should return 0 (no-op)");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fast_sync_run_no_peers_fails() {
+        let tmp = std::env::temp_dir().join(format!("call-fast-sync-no-peers-{}", std::process::id()));
+        let pubkeys: HashMap<u32, call_primitives::Ed25519PublicKey> = HashMap::new();
+        let peers: Vec<String> = Vec::new();
+
+        let err = FastSyncFlow::run(&tmp, &peers, &pubkeys).unwrap_err();
+        assert!(
+            err.to_string().contains("no peers available"),
+            "should fail with no peers: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_fast_sync_run_no_pubkeys_fails() {
+        let tmp = std::env::temp_dir().join(format!("call-fast-sync-no-pubkeys-{}", std::process::id()));
+        let pubkeys: HashMap<u32, call_primitives::Ed25519PublicKey> = HashMap::new();
+        let peers = vec!["peer1".to_string()];
+
+        let err = FastSyncFlow::run(&tmp, &peers, &pubkeys).unwrap_err();
+        assert!(
+            err.to_string().contains("validator_pubkeys required"),
+            "should fail with no pubkeys: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_fast_sync_restore_snapshot_mismatch_rejected() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-fast-sync-mismatch-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Create and save an original snapshot
+        let mut snapshot = make_snapshot(300);
+        let mut pubkeys = HashMap::new();
+        for id in 0..3 {
+            let (pk, sk) = ed25519_generate_keypair();
+            pubkeys.insert(id, pk);
+            if id < 2 {
+                sign_snapshot(&mut snapshot, id, &sk);
+            }
+        }
+        FastSyncFlow::save_snapshot(&snapshot, &tmp).unwrap();
+
+        // Pass a tampered snapshot to restore_snapshot (different protocol_root)
+        let mut tampered = snapshot.clone();
+        tampered.protocol_root = Hash::repeat_byte(0xFF);
+
+        let err = FastSyncFlow::restore_snapshot(&tmp, &tampered).unwrap_err();
+        assert!(
+            err.to_string().contains("snapshot restore verification failed"),
+            "tampered snapshot should fail restore: {}",
+            err
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fast_sync_list_snapshots_sorted() {
+        let tmp = std::env::temp_dir().join(format!(
+            "call-fast-sync-list-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Save snapshots at various heights (out of order)
+        let heights = [500, 100, 300, 200, 400];
+        for h in heights {
+            let snapshot = make_snapshot(h);
+            FastSyncFlow::save_snapshot(&snapshot, &tmp).unwrap();
+        }
+
+        let listed = FastSyncFlow::list_snapshots(&tmp).unwrap();
+        assert_eq!(listed, vec![100, 200, 300, 400, 500]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
