@@ -26,6 +26,7 @@ pub enum ValidatorError {
     NotUnbonding,
     UnbondingPeriodNotElapsed,
     NoUnbondingRequest,
+    BelowSafetyFloor,
 }
 
 impl std::fmt::Display for ValidatorError {
@@ -43,6 +44,7 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::NotUnbonding => write!(f, "not unbonding"),
             ValidatorError::UnbondingPeriodNotElapsed => write!(f, "unbonding period not elapsed"),
             ValidatorError::NoUnbondingRequest => write!(f, "no unbonding request found"),
+            ValidatorError::BelowSafetyFloor => write!(f, "below safety floor"),
         }
     }
 }
@@ -98,6 +100,16 @@ pub fn slot_unbonding(index: u64) -> U256 {
 
 pub fn slot_active_validator_count() -> U256 {
     U256::from(2)
+}
+
+/// Safety floor: minimum active validators required before unstake is rejected.
+pub fn slot_safety_floor() -> U256 {
+    U256::from(3)
+}
+
+/// Unbonding period in blocks (overridable via storage for dynamic periods).
+pub fn slot_unbonding_period_blocks() -> U256 {
+    U256::from(4)
 }
 
 // ── ValidatorStorage ──────────────────────────────────────────────────
@@ -174,6 +186,29 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             .try_into()
             .map(|v: u128| v as u64)
             .unwrap_or(0)
+    }
+
+    pub fn read_safety_floor(&mut self) -> u64 {
+        let raw: u64 = self
+            .backend
+            .load(VALIDATOR_ADDRESS, slot_safety_floor())
+            .try_into()
+            .map(|v: u128| v as u64)
+            .unwrap_or(0);
+        // 0 means "no safety floor" (unset / disabled).
+        // Production nodes should initialize this to 28 via genesis/governance.
+        raw
+    }
+
+    pub fn read_unbonding_period_blocks(&mut self) -> u64 {
+        let raw: u64 = self
+            .backend
+            .load(VALIDATOR_ADDRESS, slot_unbonding_period_blocks())
+            .try_into()
+            .map(|v: u128| v as u64)
+            .unwrap_or(0);
+        // Default: 120_960 blocks (~8.4h at 250ms) when unset
+        if raw == 0 { 120_960 } else { raw }
     }
 
     // ── Write operations ──────────────────────────────────────────────
@@ -264,6 +299,13 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         let status = self.read_status(caller);
         if status != 1 {
             return Err(ValidatorError::AlreadyUnbonding);
+        }
+
+        // Safety floor: reject if removing this validator would drop active count below threshold
+        let active_count = self.read_active_validator_count();
+        let safety_floor = self.read_safety_floor();
+        if active_count > 0 && active_count - 1 < safety_floor {
+            return Err(ValidatorError::BelowSafetyFloor);
         }
 
         let stake = self.read_stake(caller);
@@ -392,7 +434,8 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         }
 
         let unbond_height = self.read_unbond_height(caller);
-        if current_block < unbond_height + UNBONDING_PERIOD_BLOCKS {
+        let unbonding_period = self.read_unbonding_period_blocks();
+        if current_block < unbond_height + unbonding_period {
             return Err(ValidatorError::UnbondingPeriodNotElapsed);
         }
 
@@ -477,6 +520,13 @@ mod tests {
                 slot_balance(CALL_ASSET_ID, addr),
                 u128_to_u256(amount),
             )
+            .unwrap();
+    }
+
+    fn seed_test_safety_floor(provider: &mut HashMapStorageProvider) {
+        // Set safety floor to 0 (disabled) for tests that need to unstake with few validators
+        provider
+            .sstore(VALIDATOR_ADDRESS, slot_safety_floor(), U256::ZERO)
             .unwrap();
     }
 
@@ -574,6 +624,8 @@ mod tests {
         let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
         let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
+        seed_test_safety_floor(&mut provider);
+
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
             .unwrap();
@@ -610,6 +662,8 @@ mod tests {
 
         let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
         let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        seed_test_safety_floor(&mut provider);
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -655,6 +709,8 @@ mod tests {
 
         let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
         let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        seed_test_safety_floor(&mut provider);
 
         validator_store
             .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
@@ -955,5 +1011,164 @@ mod tests {
         // Old slot should be zeroed, new slot should have the address
         assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
         assert_eq!(validator_store.read_validator_by_index(2), caller);
+    }
+
+    // ── Safety floor tests ─────────────────────────────────────────────
+
+    fn set_safety_floor(provider: &mut HashMapStorageProvider, floor: u64) {
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_safety_floor(),
+                u64_to_u256(floor),
+            )
+            .unwrap();
+    }
+
+    fn set_unbonding_period(provider: &mut HashMapStorageProvider, period: u64) {
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_unbonding_period_blocks(),
+                u64_to_u256(period),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_unstake_below_safety_floor_rejected() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let v1 = test_addr(0x11);
+        let v2 = test_addr(0x22);
+        seed_balance(&mut provider, v1, 10_000_000);
+        seed_balance(&mut provider, v2, 10_000_000);
+
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        // Set safety floor to 2
+        set_safety_floor(&mut provider, 2);
+
+        // Stake 2 validators
+        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
+        validator_store.stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2).unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 2);
+
+        // Unstake first validator: active_count would drop to 1, which is below floor 2
+        let result = validator_store.unstake(1, v1, 100);
+        assert!(
+            matches!(result, Err(ValidatorError::BelowSafetyFloor)),
+            "expected BelowSafetyFloor, got {:?}",
+            result
+        );
+        // Status should remain active
+        assert_eq!(validator_store.read_status(v1), 1);
+    }
+
+    #[test]
+    fn test_unstake_above_safety_floor_allowed() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let v1 = test_addr(0x11);
+        let v2 = test_addr(0x22);
+        let v3 = test_addr(0x33);
+        seed_balance(&mut provider, v1, 10_000_000);
+        seed_balance(&mut provider, v2, 10_000_000);
+        seed_balance(&mut provider, v3, 10_000_000);
+
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        // Set safety floor to 2
+        set_safety_floor(&mut provider, 2);
+
+        // Stake 3 validators
+        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
+        validator_store.stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2).unwrap();
+        validator_store.stake(&mut asset_store, [0xCCu8; 32], 5_000_000, v3).unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 3);
+
+        // Unstake one validator: active_count would drop to 2, which meets floor 2
+        let result = validator_store.unstake(1, v1, 100);
+        assert!(result.is_ok(), "unstake should succeed above safety floor: {:?}", result.err());
+        assert_eq!(validator_store.read_status(v1), 2); // unbonding
+    }
+
+    #[test]
+    fn test_unstake_default_safety_floor_when_unset() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let v1 = test_addr(0x11);
+        seed_balance(&mut provider, v1, 10_000_000);
+
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        // Default safety floor is 0 (disabled) when unset — production nodes should initialize
+        assert_eq!(validator_store.read_safety_floor(), 0);
+
+        // Single validator can unstake with no floor
+        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
+        let result = validator_store.unstake(1, v1, 100);
+        assert!(result.is_ok(), "unstake should succeed with no safety floor: {:?}", result);
+    }
+
+    // ── Dynamic unbonding period tests ─────────────────────────────────
+
+    #[test]
+    fn test_claim_with_custom_unbonding_period() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        // Set custom unbonding period to 50 blocks
+        set_unbonding_period(&mut provider, 50);
+        assert_eq!(validator_store.read_unbonding_period_blocks(), 50);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        // Claim at block 149 (100 + 50 - 1) should fail
+        let result = validator_store.claim_unbonded(&mut asset_store, 1, caller, 149);
+        assert!(
+            matches!(result, Err(ValidatorError::UnbondingPeriodNotElapsed)),
+            "expected UnbondingPeriodNotElapsed, got {:?}",
+            result
+        );
+
+        // Claim at block 150 (100 + 50) should succeed
+        let result = validator_store.claim_unbonded(&mut asset_store, 1, caller, 150);
+        assert!(result.is_ok(), "claim should succeed at exact period: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_default_unbonding_period_when_unset() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        // Default is 120_960 when unset
+        assert_eq!(validator_store.read_unbonding_period_blocks(), 120_960);
+
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, caller)
+            .unwrap();
+        validator_store.unstake(1, caller, 100).unwrap();
+
+        let result = validator_store.claim_unbonded(&mut asset_store, 1, caller, 100 + 120_960 - 1);
+        assert!(
+            matches!(result, Err(ValidatorError::UnbondingPeriodNotElapsed)),
+            "expected UnbondingPeriodNotElapsed, got {:?}",
+            result
+        );
+
+        let result = validator_store.claim_unbonded(&mut asset_store, 1, caller, 100 + 120_960);
+        assert!(result.is_ok(), "claim should succeed at default period: {:?}", result.err());
     }
 }

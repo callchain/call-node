@@ -302,6 +302,15 @@ mod tests {
 
         let mut precompile = ValidatorPrecompile;
 
+        // Disable safety floor for this test (single validator)
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                crate::slot_safety_floor(),
+                alloy_primitives::U256::ZERO,
+            )
+            .unwrap();
+
         // stake first
         let input = IProtocolValidator::stakeCall {
             pubkey: [0xAAu8; 32].into(),
@@ -343,6 +352,15 @@ mod tests {
             .unwrap();
 
         let mut precompile = ValidatorPrecompile;
+
+        // Disable safety floor for this test (single validator)
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                crate::slot_safety_floor(),
+                alloy_primitives::U256::ZERO,
+            )
+            .unwrap();
 
         // stake first
         let input = IProtocolValidator::stakeCall {

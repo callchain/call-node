@@ -1116,4 +1116,142 @@ mod tests {
         let active = consensus.active_validators(&evm);
         assert!(!active.contains(&validator_id));
     }
+
+    // ── Safety floor & churn limit tests ───────────────────────────────
+
+    #[test]
+    fn test_safety_floor_computation() {
+        let params = ConsensusParams::default();
+        // Default: subset_size=21, ratio=4/3 => ceil(21 * 4/3) = ceil(28) = 28
+        assert_eq!(params.safety_floor(), 28);
+
+        // Custom ratio
+        let custom = ConsensusParams {
+            subset_size: 10,
+            safety_ratio_num: 3,
+            safety_ratio_den: 2,
+            ..ConsensusParams::default()
+        };
+        // ceil(10 * 3/2) = ceil(15) = 15
+        assert_eq!(custom.safety_floor(), 15);
+
+        // Exact division
+        let exact = ConsensusParams {
+            subset_size: 9,
+            safety_ratio_num: 2,
+            safety_ratio_den: 3,
+            ..ConsensusParams::default()
+        };
+        // ceil(9 * 2/3) = ceil(6) = 6
+        assert_eq!(exact.safety_floor(), 6);
+    }
+
+    #[test]
+    fn test_churn_limit_various_validator_counts() {
+        let params = ConsensusParams::default();
+        // Default: min_churn_limit=2, quotient=16
+
+        // Small set: max(2, 10/16) = 2
+        assert_eq!(params.churn_limit(10), 2);
+
+        // Medium set: max(2, 100/16) = max(2, 6) = 6
+        assert_eq!(params.churn_limit(100), 6);
+
+        // Large set: max(2, 216/16) = max(2, 13) = 13
+        assert_eq!(params.churn_limit(216), 13);
+
+        // Edge: exactly at quotient boundary: max(2, 32/16) = 2
+        assert_eq!(params.churn_limit(32), 2);
+
+        // Above boundary: max(2, 33/16) = max(2, 2) = 2
+        assert_eq!(params.churn_limit(33), 2);
+    }
+
+    #[test]
+    fn test_epoch_churn_auto_exits_below_minimum_stake() {
+        use crate::exec::state_accessors::read_validator_status;
+        use call_precompile::{
+            storage::storage_slot, u128_to_u256, VALIDATOR_ADDRESS,
+        };
+
+        let mut evm = InMemoryStateProvider::new();
+        // Seed 5 validators
+        for i in 1..=5 {
+            seed_validator(
+                &mut evm,
+                i,
+                test_addr(i as u8),
+                test_pubkey(i as u8),
+                one_million_call(),
+                1, // active
+            );
+        }
+
+        // Reduce validator 3 stake below minimum
+        let addr3 = test_addr(3);
+        let min_stake = ConsensusParams::default().min_self_stake;
+        evm.set_storage(
+            VALIDATOR_ADDRESS,
+            storage_slot(&[addr3.as_slice(), b"stake"]),
+            u128_to_u256(min_stake - 1),
+        );
+
+        let mut consensus = SimplexConsensus::new(ConsensusParams::default(), &evm);
+        // Set height so current_block >= unbonding_period_blocks
+        consensus.current_height = consensus.params().unbonding_period_blocks + 1;
+        // Advance to epoch boundary
+        for _ in 0..consensus.params().epoch_length {
+            consensus.advance_round(&mut evm);
+        }
+
+        // Validator 3 should have been auto-exited (stake below minimum)
+        assert_eq!(read_validator_stake(&evm, addr3), 0);
+        assert_eq!(read_validator_status(&evm, addr3), 0);
+
+        // Other validators should still be active
+        for i in [1, 2, 4, 5] {
+            let addr = test_addr(i as u8);
+            assert_eq!(
+                read_validator_status(&evm, addr),
+                1,
+                "validator {i} should still be active"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stake_validator_via_consensus() {
+        let mut evm = InMemoryStateProvider::new();
+        let mut consensus = SimplexConsensus::new(ConsensusParams::default(), &evm);
+
+        let addr = test_addr(0x99);
+        let pk = test_pubkey(0x99);
+        let amount = one_million_call();
+
+        let id = consensus
+            .stake_validator(&mut evm, addr, pk, amount)
+            .unwrap();
+        assert_eq!(id, 1);
+
+        assert_eq!(read_validator_stake(&evm, addr), amount);
+        assert_eq!(read_validator_status(&evm, addr), 1);
+        assert!(consensus.active_validators(&evm).contains(&1));
+    }
+
+    #[test]
+    fn test_stake_validator_below_minimum_rejected() {
+        let mut evm = InMemoryStateProvider::new();
+        let mut consensus = SimplexConsensus::new(ConsensusParams::default(), &evm);
+
+        let addr = test_addr(0x99);
+        let pk = test_pubkey(0x99);
+        let amount = ConsensusParams::default().min_self_stake - 1;
+
+        let result = consensus.stake_validator(&mut evm, addr, pk, amount);
+        assert!(
+            result.is_err(),
+            "stake below minimum should be rejected"
+        );
+        assert!(result.unwrap_err().to_string().contains("insufficient stake"));
+    }
 }
