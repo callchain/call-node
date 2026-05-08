@@ -496,7 +496,9 @@ impl SimplexConsensus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::state_accessors::seed_validator;
+    use crate::exec::state_accessors::{
+        read_validator_stake, read_validator_status, seed_validator,
+    };
     use call_evm::provider::InMemoryStateProvider;
     use call_primitives::{Address, Ed25519PublicKey, ProtocolVersion};
 
@@ -973,5 +975,145 @@ mod tests {
             !subset_after.contains(&1),
             "slashed validator should not appear in proposer subset"
         );
+    }
+
+    #[test]
+    fn test_double_sign_stake_reduced_to_zero() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+        let validator_id = 1;
+        let addr = test_addr(1);
+
+        let stake_before = read_validator_stake(&evm, addr);
+        assert_eq!(stake_before, one_million_call());
+        assert_eq!(read_validator_status(&evm, addr), 1);
+
+        let slashed = consensus.handle_double_sign(&mut evm, validator_id).unwrap();
+        assert_eq!(slashed, one_million_call());
+
+        // Stake should be zero in EVM storage
+        let stake_after = read_validator_stake(&evm, addr);
+        assert_eq!(stake_after, 0, "stake should be zero after double-sign slash");
+
+        // Status should be inactive (0)
+        assert_eq!(
+            read_validator_status(&evm, addr),
+            0,
+            "validator status should be inactive after stake reaches zero"
+        );
+
+        // Should no longer be qualified (stake < min_self_stake)
+        let qualified = consensus.qualified_validators(&evm);
+        assert!(
+            !qualified.contains(&validator_id),
+            "zero-stake validator should not be qualified"
+        );
+    }
+
+    #[test]
+    fn test_offline_slash_stake_reduced_in_storage() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+        let validator_id = 3;
+        let addr = test_addr(3);
+
+        let stake_before = read_validator_stake(&evm, addr);
+        assert_eq!(stake_before, one_million_call());
+
+        let rounds = 5;
+        let slashed = consensus.handle_offline(&mut evm, validator_id, rounds).unwrap();
+        let expected_slashed = (stake_before * rounds as u128 * 10) / 10_000;
+        assert_eq!(slashed, expected_slashed);
+
+        // EVM storage should reflect the reduction
+        let stake_after = read_validator_stake(&evm, addr);
+        let expected_remaining = stake_before - expected_slashed;
+        assert_eq!(
+            stake_after, expected_remaining,
+            "stake should be reduced by offline penalty"
+        );
+
+        // Validator remains active (status unchanged) even if below min_self_stake
+        assert_eq!(read_validator_status(&evm, addr), 1);
+        // But drops from qualified set because remaining stake < min_self_stake
+        let qualified = consensus.qualified_validators(&evm);
+        assert!(
+            !qualified.contains(&validator_id),
+            "validator below min stake should not be qualified"
+        );
+    }
+
+    #[test]
+    fn test_oracle_outlier_slash_stake_reduced_in_storage() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+        let validator_id = 4;
+        let addr = test_addr(4);
+
+        let stake_before = read_validator_stake(&evm, addr);
+        assert_eq!(stake_before, one_million_call());
+
+        let slashed = consensus.handle_oracle_outlier(&mut evm, validator_id).unwrap();
+        let expected_slashed = stake_before / 1_000; // 0.1%
+        assert_eq!(slashed, expected_slashed);
+
+        let stake_after = read_validator_stake(&evm, addr);
+        let expected_remaining = stake_before - expected_slashed;
+        assert_eq!(
+            stake_after, expected_remaining,
+            "stake should be reduced by 0.1% for oracle outlier"
+        );
+
+        // Status remains active but drops from qualified set
+        assert_eq!(read_validator_status(&evm, addr), 1);
+        let qualified = consensus.qualified_validators(&evm);
+        assert!(
+            !qualified.contains(&validator_id),
+            "validator below min stake should not be qualified"
+        );
+    }
+
+    #[test]
+    fn test_cumulative_offline_slash_accumulates() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+        let validator_id = 2;
+        let addr = test_addr(2);
+
+        let initial = read_validator_stake(&evm, addr);
+        assert_eq!(initial, one_million_call());
+
+        // First slash: 5 rounds = 0.5% of current stake
+        let slashed1 = consensus.handle_offline(&mut evm, validator_id, 5).unwrap();
+        let expected1 = (initial * 5 * 10) / 10_000;
+        assert_eq!(slashed1, expected1);
+        let remaining1 = read_validator_stake(&evm, addr);
+        assert_eq!(remaining1, initial - expected1);
+
+        // Second slash: 10 rounds = 1.0% of *current* (reduced) stake
+        let stake_before_second = read_validator_stake(&evm, addr);
+        let slashed2 = consensus.handle_offline(&mut evm, validator_id, 10).unwrap();
+        let expected2 = (stake_before_second * 10 * 10) / 10_000;
+        assert_eq!(slashed2, expected2);
+        let remaining2 = read_validator_stake(&evm, addr);
+        assert_eq!(remaining2, stake_before_second - expected2);
+
+        // Validator should still be active (status unchanged by partial slash)
+        assert_eq!(read_validator_status(&evm, addr), 1);
+    }
+
+    #[test]
+    fn test_offline_slash_to_zero_makes_inactive() {
+        let (mut consensus, mut evm) = make_test_consensus(10);
+        let validator_id = 5;
+        let addr = test_addr(5);
+
+        let initial = read_validator_stake(&evm, addr);
+
+        // Slash 1000 rounds at 0.1% = 100% of stake
+        let slashed = consensus.handle_offline(&mut evm, validator_id, 1000).unwrap();
+        assert_eq!(slashed, initial, "should slash entire stake");
+
+        assert_eq!(read_validator_stake(&evm, addr), 0);
+        assert_eq!(read_validator_status(&evm, addr), 0);
+
+        let active = consensus.active_validators(&evm);
+        assert!(!active.contains(&validator_id));
     }
 }
