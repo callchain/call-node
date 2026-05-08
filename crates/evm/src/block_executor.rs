@@ -119,9 +119,23 @@ pub fn execute_block_transactions(
                 // Update CacheDB so subsequent transactions see the latest state.
                 cache_db.commit(tx_delta.clone());
 
-                // Accumulate state delta from this transaction
-                for (addr, account) in tx_delta {
-                    accumulated_state.insert(addr, account);
+                // Accumulate state delta from this transaction.
+                // Merge storage slots so earlier tx writes are not lost
+                // when a later tx touches the same address.
+                for (addr, new_account) in tx_delta {
+                    match accumulated_state.entry(addr) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            let existing = entry.get_mut();
+                            existing.info = new_account.info;
+                            existing.status |= new_account.status;
+                            for (slot, value) in new_account.storage {
+                                existing.storage.insert(slot, value);
+                            }
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(new_account);
+                        }
+                    }
                 }
 
                 let contract_address = if tx_to.is_none() {
