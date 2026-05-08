@@ -3,7 +3,9 @@
 //! Architecture: all state-mutating operations go through EVM precompiles.
 //! Read-only endpoints remain as individual `call_*` methods.
 
-use crate::handlers::helpers::{internal_error, invalid_params};
+use crate::handlers::helpers::{
+    db_error, internal_error, invalid_params, method_not_available, resource_unavailable,
+};
 use crate::handlers::state::RpcState;
 use call_consensus::exec::state_accessors;
 use call_primitives::Address;
@@ -152,10 +154,8 @@ pub fn register_callchain_rpc(
     // call_shieldedDepositProve
     module
         .register_async_method("call_shieldedDepositProve", |_params, _state, _ctx| async move {
-            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
-                -32601,
+            Err::<serde_json::Value, _>(method_not_available(
                 "shielded deposit proving requires a local prover — use `call-cli shielded deposit-prove <args>` or run a dedicated proving service with `--prover-mode deposit`",
-                None::<()>,
             ))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -163,10 +163,8 @@ pub fn register_callchain_rpc(
     // call_shieldedTransferProve
     module
         .register_async_method("call_shieldedTransferProve", |_params, _state, _ctx| async move {
-            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
-                -32601,
+            Err::<serde_json::Value, _>(method_not_available(
                 "shielded transfer proving requires a local prover — use `call-cli shielded transfer-prove <args>` or run a dedicated proving service with `--prover-mode transfer`",
-                None::<()>,
             ))
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -179,12 +177,12 @@ pub fn register_callchain_rpc(
             let vk_hex = call_obj
                 .get("viewingKey")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("missing 'viewingKey' field".into()))?;
+                .ok_or_else(|| invalid_params("missing 'viewingKey' field"))?;
             let vk_bytes = hex::decode(vk_hex.trim_start_matches("0x"))
                 .map_err(|e| invalid_params(format!("invalid viewing key: {e}")))?;
             if vk_bytes.len() < 32 {
                 return Err(invalid_params(
-                    "viewing key must be at least 32 bytes".into(),
+                    "viewing key must be at least 32 bytes",
                 ));
             }
             let mut ivk = [0u8; 32];
@@ -201,7 +199,7 @@ pub fn register_callchain_rpc(
                 full_view_key: fvk,
             };
             let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                .map_err(|e| db_error(format!("db error: {e}")))?;
             let merkle_root = state_accessors::read_shielded_merkle_root(&provider);
             // Note balances require the full note registry (not in EVM storage).
             // Return merkle root only; use a local shielded node for balance queries.
@@ -329,7 +327,7 @@ pub fn register_callchain_rpc(
     // call_getRollbackHistory
     module
         .register_async_method("call_getRollbackHistory", |_params, state, _ctx| async move {
-            let fm = state.fork_manager.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let fm = state.fork_manager.read().map_err(|_| resource_unavailable("lock poisoned"))?;
             let history: Vec<serde_json::Value> = fm.rollback_history()
                 .iter()
                 .map(|r| serde_json::json!({
@@ -347,8 +345,8 @@ pub fn register_callchain_rpc(
     // call_getScheduledUpgrades
     module
         .register_async_method("call_getScheduledUpgrades", |_params, state, _ctx| async move {
-            let fm = state.fork_manager.read().map_err(|_| internal_error("lock poisoned".into()))?;
-            let current_block = *state.current_block.read().map_err(|_| internal_error("lock poisoned".into()))?;
+            let fm = state.fork_manager.read().map_err(|_| resource_unavailable("lock poisoned"))?;
+            let current_block = *state.current_block.read().map_err(|_| resource_unavailable("lock poisoned"))?;
             let upgrades: Vec<serde_json::Value> = fm.scheduled_upgrades()
                 .iter()
                 .filter(|u| !u.applied)
@@ -382,10 +380,10 @@ pub fn register_callchain_rpc(
                     params.one().map_err(|e| invalid_params(e.to_string()))?;
                 let header_json = call_obj
                     .get("header")
-                    .ok_or_else(|| invalid_params("missing 'header' field".into()))?;
+                    .ok_or_else(|| invalid_params("missing 'header' field"))?;
                 let sigs_json = call_obj
                     .get("signatures")
-                    .ok_or_else(|| invalid_params("missing 'signatures' field".into()))?;
+                    .ok_or_else(|| invalid_params("missing 'signatures' field"))?;
                 let header: call_consensus::BlockHeader =
                     serde_json::from_value(header_json.clone())
                         .map_err(|e| invalid_params(format!("invalid header: {e}")))?;
@@ -393,9 +391,9 @@ pub fn register_callchain_rpc(
                 let sigs_array = sigs_json
                     .get("signatures")
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| invalid_params("missing signatures array".into()))?;
+                    .ok_or_else(|| invalid_params("missing signatures array"))?;
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let validators = state_accessors::read_validator_addresses(&provider);
                 let total = validators.len() as u32;
                 let quorum = (2 * total as usize).div_ceil(3).max(1);
@@ -458,7 +456,7 @@ pub fn register_callchain_rpc(
                     .map_err(|e| invalid_params(e.to_string()))?;
                 let balance = state.get_balance(asset_id, &address);
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let merkle_root = state_accessors::read_shielded_merkle_root(&provider);
                 let leaf_count = state_accessors::read_shielded_commitment_count(&provider);
                 // Full note proofs require the Merkle tree structure (not in EVM storage).
@@ -530,7 +528,7 @@ pub fn register_callchain_rpc(
                     })
                     .unwrap_or_default();
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let mut spent = Vec::new();
                 for nf_hex in &nullifiers {
                     if let Ok(bytes) = hex::decode(nf_hex.trim_start_matches("0x")) {
@@ -565,11 +563,11 @@ pub fn register_callchain_rpc(
                 let viewing_key_hex = call_obj
                     .get("viewingKey")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| invalid_params("missing 'viewingKey' field".into()))?;
+                    .ok_or_else(|| invalid_params("missing 'viewingKey' field"))?;
                 let _vk_bytes = hex::decode(viewing_key_hex.trim_start_matches("0x"))
                     .map_err(|e| invalid_params(format!("invalid viewing key: {e}")))?;
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let leaf_count = state_accessors::read_shielded_commitment_count(&provider);
                 let merkle_root = state_accessors::read_shielded_merkle_root(&provider);
                 Ok::<_, ErrorObjectOwned>(serde_json::json!({
@@ -590,7 +588,7 @@ pub fn register_callchain_rpc(
             |params, state, _ctx| async move {
                 let proposal_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let count = state_accessors::read_gov_proposal_count(&provider);
                 if proposal_id == 0 || proposal_id > count {
                     return Ok::<_, ErrorObjectOwned>(serde_json::json!(null));
@@ -633,7 +631,7 @@ pub fn register_callchain_rpc(
             "call_governanceGetAllProposals",
             |_params, state, _ctx| async move {
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let count = state_accessors::read_gov_proposal_count(&provider);
                 let mut proposals = Vec::with_capacity(count as usize);
                 for id in 1..=count {
@@ -665,7 +663,7 @@ pub fn register_callchain_rpc(
             "call_governanceIsPaused",
             |_params, state, _ctx| async move {
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let paused = state_accessors::read_gov_paused(&provider);
                 Ok::<_, ErrorObjectOwned>(serde_json::json!({ "isPaused": paused }))
             },
@@ -679,7 +677,7 @@ pub fn register_callchain_rpc(
         .register_async_method("call_oracleGetPrice", |params, state, _ctx| async move {
             let asset_id: u64 = params.one().map_err(|e| invalid_params(e.to_string()))?;
             let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                .map_err(|e| db_error(format!("db error: {e}")))?;
             let price =
                 call_consensus::exec::state_accessors::read_oracle_price(&provider, asset_id);
             if price == 0 {
@@ -714,7 +712,7 @@ pub fn register_callchain_rpc(
         .register_async_method("call_oracleGetTwap", |params, state, _ctx| async move {
             let (asset_id,): (u64,) = params.parse().map_err(|e| invalid_params(e.to_string()))?;
             let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                .map_err(|e| db_error(format!("db error: {e}")))?;
             let twap = call_consensus::exec::state_accessors::read_oracle_twap(&provider, asset_id);
             Ok::<_, ErrorObjectOwned>(serde_json::json!({
                 "assetId": asset_id,
@@ -731,7 +729,7 @@ pub fn register_callchain_rpc(
             |params, state, _ctx| async move {
                 let validator_id: u32 = params.one().map_err(|e| invalid_params(e.to_string()))?;
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let addr = call_consensus::exec::state_accessors::read_validator_addr(
                     &provider,
                     validator_id as u64,
@@ -769,13 +767,13 @@ pub fn register_callchain_rpc(
                 let tx_hash_bytes = hex::decode(tx_hash_clean)
                     .map_err(|e| invalid_params(format!("invalid sourceTxHash: {e}")))?;
                 if tx_hash_bytes.len() != 32 {
-                    return Err(invalid_params("sourceTxHash must be 32 bytes".into()));
+                    return Err(invalid_params("sourceTxHash must be 32 bytes"));
                 }
                 let mut tx_hash_arr = [0u8; 32];
                 tx_hash_arr.copy_from_slice(&tx_hash_bytes);
                 let _tx_hash = alloy_primitives::B256::from(tx_hash_arr);
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 let pending_status =
                     state_accessors::read_bridge_pending_status(&provider, tx_hash_arr);
                 let is_processed = state_accessors::read_bridge_processed(&provider, tx_hash_arr);
@@ -837,7 +835,7 @@ pub fn register_callchain_rpc(
     module
         .register_async_method("call_validatorList", |_params, state, _ctx| async move {
             let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                .map_err(|e| db_error(format!("db error: {e}")))?;
             let count = state_accessors::read_validator_count(&provider);
             let mut validators = Vec::new();
             for i in 1..=count {

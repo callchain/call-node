@@ -925,4 +925,87 @@ mod tests {
         assert_eq!(logs[1]["logIndex"], "0x1");
         assert_eq!(logs[2]["logIndex"], "0x2");
     }
+
+    // ------------------------------------------------------------------
+    // Structured error code tests (issue #23)
+    // ------------------------------------------------------------------
+
+    use crate::handlers::helpers::{
+        db_error, execution_reverted, filter_not_found, internal_error, invalid_params,
+        method_not_available, resource_unavailable, rpc_error, RpcErrorCode,
+        tx_validation_failed,
+    };
+
+    #[test]
+    fn test_rpc_error_code_values() {
+        assert_eq!(RpcErrorCode::InternalError.code(), -32000);
+        assert_eq!(RpcErrorCode::ExecutionReverted.code(), -32001);
+        assert_eq!(RpcErrorCode::ResourceUnavailable.code(), -32002);
+        assert_eq!(RpcErrorCode::DatabaseError.code(), -32003);
+        assert_eq!(RpcErrorCode::MethodNotAvailable.code(), -32004);
+        assert_eq!(RpcErrorCode::TransactionValidationFailed.code(), -32005);
+        assert_eq!(RpcErrorCode::FilterNotFound.code(), -32006);
+        assert_eq!(RpcErrorCode::LightClientVerificationFailed.code(), -32007);
+        assert_eq!(RpcErrorCode::InvalidHex.code(), -32010);
+    }
+
+    #[test]
+    fn test_rpc_error_helpers_return_correct_codes() {
+        let e = internal_error("something broke");
+        assert_eq!(e.code(), -32000);
+        assert!(e.message().contains("something broke"));
+
+        let e = execution_reverted("out of gas");
+        assert_eq!(e.code(), -32001);
+        assert!(e.message().contains("out of gas"));
+
+        let e = resource_unavailable("lock poisoned");
+        assert_eq!(e.code(), -32002);
+        assert!(e.message().contains("lock poisoned"));
+
+        let e = db_error("MDBX read failed");
+        assert_eq!(e.code(), -32003);
+        assert!(e.message().contains("MDBX read failed"));
+
+        let e = method_not_available("feature disabled");
+        assert_eq!(e.code(), -32004);
+        assert!(e.message().contains("feature disabled"));
+
+        let e = tx_validation_failed("nonce too low");
+        assert_eq!(e.code(), -32005);
+        assert!(e.message().contains("nonce too low"));
+
+        let e = filter_not_found("no such filter");
+        assert_eq!(e.code(), -32006);
+        assert!(e.message().contains("no such filter"));
+
+        let e = rpc_error(RpcErrorCode::InvalidHex, "bad hex");
+        assert_eq!(e.code(), -32010);
+        assert!(e.message().contains("bad hex"));
+    }
+
+    #[test]
+    fn test_invalid_params_uses_standard_code() {
+        let e = invalid_params("missing field");
+        assert_eq!(e.code(), -32602, "invalid_params must use standard JSON-RPC -32602");
+        assert!(e.message().contains("missing field"));
+    }
+
+    #[test]
+    fn test_rpc_error_helpers_accept_static_str() {
+        // Verify the `impl Into<String>` bound works for &'static str
+        let _ = internal_error("static str ok");
+        let _ = execution_reverted("static str ok");
+        let _ = db_error("static str ok");
+        let _ = invalid_params("static str ok");
+    }
+
+    #[test]
+    fn test_rpc_error_helpers_accept_owned_string() {
+        // Verify the `impl Into<String>` bound works for String
+        let _ = internal_error(String::from("owned string ok"));
+        let _ = execution_reverted(String::from("owned string ok"));
+        let _ = db_error(String::from("owned string ok"));
+        let _ = invalid_params(String::from("owned string ok"));
+    }
 }

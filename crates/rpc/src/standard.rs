@@ -1,6 +1,9 @@
 //! Standard Ethereum JSON-RPC endpoints (per spec §11.1)
 
-use crate::handlers::{internal_error, invalid_params, RpcState};
+use crate::handlers::{
+    db_error, execution_reverted, filter_not_found, internal_error, invalid_params,
+    resource_unavailable, tx_validation_failed, RpcState,
+};
 use call_primitives::Address;
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
@@ -97,7 +100,7 @@ pub fn register_standard_rpc(
                     if result.success {
                         Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(&result.output)))
                     } else {
-                        Err(internal_error("execution reverted".into()))
+                        Err(execution_reverted("execution reverted"))
                     }
                 }
                 Err(e) => Err(internal_error(e)),
@@ -114,7 +117,7 @@ pub fn register_standard_rpc(
 
             match state.submit_evm_tx(&raw_tx_bytes) {
                 Ok(tx_hash) => Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(tx_hash))),
-                Err(e) => Err(invalid_params(e)),
+                Err(e) => Err(tx_validation_failed(e)),
             }
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -286,7 +289,7 @@ pub fn register_standard_rpc(
                 .map_err(|e| invalid_params(e.to_string()))?;
 
             let Some(filter) = state.filter_manager.get_filter(id) else {
-                return Err::<serde_json::Value, _>(invalid_params("filter not found".into()));
+                return Err::<serde_json::Value, _>(filter_not_found("filter not found"));
             };
 
             let result = match filter {
@@ -338,7 +341,7 @@ pub fn register_standard_rpc(
                         let mempool = state
                             .mempool
                             .read()
-                            .map_err(|_| internal_error("lock poisoned".into()))?;
+                            .map_err(|_| resource_unavailable("lock poisoned"))?;
                         for entry in mempool.evm_pool.iter() {
                             let hash = call_crypto::keccak256(&entry.data);
                             let tx_hash = call_primitives::TxHash::from(hash.0);
@@ -369,7 +372,7 @@ pub fn register_standard_rpc(
                 .map_err(|e| invalid_params(e.to_string()))?;
 
             let Some(filter) = state.filter_manager.get_filter(id) else {
-                return Err::<serde_json::Value, _>(invalid_params("filter not found".into()));
+                return Err::<serde_json::Value, _>(filter_not_found("filter not found"));
             };
 
             let result = match filter {
@@ -410,7 +413,7 @@ pub fn register_standard_rpc(
 
             let address_str = call_obj.get("address")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_params("missing 'address' field".into()))?;
+                .ok_or_else(|| invalid_params("missing 'address' field"))?;
             let address = address_str.parse::<alloy_primitives::Address>()
                 .map_err(|e| invalid_params(e.to_string()))?;
 
@@ -446,7 +449,7 @@ pub fn register_standard_rpc(
             let proof = if block_num == current {
                 // Latest block: use persistent trie nodes from MDBX (avoids rebuilding trie from scratch)
                 let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                    .map_err(|e| internal_error(format!("db error: {e}")))?;
+                    .map_err(|e| db_error(format!("db error: {e}")))?;
                 match call_evm::trie::compute_account_proof_persistent(&state.db_env, &provider, address, &slots) {
                     Ok(p) => p,
                     Err(e) => return Err(internal_error(format!("proof computation failed: {:?}", e))),
@@ -457,7 +460,7 @@ pub fn register_standard_rpc(
                     Ok(Some(snapshot)) => snapshot,
                     _ => {
                         let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                            .map_err(|e| internal_error(format!("db error: {e}")))?;
+                            .map_err(|e| db_error(format!("db error: {e}")))?;
                         provider.state().clone()
                     }
                 };
@@ -511,7 +514,7 @@ pub fn register_standard_rpc(
             let base_fee = state
                 .fee_params
                 .read()
-                .map_err(|_| internal_error("lock poisoned".into()))?
+                .map_err(|_| resource_unavailable("lock poisoned"))?
                 .base_fee;
             let gas_price = base_fee.saturating_add(call_protocol::gas::MIN_PRIORITY_FEE_PER_GAS);
             Ok::<_, ErrorObjectOwned>(format!("0x{:x}", gas_price))
@@ -550,7 +553,7 @@ pub fn register_standard_rpc(
             let history = state
                 .fee_history
                 .read()
-                .map_err(|_| internal_error("lock poisoned".into()))?;
+                .map_err(|_| resource_unavailable("lock poisoned"))?;
             let entries: Vec<_> = history
                 .iter()
                 .rev()
@@ -579,7 +582,7 @@ pub fn register_standard_rpc(
             let next_base_fee = state
                 .fee_params
                 .read()
-                .map_err(|_| internal_error("lock poisoned".into()))?
+                .map_err(|_| resource_unavailable("lock poisoned"))?
                 .base_fee;
             base_fee_per_gas.push(format!("0x{:x}", next_base_fee));
 
@@ -610,7 +613,7 @@ pub fn register_standard_rpc(
             let progress = state
                 .sync_progress
                 .read()
-                .map_err(|_| internal_error("lock poisoned".into()))?
+                .map_err(|_| resource_unavailable("lock poisoned"))?
                 .clone();
             match progress {
                 Some(p) if p.current_block < p.highest_block => {
@@ -641,18 +644,18 @@ pub fn register_standard_rpc(
                     Some("pending") => {
                         let provider =
                             call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                                .map_err(|e| db_error(format!("db error: {e}")))?;
                         let committed_nonce = provider.state().get_nonce(&cp_address);
                         let mempool = state
                             .mempool
                             .read()
-                            .map_err(|_| internal_error("lock poisoned".into()))?;
+                            .map_err(|_| resource_unavailable("lock poisoned"))?;
                         committed_nonce.max(mempool.evm_pool.get_address_nonce(&cp_address))
                     }
                     Some("latest") | Some("safe") | Some("finalized") | None => {
                         let provider =
                             call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                                .map_err(|e| internal_error(format!("db error: {e}")))?;
+                                .map_err(|e| db_error(format!("db error: {e}")))?;
                         provider.state().get_nonce(&cp_address)
                     }
                     Some(tag) => {
@@ -687,7 +690,7 @@ pub fn register_standard_rpc(
                 Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
                     let provider =
                         call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                            .map_err(|e| internal_error(format!("db error: {e}")))?;
+                            .map_err(|e| db_error(format!("db error: {e}")))?;
                     provider.state().get_code(&cp_address)
                 }
                 Some(tag) => {
@@ -720,7 +723,7 @@ pub fn register_standard_rpc(
                 Some("latest") | Some("pending") | Some("safe") | Some("finalized") | None => {
                     let provider =
                         call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
-                            .map_err(|e| internal_error(format!("db error: {e}")))?;
+                            .map_err(|e| db_error(format!("db error: {e}")))?;
                     provider.state().get_storage(&cp_address, key)
                 }
                 Some(tag) => {
@@ -797,7 +800,7 @@ pub fn register_standard_rpc(
                     if result.success {
                         Ok::<_, ErrorObjectOwned>(format!("0x{:x}", result.gas_used))
                     } else {
-                        Err(internal_error("execution reverted".into()))
+                        Err(execution_reverted("execution reverted"))
                     }
                 }
                 Err(e) => Err(internal_error(e)),
