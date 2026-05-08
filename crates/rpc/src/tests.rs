@@ -597,4 +597,332 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    // ------------------------------------------------------------------
+    // eth_getLogs performance & correctness tests (issue #11)
+    // ------------------------------------------------------------------
+
+    use call_primitives::{ExecutionStatus, FeeCurrency, Hash, TxHash};
+    use call_protocol::{LogEntry, ProtocolReceipt};
+
+    fn make_log(address: Address, topic_seed: u8, data: Vec<u8>) -> LogEntry {
+        let mut topics = Vec::new();
+        if topic_seed > 0 {
+            topics.push(Hash::repeat_byte(topic_seed));
+        }
+        LogEntry { address, topics, data }
+    }
+
+    fn make_receipt_with_logs(
+        block_number: u64,
+        tx_hash: TxHash,
+        logs: Vec<LogEntry>,
+    ) -> ProtocolReceipt {
+        ProtocolReceipt {
+            tx_hash,
+            status: ExecutionStatus::Success,
+            gas_used: 21_000,
+            gas_payer: test_addr(1),
+            fee_currency: FeeCurrency::Call,
+            fee_amount: 0,
+            block_number,
+            block_hash: Hash::repeat_byte(block_number as u8),
+            transaction_index: 0,
+            to: None,
+            contract_address: None,
+            cumulative_gas_used: 21_000,
+            effective_gas_price: 0,
+            logs_bloom: vec![],
+            instruction_results: vec![],
+            logs,
+            memos: vec![],
+            state_changes: vec![],
+        }
+    }
+
+    #[test]
+    fn test_eth_getLogs_basic() {
+        let state = make_test_state();
+        state.set_current_block(10);
+
+        let addr_a = test_addr(1);
+        let addr_b = test_addr(2);
+
+        // Block 1: 2 receipts, 2 logs each
+        let tx1 = TxHash::repeat_byte(1);
+        state.store_receipt(
+            tx1,
+            make_receipt_with_logs(
+                1,
+                tx1,
+                vec![
+                    make_log(addr_a, 1, vec![0x01]),
+                    make_log(addr_b, 2, vec![0x02]),
+                ],
+            ),
+        );
+        let tx2 = TxHash::repeat_byte(2);
+        state.store_receipt(
+            tx2,
+            make_receipt_with_logs(
+                1,
+                tx2,
+                vec![
+                    make_log(addr_a, 3, vec![0x03]),
+                    make_log(addr_b, 4, vec![0x04]),
+                ],
+            ),
+        );
+
+        // Block 5: 1 receipt, 1 log
+        let tx3 = TxHash::repeat_byte(3);
+        state.store_receipt(
+            tx3,
+            make_receipt_with_logs(5, tx3, vec![make_log(addr_a, 5, vec![0x05])]),
+        );
+
+        let filter = serde_json::json!({"fromBlock": "0x1", "toBlock": "0xa"});
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        assert_eq!(logs.len(), 5, "expected 5 logs across blocks 1-10");
+    }
+
+    #[test]
+    fn test_eth_getLogs_by_address() {
+        let state = make_test_state();
+        state.set_current_block(100);
+
+        let addr_a = test_addr(1);
+        let addr_b = test_addr(2);
+        let addr_c = test_addr(3);
+
+        for block in 1..=50 {
+            let tx = TxHash::repeat_byte(block as u8);
+            let logs = vec![
+                make_log(addr_a, 1, vec![block as u8]),
+                make_log(addr_b, 2, vec![block as u8]),
+                make_log(addr_c, 3, vec![block as u8]),
+            ];
+            state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
+        }
+
+        // Filter by addr_b only
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x64",
+            "address": format!("{:?}", addr_b)
+        });
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        assert_eq!(logs.len(), 50, "expected 50 logs from addr_b");
+        for log in &logs {
+            assert_eq!(log["address"], format!("{:?}", addr_b));
+        }
+
+        // Filter by multiple addresses
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x64",
+            "address": [format!("{:?}", addr_a), format!("{:?}", addr_c)]
+        });
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        assert_eq!(logs.len(), 100, "expected 100 logs from addr_a + addr_c");
+    }
+
+    #[test]
+    fn test_eth_getLogs_by_topic() {
+        let state = make_test_state();
+        state.set_current_block(20);
+
+        let addr = test_addr(1);
+        let topic_a = Hash::repeat_byte(0xAA);
+        let topic_b = Hash::repeat_byte(0xBB);
+
+        for block in 1..=10 {
+            let tx = TxHash::repeat_byte(block as u8);
+            let logs = vec![
+                LogEntry { address: addr, topics: vec![topic_a], data: vec![0x01] },
+                LogEntry { address: addr, topics: vec![topic_b], data: vec![0x02] },
+                LogEntry { address: addr, topics: vec![topic_a, topic_b], data: vec![0x03] },
+            ];
+            state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
+        }
+
+        // Filter by topic_a at position 0
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x14",
+            "topics": [format!("0x{}", hex::encode(topic_a.as_slice()))]
+        });
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        // Logs with topic_a at position 0: first and third log of each block = 20
+        assert_eq!(logs.len(), 20);
+
+        // Filter by topic_b at position 1
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x14",
+            "topics": [null, format!("0x{}", hex::encode(topic_b.as_slice()))]
+        });
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        // Only third log has topic_b at position 1 = 10
+        assert_eq!(logs.len(), 10);
+    }
+
+    #[test]
+    fn test_eth_getLogs_address_and_topic_combined() {
+        let state = make_test_state();
+        state.set_current_block(30);
+
+        let addr_a = test_addr(1);
+        let addr_b = test_addr(2);
+        let topic_x = Hash::repeat_byte(0xDE);
+
+        for block in 1..=20 {
+            let tx = TxHash::repeat_byte(block as u8);
+            let logs = vec![
+                LogEntry { address: addr_a, topics: vec![topic_x], data: vec![0x01] },
+                LogEntry { address: addr_b, topics: vec![topic_x], data: vec![0x02] },
+                LogEntry { address: addr_a, topics: vec![], data: vec![0x03] },
+            ];
+            state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
+        }
+
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x1e",
+            "address": format!("{:?}", addr_a),
+            "topics": [format!("0x{}", hex::encode(topic_x.as_slice()))]
+        });
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        // addr_a + topic_x = first log of each block = 20
+        assert_eq!(logs.len(), 20);
+    }
+
+    #[test]
+    fn test_eth_getLogs_block_range_filtering() {
+        let state = make_test_state();
+        state.set_current_block(1000);
+
+        let addr = test_addr(1);
+
+        for block in 1..=100 {
+            let tx = TxHash::repeat_byte(block as u8);
+            state.store_receipt(
+                tx,
+                make_receipt_with_logs(block, tx, vec![make_log(addr, 1, vec![block as u8])]),
+            );
+        }
+
+        // Query blocks 10-20 inclusive
+        let filter = serde_json::json!({
+            "fromBlock": "0xa",
+            "toBlock": "0x14"
+        });
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        assert_eq!(logs.len(), 11, "blocks 10-20 inclusive = 11 blocks");
+    }
+
+    #[test]
+    fn test_eth_getLogs_performance_large_dataset() {
+        let state = make_test_state();
+        state.set_current_block(10_000);
+
+        let target_addr = test_addr(0x42);
+        let other_addrs: Vec<Address> = (1..=20).map(test_addr).collect();
+
+        // Generate 5,000 blocks, 2 receipts per block, 3 logs per receipt
+        // Only ~10% of logs are from target_addr
+        let mut total_target_logs = 0;
+        for block in 1u64..=5_000 {
+            for rec_idx in 0u64..2 {
+                let tx_input = block.to_le_bytes().iter().chain(rec_idx.to_le_bytes().iter()).copied().collect::<Vec<u8>>();
+                let tx = TxHash::from(call_crypto::keccak256(&tx_input).0);
+                let logs: Vec<LogEntry> = (0..3)
+                    .map(|log_idx| {
+                        let addr = if (block + rec_idx + log_idx) % 10 == 0 {
+                            total_target_logs += 1;
+                            target_addr
+                        } else {
+                            other_addrs[((block + rec_idx + log_idx) % 20) as usize]
+                        };
+                        make_log(addr, log_idx as u8, vec![block as u8, rec_idx as u8, log_idx as u8])
+                    })
+                    .collect();
+                state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
+            }
+        }
+
+        // Address-filtered query — should use log_index and be fast
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x2710",
+            "address": format!("{:?}", target_addr)
+        });
+        let start = std::time::Instant::now();
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        let elapsed_indexed = start.elapsed();
+        assert_eq!(logs.len(), total_target_logs, "indexed query should return all target logs");
+        // Address-indexed query should complete in well under 1 second even with 30K logs
+        assert!(
+            elapsed_indexed < std::time::Duration::from_secs(1),
+            "indexed eth_getLogs took too long: {:?}",
+            elapsed_indexed
+        );
+
+        // Full scan over a small range — verify fallback path still works
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x64"
+        });
+        let start = std::time::Instant::now();
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        let elapsed_scan = start.elapsed();
+        assert_eq!(logs.len(), 100 * 2 * 3, "full scan over 100 blocks = 600 logs");
+        assert!(
+            elapsed_scan < std::time::Duration::from_secs(2),
+            "full scan eth_getLogs took too long: {:?}",
+            elapsed_scan
+        );
+    }
+
+    #[test]
+    fn test_eth_getLogs_no_logs_in_range() {
+        let state = make_test_state();
+        state.set_current_block(10);
+
+        let addr = test_addr(1);
+        let tx = TxHash::repeat_byte(1);
+        state.store_receipt(tx, make_receipt_with_logs(1, tx, vec![make_log(addr, 1, vec![])]));
+
+        // Query a block range with no logs
+        let filter = serde_json::json!({"fromBlock": "0x5", "toBlock": "0xa"});
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn test_eth_getLogs_log_index_consistency() {
+        let state = make_test_state();
+        state.set_current_block(5);
+
+        let addr = test_addr(1);
+        let tx = TxHash::repeat_byte(1);
+        let receipt = make_receipt_with_logs(
+            1,
+            tx,
+            vec![
+                make_log(addr, 1, vec![0x01]),
+                make_log(addr, 2, vec![0x02]),
+                make_log(addr, 3, vec![0x03]),
+            ],
+        );
+        state.store_receipt(tx, receipt);
+
+        let filter = serde_json::json!({"fromBlock": "0x1", "toBlock": "0x5"});
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        assert_eq!(logs.len(), 3);
+        // Verify logIndex is consistent
+        assert_eq!(logs[0]["logIndex"], "0x0");
+        assert_eq!(logs[1]["logIndex"], "0x1");
+        assert_eq!(logs[2]["logIndex"], "0x2");
+    }
 }

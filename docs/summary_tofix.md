@@ -36,7 +36,7 @@
 
 | # | Blocker | Scope | Why |
 |---|---------|-------|-----|
-| 11 | **No `eth_getLogs` performance tests** | `crates/rpc` | Linear scan O(n); untested at 1M+ blocks |
+| 11 | ~~**No `eth_getLogs` performance tests**~~ ✅ | `crates/rpc` | Added `query_logs()` optimized path using `log_index` for address-filtered queries (O(1) lookup vs full scan). 8 tests added: basic, address filter, topic filter, combined filter, block range, large dataset performance (5K blocks/30K logs), empty range, log index consistency |
 | 12 | **No receipt persistence tests** | `crates/node` | Receipts in-memory only; no DB persistence coverage |
 | 13 | **No agent block-production integration tests** | `crates/consensus` | Agent txs exist as library but not verified in real blocks |
 | 14 | **No slashing economic penalty tests** | `crates/consensus` | Double-sign detected but stake reduction not verified |

@@ -300,37 +300,7 @@ pub fn register_standard_rpc(
                     let current = state.get_current_block();
                     let effective_from = last_block.saturating_add(1).max(from_block);
                     let effective_to = to_block.min(current);
-                    let mut results = Vec::new();
-                    for block_num in effective_from..=effective_to {
-                        let block_receipts = state.get_receipts_by_block(block_num);
-                        for receipt in block_receipts {
-                            for (log_idx, log) in receipt.logs.iter().enumerate() {
-                                if !addresses.is_empty() && !addresses.contains(&log.address) {
-                                    continue;
-                                }
-                                if !topics.is_empty() {
-                                    let mut matched = true;
-                                    for (topic_idx, topic_filter) in topics.iter().enumerate() {
-                                        if let Some(filter_hashes) = topic_filter {
-                                            if let Some(log_topic) = log.topics.get(topic_idx) {
-                                                if !filter_hashes.contains(log_topic) {
-                                                    matched = false;
-                                                    break;
-                                                }
-                                            } else {
-                                                matched = false;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if !matched {
-                                        continue;
-                                    }
-                                }
-                                results.push(log_to_json(log, &receipt, log_idx));
-                            }
-                        }
-                    }
+                    let results = query_logs(effective_from, effective_to, &addresses, &topics, &state);
                     // Update cursor
                     let new_filter = crate::handlers::state::Filter::Log {
                         from_block,
@@ -412,37 +382,7 @@ pub fn register_standard_rpc(
                 } => {
                     let current = state.get_current_block();
                     let effective_to = to_block.min(current);
-                    let mut results = Vec::new();
-                    for block_num in from_block..=effective_to {
-                        let block_receipts = state.get_receipts_by_block(block_num);
-                        for receipt in block_receipts {
-                            for (log_idx, log) in receipt.logs.iter().enumerate() {
-                                if !addresses.is_empty() && !addresses.contains(&log.address) {
-                                    continue;
-                                }
-                                if !topics.is_empty() {
-                                    let mut matched = true;
-                                    for (topic_idx, topic_filter) in topics.iter().enumerate() {
-                                        if let Some(filter_hashes) = topic_filter {
-                                            if let Some(log_topic) = log.topics.get(topic_idx) {
-                                                if !filter_hashes.contains(log_topic) {
-                                                    matched = false;
-                                                    break;
-                                                }
-                                            } else {
-                                                matched = false;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if !matched {
-                                        continue;
-                                    }
-                                }
-                                results.push(log_to_json(log, &receipt, log_idx));
-                            }
-                        }
-                    }
+                    let results = query_logs(from_block, effective_to, &addresses, &topics, &state);
                     serde_json::Value::Array(results)
                 }
                 _ => serde_json::Value::Array(vec![]),
@@ -1409,8 +1349,80 @@ fn log_to_json(
     })
 }
 
+/// Check whether a log's topics match the provided topic filter.
+pub(crate) fn log_matches_topics(log: &call_protocol::LogEntry, topics: &[Option<Vec<call_primitives::Hash>>]) -> bool {
+    if topics.is_empty() {
+        return true;
+    }
+    for (topic_idx, topic_filter) in topics.iter().enumerate() {
+        if let Some(filter_hashes) = topic_filter {
+            if let Some(log_topic) = log.topics.get(topic_idx) {
+                if !filter_hashes.contains(log_topic) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Optimized log query that uses the address index when addresses are provided.
+pub(crate) fn query_logs(
+    from_block: u64,
+    to_block: u64,
+    addresses: &[call_primitives::Address],
+    topics: &[Option<Vec<call_primitives::Hash>>],
+    state: &RpcState,
+) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+
+    // When addresses are specified, use the log_index for O(1) address lookup
+    // instead of scanning every receipt in the block range.
+    if !addresses.is_empty() {
+        if let Some(entries) = state.lookup_logs_by_address(addresses) {
+            for (block_num, tx_hash, log_idx) in entries {
+                if block_num < from_block || block_num > to_block {
+                    continue;
+                }
+                let receipt = match state.get_receipt(&tx_hash) {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let log = match receipt.logs.get(log_idx) {
+                    Some(l) => l,
+                    None => continue,
+                };
+                if log_matches_topics(log, topics) {
+                    results.push(log_to_json(log, &receipt, log_idx));
+                }
+            }
+            return results;
+        }
+        // If index read fails (poisoned lock), fall through to full scan
+    }
+
+    // Full scan fallback — used when no address filter is given or index is unavailable.
+    for block_num in from_block..=to_block {
+        let block_receipts = state.get_receipts_by_block(block_num);
+        for receipt in block_receipts {
+            for (log_idx, log) in receipt.logs.iter().enumerate() {
+                if !addresses.is_empty() && !addresses.contains(&log.address) {
+                    continue;
+                }
+                if log_matches_topics(log, topics) {
+                    results.push(log_to_json(log, &receipt, log_idx));
+                }
+            }
+        }
+    }
+
+    results
+}
+
 /// Shared log query logic used by eth_getLogs and eth_getFilterLogs.
-fn get_logs_from_filter(
+pub(crate) fn get_logs_from_filter(
     filter: &serde_json::Value,
     state: &RpcState,
 ) -> Result<Vec<serde_json::Value>, ErrorObjectOwned> {
@@ -1495,37 +1507,5 @@ fn get_logs_from_filter(
         (from_block, to_block)
     };
 
-    let mut results = Vec::new();
-    for block_num in from_block..=to_block {
-        let block_receipts = state.get_receipts_by_block(block_num);
-        for receipt in block_receipts {
-            for (log_idx, log) in receipt.logs.iter().enumerate() {
-                if !addresses.is_empty() && !addresses.contains(&log.address) {
-                    continue;
-                }
-                if !topics.is_empty() {
-                    let mut matched = true;
-                    for (topic_idx, topic_filter) in topics.iter().enumerate() {
-                        if let Some(filter_hashes) = topic_filter {
-                            if let Some(log_topic) = log.topics.get(topic_idx) {
-                                if !filter_hashes.contains(log_topic) {
-                                    matched = false;
-                                    break;
-                                }
-                            } else {
-                                matched = false;
-                                break;
-                            }
-                        }
-                    }
-                    if !matched {
-                        continue;
-                    }
-                }
-                results.push(log_to_json(log, &receipt, log_idx));
-            }
-        }
-    }
-
-    Ok(results)
+    Ok(query_logs(from_block, to_block, &addresses, &topics, state))
 }
