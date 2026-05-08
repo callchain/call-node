@@ -539,4 +539,116 @@ mod tests {
         let db = temp_db();
         assert!(load_fork_state(&db).unwrap().is_none());
     }
+
+    #[test]
+    fn test_fork_manager_persist_and_check_activation() {
+        let db = temp_db();
+        let mut fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1);
+        fm.schedule_upgrade(call_consensus::UpgradeEntry {
+            version: call_primitives::ProtocolVersion::new(1, 1, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        save_fork_state(&db, &fm).unwrap();
+        let mut loaded = load_fork_state(&db).unwrap().unwrap();
+
+        // Before activation height: no upgrade applied
+        assert!(loaded.check_upgrades_at_height(99).is_none());
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 0, 0));
+
+        // At activation height: upgrade fires
+        let result = loaded.check_upgrades_at_height(100);
+        assert_eq!(result, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 1, 0));
+
+        // Idempotent: second call at same height returns none
+        assert!(loaded.check_upgrades_at_height(100).is_none());
+    }
+
+    #[test]
+    fn test_fork_manager_persist_multiple_upgrades() {
+        let db = temp_db();
+        let mut fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1);
+        fm.schedule_upgrade(call_consensus::UpgradeEntry {
+            version: call_primitives::ProtocolVersion::new(1, 1, 0),
+            activation_height: 50,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        fm.schedule_upgrade(call_consensus::UpgradeEntry {
+            version: call_primitives::ProtocolVersion::new(1, 2, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        fm.schedule_upgrade(call_consensus::UpgradeEntry {
+            version: call_primitives::ProtocolVersion::new(1, 3, 0),
+            activation_height: 200,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        save_fork_state(&db, &fm).unwrap();
+        let mut loaded = load_fork_state(&db).unwrap().unwrap();
+
+        // Apply first upgrade
+        let v1 = loaded.check_upgrades_at_height(50);
+        assert_eq!(v1, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 1, 0));
+
+        // Apply second upgrade
+        let v2 = loaded.check_upgrades_at_height(100);
+        assert_eq!(v2, Some(call_primitives::ProtocolVersion::new(1, 2, 0)));
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 2, 0));
+
+        // Apply third upgrade
+        let v3 = loaded.check_upgrades_at_height(200);
+        assert_eq!(v3, Some(call_primitives::ProtocolVersion::new(1, 3, 0)));
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 3, 0));
+
+        // All upgrades marked applied
+        assert!(loaded.scheduled_upgrades.iter().all(|e| e.applied));
+    }
+
+    #[test]
+    fn test_fork_manager_persist_upgrade_before_save_height() {
+        let db = temp_db();
+        let mut fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1);
+        fm.schedule_upgrade(call_consensus::UpgradeEntry {
+            version: call_primitives::ProtocolVersion::new(1, 1, 0),
+            activation_height: 10,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        // Simulate that the node has already processed up to height 50
+        // (the upgrade at height 10 was scheduled before the save)
+        save_fork_state(&db, &fm).unwrap();
+        let mut loaded = load_fork_state(&db).unwrap().unwrap();
+
+        // Upgrade at height 10 should still be available after load
+        let result = loaded.check_upgrades_at_height(10);
+        assert_eq!(result, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 1, 0));
+    }
+
+    #[test]
+    fn test_fork_manager_persist_no_upgrade_at_unscheduled_height() {
+        let db = temp_db();
+        let fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1);
+        // No upgrades scheduled
+
+        save_fork_state(&db, &fm).unwrap();
+        let mut loaded = load_fork_state(&db).unwrap().unwrap();
+
+        assert!(loaded.check_upgrades_at_height(999).is_none());
+        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 0, 0));
+    }
 }
