@@ -92,3 +92,42 @@ from a drop-in dashboard. Plan:
    - **Node Health**: uptime, last block age (for stall detection)
 3. Add Grafana provisioning YAML for automatic dashboard loading
 4. Document data source configuration in `docs/observability.md`
+
+---
+
+## MEV Protection
+
+**Context:** `crates/protocol` contains a commit-reveal library for sealed-bid
+submission, but it is not integrated into block production. Validators can
+inspect the mempool and reorder or front-run transactions for profit.
+
+**Why deferred:** MEV protection requires protocol-level changes (commit-reveal
+timing, encrypted mempool, fair ordering) that complicate the consensus-critical
+path. For devnet and testnet, the economic value at risk is low and operator-run
+validators are trusted.
+
+**When to revisit:** Before mainnet launch. Plan:
+1. Integrate commit-reveal into `BlockProducer` tx selection
+2. Add encrypted mempool layer (threshold encryption or time-lock puzzles)
+3. Fair ordering: FCFS within a block or deterministic shuffle
+4. Penalize validators that violate ordering rules
+
+---
+
+## System Contracts
+
+**Context:** All protocol logic (staking, assets, governance, shielded pool,
+bridge, oracle) is currently implemented as Rust precompiles (0x201–0x209).
+There is no plan to migrate to Solidity system contracts.
+
+**Why deferred:** Rust precompiles are more auditable, gas-efficient, and
+integrate cleanly with the consensus layer. Solidity system contracts would
+require a full rewrite, new tooling, and additional audit surface. This is a
+long-term architectural question, not a testnet blocker.
+
+**When to revisit:** Post-mainnet, if ecosystem demand for Solidity-level
+composability justifies the migration cost. Plan:
+1. Formalize the precompile ↔ Solidity interface mapping
+2. Implement each precompile as a delegating Solidity proxy
+3. Governance-driven migration with backward compatibility period
+4. Deprecate Rust precompiles once usage drops below threshold

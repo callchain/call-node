@@ -67,17 +67,6 @@
 
 ---
 
-## Future (Deferred, Not Blocking)
-
-| # | Item | Scope | Notes |
-|---|------|-------|-------|
-| 32 | **EthLightClient BLS consensus verification** | `crates/light-client` | Parent-hash chain sufficient for devnet/testnet; beacon chain sync deferred |
-| 33 | **Prover key rotation** | `crates/shielded` | Governance-driven ceremony; mainnet readiness only |
-| 34 | **MEV protection** | `crates/protocol` | Commit-reveal library exists but not integrated into block production |
-| 35 | **System contracts** | Long-term | Protocol logic in Rust precompiles; Solidity migration deferred |
-
----
-
 ## What's Working Well
 
 - **~1,700 tests** across 101 files, spanning unit, integration, and E2E
