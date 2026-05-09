@@ -6,3 +6,4 @@ import CallchainShielded.Common
 import CallchainShielded.DepositCircuit
 import CallchainShielded.TransferCircuit
 import CallchainShielded.WithdrawCircuit
+import CallchainShielded.R1CSCorrespondence
