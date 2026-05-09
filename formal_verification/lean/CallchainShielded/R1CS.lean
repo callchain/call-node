@@ -49,11 +49,11 @@ def R1CS.satisfied {nPublic nPrivate : Nat} (r1cs : R1CS nPublic nPrivate)
   ∀ c ∈ r1cs.constraints, constraintSatisfied c witness
 
 /-- Encode a deposit witness into an R1CS assignment
-    Layout: [1, commitment, asset_id, value, rcm, ivk, rho]
+    Layout: [1, commitment, asset_id, value, rcm, ivk, rho, inv_val]
     public inputs: commitment (index 0), asset_id (index 1)
-    private witnesses: value (index 0), rcm (index 1), ivk (index 2), rho (index 3) -/
-def encodeDepositWitness (commitment asset_id value rcm ivk rho : Fr) :
-    Assignment 2 4 :=
-  ⟨[1, commitment, asset_id, value, rcm, ivk, rho], by simp⟩
+    private witnesses: value (index 0), rcm (index 1), ivk (index 2), rho (index 3), inv_val (index 4) -/
+def encodeDepositWitness (commitment asset_id value rcm ivk rho inv_val : Fr) :
+    Assignment 2 5 :=
+  ⟨[1, commitment, asset_id, value, rcm, ivk, rho, inv_val], by simp⟩
 
 end CallchainShielded
