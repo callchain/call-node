@@ -151,25 +151,6 @@ def verifyMerklePath (leaf : Fr) (path : MerklePath) : Fr :=
 -- Non-zero derivation from multiplicative inverse
 -- ============================================================================
 
-/-- If a * b = 1 in Fr, then a.val % p ≠ 0 -/
-theorem Fr.nonzero_of_mul_eq_one (a b : Fr) (h : a * b = 1) : a.val % BN254_P ≠ 0 := by
-  intro h_zero
-  have h1 : (a.val * b.val) % BN254_P = 0 := by
-    rw [Nat.mul_mod]
-    rw [h_zero]
-    simp
-  have h2 : Fr.fromNat (a.val * b.val) = Fr.fromNat 0 := by
-    rw [Fr.fromNat_eq_iff]
-    exact h1
-  have h3 : a * b = 0 := by
-    have h_val : a * b = Fr.fromNat (a.val * b.val) := rfl
-    rw [h_val, h2]
-    rfl
-  rw [h3] at h
-  have h4 : (0 : Fr) = 1 := h
-  have h5 : (0 : Fr).val = (1 : Fr).val := by rw [h4]
-  simp at h5
-
 /-- If n % p ≠ 0, then n > 0 (since 0 % p = 0) -/
 theorem Nat.pos_of_mod_ne_zero {n : Nat} (h : n % BN254_P ≠ 0) : n > 0 := by
   have h_nz : n ≠ 0 := by

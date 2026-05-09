@@ -131,85 +131,61 @@ theorem value_lt_p {w : DepositWitness} :
 theorem evalLC_c2_a (w0 w1 w2 w3 w4 w5 w6 w7 : Fr) :
   evalLC [0, 0, 0, 1, 0, 0, 0, 0] [w0, w1, w2, w3, w4, w5, w6, w7] = Fr.fromNat w3.val := by
   repeat rw [evalLC]
-  have h0 : (0 : Fr) * w7 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h0 : (0 : Fr) * w7 + (0 : Fr) = (0 : Fr) := by simp
   rw [h0]
-  have h1 : (0 : Fr) * w6 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h1 : (0 : Fr) * w6 + (0 : Fr) = (0 : Fr) := by simp
   rw [h1]
-  have h2 : (0 : Fr) * w5 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h2 : (0 : Fr) * w5 + (0 : Fr) = (0 : Fr) := by simp
   rw [h2]
-  have h3 : (0 : Fr) * w4 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h3 : (0 : Fr) * w4 + (0 : Fr) = (0 : Fr) := by simp
   rw [h3]
-  have h4 : (1 : Fr) * w3 + (0 : Fr) = Fr.fromNat w3.val := by
-    simp only [Fr.one_mul', Fr.add_zero', Fr.fromNat_val]
+  have h4 : (1 : Fr) * w3 + (0 : Fr) = Fr.fromNat w3.val := by simp
   rw [h4]
-  have h5 : (0 : Fr) * w2 + Fr.fromNat w3.val = Fr.fromNat w3.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h5 : (0 : Fr) * w2 + Fr.fromNat w3.val = Fr.fromNat w3.val := by simp
   rw [h5]
-  have h6 : (0 : Fr) * w1 + Fr.fromNat w3.val = Fr.fromNat w3.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h6 : (0 : Fr) * w1 + Fr.fromNat w3.val = Fr.fromNat w3.val := by simp
   rw [h6]
-  have h7 : (0 : Fr) * w0 + Fr.fromNat w3.val = Fr.fromNat w3.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h7 : (0 : Fr) * w0 + Fr.fromNat w3.val = Fr.fromNat w3.val := by simp
   rw [h7]
 
 theorem evalLC_c2_b (w0 w1 w2 w3 w4 w5 w6 w7 : Fr) :
   evalLC [0, 0, 0, 0, 0, 0, 0, 1] [w0, w1, w2, w3, w4, w5, w6, w7] = Fr.fromNat w7.val := by
   repeat rw [evalLC]
-  have h0 : (1 : Fr) * w7 + (0 : Fr) = Fr.fromNat w7.val := by
-    simp only [Fr.one_mul', Fr.add_zero', Fr.fromNat_val]
+  have h0 : (1 : Fr) * w7 + (0 : Fr) = Fr.fromNat w7.val := by simp
   rw [h0]
-  have h1 : (0 : Fr) * w6 + Fr.fromNat w7.val = Fr.fromNat w7.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h1 : (0 : Fr) * w6 + Fr.fromNat w7.val = Fr.fromNat w7.val := by simp
   rw [h1]
-  have h2 : (0 : Fr) * w5 + Fr.fromNat w7.val = Fr.fromNat w7.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h2 : (0 : Fr) * w5 + Fr.fromNat w7.val = Fr.fromNat w7.val := by simp
   rw [h2]
-  have h3 : (0 : Fr) * w4 + Fr.fromNat w7.val = Fr.fromNat w7.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h3 : (0 : Fr) * w4 + Fr.fromNat w7.val = Fr.fromNat w7.val := by simp
   rw [h3]
-  have h4 : (0 : Fr) * w3 + Fr.fromNat w7.val = Fr.fromNat w7.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h4 : (0 : Fr) * w3 + Fr.fromNat w7.val = Fr.fromNat w7.val := by simp
   rw [h4]
-  have h5 : (0 : Fr) * w2 + Fr.fromNat w7.val = Fr.fromNat w7.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h5 : (0 : Fr) * w2 + Fr.fromNat w7.val = Fr.fromNat w7.val := by simp
   rw [h5]
-  have h6 : (0 : Fr) * w1 + Fr.fromNat w7.val = Fr.fromNat w7.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h6 : (0 : Fr) * w1 + Fr.fromNat w7.val = Fr.fromNat w7.val := by simp
   rw [h6]
-  have h7 : (0 : Fr) * w0 + Fr.fromNat w7.val = Fr.fromNat w7.val := by
-    simp only [Fr.zero_mul, Fr.zero_add', Fr.fromNat_val]
+  have h7 : (0 : Fr) * w0 + Fr.fromNat w7.val = Fr.fromNat w7.val := by simp
   rw [h7]
 
 theorem evalLC_c2_c (w0 w1 w2 w3 w4 w5 w6 w7 : Fr) :
   evalLC [1, 0, 0, 0, 0, 0, 0, 0] [w0, w1, w2, w3, w4, w5, w6, w7] = Fr.fromNat w0.val := by
   repeat rw [evalLC]
-  have h0 : (0 : Fr) * w7 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h0 : (0 : Fr) * w7 + (0 : Fr) = (0 : Fr) := by simp
   rw [h0]
-  have h1 : (0 : Fr) * w6 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h1 : (0 : Fr) * w6 + (0 : Fr) = (0 : Fr) := by simp
   rw [h1]
-  have h2 : (0 : Fr) * w5 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h2 : (0 : Fr) * w5 + (0 : Fr) = (0 : Fr) := by simp
   rw [h2]
-  have h3 : (0 : Fr) * w4 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h3 : (0 : Fr) * w4 + (0 : Fr) = (0 : Fr) := by simp
   rw [h3]
-  have h4 : (0 : Fr) * w3 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h4 : (0 : Fr) * w3 + (0 : Fr) = (0 : Fr) := by simp
   rw [h4]
-  have h5 : (0 : Fr) * w2 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h5 : (0 : Fr) * w2 + (0 : Fr) = (0 : Fr) := by simp
   rw [h5]
-  have h6 : (0 : Fr) * w1 + (0 : Fr) = (0 : Fr) := by
-    simp only [Fr.zero_mul, Fr.add_zero', Fr.val_zero, Fr.fromNat_zero]
+  have h6 : (0 : Fr) * w1 + (0 : Fr) = (0 : Fr) := by simp
   rw [h6]
-  have h7 : (1 : Fr) * w0 + (0 : Fr) = Fr.fromNat w0.val := by
-    simp only [Fr.one_mul', Fr.add_zero', Fr.fromNat_val]
+  have h7 : (1 : Fr) * w0 + (0 : Fr) = Fr.fromNat w0.val := by simp
   rw [h7]
 
 -- ============================================================================
@@ -259,11 +235,9 @@ theorem DepositCircuit.completeness :
       · exact h_commit
       constructor
       · -- C3: value < 2^128
-        have h_val : (Fr.fromNat w.value).val = w.value := by
-          simp [Fr.fromNat]
-          rw [Nat.mod_eq_of_lt]
-          exact value_lt_p w.h_value_range
-        rw [h_val]
+        have h_lt_p : w.value < BN254_P := value_lt_p w.h_value_range
+        simp [Fr.fromNat]
+        rw [Nat.mod_eq_of_lt h_lt_p]
         exact w.h_value_range
       · exact h_rcm
     exact h_sem
@@ -425,21 +399,14 @@ theorem DepositCircuit.soundness :
   -- value_fr.val % BN254_P ≠ 0: if it were 0, then value_fr * inv_val = 0 ≠ 1
   have h_nz_mod : value_fr.val % BN254_P ≠ 0 := by
     intro h_zero
-    have h1 : (value_fr.val * inv_val.val) % BN254_P = 0 := by
-      rw [Nat.mul_mod]
-      rw [h_zero]
-      simp
-    have h2 : Fr.fromNat (value_fr.val * inv_val.val) = Fr.fromNat 0 := by
-      rw [Fr.fromNat_eq_iff]
-      exact h1
-    have h3 : value_fr * inv_val = 0 := by
-      have h_val : value_fr * inv_val = Fr.fromNat (value_fr.val * inv_val.val) := rfl
-      rw [h_val, h2]
-      rfl
-    rw [h3] at h_c2
-    have h4 : (0 : Fr) = 1 := h_c2
-    have h5 : (0 : Fr).val = (1 : Fr).val := by rw [h4]
-    simp at h5
+    have h_val_zero : value_fr.val = 0 := by
+      rw [Nat.mod_eq_of_lt (ZMod.val_lt value_fr)] at h_zero
+      exact h_zero
+    have h_fr_zero : value_fr = 0 := by
+      rw [←ZMod.val_eq_zero]
+      exact h_val_zero
+    rw [h_fr_zero] at h_c2
+    simp at h_c2
 
   -- Since value_nat = value_fr.val and value_fr.val % BN254_P ≠ 0,
   -- we have value_nat > 0 (because 0 % p = 0)
@@ -467,17 +434,18 @@ theorem DepositCircuit.soundness :
     rw [h4]
     exact h3
 
-  -- value_fr = Fr.fromNat value_nat (since value_fr.val < BN254_P)
-  have h_val_eq : Fr.fromNat value_nat = value_fr := by
+  -- value_fr = ↑value_nat (since value_nat = value_fr.val and value_fr.val < BN254_P)
+  have h_val_eq : ↑value_nat = value_fr := by
     have h1 : value_nat = value_fr.val := rfl
     rw [h1]
-    exact Fr.fromNat_eq_of_lt value_fr h_val_lt_p
+    simp [Fr.fromNat]
 
   -- inv_val = Fr.inv (Fr.fromNat value_nat) (by inverse uniqueness)
   have h_inv_eq : inv_val = Fr.inv (Fr.fromNat value_nat) := by
-    have h : Fr.inv (Fr.fromNat value_nat) = Fr.inv value_fr := by
-      rw [h_val_eq]
-    rw [h]
+    have h_fn : Fr.fromNat value_nat = value_fr := by
+      simp [Fr.fromNat]
+      exact h_val_eq
+    rw [h_fn]
     exact Fr.inv_unique value_fr inv_val h_nz_mod h_c2
 
   -- Public input and witness component equalities

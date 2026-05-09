@@ -25,7 +25,7 @@ def ark (state : List Fr) (round : Nat) (t : Nat)
 /-- MDS matrix multiplication (Mix step) -/
 def mix (state : List Fr) (t : Nat) (mds : List (List Fr)) : List Fr :=
   List.map (fun i =>
-    let row := List.map (fun j => mds[i]![j]!) (List.range t)
+    let row := List.map (fun j => (mds[i]!)[j]!) (List.range t)
     let pairs := row.zip state
     pairs.foldl (fun acc (m, s) => acc + m * s) 0)
     (List.range t)

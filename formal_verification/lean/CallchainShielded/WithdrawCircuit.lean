@@ -145,7 +145,7 @@ theorem evalLC_sel_3_10 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 : Fr) :
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9]
     = Fr.fromNat w3.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 9 (inv_value) in 10-element assignment -/
 theorem evalLC_sel_9_10 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 : Fr) :
@@ -153,7 +153,7 @@ theorem evalLC_sel_9_10 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 : Fr) :
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9]
     = Fr.fromNat w9.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 0 (constant 1) in 10-element assignment -/
 theorem evalLC_sel_0_10 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 : Fr) :
@@ -161,7 +161,7 @@ theorem evalLC_sel_0_10 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 : Fr) :
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9]
     = Fr.fromNat w0.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 -- ============================================================================
 -- Helper: list decomposition for 10 elements
@@ -208,7 +208,7 @@ theorem WithdrawCircuit.completeness :
         have h3 : value.val = w.value := by rw [h_vm]
         rw [h3]
         exact h_lt_p
-      have h3 : value = Fr.fromNat value.val := (Fr.fromNat_eq_of_lt value h2).symm
+      have h3 : value = Fr.fromNat value.val := (Fr.fromNat_eq_val value).symm
       rw [h1, h3]
       rw [h_vm]
     rw [h_val_eq]
@@ -284,6 +284,7 @@ theorem WithdrawCircuit.soundness :
       rw [hw_eq]
       rfl
     rw [h3]
+    simp
 
   have h_eval_b : evalLC c2WithdrawConstraint.b assignment.values = Fr.fromNat inv_val.val := by
     rw [hw_eq]
@@ -294,6 +295,7 @@ theorem WithdrawCircuit.soundness :
       rw [hw_eq]
       rfl
     rw [h9]
+    simp
 
   have h_eval_c : evalLC c2WithdrawConstraint.c assignment.values = Fr.fromNat assignment.one.val := by
     rw [hw_eq]
@@ -304,6 +306,7 @@ theorem WithdrawCircuit.soundness :
       rw [hw_eq]
       rfl
     rw [h0]
+    simp
 
   -- Extract C2 constraint satisfaction
   have h_c2 : constraintSatisfied c2WithdrawConstraint assignment.values := by
@@ -346,7 +349,7 @@ theorem WithdrawCircuit.soundness :
   have h_val_eq : Fr.fromNat val_nat = val_fr := by
     have h1 : val_nat = val_fr.val := rfl
     rw [h1]
-    exact Fr.fromNat_eq_of_lt val_fr h_lt_p
+    exact Fr.fromNat_eq_val val_fr
 
   -- inv_val = Fr.inv (Fr.fromNat val_nat)
   have h_inv_eq : inv_val = Fr.inv (Fr.fromNat val_nat) := by

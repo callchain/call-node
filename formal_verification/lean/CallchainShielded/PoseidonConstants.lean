@@ -1,5 +1,7 @@
 import CallchainShielded.Fr
 
+set_option maxHeartbeats 0
+
 namespace CallchainShielded
 
 /-! Poseidon constants extracted from poseidon-ark-no-std v0.0.1 -/

@@ -325,7 +325,7 @@ theorem evalLC_sel_0 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w0.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 7 (input1_value) -/
 theorem evalLC_sel_7 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -333,7 +333,7 @@ theorem evalLC_sel_7 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w7.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 12 (inv_input1) -/
 theorem evalLC_sel_12 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -341,7 +341,7 @@ theorem evalLC_sel_12 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w12.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 13 (input2_value) -/
 theorem evalLC_sel_13 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -349,7 +349,7 @@ theorem evalLC_sel_13 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w13.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 18 (inv_input2) -/
 theorem evalLC_sel_18 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -357,7 +357,7 @@ theorem evalLC_sel_18 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w18.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 19 (output1_value) -/
 theorem evalLC_sel_19 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -365,7 +365,7 @@ theorem evalLC_sel_19 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w19.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 22 (inv_output1) -/
 theorem evalLC_sel_22 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -373,7 +373,7 @@ theorem evalLC_sel_22 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w22.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 23 (output2_value) -/
 theorem evalLC_sel_23 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -381,7 +381,7 @@ theorem evalLC_sel_23 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w23.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 /-- Selector at index 26 (inv_output2) -/
 theorem evalLC_sel_26 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 : Fr) :
@@ -389,7 +389,7 @@ theorem evalLC_sel_26 (w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16
            [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15, w16, w17, w18, w19, w20, w21, w22, w23, w24, w25, w26]
     = Fr.fromNat w26.val := by
   repeat rw [evalLC]
-  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero]
+  simp only [Fr.zero_mul, Fr.add_zero', Fr.zero_add', Fr.one_mul', Fr.fromNat_val, Fr.val_zero, Fr.fromNat_zero, Fr.fromNat_eq_val]
 
 -- ============================================================================
 -- Completeness Theorem
@@ -736,12 +736,14 @@ theorem TransferCircuit.soundness :
     simp [c2In1Constraint]
     rw [evalLC_sel_7 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_in1_val]
+    simp
 
   have h_eval_c2_in1_b : evalLC c2In1Constraint.b assignment.values = Fr.fromNat inv_in1.val := by
     rw [hw_eq]
     simp [c2In1Constraint]
     rw [evalLC_sel_12 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_inv_in1]
+    simp
 
   have h_eval_c2_in1_c : evalLC c2In1Constraint.c assignment.values = Fr.fromNat assignment.one.val := by
     rw [hw_eq]
@@ -752,18 +754,21 @@ theorem TransferCircuit.soundness :
       rw [hw_eq]
       rfl
     rw [h0]
+    simp
 
   have h_eval_c2_in2_a : evalLC c2In2Constraint.a assignment.values = Fr.fromNat in2_val_fr.val := by
     rw [hw_eq]
     simp [c2In2Constraint]
     rw [evalLC_sel_13 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_in2_val]
+    simp
 
   have h_eval_c2_in2_b : evalLC c2In2Constraint.b assignment.values = Fr.fromNat inv_in2.val := by
     rw [hw_eq]
     simp [c2In2Constraint]
     rw [evalLC_sel_18 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_inv_in2]
+    simp
 
   have h_eval_c2_in2_c : evalLC c2In2Constraint.c assignment.values = Fr.fromNat assignment.one.val := by
     rw [hw_eq]
@@ -774,18 +779,21 @@ theorem TransferCircuit.soundness :
       rw [hw_eq]
       rfl
     rw [h0]
+    simp
 
   have h_eval_c2_out1_a : evalLC c2Out1Constraint.a assignment.values = Fr.fromNat out1_val_fr.val := by
     rw [hw_eq]
     simp [c2Out1Constraint]
     rw [evalLC_sel_19 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_out1_val]
+    simp
 
   have h_eval_c2_out1_b : evalLC c2Out1Constraint.b assignment.values = Fr.fromNat inv_out1.val := by
     rw [hw_eq]
     simp [c2Out1Constraint]
     rw [evalLC_sel_22 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_inv_out1]
+    simp
 
   have h_eval_c2_out1_c : evalLC c2Out1Constraint.c assignment.values = Fr.fromNat assignment.one.val := by
     rw [hw_eq]
@@ -796,18 +804,21 @@ theorem TransferCircuit.soundness :
       rw [hw_eq]
       rfl
     rw [h0]
+    simp
 
   have h_eval_c2_out2_a : evalLC c2Out2Constraint.a assignment.values = Fr.fromNat out2_val_fr.val := by
     rw [hw_eq]
     simp [c2Out2Constraint]
     rw [evalLC_sel_23 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_out2_val]
+    simp
 
   have h_eval_c2_out2_b : evalLC c2Out2Constraint.b assignment.values = Fr.fromNat inv_out2.val := by
     rw [hw_eq]
     simp [c2Out2Constraint]
     rw [evalLC_sel_26 w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26]
     rw [h_inv_out2]
+    simp
 
   have h_eval_c2_out2_c : evalLC c2Out2Constraint.c assignment.values = Fr.fromNat assignment.one.val := by
     rw [hw_eq]
@@ -818,6 +829,7 @@ theorem TransferCircuit.soundness :
       rw [hw_eq]
       rfl
     rw [h0]
+    simp
 
   -- Extract C2 constraint satisfaction
   have h_c2_in1 : constraintSatisfied c2In1Constraint assignment.values := by
@@ -964,22 +976,22 @@ theorem TransferCircuit.soundness :
   have h_in1_val_eq : Fr.fromNat in1_val_nat = in1_val_fr := by
     have h1 : in1_val_nat = in1_val_fr.val := rfl
     rw [h1]
-    exact Fr.fromNat_eq_of_lt in1_val_fr h_in1_lt_p
+    exact Fr.fromNat_eq_val in1_val_fr
 
   have h_in2_val_eq : Fr.fromNat in2_val_nat = in2_val_fr := by
     have h1 : in2_val_nat = in2_val_fr.val := rfl
     rw [h1]
-    exact Fr.fromNat_eq_of_lt in2_val_fr h_in2_lt_p
+    exact Fr.fromNat_eq_val in2_val_fr
 
   have h_out1_val_eq : Fr.fromNat out1_val_nat = out1_val_fr := by
     have h1 : out1_val_nat = out1_val_fr.val := rfl
     rw [h1]
-    exact Fr.fromNat_eq_of_lt out1_val_fr h_out1_lt_p
+    exact Fr.fromNat_eq_val out1_val_fr
 
   have h_out2_val_eq : Fr.fromNat out2_val_nat = out2_val_fr := by
     have h1 : out2_val_nat = out2_val_fr.val := rfl
     rw [h1]
-    exact Fr.fromNat_eq_of_lt out2_val_fr h_out2_lt_p
+    exact Fr.fromNat_eq_val out2_val_fr
 
   -- Derive inverse equalities
   have h_inv_in1_eq : inv_in1 = Fr.inv (Fr.fromNat in1_val_nat) := by
