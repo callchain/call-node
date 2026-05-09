@@ -18,13 +18,15 @@
 //! - rcm: [u8; 32]
 //! - recipient_ivk: [u8; 32]
 //! - rho: [u8; 32]
+//! - spending_key: [u8; 32]
 //! - merkle_path: Vec<([u8; 32], bool)>
 //!
 //! Constraints:
 //!   W1. Nullifier derivation: poseidon_hash(poseidon_hash("fvk_from_ivk" || ivk), rho) == public nullifier
 //!   W2. Merkle path validity: Walk the Poseidon Merkle path, enforce root == public merkle_root
 //!   W3. Value match: note_value == public value
-//!   W4. Range & asset: Non-zero value, 128-bit range, asset_id consistency
+//!   W4. Spending rights: ivk == poseidon_hash_tagged("call/shielded/ivk", [sk])
+//!   W5. Range & asset: Non-zero value, 128-bit range, asset_id consistency
 
 use crate::poseidon::bytes_to_fr;
 use crate::poseidon::domain;
@@ -39,6 +41,7 @@ pub struct WithdrawWitness {
     pub rcm: [u8; 32],
     pub recipient_ivk: [u8; 32],
     pub rho: [u8; 32],
+    pub spending_key: [u8; 32],
     pub merkle_path: Vec<([u8; 32], bool)>,
 }
 
@@ -140,12 +143,21 @@ impl ConstraintSynthesizer<Fr> for WithdrawCircuit {
         let rho_fr = bytes_to_fr(&witness.rho);
         let rho_var = FpVar::new_witness(cs.clone(), || Ok(rho_fr))?;
 
+        let sk_fr = bytes_to_fr(&witness.spending_key);
+        let sk_var = FpVar::new_witness(cs.clone(), || Ok(sk_fr))?;
+
         // W1: Nullifier derivation
         let fvk_tag_fr = domain_tag_to_fr(domain::FVK_FROM_IVK);
         let fvk_tag_var = FpVar::new_constant(cs.clone(), fvk_tag_fr)?;
         let fvk_from_ivk = poseidon_hash_gadget(cs.clone(), &[fvk_tag_var, ivk_var.clone()])?;
         let computed_nf = poseidon_hash_gadget(cs.clone(), &[fvk_from_ivk, rho_var.clone()])?;
         computed_nf.enforce_equal(&nullifier_var)?;
+
+        // W4: Spending rights — IVK derived from spending_key must match note IVK
+        let ivk_tag_fr = domain_tag_to_fr(domain::IVK_FROM_SK);
+        let ivk_tag_var = FpVar::new_constant(cs.clone(), ivk_tag_fr)?;
+        let derived_ivk = poseidon_hash_gadget(cs.clone(), &[ivk_tag_var, sk_var])?;
+        derived_ivk.enforce_equal(&ivk_var)?;
 
         // W2: Merkle path validity
         let note_commitment = poseidon_hash_gadget(
@@ -276,6 +288,7 @@ mod tests {
             rcm,
             recipient_ivk: vk.incoming_view_key,
             rho,
+            spending_key: sk,
             merkle_path,
         };
 
@@ -445,6 +458,7 @@ mod tests {
             rcm,
             recipient_ivk: vk.incoming_view_key,
             rho,
+            spending_key: sk,
             merkle_path,
         };
 

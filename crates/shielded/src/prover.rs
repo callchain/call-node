@@ -523,6 +523,7 @@ mod real_prover_impl {
             rcm,
             recipient_ivk: vk.incoming_view_key,
             rho,
+            spending_key: sk,
             merkle_path,
         };
         let target_address = [1u8; 20];

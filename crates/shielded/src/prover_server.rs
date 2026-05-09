@@ -219,6 +219,8 @@ pub struct WithdrawRequest {
     pub target_address: String,
     #[serde(rename = "recipientIvk")]
     pub recipient_ivk: String,
+    #[serde(rename = "spendingKey")]
+    pub spending_key: String,
     pub rho: String,
     #[serde(rename = "merkleRoot")]
     pub merkle_root: String,
@@ -509,6 +511,7 @@ async fn handle_withdraw(
     Json(req): Json<WithdrawRequest>,
 ) -> Result<Json<WithdrawResponse>, (StatusCode, String)> {
     let recipient_ivk = decode_hex_32(&req.recipient_ivk, "recipientIvk")?;
+    let spending_key = decode_hex_32(&req.spending_key, "spendingKey")?;
     let rho = decode_hex_32(&req.rho, "rho")?;
     let target_address = decode_hex_20(&req.target_address, "targetAddress")?;
     let merkle_root = decode_hex_32(&req.merkle_root, "merkleRoot")?;
@@ -550,6 +553,7 @@ async fn handle_withdraw(
         rcm,
         recipient_ivk,
         rho,
+        spending_key,
         merkle_path,
     };
 
