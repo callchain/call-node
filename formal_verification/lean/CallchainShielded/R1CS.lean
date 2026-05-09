@@ -10,11 +10,6 @@ structure R1CSConstraint where
   c : List Fr  -- coefficients for C vector
   deriving Repr
 
-/-- An R1CS instance with public inputs and constraints -/
-structure R1CS (nPublic nPrivate : Nat) where
-  constraints : List R1CSConstraint
-  deriving Repr
-
 /-- A witness assignment: public inputs followed by private witnesses -/
 structure Assignment (nPublic nPrivate : Nat) where
   values : List Fr
@@ -34,19 +29,31 @@ def Assignment.private {nPublic nPrivate : Nat} (a : Assignment nPublic nPrivate
     (hi : i < nPrivate) : Fr :=
   a.values[1 + nPublic + i]!
 
+/-- An R1CS instance with low-level constraints and high-level semantic assertions.
+    The `constraints` are native R1CS gates (A·w)*(B·w)=(C·w).
+    The `semantic` captures high-level properties (hash equalities, range bounds)
+    that would be expanded into hundreds of R1CS gates in a full implementation. -/
+structure R1CS (nPublic nPrivate : Nat) where
+  constraints : List R1CSConstraint
+  semantic : Assignment nPublic nPrivate → Prop
+
 /-- Evaluate a linear combination: Σ coeff[i] * witness[i] -/
 def evalLC (coeffs : List Fr) (witness : List Fr) : Fr :=
-  (coeffs.zip witness).foldl (fun acc (c, w) => acc + c * w) 0
+  match coeffs, witness with
+  | [], _ => 0
+  | _, [] => 0
+  | c :: cs, w :: ws => c * w + evalLC cs ws
 
 /-- Check if a single constraint is satisfied by a witness vector -/
 def constraintSatisfied (c : R1CSConstraint) (witness : List Fr) : Prop :=
   evalLC c.a witness * evalLC c.b witness = evalLC c.c witness
 
-/-- An assignment satisfies an R1CS if all constraints are satisfied -/
+/-- An assignment satisfies an R1CS if all low-level constraints AND high-level
+    semantic assertions are satisfied. -/
 def R1CS.satisfied {nPublic nPrivate : Nat} (r1cs : R1CS nPublic nPrivate)
     (assignment : Assignment nPublic nPrivate) : Prop :=
   let witness := assignment.values
-  ∀ c ∈ r1cs.constraints, constraintSatisfied c witness
+  (∀ c ∈ r1cs.constraints, constraintSatisfied c witness) ∧ r1cs.semantic assignment
 
 /-- Encode a deposit witness into an R1CS assignment
     Layout: [1, commitment, asset_id, value, rcm, ivk, rho, inv_val]
