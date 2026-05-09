@@ -1,50 +1,81 @@
 /-!
-# BN254 Finite Field (Fr)
+# BN254 Finite Field (Fr) — Minimal Stub
 
-The scalar field of the BN254 elliptic curve, used by all shielded circuits.
-
-`p = 21888242871839275222246405745257275088548364400416034343698204186575808495617`
+Temporary definitions to allow `lake build` without mathlib dependency.
+When mathlib is available, replace with `ZMod BN254_P`.
 -/
-
-import Mathlib
 
 namespace CallchainShielded
 
-/-- The BN254 prime: 2^254 + 0x224698fc094cf91b992d30ed00000001 -/
-def BN254_P : ℕ :=
+/-- The BN254 prime -/
+def BN254_P : Nat :=
   21888242871839275222246405745257275088548364400416034343698204186575808495617
 
-/-- BN254 Fr field elements -/
-def Fr := ZMod BN254_P
+/-- Fast modular exponentiation: base^exp mod mod -/
+def powMod (base exp mod : Nat) : Nat :=
+  if mod = 0 then 0
+  else if exp = 0 then 1 % mod
+  else
+    let half := powMod base (exp / 2) mod
+    let result := (half * half) % mod
+    if exp % 2 = 1 then (result * base) % mod
+    else result
 
-instance : Field Fr := ZMod.instField BN254_P
+/-- BN254 Fr field elements represented as natural numbers modulo p -/
+structure Fr where
+  val : Nat
+  deriving Repr, BEq, Ord
 
-instance : Fintype Fr := ZMod.fintype BN254_P
+/-- Reduce a natural number to Fr (mod p) -/
+def Fr.fromNat (n : Nat) : Fr := ⟨n % BN254_P⟩
 
-instance : Inhabited Fr := ⟨0⟩
+/-- Zero element -/
+instance : OfNat Fr 0 where
+  ofNat := Fr.fromNat 0
 
-/-- Fr is a prime field -/
-lemma Fr.prime : Nat.Prime BN254_P := by
-  -- This is a known prime; in a full formalization this would be a native_decide or proven externally
-  sorry
+/-- One element -/
+instance : OfNat Fr 1 where
+  ofNat := Fr.fromNat 1
 
-/-- The order of the multiplicative group Fr* -/
-lemma Fr.mul_order : Fintype.card (Units Fr) = BN254_P - 1 := by
-  rw [ZMod.card_units_eq_totient, Nat.totient_prime]
-  · exact Fr.prime
-  · exact Nat.Prime.one_lt Fr.prime
+/-- Addition modulo p -/
+instance : Add Fr where
+  add a b := Fr.fromNat (a.val + b.val)
 
-/-- Every non-zero element has a multiplicative inverse -/
-lemma Fr.inv_exists (x : Fr) (hx : x ≠ 0) : ∃ y, x * y = 1 := by
-  use x⁻¹
-  exact mul_inv_cancel₀ hx
+/-- Multiplication modulo p -/
+instance : Mul Fr where
+  mul a b := Fr.fromNat (a.val * b.val)
 
-/-- Zero is not one in Fr -/
-lemma Fr.zero_ne_one : (0 : Fr) ≠ 1 := by
-  have h : BN254_P > 1 := by norm_num [BN254_P]
-  exact Ne.symm (ZMod.ne_zero_iff.mpr (by omega))
+/-- Additive inverse -/
+instance : Neg Fr where
+  neg a := Fr.fromNat (BN254_P - a.val % BN254_P)
 
-/-- The field characteristic is p -/
-lemma Fr.charP : CharP Fr BN254_P := ZMod.charP BN254_P
+/-- Subtraction -/
+instance : Sub Fr where
+  sub a b := Fr.fromNat (a.val + (BN254_P - b.val % BN254_P))
+
+/-- Multiplicative inverse (Fermat's little theorem) -/
+def Fr.inv (a : Fr) : Fr :=
+  if a.val % BN254_P = 0 then Fr.fromNat 0
+  else Fr.fromNat (powMod a.val (BN254_P - 2) BN254_P)
+
+/-- Power operation -/
+instance : Pow Fr Nat where
+  pow a n := Fr.fromNat (powMod a.val n BN254_P)
+
+/-- String representation -/
+instance : ToString Fr where
+  toString a := toString (a.val % BN254_P)
+
+/-- Cast from Nat to Fr -/
+instance : Coe Nat Fr where
+  coe n := Fr.fromNat n
+
+/-- Inhabited instance for default values -/
+instance : Inhabited Fr where
+  default := Fr.fromNat 0
+
+/-- Any natural number literal can be used as Fr -/
+instance (n : Nat) : OfNat Fr n where
+  ofNat := Fr.fromNat n
 
 end CallchainShielded

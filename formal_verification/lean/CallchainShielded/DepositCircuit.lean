@@ -1,16 +1,3 @@
-/-!
-# DepositCircuit Formal Model and Proofs
-
-The DepositCircuit is the simplest shielded circuit with 3 constraint families:
-1. Commitment validity: H(value, asset_id, rcm, rho) = commitment
-2. Value range: non-zero + 128-bit
-3. RCM determinism: H_tag("rcm", ivk, value, asset_id, rho) = rcm
-
-This file defines the circuit constraints, the high-level validity predicate,
-and states the completeness and soundness theorems.
--/
-
-import Mathlib
 import CallchainShielded.Fr
 import CallchainShielded.Poseidon
 import CallchainShielded.R1CS
@@ -23,7 +10,7 @@ namespace CallchainShielded
 
 /-- A deposit witness contains the private data needed to create a deposit proof -/
 structure DepositWitness where
-  value : ℕ
+  value : Nat
   rcm : Fr
   ivk : Fr
   rho : Fr
@@ -34,18 +21,18 @@ namespace DepositWitness
 
 /-- Compute the note commitment: H(value, asset_id, rcm, rho) -/
 def commitment (w : DepositWitness) (asset_id : Fr) : Fr :=
-  let v_fr := (w.value : Fr)
+  let v_fr : Fr := w.value
   poseidonHash [v_fr, asset_id, w.rcm, w.rho]
-    (by have h1 : (4 : ℕ) > 0 := by norm_num
-        have h2 : (4 : ℕ) ≤ 16 := by norm_num
+    (by have h1 : (4 : Nat) > 0 := by decide
+        have h2 : (4 : Nat) ≤ 16 := by decide
         exact ⟨h1, h2⟩)
 
 /-- Check RCM determinism: H_tag("rcm", ivk, value, asset_id, rho) = rcm -/
 def rcmValid (w : DepositWitness) (asset_id : Fr) : Prop :=
-  let v_fr := (w.value : Fr)
+  let v_fr : Fr := w.value
   poseidonHashTagged "rcm" [w.ivk, v_fr, asset_id, w.rho]
-    (by have h1 : (4 : ℕ) > 0 := by norm_num
-        have h2 : (4 : ℕ) ≤ 15 := by norm_num
+    (by have h1 : (4 : Nat) > 0 := by decide
+        have h2 : (4 : Nat) ≤ 15 := by decide
         exact ⟨h1, h2⟩)
     = w.rcm
 
@@ -119,10 +106,10 @@ theorem DepositCircuit.soundness :
     encodeDeposit w commitment asset_id = assignment := by
   intro assignment commitment asset_id h_sat
   -- Decode the assignment into witness components
-  let value_nat := (assignment.private 0 (by norm_num)).val
-  let rcm := assignment.private 1 (by norm_num)
-  let ivk := assignment.private 2 (by norm_num)
-  let rho := assignment.private 3 (by norm_num)
+  let value_nat := (assignment.private 0 (by decide)).val
+  let rcm := assignment.private 1 (by decide)
+  let ivk := assignment.private 2 (by decide)
+  let rho := assignment.private 3 (by decide)
 
   -- TODO: Construct the witness and prove validity
   -- From C1: commitment = H(value, asset_id, rcm, rho)
@@ -130,18 +117,10 @@ theorem DepositCircuit.soundness :
   -- From C3: value < 2^128 (from bit decomposition constraint)
   -- From C4: rcm = H_tag("rcm", ivk, value, asset_id, rho)
 
-  use ⟨
-    value_nat,
-    rcm,
-    ivk,
-    rho,
-    by sorry,  -- value > 0 from non-zero constraint
-    by sorry   -- value < 2^128 from range constraint
-  ⟩
+  refine ⟨⟨value_nat, rcm, ivk, rho, by sorry, by sorry⟩, ?_, ?_⟩
   constructor
-  · constructor
-    · sorry  -- commitment validity from C1
-    · sorry  -- RCM determinism from C4
+  · sorry  -- commitment validity from C1
+  · sorry  -- RCM determinism from C4
   · sorry  -- encoding equality
 
 end CallchainShielded

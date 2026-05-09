@@ -4,8 +4,3 @@ defaultTargets = ["CallchainShielded"]
 
 [[lean_lib]]
 name = "CallchainShielded"
-
-[[require]]
-name = "mathlib"
-scope = "leanprover-community"
-version = "v4.16.0"
