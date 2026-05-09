@@ -46,5 +46,21 @@ jobs:
       - name: Build
         run: lake build
 
+      - name: Verify no sorry
+        run: |
+          if grep -r "sorry" CallchainShielded/; then
+            echo "Found sorry in proofs"
+            exit 1
+          fi
+
+      - name: Verify axiom count
+        run: |
+          AXIOM_COUNT=$(grep -c "axiom" CallchainShielded/Fr.lean || true)
+          if [ "$AXIOM_COUNT" -gt 2 ]; then
+            echo "Too many axioms: $AXIOM_COUNT (expected <= 2)"
+            exit 1
+          fi
+          echo "Axiom count: $AXIOM_COUNT (OK)"
+
       - name: Test
         run: lake test || true
