@@ -1,8 +1,21 @@
 /-!
 # BN254 Finite Field (Fr) — Minimal Stub
 
-Temporary definitions to allow `lake build` without mathlib dependency.
-When mathlib is available, replace with `ZMod BN254_P`.
+Lean 4 core definitions for the BN254 scalar field, avoiding mathlib4
+dependency. When mathlib is available, replace with `ZMod BN254_P` which
+provides `Field (ZMod p)` eliminating the two remaining axioms.
+
+## Axiom status
+
+**Proven from Lean 4 core** (4/6 eliminated):
+- `Nat.mul_mod` / `Nat.add_mod` — core theorems
+- `Fr.mul_fromNat` / `Fr.add_fromNat` — proven from definitions + core
+
+**Remaining axioms** (2/6, require mathlib4 `ZMod.instField`):
+- `Fr.inv_mul` — Fermat's Little Theorem (a^(p-1) ≡ 1 mod p for prime p)
+- `Fr.mul_cancel_left` — no zero divisors in Z/pZ when p is prime
+
+Both are standard properties of the prime field Z/BN254_P.
 -/
 
 namespace CallchainShielded
@@ -58,11 +71,11 @@ def Fr.inv (a : Fr) : Fr :=
   if a.val % BN254_P = 0 then Fr.fromNat 0
   else Fr.fromNat (powMod a.val (BN254_P - 2) BN254_P)
 
-/-- Multiplicative inverse axiom: a * a⁻¹ = 1 for a ≠ 0.
-    This follows from Fermat's little theorem (a^(p-1) ≡ 1 mod p).
-    Marked as axiom because a full proof requires substantial number theory
-    infrastructure that mathlib provides via ZMod.instField.
-    TODO: Replace with theorem proof when mathlib is available. -/
+/-- Multiplicative inverse: a * a⁻¹ = 1 for a ≠ 0.
+    This is Fermat's Little Theorem for the BN254 prime field.
+    Requires proving BN254_P is prime and that a^(p-1) ≡ 1 (mod p).
+    Mathlib provides this via `ZMod.instField BN254_P`.
+    Remaining axiom pending mathlib4 integration. -/
 axiom Fr.inv_mul (a : Fr) (ha : a.val % BN254_P ≠ 0) : a * Fr.inv a = 1
 
 -- ============================================================================
@@ -258,11 +271,13 @@ instance (n : Nat) : OfNat Fr n where
   ofNat := Fr.fromNat n
 
 -- ============================================================================
--- Field cancellation and inverse uniqueness
+-- Field axioms (require mathlib4 ZMod.instField to prove)
 -- ============================================================================
 
 /-- Left cancellation in a field: if a ≠ 0 and a * b = a * c, then b = c.
-    Provable in mathlib via Field properties. Marked as axiom pending mathlib. -/
+    This follows from the field having no zero divisors (true for Z/pZ
+    when p is prime). Mathlib provides this via `Field` properties.
+    Depends on `Fr.inv_mul` and the primality of BN254_P. -/
 axiom Fr.mul_cancel_left (a b c : Fr) (ha : a.val % BN254_P ≠ 0) (h : a * b = a * c) : b = c
 
 /-- Uniqueness of multiplicative inverse: if a * b = 1, then b = a⁻¹. -/
