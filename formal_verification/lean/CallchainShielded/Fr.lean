@@ -66,20 +66,30 @@ def Fr.inv (a : Fr) : Fr :=
 axiom Fr.inv_mul (a : Fr) (ha : a.val % BN254_P ≠ 0) : a * Fr.inv a = 1
 
 -- ============================================================================
--- Modular arithmetic axioms (provable in mathlib via Nat.ModEq)
+-- Modular arithmetic theorems (provided by Lean 4 core)
 -- ============================================================================
 
-/-- Modular multiplication: (a * b) % n = ((a % n) * (b % n)) % n -/
-axiom Nat.mul_mod (a b n : Nat) (hn : n > 0) : (a * b) % n = ((a % n) * (b % n)) % n
+/-- Fr.fromNat distributes over multiplication.
+    Proven from Nat.mul_mod in Lean 4 core. -/
+theorem Fr.mul_fromNat (a b : Nat) : Fr.fromNat (a * b) = Fr.fromNat a * Fr.fromNat b := by
+  have h1 : Fr.fromNat a * Fr.fromNat b = Fr.fromNat ((Fr.fromNat a).val * (Fr.fromNat b).val) := rfl
+  rw [h1]
+  have h2 : (Fr.fromNat a).val = a % BN254_P := rfl
+  have h3 : (Fr.fromNat b).val = b % BN254_P := rfl
+  rw [h2, h3]
+  dsimp only [Fr.fromNat]
+  rw [Nat.mul_mod]
 
-/-- Modular addition: (a + b) % n = ((a % n) + (b % n)) % n -/
-axiom Nat.add_mod (a b n : Nat) (hn : n > 0) : (a + b) % n = ((a % n) + (b % n)) % n
-
-/-- Fr.fromNat distributes over multiplication -/
-axiom Fr.mul_fromNat (a b : Nat) : Fr.fromNat (a * b) = Fr.fromNat a * Fr.fromNat b
-
-/-- Fr.fromNat distributes over addition -/
-axiom Fr.add_fromNat (a b : Nat) : Fr.fromNat (a + b) = Fr.fromNat a + Fr.fromNat b
+/-- Fr.fromNat distributes over addition.
+    Proven from Nat.add_mod in Lean 4 core. -/
+theorem Fr.add_fromNat (a b : Nat) : Fr.fromNat (a + b) = Fr.fromNat a + Fr.fromNat b := by
+  have h1 : Fr.fromNat a + Fr.fromNat b = Fr.fromNat ((Fr.fromNat a).val + (Fr.fromNat b).val) := rfl
+  rw [h1]
+  have h2 : (Fr.fromNat a).val = a % BN254_P := rfl
+  have h3 : (Fr.fromNat b).val = b % BN254_P := rfl
+  rw [h2, h3]
+  dsimp only [Fr.fromNat]
+  rw [Nat.add_mod]
 
 /-- Injectivity of Fr.fromNat modulo p -/
 theorem Fr.fromNat_eq_iff (a b : Nat) : Fr.fromNat a = Fr.fromNat b ↔ a % BN254_P = b % BN254_P := by

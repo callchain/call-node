@@ -426,7 +426,7 @@ theorem DepositCircuit.soundness :
   have h_nz_mod : value_fr.val % BN254_P ≠ 0 := by
     intro h_zero
     have h1 : (value_fr.val * inv_val.val) % BN254_P = 0 := by
-      rw [Nat.mul_mod value_fr.val inv_val.val BN254_P (by decide)]
+      rw [Nat.mul_mod]
       rw [h_zero]
       simp
     have h2 : Fr.fromNat (value_fr.val * inv_val.val) = Fr.fromNat 0 := by

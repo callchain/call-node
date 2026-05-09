@@ -155,7 +155,7 @@ def verifyMerklePath (leaf : Fr) (path : MerklePath) : Fr :=
 theorem Fr.nonzero_of_mul_eq_one (a b : Fr) (h : a * b = 1) : a.val % BN254_P ≠ 0 := by
   intro h_zero
   have h1 : (a.val * b.val) % BN254_P = 0 := by
-    rw [Nat.mul_mod a.val b.val BN254_P (by decide)]
+    rw [Nat.mul_mod]
     rw [h_zero]
     simp
   have h2 : Fr.fromNat (a.val * b.val) = Fr.fromNat 0 := by
