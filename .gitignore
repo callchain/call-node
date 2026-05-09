@@ -19,3 +19,13 @@ arc-node/
 tempo/
 
 .claude/
+
+# Lean 4 build cache
+.lake/
+formal_verification/lean/.lake/
+
+# Backup files
+*.bak
+
+# Generated R1CS exports (reproducible via export_r1cs binary)
+r1cs/
