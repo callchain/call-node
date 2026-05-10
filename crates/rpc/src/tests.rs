@@ -1182,7 +1182,7 @@ mod tests {
         use call_crypto::recover_secp256k1_signer;
 
         let keystore = crate::keystore::LocalKeystore::new();
-        let (secret, pubkey) = call_crypto::generate_keypair();
+        let (secret, _pubkey) = call_crypto::generate_keypair();
         let addr = keystore.import_raw_key(&secret, None).expect("import ok");
 
         let message = b"hello world";
@@ -1277,5 +1277,120 @@ mod tests {
         let accounts = state.keystore.list_accounts();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0], addr);
+    }
+
+    // ------------------------------------------------------------------
+    // Access list tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_build_and_sign_tx_eip1559_with_access_list() {
+        let state = make_test_state();
+        let (secret, _pubkey) = call_crypto::generate_keypair();
+        let addr = call_crypto::pubkey_to_address(&_pubkey);
+        state.keystore.import_raw_key(&secret, None).expect("import ok");
+        state.keystore.import_raw_key(&secret, None).expect("import ok");
+
+        let access_list = serde_json::json!([
+            {
+                "address": "0x0000000000000000000000000000000000000001",
+                "storageKeys": [
+                    "0x0000000000000000000000000000000000000000000000000000000000000001",
+                    "0x0000000000000000000000000000000000000000000000000000000000000002"
+                ]
+            }
+        ]);
+
+        let tx_obj = serde_json::json!({
+            "from": format!("{:?}", addr),
+            "to": format!("{:?}", test_addr(2)),
+            "value": "0x64",
+            "gas": "0x5208",
+            "type": "0x2",
+            "maxFeePerGas": "0xa",
+            "maxPriorityFeePerGas": "0x1",
+            "nonce": "0x0",
+            "accessList": access_list,
+        });
+
+        let raw_hex = crate::standard::build_and_sign_tx(&tx_obj, &state).expect("sign ok");
+        assert!(raw_hex.starts_with("0x"));
+
+        // Decode and verify it's an EIP-1559 envelope with access list
+        let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode hex");
+        let envelope = alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
+        match envelope {
+            alloy_consensus::TxEnvelope::Eip1559(signed) => {
+                let tx = signed.tx();
+                assert_eq!(tx.access_list.0.len(), 1);
+                assert_eq!(tx.access_list.0[0].address, alloy_primitives::address!("0x0000000000000000000000000000000000000001"));
+                assert_eq!(tx.access_list.0[0].storage_keys.len(), 2);
+            }
+            other => panic!("expected EIP-1559 envelope, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_and_sign_tx_eip2930_with_access_list() {
+        let state = make_test_state();
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let addr = call_crypto::pubkey_to_address(&pubkey);
+        state.keystore.import_raw_key(&secret, None).expect("import ok");
+
+        let access_list = serde_json::json!([
+            {
+                "address": "0x0000000000000000000000000000000000000002",
+                "storageKeys": ["0x0000000000000000000000000000000000000000000000000000000000000003"]
+            }
+        ]);
+
+        let tx_obj = serde_json::json!({
+            "from": format!("{:?}", addr),
+            "to": format!("{:?}", test_addr(2)),
+            "value": "0x64",
+            "gas": "0x5208",
+            "type": "0x1",
+            "gasPrice": "0xa",
+            "nonce": "0x0",
+            "accessList": access_list,
+        });
+
+        let raw_hex = crate::standard::build_and_sign_tx(&tx_obj, &state).expect("sign ok");
+        let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode hex");
+        let envelope = alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
+        match envelope {
+            alloy_consensus::TxEnvelope::Eip2930(signed) => {
+                let tx = signed.tx();
+                assert_eq!(tx.access_list.0.len(), 1);
+                assert_eq!(tx.access_list.0[0].address, alloy_primitives::address!("0x0000000000000000000000000000000000000002"));
+                assert_eq!(tx.access_list.0[0].storage_keys.len(), 1);
+            }
+            other => panic!("expected EIP-2930 envelope, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_and_sign_tx_legacy_no_access_list() {
+        let state = make_test_state();
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let addr = call_crypto::pubkey_to_address(&pubkey);
+        state.keystore.import_raw_key(&secret, None).expect("import ok");
+
+        let tx_obj = serde_json::json!({
+            "from": format!("{:?}", addr),
+            "to": format!("{:?}", test_addr(2)),
+            "value": "0x64",
+            "gas": "0x5208",
+            "gasPrice": "0xa",
+            "nonce": "0x0",
+        });
+
+        let raw_hex = crate::standard::build_and_sign_tx(&tx_obj, &state).expect("sign ok");
+        let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode hex");
+        let envelope = alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
+        assert!(
+            matches!(envelope, alloy_consensus::TxEnvelope::Legacy(_)),
+            "expected Legacy envelope"
+        );
     }
 }

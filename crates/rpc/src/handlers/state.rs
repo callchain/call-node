@@ -4,6 +4,7 @@ use crate::handlers::helpers::{AgentInfoResponse, AssetInfoResponse, ShieldedTre
 use crate::keystore::LocalKeystore;
 use crate::ws::SubscriptionManager;
 use alloy_consensus::{transaction::SignerRecoverable, Transaction as _, TxEnvelope};
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::Bytes;
 use alloy_rlp::Decodable;
 use call_consensus::exec::state_accessors;
@@ -690,6 +691,64 @@ impl RpcState {
             .execute_tx_provider(tx, state, block_num, base_fee)
             .map_err(|e| format!("{e}"))?;
         Ok(result)
+    }
+
+    /// Run an EVM call with an access-list inspector and return the discovered list.
+    pub fn create_access_list(
+        &self,
+        caller: Address,
+        to: Option<Address>,
+        value: alloy_primitives::U256,
+        data: Bytes,
+        gas_limit: u64,
+        gas_price: u128,
+        at_block: Option<u64>,
+        initial_access_list: Option<AccessList>,
+    ) -> Result<(alloy_eips::eip2930::AccessList, u64), String> {
+        let executor = EvmExecutor::new(self.chain_id);
+
+        let current = *self
+            .current_block
+            .read()
+            .map_err(|_| "lock poisoned".to_string())?;
+        let block_num = at_block.unwrap_or(current);
+
+        let state = if block_num == current {
+            self.load_provider()?
+        } else {
+            match call_evm::db::load_block_snapshot(&self.db_env, block_num) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    return Err(format!(
+                        "no state snapshot available for block {block_num}"
+                    ))
+                }
+                Err(e) => return Err(format!("failed to load block snapshot: {e}")),
+            }
+        };
+
+        let nonce = state.state().get_nonce(&caller);
+
+        let tx = call_evm::EvmTransaction {
+            caller,
+            nonce,
+            gas_limit,
+            gas_price,
+            to,
+            value,
+            data,
+            chain_id: self.chain_id,
+        };
+        let base_fee = self
+            .fee_params
+            .read()
+            .map_err(|_| "lock poisoned".to_string())?
+            .base_fee;
+
+        let (result, access_list) = executor
+            .execute_tx_provider_inspected(tx, state, block_num, base_fee, initial_access_list)
+            .map_err(|e| format!("{e}"))?;
+        Ok((access_list, result.gas_used))
     }
 
     // ── EVM submission (inserts into mempool + executes) ──────────────

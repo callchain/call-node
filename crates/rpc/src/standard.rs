@@ -1063,14 +1063,99 @@ pub fn register_standard_rpc(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
-    // eth_createAccessList — not supported
+    // eth_createAccessList — generate access list by running tx with inspector
     module
-        .register_async_method("eth_createAccessList", |_params, _state, _ctx| async move {
-            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
-                -32601,
-                "eth_createAccessList is not supported",
-                None::<&str>,
-            ))
+        .register_async_method("eth_createAccessList", |params, state, _ctx| async move {
+            let (call_obj, block_tag): (serde_json::Value, Option<String>) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let from = call_obj
+                .get("from")
+                .and_then(|v| v.as_str())
+                .map(|s| s.parse::<alloy_primitives::Address>())
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?
+                .unwrap_or_default();
+            let to = call_obj
+                .get("to")
+                .and_then(|v| v.as_str())
+                .map(|s| s.parse::<alloy_primitives::Address>())
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let value = call_obj
+                .get("value")
+                .and_then(|v| v.as_str())
+                .map(|s| alloy_primitives::U256::from_str_radix(s.trim_start_matches("0x"), 16))
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?
+                .unwrap_or_default();
+            let data = call_obj
+                .get("data")
+                .and_then(|v| v.as_str())
+                .map(|s| hex::decode(s.trim_start_matches("0x")))
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?
+                .map(alloy_primitives::Bytes::from)
+                .unwrap_or_default();
+            let gas = call_obj
+                .get("gas")
+                .and_then(|v| v.as_str())
+                .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16))
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?
+                .unwrap_or(30_000_000);
+
+            let gas_price = call_obj
+                .get("gasPrice")
+                .and_then(|v| v.as_str())
+                .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let max_fee = call_obj
+                .get("maxFeePerGas")
+                .and_then(|v| v.as_str())
+                .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
+                .transpose()
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let gas_price = gas_price.or(max_fee).unwrap_or(10);
+
+            let initial_access_list = call_obj
+                .get("accessList")
+                .and_then(|v| serde_json::from_value::<alloy_eips::eip2930::AccessList>(v.clone()).ok());
+
+            let current = state.get_current_block();
+            let at_block = block_tag.as_deref().map(|t| parse_block_tag(t, current));
+
+            match state.create_access_list(
+                from,
+                to,
+                value,
+                data,
+                gas,
+                gas_price,
+                at_block,
+                initial_access_list,
+            ) {
+                Ok((access_list, gas_used)) => {
+                    let items: Vec<serde_json::Value> = access_list
+                        .0
+                        .into_iter()
+                        .map(|item| {
+                            serde_json::json!({
+                                "address": format!("{:?}", item.address),
+                                "storageKeys": item.storage_keys
+                                    .iter()
+                                    .map(|k| format!("0x{}", hex::encode(k.as_slice())))
+                                    .collect::<Vec<String>>(),
+                            })
+                        })
+                        .collect();
+                    Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                        "accessList": items,
+                        "gasUsed": format!("0x{:x}", gas_used),
+                    }))
+                }
+                Err(e) => Err(internal_error(e)),
+            }
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -1562,9 +1647,10 @@ pub(crate) fn get_logs_from_filter(
 }
 
 /// Build and sign a transaction from a JSON transaction object.
-fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) -> Result<String, String> {
+pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) -> Result<String, String> {
     use alloy_consensus::crypto::secp256k1::sign_message;
-    use alloy_consensus::{SignableTransaction, TxEip1559, TxLegacy, TxEnvelope};
+    use alloy_consensus::{SignableTransaction, TxEip1559, TxEip2930, TxLegacy, TxEnvelope};
+    use alloy_eips::eip2930::AccessList;
     use alloy_primitives::{FixedBytes, TxKind};
     use alloy_rlp::Encodable;
 
@@ -1644,6 +1730,12 @@ fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) -> Result<Str
         }
     };
 
+    // Parse optional access list
+    let access_list: AccessList = tx_obj
+        .get("accessList")
+        .and_then(|v| serde_json::from_value::<AccessList>(v.clone()).ok())
+        .unwrap_or_default();
+
     // Determine transaction type
     let tx_type = tx_obj
         .get("type")
@@ -1656,6 +1748,8 @@ fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) -> Result<Str
         || (tx_type.is_none()
             && (tx_obj.get("maxFeePerGas").is_some()
                 || tx_obj.get("maxPriorityFeePerGas").is_some()));
+    let is_eip2930 = tx_type == Some(1)
+        || (tx_type.is_none() && !access_list.is_empty() && !is_eip1559);
 
     let envelope = if is_eip1559 {
         let max_fee_per_gas = tx_obj
@@ -1688,7 +1782,39 @@ fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) -> Result<Str
             to: tx_kind,
             value,
             input,
-            access_list: Default::default(),
+            access_list,
+        };
+        let sig_hash = tx.signature_hash();
+        let secret = FixedBytes::<32>::from_slice(&key);
+        let signature =
+            sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
+        let signed = tx.into_signed(signature);
+        TxEnvelope::from(signed)
+    } else if is_eip2930 {
+        let gas_price = tx_obj
+            .get("gasPrice")
+            .and_then(|v| v.as_str())
+            .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
+            .transpose()
+            .map_err(|e| format!("invalid 'gasPrice': {e}"))?;
+        let gas_price = gas_price.unwrap_or_else(|| {
+            state
+                .fee_params
+                .read()
+                .map(|f| f.base_fee)
+                .unwrap_or(0)
+                + 1
+        });
+
+        let tx = TxEip2930 {
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to: tx_kind,
+            value,
+            input,
+            access_list,
         };
         let sig_hash = tx.signature_hash();
         let secret = FixedBytes::<32>::from_slice(&key);

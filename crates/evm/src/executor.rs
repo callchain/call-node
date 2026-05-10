@@ -21,7 +21,7 @@ use call_switch::precompile::SwitchPrecompile;
 use call_validator::ValidatorPrecompile;
 use revm::{
     primitives::{hardfork::SpecId, Log, TxKind},
-    Context, ExecuteEvm, MainBuilder, MainContext,
+    Context, ExecuteEvm, InspectEvm, MainBuilder, MainContext,
 };
 
 /// EVM execution error
@@ -170,6 +170,102 @@ impl EvmExecutor {
         ))
     }
 
+    /// Execute an EVM transaction with access-list inspection.
+    ///
+    /// Runs the transaction through revm with an [`AccessListInspector`] to record
+    /// every address and storage slot touched during execution. Returns the
+    /// execution result alongside the discovered access list.
+    ///
+    /// If `initial_access_list` is provided, those entries are seeded into the
+    /// inspector and excluded from the returned delta.
+    pub fn execute_tx_db_inspected<DB: revm::database_interface::Database>(
+        &self,
+        tx: EvmTransaction,
+        db: DB,
+        block_number: u64,
+        base_fee: u128,
+        initial_access_list: Option<alloy_eips::eip2930::AccessList>,
+    ) -> Result<(EvmExecutionResult, alloy_eips::eip2930::AccessList), EvmError>
+    where
+        DB::Error: core::fmt::Debug,
+    {
+        let tx_env = revm::context::TxEnv::builder()
+            .caller(tx.caller)
+            .gas_limit(tx.gas_limit)
+            .gas_price(tx.gas_price)
+            .kind(tx.to.map(TxKind::Call).unwrap_or(TxKind::Create))
+            .value(tx.value)
+            .data(tx.data.clone())
+            .nonce(tx.nonce)
+            .chain_id(Some(tx.chain_id))
+            .build()
+            .map_err(|_| EvmError::InvalidTx("tx build failed"))?;
+
+        let inspector = revm_inspectors::access_list::AccessListInspector::new(
+            initial_access_list.unwrap_or_default(),
+        );
+
+        // Scope the EVM so its borrow on db is dropped before we return.
+        let (result, access_list) = {
+            let ctx = Context::mainnet()
+                .with_db(db)
+                .modify_cfg_chained(|cfg| cfg.set_spec(self.spec_id));
+
+            let precompiles = CallPrecompiles::new(self.spec_id)
+                .with_custom(ORACLE_ADDRESS, Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS, Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS, Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS, Box::new(ShieldedPrecompile))
+                .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+                .with_custom(VALIDATOR_ADDRESS, Box::new(ValidatorPrecompile))
+                .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+                .with_custom(SWITCH_ADDRESS, Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS, Box::new(AgentPrecompile));
+            let mut evm = ctx
+                .build_mainnet_with_inspector(inspector)
+                .with_precompiles(precompiles);
+
+            let mut block_env = revm::context::BlockEnv::default();
+            block_env.number = U256::from(block_number);
+            block_env.basefee = base_fee as u64;
+            evm.set_block(block_env);
+
+            let result = evm
+                .inspect_one_tx(tx_env)
+                .map_err(|e| EvmError::ExecutionError(format!("{e:?}")))?;
+            let access_list = evm.into_inspector().into_access_list();
+            (result, access_list)
+        };
+
+        let (success, output, gas_used) = match result {
+            revm::context_interface::result::ExecutionResult::Success {
+                gas, output, ..
+            } => {
+                let bytes = match output {
+                    revm::context_interface::result::Output::Call(b) => b,
+                    revm::context_interface::result::Output::Create(b, _) => b,
+                };
+                (true, bytes, gas.spent())
+            }
+            revm::context_interface::result::ExecutionResult::Revert { gas, output, .. } => {
+                (false, output, gas.spent())
+            }
+            revm::context_interface::result::ExecutionResult::Halt { gas, .. } => {
+                (false, Bytes::default(), gas.spent())
+            }
+        };
+
+        Ok((
+            EvmExecutionResult {
+                success,
+                gas_used,
+                output,
+                logs: vec![],
+            },
+            access_list,
+        ))
+    }
+
     /// Execute an EVM transaction using any [`EvmStateProvider`] as the backing database.
     ///
     /// This is the preferred execution path for the P0 migration. It reads state
@@ -193,6 +289,19 @@ impl EvmExecutor {
     ) -> Result<(EvmExecutionResult, revm::state::EvmState), EvmError> {
         let db = reth_revm::database::StateProviderDatabase::new(provider);
         self.execute_tx_db(tx, db, block_number, base_fee)
+    }
+
+    /// Inspected variant of [`execute_tx_provider`] — returns access list.
+    pub fn execute_tx_provider_inspected<P: reth_revm::database::EvmStateProvider>(
+        &self,
+        tx: EvmTransaction,
+        provider: P,
+        block_number: u64,
+        base_fee: u128,
+        initial_access_list: Option<alloy_eips::eip2930::AccessList>,
+    ) -> Result<(EvmExecutionResult, alloy_eips::eip2930::AccessList), EvmError> {
+        let db = reth_revm::database::StateProviderDatabase::new(provider);
+        self.execute_tx_db_inspected(tx, db, block_number, base_fee, initial_access_list)
     }
 
     /// Execute an EVM transaction with a cached database for block-level execution.
@@ -735,6 +844,58 @@ mod tests {
             )
             .unwrap();
         assert!(result.success);
+    }
+
+    #[test]
+    fn test_evm_execute_inspected_access_list() {
+        let executor = EvmExecutor::new(1);
+        let mut state = InMemoryStateProvider::new();
+
+        let caller = test_addr(1);
+        let contract = test_addr(0xAB);
+        state.set_balance(caller, U256::from(1_000_000_000i128));
+        state.create_account(caller);
+        state.create_account(contract);
+
+        // Simple runtime bytecode: PUSH1 0x01 PUSH1 0x00 SSTORE PUSH1 0x00 SLOAD STOP
+        let code = alloy_primitives::bytes!("600160005560005400");
+        state.set_code(contract, code.clone());
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 100_000,
+            gas_price: 10,
+            to: Some(contract),
+            value: U256::ZERO,
+            data: code,
+            chain_id: 1,
+        };
+
+        let (result, access_list) = executor
+            .execute_tx_db_inspected(tx, &mut state, 0, 0, None)
+            .expect("inspected execution should succeed");
+
+        assert!(result.success, "execution should succeed");
+        assert!(
+            result.gas_used > 0,
+            "gas should be consumed"
+        );
+
+        // The access list should contain the contract address with at least one storage slot
+        let item = access_list
+            .0
+            .iter()
+            .find(|item| item.address == alloy_primitives::Address::from_slice(contract.as_slice()));
+        assert!(
+            item.is_some(),
+            "access list should contain the contract address"
+        );
+        let item = item.unwrap();
+        assert!(
+            !item.storage_keys.is_empty(),
+            "contract should have touched storage slots"
+        );
     }
 
     #[test]
