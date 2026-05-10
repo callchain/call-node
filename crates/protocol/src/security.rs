@@ -331,7 +331,10 @@ mod tests {
         // Fill exactly to max_seen
         for i in 0..max_seen {
             let hash = TxHash::repeat_byte(i as u8);
-            assert!(protector.check_and_record(hash), "first insert #{i} should succeed");
+            assert!(
+                protector.check_and_record(hash),
+                "first insert #{i} should succeed"
+            );
         }
         assert_eq!(protector.seen_hashes.len(), max_seen);
 
@@ -368,7 +371,10 @@ mod tests {
         assert_eq!(protector.seen_hashes.len(), 7);
 
         // The new hash must still be present (it was just inserted)
-        assert!(!protector.check_and_record(new_hash), "new hash should still be a replay");
+        assert!(
+            !protector.check_and_record(new_hash),
+            "new hash should still be a replay"
+        );
 
         // At least one of the original 8 hashes should have been evicted
         // (since we only have room for 7 and the new hash is one of them)
@@ -455,10 +461,9 @@ mod tests {
             let addr = Address::repeat_byte(1);
             let mut allowed_count = 0u32;
 
-            // Burst within a single window
-            for i in 0..(max_requests * 2) {
-                let time_ms = i as u64;
-                if limiter.allow(addr, time_ms) {
+            // Burst within a single window (time stays constant so we never cross windows)
+            for _ in 0..(max_requests * 2) {
+                if limiter.allow(addr, 0u64) {
                     allowed_count += 1;
                 }
             }

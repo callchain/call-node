@@ -1,5 +1,7 @@
 //! Callchain Protocol Layer — Core protocol types, execution, and economics.
 
+#![allow(unexpected_cfgs)]
+
 pub mod compliance;
 pub mod economics;
 pub mod gas;
