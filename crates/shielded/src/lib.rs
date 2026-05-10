@@ -453,6 +453,55 @@ impl ShieldedBlockTracker {
     }
 }
 
+// ── Prover Key Rotation Auto-Pickup ──────────────────────────────────
+
+/// Get the current prover key version from the global registry.
+///
+/// Returns 0 when `production-keys` is not enabled or the registry is empty.
+pub fn current_prover_key_version() -> u32 {
+    #[cfg(feature = "production-keys")]
+    {
+        crate::key_registry::ProverRegistry::global().current_version()
+    }
+    #[cfg(not(feature = "production-keys"))]
+    {
+        0
+    }
+}
+
+/// Attempt to load and register prover keys for the given version.
+///
+/// When `production-keys` is enabled, tries to load keys from
+/// `/var/lib/callchain/shielded_keys_v{version}` and registers them with the
+/// global [`ProverRegistry`]. Returns `true` if registration succeeded.
+#[cfg(feature = "production-keys")]
+pub fn try_register_prover_keys(version: u32) -> bool {
+    let path = format!("/var/lib/callchain/shielded_keys_v{version}");
+    let keys = match crate::ceremony::ProductionKeys::load(&path) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(error = %e, version, path, "prover_key_rotation: failed to load keys");
+            return false;
+        }
+    };
+    match crate::key_registry::ProverRegistry::global().register(version, keys) {
+        Ok(()) => {
+            tracing::info!(version, path, "prover_key_rotation: registered new key set");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, version, "prover_key_rotation: registration failed");
+            false
+        }
+    }
+}
+
+/// No-op when `production-keys` is not enabled.
+#[cfg(not(feature = "production-keys"))]
+pub fn try_register_prover_keys(_version: u32) -> bool {
+    false
+}
+
 #[cfg(test)]
 pub mod test_utils {
     use crate::{Note, NoteCommitment, Nullifier, ViewingKey, ZkProof};

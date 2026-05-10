@@ -45,15 +45,23 @@ checkpoint.
    - Dev-setup fallback when registry is empty
    - Proving server picks up current keys automatically
 
-**Remaining:**
+**Completed (2026-05-10):**
 
-1. **Governance proposal type for `ProverKeyRotation`**
+4. **Governance proposal type for `ProverKeyRotation`** (`crates/governance/src/types.rs`, `precompile.rs`)
    - Proposal payload: new VK hashes, ceremony attestation, activation block height
-   - Node executes `ProverRegistry::register()` upon proposal finalization
-   - This is the only remaining code change; ceremony coordination is operational
+   - Precompile stores rotation metadata in EVM storage on execution
 
-**When to revisit:** Before mainnet shielded pool launch. The infrastructure
-is ready — only the governance wiring remains.
+5. **Auto-pickup in `LightClientService`** (`crates/node/src/light_client_service.rs`)
+   - `check_prover_key_rotation()` polls governance storage at each epoch boundary
+   - Reads `prover_key_rotation/pending` flag and `version` from EVM state
+   - Calls `try_register_prover_keys(version)` to load keys from `/var/lib/callchain/shielded_keys_v{version}`
+   - Tracks `last_applied_key_version` to avoid duplicate registration
+   - No-op when `production-keys` feature is not enabled
+
+**Status:** ~~Deferred~~ **Fully Implemented**
+
+**When to revisit:** Before mainnet shielded pool launch for operational testing
+of the full governance → node → proof lifecycle.
 
 ---
 
