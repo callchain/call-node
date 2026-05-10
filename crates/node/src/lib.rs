@@ -639,18 +639,26 @@ impl CallNode {
                         let mut client = lc.write().unwrap();
                         match client.apply_light_client_update(update) {
                             Ok((slot, root)) => {
-                                // Approximate mapping: beacon slot -> execution block number.
-                                // Ethereum mainnet: 1 slot = 12s, 1 block ≈ 12s.
-                                // The exact mapping requires looking up the execution payload
-                                // in the beacon block, but for finalized checkpoints the
-                                // difference is typically small.
-                                let exec_block = slot;
-                                client.set_finalized_block(exec_block, root);
-                                tracing::info!(
-                                    slot,
-                                    exec_block,
-                                    "beacon light client update applied"
-                                );
+                                match call_light_client::sync::fetch_beacon_block_execution_number(
+                                    &beacon_url, slot,
+                                ) {
+                                    Ok(exec_block) => {
+                                        client.set_finalized_block(exec_block, root);
+                                        tracing::info!(
+                                            slot,
+                                            exec_block,
+                                            "beacon light client update applied (exact mapping)"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            slot,
+                                            error = %e,
+                                            "beacon light client update applied (slot fallback)"
+                                        );
+                                        client.set_finalized_block(slot, root);
+                                    }
+                                }
                             }
                             Err(e) => tracing::warn!(error = %e, "BLS verification failed"),
                         }

@@ -82,6 +82,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub genesis_validators_root: Option<String>,
 
+    /// Trusted beacon chain checkpoint file (JSON with sync committee pubkeys)
+    #[arg(long)]
+    pub checkpoint_file: Option<PathBuf>,
+
     // ── Genesis ───────────────────────────────────────────────────────
     /// Path to genesis JSON file
     #[arg(long)]

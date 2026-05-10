@@ -161,8 +161,8 @@ impl AssetPrecompile {
         }
 
         let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts).collect();
-        let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
         let cp = storage.checkpoint();
+        let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
         store
             .batch_transfer(call.assetId, from, &pairs)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))?;

@@ -317,6 +317,8 @@ pub enum LightClientError {
     SyncCommitteeSignatureInvalid(String),
     #[error("sync committee update failed: {0}")]
     SyncCommitteeUpdateFailed(String),
+    #[error("sync committee already initialized")]
+    AlreadyInitialized,
     #[error("insufficient sync committee participation: {got}/{required}")]
     InsufficientSyncParticipation { got: usize, required: usize },
 }

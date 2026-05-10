@@ -690,20 +690,27 @@ impl call_protocol::storage_backend::StorageBackend for dyn StorageProvider {
 ///   call lives only for the duration of that single call, so two copies of
 /// `StorageRef` can safely be held by different domain storage structs as long
 ///   as their `&mut self` methods are not invoked concurrently.
+///
+/// Safe wrapper around `&mut dyn StorageProvider` that implements
+/// [`StorageBackend`].
+///
+/// Unlike the old `JournalBackend`, this never splits a fat pointer into
+/// `(data_ptr, vtable_ptr)` — the trait object stays intact as a single
+/// `*mut dyn StorageProvider`.  The only `unsafe` code is a single
+/// lifetime-erasing cast in `new()`, which is sound because every
+/// `StorageRef` is discarded before the precompile call returns.
 pub struct StorageRef {
-    ptr: *mut (),
-    vtable: *mut (),
+    ptr: *mut dyn StorageProvider,
 }
 
 impl StorageRef {
     pub fn new(storage: &mut dyn StorageProvider) -> Self {
-        let fat: *mut dyn StorageProvider = storage;
-        // SAFETY: `*mut dyn Trait` is a fat pointer (data ptr + vtable ptr).
-        // We decompose it so `StorageRef` can be `Copy`.  This is sound as long
-        // as the original `&mut dyn StorageProvider` remains valid for the
-        // duration of the precompile call, which it does by construction.
-        let (ptr, vtable): (*mut (), *mut ()) = unsafe { std::mem::transmute(fat) };
-        Self { ptr, vtable }
+        // Erase the concrete lifetime: the caller promises the `storage`
+        // reference outlives the precompile call.
+        let ptr: *mut (dyn StorageProvider + '_) = storage;
+        Self {
+            ptr: unsafe { std::mem::transmute(ptr) },
+        }
     }
 }
 
@@ -716,14 +723,16 @@ impl Clone for StorageRef {
 
 impl call_protocol::storage_backend::StorageBackend for StorageRef {
     fn load(&mut self, address: Address, slot: U256) -> U256 {
-        let fat: *mut dyn StorageProvider = unsafe { std::mem::transmute((self.ptr, self.vtable)) };
-        unsafe { (*fat).sload(address, slot).unwrap_or_default() }
+        // SAFETY: `self.ptr` was created from a valid `&mut dyn StorageProvider`
+        // that lives for the entire precompile call.  We dereference it here
+        // only to dispatch a single method call; no alias is created.
+        unsafe { (*self.ptr).sload(address, slot).unwrap_or_default() }
     }
 
     fn store(&mut self, address: Address, slot: U256, value: U256) {
-        let fat: *mut dyn StorageProvider = unsafe { std::mem::transmute((self.ptr, self.vtable)) };
+        // SAFETY: same as `load` above.
         unsafe {
-            let _ = (*fat).sstore(address, slot, value);
+            let _ = (*self.ptr).sstore(address, slot, value);
         }
     }
 }

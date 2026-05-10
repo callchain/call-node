@@ -22,6 +22,11 @@ pub struct LightClientConfig {
     /// Required to enable beacon consensus verification.
     #[serde(default)]
     pub genesis_validators_root: Option<String>,
+    /// Trusted checkpoint file containing an initial sync committee.
+    /// When provided, the light client bootstraps from this committee instead
+    /// of trusting the first LightClientUpdate's next_sync_committee.
+    #[serde(default)]
+    pub checkpoint_file: Option<PathBuf>,
 }
 
 impl Default for LightClientConfig {
@@ -30,6 +35,7 @@ impl Default for LightClientConfig {
             beacon_url: None,
             fork_version: Self::default_fork_version(),
             genesis_validators_root: None,
+            checkpoint_file: None,
         }
     }
 }
@@ -450,6 +456,11 @@ impl NodeConfig {
             self.light_client
                 .genesis_validators_root
                 .clone_from(&args.genesis_validators_root);
+        }
+        if args.checkpoint_file.is_some() {
+            self.light_client
+                .checkpoint_file
+                .clone_from(&args.checkpoint_file);
         }
 
         self

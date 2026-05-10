@@ -242,6 +242,24 @@ impl EthLightClient {
         self.current_sync_period
     }
 
+    /// Bootstrap the sync committee from a trusted checkpoint.
+    ///
+    /// This allows the light client to verify its first `LightClientUpdate`
+    /// using a known-good sync committee instead of trusting the update's
+    /// `next_sync_committee`.
+    pub fn bootstrap_sync_committee(
+        &mut self,
+        period: u64,
+        committee: SyncCommittee,
+    ) -> Result<(), LightClientError> {
+        if self.sync_committee.is_some() {
+            return Err(LightClientError::AlreadyInitialized);
+        }
+        self.sync_committee = Some(committee);
+        self.current_sync_period = period;
+        Ok(())
+    }
+
     /// Apply a beacon chain light client update.
     ///
     /// Verifies the sync committee aggregate BLS signature against the

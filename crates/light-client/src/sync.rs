@@ -278,3 +278,34 @@ pub fn fetch_light_client_finality_update(beacon_url: &str) -> Result<LightClien
     LightClientUpdate::from_ssz(&bytes)
         .ok_or_else(|| "Failed to decode LightClientUpdate from SSZ".into())
 }
+
+/// Fetch the execution block number for a given beacon slot.
+///
+/// Calls `/eth/v2/beacon/blocks/{slot}` and extracts
+/// `data.message.body.execution_payload.block_number`.
+pub fn fetch_beacon_block_execution_number(beacon_url: &str, slot: u64) -> Result<u64, String> {
+    let url = format!("{}/eth/v2/beacon/blocks/{}", beacon_url, slot);
+    let resp = ureq::get(&url)
+        .call()
+        .map_err(|e| format!("Beacon block request failed: {e}"))?;
+
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("Failed to read beacon block response: {e}"))?;
+
+    let response: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Failed to parse beacon block JSON: {e}"))?;
+
+    let block_number = response
+        .get("data")
+        .and_then(|d| d.get("message"))
+        .and_then(|m| m.get("body"))
+        .and_then(|b| b.get("execution_payload"))
+        .and_then(|ep| ep.get("block_number"))
+        .and_then(|bn| bn.as_str())
+        .ok_or("Missing execution_payload.block_number in beacon block response")?;
+
+    block_number
+        .parse()
+        .map_err(|e| format!("Failed to parse execution block number: {e}"))
+}
