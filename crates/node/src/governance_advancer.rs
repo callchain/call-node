@@ -328,6 +328,17 @@ impl GovernanceAdvancer {
                 if execution_data.len() >= 64 {
                     let mut id_buf = [0u8; 8];
                     id_buf.copy_from_slice(&execution_data[24..32]);
+                    let validator_id = u64::from_be_bytes(id_buf);
+
+                    let mut pubkey_buf = [0u8; 32];
+                    pubkey_buf.copy_from_slice(&execution_data[32..64]);
+
+                    let validator_addr = sa::read_validator_addr(evm_state, validator_id);
+                    if validator_addr != Address::ZERO {
+                        sa::rotate_validator_key_evm(evm_state, validator_addr, pubkey_buf);
+                    }
+
+                    // Governance audit flag
                     evm_state.set_storage(
                         call_governance::precompile::GOVERNANCE_ADDRESS,
                         storage_slot(&[b"key_rotation", &id_buf]),
@@ -828,7 +839,8 @@ mod tests {
     fn test_key_rotation_side_effect() {
         let mut evm = InMemoryStateProvider::new();
         sa::seed_gov_config(&mut evm);
-        sa::seed_validator(&mut evm, 1, test_addr(1), [1u8; 32], 1_000_000, 1);
+        let validator_addr = test_addr(1);
+        sa::seed_validator(&mut evm, 1, validator_addr, [1u8; 32], 1_000_000, 1);
 
         setup_proposal(&mut evm, 1, 9, 2, 0, 100, 0, 1_000_000, 0, 0);
         sa::write_gov_proposal_quorum_required(&mut evm, 1, 1);
@@ -838,20 +850,30 @@ mod tests {
             u64_to_u256(50),
         );
 
-        // ValidatorKeyRotation execution_data: bytes 24-32 = uint64 validatorId
+        // ValidatorKeyRotation execution_data: bytes 24-32 = uint64 validatorId, bytes 32-64 = bytes32 newPubkey
+        let new_pubkey = [0xAAu8; 32];
         let mut exec_data = vec![0u8; 64];
-        exec_data[24..32].copy_from_slice(&7u64.to_be_bytes());
+        exec_data[24..32].copy_from_slice(&1u64.to_be_bytes());
+        exec_data[32..64].copy_from_slice(&new_pubkey);
         store_execution_data(&mut evm, 1, &exec_data);
+
+        // Verify old pubkey before rotation
+        assert_eq!(sa::read_validator_pubkey(&evm, validator_addr), [1u8; 32]);
 
         let advancer = GovernanceAdvancer;
         advancer.advance(&mut evm, 55);
 
         assert_eq!(sa::read_gov_proposal_status(&evm, 1), 3);
-        let rotation_slot = storage_slot(&[b"key_rotation", &7u64.to_be_bytes()[..]]);
+
+        // Governance audit flag set
+        let rotation_slot = storage_slot(&[b"key_rotation", &1u64.to_be_bytes()[..]]);
         let val = evm
             .get_storage(&GOVERNANCE_ADDRESS, rotation_slot)
             .to_be_bytes::<32>()[31];
         assert_eq!(val, 1);
+
+        // Validator pubkey actually updated on-chain
+        assert_eq!(sa::read_validator_pubkey(&evm, validator_addr), new_pubkey);
     }
 
     #[test]
