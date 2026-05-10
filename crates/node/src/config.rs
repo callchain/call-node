@@ -69,6 +69,10 @@ pub struct KeysConfig {
     pub vault_token: Option<String>,
     #[serde(default)]
     pub vault_key_name: Option<String>,
+    #[serde(default)]
+    pub keyring_service: Option<String>,
+    #[serde(default)]
+    pub keyring_user: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -316,6 +320,12 @@ impl NodeConfig {
         if args.vault_key_name.is_some() {
             self.keys.vault_key_name.clone_from(&args.vault_key_name);
         }
+        if args.keyring_service.is_some() {
+            self.keys.keyring_service.clone_from(&args.keyring_service);
+        }
+        if args.keyring_user.is_some() {
+            self.keys.keyring_user.clone_from(&args.keyring_user);
+        }
 
         // Genesis
         if args.genesis_path.is_some() {
@@ -401,11 +411,12 @@ impl NodeConfig {
                 ),
                 ("--aws-kms-key-id", self.keys.aws_kms_key_id.is_some()),
                 ("--vault-addr", self.keys.vault_addr.is_some()),
+                ("--keyring-service", self.keys.keyring_service.is_some()),
             ];
             let active_sources: Vec<_> = key_sources.iter().filter(|(_, active)| *active).collect();
 
             if active_sources.is_empty() {
-                return Err("validator mode requires one key source: --validator-key, --validator-keystore, --aws-kms-key-id, or --vault-addr".into());
+                return Err("validator mode requires one key source: --validator-key, --validator-keystore, --aws-kms-key-id, --vault-addr, or --keyring-service".into());
             }
             if active_sources.len() > 1 {
                 return Err(format!(
@@ -437,6 +448,9 @@ impl NodeConfig {
                 if self.keys.vault_key_name.is_none() {
                     return Err("--vault-key-name required when using --vault-addr".into());
                 }
+            }
+            if self.keys.keyring_service.is_some() && self.keys.keyring_user.is_none() {
+                return Err("--keyring-user required when using --keyring-service".into());
             }
         }
         if let Some(ref key) = self.keys.identity_key {

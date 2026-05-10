@@ -99,8 +99,25 @@ async fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<Signe
             let _ = vault_addr;
             Err("HashiVault support not compiled in (enable hashi-vault feature)".into())
         }
+    } else if let Some(ref service) = keys.keyring_service {
+        #[cfg(feature = "keyring")]
+        {
+            let user = keys
+                .keyring_user
+                .clone()
+                .ok_or("--keyring-user required")?;
+            let signer = call_crypto::KeyringSigner::new(service, &user)
+                .map_err(|e| format!("failed to load key from OS keyring: {e}"))?;
+            info!(service, user, "validator key loaded from OS keyring");
+            Ok(Arc::new(signer))
+        }
+        #[cfg(not(feature = "keyring"))]
+        {
+            let _ = service;
+            Err("keyring support not compiled in (enable keyring feature)".into())
+        }
     } else {
-        Err("validator key required (use --validator-keystore, --validator-key, --aws-kms-key-id, or --vault-addr)".into())
+        Err("validator key required (use --validator-keystore, --validator-key, --aws-kms-key-id, --vault-addr, or --keyring-service)".into())
     }
 }
 

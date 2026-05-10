@@ -61,6 +61,14 @@ pub struct CliArgs {
     #[arg(long)]
     pub vault_key_name: Option<String>,
 
+    /// OS keyring service name for validator signing (requires keyring feature)
+    #[arg(long)]
+    pub keyring_service: Option<String>,
+
+    /// OS keyring username/account for validator signing
+    #[arg(long)]
+    pub keyring_user: Option<String>,
+
     // ── Genesis ───────────────────────────────────────────────────────
     /// Path to genesis JSON file
     #[arg(long)]
@@ -214,5 +222,17 @@ pub enum WalletCommand {
         /// RPC URL
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         rpc_url: String,
+    },
+    /// Store a validator key in the OS keyring
+    StoreKeyring {
+        /// Hex-encoded 32-byte private key
+        #[arg(long)]
+        key: String,
+        /// Keyring service name (default: call-node)
+        #[arg(long, default_value = "call-node")]
+        service: String,
+        /// Keyring username / account name
+        #[arg(long)]
+        user: String,
     },
 }

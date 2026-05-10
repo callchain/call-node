@@ -11,7 +11,7 @@ use thiserror::Error;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-#[cfg(feature = "hashi-vault")]
+#[cfg(any(feature = "hashi-vault", feature = "keyring"))]
 use base64::Engine as _;
 
 #[derive(Debug, Error)]
@@ -31,6 +31,8 @@ pub enum SignerKind {
     AwsKms,
     /// HashiCorp Vault remote signing (production)
     HashiVault,
+    /// OS keyring (macOS Keychain / Windows Credential Manager / Linux secret-service)
+    Keyring,
 }
 
 /// Core signing interface — consensus code never holds raw keys
@@ -80,7 +82,7 @@ impl LocalSigner {
         Self::from_raw_key(key)
     }
 
-    fn derive_pubkey_and_address(key: &[u8; 32]) -> Result<(PublicKey, Address), SignerError> {
+    pub(crate) fn derive_pubkey_and_address(key: &[u8; 32]) -> Result<(PublicKey, Address), SignerError> {
         let signing_key = k256::ecdsa::SigningKey::from_slice(key)
             .map_err(|e| SignerError::SigningFailed(format!("invalid key: {e}")))?;
         let verifying_key = signing_key.verifying_key();
@@ -396,6 +398,125 @@ impl HashiVaultSigner {
     }
 }
 
+/// OS keyring signer — stores the validator key in the operating system's
+/// secure credential store (macOS Keychain, Windows Credential Manager,
+/// or Linux secret-service / kernel keyring).
+///
+/// The key is retrieved once at node startup and held in zeroized memory
+/// for the process lifetime.  This is safer than a plaintext file or env
+/// variable, because the OS credential store is encrypted at rest and
+/// access-controlled by the OS.
+#[cfg(feature = "keyring")]
+pub struct KeyringSigner {
+    key: Zeroizing<[u8; 32]>,
+    pubkey: PublicKey,
+    address: Address,
+}
+
+#[cfg(feature = "keyring")]
+impl KeyringSigner {
+    /// Load a key from the OS keyring.
+    ///
+    /// `service` — application identifier (e.g. `"call-node"`).
+    /// `username` — per-key identifier (e.g. validator address hex).
+    /// The stored secret must be a base64-encoded 32-byte raw secp256k1 key.
+    pub fn new(service: &str, username: &str) -> Result<Self, SignerError> {
+        let entry = keyring::Entry::new(service, username)
+            .map_err(|e| SignerError::SigningFailed(format!("keyring entry: {e}")))?;
+        Self::from_entry(entry)
+    }
+
+    /// Load a key from an existing keyring entry.
+    ///
+    /// Useful for testing with mock credentials.
+    pub fn from_entry(entry: keyring::Entry) -> Result<Self, SignerError> {
+        let secret = entry
+            .get_password()
+            .map_err(|e| SignerError::SigningFailed(format!("keyring get_password: {e}")))?;
+
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(secret)
+            .map_err(|e| SignerError::SigningFailed(format!("base64 decode: {e}")))?;
+
+        if bytes.len() != 32 {
+            return Err(SignerError::SigningFailed(format!(
+                "keyring secret must decode to 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+
+        let mut key = Zeroizing::new([0u8; 32]);
+        key.copy_from_slice(&bytes);
+
+        let (pubkey, address) = LocalSigner::derive_pubkey_and_address(&key)?;
+
+        Ok(Self {
+            key,
+            pubkey,
+            address,
+        })
+    }
+
+    /// Store a 32-byte hex key into the OS keyring (one-time setup helper).
+    ///
+    /// After calling this the operator can delete the plaintext file.
+    pub fn store_key(service: &str, username: &str, hex_key: &str) -> Result<(), SignerError> {
+        let entry = keyring::Entry::new(service, username)
+            .map_err(|e| SignerError::SigningFailed(format!("keyring entry: {e}")))?;
+        Self::store_key_with_entry(&entry, hex_key)
+    }
+
+    /// Store a 32-byte hex key into the given keyring entry.
+    ///
+    /// Useful for testing with mock credentials.
+    pub fn store_key_with_entry(
+        entry: &keyring::Entry,
+        hex_key: &str,
+    ) -> Result<(), SignerError> {
+        let bytes = hex::decode(hex_key.trim_start_matches("0x"))
+            .map_err(|e| SignerError::SigningFailed(format!("invalid hex: {e}")))?;
+
+        if bytes.len() != 32 {
+            return Err(SignerError::SigningFailed(
+                "key must be 32 bytes".into(),
+            ));
+        }
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        entry
+            .set_password(&b64)
+            .map_err(|e| SignerError::SigningFailed(format!("keyring set_password: {e}")))?;
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "keyring")]
+impl Signer for KeyringSigner {
+    fn sign(&self, msg_hash: &[u8; 32]) -> Result<Signature, SignerError> {
+        Ok(secp256k1_sign(&self.key, msg_hash))
+    }
+
+    fn public_key(&self) -> PublicKey {
+        self.pubkey
+    }
+
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn kind(&self) -> SignerKind {
+        SignerKind::Keyring
+    }
+}
+
+#[cfg(feature = "keyring")]
+impl Drop for KeyringSigner {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
 /// Type alias for shared signer
 pub type SignerRef = Arc<dyn Signer>;
 
@@ -429,5 +550,35 @@ mod tests {
     fn test_local_signer_invalid_hex_length() {
         let signer = LocalSigner::from_hex("short");
         assert!(signer.is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "keyring")]
+    fn test_keyring_signer_roundtrip() {
+        let hex_key = "a".repeat(64);
+
+        // Use an in-memory mock credential so the test is deterministic
+        // across platforms (especially headless CI where no OS keyring
+        // daemon is available).
+        let credential = keyring::mock::default_credential_builder()
+            .build(None, "call-node-test", "test-validator")
+            .unwrap();
+        let entry = keyring::Entry::new_with_credential(credential);
+
+        // Store key via the shared entry
+        KeyringSigner::store_key_with_entry(&entry, &hex_key).unwrap();
+
+        // Load from the same entry
+        let signer = KeyringSigner::from_entry(entry).unwrap();
+        assert_eq!(signer.kind(), SignerKind::Keyring);
+
+        let msg = crypto_keccak256(b"keyring test message");
+        let sig = signer.sign(&msg).unwrap();
+        assert_eq!(sig.len(), 65);
+
+        // Verify pubkey matches LocalSigner with same key
+        let local = LocalSigner::from_hex(&hex_key).unwrap();
+        assert_eq!(signer.public_key(), local.public_key());
+        assert_eq!(signer.address(), local.address());
     }
 }

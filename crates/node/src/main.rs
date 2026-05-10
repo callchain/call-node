@@ -119,6 +119,26 @@ async fn handle_wallet(
         } => wallet::send_payment(from_key, to, *asset_id, *amount, *nonce, rpc_url).await,
         WalletCommand::ServerInfo { rpc_url } => wallet::server_info(rpc_url).await,
         WalletCommand::Mempool { rpc_url } => wallet::mempool_stats(rpc_url).await,
+        WalletCommand::StoreKeyring {
+            key,
+            service,
+            user,
+        } => {
+            #[cfg(feature = "keyring")]
+            {
+                call_crypto::KeyringSigner::store_key(service, user, key)
+                    .map_err(|e| format!("failed to store key in keyring: {e}"))?;
+                println!(
+                    "Key stored successfully in OS keyring (service={service}, user={user})"
+                );
+                Ok(())
+            }
+            #[cfg(not(feature = "keyring"))]
+            {
+                let _ = (key, service, user);
+                Err("keyring support not compiled in (enable keyring feature)".into())
+            }
+        }
     }
 }
 
