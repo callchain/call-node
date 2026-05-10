@@ -193,9 +193,7 @@ fn write_r1cs_json(
             let make_entries = |entries: &[(Fr, usize)]| -> Vec<serde_json::Value> {
                 entries
                     .iter()
-                    .map(|(coeff, wire_idx)| {
-                        json!([wire_idx, coeff_to_decimal(coeff)])
-                    })
+                    .map(|(coeff, wire_idx)| json!([wire_idx, coeff_to_decimal(coeff)]))
                     .collect()
             };
 
@@ -506,7 +504,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let circuit = build_deposit_circuit();
     let (matrices, n_wires) = synthesize(circuit)?;
     write_r1cs_binary(&matrices, n_wires, &output_dir.join("deposit.r1cs"))?;
-    write_r1cs_json("deposit", &matrices, n_wires, &output_dir.join("deposit.json"))?;
+    write_r1cs_json(
+        "deposit",
+        &matrices,
+        n_wires,
+        &output_dir.join("deposit.json"),
+    )?;
     println!("");
 
     // --- Withdraw ---
@@ -514,7 +517,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let circuit = build_withdraw_circuit();
     let (matrices, n_wires) = synthesize(circuit)?;
     write_r1cs_binary(&matrices, n_wires, &output_dir.join("withdraw.r1cs"))?;
-    write_r1cs_json("withdraw", &matrices, n_wires, &output_dir.join("withdraw.json"))?;
+    write_r1cs_json(
+        "withdraw",
+        &matrices,
+        n_wires,
+        &output_dir.join("withdraw.json"),
+    )?;
     println!("");
 
     // --- Transfer ---
@@ -522,7 +530,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let circuit = build_transfer_circuit();
     let (matrices, n_wires) = synthesize(circuit)?;
     write_r1cs_binary(&matrices, n_wires, &output_dir.join("transfer.r1cs"))?;
-    write_r1cs_json("transfer", &matrices, n_wires, &output_dir.join("transfer.json"))?;
+    write_r1cs_json(
+        "transfer",
+        &matrices,
+        n_wires,
+        &output_dir.join("transfer.json"),
+    )?;
     println!("");
 
     println!("=== All circuits exported ===");

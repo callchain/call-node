@@ -512,10 +512,7 @@ impl LightClient {
     }
 
     /// Re-read validator set from EVM state.
-    pub fn refresh_validator_set(
-        &mut self,
-        db_env: &Arc<DatabaseEnv>,
-    ) -> Result<(), String> {
+    pub fn refresh_validator_set(&mut self, db_env: &Arc<DatabaseEnv>) -> Result<(), String> {
         let provider = call_evm::provider::InMemoryStateProvider::from_db(db_env)
             .map_err(|e| format!("db load: {e}"))?;
         let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
@@ -1266,7 +1263,10 @@ mod tests {
             alt.state_root = test_hash(0xAA + 2);
             alt.hash()
         };
-        assert_eq!(alt_h2, expected_alt_h2, "alternate chain should be canonical");
+        assert_eq!(
+            alt_h2, expected_alt_h2,
+            "alternate chain should be canonical"
+        );
     }
 
     #[test]
@@ -1308,7 +1308,13 @@ mod tests {
         let fake_sigs: BlockSignatures = BlockSignatures {
             block_hash: genesis.hash(),
             signatures: (100..=114)
-                .map(|i| (i, PubKeyBytes(test_pubkey(i as u8)), SigBytes(test_sig(i as u8))))
+                .map(|i| {
+                    (
+                        i,
+                        PubKeyBytes(test_pubkey(i as u8)),
+                        SigBytes(test_sig(i as u8)),
+                    )
+                })
                 .collect(),
         };
 

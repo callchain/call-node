@@ -101,7 +101,9 @@ impl LightClientService {
             return;
         }
 
-        let version = provider.get_storage(&GOVERNANCE_ADDRESS, version_slot).to::<u32>();
+        let version = provider
+            .get_storage(&GOVERNANCE_ADDRESS, version_slot)
+            .to::<u32>();
         if version <= *last_applied {
             return;
         }

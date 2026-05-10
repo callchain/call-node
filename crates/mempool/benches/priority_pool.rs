@@ -100,5 +100,10 @@ fn bench_pool_evict_lowest(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_pool_insert, bench_pool_drain_sorted, bench_pool_evict_lowest);
+criterion_group!(
+    benches,
+    bench_pool_insert,
+    bench_pool_drain_sorted,
+    bench_pool_evict_lowest
+);
 criterion_main!(benches);

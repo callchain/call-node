@@ -114,9 +114,7 @@ pub struct CommonwareNetwork {
     /// TTL for PEX-discovered peers (seconds). 0 = no expiry.
     pex_peer_ttl_seconds: u64,
     /// PEX-discovered peers with timestamps (separate from trusted bootstrap peers)
-    pex_entries: Arc<
-        tokio::sync::RwLock<std::collections::HashMap<String, (SocketAddr, Instant)>>,
-    >,
+    pex_entries: Arc<tokio::sync::RwLock<std::collections::HashMap<String, (SocketAddr, Instant)>>>,
 }
 
 struct InitComponents {
@@ -467,10 +465,8 @@ impl CommonwareNetwork {
         };
         let now = Instant::now();
 
-        let mut result: Vec<(String, SocketAddr)> = bootstrap
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
+        let mut result: Vec<(String, SocketAddr)> =
+            bootstrap.iter().map(|(k, v)| (k.clone(), *v)).collect();
 
         for (peer_id, (addr, added)) in pex {
             if let Some(ttl) = ttl {

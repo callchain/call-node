@@ -181,9 +181,7 @@ pub fn register_callchain_rpc(
             let vk_bytes = hex::decode(vk_hex.trim_start_matches("0x"))
                 .map_err(|e| invalid_params(format!("invalid viewing key: {e}")))?;
             if vk_bytes.len() < 32 {
-                return Err(invalid_params(
-                    "viewing key must be at least 32 bytes",
-                ));
+                return Err(invalid_params("viewing key must be at least 32 bytes"));
             }
             let mut ivk = [0u8; 32];
             ivk.copy_from_slice(&vk_bytes[..32]);

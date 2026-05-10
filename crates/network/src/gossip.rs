@@ -500,12 +500,18 @@ mod tests {
 
         // Immediately check with long duration — should still be banned
         peer.check_ban_expiry(Duration::from_secs(3600));
-        assert!(peer.banned, "peer should still be banned immediately after ban");
+        assert!(
+            peer.banned,
+            "peer should still be banned immediately after ban"
+        );
 
         // Simulate expiry by setting banned_at far in the past
         peer.banned_at = Some(Instant::now() - Duration::from_secs(7200));
         peer.check_ban_expiry(Duration::from_secs(3600));
-        assert!(!peer.banned, "peer should be auto-unbanned after duration expires");
+        assert!(
+            !peer.banned,
+            "peer should be auto-unbanned after duration expires"
+        );
         assert!(peer.ban_reason.is_none());
     }
 

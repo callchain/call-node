@@ -291,7 +291,11 @@ pub fn cache_get(
     None
 }
 
-pub fn cache_insert(cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>, key: [u8; 32], proof: Vec<u8>) {
+pub fn cache_insert(
+    cache: &mut HashMap<[u8; 32], (Vec<u8>, Instant)>,
+    key: [u8; 32],
+    proof: Vec<u8>,
+) {
     cache.insert(key, (proof, Instant::now()));
 }
 
@@ -636,7 +640,12 @@ pub fn derive_fvk_from_ivk(ivk: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Compute RCM using Poseidon hash (matching circuit D3 constraint).
-pub fn compute_rcm_poseidon(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
+pub fn compute_rcm_poseidon(
+    vk: &ViewingKey,
+    value: u128,
+    asset_id: u64,
+    rho: &[u8; 32],
+) -> [u8; 32] {
     let rcm_tag = domain_tag_to_fr("rcm");
     let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
     let value_fr = value_to_fr_bytes(value);

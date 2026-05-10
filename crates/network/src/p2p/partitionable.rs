@@ -199,8 +199,7 @@ impl Network for PartitionableNetwork {
     }
 
     async fn send_to(&self, channel: u64, peers: Vec<String>, message: Vec<u8>) {
-        self.router
-            .send_to(&self.node_id, channel, &peers, message);
+        self.router.send_to(&self.node_id, channel, &peers, message);
     }
 
     async fn receive(&self) -> Result<(String, u64, Vec<u8>), NetworkError> {

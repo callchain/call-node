@@ -108,8 +108,14 @@ impl ProverRegistry {
     /// `version` must be greater than the current version or the call is rejected.
     /// This prevents accidental downgrade attacks.
     pub fn register(&self, version: KeyVersion, keys: ProductionKeys) -> Result<(), RegistryError> {
-        let current = self.current.read().map_err(|_| RegistryError::LockPoisoned)?;
-        let versions = self.versions.read().map_err(|_| RegistryError::LockPoisoned)?;
+        let current = self
+            .current
+            .read()
+            .map_err(|_| RegistryError::LockPoisoned)?;
+        let versions = self
+            .versions
+            .read()
+            .map_err(|_| RegistryError::LockPoisoned)?;
         let is_empty = versions.is_empty();
         drop(versions);
         // Allow version 0 as the initial seed when registry is empty.
@@ -145,7 +151,10 @@ impl ProverRegistry {
 
     /// Get the current key version.
     pub fn current_version(&self) -> KeyVersion {
-        *self.current.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self
+            .current
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Get the key set for a specific version.
@@ -203,7 +212,10 @@ pub enum RegistryError {
     #[error("lock poisoned")]
     LockPoisoned,
     #[error("version {requested} is not greater than current {current}")]
-    VersionNotMonotonic { requested: KeyVersion, current: KeyVersion },
+    VersionNotMonotonic {
+        requested: KeyVersion,
+        current: KeyVersion,
+    },
     #[error("key load error: {0}")]
     KeyLoad(#[from] KeyLoadError),
 }
@@ -265,7 +277,10 @@ mod tests {
             pk: None,
         };
         let result = registry.register(1, bad_keys);
-        assert!(matches!(result, Err(RegistryError::VersionNotMonotonic { .. })));
+        assert!(matches!(
+            result,
+            Err(RegistryError::VersionNotMonotonic { .. })
+        ));
     }
 
     #[test]

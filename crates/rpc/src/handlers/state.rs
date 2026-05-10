@@ -719,9 +719,7 @@ impl RpcState {
             match call_evm::db::load_block_snapshot(&self.db_env, block_num) {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) => {
-                    return Err(format!(
-                        "no state snapshot available for block {block_num}"
-                    ))
+                    return Err(format!("no state snapshot available for block {block_num}"))
                 }
                 Err(e) => return Err(format!("failed to load block snapshot: {e}")),
             }

@@ -78,7 +78,12 @@ pub(crate) async fn handle_network_message(
             }
         }
         BLOCK_CHANNEL => {
-            crate::telemetry::record_p2p_span(telemetry, "received", "block_announcement", data.len());
+            crate::telemetry::record_p2p_span(
+                telemetry,
+                "received",
+                "block_announcement",
+                data.len(),
+            );
             // Handle block announcements (post-commit) — trigger sync if behind.
             // The sender wraps the announcement in `NetworkMessage::BlockAnnouncement`
             // and uses bincode (see the BFT event-loop broadcast path); the
@@ -321,7 +326,12 @@ pub(crate) async fn handle_network_message(
             }
         }
         UPGRADE_CHANNEL => {
-            crate::telemetry::record_p2p_span(telemetry, "received", "upgrade_announcement", data.len());
+            crate::telemetry::record_p2p_span(
+                telemetry,
+                "received",
+                "upgrade_announcement",
+                data.len(),
+            );
             if let Ok(announcement) = serde_json::from_slice::<UpgradeAnnouncement>(data) {
                 tracing::info!(
                     peer_id,

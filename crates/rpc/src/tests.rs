@@ -610,7 +610,11 @@ mod tests {
         if topic_seed > 0 {
             topics.push(Hash::repeat_byte(topic_seed));
         }
-        LogEntry { address, topics, data }
+        LogEntry {
+            address,
+            topics,
+            data,
+        }
     }
 
     fn make_receipt_with_logs(
@@ -739,9 +743,21 @@ mod tests {
         for block in 1..=10 {
             let tx = TxHash::repeat_byte(block as u8);
             let logs = vec![
-                LogEntry { address: addr, topics: vec![topic_a], data: vec![0x01] },
-                LogEntry { address: addr, topics: vec![topic_b], data: vec![0x02] },
-                LogEntry { address: addr, topics: vec![topic_a, topic_b], data: vec![0x03] },
+                LogEntry {
+                    address: addr,
+                    topics: vec![topic_a],
+                    data: vec![0x01],
+                },
+                LogEntry {
+                    address: addr,
+                    topics: vec![topic_b],
+                    data: vec![0x02],
+                },
+                LogEntry {
+                    address: addr,
+                    topics: vec![topic_a, topic_b],
+                    data: vec![0x03],
+                },
             ];
             state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
         }
@@ -779,9 +795,21 @@ mod tests {
         for block in 1..=20 {
             let tx = TxHash::repeat_byte(block as u8);
             let logs = vec![
-                LogEntry { address: addr_a, topics: vec![topic_x], data: vec![0x01] },
-                LogEntry { address: addr_b, topics: vec![topic_x], data: vec![0x02] },
-                LogEntry { address: addr_a, topics: vec![], data: vec![0x03] },
+                LogEntry {
+                    address: addr_a,
+                    topics: vec![topic_x],
+                    data: vec![0x01],
+                },
+                LogEntry {
+                    address: addr_b,
+                    topics: vec![topic_x],
+                    data: vec![0x02],
+                },
+                LogEntry {
+                    address: addr_a,
+                    topics: vec![],
+                    data: vec![0x03],
+                },
             ];
             state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
         }
@@ -834,7 +862,12 @@ mod tests {
         let mut total_target_logs = 0;
         for block in 1u64..=5_000 {
             for rec_idx in 0u64..2 {
-                let tx_input = block.to_le_bytes().iter().chain(rec_idx.to_le_bytes().iter()).copied().collect::<Vec<u8>>();
+                let tx_input = block
+                    .to_le_bytes()
+                    .iter()
+                    .chain(rec_idx.to_le_bytes().iter())
+                    .copied()
+                    .collect::<Vec<u8>>();
                 let tx = TxHash::from(call_crypto::keccak256(&tx_input).0);
                 let logs: Vec<LogEntry> = (0..3)
                     .map(|log_idx| {
@@ -844,7 +877,11 @@ mod tests {
                         } else {
                             other_addrs[((block + rec_idx + log_idx) % 20) as usize]
                         };
-                        make_log(addr, log_idx as u8, vec![block as u8, rec_idx as u8, log_idx as u8])
+                        make_log(
+                            addr,
+                            log_idx as u8,
+                            vec![block as u8, rec_idx as u8, log_idx as u8],
+                        )
                     })
                     .collect();
                 state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
@@ -860,7 +897,11 @@ mod tests {
         let start = std::time::Instant::now();
         let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
         let elapsed_indexed = start.elapsed();
-        assert_eq!(logs.len(), total_target_logs, "indexed query should return all target logs");
+        assert_eq!(
+            logs.len(),
+            total_target_logs,
+            "indexed query should return all target logs"
+        );
         // Address-indexed query should complete in well under 1 second even with 30K logs
         assert!(
             elapsed_indexed < std::time::Duration::from_secs(1),
@@ -876,7 +917,11 @@ mod tests {
         let start = std::time::Instant::now();
         let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
         let elapsed_scan = start.elapsed();
-        assert_eq!(logs.len(), 100 * 2 * 3, "full scan over 100 blocks = 600 logs");
+        assert_eq!(
+            logs.len(),
+            100 * 2 * 3,
+            "full scan over 100 blocks = 600 logs"
+        );
         assert!(
             elapsed_scan < std::time::Duration::from_secs(2),
             "full scan eth_getLogs took too long: {:?}",
@@ -891,7 +936,10 @@ mod tests {
 
         let addr = test_addr(1);
         let tx = TxHash::repeat_byte(1);
-        state.store_receipt(tx, make_receipt_with_logs(1, tx, vec![make_log(addr, 1, vec![])]));
+        state.store_receipt(
+            tx,
+            make_receipt_with_logs(1, tx, vec![make_log(addr, 1, vec![])]),
+        );
 
         // Query a block range with no logs
         let filter = serde_json::json!({"fromBlock": "0x5", "toBlock": "0xa"});
@@ -932,8 +980,7 @@ mod tests {
 
     use crate::handlers::helpers::{
         db_error, execution_reverted, filter_not_found, internal_error, invalid_params,
-        method_not_available, resource_unavailable, rpc_error, RpcErrorCode,
-        tx_validation_failed,
+        method_not_available, resource_unavailable, rpc_error, tx_validation_failed, RpcErrorCode,
     };
 
     #[test]
@@ -987,7 +1034,11 @@ mod tests {
     #[test]
     fn test_invalid_params_uses_standard_code() {
         let e = invalid_params("missing field");
-        assert_eq!(e.code(), -32602, "invalid_params must use standard JSON-RPC -32602");
+        assert_eq!(
+            e.code(),
+            -32602,
+            "invalid_params must use standard JSON-RPC -32602"
+        );
         assert!(e.message().contains("missing field"));
     }
 
@@ -1045,10 +1096,7 @@ mod tests {
                 // May succeed for the newest items in the buffer
             }
             Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                assert!(
-                    n >= 3,
-                    "expected at least 3 dropped messages, got {n}"
-                );
+                assert!(n >= 3, "expected at least 3 dropped messages, got {n}");
             }
             Err(broadcast::error::TryRecvError::Closed) => {
                 panic!("channel should not be closed");
@@ -1215,7 +1263,9 @@ mod tests {
         // Create keystore with persistence and import a key
         {
             let keystore = crate::keystore::LocalKeystore::new_with_dir(&dir);
-            let addr = keystore.import_raw_key(&secret, Some("testpass")).expect("import ok");
+            let addr = keystore
+                .import_raw_key(&secret, Some("testpass"))
+                .expect("import ok");
             let accounts = keystore.list_accounts();
             assert_eq!(accounts.len(), 1);
             assert_eq!(accounts[0], addr);
@@ -1247,7 +1297,9 @@ mod tests {
         // Create keystore with persistence, import, then remove
         {
             let keystore = crate::keystore::LocalKeystore::new_with_dir(&dir);
-            let imported = keystore.import_raw_key(&secret, Some("testpass")).expect("import ok");
+            let imported = keystore
+                .import_raw_key(&secret, Some("testpass"))
+                .expect("import ok");
             assert_eq!(imported, addr);
             assert!(keystore.has_account(&addr));
 
@@ -1271,7 +1323,10 @@ mod tests {
         assert!(state.keystore.list_accounts().is_empty());
 
         // Import key into the state's keystore
-        let imported = state.keystore.import_raw_key(&secret, None).expect("import ok");
+        let imported = state
+            .keystore
+            .import_raw_key(&secret, None)
+            .expect("import ok");
         assert_eq!(imported, addr);
 
         let accounts = state.keystore.list_accounts();
@@ -1288,8 +1343,14 @@ mod tests {
         let state = make_test_state();
         let (secret, _pubkey) = call_crypto::generate_keypair();
         let addr = call_crypto::pubkey_to_address(&_pubkey);
-        state.keystore.import_raw_key(&secret, None).expect("import ok");
-        state.keystore.import_raw_key(&secret, None).expect("import ok");
+        state
+            .keystore
+            .import_raw_key(&secret, None)
+            .expect("import ok");
+        state
+            .keystore
+            .import_raw_key(&secret, None)
+            .expect("import ok");
 
         let access_list = serde_json::json!([
             {
@@ -1318,12 +1379,16 @@ mod tests {
 
         // Decode and verify it's an EIP-1559 envelope with access list
         let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode hex");
-        let envelope = alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
+        let envelope =
+            alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
         match envelope {
             alloy_consensus::TxEnvelope::Eip1559(signed) => {
                 let tx = signed.tx();
                 assert_eq!(tx.access_list.0.len(), 1);
-                assert_eq!(tx.access_list.0[0].address, alloy_primitives::address!("0x0000000000000000000000000000000000000001"));
+                assert_eq!(
+                    tx.access_list.0[0].address,
+                    alloy_primitives::address!("0x0000000000000000000000000000000000000001")
+                );
                 assert_eq!(tx.access_list.0[0].storage_keys.len(), 2);
             }
             other => panic!("expected EIP-1559 envelope, got {:?}", other),
@@ -1335,7 +1400,10 @@ mod tests {
         let state = make_test_state();
         let (secret, pubkey) = call_crypto::generate_keypair();
         let addr = call_crypto::pubkey_to_address(&pubkey);
-        state.keystore.import_raw_key(&secret, None).expect("import ok");
+        state
+            .keystore
+            .import_raw_key(&secret, None)
+            .expect("import ok");
 
         let access_list = serde_json::json!([
             {
@@ -1357,12 +1425,16 @@ mod tests {
 
         let raw_hex = crate::standard::build_and_sign_tx(&tx_obj, &state).expect("sign ok");
         let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode hex");
-        let envelope = alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
+        let envelope =
+            alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
         match envelope {
             alloy_consensus::TxEnvelope::Eip2930(signed) => {
                 let tx = signed.tx();
                 assert_eq!(tx.access_list.0.len(), 1);
-                assert_eq!(tx.access_list.0[0].address, alloy_primitives::address!("0x0000000000000000000000000000000000000002"));
+                assert_eq!(
+                    tx.access_list.0[0].address,
+                    alloy_primitives::address!("0x0000000000000000000000000000000000000002")
+                );
                 assert_eq!(tx.access_list.0[0].storage_keys.len(), 1);
             }
             other => panic!("expected EIP-2930 envelope, got {:?}", other),
@@ -1374,7 +1446,10 @@ mod tests {
         let state = make_test_state();
         let (secret, pubkey) = call_crypto::generate_keypair();
         let addr = call_crypto::pubkey_to_address(&pubkey);
-        state.keystore.import_raw_key(&secret, None).expect("import ok");
+        state
+            .keystore
+            .import_raw_key(&secret, None)
+            .expect("import ok");
 
         let tx_obj = serde_json::json!({
             "from": format!("{:?}", addr),
@@ -1387,7 +1462,8 @@ mod tests {
 
         let raw_hex = crate::standard::build_and_sign_tx(&tx_obj, &state).expect("sign ok");
         let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode hex");
-        let envelope = alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
+        let envelope =
+            alloy_rlp::Decodable::decode(&mut raw_bytes.as_slice()).expect("decode envelope");
         assert!(
             matches!(envelope, alloy_consensus::TxEnvelope::Legacy(_)),
             "expected Legacy envelope"

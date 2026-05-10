@@ -303,7 +303,8 @@ pub fn register_standard_rpc(
                     let current = state.get_current_block();
                     let effective_from = last_block.saturating_add(1).max(from_block);
                     let effective_to = to_block.min(current);
-                    let results = query_logs(effective_from, effective_to, &addresses, &topics, &state);
+                    let results =
+                        query_logs(effective_from, effective_to, &addresses, &topics, &state);
                     // Update cursor
                     let new_filter = crate::handlers::state::Filter::Log {
                         from_block,
@@ -1025,11 +1026,7 @@ pub fn register_standard_rpc(
                 .keystore
                 .sign_message(&address, &message)
                 .ok_or_else(|| {
-                    ErrorObjectOwned::owned(
-                        -32000,
-                        "account not found in keystore",
-                        None::<&str>,
-                    )
+                    ErrorObjectOwned::owned(-32000, "account not found in keystore", None::<&str>)
                 })?;
             Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(sig)))
         })
@@ -1041,7 +1038,7 @@ pub fn register_standard_rpc(
             let tx_obj: serde_json::Value =
                 params.one().map_err(|e| invalid_params(e.to_string()))?;
             let raw_hex = build_and_sign_tx(&tx_obj, &state)
-                    .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<&str>))?;
+                .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<&str>))?;
             Ok::<_, ErrorObjectOwned>(raw_hex)
         })
         .map_err(|e| internal_error(e.to_string()))?;
@@ -1052,7 +1049,7 @@ pub fn register_standard_rpc(
             let tx_obj: serde_json::Value =
                 params.one().map_err(|e| invalid_params(e.to_string()))?;
             let raw_hex = build_and_sign_tx(&tx_obj, &state)
-                    .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<&str>))?;
+                .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<&str>))?;
             let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x"))
                 .map_err(|e| invalid_params(e.to_string()))?;
 
@@ -1118,9 +1115,9 @@ pub fn register_standard_rpc(
                 .map_err(|e| invalid_params(e.to_string()))?;
             let gas_price = gas_price.or(max_fee).unwrap_or(10);
 
-            let initial_access_list = call_obj
-                .get("accessList")
-                .and_then(|v| serde_json::from_value::<alloy_eips::eip2930::AccessList>(v.clone()).ok());
+            let initial_access_list = call_obj.get("accessList").and_then(|v| {
+                serde_json::from_value::<alloy_eips::eip2930::AccessList>(v.clone()).ok()
+            });
 
             let current = state.get_current_block();
             let at_block = block_tag.as_deref().map(|t| parse_block_tag(t, current));
@@ -1486,7 +1483,10 @@ fn log_to_json(
 }
 
 /// Check whether a log's topics match the provided topic filter.
-pub(crate) fn log_matches_topics(log: &call_protocol::LogEntry, topics: &[Option<Vec<call_primitives::Hash>>]) -> bool {
+pub(crate) fn log_matches_topics(
+    log: &call_protocol::LogEntry,
+    topics: &[Option<Vec<call_primitives::Hash>>],
+) -> bool {
     if topics.is_empty() {
         return true;
     }
@@ -1647,9 +1647,12 @@ pub(crate) fn get_logs_from_filter(
 }
 
 /// Build and sign a transaction from a JSON transaction object.
-pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) -> Result<String, String> {
+pub(crate) fn build_and_sign_tx(
+    tx_obj: &serde_json::Value,
+    state: &RpcState,
+) -> Result<String, String> {
     use alloy_consensus::crypto::secp256k1::sign_message;
-    use alloy_consensus::{SignableTransaction, TxEip1559, TxEip2930, TxLegacy, TxEnvelope};
+    use alloy_consensus::{SignableTransaction, TxEip1559, TxEip2930, TxEnvelope, TxLegacy};
     use alloy_eips::eip2930::AccessList;
     use alloy_primitives::{FixedBytes, TxKind};
     use alloy_rlp::Encodable;
@@ -1659,8 +1662,9 @@ pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) ->
         .get("from")
         .and_then(|v| v.as_str())
         .ok_or("missing 'from' field")?;
-    let from: alloy_primitives::Address =
-        from_hex.parse().map_err(|e| format!("invalid 'from': {e}"))?;
+    let from: alloy_primitives::Address = from_hex
+        .parse()
+        .map_err(|e| format!("invalid 'from': {e}"))?;
 
     // Verify account exists in keystore
     if !state.keystore.has_account(&from) {
@@ -1748,8 +1752,8 @@ pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) ->
         || (tx_type.is_none()
             && (tx_obj.get("maxFeePerGas").is_some()
                 || tx_obj.get("maxPriorityFeePerGas").is_some()));
-    let is_eip2930 = tx_type == Some(1)
-        || (tx_type.is_none() && !access_list.is_empty() && !is_eip1559);
+    let is_eip2930 =
+        tx_type == Some(1) || (tx_type.is_none() && !access_list.is_empty() && !is_eip1559);
 
     let envelope = if is_eip1559 {
         let max_fee_per_gas = tx_obj
@@ -1786,8 +1790,7 @@ pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) ->
         };
         let sig_hash = tx.signature_hash();
         let secret = FixedBytes::<32>::from_slice(&key);
-        let signature =
-            sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
+        let signature = sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
         let signed = tx.into_signed(signature);
         TxEnvelope::from(signed)
     } else if is_eip2930 {
@@ -1797,14 +1800,8 @@ pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) ->
             .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
             .transpose()
             .map_err(|e| format!("invalid 'gasPrice': {e}"))?;
-        let gas_price = gas_price.unwrap_or_else(|| {
-            state
-                .fee_params
-                .read()
-                .map(|f| f.base_fee)
-                .unwrap_or(0)
-                + 1
-        });
+        let gas_price = gas_price
+            .unwrap_or_else(|| state.fee_params.read().map(|f| f.base_fee).unwrap_or(0) + 1);
 
         let tx = TxEip2930 {
             chain_id,
@@ -1818,8 +1815,7 @@ pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) ->
         };
         let sig_hash = tx.signature_hash();
         let secret = FixedBytes::<32>::from_slice(&key);
-        let signature =
-            sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
+        let signature = sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
         let signed = tx.into_signed(signature);
         TxEnvelope::from(signed)
     } else {
@@ -1829,14 +1825,8 @@ pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) ->
             .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
             .transpose()
             .map_err(|e| format!("invalid 'gasPrice': {e}"))?;
-        let gas_price = gas_price.unwrap_or_else(|| {
-            state
-                .fee_params
-                .read()
-                .map(|f| f.base_fee)
-                .unwrap_or(0)
-                + 1
-        });
+        let gas_price = gas_price
+            .unwrap_or_else(|| state.fee_params.read().map(|f| f.base_fee).unwrap_or(0) + 1);
 
         let tx = TxLegacy {
             chain_id: Some(chain_id),
@@ -1849,8 +1839,7 @@ pub(crate) fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) ->
         };
         let sig_hash = tx.signature_hash();
         let secret = FixedBytes::<32>::from_slice(&key);
-        let signature =
-            sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
+        let signature = sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
         let signed = tx.into_signed(signature);
         TxEnvelope::from(signed)
     };

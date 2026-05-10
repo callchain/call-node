@@ -118,7 +118,11 @@ async fn test_cors_preflight_allowed_origin() {
     );
     let headers = parse_response_headers(&response);
     assert!(
-        has_header_contains(&headers, "access-control-allow-origin", "http://example.com"),
+        has_header_contains(
+            &headers,
+            "access-control-allow-origin",
+            "http://example.com"
+        ),
         "Expected ACAO header for allowed origin"
     );
 
@@ -199,7 +203,11 @@ async fn test_cors_actual_request_allowed() {
     );
     let headers = parse_response_headers(&response);
     assert!(
-        has_header_contains(&headers, "access-control-allow-origin", "http://example.com"),
+        has_header_contains(
+            &headers,
+            "access-control-allow-origin",
+            "http://example.com"
+        ),
         "Expected ACAO header for allowed origin"
     );
 
@@ -324,7 +332,11 @@ async fn test_cors_empty_origins_allows_localhost() {
     );
     let headers = parse_response_headers(&response);
     assert!(
-        has_header_contains(&headers, "access-control-allow-origin", "http://localhost:3000"),
+        has_header_contains(
+            &headers,
+            "access-control-allow-origin",
+            "http://localhost:3000"
+        ),
         "Expected ACAO header for localhost origin"
     );
 

@@ -26,12 +26,7 @@ fn one_million_call() -> u128 {
     1_000_000 * 10u128.pow(18)
 }
 
-fn make_tx(
-    sender: Address,
-    nonce: u64,
-    to: Address,
-    amount: u128,
-) -> call_evm::EvmTransaction {
+fn make_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> call_evm::EvmTransaction {
     call_evm::EvmTransaction {
         caller: sender,
         nonce,

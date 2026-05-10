@@ -6,9 +6,7 @@
 
 use crate::ComplianceStorage;
 use alloy_sol_types::{sol, SolCall};
-use call_precompile::{
-    dispatch, require_caller, storage::StorageProvider, StorageRef,
-};
+use call_precompile::{dispatch, require_caller, storage::StorageProvider, StorageRef};
 use call_primitives::Address;
 use revm_precompile::{PrecompileError, PrecompileResult};
 

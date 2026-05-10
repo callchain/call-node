@@ -7,9 +7,9 @@
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, dispatch, require_caller, slot_asset_meta,
-    storage::storage_slot, u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256,
-    StorageRef, ASSET_ADDRESS,
+    address_to_u256, dispatch, require_caller, slot_asset_meta, storage::storage_slot,
+    u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
+    ASSET_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;

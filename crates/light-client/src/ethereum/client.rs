@@ -63,7 +63,10 @@ impl EthLightClient {
     /// When `beacon_config` is `Some`, the light client will verify sync
     /// committee aggregate signatures via [`Self::apply_light_client_update`].
     /// When `None`, behavior is identical to [`Self::init`].
-    pub fn init_with_beacon_config(genesis: GenesisState, beacon_config: Option<BeaconConfig>) -> Self {
+    pub fn init_with_beacon_config(
+        genesis: GenesisState,
+        beacon_config: Option<BeaconConfig>,
+    ) -> Self {
         let latest = genesis.anchor_block;
         let mut verified = HashMap::new();
         verified.insert(

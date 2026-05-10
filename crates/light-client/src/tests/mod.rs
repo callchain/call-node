@@ -333,10 +333,7 @@ fn test_reject_tampered_block_hash() {
 
     let result = client.submit_header(header);
     assert!(
-        matches!(
-            result,
-            Err(LightClientError::InvalidHeader(_))
-        ),
+        matches!(result, Err(LightClientError::InvalidHeader(_))),
         "tampered block hash should be rejected, got {:?}",
         result
     );

@@ -7,9 +7,7 @@
 use crate::ValidatorStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
-use call_precompile::{
-    dispatch, require_caller, storage::StorageProvider, StorageRef,
-};
+use call_precompile::{dispatch, require_caller, storage::StorageProvider, StorageRef};
 use call_primitives::{Address, U256};
 use revm_precompile::{PrecompileError, PrecompileResult};
 

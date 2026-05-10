@@ -387,10 +387,7 @@ pub struct BTreeStorageTrieCursor<'a> {
 }
 
 impl<'a> BTreeStorageTrieCursor<'a> {
-    fn new(
-        hashed_address: B256,
-        data: Option<&'a BTreeMap<Nibbles, BranchNodeCompact>>,
-    ) -> Self {
+    fn new(hashed_address: B256, data: Option<&'a BTreeMap<Nibbles, BranchNodeCompact>>) -> Self {
         Self {
             hashed_address,
             data,

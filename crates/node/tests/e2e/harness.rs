@@ -471,7 +471,10 @@ impl PartitionSimulator {
     pub fn add_node(&mut self, mut node: TestNode) -> Arc<RwLock<TestNode>> {
         let idx = self.nodes.len();
         let node_id = format!("node-{}", idx);
-        let net = Arc::new(PartitionableNetwork::new(node_id.clone(), Arc::clone(&self.router)));
+        let net = Arc::new(PartitionableNetwork::new(
+            node_id.clone(),
+            Arc::clone(&self.router),
+        ));
 
         // Register all existing peers on this new network handle
         for existing in &self.networks {

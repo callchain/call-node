@@ -298,7 +298,10 @@ impl SigningData {
 ///
 /// `domain = hash(fork_version || genesis_validators_root)` truncated to 28 bytes,
 /// then prefixed with `DOMAIN_SYNC_COMMITTEE`.
-pub fn compute_domain_sync_committee(fork_version: [u8; 4], genesis_validators_root: B256) -> [u8; 32] {
+pub fn compute_domain_sync_committee(
+    fork_version: [u8; 4],
+    genesis_validators_root: B256,
+) -> [u8; 32] {
     // ForkData: fork_version (4) + genesis_validators_root (32) = 36 bytes
     let mut fork_data = [0u8; 36];
     fork_data[0..4].copy_from_slice(&fork_version);

@@ -771,7 +771,11 @@ mod tests {
             "block with wrong height should be rejected"
         );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("height"), "error should mention height: {}", err);
+        assert!(
+            err.contains("height"),
+            "error should mention height: {}",
+            err
+        );
     }
 
     #[test]
@@ -987,12 +991,17 @@ mod tests {
         assert_eq!(stake_before, one_million_call());
         assert_eq!(read_validator_status(&evm, addr), 1);
 
-        let slashed = consensus.handle_double_sign(&mut evm, validator_id).unwrap();
+        let slashed = consensus
+            .handle_double_sign(&mut evm, validator_id)
+            .unwrap();
         assert_eq!(slashed, one_million_call());
 
         // Stake should be zero in EVM storage
         let stake_after = read_validator_stake(&evm, addr);
-        assert_eq!(stake_after, 0, "stake should be zero after double-sign slash");
+        assert_eq!(
+            stake_after, 0,
+            "stake should be zero after double-sign slash"
+        );
 
         // Status should be inactive (0)
         assert_eq!(
@@ -1019,7 +1028,9 @@ mod tests {
         assert_eq!(stake_before, one_million_call());
 
         let rounds = 5;
-        let slashed = consensus.handle_offline(&mut evm, validator_id, rounds).unwrap();
+        let slashed = consensus
+            .handle_offline(&mut evm, validator_id, rounds)
+            .unwrap();
         let expected_slashed = (stake_before * rounds as u128 * 10) / 10_000;
         assert_eq!(slashed, expected_slashed);
 
@@ -1050,7 +1061,9 @@ mod tests {
         let stake_before = read_validator_stake(&evm, addr);
         assert_eq!(stake_before, one_million_call());
 
-        let slashed = consensus.handle_oracle_outlier(&mut evm, validator_id).unwrap();
+        let slashed = consensus
+            .handle_oracle_outlier(&mut evm, validator_id)
+            .unwrap();
         let expected_slashed = stake_before / 1_000; // 0.1%
         assert_eq!(slashed, expected_slashed);
 
@@ -1088,7 +1101,9 @@ mod tests {
 
         // Second slash: 10 rounds = 1.0% of *current* (reduced) stake
         let stake_before_second = read_validator_stake(&evm, addr);
-        let slashed2 = consensus.handle_offline(&mut evm, validator_id, 10).unwrap();
+        let slashed2 = consensus
+            .handle_offline(&mut evm, validator_id, 10)
+            .unwrap();
         let expected2 = (stake_before_second * 10 * 10) / 10_000;
         assert_eq!(slashed2, expected2);
         let remaining2 = read_validator_stake(&evm, addr);
@@ -1107,7 +1122,9 @@ mod tests {
         let initial = read_validator_stake(&evm, addr);
 
         // Slash 1000 rounds at 0.1% = 100% of stake
-        let slashed = consensus.handle_offline(&mut evm, validator_id, 1000).unwrap();
+        let slashed = consensus
+            .handle_offline(&mut evm, validator_id, 1000)
+            .unwrap();
         assert_eq!(slashed, initial, "should slash entire stake");
 
         assert_eq!(read_validator_stake(&evm, addr), 0);
@@ -1170,9 +1187,7 @@ mod tests {
     #[test]
     fn test_epoch_churn_auto_exits_below_minimum_stake() {
         use crate::exec::state_accessors::read_validator_status;
-        use call_precompile::{
-            storage::storage_slot, u128_to_u256, VALIDATOR_ADDRESS,
-        };
+        use call_precompile::{storage::storage_slot, u128_to_u256, VALIDATOR_ADDRESS};
 
         let mut evm = InMemoryStateProvider::new();
         // Seed 5 validators
@@ -1248,10 +1263,10 @@ mod tests {
         let amount = ConsensusParams::default().min_self_stake - 1;
 
         let result = consensus.stake_validator(&mut evm, addr, pk, amount);
-        assert!(
-            result.is_err(),
-            "stake below minimum should be rejected"
-        );
-        assert!(result.unwrap_err().to_string().contains("insufficient stake"));
+        assert!(result.is_err(), "stake below minimum should be rejected");
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("insufficient stake"));
     }
 }

@@ -9,8 +9,8 @@
 //!   call-prover --listen-addr 0.0.0.0:8550
 //!   call-prover --api-keys key1,key2  # require X-API-Key header
 
-use call_shielded::prover_server::{build_router, ProverMode, ProverState};
 use call_shielded::prover::RealProver;
+use call_shielded::prover_server::{build_router, ProverMode, ProverState};
 use clap::Parser;
 use std::{
     collections::{HashMap, HashSet},

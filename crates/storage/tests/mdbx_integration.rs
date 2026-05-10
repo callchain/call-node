@@ -6,16 +6,15 @@
 //! - Batch writes, iteration, empty-table handling, overwrite, and large-value behaviour
 
 use call_storage::{
-    db_batch_put, db_clear, db_del, db_get, db_iter_all, db_put,
-    delete_block_hash_by_height, delete_bytecode, delete_light_client_header,
-    load_all_light_client_headers, load_block_hash_by_height, load_bytecode,
-    load_light_client_header, load_prune_state, save_block_hash_by_height, save_bytecode,
-    save_light_client_header, save_prune_state,
-    CallAccountHistory, CallAccountTrie, CallBlockHashIndex,
-    CallBlockStateSnapshots, CallBytecodes, CallCheckpoint, CallConsensusBlocks,
-    CallConsensusState, CallEvmAccounts, CallEvmStorage, CallFeeParams, CallForkState,
-    CallLightClientHeaders, CallMetadataChainId, CallReceipts,
-    CallReceiptsByBlock, CallRpcFilters, CallStorageHistory, CallStorageTrie, CallTrieUpdates,
+    db_batch_put, db_clear, db_del, db_get, db_iter_all, db_put, delete_block_hash_by_height,
+    delete_bytecode, delete_light_client_header, load_all_light_client_headers,
+    load_block_hash_by_height, load_bytecode, load_light_client_header, load_prune_state,
+    save_block_hash_by_height, save_bytecode, save_light_client_header, save_prune_state,
+    CallAccountHistory, CallAccountTrie, CallBlockHashIndex, CallBlockStateSnapshots,
+    CallBytecodes, CallCheckpoint, CallConsensusBlocks, CallConsensusState, CallEvmAccounts,
+    CallEvmStorage, CallFeeParams, CallForkState, CallLightClientHeaders, CallMetadataChainId,
+    CallReceipts, CallReceiptsByBlock, CallRpcFilters, CallStorageHistory, CallStorageTrie,
+    CallTrieUpdates,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -79,10 +78,15 @@ fn test_consensus_state_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!({"validators": [1,2,3]})).unwrap();
 
     db_put::<CallConsensusState>(&db.db, vec![0], value.clone()).unwrap();
-    assert_eq!(db_get::<CallConsensusState>(&db.db, &[0]).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallConsensusState>(&db.db, &[0]).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallConsensusState>(&db.db, &[0]).unwrap();
-    assert!(db_get::<CallConsensusState>(&db.db, &[0]).unwrap().is_none());
+    assert!(db_get::<CallConsensusState>(&db.db, &[0])
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -92,10 +96,15 @@ fn test_consensus_blocks_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!({"height": 42, "hash": "0x00"})).unwrap();
 
     db_put::<CallConsensusBlocks>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallConsensusBlocks>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallConsensusBlocks>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallConsensusBlocks>(&db.db, &key).unwrap();
-    assert!(db_get::<CallConsensusBlocks>(&db.db, &key).unwrap().is_none());
+    assert!(db_get::<CallConsensusBlocks>(&db.db, &key)
+        .unwrap()
+        .is_none());
 }
 
 // ── Receipt tables ───────────────────────────────────────────────────
@@ -120,10 +129,15 @@ fn test_receipts_by_block_roundtrip() {
     let value = serde_json::to_vec(&vec!["tx_a", "tx_b"]).unwrap();
 
     db_put::<CallReceiptsByBlock>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallReceiptsByBlock>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallReceiptsByBlock>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallReceiptsByBlock>(&db.db, &key).unwrap();
-    assert!(db_get::<CallReceiptsByBlock>(&db.db, &key).unwrap().is_none());
+    assert!(db_get::<CallReceiptsByBlock>(&db.db, &key)
+        .unwrap()
+        .is_none());
 }
 
 // ── Metadata ─────────────────────────────────────────────────────────
@@ -134,10 +148,15 @@ fn test_metadata_chain_id_roundtrip() {
     let value = 1337u64.to_be_bytes().to_vec();
 
     db_put::<CallMetadataChainId>(&db.db, vec![0], value.clone()).unwrap();
-    assert_eq!(db_get::<CallMetadataChainId>(&db.db, &[0]).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallMetadataChainId>(&db.db, &[0]).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallMetadataChainId>(&db.db, &[0]).unwrap();
-    assert!(db_get::<CallMetadataChainId>(&db.db, &[0]).unwrap().is_none());
+    assert!(db_get::<CallMetadataChainId>(&db.db, &[0])
+        .unwrap()
+        .is_none());
 }
 
 // ── Fee / Fork / Trie / Checkpoint ───────────────────────────────────
@@ -173,7 +192,10 @@ fn test_trie_updates_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!({"nodes": ["a", "b"]})).unwrap();
 
     db_put::<CallTrieUpdates>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallTrieUpdates>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallTrieUpdates>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallTrieUpdates>(&db.db, &key).unwrap();
     assert!(db_get::<CallTrieUpdates>(&db.db, &key).unwrap().is_none());
@@ -185,10 +207,15 @@ fn test_checkpoint_roundtrip() {
     let value = [0xDEu8; 32].to_vec();
 
     db_put::<CallCheckpoint>(&db.db, b"pending".to_vec(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallCheckpoint>(&db.db, b"pending").unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallCheckpoint>(&db.db, b"pending").unwrap(),
+        Some(value)
+    );
 
     db_del::<CallCheckpoint>(&db.db, b"pending").unwrap();
-    assert!(db_get::<CallCheckpoint>(&db.db, b"pending").unwrap().is_none());
+    assert!(db_get::<CallCheckpoint>(&db.db, b"pending")
+        .unwrap()
+        .is_none());
 }
 
 // ── History tables ───────────────────────────────────────────────────
@@ -202,10 +229,15 @@ fn test_account_history_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!({"nonce": 1})).unwrap();
 
     db_put::<CallAccountHistory>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallAccountHistory>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallAccountHistory>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallAccountHistory>(&db.db, &key).unwrap();
-    assert!(db_get::<CallAccountHistory>(&db.db, &key).unwrap().is_none());
+    assert!(db_get::<CallAccountHistory>(&db.db, &key)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -218,10 +250,15 @@ fn test_storage_history_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!("0x1234")).unwrap();
 
     db_put::<CallStorageHistory>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallStorageHistory>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallStorageHistory>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallStorageHistory>(&db.db, &key).unwrap();
-    assert!(db_get::<CallStorageHistory>(&db.db, &key).unwrap().is_none());
+    assert!(db_get::<CallStorageHistory>(&db.db, &key)
+        .unwrap()
+        .is_none());
 }
 
 // ── Trie node tables ─────────────────────────────────────────────────
@@ -233,7 +270,10 @@ fn test_account_trie_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!({"branch": true})).unwrap();
 
     db_put::<CallAccountTrie>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallAccountTrie>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallAccountTrie>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallAccountTrie>(&db.db, &key).unwrap();
     assert!(db_get::<CallAccountTrie>(&db.db, &key).unwrap().is_none());
@@ -246,7 +286,10 @@ fn test_storage_trie_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!({"leaf": true})).unwrap();
 
     db_put::<CallStorageTrie>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallStorageTrie>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallStorageTrie>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallStorageTrie>(&db.db, &key).unwrap();
     assert!(db_get::<CallStorageTrie>(&db.db, &key).unwrap().is_none());
@@ -261,10 +304,15 @@ fn test_block_state_snapshots_roundtrip() {
     let value = serde_json::to_vec(&serde_json::json!({"accounts": {}})).unwrap();
 
     db_put::<CallBlockStateSnapshots>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallBlockStateSnapshots>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallBlockStateSnapshots>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallBlockStateSnapshots>(&db.db, &key).unwrap();
-    assert!(db_get::<CallBlockStateSnapshots>(&db.db, &key).unwrap().is_none());
+    assert!(db_get::<CallBlockStateSnapshots>(&db.db, &key)
+        .unwrap()
+        .is_none());
 }
 
 // ── Light client headers (convenience helpers) ───────────────────────
@@ -302,10 +350,15 @@ fn test_block_hash_index_roundtrip() {
     let value = 1234u64.to_be_bytes().to_vec();
 
     db_put::<CallBlockHashIndex>(&db.db, key.clone(), value.clone()).unwrap();
-    assert_eq!(db_get::<CallBlockHashIndex>(&db.db, &key).unwrap(), Some(value));
+    assert_eq!(
+        db_get::<CallBlockHashIndex>(&db.db, &key).unwrap(),
+        Some(value)
+    );
 
     db_del::<CallBlockHashIndex>(&db.db, &key).unwrap();
-    assert!(db_get::<CallBlockHashIndex>(&db.db, &key).unwrap().is_none());
+    assert!(db_get::<CallBlockHashIndex>(&db.db, &key)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -345,7 +398,10 @@ fn test_bytecode_helpers() {
     let code = vec![0x60, 0x80, 0x60, 0x40, 0x52]; // PUSH1 80 PUSH1 40 MSTORE
 
     save_bytecode(&db.db, &code_hash, &code).unwrap();
-    assert_eq!(load_bytecode(&db.db, &code_hash).unwrap(), Some(code.clone()));
+    assert_eq!(
+        load_bytecode(&db.db, &code_hash).unwrap(),
+        Some(code.clone())
+    );
 
     delete_bytecode(&db.db, &code_hash).unwrap();
     assert_eq!(load_bytecode(&db.db, &code_hash).unwrap(), None);
@@ -387,10 +443,7 @@ fn test_batch_write_multiple_tables() {
     db_batch_put::<CallEvmAccounts>(&db.db, pairs_evm).unwrap();
     db_batch_put::<CallReceipts>(&db.db, pairs_receipts).unwrap();
 
-    assert_eq!(
-        db_iter_all::<CallEvmAccounts>(&db.db).unwrap().len(),
-        100
-    );
+    assert_eq!(db_iter_all::<CallEvmAccounts>(&db.db).unwrap().len(), 100);
     assert_eq!(db_iter_all::<CallReceipts>(&db.db).unwrap().len(), 100);
 }
 
@@ -445,7 +498,9 @@ fn test_large_value() {
     let value = vec![0xABu8; 1_000_000]; // 1 MB
 
     db_put::<CallBlockStateSnapshots>(&db.db, key.clone(), value.clone()).unwrap();
-    let loaded = db_get::<CallBlockStateSnapshots>(&db.db, &key).unwrap().unwrap();
+    let loaded = db_get::<CallBlockStateSnapshots>(&db.db, &key)
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.len(), 1_000_000);
     assert_eq!(loaded, value);
 }
@@ -457,10 +512,15 @@ fn test_db_clear_removes_all() {
         let key = format!("k{}", i).into_bytes();
         db_put::<CallConsensusBlocks>(&db.db, key, vec![i as u8]).unwrap();
     }
-    assert_eq!(db_iter_all::<CallConsensusBlocks>(&db.db).unwrap().len(), 50);
+    assert_eq!(
+        db_iter_all::<CallConsensusBlocks>(&db.db).unwrap().len(),
+        50
+    );
 
     db_clear::<CallConsensusBlocks>(&db.db).unwrap();
-    assert!(db_iter_all::<CallConsensusBlocks>(&db.db).unwrap().is_empty());
+    assert!(db_iter_all::<CallConsensusBlocks>(&db.db)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -600,9 +660,18 @@ fn test_batch_write_atomicity() {
     db_batch_put::<CallFeeParams>(&db.db, batch).unwrap();
 
     // All entries should be updated consistently
-    assert_eq!(db_get::<CallFeeParams>(&db.db, b"a").unwrap(), Some(b"10".to_vec()));
-    assert_eq!(db_get::<CallFeeParams>(&db.db, b"b").unwrap(), Some(b"20".to_vec()));
-    assert_eq!(db_get::<CallFeeParams>(&db.db, b"c").unwrap(), Some(b"30".to_vec()));
+    assert_eq!(
+        db_get::<CallFeeParams>(&db.db, b"a").unwrap(),
+        Some(b"10".to_vec())
+    );
+    assert_eq!(
+        db_get::<CallFeeParams>(&db.db, b"b").unwrap(),
+        Some(b"20".to_vec())
+    );
+    assert_eq!(
+        db_get::<CallFeeParams>(&db.db, b"c").unwrap(),
+        Some(b"30".to_vec())
+    );
 }
 
 #[test]

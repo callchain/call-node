@@ -805,8 +805,7 @@ mod tests {
     fn test_transfer_circuit_wrong_spending_key_rejected() {
         let sk = test_spending_key(1);
         let rho_in = test_hash(10).0;
-        let (input_witness, nullifier, input_cm) =
-            make_input_note(1000, 1, &sk, rho_in);
+        let (input_witness, nullifier, input_cm) = make_input_note(1000, 1, &sk, rho_in);
 
         let mut tree = PoseidonMerkleTree::new(32);
         tree.insert(&input_cm);

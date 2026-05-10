@@ -9,8 +9,8 @@ use crate::AssetStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
-    dispatch, ok_empty, require_caller, slot_asset_meta,
-    slot_compliance, write_string32, StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
+    dispatch, ok_empty, require_caller, slot_asset_meta, slot_compliance, write_string32,
+    StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::CALL_ASSET_ID;

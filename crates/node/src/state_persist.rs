@@ -370,9 +370,13 @@ mod tests {
         let tx3 = call_primitives::TxHash::from([0x03u8; 32]);
         receipts.insert(
             tx3,
-            make_receipt(tx3, 20, call_primitives::ExecutionStatus::Reverted {
-                reason: "out of gas".into(),
-            }),
+            make_receipt(
+                tx3,
+                20,
+                call_primitives::ExecutionStatus::Reverted {
+                    reason: "out of gas".into(),
+                },
+            ),
         );
 
         save_receipts(&db, &receipts).unwrap();
@@ -477,11 +481,23 @@ mod tests {
         let tx_hash = call_primitives::TxHash::from([0xCCu8; 32]);
 
         let mut receipts1 = std::collections::HashMap::new();
-        receipts1.insert(tx_hash, make_receipt(tx_hash, 10, call_primitives::ExecutionStatus::Success));
+        receipts1.insert(
+            tx_hash,
+            make_receipt(tx_hash, 10, call_primitives::ExecutionStatus::Success),
+        );
         save_receipts(&db, &receipts1).unwrap();
 
         let mut receipts2 = std::collections::HashMap::new();
-        receipts2.insert(tx_hash, make_receipt(tx_hash, 20, call_primitives::ExecutionStatus::Reverted { reason: "fail".into() }));
+        receipts2.insert(
+            tx_hash,
+            make_receipt(
+                tx_hash,
+                20,
+                call_primitives::ExecutionStatus::Reverted {
+                    reason: "fail".into(),
+                },
+            ),
+        );
         save_receipts(&db, &receipts2).unwrap();
 
         let loaded = load_receipts(&db).unwrap();
@@ -531,7 +547,10 @@ mod tests {
 
         save_fork_state(&db, &fm).unwrap();
         let loaded = load_fork_state(&db).unwrap().unwrap();
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 2, 3));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 2, 3)
+        );
     }
 
     #[test]
@@ -557,12 +576,18 @@ mod tests {
 
         // Before activation height: no upgrade applied
         assert!(loaded.check_upgrades_at_height(99).is_none());
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 0, 0));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 0, 0)
+        );
 
         // At activation height: upgrade fires
         let result = loaded.check_upgrades_at_height(100);
         assert_eq!(result, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 1, 0));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 1, 0)
+        );
 
         // Idempotent: second call at same height returns none
         assert!(loaded.check_upgrades_at_height(100).is_none());
@@ -600,17 +625,26 @@ mod tests {
         // Apply first upgrade
         let v1 = loaded.check_upgrades_at_height(50);
         assert_eq!(v1, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 1, 0));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 1, 0)
+        );
 
         // Apply second upgrade
         let v2 = loaded.check_upgrades_at_height(100);
         assert_eq!(v2, Some(call_primitives::ProtocolVersion::new(1, 2, 0)));
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 2, 0));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 2, 0)
+        );
 
         // Apply third upgrade
         let v3 = loaded.check_upgrades_at_height(200);
         assert_eq!(v3, Some(call_primitives::ProtocolVersion::new(1, 3, 0)));
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 3, 0));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 3, 0)
+        );
 
         // All upgrades marked applied
         assert!(loaded.scheduled_upgrades.iter().all(|e| e.applied));
@@ -636,7 +670,10 @@ mod tests {
         // Upgrade at height 10 should still be available after load
         let result = loaded.check_upgrades_at_height(10);
         assert_eq!(result, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 1, 0));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 1, 0)
+        );
     }
 
     #[test]
@@ -649,6 +686,9 @@ mod tests {
         let mut loaded = load_fork_state(&db).unwrap().unwrap();
 
         assert!(loaded.check_upgrades_at_height(999).is_none());
-        assert_eq!(loaded.current_version, call_primitives::ProtocolVersion::new(1, 0, 0));
+        assert_eq!(
+            loaded.current_version,
+            call_primitives::ProtocolVersion::new(1, 0, 0)
+        );
     }
 }

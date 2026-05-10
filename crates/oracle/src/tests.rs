@@ -193,7 +193,13 @@ fn test_oracle_invalid_signature_wrong_key() {
     // Sign with a completely unrelated keypair
     let (_, wrong_signing_key) = ed25519_generate_keypair();
     let bad_sig = sign_oracle_submission(
-        &wrong_signing_key, validators[0].0, pair, 2_000_000, block, timestamp);
+        &wrong_signing_key,
+        validators[0].0,
+        pair,
+        2_000_000,
+        block,
+        timestamp,
+    );
 
     let submission = OracleSubmission {
         validator_id: validators[0].0,

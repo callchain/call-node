@@ -6,8 +6,7 @@
 
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
-    dispatch,
-    require_caller,
+    dispatch, require_caller,
     storage::{storage_slot, StorageProvider},
     u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
 };
@@ -194,29 +193,44 @@ pub struct OraclePrecompile;
 
 impl OraclePrecompile {
     fn get_price(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::view::<IProtocolOracle::getPriceCall, _, _>(calldata, 1000, storage, |call, storage| {
-            let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
-            Ok(store.read_price(call.assetId))
-        })
+        dispatch::view::<IProtocolOracle::getPriceCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |call, storage| {
+                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+                Ok(store.read_price(call.assetId))
+            },
+        )
     }
 
     fn get_twap(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-        dispatch::view::<IProtocolOracle::getTWAPCall, _, _>(calldata, 1000, storage, |call, storage| {
-            let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
-            Ok(store.read_twap(call.assetId))
-        })
+        dispatch::view::<IProtocolOracle::getTWAPCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |call, storage| {
+                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+                Ok(store.read_twap(call.assetId))
+            },
+        )
     }
 
     fn is_stale(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
         let current_ts = storage.timestamp().to::<u64>();
-        dispatch::view::<IProtocolOracle::isStaleCall, _, _>(calldata, 1000, storage, |call, storage| {
-            let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
-            Ok(U256::from(if store.is_stale(call.assetId, current_ts) {
-                1u8
-            } else {
-                0u8
-            }))
-        })
+        dispatch::view::<IProtocolOracle::isStaleCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |call, storage| {
+                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+                Ok(U256::from(if store.is_stale(call.assetId, current_ts) {
+                    1u8
+                } else {
+                    0u8
+                }))
+            },
+        )
     }
 
     fn submit_price(

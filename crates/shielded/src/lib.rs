@@ -41,6 +41,8 @@ pub mod circuit_deposit;
 pub mod circuit_transfer;
 #[cfg(feature = "real-prover")]
 pub mod circuit_withdraw;
+#[cfg(feature = "production-keys")]
+pub mod key_registry;
 #[cfg(feature = "real-prover")]
 pub mod keygen;
 pub mod merkle_poseidon;
@@ -50,8 +52,6 @@ pub mod precompile;
 pub mod proof_ser;
 #[cfg(feature = "prover-server")]
 pub mod prover_server;
-#[cfg(feature = "production-keys")]
-pub mod key_registry;
 
 /// Whether the `real-prover` feature is enabled at compile time.
 /// Tests in downstream crates can use this to skip mock-proof tests
@@ -293,8 +293,12 @@ pub fn verify_shielded_proof(
         return Ok(false);
     }
 
-    let prover = RealProver::for_version(proof.key_version)
-        .ok_or_else(|| format!("no prover keys registered for version {}", proof.key_version))?;
+    let prover = RealProver::for_version(proof.key_version).ok_or_else(|| {
+        format!(
+            "no prover keys registered for version {}",
+            proof.key_version
+        )
+    })?;
 
     let result: Result<bool, ProverError> = match circuit_type {
         "deposit" => {

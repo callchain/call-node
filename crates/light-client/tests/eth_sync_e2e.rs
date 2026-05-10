@@ -114,8 +114,13 @@ fn test_light_client_real_network_epoch_sync() {
     let mut client = EthLightClient::init(genesis);
 
     // Sync 32 headers (one Ethereum epoch)
-    let synced = sync_header_range(&eth_rpc_url, &mut client, anchor_block + 1, anchor_block + 32)
-        .expect("sync epoch");
+    let synced = sync_header_range(
+        &eth_rpc_url,
+        &mut client,
+        anchor_block + 1,
+        anchor_block + 32,
+    )
+    .expect("sync epoch");
     assert_eq!(synced, 32, "should sync full epoch");
     assert_eq!(client.latest_block(), anchor_block + 32);
 
@@ -128,7 +133,10 @@ fn test_light_client_real_network_epoch_sync() {
         );
     }
 
-    println!("Epoch sync passed: {} headers from {}", synced, anchor_block);
+    println!(
+        "Epoch sync passed: {} headers from {}",
+        synced, anchor_block
+    );
 }
 
 /// Verify parent-hash chain integrity across real Ethereum headers.
@@ -170,7 +178,8 @@ fn test_light_client_real_network_parent_chain() {
         let prev_hash = headers[i - 1].block_hash;
         let parent_hash = headers[i].parent_hash().expect("decode parent hash");
         assert_eq!(
-            parent_hash, prev_hash,
+            parent_hash,
+            prev_hash,
             "parent hash mismatch at block {}",
             anchor_block + i as u64 + 1
         );
@@ -181,10 +190,16 @@ fn test_light_client_real_network_parent_chain() {
         let bn = anchor_block + i as u64;
         let stored = client.get_header(bn).expect("header should be stored");
         let fetched = sync_single_header(&eth_rpc_url, bn).expect("fetch for comparison");
-        assert_eq!(stored.block_hash, fetched.block_hash, "stored hash mismatch at {bn}");
+        assert_eq!(
+            stored.block_hash, fetched.block_hash,
+            "stored hash mismatch at {bn}"
+        );
     }
 
-    println!("Parent chain test passed: {} headers linked correctly", count);
+    println!(
+        "Parent chain test passed: {} headers linked correctly",
+        count
+    );
 }
 
 /// Test gap sync: submit every other header first, then fill the gaps.
@@ -227,7 +242,11 @@ fn test_light_client_real_network_gap_sync() {
             let result = client.submit_header(header.clone());
             // May buffer or fail depending on gap size; just record result
             if let Err(e) = result {
-                println!("  Buffer/gap at block {}: {}", header.number().unwrap_or(0), e);
+                println!(
+                    "  Buffer/gap at block {}: {}",
+                    header.number().unwrap_or(0),
+                    e
+                );
             }
         }
     }
@@ -236,9 +255,10 @@ fn test_light_client_real_network_gap_sync() {
     // These should connect to the anchor and flush buffered children
     for (idx, header) in headers.iter().enumerate() {
         if idx % 2 == 0 {
-            client
-                .submit_header(header.clone())
-                .expect(&format!("submit gap-filler at block {}", header.number().unwrap_or(0)));
+            client.submit_header(header.clone()).expect(&format!(
+                "submit gap-filler at block {}",
+                header.number().unwrap_or(0)
+            ));
         }
     }
 

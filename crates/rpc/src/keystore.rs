@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use alloy_primitives::{Address, B256};
-use call_crypto::{encrypt_key, keccak256, load_key, pubkey_to_address, secp256k1_sign, KeystoreError};
+use call_crypto::{
+    encrypt_key, keccak256, load_key, pubkey_to_address, secp256k1_sign, KeystoreError,
+};
 use call_primitives::PublicKey;
 
 /// Local keystore with optional disk persistence.
@@ -73,11 +75,7 @@ impl LocalKeystore {
     }
 
     /// Load an encrypted keystore file into memory.
-    pub fn load_from_file(
-        &self,
-        path: &Path,
-        passphrase: &str,
-    ) -> Result<Address, KeystoreError> {
+    pub fn load_from_file(&self, path: &Path, passphrase: &str) -> Result<Address, KeystoreError> {
         let raw_key = load_key(path, passphrase)?;
         let address = derive_address(&*raw_key);
         if let Ok(mut keys) = self.keys.write() {

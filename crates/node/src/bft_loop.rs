@@ -144,7 +144,9 @@ pub(crate) async fn bft_event_loop(
     oracle_tracker: Arc<RwLock<OracleTracker>>,
     governance_advancer: crate::governance_advancer::GovernanceAdvancer,
     snapshot_retention_blocks: u64,
-    light_client_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::light_client_service::LightClientEvent>>,
+    light_client_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::light_client_service::LightClientEvent>,
+    >,
 ) {
     let mut execution_results: std::collections::HashMap<ConsensusDigest, BlockExecutionResult> =
         std::collections::HashMap::new();

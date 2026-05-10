@@ -238,9 +238,7 @@ impl EvmExecutor {
         };
 
         let (success, output, gas_used) = match result {
-            revm::context_interface::result::ExecutionResult::Success {
-                gas, output, ..
-            } => {
+            revm::context_interface::result::ExecutionResult::Success { gas, output, .. } => {
                 let bytes = match output {
                     revm::context_interface::result::Output::Call(b) => b,
                     revm::context_interface::result::Output::Create(b, _) => b,
@@ -877,16 +875,12 @@ mod tests {
             .expect("inspected execution should succeed");
 
         assert!(result.success, "execution should succeed");
-        assert!(
-            result.gas_used > 0,
-            "gas should be consumed"
-        );
+        assert!(result.gas_used > 0, "gas should be consumed");
 
         // The access list should contain the contract address with at least one storage slot
-        let item = access_list
-            .0
-            .iter()
-            .find(|item| item.address == alloy_primitives::Address::from_slice(contract.as_slice()));
+        let item = access_list.0.iter().find(|item| {
+            item.address == alloy_primitives::Address::from_slice(contract.as_slice())
+        });
         assert!(
             item.is_some(),
             "access list should contain the contract address"

@@ -566,7 +566,11 @@ mod tests {
         // Run the full fast sync pipeline
         let peers = vec!["peer1".to_string()];
         let result = FastSyncFlow::run(&tmp, &peers, &pubkeys);
-        assert!(result.is_ok(), "fast sync pipeline should complete: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "fast sync pipeline should complete: {:?}",
+            result.err()
+        );
         assert_eq!(result.unwrap(), 0, "catch-up should return 0 (no-op)");
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -574,7 +578,8 @@ mod tests {
 
     #[test]
     fn test_fast_sync_run_no_peers_fails() {
-        let tmp = std::env::temp_dir().join(format!("call-fast-sync-no-peers-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("call-fast-sync-no-peers-{}", std::process::id()));
         let pubkeys: HashMap<u32, call_primitives::Ed25519PublicKey> = HashMap::new();
         let peers: Vec<String> = Vec::new();
 
@@ -588,7 +593,8 @@ mod tests {
 
     #[test]
     fn test_fast_sync_run_no_pubkeys_fails() {
-        let tmp = std::env::temp_dir().join(format!("call-fast-sync-no-pubkeys-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("call-fast-sync-no-pubkeys-{}", std::process::id()));
         let pubkeys: HashMap<u32, call_primitives::Ed25519PublicKey> = HashMap::new();
         let peers = vec!["peer1".to_string()];
 
@@ -602,10 +608,8 @@ mod tests {
 
     #[test]
     fn test_fast_sync_restore_snapshot_mismatch_rejected() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-fast-sync-mismatch-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-fast-sync-mismatch-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         // Create and save an original snapshot
@@ -626,7 +630,8 @@ mod tests {
 
         let err = FastSyncFlow::restore_snapshot(&tmp, &tampered).unwrap_err();
         assert!(
-            err.to_string().contains("snapshot restore verification failed"),
+            err.to_string()
+                .contains("snapshot restore verification failed"),
             "tampered snapshot should fail restore: {}",
             err
         );
@@ -636,10 +641,7 @@ mod tests {
 
     #[test]
     fn test_fast_sync_list_snapshots_sorted() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-fast-sync-list-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("call-fast-sync-list-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         // Save snapshots at various heights (out of order)

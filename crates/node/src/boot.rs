@@ -273,7 +273,8 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     let (_light_client_handle, light_client_tx) = node.start_light_client_service();
     info!("light client service started");
 
-    node.start_network(p2p_config, identity_key, Some(light_client_tx.clone())).await?;
+    node.start_network(p2p_config, identity_key, Some(light_client_tx.clone()))
+        .await?;
 
     // Step 5: Init consensus (validator or full node)
     match config.mode {
@@ -386,8 +387,12 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                     consensus_p2p_port, "BFT consensus P2P bootstrap peers configured"
                 );
 
-                let _handle =
-                    node.start_bft_engine(ed25519_key, consensus_p2p_port, bft_bootstrap_peers, Some(light_client_tx.clone()));
+                let _handle = node.start_bft_engine(
+                    ed25519_key,
+                    consensus_p2p_port,
+                    bft_bootstrap_peers,
+                    Some(light_client_tx.clone()),
+                );
             }
         }
         NodeMode::Full | NodeMode::Archive => {

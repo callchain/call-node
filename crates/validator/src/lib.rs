@@ -208,7 +208,11 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             .map(|v: u128| v as u64)
             .unwrap_or(0);
         // Default: 120_960 blocks (~8.4h at 250ms) when unset
-        if raw == 0 { 120_960 } else { raw }
+        if raw == 0 {
+            120_960
+        } else {
+            raw
+        }
     }
 
     // ── Write operations ──────────────────────────────────────────────
@@ -504,9 +508,7 @@ mod tests {
     use super::*;
     use call_asset::AssetStorage;
     use call_precompile::storage::{HashMapStorageProvider, StorageProvider};
-    use call_precompile::{StorageRef,
-        slot_balance, u128_to_u256, ASSET_ADDRESS,
-    };
+    use call_precompile::{slot_balance, u128_to_u256, StorageRef, ASSET_ADDRESS};
     use call_primitives::Address;
 
     fn test_addr(n: u8) -> Address {
@@ -936,10 +938,14 @@ mod tests {
 
         assert_eq!(validator_store.read_active_validator_count(), 0);
 
-        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1)
+            .unwrap();
         assert_eq!(validator_store.read_active_validator_count(), 1);
 
-        validator_store.stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2).unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2)
+            .unwrap();
         assert_eq!(validator_store.read_active_validator_count(), 2);
 
         validator_store.unstake(1, v1, 100).unwrap();
@@ -969,7 +975,9 @@ mod tests {
         assert_eq!(validator_store.read_unbonding_count(), 1);
 
         // Slash while unbonding
-        let slashed = validator_store.slash_stake(&mut asset_store, caller).unwrap();
+        let slashed = validator_store
+            .slash_stake(&mut asset_store, caller)
+            .unwrap();
         assert_eq!(slashed, 5_000_000);
 
         // Queue entry should be removed
@@ -1017,11 +1025,7 @@ mod tests {
 
     fn set_safety_floor(provider: &mut HashMapStorageProvider, floor: u64) {
         provider
-            .sstore(
-                VALIDATOR_ADDRESS,
-                slot_safety_floor(),
-                u64_to_u256(floor),
-            )
+            .sstore(VALIDATOR_ADDRESS, slot_safety_floor(), u64_to_u256(floor))
             .unwrap();
     }
 
@@ -1050,8 +1054,12 @@ mod tests {
         set_safety_floor(&mut provider, 2);
 
         // Stake 2 validators
-        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
-        validator_store.stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2).unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1)
+            .unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2)
+            .unwrap();
         assert_eq!(validator_store.read_active_validator_count(), 2);
 
         // Unstake first validator: active_count would drop to 1, which is below floor 2
@@ -1082,14 +1090,24 @@ mod tests {
         set_safety_floor(&mut provider, 2);
 
         // Stake 3 validators
-        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
-        validator_store.stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2).unwrap();
-        validator_store.stake(&mut asset_store, [0xCCu8; 32], 5_000_000, v3).unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1)
+            .unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2)
+            .unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xCCu8; 32], 5_000_000, v3)
+            .unwrap();
         assert_eq!(validator_store.read_active_validator_count(), 3);
 
         // Unstake one validator: active_count would drop to 2, which meets floor 2
         let result = validator_store.unstake(1, v1, 100);
-        assert!(result.is_ok(), "unstake should succeed above safety floor: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "unstake should succeed above safety floor: {:?}",
+            result.err()
+        );
         assert_eq!(validator_store.read_status(v1), 2); // unbonding
     }
 
@@ -1106,9 +1124,15 @@ mod tests {
         assert_eq!(validator_store.read_safety_floor(), 0);
 
         // Single validator can unstake with no floor
-        validator_store.stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1).unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1)
+            .unwrap();
         let result = validator_store.unstake(1, v1, 100);
-        assert!(result.is_ok(), "unstake should succeed with no safety floor: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "unstake should succeed with no safety floor: {:?}",
+            result
+        );
     }
 
     // ── Dynamic unbonding period tests ─────────────────────────────────
@@ -1141,7 +1165,11 @@ mod tests {
 
         // Claim at block 150 (100 + 50) should succeed
         let result = validator_store.claim_unbonded(&mut asset_store, 1, caller, 150);
-        assert!(result.is_ok(), "claim should succeed at exact period: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "claim should succeed at exact period: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1169,6 +1197,10 @@ mod tests {
         );
 
         let result = validator_store.claim_unbonded(&mut asset_store, 1, caller, 100 + 120_960);
-        assert!(result.is_ok(), "claim should succeed at default period: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "claim should succeed at default period: {:?}",
+            result.err()
+        );
     }
 }

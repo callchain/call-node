@@ -237,7 +237,10 @@ fn encode_rlp_field(out: &mut Vec<u8>, data: &[u8]) {
 ///
 /// Returns the first available [`LightClientUpdate`] at or after `period`.
 /// The update is requested in SSZ format for efficient parsing.
-pub fn fetch_light_client_update(beacon_url: &str, period: u64) -> Result<LightClientUpdate, String> {
+pub fn fetch_light_client_update(
+    beacon_url: &str,
+    period: u64,
+) -> Result<LightClientUpdate, String> {
     let url = format!(
         "{}/eth/v1/beacon/light_client/updates?start_period={}&count=1",
         beacon_url, period

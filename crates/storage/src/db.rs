@@ -59,9 +59,9 @@ pub trait Migration: Send + Sync {
 pub fn read_schema_version(db: &DatabaseEnv) -> Result<u64, StorageError> {
     match db_get::<CallSchemaVersion>(db, b"version")? {
         Some(bytes) if bytes.len() >= 8 => {
-            let arr: [u8; 8] = bytes[..8].try_into().map_err(|_| {
-                StorageError::Decoding("invalid schema version bytes".into())
-            })?;
+            let arr: [u8; 8] = bytes[..8]
+                .try_into()
+                .map_err(|_| StorageError::Decoding("invalid schema version bytes".into()))?;
             Ok(u64::from_be_bytes(arr))
         }
         _ => Ok(0),
@@ -200,10 +200,8 @@ mod tests {
 
     #[test]
     fn test_migration_fresh_db_starts_at_version_zero() {
-        let tmp = std::env::temp_dir().join(format!(
-            "call-db-migration-fresh-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-db-migration-fresh-{}", std::process::id()));
         let db = open_db(tmp).expect("open test db");
         let version = read_schema_version(&db.db).expect("read version");
         assert_eq!(version, 0, "fresh db should have schema version 0");
@@ -214,10 +212,8 @@ mod tests {
     fn test_migration_applies_in_order() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        let tmp = std::env::temp_dir().join(format!(
-            "call-db-migration-order-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-db-migration-order-{}", std::process::id()));
         let db = open_db(tmp).expect("open test db");
 
         static ORDER: AtomicU64 = AtomicU64::new(0);
@@ -230,8 +226,12 @@ mod tests {
 
         struct MigrationV1;
         impl Migration for MigrationV1 {
-            fn name(&self) -> &'static str { "add_default_asset" }
-            fn version(&self) -> u64 { 1 }
+            fn name(&self) -> &'static str {
+                "add_default_asset"
+            }
+            fn version(&self) -> u64 {
+                1
+            }
             fn apply(&self, _db: &DatabaseEnv) -> Result<(), StorageError> {
                 V1_RAN.store(ORDER.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
                 Ok(())
@@ -239,8 +239,12 @@ mod tests {
         }
         struct MigrationV2;
         impl Migration for MigrationV2 {
-            fn name(&self) -> &'static str { "add_fee_currency_index" }
-            fn version(&self) -> u64 { 2 }
+            fn name(&self) -> &'static str {
+                "add_fee_currency_index"
+            }
+            fn version(&self) -> u64 {
+                2
+            }
             fn apply(&self, _db: &DatabaseEnv) -> Result<(), StorageError> {
                 V2_RAN.store(ORDER.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
                 Ok(())
@@ -274,22 +278,29 @@ mod tests {
 
         struct CountingMigration;
         impl Migration for CountingMigration {
-            fn name(&self) -> &'static str { "counting_migration" }
-            fn version(&self) -> u64 { 1 }
+            fn name(&self) -> &'static str {
+                "counting_migration"
+            }
+            fn version(&self) -> u64 {
+                1
+            }
             fn apply(&self, _db: &DatabaseEnv) -> Result<(), StorageError> {
                 COUNTER.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
         }
 
-        let runner = MigrationRunner::new()
-            .register(Box::new(CountingMigration));
+        let runner = MigrationRunner::new().register(Box::new(CountingMigration));
 
         runner.run(&db.db).expect("first run");
         assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
 
         runner.run(&db.db).expect("second run");
-        assert_eq!(COUNTER.load(Ordering::SeqCst), 1, "migration should not run twice");
+        assert_eq!(
+            COUNTER.load(Ordering::SeqCst),
+            1,
+            "migration should not run twice"
+        );
 
         assert_eq!(read_schema_version(&db.db).unwrap(), 1);
         let _ = std::fs::remove_dir_all(&db.data_dir);
@@ -299,10 +310,8 @@ mod tests {
     fn test_migration_failure_leaves_version_unchanged() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        let tmp = std::env::temp_dir().join(format!(
-            "call-db-migration-fail-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-db-migration-fail-{}", std::process::id()));
         let db = open_db(tmp).expect("open test db");
 
         static V1_RAN: AtomicU64 = AtomicU64::new(0);
@@ -310,8 +319,12 @@ mod tests {
 
         struct GoodMigration;
         impl Migration for GoodMigration {
-            fn name(&self) -> &'static str { "good_migration" }
-            fn version(&self) -> u64 { 1 }
+            fn name(&self) -> &'static str {
+                "good_migration"
+            }
+            fn version(&self) -> u64 {
+                1
+            }
             fn apply(&self, _db: &DatabaseEnv) -> Result<(), StorageError> {
                 V1_RAN.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -320,8 +333,12 @@ mod tests {
 
         struct BadMigration;
         impl Migration for BadMigration {
-            fn name(&self) -> &'static str { "bad_migration" }
-            fn version(&self) -> u64 { 2 }
+            fn name(&self) -> &'static str {
+                "bad_migration"
+            }
+            fn version(&self) -> u64 {
+                2
+            }
             fn apply(&self, _db: &DatabaseEnv) -> Result<(), StorageError> {
                 Err(StorageError::Validation("intentional failure".into()))
             }
@@ -336,7 +353,11 @@ mod tests {
 
         // Version should remain at 1 (last successful migration)
         assert_eq!(read_schema_version(&db.db).unwrap(), 1);
-        assert_eq!(V1_RAN.load(Ordering::SeqCst), 1, "good migration should have run");
+        assert_eq!(
+            V1_RAN.load(Ordering::SeqCst),
+            1,
+            "good migration should have run"
+        );
         let _ = std::fs::remove_dir_all(&db.data_dir);
     }
 
@@ -344,27 +365,24 @@ mod tests {
     fn test_migration_can_write_data() {
         use crate::reth_db::{db_get, CallEvmAccounts};
 
-        let tmp = std::env::temp_dir().join(format!(
-            "call-db-migration-write-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("call-db-migration-write-{}", std::process::id()));
         let db = open_db(tmp).expect("open test db");
 
         struct SeedMigration;
         impl Migration for SeedMigration {
-            fn name(&self) -> &'static str { "seed_test_data" }
-            fn version(&self) -> u64 { 1 }
+            fn name(&self) -> &'static str {
+                "seed_test_data"
+            }
+            fn version(&self) -> u64 {
+                1
+            }
             fn apply(&self, db: &DatabaseEnv) -> Result<(), StorageError> {
-                db_put::<CallEvmAccounts>(
-                    db,
-                    b"seed_key".to_vec(),
-                    b"seed_value".to_vec(),
-                )
+                db_put::<CallEvmAccounts>(db, b"seed_key".to_vec(), b"seed_value".to_vec())
             }
         }
 
-        let runner = MigrationRunner::new()
-            .register(Box::new(SeedMigration));
+        let runner = MigrationRunner::new().register(Box::new(SeedMigration));
 
         runner.run(&db.db).expect("run migration");
 

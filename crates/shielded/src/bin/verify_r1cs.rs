@@ -95,7 +95,10 @@ fn check_metadata(
         passed: data.n_wires == 1 + data.n_public + data.n_private,
         detail: format!(
             "1 + {} + {} = {}, n_wires = {}",
-            data.n_public, data.n_private, 1 + data.n_public + data.n_private, data.n_wires
+            data.n_public,
+            data.n_private,
+            1 + data.n_public + data.n_private,
+            data.n_wires
         ),
     });
 
@@ -149,7 +152,9 @@ fn find_c2_signatures(data: &R1CSJson) -> Vec<(usize, usize, usize, usize)> {
 
             // Pattern: a = [0, 1] + [w3, p-1], b = [0, 1], c = []
             let a_has_const = c2.a.iter().any(|(w, coeff)| *w == 0 && coeff == "1");
-            let a_has_neg = c2.a.iter().any(|(w, coeff)| *w == w3 && coeff == BN254_P_MINUS_1);
+            let a_has_neg =
+                c2.a.iter()
+                    .any(|(w, coeff)| *w == w3 && coeff == BN254_P_MINUS_1);
             let b_has_one = c2.b.len() == 1 && c2.b[0].0 == 0 && c2.b[0].1 == "1";
             let c_empty = c2.c.is_empty();
 
@@ -164,7 +169,11 @@ fn find_c2_signatures(data: &R1CSJson) -> Vec<(usize, usize, usize, usize)> {
 }
 
 /// Check C2 signatures for a circuit.
-fn check_c2_signatures(data: &R1CSJson, expected_count: usize, value_wire_hint: Option<usize>) -> Vec<CheckResult> {
+fn check_c2_signatures(
+    data: &R1CSJson,
+    expected_count: usize,
+    value_wire_hint: Option<usize>,
+) -> Vec<CheckResult> {
     let signatures = find_c2_signatures(data);
 
     let mut results = Vec::new();
@@ -191,7 +200,10 @@ fn check_c2_signatures(data: &R1CSJson, expected_count: usize, value_wire_hint: 
                 format!(
                     "no C2 signature uses expected value wire {}; found signatures on wires {:?}",
                     hint,
-                    signatures.iter().map(|(_, w1, _, _)| *w1).collect::<Vec<_>>()
+                    signatures
+                        .iter()
+                        .map(|(_, w1, _, _)| *w1)
+                        .collect::<Vec<_>>()
                 )
             },
         });
@@ -261,7 +273,9 @@ fn check_boolean_patterns(data: &R1CSJson) -> Vec<CheckResult> {
         // Pattern: a = [0, 1] + [w, p-1], b = [w, 1], c = []
         if c.a.len() == 2 && c.b.len() == 1 && c.c.is_empty() {
             let a_const = c.a.iter().find(|(w, _)| *w == 0);
-            let a_neg = c.a.iter().find(|(w, coeff)| *w != 0 && coeff == BN254_P_MINUS_1);
+            let a_neg =
+                c.a.iter()
+                    .find(|(w, coeff)| *w != 0 && coeff == BN254_P_MINUS_1);
             let b_wire = c.b.first();
 
             if let (Some((_, const_coeff)), Some((neg_wire, _)), Some((b_wire, b_coeff))) =
@@ -275,17 +289,15 @@ fn check_boolean_patterns(data: &R1CSJson) -> Vec<CheckResult> {
         }
     }
 
-    vec![
-        CheckResult {
-            name: "boolean_constraint_count".to_string(),
-            passed: bool_count >= 100,
-            detail: format!(
-                "found {} boolean constraints on {} distinct wires (expected >= 100)",
-                bool_count,
-                bool_wires.len()
-            ),
-        },
-    ]
+    vec![CheckResult {
+        name: "boolean_constraint_count".to_string(),
+        passed: bool_count >= 100,
+        detail: format!(
+            "found {} boolean constraints on {} distinct wires (expected >= 100)",
+            bool_count,
+            bool_wires.len()
+        ),
+    }]
 }
 
 /// Check that public input wires are at expected positions.
@@ -364,13 +376,12 @@ fn verify_transfer(data: &R1CSJson) -> CircuitReport {
     // C2 on input value (wire 5) and output value (somewhere after Merkle siblings)
 
     // Use adaptive check based on actual n_public
-    let (expected_public, constraint_range, expected_c2, value_wire_hint) =
-        if data.n_public == 4 {
-            (4, (10000, 13000), 2, Some(5))
-        } else {
-            // N=2, M=2
-            (6, (18000, 23000), 4, Some(7))
-        };
+    let (expected_public, constraint_range, expected_c2, value_wire_hint) = if data.n_public == 4 {
+        (4, (10000, 13000), 2, Some(5))
+    } else {
+        // N=2, M=2
+        (6, (18000, 23000), 4, Some(7))
+    };
 
     checks.extend(check_metadata(data, expected_public, constraint_range));
     checks.extend(check_c2_signatures(data, expected_c2, value_wire_hint));

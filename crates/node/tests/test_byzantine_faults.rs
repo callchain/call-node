@@ -78,7 +78,11 @@ async fn test_equivocating_proposer_network_partition() {
     // Let the spawned broadcast task complete while still partitioned
     tokio::task::yield_now().await;
     // Node 1 should not have received anything yet
-    assert_eq!(sim.pending_messages(1), 0, "node 1 should be partitioned off");
+    assert_eq!(
+        sim.pending_messages(1),
+        0,
+        "node 1 should be partitioned off"
+    );
 
     // Create a *different* block at the same height (equivocation)
     let mut block_b = Block::new(
@@ -103,8 +107,10 @@ async fn test_equivocating_proposer_network_partition() {
         proposer: block_a.header.proposer,
         timestamp_millis: block_a.header.timestamp_millis,
     };
-    let msg_a = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(announcement_a))
-        .unwrap();
+    let msg_a = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(
+        announcement_a,
+    ))
+    .unwrap();
     net0.broadcast(2, msg_a).await;
 
     let announcement_b = call_network::BlockAnnouncement {
@@ -113,8 +119,10 @@ async fn test_equivocating_proposer_network_partition() {
         proposer: block_b.header.proposer,
         timestamp_millis: block_b.header.timestamp_millis,
     };
-    let msg_b = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(announcement_b))
-        .unwrap();
+    let msg_b = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(
+        announcement_b,
+    ))
+    .unwrap();
     net0.broadcast(2, msg_b).await;
 
     tokio::task::yield_now().await;
@@ -127,8 +135,7 @@ async fn test_equivocating_proposer_network_partition() {
     // blocks were committed.
     let node = sim.node(0);
     let n0 = node.read().unwrap();
-    let provider =
-        call_evm::provider::InMemoryStateProvider::from_db(&n0.state.db_env).unwrap();
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&n0.state.db_env).unwrap();
     let val_id: ValidatorId = call_consensus::exec::state_accessors::read_validator_id_by_addr(
         provider.state(),
         val_addr,
@@ -230,10 +237,7 @@ async fn test_malicious_message_flood_ignored() {
 
     // Node 1 should have the legitimate block announcement mixed with garbage.
     let msgs = sim.drain_messages(1);
-    let real_announcements: Vec<_> = msgs
-        .iter()
-        .filter(|(_, ch, _)| *ch == 2)
-        .collect();
+    let real_announcements: Vec<_> = msgs.iter().filter(|(_, ch, _)| *ch == 2).collect();
     assert!(
         !real_announcements.is_empty(),
         "legitimate block announcement should survive the flood"
@@ -271,8 +275,10 @@ async fn test_invalid_block_broadcast_rejected() {
         proposer: invalid_block.header.proposer,
         timestamp_millis: invalid_block.header.timestamp_millis,
     };
-    let msg =
-        bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(announcement)).unwrap();
+    let msg = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(
+        announcement,
+    ))
+    .unwrap();
     net0.broadcast(2, msg).await;
 
     tokio::task::yield_now().await;

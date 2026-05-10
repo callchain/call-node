@@ -65,9 +65,10 @@ fn test_oracle_price_submit_and_read() {
             validator_addr,
             one_million_call(),
         );
-        provider
-            .state_mut()
-            .set_balance(validator_addr, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(
+            validator_addr,
+            call_primitives::U256::from(100_000_000_000u128),
+        );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
@@ -123,7 +124,10 @@ fn test_oracle_price_submit_and_read() {
             .get_storage(&ORACLE_ADDRESS, oracle_twap_slot(asset_id))
             .to_be_bytes::<32>();
         let twap_u128 = u128::from_be_bytes(stored_twap[16..32].try_into().unwrap());
-        assert_eq!(twap_u128, price1, "twap should equal first price when count=1");
+        assert_eq!(
+            twap_u128, price1,
+            "twap should equal first price when count=1"
+        );
     }
 
     // Step 2: Submit second price to test TWAP averaging
@@ -176,7 +180,10 @@ fn test_oracle_price_submit_and_read() {
             .get_storage(&ORACLE_ADDRESS, oracle_twap_slot(asset_id))
             .to_be_bytes::<32>();
         let twap_u128 = u128::from_be_bytes(stored_twap[16..32].try_into().unwrap());
-        assert_eq!(twap_u128, expected_twap, "twap should be average of two prices");
+        assert_eq!(
+            twap_u128, expected_twap,
+            "twap should be average of two prices"
+        );
     }
 }
 
@@ -209,9 +216,10 @@ fn test_oracle_non_validator_rejected() {
     {
         let mut provider =
             call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
-        provider
-            .state_mut()
-            .set_balance(non_validator_addr, call_primitives::U256::from(100_000_000_000u128));
+        provider.state_mut().set_balance(
+            non_validator_addr,
+            call_primitives::U256::from(100_000_000_000u128),
+        );
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 

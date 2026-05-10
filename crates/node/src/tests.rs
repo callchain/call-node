@@ -609,10 +609,7 @@ async fn test_e2e_state_persistence_restart() {
 
 #[tokio::test]
 async fn test_crash_recovery_checkpoint_detected() {
-    let tmp = std::env::temp_dir().join(format!(
-        "call-node-crash-recovery-{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("call-node-crash-recovery-{}", std::process::id()));
 
     // Phase 1: Create node, persist state cleanly, then simulate crash
     {
@@ -676,7 +673,12 @@ async fn test_crash_recovery_checkpoint_detected() {
             let mut provider =
                 call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
             let result = block
-                .execute(&mut provider, &mut s.fee_params, height, Some(&node.state.db_env))
+                .execute(
+                    &mut provider,
+                    &mut s.fee_params,
+                    height,
+                    Some(&node.state.db_env),
+                )
                 .expect("execution");
             provider.state().save_to_db(&node.state.db_env).unwrap();
             result
@@ -696,11 +698,8 @@ async fn test_crash_recovery_checkpoint_detected() {
 
         // Simulate crash: write checkpoint marker without clearing it
         // This represents a crash during a subsequent persist
-        crate::state_persist::write_checkpoint_pending(
-            &node.db.db,
-            block.header.hash().0,
-        )
-        .expect("write checkpoint");
+        crate::state_persist::write_checkpoint_pending(&node.db.db, block.header.hash().0)
+            .expect("write checkpoint");
 
         // Node dropped here
     }
@@ -713,13 +712,19 @@ async fn test_crash_recovery_checkpoint_detected() {
 
         // Recovery should have reset fork_manager to default
         let fm = node2.state.fork_manager.read().unwrap();
-        assert_eq!(fm.current_version, call_primitives::ProtocolVersion::new(1, 0, 0));
+        assert_eq!(
+            fm.current_version,
+            call_primitives::ProtocolVersion::new(1, 0, 0)
+        );
         assert!(fm.scheduled_upgrades().is_empty());
         drop(fm);
 
         // Receipts should be empty (reset by recovery)
         let receipts = node2.state.receipts.read().unwrap();
-        assert!(receipts.is_empty(), "receipts should be empty after recovery");
+        assert!(
+            receipts.is_empty(),
+            "receipts should be empty after recovery"
+        );
         drop(receipts);
 
         // Checkpoint should be cleared
@@ -1305,10 +1310,8 @@ async fn test_sync_within_same_epoch_does_not_set_restart_signal() {
 
 #[tokio::test]
 async fn test_receipt_persistence_restart() {
-    let tmp = std::env::temp_dir().join(format!(
-        "call-node-receipt-persist-{}",
-        std::process::id()
-    ));
+    let tmp =
+        std::env::temp_dir().join(format!("call-node-receipt-persist-{}", std::process::id()));
     let log_addr = test_addr(0x42);
     let topic = call_primitives::Hash::repeat_byte(0x11);
 
@@ -1409,21 +1412,34 @@ async fn test_receipt_persistence_restart() {
         node.state.store_receipt(tx3, receipt3);
 
         // Persist state (including receipts)
-        persist_state_to_db(
-            &node.db.db, &node.state, &node.consensus)
-            .expect("persist state");
+        persist_state_to_db(&node.db.db, &node.state, &node.consensus).expect("persist state");
 
         // Verify in-memory state before restart
         let receipts_block_10 = node.state.get_receipts_by_block(10);
-        assert_eq!(receipts_block_10.len(), 2, "should have 2 receipts in block 10");
+        assert_eq!(
+            receipts_block_10.len(),
+            2,
+            "should have 2 receipts in block 10"
+        );
 
         let receipts_block_20 = node.state.get_receipts_by_block(20);
-        assert_eq!(receipts_block_20.len(), 1, "should have 1 receipt in block 20");
+        assert_eq!(
+            receipts_block_20.len(),
+            1,
+            "should have 1 receipt in block 20"
+        );
 
         // Verify log_index was built
         let log_entries = node.state.lookup_logs_by_address(&[log_addr]);
-        assert!(log_entries.is_some(), "log_index should contain entries for log_addr");
-        assert_eq!(log_entries.unwrap().len(), 2, "should have 2 log entries indexed");
+        assert!(
+            log_entries.is_some(),
+            "log_index should contain entries for log_addr"
+        );
+        assert_eq!(
+            log_entries.unwrap().len(),
+            2,
+            "should have 2 log entries indexed"
+        );
     }
 
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1449,22 +1465,29 @@ async fn test_receipt_persistence_restart() {
 
         // Verify individual receipt fields
         let tx1 = call_primitives::TxHash::repeat_byte(1);
-        let r1 = node2.state.get_receipt(&tx1).expect("tx1 receipt should exist");
+        let r1 = node2
+            .state
+            .get_receipt(&tx1)
+            .expect("tx1 receipt should exist");
         assert_eq!(r1.block_number, 10);
-        assert!(matches!(r1.status, call_primitives::ExecutionStatus::Success));
+        assert!(matches!(
+            r1.status,
+            call_primitives::ExecutionStatus::Success
+        ));
         assert_eq!(r1.logs.len(), 1);
         assert_eq!(r1.logs[0].address, log_addr);
         assert_eq!(r1.logs[0].topics.len(), 1);
         assert_eq!(r1.logs[0].topics[0], topic);
 
         let tx3 = call_primitives::TxHash::repeat_byte(3);
-        let r3 = node2.state.get_receipt(&tx3).expect("tx3 receipt should exist");
+        let r3 = node2
+            .state
+            .get_receipt(&tx3)
+            .expect("tx3 receipt should exist");
         assert_eq!(r3.block_number, 20);
-        assert!(
-            matches!(
-                &r3.status, call_primitives::ExecutionStatus::Reverted { reason } if reason == "insufficient gas"
-            )
-        );
+        assert!(matches!(
+            &r3.status, call_primitives::ExecutionStatus::Reverted { reason } if reason == "insufficient gas"
+        ));
 
         // Verify log_index was rebuilt from loaded receipts
         let log_entries = node2.state.lookup_logs_by_address(&[log_addr]);
@@ -1480,7 +1503,10 @@ async fn test_receipt_persistence_restart() {
 
         // Verify empty block returns empty
         let receipts_block_99 = node2.state.get_receipts_by_block(99);
-        assert!(receipts_block_99.is_empty(), "block 99 should have no receipts");
+        assert!(
+            receipts_block_99.is_empty(),
+            "block 99 should have no receipts"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1564,22 +1590,29 @@ async fn test_agent_register_in_block() {
 
     // Verify tx succeeded
     assert_eq!(result.evm_tx_results.len(), 1);
-    assert!(result.evm_tx_results[0].status, "agent register tx should succeed");
+    assert!(
+        result.evm_tx_results[0].status,
+        "agent register tx should succeed"
+    );
 
     // Verify agent state in DB
-    let provider =
-        call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
     assert_eq!(state_accessors::read_agent_count(provider.state()), 1);
-    assert_eq!(state_accessors::agent_get_owner(provider.state(), 0), *test_sender());
-    assert_eq!(state_accessors::agent_get_name(provider.state(), 0), "TestAgent");
+    assert_eq!(
+        state_accessors::agent_get_owner(provider.state(), 0),
+        *test_sender()
+    );
+    assert_eq!(
+        state_accessors::agent_get_name(provider.state(), 0),
+        "TestAgent"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[tokio::test]
 async fn test_agent_grant_and_pay_in_block() {
-    let tmp =
-        std::env::temp_dir().join(format!("call-node-agent-pay-test-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("call-node-agent-pay-test-{}", std::process::id()));
     let node = CallNode::new(tmp.clone()).expect("node creation");
 
     // Stake validator
@@ -1697,17 +1730,15 @@ async fn test_agent_grant_and_pay_in_block() {
     assert!(result.evm_tx_results[2].status, "pay should succeed");
 
     // Verify agent state in DB
-    let provider =
-        call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+    let provider = call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
     assert_eq!(state_accessors::read_agent_count(provider.state()), 1);
-    assert_eq!(state_accessors::agent_get_owner(provider.state(), 0), *test_sender());
+    assert_eq!(
+        state_accessors::agent_get_owner(provider.state(), 0),
+        *test_sender()
+    );
     // Agent balance should be 5_000 - 1_000 = 4_000
     assert_eq!(
-        state_accessors::agent_get_balance(
-            provider.state(),
-            0,
-            call_agent::CALL_ASSET_ID
-        ),
+        state_accessors::agent_get_balance(provider.state(), 0, call_agent::CALL_ASSET_ID),
         4_000
     );
     // Recipient should have received 1_000

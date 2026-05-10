@@ -442,7 +442,8 @@ mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
     use call_precompile::{
-        address_to_u256, slot_asset_meta, u128_to_u256, u256_to_u128, StatefulPrecompile, StorageRef,
+        address_to_u256, slot_asset_meta, u128_to_u256, u256_to_u128, StatefulPrecompile,
+        StorageRef,
     };
 
     fn addr(n: u8) -> Address {
@@ -1021,7 +1022,11 @@ mod tests {
         let asset_id = 7u64;
 
         provider
-            .sstore(ASSET_ADDRESS, slot_balance(asset_id, addr), u128_to_u256(10))
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(asset_id, addr),
+                u128_to_u256(10),
+            )
             .unwrap();
 
         let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
@@ -1075,11 +1080,7 @@ mod tests {
         let mut padded = [0u8; 32];
         padded[12..32].copy_from_slice(holder.as_slice());
         provider
-            .sstore(
-                contract,
-                mapping_slot(&padded, 4),
-                u128_to_u256(200),
-            )
+            .sstore(contract, mapping_slot(&padded, 4), u128_to_u256(200))
             .unwrap();
 
         let result = store.erc20_burn(asset_id, contract, holder, 200);
