@@ -69,6 +69,19 @@ pub struct CliArgs {
     #[arg(long)]
     pub keyring_user: Option<String>,
 
+    // ── Ethereum Light Client / Bridge ────────────────────────────────
+    /// Ethereum beacon chain REST API URL for consensus verification
+    #[arg(long)]
+    pub beacon_url: Option<String>,
+
+    /// Beacon chain fork version hex (default: 0x00000001 for Altair)
+    #[arg(long)]
+    pub beacon_fork_version: Option<String>,
+
+    /// Genesis validators root (32-byte hex) for beacon domain computation
+    #[arg(long)]
+    pub genesis_validators_root: Option<String>,
+
     // ── Genesis ───────────────────────────────────────────────────────
     /// Path to genesis JSON file
     #[arg(long)]

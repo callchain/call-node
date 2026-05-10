@@ -17,6 +17,9 @@ use rand::rngs::OsRng;
 use std::sync::Arc;
 use tracing::info;
 
+use call_light_client::{BeaconConfig, EthLightClient, GenesisState};
+use alloy_primitives::B256;
+
 /// Result type for boot sequence
 pub type BootResult = Result<CallNode, String>;
 
@@ -207,6 +210,39 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
         }
     }
 
+    // Step 2d: Initialize Ethereum light client (optional — for beacon consensus verification)
+    {
+        let genesis_state = GenesisState {
+            anchor_hash: B256::ZERO,
+            anchor_block: 0,
+            state_root: B256::ZERO,
+        };
+        if let (Some(ref beacon_url), Some(ref gvr_hex)) = (
+            config.light_client.beacon_url.as_ref(),
+            config.light_client.genesis_validators_root.as_ref(),
+        ) {
+            let gvr = gvr_hex
+                .trim_start_matches("0x")
+                .parse::<B256>()
+                .map_err(|e| format!("invalid genesis_validators_root: {e}"))?;
+            let beacon_config = BeaconConfig {
+                fork_version: config.light_client.fork_version,
+                genesis_validators_root: gvr,
+            };
+            info!(
+                beacon_url = %beacon_url,
+                fork_version = ?config.light_client.fork_version,
+                "initializing Ethereum light client with beacon consensus verification"
+            );
+            let eth_lc = EthLightClient::init_with_beacon_config(genesis_state, Some(beacon_config));
+            node.eth_light_client = Some(Arc::new(std::sync::RwLock::new(eth_lc)));
+        } else {
+            info!("Ethereum light client running without beacon verification (parent-hash only)");
+            let eth_lc = EthLightClient::init(genesis_state);
+            node.eth_light_client = Some(Arc::new(std::sync::RwLock::new(eth_lc)));
+        }
+    }
+
     // Step 3: Apply genesis if this is a fresh start
     if node.fresh_start {
         if let Some(genesis) = preloaded_genesis {
@@ -292,6 +328,14 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
 
     node.start_network(p2p_config, identity_key, Some(light_client_tx.clone()))
         .await?;
+
+    // Step 4b: Start beacon chain light client sync task (if configured)
+    if let Some(ref beacon_url) = config.light_client.beacon_url {
+        if config.light_client.genesis_validators_root.is_some() {
+            node.start_beacon_sync_task(beacon_url.clone(), 60);
+            info!("beacon sync task started (interval: 60s)");
+        }
+    }
 
     // Step 5: Init consensus (validator or full node)
     match config.mode {

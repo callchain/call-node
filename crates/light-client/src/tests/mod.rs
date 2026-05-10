@@ -530,3 +530,90 @@ fn test_malicious_parent_hash_chain_break() {
         result
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Beacon chain BLS consensus verification tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_init_with_beacon_config_stores_config() {
+    let genesis = GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let beacon_config = BeaconConfig {
+        fork_version: [0, 0, 0, 1],
+        genesis_validators_root: B256::repeat_byte(0xBB),
+    };
+    let client = EthLightClient::init_with_beacon_config(genesis, Some(beacon_config));
+
+    // Without any updates, apply_light_client_update should fail because
+    // there is no sync committee yet.
+    assert_eq!(client.current_sync_period(), 0);
+    assert_eq!(client.finalized_block(), None);
+    assert!(!client.is_consensus_verified(1000));
+}
+
+#[test]
+fn test_is_consensus_verified_without_finalized() {
+    let genesis = GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+
+    // Submit block 1001
+    let rlp = make_test_header_rlp(B256::repeat_byte(0xAA), 1001, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    client.submit_header(header).unwrap();
+
+    // No finalized block set yet
+    assert!(!client.is_consensus_verified(1000));
+    assert!(!client.is_consensus_verified(1001));
+    assert!(!client.is_consensus_verified(999));
+}
+
+#[test]
+fn test_is_consensus_verified_with_finalized() {
+    let genesis = GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+
+    // Build chain 1001 → 1002 → 1003
+    let rlp1 = make_test_header_rlp(B256::repeat_byte(0xAA), 1001, tx_root, receipt_root);
+    let h1 = EthHeader::from_rlp(rlp1);
+    let hash1 = h1.block_hash;
+    client.submit_header(h1).unwrap();
+
+    let rlp2 = make_test_header_rlp(hash1, 1002, tx_root, receipt_root);
+    let h2 = EthHeader::from_rlp(rlp2);
+    let hash2 = h2.block_hash;
+    client.submit_header(h2).unwrap();
+
+    let rlp3 = make_test_header_rlp(hash2, 1003, tx_root, receipt_root);
+    let h3 = EthHeader::from_rlp(rlp3);
+    let hash3 = h3.block_hash;
+    client.submit_header(h3).unwrap();
+
+    // Finalize block 1002
+    client.set_finalized_block(1002, hash2);
+
+    assert!(client.is_consensus_verified(1000));
+    assert!(client.is_consensus_verified(1001));
+    assert!(client.is_consensus_verified(1002));
+    assert!(!client.is_consensus_verified(1003));
+    assert!(!client.is_consensus_verified(1004));
+
+    // Advance finalized to 1003
+    client.set_finalized_block(1003, hash3);
+    assert!(client.is_consensus_verified(1003));
+}

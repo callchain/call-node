@@ -28,6 +28,7 @@ call-oracle.workspace = true
 call-evm.workspace = true
 call-precompile.workspace = true
 call-bridge.workspace = true
+call-light-client = { workspace = true, features = ["eth-sync"] }
 call-consensus.workspace = true
 call-shielded.workspace = true
 call-crypto.workspace = true

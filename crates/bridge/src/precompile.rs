@@ -49,6 +49,7 @@ pub enum BridgeError {
     InsufficientBalance,
     BalanceOverflow,
     InvalidInput,
+    NotConsensusVerified(u64),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -69,6 +70,9 @@ impl std::fmt::Display for BridgeError {
             BridgeError::InsufficientBalance => write!(f, "insufficient balance"),
             BridgeError::BalanceOverflow => write!(f, "balance overflow"),
             BridgeError::InvalidInput => write!(f, "invalid input"),
+            BridgeError::NotConsensusVerified(block) => {
+                write!(f, "block {block} not consensus-verified by beacon chain")
+            }
         }
     }
 }

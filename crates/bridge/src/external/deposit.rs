@@ -305,6 +305,13 @@ pub fn process_light_client_deposit_evm<B: StorageBackend>(
         .verify_receipt_and_parse_bridge_event(block_number, receipt_proof)
         .map_err(|e| BridgeError::MptProofError(e.to_string()))?;
 
+    // Verify the deposit block has been consensus-finalized by beacon chain BLS.
+    // Without this check, an attacker could construct a valid parent-hash chain
+    // that was never accepted by Ethereum consensus.
+    if !light_client.is_consensus_verified(block_number) {
+        return Err(BridgeError::NotConsensusVerified(block_number));
+    }
+
     if bridge_event.recipient != *recipient {
         return Err(BridgeError::MptProofError("recipient mismatch".into()));
     }
@@ -359,4 +366,338 @@ pub fn process_light_client_deposit_evm<B: StorageBackend>(
         challenge_period_blocks: config.challenge_period_blocks,
         finalized_at_block: current_block + config.challenge_period_blocks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{keccak256, Address, B256};
+    use call_light_client::{EthHeader, GenesisState, MptProofNode, ReceiptProof, TxInclusionProof};
+    use crate::ExternalChain;
+
+    // ── Mock storage backend ─────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct MockStorage {
+        slots: std::collections::HashMap<(Address, U256), U256>,
+    }
+
+    impl StorageBackend for MockStorage {
+        fn load(&mut self, address: Address, slot: U256) -> U256 {
+            self.slots.get(&(address, slot)).copied().unwrap_or(U256::ZERO)
+        }
+        fn store(&mut self, address: Address, slot: U256, value: U256) {
+            self.slots.insert((address, slot), value);
+        }
+    }
+
+    // ── Minimal RLP helpers for test construction ────────────────────────
+
+    fn rlp_short(data: &[u8]) -> Vec<u8> {
+        if data.len() == 1 && data[0] < 0x80 {
+            data.to_vec()
+        } else if data.len() < 56 {
+            let mut out = vec![0x80 + data.len() as u8];
+            out.extend_from_slice(data);
+            out
+        } else {
+            let len_bytes = data.len().to_be_bytes();
+            let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(8);
+            let num = 8 - skip;
+            let mut out = vec![0xB7 + num as u8];
+            out.extend_from_slice(&len_bytes[skip..]);
+            out.extend_from_slice(data);
+            out
+        }
+    }
+
+    fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+        let total: usize = items.iter().map(|i| i.len()).sum();
+        let mut out = Vec::with_capacity(1 + total);
+        if total < 56 {
+            out.push(0xC0 + total as u8);
+        } else {
+            let len_bytes = total.to_be_bytes();
+            let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(8);
+            let num = 8 - skip;
+            out.push(0xF7 + num as u8);
+            out.extend_from_slice(&len_bytes[skip..]);
+        }
+        for item in items {
+            out.extend_from_slice(item);
+        }
+        out
+    }
+
+    fn rlp_u64(v: u64) -> Vec<u8> {
+        if v == 0 {
+            vec![0x80]
+        } else {
+            let bytes = v.to_be_bytes();
+            let start = bytes.iter().position(|&b| b != 0).unwrap_or(8);
+            let data = &bytes[start..];
+            if data.len() == 1 && data[0] < 0x80 {
+                data.to_vec()
+            } else {
+                let mut out = vec![0x80 + data.len() as u8];
+                out.extend_from_slice(data);
+                out
+            }
+        }
+    }
+
+    fn rlp_u128(v: u128) -> Vec<u8> {
+        if v == 0 {
+            vec![0x80]
+        } else {
+            let bytes = v.to_be_bytes();
+            let start = bytes.iter().position(|&b| b != 0).unwrap_or(16);
+            let data = &bytes[start..];
+            if data.len() == 1 && data[0] < 0x80 {
+                data.to_vec()
+            } else {
+                let mut out = vec![0x80 + data.len() as u8];
+                out.extend_from_slice(data);
+                out
+            }
+        }
+    }
+
+    // ── MPT leaf builder (compact encoding) ──────────────────────────────
+
+    fn compact_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
+        let odd = nibbles.len() % 2 != 0;
+        let first = if odd {
+            let ty = if is_leaf { 3 } else { 1 };
+            (nibbles[0] << 4) | ty
+        } else if is_leaf {
+            0x20
+        } else {
+            0x00
+        };
+        let mut out = vec![first];
+        let start = if odd { 1 } else { 0 };
+        for i in (start..nibbles.len()).step_by(2) {
+            if i + 1 < nibbles.len() {
+                out.push((nibbles[i] << 4) | nibbles[i + 1]);
+            }
+        }
+        out
+    }
+
+    fn make_leaf_node_rlp(key_nibbles: &[u8], value: &[u8]) -> Vec<u8> {
+        let compact = compact_encode(key_nibbles, true);
+        rlp_list(&[rlp_short(&compact), rlp_short(value)])
+    }
+
+    // ── Header builder ───────────────────────────────────────────────────
+
+    fn make_test_header_rlp(
+        parent_hash: B256,
+        block_number: u64,
+        tx_root: B256,
+        receipt_root: B256,
+    ) -> Vec<u8> {
+        let mut fields: Vec<Vec<u8>> = Vec::new();
+        fields.push(rlp_short(&parent_hash.0)); // 0 parent_hash
+        fields.push(vec![0x80]); // 1 sha3_uncles
+        fields.push(vec![0x80]); // 2 miner
+        fields.push(rlp_short(&[0u8; 32])); // 3 state_root
+        fields.push(rlp_short(&tx_root.0)); // 4 transactions_root
+        fields.push(rlp_short(&receipt_root.0)); // 5 receipts_root
+        fields.push(vec![0x80]); // 6 logs_bloom
+        fields.push(rlp_short(&[0x01])); // 7 difficulty
+        fields.push(rlp_u64(block_number)); // 8 number
+        fields.push(rlp_short(&[0x01])); // 9 gas_limit
+        fields.push(vec![0x80]); // 10 gas_used
+        fields.push(rlp_short(&[0x01])); // 11 timestamp
+        fields.push(vec![0x80]); // 12 extra_data
+        fields.push(rlp_short(&[0u8; 32])); // 13 mix_hash
+        fields.push(vec![0x88, 0, 0, 0, 0, 0, 0, 0, 0]); // 14 nonce
+        fields.push(vec![0x80]); // 15 base_fee
+        rlp_list(&fields)
+    }
+
+    // ── Bridge event receipt builder ─────────────────────────────────────
+
+    fn make_bridge_receipt_rlp(
+        recipient: Address,
+        source_tx_hash: B256,
+        _asset_id: u64,
+        amount: u128,
+    ) -> Vec<u8> {
+        // BridgeDeposit event signature
+        let event_sig = B256::new([
+            0x3a, 0x95, 0x7f, 0x16, 0x8e, 0x13, 0xa0, 0x27, 0xb5, 0x3e, 0x7f, 0x6f, 0xe9, 0x58,
+            0xa0, 0xbc, 0xa9, 0x0d, 0x51, 0x5b, 0x66, 0xbf, 0x4b, 0x5a, 0x6c, 0x61, 0x60, 0x84,
+            0x79, 0x13, 0x54, 0x06,
+        ]);
+
+        // Topics: [event_sig, source_tx_hash, recipient_padded]
+        let mut recipient_padded = [0u8; 32];
+        recipient_padded[12..].copy_from_slice(recipient.as_slice());
+        let topics_rlp = rlp_list(&[
+            rlp_short(&event_sig.0),
+            rlp_short(&source_tx_hash.0),
+            rlp_short(&recipient_padded),
+        ]);
+
+        // Data: [source_chain, source_block, sender, asset_id, amount]
+        let data_rlp = rlp_list(&[
+            rlp_short(&[0x01]), // source_chain = 1
+            rlp_u64(60003),     // source_block
+            vec![0x80],         // sender (empty)
+            rlp_short(&[0x01]), // asset_id = 1
+            rlp_u128(amount),   // amount
+        ]);
+
+        // Log: [address, topics, data]
+        let address = vec![0xC0u8; 20];
+        let log_rlp = rlp_list(&[rlp_short(&address), topics_rlp, data_rlp]);
+        let logs_rlp = rlp_list(&[log_rlp]);
+
+        // Receipt: [status, gas_used, bloom, logs]
+        rlp_list(&[
+            rlp_short(&[0x01]),       // status
+            rlp_short(&[0x52, 0x08]), // gas_used = 21000
+            vec![0x80],               // bloom
+            logs_rlp,
+        ])
+    }
+
+    #[test]
+    fn test_light_client_deposit_rejects_unverified_block() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut light_client = call_light_client::EthLightClient::init(genesis);
+
+        let recipient = Address::repeat_byte(0x42);
+        let source_tx_hash = B256::repeat_byte(0xAB);
+        let asset_id = 1u64;
+        let amount = 1000u128;
+
+        // Build receipt with bridge event
+        let receipt_rlp = make_bridge_receipt_rlp(recipient, source_tx_hash, asset_id, amount);
+        let receipt_leaf = make_leaf_node_rlp(&[], &receipt_rlp);
+        let receipt_root = keccak256(&receipt_leaf);
+
+        // Build tx leaf (single tx trie, empty key matches any key)
+        let tx_hash = B256::repeat_byte(0xDE);
+        let tx_leaf = make_leaf_node_rlp(&[], &tx_hash.0);
+        let tx_root = keccak256(&tx_leaf);
+
+        // Build header
+        let header_rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+        let header = EthHeader::from_rlp(header_rlp);
+
+        let tx_proof = TxInclusionProof::new(vec![MptProofNode::new(tx_leaf)]);
+        let receipt_proof = ReceiptProof::new(0, vec![MptProofNode::new(receipt_leaf)]);
+
+        let op = ExternalBridgeOp::LightClientDeposit {
+            source_chain: ExternalChain::EthereumMainnet,
+            header,
+            tx_proof,
+            receipt_proof,
+            recipient,
+            asset_id,
+            amount,
+        };
+
+        let config = BridgeConfig {
+            allowed_assets: vec![1],
+            ..Default::default()
+        };
+        let mut backend = MockStorage::default();
+
+        // Block 1001 has NOT been consensus-verified (no finalized block set)
+        let result = process_light_client_deposit_evm(
+            &mut light_client,
+            &op,
+            &mut backend,
+            &config,
+            1, // current Callchain block
+        );
+
+        assert!(
+            matches!(result, Err(BridgeError::NotConsensusVerified(1001))),
+            "expected NotConsensusVerified(1001), got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_light_client_deposit_accepts_verified_block() {
+        let anchor = B256::repeat_byte(0xAA);
+        let genesis = GenesisState {
+            anchor_hash: anchor,
+            anchor_block: 1000,
+            state_root: B256::ZERO,
+        };
+        let mut light_client = call_light_client::EthLightClient::init(genesis);
+
+        let recipient = Address::repeat_byte(0x42);
+        let source_tx_hash = B256::repeat_byte(0xAB);
+        let asset_id = 1u64;
+        let amount = 1000u128;
+
+        // Build receipt with bridge event
+        let receipt_rlp = make_bridge_receipt_rlp(recipient, source_tx_hash, asset_id, amount);
+        let receipt_leaf = make_leaf_node_rlp(&[], &receipt_rlp);
+        let receipt_root = keccak256(&receipt_leaf);
+
+        let tx_hash = B256::repeat_byte(0xDE);
+        let tx_leaf = make_leaf_node_rlp(&[], &tx_hash.0);
+        let tx_root = keccak256(&tx_leaf);
+
+        let header_rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+        let header = EthHeader::from_rlp(header_rlp);
+        let header_hash = header.block_hash;
+
+        let tx_proof = TxInclusionProof::new(vec![MptProofNode::new(tx_leaf)]);
+        let receipt_proof = ReceiptProof::new(0, vec![MptProofNode::new(receipt_leaf)]);
+
+        let op = ExternalBridgeOp::LightClientDeposit {
+            source_chain: ExternalChain::EthereumMainnet,
+            header,
+            tx_proof,
+            receipt_proof,
+            recipient,
+            asset_id,
+            amount,
+        };
+
+        let config = BridgeConfig {
+            allowed_assets: vec![1],
+            ..Default::default()
+        };
+        let mut backend = MockStorage::default();
+
+        // Finalize block 1001 — now it should pass consensus verification
+        light_client.set_finalized_block(1001, header_hash);
+
+        let result = process_light_client_deposit_evm(
+            &mut light_client,
+            &op,
+            &mut backend,
+            &config,
+            1,
+        );
+
+        assert!(
+            result.is_ok(),
+            "expected Ok after consensus verification, got {:?}",
+            result
+        );
+
+        let queued = result.unwrap();
+        match queued {
+            ExternalDepositResult::Queued { source_tx_hash: stx, .. } => {
+                assert_eq!(stx, source_tx_hash);
+            }
+        }
+    }
 }

@@ -2015,6 +2015,7 @@ dependencies = [
  "call-crypto",
  "call-evm",
  "call-governance",
+ "call-light-client",
  "call-mempool",
  "call-network",
  "call-oracle",

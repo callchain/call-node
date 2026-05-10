@@ -5,6 +5,41 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+/// Ethereum beacon chain light client configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LightClientConfig {
+    /// Ethereum beacon chain REST API URL (e.g. https://beacon-api.example.com).
+    /// When set together with `genesis_validators_root`, the node will
+    /// periodically fetch light-client updates and verify BLS aggregate
+    /// signatures to determine Ethereum consensus finality.
+    #[serde(default)]
+    pub beacon_url: Option<String>,
+    /// Fork version for beacon chain domain computation.
+    /// Default `[0, 0, 0, 1]` = Altair.
+    #[serde(default = "LightClientConfig::default_fork_version")]
+    pub fork_version: [u8; 4],
+    /// Genesis validators root (32-byte hex, with or without 0x prefix).
+    /// Required to enable beacon consensus verification.
+    #[serde(default)]
+    pub genesis_validators_root: Option<String>,
+}
+
+impl Default for LightClientConfig {
+    fn default() -> Self {
+        Self {
+            beacon_url: None,
+            fork_version: Self::default_fork_version(),
+            genesis_validators_root: None,
+        }
+    }
+}
+
+impl LightClientConfig {
+    fn default_fork_version() -> [u8; 4] {
+        [0, 0, 0, 1] // Altair
+    }
+}
+
 /// Full node configuration — loaded from TOML file, overridden by CLI.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct NodeConfig {
@@ -30,6 +65,8 @@ pub struct NodeConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub governance: GovernanceConfig,
+    #[serde(default)]
+    pub light_client: LightClientConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -397,6 +434,24 @@ impl NodeConfig {
             self.governance.require_auth = true;
         }
 
+        // Light client / beacon chain
+        if args.beacon_url.is_some() {
+            self.light_client.beacon_url.clone_from(&args.beacon_url);
+        }
+        if let Some(ref fv) = args.beacon_fork_version {
+            let hex = fv.trim_start_matches("0x");
+            if let Ok(bytes) = hex::decode(hex) {
+                if bytes.len() == 4 {
+                    self.light_client.fork_version.copy_from_slice(&bytes);
+                }
+            }
+        }
+        if args.genesis_validators_root.is_some() {
+            self.light_client
+                .genesis_validators_root
+                .clone_from(&args.genesis_validators_root);
+        }
+
         self
     }
 
@@ -461,6 +516,13 @@ impl NodeConfig {
         }
         if self.keys.identity_key.is_some() && self.keys.identity_keystore.is_some() {
             return Err("provide either --identity-key or --identity-keystore, not both".into());
+        }
+        if self.light_client.beacon_url.is_some()
+            && self.light_client.genesis_validators_root.is_none()
+        {
+            return Err(
+                "--genesis-validators-root required when --beacon-url is set".into(),
+            );
         }
         Ok(())
     }
@@ -738,6 +800,78 @@ level = "warn"
         // Archive mode without key should pass
         let mut config = NodeConfig::default();
         config.mode = NodeMode::Archive;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_light_client_toml_parse() {
+        let toml_content = r#"
+[light_client]
+beacon_url = "https://beacon.example.com"
+fork_version = [0, 0, 0, 1]
+genesis_validators_root = "0x4b363db94e2865d6e0b3a5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d"
+"#;
+        let path = std::env::temp_dir().join("call_test_light_client.toml");
+        std::fs::write(&path, toml_content).unwrap();
+
+        let config = NodeConfig::from_file(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(
+            config.light_client.beacon_url,
+            Some("https://beacon.example.com".into())
+        );
+        assert_eq!(config.light_client.fork_version, [0, 0, 0, 1]);
+        assert_eq!(
+            config.light_client.genesis_validators_root,
+            Some("0x4b363db94e2865d6e0b3a5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d5e5d".into())
+        );
+    }
+
+    #[test]
+    fn test_light_client_cli_override() {
+        let base = NodeConfig::default();
+        let args = CliArgs::parse_from([
+            "calld",
+            "--beacon-url",
+            "https://beacon-cli.example.com",
+            "--beacon-fork-version",
+            "0x01020304",
+            "--genesis-validators-root",
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ]);
+
+        let config = base.merge_from_cli(&args);
+
+        assert_eq!(
+            config.light_client.beacon_url,
+            Some("https://beacon-cli.example.com".into())
+        );
+        assert_eq!(config.light_client.fork_version, [1, 2, 3, 4]);
+        assert_eq!(
+            config.light_client.genesis_validators_root,
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into())
+        );
+    }
+
+    #[test]
+    fn test_light_client_validation_beacon_url_requires_root() {
+        let mut config = NodeConfig::default();
+        config.light_client.beacon_url = Some("https://beacon.example.com".into());
+        config.light_client.genesis_validators_root = None;
+
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("genesis-validators-root"),
+            "expected error about genesis-validators-root, got: {}",
+            err
+        );
+
+        // With both set, validation passes
+        config.light_client.genesis_validators_root =
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
         assert!(config.validate().is_ok());
     }
 }

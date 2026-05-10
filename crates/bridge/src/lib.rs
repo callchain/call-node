@@ -52,6 +52,8 @@ pub enum BridgeError {
     EvmExecutionFailed(String),
     #[error("MPT proof verification failed: {0}")]
     MptProofError(String),
+    #[error("block {0} not consensus-verified by beacon chain")]
+    NotConsensusVerified(u64),
 }
 
 /// Bridge operation types (per spec §5.1)
