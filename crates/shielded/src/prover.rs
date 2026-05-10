@@ -39,6 +39,7 @@ impl Prover for MockProver {
             nullifiers: circuit.nullifiers.clone(),
             commitments: circuit.commitments.clone(),
             asset_id: circuit.asset_id,
+            key_version: 0,
         })
     }
 
@@ -108,6 +109,11 @@ mod real_prover_impl {
             INSTANCE.get_or_init(|| {
                 #[cfg(feature = "production-keys")]
                 {
+                    // Try the registry first (populated at boot with version 0)
+                    if let Some(prover) = Self::for_version(0) {
+                        return prover;
+                    }
+                    // Registry empty — try direct load as fallback
                     match Self::from_production_dir("/var/lib/callchain/shielded_keys") {
                         Ok(prover) => return prover,
                         Err(e) => {
@@ -200,6 +206,27 @@ mod real_prover_impl {
             let keys =
                 crate::ceremony::ProductionKeys::load_with_verification(keys_dir, genesis_hashes)?;
             Ok(Self::from_production_keys(keys))
+        }
+
+        /// Create a RealProver for a specific key version.
+        ///
+        /// With `production-keys`, looks up the version in the global registry.
+        /// Without `production-keys`, only version 0 is supported (returns a clone
+        /// of the dev-setup global singleton).
+        pub fn for_version(version: u32) -> Option<Self> {
+            if version == 0 {
+                return Some(Self::global().clone());
+            }
+            #[cfg(feature = "production-keys")]
+            {
+                let registry = crate::key_registry::ProverRegistry::global();
+                let keys = registry.get(version)?;
+                Some(Self::from_production_keys(keys))
+            }
+            #[cfg(not(feature = "production-keys"))]
+            {
+                None
+            }
         }
 
         /// Generate a Groth16 proof for a deposit circuit.
@@ -745,6 +772,7 @@ mod tests {
             nullifiers: vec![nf],
             commitments: vec![cm],
             asset_id: 1,
+            key_version: 0,
         };
 
         (circuit, zk_proof)
@@ -775,6 +803,7 @@ mod tests {
             nullifiers: vec![],
             commitments: vec![],
             asset_id: 1,
+            key_version: 0,
         };
         assert!(!prover.verify(&bad).unwrap());
     }

@@ -99,6 +99,7 @@ mod shielded_flow {
                 .map(|i| NoteCommitment::new(test_hash(i as u8)))
                 .collect(),
             asset_id: 1,
+            key_version: 0,
         }
     }
 
@@ -192,6 +193,7 @@ mod shielded_flow {
             rcm,
             recipient_ivk: vk.incoming_view_key,
             rho,
+            spending_key: sk,
             merkle_path,
         };
 
@@ -282,6 +284,7 @@ mod shielded_flow {
             nullifiers: vec![Nullifier::new(Hash::from_slice(&nf1))],
             commitments: vec![NoteCommitment::new(Hash::from_slice(&out_cm))],
             asset_id,
+            key_version: 0,
         };
 
         let transfer = ShieldedTransfer {
@@ -418,6 +421,7 @@ mod shielded_flow {
                 nullifiers: vec![Nullifier::new(test_hash(1))],
                 commitments: vec![NoteCommitment::new(test_hash(2))],
                 asset_id: 1,
+                key_version: 0,
             },
         };
         assert!(transfer.value_conservable());

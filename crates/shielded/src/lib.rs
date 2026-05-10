@@ -50,6 +50,8 @@ pub mod precompile;
 pub mod proof_ser;
 #[cfg(feature = "prover-server")]
 pub mod prover_server;
+#[cfg(feature = "production-keys")]
+pub mod key_registry;
 
 /// Whether the `real-prover` feature is enabled at compile time.
 /// Tests in downstream crates can use this to skip mock-proof tests
@@ -171,6 +173,12 @@ pub struct ZkProof {
     pub nullifiers: Vec<Nullifier>,
     pub commitments: Vec<NoteCommitment>,
     pub asset_id: AssetId,
+    /// Prover key version used to generate this proof.
+    ///
+    /// Version 0 = genesis key set. Each governance-driven rotation increments
+    /// this. Validators verify against the corresponding key version.
+    #[serde(default)]
+    pub key_version: u32,
 }
 
 impl ZkProof {
@@ -178,6 +186,7 @@ impl ZkProof {
     pub fn serialized_size(&self) -> usize {
         self.proof_data.len() + self.nullifiers.len() * 32 + self.commitments.len() * 32 + 8
         // asset_id
+        + 4 // key_version
     }
 }
 
@@ -284,7 +293,8 @@ pub fn verify_shielded_proof(
         return Ok(false);
     }
 
-    let prover = RealProver::global();
+    let prover = RealProver::for_version(proof.key_version)
+        .ok_or_else(|| format!("no prover keys registered for version {}", proof.key_version))?;
 
     let result: Result<bool, ProverError> = match circuit_type {
         "deposit" => {
@@ -478,6 +488,7 @@ pub mod test_utils {
                 .map(|i| NoteCommitment::new(test_hash(i as u8)))
                 .collect(),
             asset_id: 1,
+            key_version: 0,
         }
     }
 }
@@ -519,6 +530,7 @@ mod tests {
             nullifiers: vec![Nullifier::new(test_hash(1))],
             commitments: vec![NoteCommitment::new(test_hash(2))],
             asset_id: 1,
+            key_version: 0,
         };
         assert!(!verify_zk_proof(&bad));
     }
@@ -531,6 +543,7 @@ mod tests {
             nullifiers: vec![nf.clone(), nf],
             commitments: vec![NoteCommitment::new(test_hash(2))],
             asset_id: 1,
+            key_version: 0,
         };
         assert!(!verify_zk_proof(&dup));
     }

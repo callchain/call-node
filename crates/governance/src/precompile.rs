@@ -760,6 +760,58 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                     );
                 }
             }
+            10 => {
+                // ProverKeyRotation: execution_data = ABI-encoded
+                // (uint32 keyVersion, bytes32 transferVkHash, bytes32 depositVkHash, bytes32 withdrawVkHash, uint64 sunsetTimestamp)
+                if execution_data.len() >= 160 {
+                    let mut version_buf = [0u8; 4];
+                    version_buf.copy_from_slice(&execution_data[28..32]);
+                    let key_version = u32::from_be_bytes(version_buf);
+
+                    let mut transfer_hash = [0u8; 32];
+                    transfer_hash.copy_from_slice(&execution_data[32..64]);
+                    let mut deposit_hash = [0u8; 32];
+                    deposit_hash.copy_from_slice(&execution_data[64..96]);
+                    let mut withdraw_hash = [0u8; 32];
+                    withdraw_hash.copy_from_slice(&execution_data[96..128]);
+                    let mut sunset_buf = [0u8; 8];
+                    sunset_buf.copy_from_slice(&execution_data[152..160]);
+                    let sunset_timestamp = u64::from_be_bytes(sunset_buf);
+
+                    // Store rotation signal and metadata in governance storage
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"prover_key_rotation", b"version"]),
+                        U256::from(key_version),
+                    );
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"prover_key_rotation", b"transfer_vk_hash"]),
+                        U256::from_be_slice(&transfer_hash),
+                    );
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"prover_key_rotation", b"deposit_vk_hash"]),
+                        U256::from_be_slice(&deposit_hash),
+                    );
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"prover_key_rotation", b"withdraw_vk_hash"]),
+                        U256::from_be_slice(&withdraw_hash),
+                    );
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"prover_key_rotation", b"sunset_timestamp"]),
+                        U256::from(sunset_timestamp),
+                    );
+                    // Set a pending flag so nodes know to pick it up
+                    self.backend.store(
+                        GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"prover_key_rotation", b"pending"]),
+                        U256::from(1u8),
+                    );
+                }
+            }
             _ => {}
         }
 

@@ -202,6 +202,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
                 nullifiers: vec![crate::Nullifier::new(Hash::from_slice(&nullifier))],
                 commitments: vec![],
                 asset_id,
+                key_version: 0,
             };
 
             match crate::verify_shielded_proof(&proof, "withdraw", Some(&merkle_root), Some(amount))
@@ -262,6 +263,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
                     .map(|cm| crate::NoteCommitment::new(Hash::from_slice(cm)))
                     .collect(),
                 asset_id,
+                key_version: 0,
             };
 
             match crate::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None) {

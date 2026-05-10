@@ -25,19 +25,35 @@ checkpoint.
 
 ## Prover Key Rotation
 
-**Context:** `call-shielded::prover::RealProver` uses `OnceLock` global static
-for proving/verification keys. There is no runtime mechanism to rotate keys
-without restarting the prover service.
+**Status:** ~~Deferred~~ **Infrastructure Implemented** (2026-05-10)
 
-**Why deferred:** Key rotation requires a governance-driven ceremony
-(coordinated trusted setup, new CRS distribution, verifying-key hash update in
-code). This is a mainnet-readiness procedure, not a devnet/testnet concern.
+**Completed:**
 
-**When to revisit:** Before mainnet shielded pool launch. Plan:
-1. Governance proposal type for `ProverKeyRotation`
-2. Ceremony coordination (offline MPC)
-3. Service hot-reload of new verification key
-4. Old key sunset period for in-flight proofs
+1. **`ProverRegistry`** (`crates/shielded/src/key_registry.rs`)
+   - `RwLock<HashMap<KeyVersion, VersionedKeys>>` replaces `OnceLock`
+   - Runtime key registration without restart
+   - Monotonic version enforcement (prevents downgrade attacks)
+   - `sunset_older_than(Duration)` cleanup for expired versions
+
+2. **`ZkProof.key_version`** field
+   - Proofs are tagged with the key version used to generate them
+   - Validators look up the correct VK via `RealProver::for_version()`
+   - Backward-compatible: missing/0 defaults to genesis keys
+
+3. **`RealProver::global()` registry integration**
+   - Boot-time load from `/var/lib/callchain/shielded_keys` as version 0
+   - Dev-setup fallback when registry is empty
+   - Proving server picks up current keys automatically
+
+**Remaining:**
+
+1. **Governance proposal type for `ProverKeyRotation`**
+   - Proposal payload: new VK hashes, ceremony attestation, activation block height
+   - Node executes `ProverRegistry::register()` upon proposal finalization
+   - This is the only remaining code change; ceremony coordination is operational
+
+**When to revisit:** Before mainnet shielded pool launch. The infrastructure
+is ready — only the governance wiring remains.
 
 ---
 

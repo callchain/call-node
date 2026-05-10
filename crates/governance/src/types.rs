@@ -50,6 +50,17 @@ pub enum ProposalType {
         /// secp256k1 signature from old key: sign(hash(old_pubkey || new_pubkey))
         signature: Vec<u8>,
     },
+    /// Rotate shielded prover keys (per spec §3.8.5)
+    /// Requires a new trusted setup ceremony. Nodes load new VKs from disk
+    /// and verify hashes against this proposal before registering.
+    ProverKeyRotation {
+        key_version: u32,
+        transfer_vk_hash: [u8; 32],
+        deposit_vk_hash: [u8; 32],
+        withdraw_vk_hash: [u8; 32],
+        /// Unix timestamp when old keys can be sunset
+        sunset_timestamp: u64,
+    },
 }
 
 impl ProposalType {
@@ -62,6 +73,7 @@ impl ProposalType {
                 | ProposalType::ValidatorSlash { .. }
                 | ProposalType::EmergencyPause { .. }
                 | ProposalType::ValidatorKeyRotation { .. }
+                | ProposalType::ProverKeyRotation { .. }
         )
     }
 
