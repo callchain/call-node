@@ -1010,14 +1010,56 @@ pub fn register_standard_rpc(
         )
         .map_err(|e| internal_error(e.to_string()))?;
 
-    // eth_sendTransaction — not supported
+    // eth_sign — personal_sign format
     module
-        .register_async_method("eth_sendTransaction", |_params, _state, _ctx| async move {
-            Err::<serde_json::Value, _>(ErrorObjectOwned::owned(
-                -32601,
-                "eth_sendTransaction is not supported; use eth_sendRawTransaction",
-                None::<&str>,
-            ))
+        .register_async_method("eth_sign", |params, state, _ctx| async move {
+            let (address_hex, message_hex): (String, String) =
+                params.parse().map_err(|e| invalid_params(e.to_string()))?;
+            let address = address_hex
+                .parse::<alloy_primitives::Address>()
+                .map_err(|e| invalid_params(e.to_string()))?;
+            let message = hex::decode(message_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(e.to_string()))?;
+
+            let sig = state
+                .keystore
+                .sign_message(&address, &message)
+                .ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32000,
+                        "account not found in keystore",
+                        None::<&str>,
+                    )
+                })?;
+            Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(sig)))
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_signTransaction — build, sign, and return raw tx
+    module
+        .register_async_method("eth_signTransaction", |params, state, _ctx| async move {
+            let tx_obj: serde_json::Value =
+                params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let raw_hex = build_and_sign_tx(&tx_obj, &state)
+                    .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<&str>))?;
+            Ok::<_, ErrorObjectOwned>(raw_hex)
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // eth_sendTransaction — build, sign, and submit
+    module
+        .register_async_method("eth_sendTransaction", |params, state, _ctx| async move {
+            let tx_obj: serde_json::Value =
+                params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let raw_hex = build_and_sign_tx(&tx_obj, &state)
+                    .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<&str>))?;
+            let raw_bytes = hex::decode(raw_hex.trim_start_matches("0x"))
+                .map_err(|e| invalid_params(e.to_string()))?;
+
+            match state.submit_evm_tx(&raw_bytes) {
+                Ok(tx_hash) => Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(tx_hash))),
+                Err(e) => Err(tx_validation_failed(e)),
+            }
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -1041,10 +1083,16 @@ pub fn register_standard_rpc(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
-    // eth_accounts
+    // eth_accounts — returns addresses in the local keystore
     module
-        .register_async_method("eth_accounts", |_params, _state, _ctx| async move {
-            Ok::<_, ErrorObjectOwned>(Vec::<String>::new())
+        .register_async_method("eth_accounts", |_params, state, _ctx| async move {
+            let accounts: Vec<String> = state
+                .keystore
+                .list_accounts()
+                .iter()
+                .map(|a| format!("0x{}", hex::encode(a.as_slice())))
+                .collect();
+            Ok::<_, ErrorObjectOwned>(accounts)
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -1511,4 +1559,177 @@ pub(crate) fn get_logs_from_filter(
     };
 
     Ok(query_logs(from_block, to_block, &addresses, &topics, state))
+}
+
+/// Build and sign a transaction from a JSON transaction object.
+fn build_and_sign_tx(tx_obj: &serde_json::Value, state: &RpcState) -> Result<String, String> {
+    use alloy_consensus::crypto::secp256k1::sign_message;
+    use alloy_consensus::{SignableTransaction, TxEip1559, TxLegacy, TxEnvelope};
+    use alloy_primitives::{FixedBytes, TxKind};
+    use alloy_rlp::Encodable;
+
+    // Parse 'from' (required)
+    let from_hex = tx_obj
+        .get("from")
+        .and_then(|v| v.as_str())
+        .ok_or("missing 'from' field")?;
+    let from: alloy_primitives::Address =
+        from_hex.parse().map_err(|e| format!("invalid 'from': {e}"))?;
+
+    // Verify account exists in keystore
+    if !state.keystore.has_account(&from) {
+        return Err(format!("account {} not found in keystore", from));
+    }
+
+    // Get private key
+    let key = state
+        .keystore
+        .get_key(&from)
+        .ok_or("account not found in keystore")?;
+
+    // Parse optional fields
+    let to = tx_obj
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(|s| s.parse::<alloy_primitives::Address>())
+        .transpose()
+        .map_err(|e| format!("invalid 'to': {e}"))?;
+    let tx_kind = to.map(TxKind::Call).unwrap_or(TxKind::Create);
+
+    let value = tx_obj
+        .get("value")
+        .and_then(|v| v.as_str())
+        .map(|s| alloy_primitives::U256::from_str_radix(s.trim_start_matches("0x"), 16))
+        .transpose()
+        .map_err(|e| format!("invalid 'value': {e}"))?
+        .unwrap_or_default();
+
+    let data = tx_obj
+        .get("data")
+        .or_else(|| tx_obj.get("input"))
+        .and_then(|v| v.as_str())
+        .map(|s| hex::decode(s.trim_start_matches("0x")))
+        .transpose()
+        .map_err(|e| format!("invalid 'data': {e}"))?;
+    let input = data.map(alloy_primitives::Bytes::from).unwrap_or_default();
+
+    let gas_limit = tx_obj
+        .get("gas")
+        .or_else(|| tx_obj.get("gasLimit"))
+        .and_then(|v| v.as_str())
+        .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16))
+        .transpose()
+        .map_err(|e| format!("invalid 'gas': {e}"))?
+        .unwrap_or(21_000);
+
+    let chain_id = tx_obj
+        .get("chainId")
+        .and_then(|v| v.as_str())
+        .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16))
+        .transpose()
+        .map_err(|e| format!("invalid 'chainId': {e}"))?
+        .unwrap_or(state.chain_id);
+
+    let nonce = tx_obj
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16))
+        .transpose()
+        .map_err(|e| format!("invalid 'nonce': {e}"))?;
+    let nonce = match nonce {
+        Some(n) => n,
+        None => {
+            let cp_addr = call_primitives::Address::from_slice(from.as_slice());
+            state.get_nonce(&cp_addr)
+        }
+    };
+
+    // Determine transaction type
+    let tx_type = tx_obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16))
+        .transpose()
+        .map_err(|e| format!("invalid 'type': {e}"))?;
+
+    let is_eip1559 = tx_type == Some(2)
+        || (tx_type.is_none()
+            && (tx_obj.get("maxFeePerGas").is_some()
+                || tx_obj.get("maxPriorityFeePerGas").is_some()));
+
+    let envelope = if is_eip1559 {
+        let max_fee_per_gas = tx_obj
+            .get("maxFeePerGas")
+            .and_then(|v| v.as_str())
+            .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
+            .transpose()
+            .map_err(|e| format!("invalid 'maxFeePerGas': {e}"))?;
+        let max_priority_fee_per_gas = tx_obj
+            .get("maxPriorityFeePerGas")
+            .and_then(|v| v.as_str())
+            .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
+            .transpose()
+            .map_err(|e| format!("invalid 'maxPriorityFeePerGas': {e}"))?;
+
+        let base_fee = state
+            .fee_params
+            .read()
+            .map_err(|_| "lock poisoned".to_string())?
+            .base_fee;
+        let max_fee = max_fee_per_gas.unwrap_or(base_fee + 1);
+        let max_priority = max_priority_fee_per_gas.unwrap_or(1);
+
+        let tx = TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: max_fee,
+            max_priority_fee_per_gas: max_priority,
+            to: tx_kind,
+            value,
+            input,
+            access_list: Default::default(),
+        };
+        let sig_hash = tx.signature_hash();
+        let secret = FixedBytes::<32>::from_slice(&key);
+        let signature =
+            sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
+        let signed = tx.into_signed(signature);
+        TxEnvelope::from(signed)
+    } else {
+        let gas_price = tx_obj
+            .get("gasPrice")
+            .and_then(|v| v.as_str())
+            .map(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16))
+            .transpose()
+            .map_err(|e| format!("invalid 'gasPrice': {e}"))?;
+        let gas_price = gas_price.unwrap_or_else(|| {
+            state
+                .fee_params
+                .read()
+                .map(|f| f.base_fee)
+                .unwrap_or(0)
+                + 1
+        });
+
+        let tx = TxLegacy {
+            chain_id: Some(chain_id),
+            nonce,
+            gas_price,
+            gas_limit,
+            to: tx_kind,
+            value,
+            input,
+        };
+        let sig_hash = tx.signature_hash();
+        let secret = FixedBytes::<32>::from_slice(&key);
+        let signature =
+            sign_message(secret, sig_hash).map_err(|e| format!("sign failed: {e}"))?;
+        let signed = tx.into_signed(signature);
+        TxEnvelope::from(signed)
+    };
+
+    let mut raw = Vec::new();
+    envelope.encode(&mut raw);
+    Ok(format!("0x{}", hex::encode(raw)))
 }

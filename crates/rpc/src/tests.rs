@@ -1154,4 +1154,128 @@ mod tests {
         assert_eq!(lag["lagged"], 128);
         assert_eq!(lag["error"], "subscriber lagged");
     }
+
+    // ------------------------------------------------------------------
+    // Local keystore tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_keystore_import_and_list() {
+        let keystore = crate::keystore::LocalKeystore::new();
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let expected_addr = call_crypto::pubkey_to_address(&pubkey);
+
+        let addr = keystore.import_raw_key(&secret, None).expect("import ok");
+        assert_eq!(addr, expected_addr);
+
+        let accounts = keystore.list_accounts();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0], expected_addr);
+        assert!(keystore.has_account(&expected_addr));
+
+        let key = keystore.get_key(&expected_addr).expect("key exists");
+        assert_eq!(key, secret);
+    }
+
+    #[test]
+    fn test_keystore_sign_message_recovery() {
+        use call_crypto::recover_secp256k1_signer;
+
+        let keystore = crate::keystore::LocalKeystore::new();
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let addr = keystore.import_raw_key(&secret, None).expect("import ok");
+
+        let message = b"hello world";
+        let sig = keystore.sign_message(&addr, message).expect("sign ok");
+
+        // Reconstruct the personal_sign hash
+        let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
+        let mut full = prefix.into_bytes();
+        full.extend_from_slice(message);
+        let hash = call_crypto::keccak256(&full);
+
+        // Recover signer address from signature
+        let recovered = recover_secp256k1_signer(&hash, &sig).expect("recover ok");
+        assert_eq!(recovered, addr, "recovered address should match");
+    }
+
+    #[test]
+    fn test_keystore_persistence() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = tmp.path().join("keystore");
+
+        // Known test key
+        let secret = {
+            let hex = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+            let mut bytes = [0u8; 32];
+            hex::decode_to_slice(hex, &mut bytes).unwrap();
+            bytes
+        };
+
+        // Create keystore with persistence and import a key
+        {
+            let keystore = crate::keystore::LocalKeystore::new_with_dir(&dir);
+            let addr = keystore.import_raw_key(&secret, Some("testpass")).expect("import ok");
+            let accounts = keystore.list_accounts();
+            assert_eq!(accounts.len(), 1);
+            assert_eq!(accounts[0], addr);
+        }
+
+        // Create a new keystore pointing at the same dir, load all keys
+        {
+            let keystore = crate::keystore::LocalKeystore::new_with_dir(&dir);
+            let (ok, failures) = keystore.load_all_from_dir("testpass");
+            assert_eq!(ok, 1, "should load 1 key");
+            assert!(failures.is_empty(), "no failures: {:?}", failures);
+
+            let accounts = keystore.list_accounts();
+            assert_eq!(accounts.len(), 1);
+
+            let key = keystore.get_key(&accounts[0]).expect("key loaded");
+            assert_eq!(key, secret);
+        }
+    }
+
+    #[test]
+    fn test_keystore_remove_account() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = tmp.path().join("keystore");
+
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let addr = call_crypto::pubkey_to_address(&pubkey);
+
+        // Create keystore with persistence, import, then remove
+        {
+            let keystore = crate::keystore::LocalKeystore::new_with_dir(&dir);
+            let imported = keystore.import_raw_key(&secret, Some("testpass")).expect("import ok");
+            assert_eq!(imported, addr);
+            assert!(keystore.has_account(&addr));
+
+            let removed = keystore.remove_account(&addr);
+            assert!(removed, "should remove");
+            assert!(!keystore.has_account(&addr));
+        }
+
+        // File should also be gone
+        let path = dir.join(format!("{:?}.json", addr).to_lowercase());
+        assert!(!path.exists(), "keystore file should be removed");
+    }
+
+    #[test]
+    fn test_keystore_eth_accounts_via_rpc_state() {
+        let state = make_test_state();
+        let (secret, pubkey) = call_crypto::generate_keypair();
+        let addr = call_crypto::pubkey_to_address(&pubkey);
+
+        // Initially empty
+        assert!(state.keystore.list_accounts().is_empty());
+
+        // Import key into the state's keystore
+        let imported = state.keystore.import_raw_key(&secret, None).expect("import ok");
+        assert_eq!(imported, addr);
+
+        let accounts = state.keystore.list_accounts();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0], addr);
+    }
 }

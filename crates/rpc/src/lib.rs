@@ -1,6 +1,7 @@
 //! call-rpc — JSON-RPC server (per spec §11)
 
 pub mod handlers;
+pub mod keystore;
 pub mod rate_limit;
 pub mod standard;
 pub mod state_bundle;
@@ -10,6 +11,7 @@ pub mod ws;
 mod tests;
 
 pub use handlers::*;
+pub use keystore::LocalKeystore;
 pub use rate_limit::RateLimiter;
 pub use standard::*;
 pub use state_bundle::*;

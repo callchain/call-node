@@ -2,7 +2,7 @@
 
 **Scope**: 所有 `eth_*` 方法 — 已实现方法的功能完整性审计 + 未实现方法的实现方案
 **Files**: `crates/rpc/src/standard.rs`, `crates/rpc/src/handlers/state.rs`, `crates/rpc/src/ws.rs`
-**Last Updated**: 2026-05-05
+**Last Updated**: 2026-05-10
 
 ---
 
@@ -19,14 +19,14 @@
 | 7 | `eth_gasPrice` | ✅ 已实现 | 返回 `base_fee + MIN_PRIORITY_FEE_PER_GAS` |
 | 8 | `eth_maxPriorityFeePerGas` | ✅ 已实现 | 返回 `MIN_PRIORITY_FEE_PER_GAS`（1 wei） |
 | 9 | `eth_feeHistory` | ✅ 已实现 | 读 `fee_history` ring buffer（最大 1024 条） |
-| 10 | `eth_accounts` | ✅ 已实现 | 无本地 keystore，返回 `[]` |
+| 10 | `eth_accounts` | ✅ 已实现 | 返回本地 keystore 中的地址列表 |
 | 11 | `eth_getBalance` | ✅ 已实现 | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
 | 12 | `eth_getStorageAt` | ✅ 已实现 | 支持 blockTag（历史状态通过 `StorageHistory` 表） |
 | 13 | `eth_getTransactionCount` | ✅ 已实现 | 支持 blockTag；`"pending"` 合并 mempool nonce |
 | 14 | `eth_getCode` | ✅ 已实现 | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
-| 15 | `eth_sign` | ⛔ 不支持 | 需本地 keystore，返回 unsupported error |
-| 16 | `eth_signTransaction` | ⛔ 不支持 | 需本地 keystore，返回 unsupported error |
-| 17 | `eth_sendTransaction` | ⛔ 不支持 | 需本地 keystore，返回 unsupported error |
+| 15 | `eth_sign` | ✅ 已实现 | personal_sign 格式，需账户在 keystore |
+| 16 | `eth_signTransaction` | ✅ 已实现 | 构建、签名并返回 raw tx hex |
+| 17 | `eth_sendTransaction` | ✅ 已实现 | 构建、签名并通过 mempool 提交 |
 | 18 | `eth_sendRawTransaction` | ✅ 已实现 | |
 | 19 | `eth_call` | ✅ 已实现 | 支持 blockTag（当前 state 或 block snapshot） |
 | 20 | `eth_estimateGas` | ✅ 已实现 | 支持 blockTag（当前 state 或 block snapshot） |
@@ -60,7 +60,7 @@
 
 > **图例**: ✅ 已实现 / ⚠️ 已实现但有缺陷 / ⛔ 不支持（设计层面） / ⛔ 不需要(PoW 专用)
 
-**统计**: 完全实现 42 个 (89%) / 有缺陷 1 个 (2%) / 不支持 4 个 (9%) / 不需要 3 个 (6%)
+**统计**: 完全实现 45 个 (96%) / 有缺陷 1 个 (2%) / 不支持 1 个 (2%) / 不需要 3 个 (6%)
 
 ---
 
@@ -350,7 +350,7 @@ eth_getBlockByNumber(blockTag, fullTransactions)
 - `eth_protocolVersion`：返回 `"1"`
 - `eth_mining`：返回 `false`
 - `eth_hashrate`：返回 `"0x0"`
-- `eth_accounts`：返回 `[]`
+- `eth_accounts`：返回本地 keystore 中的地址列表（通过 `LocalKeystore` 管理）
 
 ---
 
@@ -361,13 +361,7 @@ eth_getBlockByNumber(blockTag, fullTransactions)
 
 ---
 
-## 二、不支持的方法（4 个）
-
-### `eth_sign` / `eth_signTransaction` / `eth_sendTransaction`
-
-**原因**：Callchain 没有本地 keystore，不托管私钥。这是 EVM 节点的常见设计（Geth 也要求解锁账户才能用）。
-
-**行为**：返回 `method not supported` error。
+## 二、不支持的方法（1 个）
 
 ### `eth_createAccessList`
 
@@ -434,10 +428,19 @@ Ethereum JSON-RPC 规范共 **47 个** `eth_*` 方法（不含已废弃的编译
 
 | 类别 | 数量 | 占比 |
 |---|---|---|
-| 完全实现（无缺陷） | 43 | 91% |
+| 完全实现（无缺陷） | 45 | 96% |
 | 已实现但有缺陷 | 0 | 0% |
-| 不支持（设计层面） | 4 | 9% |
+| 不支持（设计层面） | 1 | 2% |
 | 不需要（PoW / 已废弃） | 3 | 6% |
 | **总计** | **47** | **100%** |
 
-**结论**：绝大多数接口已完整实现。blockTag 历史状态查询（P1 完成）和 Merkle proof（`reth-trie` 集成）均已支持。剩余两个低优先级问题（`eth_coinbase` 读 proposer、`eth_getTransactionByHash` pending tx 查询）不影响核心 dApp 功能。
+### 27. `eth_sign` / `eth_signTransaction` / `eth_sendTransaction` — ✅ 已实现
+
+**本地 keystore 支持**：
+- `LocalKeystore` 支持内存（ephemeral）和磁盘（Web3 Secret Storage）两种模式
+- `eth_sign`：personal_sign 格式（`\x19Ethereum Signed Message:\n{len}\n{message}`）
+- `eth_signTransaction`：构建交易 → 用 keystore 私钥签名 → 返回 RLP-encoded raw tx hex
+- `eth_sendTransaction`：同 `eth_signTransaction`，额外通过 `submit_evm_tx` 提交到 mempool
+- 支持 Legacy 和 EIP-1559 交易类型
+
+**结论**：绝大多数接口已完整实现。blockTag 历史状态查询（P1 完成）、Merkle proof（`reth-trie` 集成）和本地 keystore 签名均已支持。剩余两个低优先级问题（`eth_coinbase` 读 proposer、`eth_getTransactionByHash` pending tx 查询）不影响核心 dApp 功能。

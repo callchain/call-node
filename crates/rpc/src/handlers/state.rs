@@ -1,6 +1,7 @@
 //! RpcState struct and its methods.
 
 use crate::handlers::helpers::{AgentInfoResponse, AssetInfoResponse, ShieldedTreeStateResponse};
+use crate::keystore::LocalKeystore;
 use crate::ws::SubscriptionManager;
 use alloy_consensus::{transaction::SignerRecoverable, Transaction as _, TxEnvelope};
 use alloy_primitives::Bytes;
@@ -249,6 +250,8 @@ pub struct RpcState {
     pub db_env: Arc<DatabaseEnv>,
     /// Current block proposer address (updated after each block commit).
     pub current_proposer_addr: RwLock<Address>,
+    /// Local in-memory keystore for eth_sign / eth_sendTransaction.
+    pub keystore: LocalKeystore,
 }
 
 impl RpcState {
@@ -290,6 +293,7 @@ impl RpcState {
             sync_progress: Arc::new(RwLock::new(None)),
             db_env,
             current_proposer_addr: RwLock::new(Address::ZERO),
+            keystore: LocalKeystore::new(),
         }
     }
 
