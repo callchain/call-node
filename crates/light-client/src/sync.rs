@@ -1,11 +1,14 @@
 //! Ethereum header synchronization.
 //!
-//! Fetches headers and finalized checkpoints from Ethereum via JSON-RPC.
+//! Fetches headers and finalized checkpoints from Ethereum via JSON-RPC,
+//! and light client updates from the beacon chain REST API.
 //! Requires the `eth-sync` feature flag.
 
+use crate::beacon::LightClientUpdate;
 use crate::types::EthHeader;
 use crate::EthLightClient;
 use alloy_primitives::B256;
+use std::io::Read;
 
 /// Fetch a single Ethereum header by block number via `eth_getBlockByNumber`.
 pub fn sync_single_header(eth_rpc_url: &str, block_number: u64) -> Result<EthHeader, String> {
@@ -226,4 +229,49 @@ fn encode_rlp_field(out: &mut Vec<u8>, data: &[u8]) {
         out.extend_from_slice(&len_bytes[skip..]);
         out.extend_from_slice(data);
     }
+}
+
+// ── Beacon Chain Light Client API ────────────────────────────────────
+
+/// Fetch a light client update for the given sync period.
+///
+/// Returns the first available [`LightClientUpdate`] at or after `period`.
+/// The update is requested in SSZ format for efficient parsing.
+pub fn fetch_light_client_update(beacon_url: &str, period: u64) -> Result<LightClientUpdate, String> {
+    let url = format!(
+        "{}/eth/v1/beacon/light_client/updates?start_period={}&count=1",
+        beacon_url, period
+    );
+    let resp = ureq::get(&url)
+        .set("Accept", "application/octet-stream")
+        .call()
+        .map_err(|e| format!("Beacon light_client update request failed: {e}"))?;
+
+    let mut bytes = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read SSZ response body: {e}"))?;
+
+    LightClientUpdate::from_ssz(&bytes)
+        .ok_or_else(|| "Failed to decode LightClientUpdate from SSZ".into())
+}
+
+/// Fetch the latest finalized light client update.
+///
+/// This is a convenience endpoint that returns the most recent finalized
+/// update without needing to know the current sync period.
+pub fn fetch_light_client_finality_update(beacon_url: &str) -> Result<LightClientUpdate, String> {
+    let url = format!("{}/eth/v1/beacon/light_client/finality_update", beacon_url);
+    let resp = ureq::get(&url)
+        .set("Accept", "application/octet-stream")
+        .call()
+        .map_err(|e| format!("Beacon light_client finality request failed: {e}"))?;
+
+    let mut bytes = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read SSZ response body: {e}"))?;
+
+    LightClientUpdate::from_ssz(&bytes)
+        .ok_or_else(|| "Failed to decode LightClientUpdate from SSZ".into())
 }

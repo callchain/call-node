@@ -1,22 +1,25 @@
 //! Ethereum light client core implementation.
 //!
-//! Verifies Ethereum block headers against a trusted anchor and
-//! transaction inclusion via Merkle-Patricia Trie proofs.
+//! Verifies Ethereum block headers against a trusted anchor,
+//! transaction inclusion via Merkle-Patricia Trie proofs,
+//! and optionally beacon chain sync committee BLS consensus signatures.
 //!
 //! Security model:
 //! - Starts from a trusted anchor (known-good header at a specific block).
 //! - Each new header must link to a previously verified header via parent_hash.
 //! - The parent_hash chain ensures headers are on the canonical chain.
 //! - Transaction/receipt inclusion is proven via MPT proofs against header roots.
-//!
-//! Note: This implementation does NOT verify Ethereum's BLS consensus signatures.
-//! It assumes the anchor is final and that the parent_hash chain follows the
-//! canonical chain. For full security, the anchor should be a finalized block
-//! (e.g., from Ethereum's consensus layer or a widely-known checkpoint).
+//! - When beacon config is provided, sync committee aggregate signatures are
+//!   verified to ensure headers are consensus-finalized (Altair light client sync).
 
+use crate::beacon::{
+    compute_sync_committee_signing_root, BeaconBlockHeader, LightClientUpdate, SyncAggregate,
+    SyncCommittee,
+};
 use crate::types::*;
 use crate::verifier;
 use alloy_primitives::{keccak256, B256};
+use call_crypto::bls_verify_aggregate_beacon;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -35,6 +38,14 @@ pub struct EthLightClient {
     finalized_block: Option<(u64, B256)>,
     /// Buffer for out-of-order headers waiting for their parent.
     buffer: BTreeMap<u64, EthHeader>,
+    /// Beacon chain configuration for BLS consensus verification.
+    /// When `Some`, sync committee signatures are verified on each update.
+    beacon_config: Option<BeaconConfig>,
+    /// Current sync committee (valid for the current sync period).
+    /// Updated via [`Self::apply_light_client_update`].
+    sync_committee: Option<SyncCommittee>,
+    /// Current sync committee period.
+    current_sync_period: u64,
 }
 
 /// Maximum number of buffered headers waiting for missing parents.
@@ -43,6 +54,16 @@ const MAX_BUFFER_SIZE: usize = 64;
 impl EthLightClient {
     /// Create a new light client with a trusted genesis anchor.
     pub fn init(genesis: GenesisState) -> Self {
+        Self::init_with_beacon_config(genesis, None)
+    }
+
+    /// Create a new light client with a trusted genesis anchor and beacon chain
+    /// configuration for BLS consensus verification.
+    ///
+    /// When `beacon_config` is `Some`, the light client will verify sync
+    /// committee aggregate signatures via [`Self::apply_light_client_update`].
+    /// When `None`, behavior is identical to [`Self::init`].
+    pub fn init_with_beacon_config(genesis: GenesisState, beacon_config: Option<BeaconConfig>) -> Self {
         let latest = genesis.anchor_block;
         let mut verified = HashMap::new();
         verified.insert(
@@ -58,6 +79,9 @@ impl EthLightClient {
             latest_block: latest,
             finalized_block: None,
             buffer: BTreeMap::new(),
+            beacon_config,
+            sync_committee: None,
+            current_sync_period: 0,
         }
     }
 
@@ -208,6 +232,115 @@ impl EthLightClient {
     /// Check if a block is consensus-verified (at or below finalized).
     pub fn is_consensus_verified(&self, block: u64) -> bool {
         self.finalized_block.is_some_and(|(n, _)| block <= n)
+    }
+
+    /// Get the current sync committee period.
+    pub fn current_sync_period(&self) -> u64 {
+        self.current_sync_period
+    }
+
+    /// Apply a beacon chain light client update.
+    ///
+    /// Verifies the sync committee aggregate BLS signature against the
+    /// attested header, checks participation threshold, and updates the
+    /// sync committee if the period advanced.
+    ///
+    /// Returns the finalized beacon header `(slot, hash_tree_root)` on success.
+    /// The caller should map this to the corresponding execution block and call
+    /// [`Self::set_finalized_block`] to mark execution headers as consensus-verified.
+    ///
+    /// # Errors
+    /// - `NotInitialized` if beacon config was not provided at init.
+    /// - `SyncCommitteeSignatureInvalid` if BLS verification fails.
+    /// - `InsufficientSyncParticipation` if not enough validators signed.
+    pub fn apply_light_client_update(
+        &mut self,
+        update: LightClientUpdate,
+    ) -> Result<(u64, B256), LightClientError> {
+        let beacon_config = self
+            .beacon_config
+            .as_ref()
+            .ok_or(LightClientError::NotInitialized)?;
+
+        // Determine which sync committee to use for verification.
+        // If we already have a sync committee and the update's signature_slot
+        // is in the current period, use the current one.
+        // Otherwise, bootstrap from the update's next_sync_committee.
+        let sync_committee = if let Some(ref current) = self.sync_committee {
+            let update_period = crate::beacon::sync_period(update.signature_slot.saturating_sub(1));
+            if update_period == self.current_sync_period {
+                current
+            } else {
+                // Period advanced — use next sync committee from the update.
+                &update.next_sync_committee
+            }
+        } else {
+            // First update — bootstrap with next_sync_committee.
+            &update.next_sync_committee
+        };
+
+        // Verify BLS aggregate signature
+        self.verify_sync_aggregate(
+            &update.attested_header,
+            &update.sync_aggregate,
+            sync_committee,
+            beacon_config,
+        )?;
+
+        // Check participation threshold (> 2/3 of 512 = 342)
+        const MIN_SYNC_PARTICIPATION: usize = 342;
+        let participation = update.sync_aggregate.participant_count();
+        if participation < MIN_SYNC_PARTICIPATION {
+            return Err(LightClientError::InsufficientSyncParticipation {
+                got: participation,
+                required: MIN_SYNC_PARTICIPATION,
+            });
+        }
+
+        // Update sync committee if period advanced
+        let new_period = crate::beacon::sync_period(update.signature_slot.saturating_sub(1));
+        if new_period > self.current_sync_period {
+            self.sync_committee = Some(update.next_sync_committee.clone());
+            self.current_sync_period = new_period;
+        }
+
+        let finalized_root = update.finalized_header.hash_tree_root();
+        Ok((update.finalized_header.slot, finalized_root))
+    }
+
+    /// Verify a sync committee aggregate signature against a beacon block header.
+    ///
+    /// Computes the sync committee signing root from the header and beacon config,
+    /// extracts participating pubkeys from the bitmask, and verifies the BLS
+    /// aggregate signature using the beacon chain DST.
+    fn verify_sync_aggregate(
+        &self,
+        header: &BeaconBlockHeader,
+        sync_aggregate: &SyncAggregate,
+        sync_committee: &SyncCommittee,
+        beacon_config: &BeaconConfig,
+    ) -> Result<(), LightClientError> {
+        let signing_root = compute_sync_committee_signing_root(
+            header,
+            beacon_config.fork_version,
+            beacon_config.genesis_validators_root,
+        );
+
+        let participant_pubkeys =
+            sync_committee.participant_pubkeys(&sync_aggregate.sync_committee_bits);
+
+        if participant_pubkeys.is_empty() {
+            return Err(LightClientError::SyncCommitteeSignatureInvalid(
+                "no participants".into(),
+            ));
+        }
+
+        bls_verify_aggregate_beacon(
+            &participant_pubkeys,
+            signing_root.as_slice(),
+            &sync_aggregate.sync_committee_signature,
+        )
+        .map_err(|e| LightClientError::SyncCommitteeSignatureInvalid(e.to_string()))
     }
 
     /// Handle a potential reorg when the parent doesn't match the latest header.

@@ -29,7 +29,7 @@ pub enum BlsError {
 pub struct BlsPublicKey(pub [u8; 48]);
 
 /// BLS12-381 signature (96 bytes compressed)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlsSignature(pub [u8; 96]);
 
 /// BLS12-381 secret key
@@ -40,6 +40,12 @@ pub struct BlsSecretKey {
 
 /// Domain Separation Tag for consensus signing
 const DST: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+
+/// Domain Separation Tag for Ethereum beacon chain signing (proof-of-possession).
+///
+/// The beacon chain uses the `POP` variant instead of `NUL` for all BLS operations
+/// within the consensus layer (sync committee signatures, randao, etc.).
+const DST_BEACON: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Generate a new BLS12-381 keypair
 pub fn bls_generate() -> Result<(BlsSecretKey, BlsPublicKey), BlsError> {
@@ -121,6 +127,27 @@ pub fn bls_verify_aggregate(
     msg: &[u8],
     agg_sig: &BlsSignature,
 ) -> Result<(), BlsError> {
+    bls_verify_aggregate_with_dst(pubkeys, msg, agg_sig, DST)
+}
+
+/// Verify an aggregated BLS signature using the Ethereum beacon chain DST.
+///
+/// This is the same as [`bls_verify_aggregate`] but uses the beacon chain's
+/// proof-of-possession DST, which is required for sync committee signatures.
+pub fn bls_verify_aggregate_beacon(
+    pubkeys: &[BlsPublicKey],
+    msg: &[u8],
+    agg_sig: &BlsSignature,
+) -> Result<(), BlsError> {
+    bls_verify_aggregate_with_dst(pubkeys, msg, agg_sig, DST_BEACON)
+}
+
+fn bls_verify_aggregate_with_dst(
+    pubkeys: &[BlsPublicKey],
+    msg: &[u8],
+    agg_sig: &BlsSignature,
+    dst: &[u8],
+) -> Result<(), BlsError> {
     let pks: Vec<BlstPublicKey> = pubkeys
         .iter()
         .map(|pk| BlstPublicKey::uncompress(&pk.0).map_err(|_| BlsError::InvalidPublicKey))
@@ -130,7 +157,7 @@ pub fn bls_verify_aggregate(
     let sig =
         blst::min_pk::Signature::uncompress(&agg_sig.0).map_err(|_| BlsError::InvalidSignature)?;
 
-    let err = sig.fast_aggregate_verify(true, msg, DST, &pk_refs);
+    let err = sig.fast_aggregate_verify(true, msg, dst, &pk_refs);
     if err == BLST_ERROR::BLST_SUCCESS {
         Ok(())
     } else {

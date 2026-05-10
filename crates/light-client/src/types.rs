@@ -16,6 +16,21 @@ pub struct GenesisState {
     pub state_root: B256,
 }
 
+/// Beacon chain configuration for consensus signature verification.
+///
+/// These parameters are chain-level constants needed to compute the BLS
+/// signing domain for sync committee aggregate signatures. They are
+/// provided at light client initialization (bootstrap) and remain fixed
+/// unless a hard fork changes the `fork_version`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeaconConfig {
+    /// Current fork version (e.g. `[0, 0, 0, 1]` for Altair).
+    /// Changes at scheduled hard forks.
+    pub fork_version: [u8; 4],
+    /// Genesis validators root (32 bytes), fixed at chain genesis.
+    pub genesis_validators_root: B256,
+}
+
 /// RLP-encoded Ethereum block header with computed hash.
 /// We use the full RLP bytes for verification and decode fields as needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,4 +313,10 @@ pub enum LightClientError {
     BufferFull,
     #[error("block {0} not yet verified, cannot advance anchor")]
     AnchorNotVerified(u64),
+    #[error("sync committee signature invalid: {0}")]
+    SyncCommitteeSignatureInvalid(String),
+    #[error("sync committee update failed: {0}")]
+    SyncCommitteeUpdateFailed(String),
+    #[error("insufficient sync committee participation: {got}/{required}")]
+    InsufficientSyncParticipation { got: usize, required: usize },
 }

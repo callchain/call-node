@@ -24,10 +24,12 @@
 //! **Note**: This does NOT verify Ethereum's BLS consensus signatures. The anchor
 //! must be a finalized block (e.g., from Ethereum's consensus layer).
 
+mod beacon;
 mod ethereum;
 mod types;
 mod verifier;
 
+pub use beacon::*;
 pub use ethereum::proof::{parse_bridge_event_from_logs, parse_receipt_logs, rlp_encode_u64};
 pub use ethereum::EthLightClient;
 pub use types::*;
