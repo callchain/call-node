@@ -2,12 +2,12 @@
 
 ## Overview
 
-The Callchain test suite spans unit tests (per-crate), integration tests (cross-crate protocol flows), and end-to-end tests (full node lifecycle, multi-node networks). Total test count: ~1,682 test annotations across 99 files.
+The Callchain test suite spans unit tests (per-crate), integration tests (cross-crate protocol flows), and end-to-end tests (full node lifecycle, multi-node networks). Total test count: **~856 `#[test]` / `#[tokio::test]` annotations across ~92 files**.
 
 **Test philosophy:**
 - Unit tests for individual components (consensus, protocol, crypto, storage, etc.)
-- Integration tests for cross-crate flows (payment, bridge, governance, agent, shielded)
-- E2E tests for full node behavior (block production, networking, malicious actors, stress)
+- Integration tests for cross-crate flows (payment, bridge, governance, agent, shielded, network)
+- E2E tests for full node behavior (block production, networking, malicious actors, stress, soak)
 
 ---
 
@@ -33,21 +33,21 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | `call-mempool` | ~46 | Pool ordering, priority, eviction, duplicate handling |
 | `call-payload-builder` | ~15 | Block construction, gas accounting, transaction selection |
 | `call-node` | ~147 | Telemetry, logging, light client, config, boot |
-| `call-precompile` | ~53 | Asset (getBalance, getAssetInfo, transfer, batchTransfer, approve, transferFrom, mint, burn, register), Oracle (getPrice, getTWAP, isStale, submitPrice), Bridge (getTotalDeposits, getTotalWithdrawals, externalBridgeDeposit, externalBridgeWithdraw, challengeBridgeDeposit), Switch, Shielded, Governance, Validator, Compliance, Agent, state hook lifecycle |
+| `call-precompile` | ~53 | Asset, Oracle, Bridge, Switch, Shielded, Governance, Validator, Compliance, Agent, state hook lifecycle |
 | `call-chainspec` | ~25 | Genesis configuration, validator initialization |
 | `call-serialization` | ~12 | JSON, RLP encoding/decoding |
 | `call-primitives` | ~20 | Address, Hash, BlockHash, AssetId operations |
 
-### Integration Tests (`crates/protocol/tests/`)
+### Integration Tests
 
-| Test File | Coverage |
-|-----------|----------|
-| `test_payment_flow.rs` | Transfer, batch transfer, fee deduction, insufficient balance, memo, allowance |
-| `test_bridge_flow.rs` | Deposit, external tracking, challenge period, completion, withdrawal, permissionless challenge revocation |
-| `test_governance_flow.rs` | Proposal creation, voting, execution, timelock, delegation |
-| `test_agent_flow.rs` | Registration, permission checks, balance operations, transaction execution, nonce tracking |
-| `test_shielded_flow.rs` | Deposit, transfer, withdrawal, note management, nullifier tracking |
-| `test_shielded_integration.rs` | End-to-end shielded lifecycle with Merkle tree updates |
+| Test File | Coverage | Location |
+|-----------|----------|----------|
+| `test_shielded_flow.rs` | Deposit, transfer, withdrawal, note management, nullifier tracking | `crates/shielded/tests/` |
+| `test_mdbx_integration.rs` | 22 CallTables put/get/delete roundtrips, batch writes, iteration, overwrite | `crates/storage/tests/` |
+| `integration_test.rs` | P2P message handling, gossip propagation, peer connection limits | `crates/network/tests/` |
+| `eth_sync_e2e.rs` | Light client Ethereum sync committee header verification | `crates/light-client/tests/` |
+| `tls_integration.rs` | TLS handshake, certificate validation, HTTPS RPC | `crates/rpc/tests/` |
+| `cors_integration.rs` | CORS preflight, allowed origins, header handling | `crates/rpc/tests/` |
 
 ### E2E Tests (`crates/node/tests/`)
 
@@ -64,7 +64,11 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | `test_governance_e2e.rs` | Full proposal lifecycle (submit → vote → queue → execute) via `TestNode` harness |
 | `test_bridge_e2e.rs` | Bridge deposit, withdrawal, and insufficient-signature rejection via `TestNode` harness |
 | `test_light_client_e2e.rs` | Light client block header verification (`call_lightVerifyBlockHeader`) and balance proofs (`call_lightGetBalanceProof`) via `TestNode` harness |
-| `test_websocket_e2e.rs` | All 9 WebSocket subscription channels (`call_subscribeNewBlocks`, `call_subscribeNewPayments`, `call_subscribeBridgeCompleted`, `call_subscribeAssetRegistered`, `call_subscribeAgentExecuted`, `call_subscribeAgentRevoked`, `call_subscribeShieldedDeposit`, `call_subscribeShieldedWithdrawal`, `call_subscribeGovernance`) |
+| `test_websocket_e2e.rs` | All 9 WebSocket subscription channels |
+| `test_oracle_e2e.rs` | Oracle price submission and retrieval via `TestNode` harness |
+| `test_network_partition.rs` | Partition groups block cross-group messages, healing restores communication, partial drops |
+| `test_byzantine_faults.rs` | Equivocation, withholding, message flood via `PartitionSimulator` |
+| `test_soak.rs` | Sustained load over extended period |
 
 ---
 
@@ -72,47 +76,50 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 
 ### Critical Gaps
 
-| # | Gap | Impact |
-|---|-----|--------|
-| 1 | **No TLS/HTTPS tests** | RPC servers bind to plain HTTP. No tests verify TLS termination or certificate handling. |
-| 2 | **No authentication/authorization tests** | No API key, JWT, or IP allowlist tests. All RPC endpoints are effectively unprotected in tests and production. |
-| 3 | **No rate limiting tests for RPC** | `max_connections` caps concurrent connections but no tests verify per-client request throttling. |
-| 4 | **No MDBX read/write tests** | Storage crate has table descriptors but no actual MDBX integration tests. Production would run on JSON fallback. |
-| 5 | **No concurrent access/corruption recovery tests** | No tests for concurrent DB writes, crash recovery, or WAL behavior. |
-| 6 | **No network partition tests** | E2E tests use local harness. No tests for network partitions, Byzantine nodes, or message delays. |
-| 7 | **No light client consensus verification tests** | Light client does not verify Ethereum BLS signatures. No tests for malicious fork feeding. |
-| 8 | **No oracle signature verification tests** | Oracle price submissions accept any 64-byte signature. No negative test exists. |
+| # | Gap | Impact | Status |
+|---|-----|--------|--------|
+| 1 | ~~**No TLS/HTTPS tests**~~ | ~~RPC servers bind to plain HTTP~~ | **RESOLVED** — `crates/rpc/tests/tls_integration.rs` (3 tests) |
+| 2 | **No authentication/authorization tests** | No API key, JWT, or IP allowlist tests. All RPC endpoints are effectively unprotected in tests and production. | Open |
+| 3 | **No rate limiting tests for RPC** | `max_connections` caps concurrent connections but no tests verify per-client request throttling. | Open |
+| 4 | ~~**No MDBX read/write tests**~~ | ~~Storage crate has table descriptors but no actual MDBX integration~~ | **RESOLVED** — `crates/storage/tests/mdbx_integration.rs` (35 tests) |
+| 5 | **No concurrent access/corruption recovery tests** | No tests for concurrent DB writes, crash recovery, or WAL behavior. | Open |
+| 6 | ~~**No network partition tests**~~ | ~~E2E tests use local harness~~ | **RESOLVED** — `crates/node/tests/test_network_partition.rs` (7 tests) |
+| 7 | **No light client beacon BLS consensus verification tests** | `apply_light_client_update` and `bls_verify_aggregate_beacon` exist but no E2E test verifies beacon sync committee signature validation against live or mock beacon API. | Open |
+| 8 | **No oracle signature verification negative tests** | Oracle price submissions accept any 64-byte signature. No negative test exists with invalid signature data. | Partial — `test_oracle_e2e.rs` covers positive path only |
 
 ### High Gaps
 
-| # | Gap | Details |
-|---|-----|---------|
-| 9 | **No `eth_getLogs` performance tests** | Scans all receipts linearly (O(n)). No test validates behavior at 1M+ blocks. |
-| 10 | **No receipt persistence tests** | Receipts are in-memory only. No test verifies DB persistence or recovery. |
-| 11 | **No agent integration with block production tests** | Agent transactions exist as a library but are not executed during consensus. No E2E test covers agent tx in a block. |
-| 12 | **No domain verification tests (real DNS/HTTP)** | Agent domain verification is format-only. No tests with actual DNS TXT or HTTP file verification. |
-| 13 | **No batch transfer multi-payment permission tests** | `BatchTransfer` only checks the first payment. No test covers subsequent payments bypassing permission checks. |
-| 14 | **No slashing economic penalty tests** | Double-sign detection works but no test verifies stake reduction or validator removal. |
-| 15 | **No upgrade persistence tests** | ForkManager is in-memory only. No test verifies scheduled upgrades survive restart. |
-| 16 | **No multi-upgrade-at-same-height tests** | `check_upgrades_at_height` applies only the first match. No test catches this bug. |
-| 17 | **No snapshot production/verification tests** | Snapshot production is not wired. `verify_snapshot` does not cryptographically verify signatures. Tests only count signatures. |
-| 18 | **No fast sync incremental catch-up tests** | `incremental_sync()` returns `Ok(0)`. No test verifies catch-up from snapshot to chain head. |
+| # | Gap | Details | Status |
+|---|-----|---------|--------|
+| 9 | **No `eth_getLogs` performance tests** | Scans all receipts linearly (O(n)). No test validates behavior at 1M+ blocks. | Open |
+| 10 | **No receipt persistence tests** | Receipts are in-memory only. No test verifies DB persistence or recovery. | Open |
+| 11 | **No agent integration with block production tests** | Agent transactions exist as a library but are not executed during consensus. No E2E test covers agent tx in a block. | Open |
+| 12 | **No domain verification tests (real DNS/HTTP)** | Agent domain verification is format-only. No tests with actual DNS TXT or HTTP file verification. | Open |
+| 13 | **No batch transfer multi-payment permission tests** | `BatchTransfer` only checks the first payment. No test covers subsequent payments bypassing permission checks. | Open |
+| 14 | **No slashing economic penalty tests** | Double-sign detection works but no test verifies stake reduction or validator removal. | Open |
+| 15 | **No upgrade persistence tests** | ForkManager is in-memory only. No test verifies scheduled upgrades survive restart. | Open |
+| 16 | **No multi-upgrade-at-same-height tests** | `check_upgrades_at_height` applies only the first match. No test catches this bug. | Open |
+| 17 | **No snapshot production/verification tests** | Snapshot production is not wired. `verify_snapshot` does not cryptographically verify signatures. Tests only count signatures. | Open |
+| 18 | **No fast sync incremental catch-up tests** | `incremental_sync()` returns `Ok(0)`. No test verifies catch-up from snapshot to chain head. | Open |
 
 ### Medium Gaps
 
-| # | Gap | Details |
-|---|-----|---------|
-| 19 | **No overflow tests for agent balance credit** | `credit()` uses naive addition. No test for u128 overflow wrapping. |
-| 20 | **No typed receipt (EIP-2718) parsing tests** | Light client assumes legacy receipt format. No tests for Type 0x01/0x02 receipts. |
-| 21 | **No reorg handling tests for light client** | Orphaned headers are never removed. No test for following wrong chain. |
-| 22 | **No WebSocket lag handling tests** | Lagged subscribers are not notified. No test verifies silent event dropping. |
-| 23 | **No CORS configuration tests** | Default jsonrpsee CORS policy untested. |
-| 24 | **No compliance report accuracy tests** | `export_compliance_report` uses hardcoded asset symbol "CALL" and may produce incorrect timestamps. |
-| 25 | **No log rotation under load tests** | `rotate_log()` renames files sequentially. No test for rapid rotation or disk-full conditions. |
-| 26 | **No P2P ban enforcement tests** | `NetworkLimits` defines ban duration but no test verifies peer banning works in practice. |
-| 27 | **No mempool eviction under memory pressure tests** | `ReplayProtector` evicts 25% when over limit but no test verifies correctness during eviction. |
-| 28 | **No cross-crate integration test for light client bridge deposit** | `call_lightClientBridgeDeposit` is feature-gated. No integration test covers the full flow. |
-| 29 | **No MPT proof verification tests** | Bridge MPT proof verification is behind `light-client-bridge` feature flag. No tests validate tx inclusion or receipt proof verification against Ethereum headers. |
+| # | Gap | Details | Status |
+|---|-----|---------|--------|
+| 19 | **No overflow tests for agent balance credit** | `credit()` uses naive addition. No test for u128 overflow wrapping. | Open |
+| 20 | **No typed receipt (EIP-2718) parsing tests** | Light client assumes legacy receipt format. No tests for Type 0x01/0x02 receipts. | Open |
+| 21 | **No reorg handling tests for light client** | Orphaned headers are never removed. No test for following wrong chain. | Open |
+| 22 | **No WebSocket lag handling tests** | Lagged subscribers are not notified. No test verifies silent event dropping. | Open |
+| 23 | ~~**No CORS configuration tests**~~ | ~~Default jsonrpsee CORS policy untested~~ | **RESOLVED** — `crates/rpc/tests/cors_integration.rs` (6 tests) |
+| 24 | **No compliance report accuracy tests** | `export_compliance_report` uses hardcoded asset symbol mapping. No test validates symbol correctness across asset IDs. | Partial — basic CSV format tested in `crates/node/src/logging.rs` |
+| 25 | **No log rotation under load tests** | `rotate_log()` renames files sequentially. No test for rapid rotation or disk-full conditions. | Partial — `test_log_rotation` and `test_should_rotate_by_size` exist but no load/disk-full coverage |
+| 26 | **No P2P ban enforcement tests** | `NetworkLimits` defines ban duration but no test verifies peer banning works in practice. | Open |
+| 27 | **No mempool eviction under memory pressure tests** | `ReplayProtector` evicts 25% when over limit but no test verifies correctness during eviction. | Open |
+| 28 | **No cross-crate integration test for light client bridge deposit** | `call_lightClientBridgeDeposit` is feature-gated. No integration test covers the full flow. | Open |
+| 29 | **No MPT proof verification tests** | Bridge MPT proof verification is behind `light-client-bridge` feature flag. No tests validate tx inclusion or receipt proof verification against Ethereum headers. | Open |
+| 30 | **No beacon sync background task tests** | `start_beacon_sync_task` fetches `LightClientUpdate` periodically. No test verifies fetch → BLS verify → `set_finalized_block` flow. | Open |
+| 31 | **No OpenTelemetry span production tests** | `record_block_span`, `record_tx_span`, `record_p2p_span` exist but are not called in hot paths. No test verifies they fire during real block production. | Open |
+| 32 | **No FileLogLayer rotation under load tests** | Background file logger task checks rotation every 60s. No test verifies behavior under sustained high log volume. | Open |
 
 ---
 
@@ -120,8 +127,8 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 
 | # | Gap | Scope |
 |---|-----|-------|
-| 1 | **Byzantine consensus tests**: network partitions, equivocation, delayed messages | `crates/node/tests/` |
-| 2 | **Load test**: sustained 1000 TPS for 1 hour + memory profiling | `crates/node/tests/` |
+| 1 | ~~**Byzantine consensus tests**~~: network partitions, equivocation, delayed messages | ~~`crates/node/tests/`~~ — **RESOLVED** by `test_byzantine_faults.rs` and `test_network_partition.rs` |
+| 2 | **Load test**: sustained 1000 TPS for 1 hour + memory profiling | `crates/node/tests/` — Partial: `test_soak.rs` exists but may not cover 1-hour sustained load |
 
 ---
 
@@ -129,10 +136,12 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 
 ### Phase 1 — Critical (Before Mainnet)
 
-1. **RPC security tests**: Add tests for JWT auth, rate limiting, and TLS handshake.
-2. **MDBX integration tests**: Create a test MDBX env, write/read/delete data, verify transactions.
-3. **Byzantine consensus tests**: Network partition scenarios, malicious proposer withholding blocks, equivocation.
-4. **Oracle signature verification tests**: Negative tests with invalid signatures must fail.
+1. **RPC security tests**: Add tests for JWT auth, rate limiting.
+2. **MDBX integration tests**: ✅ **Done** — `crates/storage/tests/mdbx_integration.rs`
+3. **Byzantine consensus tests**: ✅ **Done** — `test_byzantine_faults.rs`, `test_network_partition.rs`
+4. **Oracle signature verification negative tests**: Add invalid signature rejection tests.
+5. **Light client beacon sync E2E**: Mock beacon API server + verify BLS signature validation in `apply_light_client_update`.
+6. **OTel span integration tests**: Wire `record_block_span` into block production and verify span emission.
 
 ### Phase 2 — High (Before Public Testnet)
 
@@ -149,7 +158,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 3. **Load tests**: Sustained 1000 TPS for 1 hour, memory profiling. Validate on real hardware with cross-region latency (50-200ms) and packet loss simulation.
 4. **Real-network light client tests**: Connect to live Ethereum RPC for 7+ days. Verify header chain submission, receipt proofs, reorg handling.
 5. **Heterogeneous fork upgrade tests**: Mixed-version testnet (50% old / 50% new). Verify upgrade activation, backward/forward compatibility, no consensus split.
-6. **Audit log integrity tests**: Tamper detection, Merkle proof verification for audit entries.
+6. **Audit log integrity tests**: ✅ **Done** — `test_audit_log_merkle_root`, `test_audit_log_file_roundtrip` in `crates/node/src/logging.rs`.
 
 ---
 
@@ -163,3 +172,22 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | 4 | **No property-based testing** | No `proptest` or `quickcheck` for invariant-based testing. |
 | 5 | **No testnet environment** | E2E tests run in-memory. No long-running testnet for soak testing, light client real-network validation, or heterogeneous fork upgrade testing. |
 | 6 | **No mutation testing** | No `cargo-mutants` to verify test suite effectiveness. |
+
+---
+
+## Recently Resolved Gaps
+
+| Gap | Resolution | File |
+|-----|-----------|------|
+| TLS/HTTPS tests | `tls_integration.rs` added | `crates/rpc/tests/tls_integration.rs` |
+| CORS tests | `cors_integration.rs` added | `crates/rpc/tests/cors_integration.rs` |
+| MDBX integration | `test_mdbx_integration.rs` with 35 table tests | `crates/storage/tests/mdbx_integration.rs` |
+| Network partition | `test_network_partition.rs` with 7 partition scenarios | `crates/node/tests/test_network_partition.rs` |
+| Byzantine faults | `test_byzantine_faults.rs` with equivocation/withholding/flood | `crates/node/tests/test_byzantine_faults.rs` |
+| Audit log integrity | Merkle root determinism, file roundtrip, append-only | `crates/node/src/logging.rs` |
+| Structured logging | JSON/text format, rotation, config defaults | `crates/node/src/logging.rs` |
+| Compliance export | CSV generation with dynamic timestamps | `crates/node/src/logging.rs` |
+| Oracle E2E | Price submit/read via TestNode harness | `crates/node/tests/test_oracle_e2e.rs` |
+| Light client sync | Ethereum sync committee header verification | `crates/light-client/tests/eth_sync_e2e.rs` |
+| Soak test | Sustained load baseline | `crates/node/tests/test_soak.rs` |
+| Network integration | P2P gossip, peer limits | `crates/network/tests/integration_test.rs` |
