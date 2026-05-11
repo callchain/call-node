@@ -32,7 +32,7 @@ fn make_test_db() -> (std::path::PathBuf, Arc<reth_db::DatabaseEnv>) {
             .as_nanos(),
         COUNTER.fetch_add(1, Ordering::SeqCst),
     ));
-    let db = call_storage::reth_db::init_call_db(&tmp).expect("init test db");
+    let db = call_storage::reth_db::init_call_db_test(&tmp).expect("init test db");
     let evm = InMemoryStateProvider::new();
     evm.save_to_db(&db).expect("seed test db");
     (tmp, db)

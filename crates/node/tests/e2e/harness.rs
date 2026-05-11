@@ -124,8 +124,8 @@ impl NodeBuilder {
             );
         }
 
-        // Persist initial state to MDBX
-        let db_env = call_storage::reth_db::init_call_db(&data_dir).expect("init test db");
+        // Persist initial state to MDBX (small geometry for tests)
+        let db_env = call_storage::reth_db::init_call_db_test(&data_dir).expect("init test db");
         evm_state.save_to_db(&db_env).expect("seed test db");
 
         let state = Arc::new(RpcState::new(db_env, mempool.clone(), self.chain_id));

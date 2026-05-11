@@ -358,6 +358,18 @@ pub fn init_call_db(data_dir: &Path) -> Result<Arc<DatabaseEnv>, StorageError> {
     Ok(Arc::new(db))
 }
 
+/// Initialize a small-footprint MDBX database for tests.
+///
+/// Uses a 64 MB max geometry to avoid exhausting `vm.max_map_count`
+/// when many test databases are open concurrently.
+pub fn init_call_db_test(data_dir: &Path) -> Result<Arc<DatabaseEnv>, StorageError> {
+    let db_path = data_dir.join("mdbx");
+    let args = DatabaseArguments::test();
+    let db = init_db_for::<_, CallTables>(&db_path, args)
+        .map_err(|e| StorageError::Database(e.to_string()))?;
+    Ok(Arc::new(db))
+}
+
 // ── Helper Functions ──────────────────────────────────────────────────
 
 fn db_err(e: DatabaseError) -> StorageError {
