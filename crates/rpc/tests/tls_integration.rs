@@ -10,7 +10,8 @@ use call_mempool::Mempool;
 use call_rpc::handlers::RpcState;
 use call_rpc::{build_rpc_module, start_http_server, RpcConfig};
 use rcgen::{CertificateParams, KeyPair, SanType};
-use rustls::{ClientConfig, RootCertStore, ServerName};
+use rustls::{ClientConfig, RootCertStore};
+use rustls::pki_types::ServerName;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -80,18 +81,17 @@ fn write_certs(
 
 /// Build a rustls `ClientConfig` that trusts the provided PEM certificate.
 fn trust_cert_config(cert_pem: &[u8]) -> ClientConfig {
+    use rustls::pki_types::CertificateDer;
+
     let mut roots = RootCertStore::empty();
     let mut reader = std::io::BufReader::new(cert_pem);
-    let certs: Vec<rustls::Certificate> = rustls_pemfile::certs(&mut reader)
-        .unwrap()
-        .into_iter()
-        .map(rustls::Certificate)
-        .collect();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     for cert in &certs {
-        roots.add(cert).unwrap();
+        roots.add(cert.clone()).unwrap();
     }
     ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates(roots)
         .with_no_client_auth()
 }

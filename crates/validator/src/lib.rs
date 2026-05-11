@@ -645,7 +645,7 @@ mod tests {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let caller = test_addr(0x11);
 
-        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let _asset_store = AssetStorage::new(StorageRef::new(&mut provider));
         let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
 
         let result = validator_store.unstake(1, caller, 100);

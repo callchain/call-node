@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_basic() {
+    fn test_eth_get_logs_basic() {
         let state = make_test_state();
         state.set_current_block(10);
 
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_by_address() {
+    fn test_eth_get_logs_by_address() {
         let state = make_test_state();
         state.set_current_block(100);
 
@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_by_topic() {
+    fn test_eth_get_logs_by_topic() {
         let state = make_test_state();
         state.set_current_block(20);
 
@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_address_and_topic_combined() {
+    fn test_eth_get_logs_address_and_topic_combined() {
         let state = make_test_state();
         state.set_current_block(30);
 
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_block_range_filtering() {
+    fn test_eth_get_logs_block_range_filtering() {
         let state = make_test_state();
         state.set_current_block(1000);
 
@@ -850,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_performance_large_dataset() {
+    fn test_eth_get_logs_performance_large_dataset() {
         let state = make_test_state();
         state.set_current_block(10_000);
 
@@ -930,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_no_logs_in_range() {
+    fn test_eth_get_logs_no_logs_in_range() {
         let state = make_test_state();
         state.set_current_block(10);
 
@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eth_getLogs_log_index_consistency() {
+    fn test_eth_get_logs_log_index_consistency() {
         let state = make_test_state();
         state.set_current_block(5);
 

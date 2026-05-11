@@ -438,7 +438,7 @@ mod tests {
         let mut pubkeys = HashMap::new();
 
         for id in 0..3 {
-            let (pk, sk) = ed25519_generate_keypair();
+            let (pk, _sk) = ed25519_generate_keypair();
             pubkeys.insert(id, pk);
         }
         // Only 1 signature — below quorum of 2
