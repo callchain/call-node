@@ -105,8 +105,6 @@ pub struct KeysConfig {
     #[serde(default)]
     pub identity_keystore_pass: Option<String>,
     #[serde(default)]
-    pub aws_kms_key_id: Option<String>,
-    #[serde(default)]
     pub vault_addr: Option<String>,
     #[serde(default)]
     pub vault_token: Option<String>,
@@ -351,9 +349,6 @@ impl NodeConfig {
                 .identity_keystore_pass
                 .clone_from(&args.identity_keystore_pass);
         }
-        if args.aws_kms_key_id.is_some() {
-            self.keys.aws_kms_key_id.clone_from(&args.aws_kms_key_id);
-        }
         if args.vault_addr.is_some() {
             self.keys.vault_addr.clone_from(&args.vault_addr);
         }
@@ -475,14 +470,13 @@ impl NodeConfig {
                     "--validator-keystore",
                     self.keys.validator_keystore.is_some(),
                 ),
-                ("--aws-kms-key-id", self.keys.aws_kms_key_id.is_some()),
                 ("--vault-addr", self.keys.vault_addr.is_some()),
                 ("--keyring-service", self.keys.keyring_service.is_some()),
             ];
             let active_sources: Vec<_> = key_sources.iter().filter(|(_, active)| *active).collect();
 
             if active_sources.is_empty() {
-                return Err("validator mode requires one key source: --validator-key, --validator-keystore, --aws-kms-key-id, --vault-addr, or --keyring-service".into());
+                return Err("validator mode requires one key source: --validator-key, --validator-keystore, --vault-addr, or --keyring-service".into());
             }
             if active_sources.len() > 1 {
                 return Err(format!(

@@ -6,7 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-aws-kms = ["call-crypto/aws-kms"]
 hashi-vault = ["call-crypto/hashi-vault"]
 keyring = ["call-crypto/keyring"]
 production-keys = ["call-shielded/production-keys"]

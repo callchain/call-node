@@ -27,8 +27,6 @@ pub enum SignerError {
 pub enum SignerKind {
     /// Local in-memory key (devnet / testnet)
     Local,
-    /// AWS KMS remote signing (production)
-    AwsKms,
     /// HashiCorp Vault remote signing (production)
     HashiVault,
     /// OS keyring (macOS Keychain / Windows Credential Manager / Linux secret-service)
@@ -116,130 +114,6 @@ impl Signer for LocalSigner {
 
     fn kind(&self) -> SignerKind {
         SignerKind::Local
-    }
-}
-
-/// AWS KMS signer — requires `aws-kms` feature flag
-///
-/// Uses AWS KMS `Sign` API with ECDSA_SECP256K1 signing algorithm.
-/// The private key never leaves AWS — only signatures are returned.
-#[cfg(feature = "aws-kms")]
-pub struct AwsKmsSigner {
-    client: aws_sdk_kms::Client,
-    key_id: String,
-    pubkey: PublicKey,
-    address: Address,
-}
-
-#[cfg(feature = "aws-kms")]
-impl AwsKmsSigner {
-    /// Create a new AWS KMS signer.
-    ///
-    /// `key_id` is the KMS key ARN or alias (e.g., "alias/validator-key").
-    /// The public key is fetched from KMS at construction and cached.
-    pub async fn new(key_id: String) -> Result<Self, SignerError> {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-        let client = aws_sdk_kms::Client::new(&config);
-
-        // Fetch and cache the public key
-        let resp = client
-            .get_public_key()
-            .key_id(&key_id)
-            .send()
-            .await
-            .map_err(|e| SignerError::KmsError(format!("get_public_key: {e}")))?;
-
-        let pk_der = resp
-            .public_key()
-            .ok_or_else(|| SignerError::KmsError("no public key in response".into()))?
-            .as_ref();
-
-        // Parse SEC1 uncompressed public key (0x04 || x || y)
-        let pubkey = Self::parse_sec1_pubkey(pk_der)?;
-        let address = pubkey_to_address(&pubkey);
-
-        Ok(Self {
-            client,
-            key_id,
-            pubkey,
-            address,
-        })
-    }
-
-    fn parse_sec1_pubkey(der: &[u8]) -> Result<PublicKey, SignerError> {
-        // SEC1 uncompressed: 0x04 || 32-byte x || 32-byte y
-        if der.len() != 65 || der[0] != 0x04 {
-            return Err(SignerError::KmsError(format!(
-                "expected 65-byte uncompressed SEC1 key, got {} bytes",
-                der.len()
-            )));
-        }
-        let mut pubkey = [0u8; 64];
-        pubkey.copy_from_slice(&der[1..]);
-        Ok(PublicKey::from(pubkey))
-    }
-}
-
-#[cfg(feature = "aws-kms")]
-impl Signer for AwsKmsSigner {
-    fn sign(&self, msg_hash: &[u8; 32]) -> Result<Signature, SignerError> {
-        use aws_sdk_kms::types::SigningAlgorithmSpec;
-
-        // Block on the async KMS call using tokio's current runtime
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|e| SignerError::KmsError(format!("no tokio runtime: {e}")))?;
-
-        let sig_resp = rt
-            .block_on(async {
-                self.client
-                    .sign()
-                    .key_id(&self.key_id)
-                    .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
-                    .message(aws_sdk_kms::primitives::Blob::new(msg_hash.as_slice()))
-                    .message_type(aws_sdk_kms::types::MessageType::Digest)
-                    .send()
-                    .await
-            })
-            .map_err(|e| SignerError::KmsError(format!("KMS sign failed: {e}")))?;
-
-        let sig_der = sig_resp
-            .signature()
-            .ok_or_else(|| SignerError::KmsError("no signature in KMS response".into()))?
-            .as_ref();
-
-        // Convert DER signature to raw 65-byte (r || s || v)
-        Self::der_to_raw(sig_der)
-    }
-
-    fn public_key(&self) -> PublicKey {
-        self.pubkey
-    }
-
-    fn address(&self) -> Address {
-        self.address
-    }
-
-    fn kind(&self) -> SignerKind {
-        SignerKind::AwsKms
-    }
-}
-
-#[cfg(feature = "aws-kms")]
-impl AwsKmsSigner {
-    /// Convert ASN.1 DER ECDSA signature to raw 65-byte format (r || s || v)
-    fn der_to_raw(der: &[u8]) -> Result<Signature, SignerError> {
-        use k256::ecdsa::Signature as K256Sig;
-        let sig =
-            K256Sig::from_der(der).map_err(|e| SignerError::KmsError(format!("DER parse: {e}")))?;
-
-        let r_bytes = sig.r().to_bytes();
-        let s_bytes = sig.s().to_bytes();
-
-        let mut result = [0u8; 65];
-        result[..32].copy_from_slice(&r_bytes);
-        result[32..64].copy_from_slice(&s_bytes);
-        result[64] = 0; // recovery id — AWS KMS doesn't provide this; caller must recover
-        Ok(result)
     }
 }
 

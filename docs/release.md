@@ -75,7 +75,6 @@ Callchain supports three signer backends via the `Signer` trait:
 | Backend | Feature Flag | Use Case | Security |
 |---|---|---|---|
 | **Local** (plaintext) | default | Devnet, CI, local testing | Private key in memory only |
-| **AWS KMS** | `aws-kms` | Production validators | Key never leaves AWS; IAM-controlled |
 | **HashiCorp Vault** | `hashi-vault` | Production validators | Key in Vault transit engine; audit log |
 
 ### Configuration
@@ -84,10 +83,6 @@ Callchain supports three signer backends via the `Signer` trait:
 # config.toml — Local key (devnet only)
 [keys]
 validator_key = "0x..."
-
-# config.toml — AWS KMS (production)
-[keys]
-aws_kms_key_id = "alias/callchain-validator-mainnet"
 
 # config.toml — HashiCorp Vault (production)
 [keys]
@@ -101,10 +96,9 @@ vault_key_name = "callchain-validator"
 The boot sequence (`boot.rs`) loads keys in priority order:
 
 ```
-1. AWS KMS key_id   → AwsKmsSigner (if aws-kms feature enabled)
-2. Vault key_name   → HashiVaultSigner (if hashi-vault feature enabled)
-3. Keystore path    → LocalSigner from encrypted keystore
-4. Plaintext key    → LocalSigner (warns in production)
+1. Vault key_name   → HashiVaultSigner (if hashi-vault feature enabled)
+2. Keystore path    → LocalSigner from encrypted keystore
+3. Plaintext key    → LocalSigner (warns in production)
 ```
 
 ### Threshold Signing (M-of-N)
@@ -112,7 +106,6 @@ The boot sequence (`boot.rs`) loads keys in priority order:
 **Current status**: Not yet implemented. The `Signer` trait is single-party. Threshold signing is on the roadmap.
 
 **Recommended approach** for production:
-- Use **AWS KMS with key policies** requiring M-of-N IAM role approvals for key deletion
 - Use **HashiCorp Vault with Shamir seal unseal** (M-of-N operators to unseal Vault)
 - For consensus-level threshold signing, integrate `commonware-cryptography` threshold Ed25519 when available
 
@@ -169,7 +162,6 @@ Phase 3: Revoke old key
 | Check | Frequency | Tool |
 |---|---|---|
 | No plaintext keys in production | Every release | `grep -r "validator_key =" config/` |
-| KMS key policies restrict usage | Quarterly | AWS IAM audit |
 | Vault token has minimal scope | Quarterly | Vault policy review |
 | Key access logs reviewed | Weekly | CloudTrail / Vault audit log |
 | Key rotation performed | Annually | Scheduled maintenance window |

@@ -71,19 +71,6 @@ async fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<Signe
             LocalSigner::from_hex(hex_key).map_err(|e| format!("invalid validator key: {e}"))?;
         info!("WARNING: using plaintext validator key — use --validator-keystore for production");
         Ok(Arc::new(signer))
-    } else if let Some(ref key_id) = keys.aws_kms_key_id {
-        #[cfg(feature = "aws-kms")]
-        {
-            let signer = call_crypto::AwsKmsSigner::new(key_id.clone())
-                .await
-                .map_err(|e| format!("failed to create AWS KMS signer: {e}"))?;
-            Ok(Arc::new(signer))
-        }
-        #[cfg(not(feature = "aws-kms"))]
-        {
-            let _ = key_id;
-            Err("AWS KMS support not compiled in (enable aws-kms feature)".into())
-        }
     } else if let Some(ref vault_addr) = keys.vault_addr {
         #[cfg(feature = "hashi-vault")]
         {
@@ -120,7 +107,7 @@ async fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<Signe
             Err("keyring support not compiled in (enable keyring feature)".into())
         }
     } else {
-        Err("validator key required (use --validator-keystore, --validator-key, --aws-kms-key-id, --vault-addr, or --keyring-service)".into())
+        Err("validator key required (use --validator-keystore, --validator-key, --vault-addr, or --keyring-service)".into())
     }
 }
 
