@@ -88,7 +88,7 @@ pub(crate) async fn handle_network_message(
             // The sender wraps the announcement in `NetworkMessage::BlockAnnouncement`
             // and uses bincode (see the BFT event-loop broadcast path); the
             // receiver MUST use the same codec to deserialize.
-            let announcement = match bincode::deserialize::<NetworkMessage>(data) {
+            let announcement = match postcard::from_bytes::<NetworkMessage>(data) {
                 Ok(NetworkMessage::BlockAnnouncement(a)) => a,
                 Ok(NetworkMessage::EpochBoundarySignal(signal)) => {
                     let mut peer_heights = state.peer_heights.write().unwrap_or_else(|e| e.into_inner());
@@ -153,7 +153,7 @@ pub(crate) async fn handle_network_message(
                 count: SYNC_REQUEST_BATCH,
                 full_state: false,
             };
-            match bincode::serialize(&NetworkMessage::SyncRequest(request)) {
+            match postcard::to_allocvec(&NetworkMessage::SyncRequest(request)) {
                 Ok(req_data) => {
                     let peer_id_owned = peer_id.to_string();
                     let net = Arc::clone(network);
@@ -230,7 +230,7 @@ pub(crate) async fn handle_network_message(
                                     signature: [0u8; 64], // would be signed
                                     sources: vec!["local_oracle".into()],
                                 };
-                                if let Ok(msg) = bincode::serialize(
+                                if let Ok(msg) = postcard::to_allocvec(
                                     &NetworkMessage::OraclePriceSubmission(submission),
                                 ) {
                                     net_clone
@@ -299,26 +299,36 @@ pub(crate) async fn handle_network_message(
                     match tracker_guard.submit_price(oracle_submission, &config, &validators) {
                         Ok(Some(aggregated)) => {
                             // Quorum reached — write aggregated price to EVM storage
-                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
+                            match call_evm::provider::InMemoryStateProvider::from_db(
                                 &state_clone.db_env,
-                            )
-                            .unwrap();
-                            call_consensus::exec::state_accessors::seed_oracle_price(
-                                &mut provider,
-                                aggregated.pair.base,
-                                aggregated.median_price,
-                                aggregated.median_price, // simplified TWAP (no history in transient tracker)
-                                aggregated.timestamp,
-                                aggregated.block_number,
-                                aggregated.submission_count as u64,
-                            );
-                            provider.state().save_to_db(&state_clone.db_env).unwrap();
-                            tracing::info!(
-                                asset_id = aggregated.pair.base,
-                                price = aggregated.median_price,
-                                contributors = aggregated.submission_count,
-                                "oracle: aggregated price written to EVM"
-                            );
+                            ) {
+                                Ok(mut provider) => {
+                                    call_consensus::exec::state_accessors::seed_oracle_price(
+                                        &mut provider,
+                                        aggregated.pair.base,
+                                        aggregated.median_price,
+                                        aggregated.median_price, // simplified TWAP (no history in transient tracker)
+                                        aggregated.timestamp,
+                                        aggregated.block_number,
+                                        aggregated.submission_count as u64,
+                                    );
+                                    if let Err(e) =
+                                        provider.state().save_to_db(&state_clone.db_env)
+                                    {
+                                        tracing::warn!(error = %e, "oracle: failed to save aggregated price to DB");
+                                    } else {
+                                        tracing::info!(
+                                            asset_id = aggregated.pair.base,
+                                            price = aggregated.median_price,
+                                            contributors = aggregated.submission_count,
+                                            "oracle: aggregated price written to EVM"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "oracle: failed to load EVM provider from DB");
+                                }
+                            }
                         }
                         Ok(None) => {}
                         Err(e) => {

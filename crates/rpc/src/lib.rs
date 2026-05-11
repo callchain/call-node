@@ -220,35 +220,32 @@ fn build_tls_acceptor(
     cert_path: &str,
     key_path: &str,
 ) -> Result<tokio_rustls::TlsAcceptor, String> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use std::fs::File;
     use std::io::BufReader;
 
     let cert_file =
         File::open(cert_path).map_err(|e| format!("open cert '{}': {}", cert_path, e))?;
     let mut cert_reader = BufReader::new(cert_file);
-    let certs: Vec<rustls::Certificate> = rustls_pemfile::certs(&mut cert_reader)
-        .map_err(|e| format!("parse cert: {}", e))?
-        .into_iter()
-        .map(rustls::Certificate)
-        .collect();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse cert: {}", e))?;
 
     let key_file = File::open(key_path).map_err(|e| format!("open key '{}': {}", key_path, e))?;
     let mut key_reader = BufReader::new(key_file);
-    let mut keys: Vec<rustls::PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
-        .map_err(|e| format!("parse key: {}", e))?
-        .into_iter()
-        .map(rustls::PrivateKey)
-        .collect();
+    let mut keys: Vec<PrivateKeyDer<'static>> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+        .map(|k| k.map(Into::into))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse key: {}", e))?;
 
     // Fallback to RSA traditional format if no PKCS#8 keys found
     if keys.is_empty() {
         let mut key_reader2 =
             BufReader::new(File::open(key_path).map_err(|e| format!("re-open key: {}", e))?);
         keys = rustls_pemfile::rsa_private_keys(&mut key_reader2)
-            .map_err(|e| format!("parse RSA key: {}", e))?
-            .into_iter()
-            .map(rustls::PrivateKey)
-            .collect();
+            .map(|k| k.map(Into::into))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("parse RSA key: {}", e))?;
     }
 
     let key = keys
@@ -257,7 +254,6 @@ fn build_tls_acceptor(
         .ok_or("no private key found in key file")?;
 
     let config = rustls::ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| format!("invalid cert/key: {}", e))?;
