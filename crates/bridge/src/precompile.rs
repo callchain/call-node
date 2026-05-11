@@ -309,26 +309,6 @@ impl<B: StorageBackend> BridgeStorage<B> {
         issuer != Address::ZERO
     }
 
-    fn validate_asset(&mut self, asset_id: u64) -> Result<(), BridgeError> {
-        if asset_id == 0 {
-            return Err(BridgeError::AssetZeroNotBridgeable);
-        }
-        if !self.asset_registered(asset_id) {
-            return Err(BridgeError::AssetNotRegistered);
-        }
-        if self.is_paused() {
-            return Err(BridgeError::BridgePaused);
-        }
-        let status = self
-            .backend
-            .load(ASSET_ADDRESS, slot_asset_meta(asset_id, b"status"))
-            .to_be_bytes::<32>()[31];
-        if status != 0 {
-            return Err(BridgeError::AssetNotActive);
-        }
-        Ok(())
-    }
-
     fn validate_basic(&mut self, asset_id: u64) -> Result<(), BridgeError> {
         if !self.asset_registered(asset_id) {
             return Err(BridgeError::AssetNotRegistered);
@@ -340,33 +320,6 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     // ── Write operations ──────────────────────────────────────────────
-
-    pub fn bridge_to_evm(
-        &mut self,
-        asset_store: &mut AssetStorage<B>,
-        asset_id: u64,
-        _to: Address,
-        amount: u128,
-        caller: Address,
-    ) -> Result<(), BridgeError> {
-        self.validate_asset(asset_id)?;
-        asset_store.deduct_balance(asset_id, caller, amount)?;
-        self.add_total_withdrawals(amount);
-        Ok(())
-    }
-
-    pub fn bridge_to_protocol(
-        &mut self,
-        asset_store: &mut AssetStorage<B>,
-        asset_id: u64,
-        to: Address,
-        amount: u128,
-    ) -> Result<(), BridgeError> {
-        self.validate_asset(asset_id)?;
-        asset_store.add_balance(asset_id, to, amount)?;
-        self.add_total_deposits(amount);
-        Ok(())
-    }
 
     pub fn external_deposit(
         &mut self,
@@ -760,8 +713,6 @@ sol! {
     interface IProtocolBridge {
         function getTotalDeposits() external view returns (uint128);
         function getTotalWithdrawals() external view returns (uint128);
-        function bridgeToEvm(uint64 assetId, address to, uint128 amount) external;
-        function bridgeToProtocol(uint64 assetId, address to, uint128 amount) external;
         function externalDeposit(bytes32 sourceTxHash, uint64 assetId, address recipient, uint128 amount) external;
         function externalWithdraw(uint64 targetChain, bytes calldata targetAddress, uint64 assetId, uint128 amount) external;
         function deposit(uint64 sourceChain, address targetAddress, uint128 amount, uint64 assetId, bytes calldata proof) external;
@@ -808,51 +759,6 @@ impl BridgePrecompile {
             |_call, _storage| {
                 let mut store = BridgeStorage::new(sr);
                 Ok(store.get_total_withdrawals())
-            },
-        )
-    }
-
-    fn bridge_to_evm(
-        &self,
-        calldata: &[u8],
-        msg_sender: Address,
-        storage: &mut dyn call_precompile::storage::StorageProvider,
-        sr: StorageRef,
-    ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::bridgeToEvmCall, _>(
-            calldata,
-            30000,
-            storage,
-            |call, _storage| {
-                let caller = require_caller(msg_sender)?;
-                let mut bridge_store = BridgeStorage::new(sr);
-                let mut asset_store = AssetStorage::new(sr);
-                bridge_store
-                    .bridge_to_evm(&mut asset_store, call.assetId, call.to, call.amount, caller)
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                Ok(())
-            },
-        )
-    }
-
-    fn bridge_to_protocol(
-        &self,
-        calldata: &[u8],
-        _msg_sender: Address,
-        storage: &mut dyn call_precompile::storage::StorageProvider,
-        sr: StorageRef,
-    ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolBridge::bridgeToProtocolCall, _>(
-            calldata,
-            30000,
-            storage,
-            |call, _storage| {
-                let mut bridge_store = BridgeStorage::new(sr);
-                let mut asset_store = AssetStorage::new(sr);
-                bridge_store
-                    .bridge_to_protocol(&mut asset_store, call.assetId, call.to, call.amount)
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                Ok(())
             },
         )
     }
@@ -1063,12 +969,6 @@ impl call_precompile::StatefulPrecompile for BridgePrecompile {
             }
             IProtocolBridge::getTotalWithdrawalsCall::SELECTOR => {
                 self.get_total_withdrawals(calldata, storage, sr)
-            }
-            IProtocolBridge::bridgeToEvmCall::SELECTOR => {
-                self.bridge_to_evm(calldata, msg_sender, storage, sr)
-            }
-            IProtocolBridge::bridgeToProtocolCall::SELECTOR => {
-                self.bridge_to_protocol(calldata, msg_sender, storage, sr)
             }
             IProtocolBridge::externalDepositCall::SELECTOR => {
                 self.external_deposit(calldata, msg_sender, storage, sr)

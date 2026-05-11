@@ -200,7 +200,7 @@ contract WrappedToken {
 }
 ```
 
-Note: The `bridge` address is passed as a constructor argument and must match the protocol bridge address (`Address::repeat_byte(0xFF)`) used in `BridgeToEvm`. The contract does **not** enforce `max_supply` — cap checks happen in protocol `Block::execute` where both `protocol_supply` and `evm_supply` are visible.
+Note: The `bridge` address is passed as a constructor argument and must match the protocol bridge address (`Address::repeat_byte(0xFF)`) used in `SwitchToEvm`. The contract does **not** enforce `max_supply` — cap checks happen in protocol `Block::execute` where both `protocol_supply` and `evm_supply` are visible.
 
 ## EVM Issuer Mint
 
@@ -239,7 +239,7 @@ The following parameters affect asset registration and can be updated via govern
 
 Assets can transition through the following states:
 
-| Status | `Mint` (issuer) | `Burn` (issuer) | `Transfer` | `BridgeToEvm` | `BridgeToProtocol` | `EvmIssuerMint` |
+| Status | `Mint` (issuer) | `Burn` (issuer) | `Transfer` | `SwitchToEvm` | `SwitchToProtocol` | `EvmIssuerMint` |
 |--------|-----------------|-----------------|------------|---------------|--------------------|-----------------|
 | `Active` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `Frozen` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -290,7 +290,7 @@ Genesis assets should use `max_supply = 0` (uncapped) because protocol-level iss
 | Frozen/Delisted asset enforcement in transaction execution | ✅ Done |
 | AssetRegistry in EVM storage under `0x201` | ✅ Done |
 | `RegisterEvmBridge` precompile removal | ✅ Done |
-| `WithdrawFromEvm` → `BridgeToProtocol` rename | ✅ Done |
+| `WithdrawFromEvm` → `SwitchToProtocol` rename | ✅ Done |
 | `call_assetInfo` extended with supply fields | ✅ Done |
 | Unified write via `eth_sendRawTransaction` to precompiles | ✅ Done |
 | Fixed bridge address for `bridgeMint` | ✅ Done |
@@ -320,7 +320,7 @@ See [precompile.md](precompile.md) for the full ABI.
 
 ## Related Documents
 
-- [internal_bridge.md](internal_bridge.md) — BridgeToEvm and BridgeToProtocol execution details
+- [switch.md](switch.md) — SwitchToEvm and SwitchToProtocol execution details
 - [protocol.md](protocol.md) — Precompile execution and atomicity guarantees
 - [transaction.md](transaction.md) — Transaction format, fees, and nonce rules
 - [rpc.md](rpc.md) — RPC method reference

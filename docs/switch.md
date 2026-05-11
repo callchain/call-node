@@ -74,8 +74,8 @@ The **Switch precompile at `0x207`** provides the same bridging functionality vi
 
 | Operation | Precompile Function | Gas |
 |---|---|---|
-| `BridgeToEvm` | `switchToEvm(uint64,address,uint128)` | 30,000 |
-| `BridgeToProtocol` | `switchToProtocol(uint64,address,uint128)` | 30,000 |
+| `SwitchToEvm` | `switchToEvm(uint64,address,uint128)` | 30,000 |
+| `SwitchToProtocol` | `switchToProtocol(uint64,address,uint128)` | 30,000 |
 
 Solidity contracts and MetaMask can call these functions directly. See [precompile.md](precompile.md) for the full ABI.
 

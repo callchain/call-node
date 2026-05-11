@@ -177,16 +177,6 @@ fn test_expired_transaction_rejected() {
 }
 
 #[test]
-fn test_frozen_asset_rejects_bridge_to_evm() {
-    // BridgeToEvm protocol transactions are no longer part of Block
-}
-
-#[test]
-fn test_delisted_asset_rejects_bridge_to_protocol() {
-    // BridgeToProtocol protocol transactions are no longer part of Block
-}
-
-#[test]
 fn test_frozen_asset_rejects_bridge_op_deposit() {
     // BridgeOp operations are no longer part of Block
     // This test is now a no-op placeholder

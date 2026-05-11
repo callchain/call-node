@@ -144,8 +144,6 @@ fn slot_challenge_bond_amount() -> U256;                     // uint128
 |----------|----------|-------|--------|-----|
 | `0xa87e4f2a` | `getTotalDeposits()` | - | `uint128` | 1,500 |
 | `0x9c3e6d1b` | `getTotalWithdrawals()` | - | `uint128` | 1,500 |
-| `0xdbae8a2a` | `bridgeToEvm(uint64,address,uint128)` | assetId, to, amount | - | 30,000 |
-| `0xf0c861e4` | `bridgeToProtocol(uint64,address,uint128)` | assetId, to, amount | - | 30,000 |
 | `0x1aba0700` | `externalDeposit(bytes32,uint64,address,uint128)` | sourceTxHash, assetId, recipient, amount | - | 30,000 |
 | `0x393da669` | `externalWithdraw(uint64,bytes,uint64,uint128)` | targetChain, targetAddress, assetId, amount | - | 30,000 |
 | `0x2689cfc0` | `deposit(uint64,address,uint128,uint64,bytes)` | sourceChain, targetAddress, amount, assetId, proof | - | 30,000 |
