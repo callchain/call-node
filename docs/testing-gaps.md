@@ -16,13 +16,14 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 
 ## Critical (Block Mainnet)
 
+> **Note**: RPC authentication / authorization (JWT, API keys) is intentionally out of scope. Callchain nodes are expected to run behind a reverse proxy or VPN where auth is handled at the infrastructure layer.
+
 | # | Gap | Crate | What to Test |
 |---|-----|-------|--------------|
-| 1 | RPC authentication / authorization | `call-rpc` | JWT token validation, API key rejection, IP allowlist enforcement |
-| 2 | RPC rate limiting | `call-rpc` | Per-client request throttling, burst handling, ban-after-excess |
-| 3 | Concurrent DB access / crash recovery | `call-storage` | Simultaneous writers, WAL replay after kill -9, corruption detection |
-| 4 | Light client beacon BLS consensus | `call-light-client` | Mock beacon API → `fetch_light_client_finality_update` → `apply_light_client_update` → `set_finalized_block` |
-| 5 | Oracle signature negative tests | `call-oracle` | Submit with invalid 64-byte signature → must fail |
+| 1 | RPC rate limiting | `call-rpc` | Per-client request throttling, burst handling, ban-after-excess |
+| 2 | Concurrent DB access / crash recovery | `call-storage` | Simultaneous writers, WAL replay after kill -9, corruption detection |
+| 3 | Light client beacon BLS consensus | `call-light-client` | Mock beacon API → `fetch_light_client_finality_update` → `apply_light_client_update` → `set_finalized_block` |
+| 4 | Oracle signature negative tests | `call-oracle` | Submit with invalid 64-byte signature → must fail |
 
 ---
 
@@ -30,16 +31,16 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 
 | # | Gap | Crate | What to Test |
 |---|-----|-------|--------------|
-| 6 | `eth_getLogs` at 1M+ blocks | `call-evm` | Create 1M blocks with receipts, measure scan latency and memory |
-| 7 | Receipt DB persistence | `call-protocol` | Write receipts, restart node, verify recovery from DB |
-| 8 | Agent tx in block production | `call-node` | Full E2E: agent registers → submits tx → included in block → executed |
-| 9 | Agent domain real verification | `call-agent` | DNS TXT record lookup, HTTP file fetch, timeout/failure handling |
-| 10 | BatchTransfer permission bypass | `call-protocol` | Multi-payment batch where payment[1+] skips permission check |
-| 11 | Slashing economic penalty | `call-consensus` | Double-sign detected → stake reduced → validator removed from set |
-| 12 | ForkManager persistence | `call-consensus` | Serialize to DB, restart, scheduled upgrades retained |
-| 13 | Multi-upgrade same height | `call-consensus` | Two upgrades at height H → only first applied, second logged |
-| 14 | Snapshot production + sig verify | `call-storage` | Trigger snapshot, verify cryptographic signatures (not just count) |
-| 15 | Fast sync incremental catch-up | `call-node` | Snapshot at block N, head at N+10K, verify catch-up completes |
+| 5 | `eth_getLogs` at 1M+ blocks | `call-evm` | Create 1M blocks with receipts, measure scan latency and memory |
+| 6 | Receipt DB persistence | `call-protocol` | Write receipts, restart node, verify recovery from DB |
+| 7 | Agent tx in block production | `call-node` | Full E2E: agent registers → submits tx → included in block → executed |
+| 8 | Agent domain real verification | `call-agent` | DNS TXT record lookup, HTTP file fetch, timeout/failure handling |
+| 9 | BatchTransfer permission bypass | `call-protocol` | Multi-payment batch where payment[1+] skips permission check |
+| 10 | Slashing economic penalty | `call-consensus` | Double-sign detected → stake reduced → validator removed from set |
+| 11 | ForkManager persistence | `call-consensus` | Serialize to DB, restart, scheduled upgrades retained |
+| 12 | Multi-upgrade same height | `call-consensus` | Two upgrades at height H → only first applied, second logged |
+| 13 | Snapshot production + sig verify | `call-storage` | Trigger snapshot, verify cryptographic signatures (not just count) |
+| 14 | Fast sync incremental catch-up | `call-node` | Snapshot at block N, head at N+10K, verify catch-up completes |
 
 ---
 
@@ -47,19 +48,19 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 
 | # | Gap | Crate | What to Test |
 |---|-----|-------|--------------|
-| 16 | Agent `credit()` u128 overflow | `call-agent` | `credit()` with `u128::MAX` + 1 → must not wrap |
-| 17 | EIP-2718 typed receipt parsing | `call-light-client` | Type 0x01 (EIP-2930) and Type 0x02 (EIP-1559) receipt proofs |
-| 18 | Light client reorg handling | `call-light-client` | Feed orphaned headers, verify rollback and resync |
-| 19 | WebSocket lag handling | `call-rpc` | Slow subscriber → verify lag notification or silent drop behavior |
-| 20 | Compliance report symbol accuracy | `call-node` | Asset ID 2 mapped to correct symbol, not hardcoded "CALL" |
-| 21 | Log rotation under load | `call-node` | Rapid 1000 logs/sec, disk-full simulation |
-| 22 | P2P ban enforcement | `call-network` | Exceed rate limit → peer banned → reconnect rejected during ban window |
-| 23 | Mempool eviction under pressure | `call-mempool` | ReplayProtector over limit → evict 25% → verify no false evictions |
-| 24 | Light client bridge deposit E2E | `call-bridge` | Full flow: `call_lightClientBridgeDeposit` with `light-client-bridge` feature |
-| 25 | Bridge MPT proof verification | `call-bridge` | Tx inclusion proof + receipt proof against real Ethereum header |
-| 26 | Beacon sync background task | `call-node` | `start_beacon_sync_task` tick → fetch → BLS verify → `is_consensus_verified` |
-| 27 | OpenTelemetry span in hot path | `call-node` | Block production triggers `record_block_span`, span emitted to collector |
-| 28 | FileLogLayer high-volume rotation | `call-node` | Background task handles sustained 10K logs/sec without drop |
+| 15 | Agent `credit()` u128 overflow | `call-agent` | `credit()` with `u128::MAX` + 1 → must not wrap |
+| 16 | EIP-2718 typed receipt parsing | `call-light-client` | Type 0x01 (EIP-2930) and Type 0x02 (EIP-1559) receipt proofs |
+| 17 | Light client reorg handling | `call-light-client` | Feed orphaned headers, verify rollback and resync |
+| 18 | WebSocket lag handling | `call-rpc` | Slow subscriber → verify lag notification or silent drop behavior |
+| 19 | Compliance report symbol accuracy | `call-node` | Asset ID 2 mapped to correct symbol, not hardcoded "CALL" |
+| 20 | Log rotation under load | `call-node` | Rapid 1000 logs/sec, disk-full simulation |
+| 21 | P2P ban enforcement | `call-network` | Exceed rate limit → peer banned → reconnect rejected during ban window |
+| 22 | Mempool eviction under pressure | `call-mempool` | ReplayProtector over limit → evict 25% → verify no false evictions |
+| 23 | Light client bridge deposit E2E | `call-bridge` | Full flow: `call_lightClientBridgeDeposit` with `light-client-bridge` feature |
+| 24 | Bridge MPT proof verification | `call-bridge` | Tx inclusion proof + receipt proof against real Ethereum header |
+| 25 | Beacon sync background task | `call-node` | `start_beacon_sync_task` tick → fetch → BLS verify → `is_consensus_verified` |
+| 26 | OpenTelemetry span in hot path | `call-node` | Block production triggers `record_block_span`, span emitted to collector |
+| 27 | FileLogLayer high-volume rotation | `call-node` | Background task handles sustained 10K logs/sec without drop |
 
 ---
 
@@ -67,12 +68,12 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 
 | # | Gap | Tool / Approach |
 |---|-----|-----------------|
-| 29 | CI/CD pipeline | GitHub Actions: `cargo test --workspace` on PR, nightly full suite |
-| 30 | Code coverage | `cargo tarpaulin` or `cargo llvm-cov`, gate PRs at >70% |
-| 31 | Benchmark suite | `criterion.rs` for MPT verify, proof gen, block production hot paths |
-| 32 | Property-based testing | `proptest` for RLP decode, MPT parse, precompile dispatch invariants |
-| 33 | Long-running testnet | 7+ day soak test with real Ethereum RPC, mixed validator versions |
-| 34 | Mutation testing | `cargo-mutants` to verify test suite actually catches bugs |
+| 28 | CI/CD pipeline | GitHub Actions: `cargo test --workspace` on PR, nightly full suite |
+| 29 | Code coverage | `cargo tarpaulin` or `cargo llvm-cov`, gate PRs at >70% |
+| 30 | Benchmark suite | `criterion.rs` for MPT verify, proof gen, block production hot paths |
+| 31 | Property-based testing | `proptest` for RLP decode, MPT parse, precompile dispatch invariants |
+| 32 | Long-running testnet | 7+ day soak test with real Ethereum RPC, mixed validator versions |
+| 33 | Mutation testing | `cargo-mutants` to verify test suite actually catches bugs |
 
 ---
 
@@ -96,6 +97,6 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 
 ## Stats
 
-- **Total open**: 34 gaps (5 critical + 10 high + 14 medium + 5 infrastructure)
+- **Total open**: 33 gaps (4 critical + 10 high + 13 medium + 6 infrastructure)
 - **Recently closed**: 11 gaps
 - **Target**: Close all critical + high before mainnet; medium + infra before public testnet
