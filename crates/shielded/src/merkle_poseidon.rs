@@ -111,7 +111,7 @@ impl PoseidonMerkleTree {
         if self.count == 0 {
             return vec![];
         }
-        self.proof_for_index(self.count - 1).unwrap()
+        self.proof_for_index(self.count - 1).expect("invariant: count > 0 guarantees valid index")
     }
 
     /// Returns a Merkle proof for the leaf at the given index.

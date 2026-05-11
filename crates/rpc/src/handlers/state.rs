@@ -498,7 +498,7 @@ impl RpcState {
         if height_bytes.len() != 8 {
             return None;
         }
-        let height = u64::from_be_bytes(height_bytes.try_into().unwrap());
+        let height = u64::from_be_bytes(height_bytes.try_into().expect("invariant: 8-byte height"));
         self.load_block(height)
     }
 
@@ -529,7 +529,7 @@ impl RpcState {
                 current_block,
             );
             let pubkey_hash: [u8; 32] = if pubkey.len() >= 32 {
-                pubkey[..32].try_into().unwrap()
+                pubkey[..32].try_into().expect("invariant: 32-byte pubkey")
             } else {
                 let mut buf = [0u8; 32];
                 buf[..pubkey.len()].copy_from_slice(&pubkey);
@@ -860,7 +860,7 @@ impl RpcState {
         {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("invariant: system time is after UNIX_EPOCH")
                 .as_millis() as u64;
             let mut defense = self
                 .mempool_defense

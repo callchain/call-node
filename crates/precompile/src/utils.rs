@@ -198,7 +198,7 @@ pub fn encode_bool(value: bool) -> [u8; 32] {
 /// Read a u128 from the low 16 bytes of a U256.
 #[allow(clippy::unwrap_used)]
 pub fn u256_to_u128(v: U256) -> u128 {
-    u128::from_be_bytes(v.to_be_bytes::<32>()[16..32].try_into().unwrap())
+    u128::from_be_bytes(v.to_be_bytes::<32>()[16..32].try_into().expect("invariant: 16-byte slice"))
 }
 
 /// Write a u128 into the low 16 bytes of a U256.
@@ -211,7 +211,7 @@ pub fn u128_to_u256(v: u128) -> U256 {
 /// Read a u64 from the low 8 bytes of a U256.
 #[allow(clippy::unwrap_used)]
 pub fn u256_to_u64(v: U256) -> u64 {
-    u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().unwrap())
+    u64::from_be_bytes(v.to_be_bytes::<32>()[24..32].try_into().expect("invariant: 8-byte slice"))
 }
 
 /// Write a u64 into the low 8 bytes of a U256.

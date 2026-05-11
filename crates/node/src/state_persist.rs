@@ -106,7 +106,7 @@ pub(crate) fn save_receipts(
         .iter()
         .map(|(k, v)| {
             let key: Vec<u8> = k.as_slice().to_vec();
-            let value: Vec<u8> = serde_json::to_vec(v).unwrap();
+            let value: Vec<u8> = serde_json::to_vec(v).expect("invariant: JSON serialization never fails for Receipt");
             (key, value)
         })
         .collect();
@@ -127,7 +127,7 @@ pub(crate) fn save_receipts(
         .map(|(block, hashes)| {
             (
                 block.to_be_bytes().to_vec(),
-                serde_json::to_vec(hashes).unwrap(),
+                serde_json::to_vec(hashes).expect("invariant: JSON serialization never fails for Vec<B256>"),
             )
         })
         .collect();

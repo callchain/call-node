@@ -83,13 +83,13 @@ impl NullifierSet {
     /// Compute bucket index from nullifier hash
     fn nullifier_bucket(&self, nullifier: &Nullifier) -> usize {
         // Use first 8 bytes of hash as bucket index
-        let prefix = u64::from_le_bytes(nullifier.as_hash().as_slice()[0..8].try_into().unwrap());
+        let prefix = u64::from_le_bytes(nullifier.as_hash().as_slice()[0..8].try_into().expect("invariant: 8-byte prefix"));
         (prefix % 64) as usize
     }
 
     /// Compute bit index within bucket
     fn nullifier_bit(&self, nullifier: &Nullifier) -> u32 {
-        let prefix = u64::from_le_bytes(nullifier.as_hash().as_slice()[8..16].try_into().unwrap());
+        let prefix = u64::from_le_bytes(nullifier.as_hash().as_slice()[8..16].try_into().expect("invariant: 8-byte prefix"));
         (prefix % 64) as u32
     }
 

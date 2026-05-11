@@ -159,7 +159,7 @@ impl Default for P2pConfig {
 
 impl P2pConfig {
     fn default_listen_addr() -> SocketAddr {
-        "0.0.0.0:51235".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0], 51235))
     }
     fn default_max_peers() -> u32 {
         50
@@ -208,10 +208,10 @@ impl Default for RpcConfig {
 
 impl RpcConfig {
     fn default_http_addr() -> SocketAddr {
-        "127.0.0.1:8545".parse().unwrap()
+        SocketAddr::from(([127, 0, 0, 1], 8545))
     }
     fn default_ws_addr() -> SocketAddr {
-        "127.0.0.1:8546".parse().unwrap()
+        SocketAddr::from(([127, 0, 0, 1], 8546))
     }
     fn default_max_connections() -> u32 {
         100
@@ -273,7 +273,7 @@ impl Default for MetricsConfig {
 
 impl MetricsConfig {
     fn default_addr() -> SocketAddr {
-        "0.0.0.0:9090".parse().unwrap()
+        SocketAddr::from(([0, 0, 0, 0], 9090))
     }
 }
 
@@ -376,7 +376,7 @@ impl NodeConfig {
         }
 
         // P2P
-        if args.p2p_listen_addr != "0.0.0.0:51235".parse().unwrap() {
+        if args.p2p_listen_addr != SocketAddr::from(([0, 0, 0, 0], 51235)) {
             self.p2p.listen_addr = args.p2p_listen_addr;
         }
         if args.p2p_bootstrap_peers.is_some() {
@@ -389,10 +389,10 @@ impl NodeConfig {
         }
 
         // RPC
-        if args.http_addr != "127.0.0.1:8545".parse().unwrap() {
+        if args.http_addr != SocketAddr::from(([127, 0, 0, 1], 8545)) {
             self.rpc.http_addr = args.http_addr;
         }
-        if args.ws_addr != "127.0.0.1:8546".parse().unwrap() {
+        if args.ws_addr != SocketAddr::from(([127, 0, 0, 1], 8546)) {
             self.rpc.ws_addr = args.ws_addr;
         }
         if let Some(max_conn) = args.rpc_max_connections {
@@ -423,7 +423,7 @@ impl NodeConfig {
         }
 
         // Metrics
-        if args.metrics_addr != "0.0.0.0:9090".parse().unwrap() {
+        if args.metrics_addr != SocketAddr::from(([0, 0, 0, 0], 9090)) {
             self.metrics.addr = args.metrics_addr;
         }
 

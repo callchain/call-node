@@ -1277,7 +1277,7 @@ impl call_precompile::StatefulPrecompile for GovernancePrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let selector: [u8; 4] = calldata[..4].try_into().expect("invariant: 4-byte selector");
         let sr = StorageRef::new(storage);
         match selector {
             IProtocolGovernance::submitProposalCall::SELECTOR => {

@@ -258,7 +258,8 @@ pub(crate) fn apply_synced_blocks(
                         tracing::warn!(height = block_height, error = %e, "sync: failed to commit block to consensus state");
                     }
                     let mut provider =
-                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        call_evm::provider::InMemoryStateProvider::from_db(&state.db_env)
+                            .expect("invariant: DB was initialized before sync task started");
                     c.advance_round(&mut provider);
                     if let Err(e) = provider.save_to_db(&state.db_env) {
                         tracing::warn!(error = ?e, "sync: failed to save provider after epoch churn");

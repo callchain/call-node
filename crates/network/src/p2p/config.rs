@@ -43,7 +43,7 @@ pub struct CommonwareConfig {
 impl Default for CommonwareConfig {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:51235".parse().unwrap(),
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 51235)),
             bootstrap_peers: Vec::new(),
             max_message_size: 10 * 1024 * 1024, // 10 MB
             allow_private_ips: false,

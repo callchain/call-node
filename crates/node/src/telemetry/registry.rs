@@ -161,7 +161,7 @@ impl TelemetryRegistry {
     pub fn seconds_since_last_block(&self) -> Option<u64> {
         self.last_block_committed_at
             .read()
-            .unwrap()
+            .expect("lock poisoned")
             .map(|inst| inst.elapsed().as_secs())
     }
 

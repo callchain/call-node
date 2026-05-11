@@ -87,11 +87,11 @@ impl OracleTracker {
             .insert(validator_id, submission);
 
         // Check if quorum reached
-        let submissions = self.pending.get(&pair).unwrap();
+        let submissions = self.pending.get(&pair).expect("invariant: just inserted submission for this pair");
         let active_count = validators.values().filter(|v| v.is_active).count();
         if submissions.len() >= oracle_quorum(active_count) {
             let (aggregated, outliers, contributors) =
-                aggregate_submissions(self.pending.remove(&pair).unwrap(), config);
+                aggregate_submissions(self.pending.remove(&pair).expect("invariant: quorum just reached for this pair"), config);
             self.last_outliers = outliers;
             self.current_contributors = contributors;
             return Ok(Some(aggregated));

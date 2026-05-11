@@ -144,11 +144,11 @@ mod real_prover_impl {
             let transfer_circuit = Self::dev_transfer_circuit();
 
             let (deposit_pk, deposit_vk) =
-                Groth16::<Bn254>::circuit_specific_setup(deposit_circuit, rng).unwrap();
+                Groth16::<Bn254>::circuit_specific_setup(deposit_circuit, rng).expect("invariant: dev circuit setup succeeds");
             let (withdraw_pk, withdraw_vk) =
-                Groth16::<Bn254>::circuit_specific_setup(withdraw_circuit, rng).unwrap();
+                Groth16::<Bn254>::circuit_specific_setup(withdraw_circuit, rng).expect("invariant: dev circuit setup succeeds");
             let (transfer_pk, transfer_vk) =
-                Groth16::<Bn254>::circuit_specific_setup(transfer_circuit, rng).unwrap();
+                Groth16::<Bn254>::circuit_specific_setup(transfer_circuit, rng).expect("invariant: dev circuit setup succeeds");
 
             Self {
                 transfer_pk,
@@ -704,7 +704,7 @@ mod real_prover_impl {
             let prover = RealProver::setup();
             let circuit = setup_deposit_circuit();
 
-            let mut proof_data = prover.prove_deposit(&circuit).unwrap();
+            let mut proof_data = prover.prove_deposit(&circuit).expect("invariant: dev circuit setup succeeds");
             proof_data[10] ^= 0xFF;
 
             // Deposit public inputs: commitment + asset_id (2 Fr = 64 bytes)
@@ -725,12 +725,12 @@ mod real_prover_impl {
             let prover = RealProver::setup();
             let circuit = setup_deposit_circuit();
 
-            let proof_data = prover.prove_deposit(&circuit).unwrap();
+            let proof_data = prover.prove_deposit(&circuit).expect("invariant: dev circuit setup succeeds");
 
             // Wrong public inputs: 64 bytes (2 Fr) of 0xFF
             let public_inputs = vec![0xFFu8; 64];
 
-            let valid = prover.verify_deposit(&proof_data, &public_inputs).unwrap();
+            let valid = prover.verify_deposit(&proof_data, &public_inputs).expect("invariant: dev circuit setup succeeds");
             assert!(!valid, "wrong public inputs should reject");
         }
     }
@@ -782,7 +782,7 @@ mod tests {
     fn test_mock_prover_generate_proof() {
         let (circuit, _) = build_circuit_with_proof();
         let prover = MockProver::new();
-        let proof = prover.prove(&circuit).unwrap();
+        let proof = prover.prove(&circuit).expect("invariant: dev circuit setup succeeds");
         assert_eq!(proof.proof_data.len(), 200);
         assert_eq!(proof.nullifiers.len(), 1);
         assert_eq!(proof.commitments.len(), 1);

@@ -784,7 +784,7 @@ impl CallNode {
                 }
 
                 // Register 3 consensus channels and wrap each in a Muxer
-                let quota = Quota::per_second(NonZeroU32::new(10000).unwrap());
+                let quota = Quota::per_second(NonZeroU32::new(10000).expect("invariant: 10000 > 0"));
                 let (vote_s, vote_r) = network_p2p.register(1, quota.clone(), 100_000);
                 let (cert_s, cert_r) = network_p2p.register(2, quota.clone(), 100_000);
                 let (resolve_s, resolve_r) = network_p2p.register(3, quota, 100_000);
@@ -953,8 +953,8 @@ impl CallNode {
 
                         let page_cache = CacheRef::from_pooler(
                             &context,
-                            NonZeroU16::new(4096).unwrap(),
-                            NonZeroUsize::new(1024).unwrap(),
+                            NonZeroU16::new(4096).expect("invariant: 4096 > 0"),
+                            NonZeroUsize::new(1024).expect("invariant: 1024 > 0"),
                         );
 
                         let cfg = SimplexConfig {
@@ -968,8 +968,8 @@ impl CallNode {
                             partition: "callchain".to_string(),
                             mailbox_size: 1024,
                             epoch: Epoch::new(epoch_counter),
-                            replay_buffer: NonZeroUsize::new(8192).unwrap(),
-                            write_buffer: NonZeroUsize::new(8192).unwrap(),
+                            replay_buffer: NonZeroUsize::new(8192).expect("invariant: 8192 > 0"),
+                            write_buffer: NonZeroUsize::new(8192).expect("invariant: 8192 > 0"),
                             page_cache,
                             leader_timeout: Duration::from_millis(500),
                             certification_timeout: Duration::from_millis(750),

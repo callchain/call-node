@@ -66,7 +66,7 @@ fn validate_pex_address(addr: SocketAddr, allow_private: bool) -> bool {
 ///
 /// # Usage
 /// ```ignore
-/// let config = CommonwareConfig::local("0.0.0.0:51235".parse().unwrap());
+/// let config = CommonwareConfig::local(SocketAddr::from(([0, 0, 0, 0], 51235)));
 /// let network = CommonwareNetwork::new(&config, identity_key).await?;
 ///
 /// // Use the network
@@ -202,7 +202,7 @@ impl CommonwareNetwork {
                 }
 
                 // Register application channel
-                let quota = Quota::per_second(NonZeroU32::new(1000).unwrap());
+                let quota = Quota::per_second(NonZeroU32::new(1000).expect("invariant: 1000 > 0"));
                 let (sender, receiver) = network.register(0, quota, 10_000);
 
                 // Start the network (spawns background tasks)
@@ -526,7 +526,7 @@ impl Network for CommonwareNetwork {
         }
 
         let recipients = if pub_keys.len() == 1 {
-            Recipients::One(pub_keys.into_iter().next().unwrap())
+            Recipients::One(pub_keys.into_iter().next().expect("invariant: exactly one pubkey"))
         } else {
             Recipients::Some(pub_keys)
         };
@@ -559,8 +559,7 @@ impl Network for CommonwareNetwork {
             // channels so consensus-critical traffic is never dropped.
             if channel == 1 {
                 let mut gossip = self.gossip.lock().await;
-                if gossip.peers.contains_key(&peer_id) {
-                    let peer_state = gossip.peers.get_mut(&peer_id).unwrap();
+                if let Some(peer_state) = gossip.peers.get_mut(&peer_id) {
                     if let Err(e) = peer_state.record_message() {
                         tracing::warn!(peer_id = %peer_id, "gossip rate limit hit: {e}");
                         continue;

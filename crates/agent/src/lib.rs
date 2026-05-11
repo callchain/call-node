@@ -100,8 +100,8 @@ pub fn pack_agent_perms(per_tx_limit: u128, expires_at: u64, flags: u8) -> U256 
 #[allow(clippy::unwrap_used)]
 pub fn unpack_agent_perms(perms: U256) -> (u128, u64, u8) {
     let bytes = perms.to_be_bytes::<32>();
-    let per_tx_limit = u128::from_be_bytes(bytes[0..16].try_into().unwrap());
-    let expires_at = u64::from_be_bytes(bytes[16..24].try_into().unwrap());
+    let per_tx_limit = u128::from_be_bytes(bytes[0..16].try_into().expect("invariant: 16-byte slice"));
+    let expires_at = u64::from_be_bytes(bytes[16..24].try_into().expect("invariant: 8-byte slice"));
     let flags = bytes[31];
     (per_tx_limit, expires_at, flags)
 }

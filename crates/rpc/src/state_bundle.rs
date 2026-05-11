@@ -48,7 +48,7 @@ impl RpcState {
     /// should acquire that lock separately and for as short a time as possible.
     pub fn write_all(&self) -> StateWriteBundle<'_> {
         StateWriteBundle {
-            fee_params: self.fee_params.write().unwrap(),
+            fee_params: self.fee_params.write().expect("lock poisoned"),
             db_env: Arc::clone(&self.db_env),
         }
     }
@@ -56,7 +56,7 @@ impl RpcState {
     /// Acquire the read lock on `fee_params` only.
     pub fn read_all(&self) -> StateReadBundle<'_> {
         StateReadBundle {
-            fee_params: self.fee_params.read().unwrap(),
+            fee_params: self.fee_params.read().expect("lock poisoned"),
             db_env: Arc::clone(&self.db_env),
         }
     }

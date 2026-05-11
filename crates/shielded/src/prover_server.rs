@@ -131,7 +131,7 @@ async fn auth_and_rate_limit(
 
     // Rate limit check
     {
-        let mut limiter = state.rate_limiter.lock().unwrap();
+        let mut limiter = state.rate_limiter.lock().expect("lock poisoned");
         let bucket = limiter
             .entry(api_key.clone())
             .or_insert_with(|| TokenBucket::new(state.max_qps));
@@ -264,7 +264,7 @@ pub fn build_router(state: ProverState) -> Router {
 // ── Health ─────────────────────────────────────────────────────────────────
 
 async fn health_check(State(state): State<ProverState>) -> Json<HealthResponse> {
-    let cache_size = state.proof_cache.lock().unwrap().len();
+    let cache_size = state.proof_cache.lock().expect("lock poisoned").len();
     let queue_depth = state.inflight.load(Ordering::Relaxed);
     Json(HealthResponse {
         status: "ok",
@@ -322,7 +322,7 @@ async fn handle_deposit(
     // Cache key = nullifier(recipient_ivk, rho)
     let cache_key = compute_nullifier(&recipient_ivk, &rho);
     {
-        let mut cache = state.proof_cache.lock().unwrap();
+        let mut cache = state.proof_cache.lock().expect("lock poisoned");
         if let Some(cached_proof) = cache_get(&mut *cache, &cache_key, state.cache_ttl_secs) {
             info!("deposit proof cache hit");
             return Ok(Json(DepositResponse {
@@ -352,7 +352,7 @@ async fn handle_deposit(
     state.inflight.fetch_sub(1, Ordering::Relaxed);
 
     {
-        let mut cache = state.proof_cache.lock().unwrap();
+        let mut cache = state.proof_cache.lock().expect("lock poisoned");
         cache_insert(&mut *cache, cache_key, proof_data.clone());
     }
 
@@ -449,7 +449,7 @@ async fn handle_transfer(
         alloy_primitives::keccak256(&key_data).0
     };
     {
-        let mut cache = state.proof_cache.lock().unwrap();
+        let mut cache = state.proof_cache.lock().expect("lock poisoned");
         if let Some(cached_proof) = cache_get(&mut *cache, &cache_key, state.cache_ttl_secs) {
             info!("transfer proof cache hit");
             let nf_hex: Vec<String> = nullifiers.iter().map(hex::encode).collect();
@@ -490,7 +490,7 @@ async fn handle_transfer(
     state.inflight.fetch_sub(1, Ordering::Relaxed);
 
     {
-        let mut cache = state.proof_cache.lock().unwrap();
+        let mut cache = state.proof_cache.lock().expect("lock poisoned");
         cache_insert(&mut *cache, cache_key, proof_data.clone());
     }
 
@@ -532,7 +532,7 @@ async fn handle_withdraw(
     // Cache key = nullifier
     let cache_key = nullifier;
     {
-        let mut cache = state.proof_cache.lock().unwrap();
+        let mut cache = state.proof_cache.lock().expect("lock poisoned");
         if let Some(cached_proof) = cache_get(&mut *cache, &cache_key, state.cache_ttl_secs) {
             info!("withdraw proof cache hit");
             return Ok(Json(WithdrawResponse {
@@ -583,7 +583,7 @@ async fn handle_withdraw(
     state.inflight.fetch_sub(1, Ordering::Relaxed);
 
     {
-        let mut cache = state.proof_cache.lock().unwrap();
+        let mut cache = state.proof_cache.lock().expect("lock poisoned");
         cache_insert(&mut *cache, cache_key, proof_data.clone());
     }
 

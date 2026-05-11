@@ -41,19 +41,19 @@ impl PartitionRouter {
 
     /// Register a node so that it has its own receive buffer.
     pub fn register_node(&self, node_id: &str) {
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.lock().expect("lock poisoned");
         buffers.entry(node_id.to_string()).or_default();
     }
 
     /// Set the partition group for a node.
     pub fn set_partition_group(&self, node_id: &str, group: &str) {
-        let mut groups = self.partition_groups.lock().unwrap();
+        let mut groups = self.partition_groups.lock().expect("lock poisoned");
         groups.insert(node_id.to_string(), group.to_string());
     }
 
     /// Get the partition group for a node.
     pub fn get_partition_group(&self, node_id: &str) -> Option<String> {
-        let groups = self.partition_groups.lock().unwrap();
+        let groups = self.partition_groups.lock().expect("lock poisoned");
         groups.get(node_id).cloned()
     }
 
@@ -79,7 +79,7 @@ impl PartitionRouter {
     /// partition group and the drop dice allow it.
     fn deliver(&self, from_node: &str, to_node: &str, channel: u64, data: Vec<u8>) {
         if from_node != to_node {
-            let groups = self.partition_groups.lock().unwrap();
+            let groups = self.partition_groups.lock().expect("lock poisoned");
             let from_group = groups.get(from_node);
             let to_group = groups.get(to_node);
             if from_group != to_group {
@@ -89,7 +89,7 @@ impl PartitionRouter {
         if self.should_drop() {
             return;
         }
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.lock().expect("lock poisoned");
         if let Some(q) = buffers.get_mut(to_node) {
             q.push_back((from_node.to_string(), channel, data));
         }
@@ -98,7 +98,7 @@ impl PartitionRouter {
     /// Broadcast `data` on `channel` from `from_node` to every registered node.
     pub fn broadcast(&self, from_node: &str, channel: u64, data: Vec<u8>) {
         let nodes: Vec<String> = {
-            let buffers = self.buffers.lock().unwrap();
+            let buffers = self.buffers.lock().expect("lock poisoned");
             buffers.keys().cloned().collect()
         };
         for node in nodes {
@@ -115,19 +115,19 @@ impl PartitionRouter {
 
     /// Pop the oldest message for `node_id`, if any.
     pub fn receive(&self, node_id: &str) -> Option<(String, u64, Vec<u8>)> {
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.lock().expect("lock poisoned");
         buffers.get_mut(node_id)?.pop_front()
     }
 
     /// Number of messages waiting for `node_id`.
     pub fn pending_count(&self, node_id: &str) -> usize {
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.lock().expect("lock poisoned");
         buffers.get(node_id).map(|q| q.len()).unwrap_or(0)
     }
 
     /// Drain all pending messages for `node_id`.
     pub fn drain(&self, node_id: &str) -> Vec<(String, u64, Vec<u8>)> {
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.lock().expect("lock poisoned");
         buffers
             .get_mut(node_id)
             .map(|q| q.drain(..).collect())
@@ -136,7 +136,7 @@ impl PartitionRouter {
 
     /// Remove all messages from every buffer.
     pub fn drain_all(&self) -> Vec<(String, u64, Vec<u8>)> {
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.lock().expect("lock poisoned");
         let mut out = Vec::new();
         for q in buffers.values_mut() {
             out.extend(q.drain(..));
@@ -174,7 +174,7 @@ impl PartitionableNetwork {
 
     /// Inject a peer into the local peer list (affects `peer_count` / `peer_ids`).
     pub fn add_peer(&self, peer_id: String) {
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().expect("lock poisoned");
         if !peers.contains(&peer_id) {
             peers.push(peer_id);
         }
@@ -182,7 +182,7 @@ impl PartitionableNetwork {
 
     /// Remove a peer from the local peer list.
     pub fn remove_peer(&self, peer_id: &str) {
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().expect("lock poisoned");
         peers.retain(|p| p != peer_id);
     }
 }
