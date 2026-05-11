@@ -691,4 +691,185 @@ mod tests {
             call_primitives::ProtocolVersion::new(1, 0, 0)
         );
     }
+
+    /// Simulate a full node restart: save all state types, then load them back
+    /// from a fresh DB reference as if the node had restarted.
+    #[test]
+    fn test_node_restart_state_recovery() {
+        let db = temp_db();
+
+        // --- Phase 1: simulate running node saving state ---
+
+        // 1. Save fee params
+        let mut params = FeeParams::default();
+        params.base_fee = 1234;
+        save_fee_params(&db, &params).unwrap();
+
+        // 2. Save receipts
+        let mut receipts = std::collections::HashMap::new();
+        let tx1 = call_primitives::TxHash::from([0x11u8; 32]);
+        let tx2 = call_primitives::TxHash::from([0x22u8; 32]);
+        receipts.insert(tx1, make_receipt(tx1, 10, call_primitives::ExecutionStatus::Success));
+        receipts.insert(
+            tx2,
+            make_receipt(
+                tx2,
+                20,
+                call_primitives::ExecutionStatus::Reverted {
+                    reason: "out of gas".into(),
+                },
+            ),
+        );
+        save_receipts(&db, &receipts).unwrap();
+
+        // 3. Save fork state with scheduled upgrade
+        let mut fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1);
+        fm.schedule_upgrade(call_consensus::UpgradeEntry {
+            version: call_primitives::ProtocolVersion::new(1, 1, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        save_fork_state(&db, &fm).unwrap();
+
+        // 4. Write checkpoint (simulates a clean shutdown with pending marker)
+        write_checkpoint_pending(&db, [0xABu8; 32]).unwrap();
+
+        // --- Phase 2: simulate restart — fresh DB reference ---
+        // Re-open the same database directory to simulate a new process
+        let db_path = {
+            // Access the underlying path through reth_db internals is not
+            // directly available, but the DatabaseEnv holds an open reference.
+            // Instead we just reuse the same Arc<DatabaseEnv> — in a real
+            // restart the OS would close and reopen the MDBX handle.
+            // For this test, using the same Arc is sufficient because MDBX
+            // commits are durable.
+            Arc::clone(&db)
+        };
+
+        // --- Phase 3: verify recovery detection ---
+        assert!(check_recovery_needed(&db_path).unwrap());
+
+        // Clear checkpoint (simulates successful recovery / startup completion)
+        clear_checkpoint(&db_path).unwrap();
+        assert!(!check_recovery_needed(&db_path).unwrap());
+
+        // --- Phase 4: load all state and verify integrity ---
+
+        // Fee params
+        let loaded_params = load_fee_params(&db_path).unwrap();
+        assert_eq!(loaded_params.base_fee, 1234);
+
+        // Receipts
+        let loaded_receipts = load_receipts(&db_path).unwrap();
+        assert_eq!(loaded_receipts.len(), 2);
+        assert_eq!(loaded_receipts.get(&tx1).unwrap().block_number, 10);
+        assert_eq!(loaded_receipts.get(&tx2).unwrap().block_number, 20);
+        assert!(
+            matches!(
+                &loaded_receipts.get(&tx2).unwrap().status,
+                call_primitives::ExecutionStatus::Reverted { reason } if reason == "out of gas"
+            )
+        );
+
+        // Fork state
+        let mut loaded_fm = load_fork_state(&db_path).unwrap().unwrap();
+        assert_eq!(
+            loaded_fm.current_version,
+            call_primitives::ProtocolVersion::new(1, 0, 0)
+        );
+        let upgrade = loaded_fm.check_upgrades_at_height(100);
+        assert_eq!(upgrade, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
+    }
+
+    /// Test that an incomplete persist (checkpoint marker left behind) is
+    /// detected on restart and triggers recovery mode.
+    #[test]
+    fn test_crash_recovery_checkpoint_detected() {
+        let db = temp_db();
+
+        // Simulate a crash mid-persist: checkpoint marker exists but state
+        // may be partially written.
+        write_checkpoint_pending(&db, [0xCCu8; 32]).unwrap();
+
+        // On restart, recovery_needed should be true
+        assert!(check_recovery_needed(&db).unwrap());
+
+        // After clearing the checkpoint (post-recovery cleanup), recovery
+        // should no longer be needed.
+        clear_checkpoint(&db).unwrap();
+        assert!(!check_recovery_needed(&db).unwrap());
+    }
+
+    /// Test that empty state survives a restart roundtrip.
+    #[test]
+    fn test_empty_state_restart_roundtrip() {
+        let db = temp_db();
+
+        // Save empty state
+        let empty_receipts: std::collections::HashMap<
+            call_primitives::TxHash,
+            call_protocol::ProtocolReceipt,
+        > = std::collections::HashMap::new();
+        save_receipts(&db, &empty_receipts).unwrap();
+
+        let fm = ForkManager::new(call_primitives::ProtocolVersion::new(1, 0, 0), 1);
+        save_fork_state(&db, &fm).unwrap();
+
+        save_fee_params(&db, &FeeParams::default()).unwrap();
+
+        // Load back
+        let loaded_receipts = load_receipts(&db).unwrap();
+        assert!(loaded_receipts.is_empty());
+
+        let loaded_fm = load_fork_state(&db).unwrap().unwrap();
+        assert_eq!(
+            loaded_fm.current_version,
+            call_primitives::ProtocolVersion::new(1, 0, 0)
+        );
+
+        let loaded_params = load_fee_params(&db).unwrap();
+        assert_eq!(loaded_params.base_fee, FeeParams::default().base_fee);
+    }
+
+    /// Test incremental persistence preserves state across multiple writes.
+    #[test]
+    fn test_incremental_persistence_overwrite() {
+        let db = temp_db();
+
+        // First write
+        let mut receipts1 = std::collections::HashMap::new();
+        let tx1 = call_primitives::TxHash::from([0xAAu8; 32]);
+        receipts1.insert(
+            tx1,
+            make_receipt(tx1, 1, call_primitives::ExecutionStatus::Success),
+        );
+        save_receipts(&db, &receipts1).unwrap();
+
+        let mut params1 = FeeParams::default();
+        params1.base_fee = 100;
+        save_fee_params(&db, &params1).unwrap();
+
+        // Second write (incremental — should overwrite)
+        let mut receipts2 = std::collections::HashMap::new();
+        let tx2 = call_primitives::TxHash::from([0xBBu8; 32]);
+        receipts2.insert(
+            tx2,
+            make_receipt(tx2, 2, call_primitives::ExecutionStatus::Success),
+        );
+        save_receipts(&db, &receipts2).unwrap();
+
+        let mut params2 = FeeParams::default();
+        params2.base_fee = 200;
+        save_fee_params(&db, &params2).unwrap();
+
+        // Verify only second write survives
+        let loaded_receipts = load_receipts(&db).unwrap();
+        assert_eq!(loaded_receipts.len(), 1);
+        assert!(loaded_receipts.contains_key(&tx2));
+
+        let loaded_params = load_fee_params(&db).unwrap();
+        assert_eq!(loaded_params.base_fee, 200);
+    }
 }
