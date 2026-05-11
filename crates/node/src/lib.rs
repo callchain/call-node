@@ -251,10 +251,10 @@ impl CallNode {
         }
 
         // Inject loaded receipts
-        *state.receipts.write().unwrap() = receipts;
+        *state.receipts.write().unwrap_or_else(|e| e.into_inner()) = receipts;
 
         // Inject loaded fork state
-        *state.fork_manager.write().unwrap() = fork_manager;
+        *state.fork_manager.write().unwrap_or_else(|e| e.into_inner()) = fork_manager;
 
         // Seed governance config defaults into EVM on fresh start
         if fresh_start {
@@ -270,13 +270,13 @@ impl CallNode {
         let governance_advancer = governance_advancer::GovernanceAdvancer;
 
         // Sync consensus params from SimplexConsensus into RpcState for governance updates
-        *state.consensus_params.write().unwrap() = *consensus.params();
+        *state.consensus_params.write().unwrap_or_else(|e| e.into_inner()) = *consensus.params();
 
         // Sync current_block from consensus height so RPCs report correct block number after restart
         state.set_current_block(consensus.current_height());
 
         // Inject loaded fee params
-        *state.fee_params.write().unwrap() = loaded.fee_params;
+        *state.fee_params.write().unwrap_or_else(|e| e.into_inner()) = loaded.fee_params;
 
         // Set parent_hash to the last committed block hash from persisted state
         let parent_hash = consensus.last_block_hash();
@@ -418,12 +418,14 @@ impl CallNode {
                         let peer_for_resp = peer_id.clone();
                         tokio::spawn(async move {
                             if let Some(response) = handle_sync_request(&db_env_owned, &request) {
-                                let resp_data =
-                                    bincode::serialize(&NetworkMessage::SyncResponse(response))
-                                        .expect("serialize sync response");
-                                net_for_resp
-                                    .send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data)
-                                    .await;
+                                match bincode::serialize(&NetworkMessage::SyncResponse(response)) {
+                                    Ok(resp_data) => {
+                                        net_for_resp
+                                            .send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data)
+                                            .await;
+                                    }
+                                    Err(e) => tracing::warn!(error = ?e, "failed to serialize sync response"),
+                                }
                             }
                         });
                     } else if let Ok(NetworkMessage::SyncResponse(response)) =
@@ -566,12 +568,26 @@ impl CallNode {
         mpsc::UnboundedSender<LightClientEvent>,
     ) {
         let (tx, rx) = mpsc::unbounded_channel::<LightClientEvent>();
-        let network = self.network.clone().expect("network must be started first");
+        let network = match self.network.clone() {
+            Some(n) => n,
+            None => {
+                tracing::warn!("start_light_client_service called before network initialized");
+                let handle = tokio::spawn(async move {});
+                return (handle, tx);
+            }
+        };
         let db_env = Arc::clone(&self.state.db_env);
         let chain_id = self.state.chain_id;
 
         let (trusted_validators, total_validators, bls_pubkeys) = {
-            let provider = call_evm::provider::InMemoryStateProvider::from_db(&db_env).unwrap();
+            let provider = match call_evm::provider::InMemoryStateProvider::from_db(&db_env) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load EVM state for light client service");
+                    let handle = tokio::spawn(async move {});
+                    return (handle, tx);
+                }
+            };
             let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
             let mut ed25519_map = std::collections::HashMap::new();
             let mut bls_map = std::collections::HashMap::new();
@@ -602,7 +618,7 @@ impl CallNode {
         );
         light_client.set_bls_pubkeys(bls_pubkeys);
 
-        let epoch_length = self.state.consensus_params.read().unwrap().epoch_length;
+        let epoch_length = self.state.consensus_params.read().unwrap_or_else(|e| e.into_inner()).epoch_length;
 
         let service = LightClientService {
             event_rx: rx,
@@ -636,7 +652,7 @@ impl CallNode {
                 match call_light_client::sync::fetch_light_client_finality_update(&beacon_url)
                 {
                     Ok(update) => {
-                        let mut client = lc.write().unwrap();
+                        let mut client = lc.write().unwrap_or_else(|e| e.into_inner());
                         match client.apply_light_client_update(update) {
                             Ok((slot, root)) => {
                                 match call_light_client::sync::fetch_beacon_block_execution_number(
@@ -806,17 +822,23 @@ impl CallNode {
                 loop {
                     epoch_counter += 1;
                     let (parent_hash, _current_height, epoch_number, subset, my_index, subset_pubkeys) = {
-                        let c = consensus.read().unwrap();
+                        let c = consensus.read().unwrap_or_else(|e| e.into_inner());
                         let ph = c.last_block_hash();
                         let height = c.current_height();
-                        let epoch_length = state.consensus_params.read().unwrap().epoch_length;
+                        let epoch_length = state.consensus_params.read().unwrap_or_else(|e| e.into_inner()).epoch_length;
                         let epoch_number = height / epoch_length;
                         let seed = derive_vrf_seed(&ph, epoch_number);
 
                         let (qualified, pubkeys) = {
-                            let provider = call_evm::provider::InMemoryStateProvider::from_db(
-                                &state.db_env).unwrap();
-                            let params = state.consensus_params.read().unwrap();
+                            let provider = match call_evm::provider::InMemoryStateProvider::from_db(
+                                &state.db_env) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "BFT: failed to load EVM state for validator set");
+                                    continue;
+                                }
+                            };
+                            let params = state.consensus_params.read().unwrap_or_else(|e| e.into_inner());
                             let count = call_consensus::exec::state_accessors::read_validator_count(
                                 &provider);
                             let mut qualified = Vec::new();
@@ -839,7 +861,7 @@ impl CallNode {
                             (qualified, pubkeys)
                         };
 
-                        let params = state.consensus_params.read().unwrap();
+                        let params = state.consensus_params.read().unwrap_or_else(|e| e.into_inner());
                         let subset =
                             select_proposer_subset(&qualified, &pubkeys, &seed, params.subset_size);
 
@@ -872,8 +894,14 @@ impl CallNode {
 
                         let mut keys: Vec<ed25519::PublicKey> = Vec::new();
                         {
-                            let provider = call_evm::provider::InMemoryStateProvider::from_db(
-                                &state.db_env).unwrap();
+                            let provider = match call_evm::provider::InMemoryStateProvider::from_db(
+                                &state.db_env) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "BFT: failed to load EVM state for participant keys");
+                                    continue;
+                                }
+                            };
                             for id in &subset {
                                 let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, *id as u64);
                                 if addr != call_primitives::Address::ZERO {
@@ -886,12 +914,17 @@ impl CallNode {
                         }
                         let participants = Set::from_iter_dedup(keys);
 
-                        let scheme = Ed25519Scheme::signer(
+                        let scheme = match Ed25519Scheme::signer(
                             b"callchain-consensus",
                             participants,
                             ed25519_private_key.clone(),
-                        )
-                        .expect("ed25519 key must be in participant set");
+                        ) {
+                            Some(s) => s,
+                            None => {
+                                tracing::warn!("BFT: ed25519 key not in participant set");
+                                continue;
+                            }
+                        };
 
                         let (propose_tx, propose_rx) = mpsc::channel::<ProposeRequest>(16);
                         let (verify_tx, verify_rx) = mpsc::channel::<VerifyRequest>(16);
@@ -904,9 +937,18 @@ impl CallNode {
 
                         let (exit_tx, exit_rx) = oneshot::channel::<EpochRotationReason>();
 
-                        let (vote_sub_s, vote_sub_r) = vote_handle.register(subchannel_counter).await.unwrap();
-                        let (cert_sub_s, cert_sub_r) = cert_handle.register(subchannel_counter + 1).await.unwrap();
-                        let (resolve_sub_s, resolve_sub_r) = resolve_handle.register(subchannel_counter + 2).await.unwrap();
+                        let (vote_sub_s, vote_sub_r) = match vote_handle.register(subchannel_counter).await {
+                            Ok(v) => v,
+                            Err(e) => { tracing::warn!(error = ?e, "BFT: vote channel registration failed"); continue; }
+                        };
+                        let (cert_sub_s, cert_sub_r) = match cert_handle.register(subchannel_counter + 1).await {
+                            Ok(v) => v,
+                            Err(e) => { tracing::warn!(error = ?e, "BFT: cert channel registration failed"); continue; }
+                        };
+                        let (resolve_sub_s, resolve_sub_r) = match resolve_handle.register(subchannel_counter + 2).await {
+                            Ok(v) => v,
+                            Err(e) => { tracing::warn!(error = ?e, "BFT: resolve channel registration failed"); continue; }
+                        };
                         subchannel_counter += 3;
 
                         let page_cache = CacheRef::from_pooler(
@@ -972,7 +1014,7 @@ impl CallNode {
                             {
                                 let pk = ed25519_private_key.public_key();
                                 let encoded = commonware_codec::Encode::encode(&pk);
-                                let bytes: [u8; 32] = encoded.as_ref().try_into().expect("ed25519 pubkey is 32 bytes");
+                                let bytes: [u8; 32] = encoded.as_ref().try_into().unwrap_or([0u8; 32]);
                                 bytes
                             },
                             oracle_tracker.clone(),
@@ -1007,10 +1049,10 @@ impl CallNode {
                         // do NOT increment here
                     } else {
                         let epoch_length = {
-                            state.consensus_params.read().unwrap().epoch_length
+                            state.consensus_params.read().unwrap_or_else(|e| e.into_inner()).epoch_length
                         };
                         let current_height = {
-                            consensus.read().unwrap().current_height()
+                            consensus.read().unwrap_or_else(|e| e.into_inner()).current_height()
                         };
                         let next_epoch_height =
                             (current_height / epoch_length + 1) * epoch_length;
@@ -1044,7 +1086,7 @@ impl CallNode {
             tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Start from persisted consensus height (more accurate than scanning blocks dir)
-            let consensus_height = consensus.read().unwrap().current_height();
+            let consensus_height = consensus.read().unwrap_or_else(|e| e.into_inner()).current_height();
             let disk_height = find_latest_height(&db_env);
             let mut local_height = consensus_height.max(disk_height);
             tracing::info!(
@@ -1061,10 +1103,10 @@ impl CallNode {
             // Initialise sync progress for eth_syncing
             {
                 let highest_block = {
-                    let heights = state.peer_heights.read().unwrap();
+                    let heights = state.peer_heights.read().unwrap_or_else(|e| e.into_inner());
                     heights.values().copied().max().unwrap_or(local_height)
                 };
-                let mut sp = state.sync_progress.write().unwrap();
+                let mut sp = state.sync_progress.write().unwrap_or_else(|e| e.into_inner());
                 *sp = Some(call_rpc::handlers::SyncProgress {
                     starting_block: local_height,
                     current_block: local_height,
@@ -1074,8 +1116,13 @@ impl CallNode {
 
             // Build light client from current validator set once at the start
             let (trusted_validators, total_validators, bls_pubkeys) = {
-                let provider =
-                    call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sync: failed to load EVM state for validator set");
+                        return;
+                    }
+                };
                 let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
                 let mut ed25519_map = std::collections::HashMap::new();
                 let mut bls_map = std::collections::HashMap::new();
@@ -1120,9 +1167,10 @@ impl CallNode {
                     count: BATCH_SIZE,
                     full_state: false,
                 };
-                let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
-                    .expect("serialize sync request");
-                network.broadcast(SYNC_CHANNEL, req_data).await;
+                match bincode::serialize(&NetworkMessage::SyncRequest(request)) {
+                    Ok(req_data) => { network.broadcast(SYNC_CHANNEL, req_data).await; }
+                    Err(e) => tracing::warn!(error = ?e, "failed to serialize sync request"),
+                }
 
                 let mut batch_applied = 0;
                 let mut received_any = false;
@@ -1243,7 +1291,7 @@ impl CallNode {
 
                                 // Push fee history entry for light-client sync path
                                 {
-                                    let fee_params = state.fee_params.read().unwrap();
+                                    let fee_params = state.fee_params.read().unwrap_or_else(|e| e.into_inner());
                                     let base_fee = fee_params.base_fee;
                                     let max_gas = fee_params.max_gas_per_block.max(1);
                                     drop(fee_params);
@@ -1287,11 +1335,15 @@ impl CallNode {
 
                                 if let Ok(mut c) = consensus.write() {
                                     let _ = c.commit_block(&block, &result);
-                                    let mut provider =
-                                        call_evm::provider::InMemoryStateProvider::from_db(
-                                            &state.db_env,
-                                        )
-                                        .unwrap();
+                                    let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(
+                                        &state.db_env,
+                                    ) {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "sync: failed to load EVM state for round advance");
+                                            continue;
+                                        }
+                                    };
                                     c.advance_round(&mut provider);
                                     let _ = provider.save_to_db(&state.db_env);
                                 }
@@ -1348,7 +1400,7 @@ impl CallNode {
             }
 
             // Clear sync progress — node is fully synced (or gave up)
-            *state.sync_progress.write().unwrap() = None;
+            *state.sync_progress.write().unwrap_or_else(|e| e.into_inner()) = None;
 
             if local_height > 0 {
                 tracing::info!(height = local_height, "sync: completed");
@@ -1357,7 +1409,7 @@ impl CallNode {
             }
 
             // Save recovered consensus state after sync
-            let c = consensus.read().unwrap();
+            let c = consensus.read().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = save_consensus_state_inner(&db_env, &c) {
                 tracing::warn!(error = %e, "sync: failed to save consensus state after sync");
             }
@@ -1385,7 +1437,7 @@ impl CallNode {
         }
         // Save consensus state explicitly
         {
-            let c = self.consensus.read().unwrap();
+            let c = self.consensus.read().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = save_consensus_state_inner(db_env, &c) {
                 tracing::warn!(error = %e, "failed to flush consensus state on shutdown");
             }
@@ -1396,7 +1448,7 @@ impl CallNode {
 
     /// Get mempool stats (EVM count, known tx count)
     pub fn mempool_stats(&self) -> (usize, usize) {
-        let mempool = self.mempool.read().unwrap();
+        let mempool = self.mempool.read().unwrap_or_else(|e| e.into_inner());
         (mempool.evm_pool.len(), mempool.known_txs.len())
     }
 
@@ -1468,7 +1520,10 @@ fn find_latest_height(db_env: &Arc<DatabaseEnv>) -> u64 {
 
 impl Default for CallNode {
     fn default() -> Self {
-        Self::new(PathBuf::from(".call-data")).expect("default node creation")
+        Self::new(PathBuf::from(".call-data")).unwrap_or_else(|e| {
+            tracing::error!("default node creation failed: {e}");
+            panic!("default node creation failed: {e}")
+        })
     }
 }
 

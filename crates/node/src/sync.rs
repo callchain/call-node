@@ -68,10 +68,10 @@ pub(crate) fn apply_synced_blocks(
     // Initialise sync progress if not already tracking
     {
         let highest_block = {
-            let heights = state.peer_heights.read().unwrap();
+            let heights = state.peer_heights.read().unwrap_or_else(|e| e.into_inner());
             heights.values().copied().max().unwrap_or(initial_height)
         };
-        let mut sp = state.sync_progress.write().unwrap();
+        let mut sp = state.sync_progress.write().unwrap_or_else(|e| e.into_inner());
         if sp.is_none() {
             *sp = Some(call_rpc::handlers::SyncProgress {
                 starting_block: initial_height,
@@ -133,7 +133,7 @@ pub(crate) fn apply_synced_blocks(
 
                 // Push fee history entry so RPC nodes have data even when syncing
                 {
-                    let fee_params = state.fee_params.read().unwrap();
+                    let fee_params = state.fee_params.read().unwrap_or_else(|e| e.into_inner());
                     let base_fee = fee_params.base_fee;
                     let max_gas = fee_params.max_gas_per_block.max(1);
                     drop(fee_params);
@@ -284,7 +284,7 @@ pub(crate) fn apply_synced_blocks(
     // If so, signal the BFT event loop to restart into the new epoch.
     if applied > 0 {
         let new_height = state.get_current_block();
-        let epoch_length = state.consensus_params.read().unwrap().epoch_length;
+        let epoch_length = state.consensus_params.read().unwrap_or_else(|e| e.into_inner()).epoch_length;
         let old_epoch = initial_height / epoch_length;
         let new_epoch = new_height / epoch_length;
         if new_epoch > old_epoch {

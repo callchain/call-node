@@ -91,7 +91,7 @@ pub(crate) async fn handle_network_message(
             let announcement = match bincode::deserialize::<NetworkMessage>(data) {
                 Ok(NetworkMessage::BlockAnnouncement(a)) => a,
                 Ok(NetworkMessage::EpochBoundarySignal(signal)) => {
-                    let mut peer_heights = state.peer_heights.write().unwrap();
+                    let mut peer_heights = state.peer_heights.write().unwrap_or_else(|e| e.into_inner());
                     peer_heights.insert(peer_id.to_string(), signal.height);
                     tracing::debug!(
                         peer_id,
@@ -153,14 +153,17 @@ pub(crate) async fn handle_network_message(
                 count: SYNC_REQUEST_BATCH,
                 full_state: false,
             };
-            let req_data = bincode::serialize(&NetworkMessage::SyncRequest(request))
-                .expect("serialize sync request");
-            let peer_id_owned = peer_id.to_string();
-            let net = Arc::clone(network);
-            tokio::spawn(async move {
-                net.send_to(SYNC_CHANNEL, vec![peer_id_owned], req_data)
-                    .await;
-            });
+            match bincode::serialize(&NetworkMessage::SyncRequest(request)) {
+                Ok(req_data) => {
+                    let peer_id_owned = peer_id.to_string();
+                    let net = Arc::clone(network);
+                    tokio::spawn(async move {
+                        net.send_to(SYNC_CHANNEL, vec![peer_id_owned], req_data)
+                            .await;
+                    });
+                }
+                Err(e) => tracing::warn!(error = ?e, "failed to serialize sync request"),
+            }
         }
         SYNC_CHANNEL => {
             // SyncRequest / SyncResponse are handled by the sync task separately
@@ -254,7 +257,7 @@ pub(crate) async fn handle_network_message(
                         signature: submission.signature,
                         sources: submission.sources,
                     };
-                    let mut tracker_guard = tracker_clone.write().unwrap();
+                    let mut tracker_guard = tracker_clone.write().unwrap_or_else(|e| e.into_inner());
                     // Build validator set and config from EVM state
                     let (config, validators) = {
                         let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
@@ -341,7 +344,7 @@ pub(crate) async fn handle_network_message(
                 );
                 let state_clone = Arc::clone(state);
                 tokio::spawn(async move {
-                    let mut fm = state_clone.fork_manager.write().unwrap();
+                    let mut fm = state_clone.fork_manager.write().unwrap_or_else(|e| e.into_inner());
                     // Only schedule if we don't already have this exact upgrade pending
                     let already_scheduled = fm.scheduled_upgrades.iter().any(|e| {
                         e.version == announcement.version

@@ -51,13 +51,13 @@ async fn apply_rollback_plan(
 
     // 1. Reset in-memory block height
     {
-        let mut current_block = state.current_block.write().unwrap();
+        let mut current_block = state.current_block.write().unwrap_or_else(|e| e.into_inner());
         *current_block = plan.target_height;
     }
 
     // 2. Reset consensus height
     {
-        let mut c = consensus.write().unwrap();
+        let mut c = consensus.write().unwrap_or_else(|e| e.into_inner());
         c.set_current_height(plan.target_height);
     }
 
@@ -69,13 +69,13 @@ async fn apply_rollback_plan(
 
     // 4. Clear execution results above target (via prune helper)
     {
-        let mut receipts = state.receipts.write().unwrap();
+        let mut receipts = state.receipts.write().unwrap_or_else(|e| e.into_inner());
         receipts.retain(|_, r| r.block_number <= plan.target_height);
     }
 
     // 5. Reset oracle block tracking
     {
-        let mut tracker_guard = oracle_tracker.write().unwrap();
+        let mut tracker_guard = oracle_tracker.write().unwrap_or_else(|e| e.into_inner());
         tracker_guard.clear_pending();
     }
 
@@ -109,7 +109,7 @@ async fn apply_rollback_plan(
     prune_state.retain_up_to(plan.target_height);
 
     // 11. Persist the structural rollback marker to DB
-    let _ = save_fork_state(db_env, &state.fork_manager.read().unwrap());
+    let _ = save_fork_state(db_env, &state.fork_manager.read().unwrap_or_else(|e| e.into_inner()));
 
     tracing::info!(
         target_height = plan.target_height,
@@ -153,21 +153,26 @@ pub(crate) async fn bft_event_loop(
     let prune_config = call_storage::PruneConfig::default();
 
     // Build a mapping from ed25519 pubkey -> validator id for propose lookups
-    let pubkey_to_id = {
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-        let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
-        let mut map = std::collections::HashMap::new();
-        for id in 1..=count {
-            let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
-            if addr != Address::ZERO {
-                let pk =
-                    call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
-                if let Ok(pk) = commonware_cryptography::ed25519::PublicKey::decode(&pk[..]) {
-                    map.insert(pk, id as u32);
+    let pubkey_to_id = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+        Ok(provider) => {
+            let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
+            let mut map = std::collections::HashMap::new();
+            for id in 1..=count {
+                let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
+                if addr != Address::ZERO {
+                    let pk =
+                        call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
+                    if let Ok(pk) = commonware_cryptography::ed25519::PublicKey::decode(&pk[..]) {
+                        map.insert(pk, id as u32);
+                    }
                 }
             }
+            map
         }
-        map
+        Err(e) => {
+            tracing::warn!(error = %e, "BFT: failed to load EVM state for pubkey mapping");
+            std::collections::HashMap::new()
+        }
     };
 
     // Epoch boundary quorum waiting state
@@ -181,7 +186,7 @@ pub(crate) async fn bft_event_loop(
 
     loop {
         // Check for pending emergency rollback and apply if present
-        let rollback_plan = state.pending_rollback.write().unwrap().take();
+        let rollback_plan = state.pending_rollback.write().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(plan) = rollback_plan {
             apply_rollback_plan(
                 &plan,
@@ -200,7 +205,7 @@ pub(crate) async fn bft_event_loop(
         // === Epoch boundary quorum check ===
         if awaiting_quorum {
             let (ready, timed_out) = {
-                let peer_heights = state.peer_heights.read().unwrap();
+                let peer_heights = state.peer_heights.read().unwrap_or_else(|e| e.into_inner());
                 let ready_count = subset_pubkeys
                     .iter()
                     .filter(|pk| {
@@ -251,25 +256,25 @@ pub(crate) async fn bft_event_loop(
             Some((context, reply_tx)) = propose_rx.recv() => {
                 // The BFT engine selected us as the leader for this view.
                 // Build a block from mempool and return its digest.
-                let selection = { mempool.write().unwrap().select_transactions() };
+                let selection = { mempool.write().unwrap_or_else(|e| e.into_inner()).select_transactions() };
 
                 // Map the BFT leader pubkey to our validator id
                 let proposer = pubkey_to_id.get(&context.leader).copied().unwrap_or(0);
                 let height = {
-                    let c = consensus.read().unwrap();
+                    let c = consensus.read().unwrap_or_else(|e| e.into_inner());
                     c.current_height()
                 };
 
                 // Refresh parent_hash in case sync recovered missed blocks independently
                 parent_hash = {
-                    let c = consensus.read().unwrap();
+                    let c = consensus.read().unwrap_or_else(|e| e.into_inner());
                     c.last_block_hash()
                 };
 
                 let evm_txs: Vec<Vec<u8>> = selection.evm_txs.into_iter().map(|e| e.data).collect();
 
                 let version = {
-                    let fm = state.fork_manager.read().unwrap();
+                    let fm = state.fork_manager.read().unwrap_or_else(|e| e.into_inner());
                     fm.current_version()
                 };
 
@@ -278,7 +283,7 @@ pub(crate) async fn bft_event_loop(
                 if is_oracle_boundary {
                     if let Some(ref net) = network {
                         let tracked = {
-                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                             let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(&provider);
                             let mut pairs = Vec::new();
                             for i in 0..count {
@@ -293,9 +298,10 @@ pub(crate) async fn bft_event_loop(
                                 block: height,
                                 requester_id: proposer,
                             };
-                            let msg = bincode::serialize(&NetworkMessage::OraclePriceRequest(request))
-                                .expect("serialize oracle request");
-                            net.broadcast(ORACLE_CHANNEL, msg).await;
+                            match bincode::serialize(&NetworkMessage::OraclePriceRequest(request)) {
+                                Ok(msg) => { net.broadcast(ORACLE_CHANNEL, msg).await; }
+                                Err(e) => tracing::warn!(error = ?e, "BFT: failed to serialize oracle request"),
+                            }
                             let delay_ms = state.consensus_params.read()
                                 .ok()
                                 .map(|p| p.oracle_request_delay_ms)
@@ -417,7 +423,7 @@ pub(crate) async fn bft_event_loop(
                 // Cache miss: try disk, then trigger sync as last resort
                 if block.is_none() {
                     let height = {
-                        let c = consensus.read().unwrap();
+                        let c = consensus.read().unwrap_or_else(|e| e.into_inner());
                         c.current_height()
                     };
                     let db_env = Arc::clone(&db.db);
@@ -448,7 +454,7 @@ pub(crate) async fn bft_event_loop(
 
                     // Height replay protection
                     let current_height = {
-                        let c = consensus.read().unwrap();
+                        let c = consensus.read().unwrap_or_else(|e| e.into_inner());
                         c.current_height()
                     };
                     if height < current_height {
@@ -477,11 +483,11 @@ pub(crate) async fn bft_event_loop(
                         let evm_hashes: Vec<TxHash> = result.evm_tx_results.iter()
                             .map(|r| r.tx_hash)
                             .collect();
-                        let mut mp = mempool.write().unwrap();
+                        let mut mp = mempool.write().unwrap_or_else(|e| e.into_inner());
                         mp.confirm_transactions(&evm_hashes);
                         // Also notify mempool defense so per-address tx_counts are decremented
                         drop(mp);
-                        let mut defense = state.mempool_defense.write().unwrap();
+                        let mut defense = state.mempool_defense.write().unwrap_or_else(|e| e.into_inner());
                         for evm in &result.evm_tx_results {
                             defense.on_tx_confirmed(evm.caller);
                         }
@@ -491,58 +497,58 @@ pub(crate) async fn bft_event_loop(
                     // (non-proposing validators advance period but don't broadcast requests — proposer already did)
                     let is_oracle_boundary = height.is_multiple_of(ORACLE_UPDATE_INTERVAL);
                     if is_oracle_boundary {
-                        let mut tracker_guard = oracle_tracker.write().unwrap();
+                        let mut tracker_guard = oracle_tracker.write().unwrap_or_else(|e| e.into_inner());
                         tracker_guard.clear_pending();
                         let outliers: Vec<u32> = tracker_guard.last_outliers().to_vec();
                         drop(tracker_guard);
                         if !outliers.is_empty() {
-                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                            let mut c = consensus.write().unwrap();
+                            let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
+                            let mut c = consensus.write().unwrap_or_else(|e| e.into_inner());
                             for vid in &outliers {
                                 if let Err(e) = c.handle_oracle_outlier(&mut provider, *vid) {
                                     tracing::warn!(validator_id = vid, error = ?e, "failed to slash oracle outlier");
                                 }
                             }
-                            provider.state().save_to_db(&state.db_env).unwrap();
+                            if let Err(e) = provider.state().save_to_db(&state.db_env) { tracing::warn!(error = %e, "BFT: failed to save EVM state"); continue; };
                             tracing::info!(outliers = ?outliers, "slashed oracle outliers");
                         }
                         let contributions = {
-                            let mut tracker_guard = oracle_tracker.write().unwrap();
+                            let mut tracker_guard = oracle_tracker.write().unwrap_or_else(|e| e.into_inner());
                             let reward_pool = {
-                                let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                                let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                                 call_consensus::exec::state_accessors::read_oracle_reward_pool(&provider)
                             };
                             let rewards = tracker_guard.distribute_rewards(reward_pool);
                             if !rewards.is_empty() {
-                                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                                let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                                 call_consensus::exec::state_accessors::zero_oracle_reward_pool(&mut provider);
-                                provider.state().save_to_db(&state.db_env).unwrap();
+                                if let Err(e) = provider.state().save_to_db(&state.db_env) { tracing::warn!(error = %e, "BFT: failed to save EVM state"); continue; };
                             }
                             rewards
                         };
                         if !contributions.is_empty() {
-                            let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
-                            let mut c = consensus.write().unwrap();
+                            let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
+                            let mut c = consensus.write().unwrap_or_else(|e| e.into_inner());
                             for (vid, amount) in &contributions {
                                 if let Err(e) = c.distribute_oracle_reward(&mut provider, *vid, *amount) {
                                     tracing::warn!(validator_id = vid, amount, error = ?e, "failed to distribute oracle reward");
                                 }
                             }
-                            provider.state().save_to_db(&state.db_env).unwrap();
+                            if let Err(e) = provider.state().save_to_db(&state.db_env) { tracing::warn!(error = %e, "BFT: failed to save EVM state"); continue; };
                             tracing::info!(count = contributions.len(), "distributed oracle rewards");
                         }
-                        oracle_tracker.write().unwrap().clear_tracking();
+                        oracle_tracker.write().unwrap_or_else(|e| e.into_inner()).clear_tracking();
                     }
 
                     // Commit via consensus (pure BFT — no state mutation)
                     {
-                        let mut c = consensus.write().unwrap();
+                        let mut c = consensus.write().unwrap_or_else(|e| e.into_inner());
                         if let Err(e) = c.commit_block(&block, &result) {
                             tracing::warn!(error = ?e, height, "BFT finalize: commit failed");
                             continue;
                         }
                         // Advance round and refresh proposer subset (may mutate for epoch churn)
-                        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                         c.advance_round(&mut provider);
                         if let Err(e) = provider.save_to_db(&state.db_env) {
                             tracing::warn!(error = ?e, "failed to save provider after epoch churn");
@@ -559,7 +565,7 @@ pub(crate) async fn bft_event_loop(
 
                     // Push fee history entry
                     {
-                        let fee_params = state.fee_params.read().unwrap();
+                        let fee_params = state.fee_params.read().unwrap_or_else(|e| e.into_inner());
                         let base_fee = fee_params.base_fee;
                         let max_gas = fee_params.max_gas_per_block.max(1);
                         drop(fee_params);
@@ -593,9 +599,9 @@ pub(crate) async fn bft_event_loop(
 
                     // Advance governance
                     {
-                        let mut provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                         let events = governance_advancer.advance(provider.state_mut(), new_height);
-                        provider.state().save_to_db(&state.db_env).unwrap();
+                        if let Err(e) = provider.state().save_to_db(&state.db_env) { tracing::warn!(error = %e, "BFT: failed to save EVM state"); continue; };
                         for event in events {
                             let (event_str, proposal_id) = match &event {
                                 call_governance::GovernanceEvent::ProposalAdvanced { id, from, to } => {
@@ -744,18 +750,18 @@ pub(crate) async fn bft_event_loop(
                     // Produce state snapshot at snapshot interval boundaries
                     if new_height % prune_config.snapshot_interval == 0 {
                         let evm_root = {
-                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                             let root = provider.state().compute_state_root();
                             Hash::from(root.0)
                         };
 
                         let shielded_root = {
-                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                             call_consensus::exec::state_accessors::read_shielded_merkle_root(&provider)
                         };
 
                         let agent_root = {
-                            let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                            let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                             let count = call_consensus::exec::state_accessors::read_agent_count(&provider);
                             let mut agents = std::collections::HashMap::new();
                             for id in 0..count {
@@ -790,7 +796,7 @@ pub(crate) async fn bft_event_loop(
 
                     // Save block state snapshot for historical queries
                     {
-                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                         if let Err(e) = save_block_snapshot(db_env, new_height, provider.state()) {
                             tracing::warn!(error = %e, height = new_height, "BFT finalize: failed to save block snapshot");
                         }
@@ -812,7 +818,7 @@ pub(crate) async fn bft_event_loop(
 
                     // Update current proposer address for eth_coinbase
                     {
-                        let provider = call_evm::provider::InMemoryStateProvider::from_db(&state.db_env).unwrap();
+                        let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "BFT: failed to load EVM state"); continue; } };
                         let proposer_addr = call_consensus::exec::state_accessors::read_validator_addr(
                             &provider,
                             block.header.proposer as u64,
@@ -834,16 +840,19 @@ pub(crate) async fn bft_event_loop(
                             proposer: block.header.proposer,
                             timestamp_millis: block.header.timestamp_millis,
                         };
-                        let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
-                            .expect("serialize block announcement");
-                        record_p2p_span(&telemetry, "sent", "block_announcement", msg.len());
-                        let net_clone = Arc::clone(net);
-                        tokio::spawn(async move {
-                            net_clone.broadcast(BLOCK_CHANNEL, msg).await;
-                        });
+                        match bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement)) {
+                            Ok(msg) => {
+                                record_p2p_span(&telemetry, "sent", "block_announcement", msg.len());
+                                let net_clone = Arc::clone(net);
+                                tokio::spawn(async move {
+                                    net_clone.broadcast(BLOCK_CHANNEL, msg).await;
+                                });
+                            }
+                            Err(e) => tracing::warn!(error = ?e, "BFT: failed to serialize block announcement"),
+                        }
                     }
                     // Check for epoch boundary
-                    let epoch_length = state.consensus_params.read().unwrap().epoch_length;
+                    let epoch_length = state.consensus_params.read().unwrap_or_else(|e| e.into_inner()).epoch_length;
                     let new_height = height + 1;
                     if new_height % epoch_length == 0 && !awaiting_quorum {
                         tracing::info!(
@@ -860,7 +869,7 @@ pub(crate) async fn bft_event_loop(
 
                         // Record self in peer_heights
                         {
-                            let mut peer_heights = state.peer_heights.write().unwrap();
+                            let mut peer_heights = state.peer_heights.write().unwrap_or_else(|e| e.into_inner());
                             peer_heights.insert(hex::encode(&my_pubkey), new_height);
                         }
 
@@ -871,13 +880,16 @@ pub(crate) async fn bft_event_loop(
                                 epoch: epoch_number,
                                 sender_pubkey: my_pubkey,
                             };
-                            let msg = bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal))
-                                .expect("serialize epoch boundary signal");
-                            record_p2p_span(&telemetry, "sent", "epoch_boundary", msg.len());
-                            let net_clone = Arc::clone(net);
-                            tokio::spawn(async move {
-                                net_clone.broadcast(BLOCK_CHANNEL, msg).await;
-                            });
+                            match bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal)) {
+                                Ok(msg) => {
+                                    record_p2p_span(&telemetry, "sent", "epoch_boundary", msg.len());
+                                    let net_clone = Arc::clone(net);
+                                    tokio::spawn(async move {
+                                        net_clone.broadcast(BLOCK_CHANNEL, msg).await;
+                                    });
+                                }
+                                Err(e) => tracing::warn!(error = ?e, "BFT: failed to serialize epoch boundary signal"),
+                            }
                         }
 
                         // Do NOT break — continue event loop, wait for quorum

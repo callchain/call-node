@@ -44,7 +44,7 @@ pub(crate) fn persist_state_to_db(
 ) -> Result<(), String> {
     // 1. Write pending checkpoint marker
     let checkpoint_hash = {
-        let c = consensus.read().unwrap();
+        let c = consensus.read().unwrap_or_else(|e| e.into_inner());
         c.last_block_hash().0
     };
     write_checkpoint_pending(db_env, checkpoint_hash)
@@ -52,25 +52,25 @@ pub(crate) fn persist_state_to_db(
 
     // Persist fee params
     {
-        let fee_params = state.fee_params.read().unwrap();
+        let fee_params = state.fee_params.read().unwrap_or_else(|e| e.into_inner());
         save_fee_params(db_env, &fee_params).map_err(|e| format!("save fee params: {e}"))?;
     }
 
     // Persist consensus state
     {
-        let c = consensus.read().unwrap();
+        let c = consensus.read().unwrap_or_else(|e| e.into_inner());
         save_consensus_state_inner(db_env, &c).map_err(|e| format!("save consensus: {e}"))?;
     }
 
     // Persist receipts
     {
-        let receipts = state.receipts.read().unwrap();
+        let receipts = state.receipts.read().unwrap_or_else(|e| e.into_inner());
         save_receipts(db_env, &receipts).map_err(|e| format!("save receipts: {e}"))?;
     }
 
     // Persist fork state
     {
-        let fork_manager = state.fork_manager.read().unwrap();
+        let fork_manager = state.fork_manager.read().unwrap_or_else(|e| e.into_inner());
         save_fork_state(db_env, &fork_manager).map_err(|e| format!("save fork state: {e}"))?;
     }
 
