@@ -91,8 +91,8 @@ fn test_oracle_price_request() {
 
     // Test serialization
     let msg = NetworkMessage::OraclePriceRequest(req.clone());
-    let serialized = bincode::serialize(&msg).unwrap();
-    let deserialized: NetworkMessage = bincode::deserialize(&serialized).unwrap();
+    let serialized = postcard::to_allocvec(&msg).unwrap();
+    let deserialized: NetworkMessage = postcard::from_bytes(&serialized).unwrap();
     assert!(matches!(deserialized, NetworkMessage::OraclePriceRequest(r) if r.block == 1000));
 }
 
@@ -112,8 +112,8 @@ fn test_oracle_price_submission() {
 
     // Test serialization
     let msg = NetworkMessage::OraclePriceSubmission(sub.clone());
-    let serialized = bincode::serialize(&msg).unwrap();
-    let deserialized: NetworkMessage = bincode::deserialize(&serialized).unwrap();
+    let serialized = postcard::to_allocvec(&msg).unwrap();
+    let deserialized: NetworkMessage = postcard::from_bytes(&serialized).unwrap();
     assert!(
         matches!(deserialized, NetworkMessage::OraclePriceSubmission(s) if s.price == 2_000_000)
     );
@@ -289,8 +289,8 @@ fn test_peer_exchange_serialization() {
         "127.0.0.1:5000".parse().unwrap(),
     );
     let msg = NetworkMessage::PeerExchange(pex);
-    let serialized = bincode::serialize(&msg).unwrap();
-    let deserialized: NetworkMessage = bincode::deserialize(&serialized).unwrap();
+    let serialized = postcard::to_allocvec(&msg).unwrap();
+    let deserialized: NetworkMessage = postcard::from_bytes(&serialized).unwrap();
     match deserialized {
         NetworkMessage::PeerExchange(px) => {
             assert_eq!(px.peers.len(), 2);

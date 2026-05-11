@@ -128,7 +128,7 @@ async fn test_two_node_connection_and_message() {
     let tx_hash = TxHash::repeat_byte(0xAB);
     let tx_msg = TransactionMessage::new(tx_data.clone(), tx_hash);
     let network_msg = NetworkMessage::Transaction(tx_msg);
-    let wire_data = bincode::serialize(&network_msg).expect("serialize");
+    let wire_data = postcard::to_allocvec(&network_msg).expect("serialize");
 
     // Retry broadcast + receive a few times to tolerate P2P handshake timing under load
     let mut received = false;
@@ -151,7 +151,7 @@ async fn test_two_node_connection_and_message() {
     assert!(received, "node2 should receive the broadcast after retries");
     assert_eq!(received_channel, 1, "channel should match");
 
-    let received_msg: NetworkMessage = bincode::deserialize(&received_data).expect("deserialize");
+    let received_msg: NetworkMessage = postcard::from_bytes(&received_data).expect("deserialize");
     assert!(matches!(received_msg, NetworkMessage::Transaction(_)));
 
     // Cleanup
@@ -393,7 +393,7 @@ async fn test_peer_exchange_discovery() {
         vec![0xFF],
         TxHash::repeat_byte(0xBB),
     ));
-    let dummy_data = bincode::serialize(&dummy).unwrap();
+    let dummy_data = postcard::to_allocvec(&dummy).unwrap();
 
     // Retry PEX + broadcast + receive to tolerate P2P handshake timing under load
     let mut received = false;

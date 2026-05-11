@@ -16,7 +16,7 @@ call-asset.workspace = true
 call-validator.workspace = true
 call-crypto.workspace = true
 call-light-client = { workspace = true, optional = true }
-bincode.workspace = true
+postcard.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 revm-precompile.workspace = true

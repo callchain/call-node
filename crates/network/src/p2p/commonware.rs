@@ -362,7 +362,7 @@ impl CommonwareNetwork {
 
         let pex = PeerExchange::new(peers_to_advertise, self.listen_addr);
         let msg = NetworkMessage::PeerExchange(pex);
-        match bincode::serialize(&msg) {
+        match postcard::to_allocvec(&msg) {
             Ok(data) => {
                 tracing::debug!(peers = %self.peer_count(), "broadcasting PEX");
                 self.broadcast(0, data).await;
@@ -575,7 +575,7 @@ impl Network for CommonwareNetwork {
             }
 
             // Transparently handle PeerExchange messages — loop again so callers never see them
-            if let Ok(NetworkMessage::PeerExchange(pex)) = bincode::deserialize(payload) {
+            if let Ok(NetworkMessage::PeerExchange(pex)) = postcard::from_bytes(payload) {
                 self.process_peer_exchange(pex, &peer_id).await;
                 continue;
             }

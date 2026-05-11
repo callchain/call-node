@@ -178,7 +178,7 @@ pub(crate) async fn block_production_loop(
                         block: height,
                         requester_id: proposer_id,
                     };
-                    match bincode::serialize(&NetworkMessage::OraclePriceRequest(request)) {
+                    match postcard::to_allocvec(&NetworkMessage::OraclePriceRequest(request)) {
                         Ok(msg) => { net.broadcast(ORACLE_CHANNEL, msg).await; }
                         Err(e) => tracing::warn!(error = ?e, "block producer: failed to serialize oracle request"),
                     }
@@ -613,7 +613,7 @@ pub(crate) async fn block_production_loop(
                 proposer,
                 timestamp_millis: block.header.timestamp_millis,
             };
-            match bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement)) {
+            match postcard::to_allocvec(&NetworkMessage::BlockAnnouncement(announcement)) {
                 Ok(msg) => {
                     let broadcast_start = Instant::now();
                     net.broadcast(BLOCK_CHANNEL, msg.clone()).await;
@@ -635,7 +635,7 @@ pub(crate) async fn block_production_loop(
             };
             if let Some(upgrade) = upgrade {
                 tracing::debug!(activation_height = upgrade.activation_height, ?upgrade.version, "broadcast upgrade announcement");
-                match bincode::serialize(&NetworkMessage::UpgradeAnnouncement(upgrade)) {
+                match postcard::to_allocvec(&NetworkMessage::UpgradeAnnouncement(upgrade)) {
                     Ok(msg) => {
                         let broadcast_start = Instant::now();
                         net.broadcast(UPGRADE_CHANNEL, msg.clone()).await;

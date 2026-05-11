@@ -298,7 +298,7 @@ pub(crate) async fn bft_event_loop(
                                 block: height,
                                 requester_id: proposer,
                             };
-                            match bincode::serialize(&NetworkMessage::OraclePriceRequest(request)) {
+                            match postcard::to_allocvec(&NetworkMessage::OraclePriceRequest(request)) {
                                 Ok(msg) => { net.broadcast(ORACLE_CHANNEL, msg).await; }
                                 Err(e) => tracing::warn!(error = ?e, "BFT: failed to serialize oracle request"),
                             }
@@ -438,7 +438,7 @@ pub(crate) async fn bft_event_loop(
                                 count: crate::network_handler::SYNC_REQUEST_BATCH,
                                 full_state: false,
                             };
-                            if let Ok(req_data) = bincode::serialize(&NetworkMessage::SyncRequest(request)) {
+                            if let Ok(req_data) = postcard::to_allocvec(&NetworkMessage::SyncRequest(request)) {
                                 let net_clone = Arc::clone(net);
                                 tokio::spawn(async move {
                                     net_clone.broadcast(SYNC_CHANNEL, req_data).await;
@@ -840,7 +840,7 @@ pub(crate) async fn bft_event_loop(
                             proposer: block.header.proposer,
                             timestamp_millis: block.header.timestamp_millis,
                         };
-                        match bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement)) {
+                        match postcard::to_allocvec(&NetworkMessage::BlockAnnouncement(announcement)) {
                             Ok(msg) => {
                                 record_p2p_span(&telemetry, "sent", "block_announcement", msg.len());
                                 let net_clone = Arc::clone(net);
@@ -880,7 +880,7 @@ pub(crate) async fn bft_event_loop(
                                 epoch: epoch_number,
                                 sender_pubkey: my_pubkey,
                             };
-                            match bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal)) {
+                            match postcard::to_allocvec(&NetworkMessage::EpochBoundarySignal(signal)) {
                                 Ok(msg) => {
                                     record_p2p_span(&telemetry, "sent", "epoch_boundary", msg.len());
                                     let net_clone = Arc::clone(net);

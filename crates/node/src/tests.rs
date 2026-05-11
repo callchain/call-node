@@ -366,7 +366,7 @@ async fn test_e2e_two_nodes_tx_propagation() {
         proposer,
         timestamp_millis: block.header.timestamp_millis,
     };
-    let msg = bincode::serialize(&NetworkMessage::BlockAnnouncement(announcement))
+    let msg = postcard::to_allocvec(&NetworkMessage::BlockAnnouncement(announcement))
         .expect("serialize block announcement");
     shared_network.broadcast(BLOCK_CHANNEL, msg).await;
 
@@ -376,7 +376,7 @@ async fn test_e2e_two_nodes_tx_propagation() {
     assert_eq!(channel, BLOCK_CHANNEL);
     assert_eq!(peer_id, "broadcast");
 
-    let received = bincode::deserialize::<NetworkMessage>(&data).expect("parse network message");
+    let received = postcard::from_bytes::<NetworkMessage>(&data).expect("parse network message");
     let announcement = match received {
         NetworkMessage::BlockAnnouncement(a) => a,
         other => panic!("expected block announcement, got {other:?}"),
@@ -1107,7 +1107,7 @@ async fn test_epoch_boundary_signal_updates_peer_heights() {
         sender_pubkey: [0xAB; 32],
     };
     let data =
-        bincode::serialize(&NetworkMessage::EpochBoundarySignal(signal)).expect("serialize signal");
+        postcard::to_allocvec(&NetworkMessage::EpochBoundarySignal(signal)).expect("serialize signal");
 
     let network: Arc<dyn Network> = Arc::new(InMemoryNetwork::new());
     let sync_inflight: SyncInflight =

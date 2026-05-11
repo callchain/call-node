@@ -197,7 +197,7 @@ pub(crate) fn save_consensus_state_inner(
     consensus: &SimplexConsensus,
 ) -> Result<(), String> {
     let state = consensus.persist_state();
-    let data = bincode::serialize(&state).map_err(|e| format!("serialize consensus: {e}"))?;
+    let data = postcard::to_allocvec(&state).map_err(|e| format!("serialize consensus: {e}"))?;
     db_put::<CallConsensusState>(db, vec![0], data).map_err(|e: StorageError| e.to_string())
 }
 

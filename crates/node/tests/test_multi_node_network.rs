@@ -110,7 +110,7 @@ async fn test_transaction_propagation() {
     let evm_tx = make_tx(&secret, sender, 0, test_addr(2), 1_000);
     let tx_data = serde_json::to_vec(&evm_tx).unwrap();
     let tx_msg = TransactionMessage::new(tx_data, TxHash::repeat_byte(0));
-    let msg_data = bincode::serialize(&NetworkMessage::Transaction(tx_msg)).unwrap();
+    let msg_data = postcard::to_allocvec(&NetworkMessage::Transaction(tx_msg)).unwrap();
     net_ref.broadcast(TX_CHANNEL, msg_data).await;
 
     // Node receives the message
@@ -118,7 +118,7 @@ async fn test_transaction_propagation() {
     assert_eq!(channel, TX_CHANNEL);
 
     // Verify it parses
-    let msg = bincode::deserialize::<NetworkMessage>(&data).unwrap();
+    let msg = postcard::from_bytes::<NetworkMessage>(&data).unwrap();
     assert!(matches!(msg, NetworkMessage::Transaction(_)));
 }
 

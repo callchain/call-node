@@ -107,7 +107,7 @@ async fn test_equivocating_proposer_network_partition() {
         proposer: block_a.header.proposer,
         timestamp_millis: block_a.header.timestamp_millis,
     };
-    let msg_a = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(
+    let msg_a = postcard::to_allocvec(&call_network::NetworkMessage::BlockAnnouncement(
         announcement_a,
     ))
     .unwrap();
@@ -119,7 +119,7 @@ async fn test_equivocating_proposer_network_partition() {
         proposer: block_b.header.proposer,
         timestamp_millis: block_b.header.timestamp_millis,
     };
-    let msg_b = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(
+    let msg_b = postcard::to_allocvec(&call_network::NetworkMessage::BlockAnnouncement(
         announcement_b,
     ))
     .unwrap();
@@ -275,7 +275,7 @@ async fn test_invalid_block_broadcast_rejected() {
         proposer: invalid_block.header.proposer,
         timestamp_millis: invalid_block.header.timestamp_millis,
     };
-    let msg = bincode::serialize(&call_network::NetworkMessage::BlockAnnouncement(
+    let msg = postcard::to_allocvec(&call_network::NetworkMessage::BlockAnnouncement(
         announcement,
     ))
     .unwrap();

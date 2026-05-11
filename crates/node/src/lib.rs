@@ -399,7 +399,7 @@ impl CallNode {
                 telemetry.set_p2p_peers(net_clone.peer_count());
                 if channel == SYNC_CHANNEL {
                     // Handle sync requests: respond with blocks
-                    if let Ok(NetworkMessage::SyncRequest(request)) = bincode::deserialize(&data) {
+                    if let Ok(NetworkMessage::SyncRequest(request)) = postcard::from_bytes(&data) {
                         tracing::debug!(
                             peer_id,
                             start = request.start_height,
@@ -418,7 +418,7 @@ impl CallNode {
                         let peer_for_resp = peer_id.clone();
                         tokio::spawn(async move {
                             if let Some(response) = handle_sync_request(&db_env_owned, &request) {
-                                match bincode::serialize(&NetworkMessage::SyncResponse(response)) {
+                                match postcard::to_allocvec(&NetworkMessage::SyncResponse(response)) {
                                     Ok(resp_data) => {
                                         net_for_resp
                                             .send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data)
@@ -429,7 +429,7 @@ impl CallNode {
                             }
                         });
                     } else if let Ok(NetworkMessage::SyncResponse(response)) =
-                        bincode::deserialize(&data)
+                        postcard::from_bytes(&data)
                     {
                         // A response for our outstanding request landed —
                         // free the in-flight slot for this peer so the next
@@ -480,7 +480,7 @@ impl CallNode {
                                         full_state: false,
                                     };
                                     if let Ok(req_data) =
-                                        bincode::serialize(&NetworkMessage::SyncRequest(next))
+                                        postcard::to_allocvec(&NetworkMessage::SyncRequest(next))
                                     {
                                         let net = Arc::clone(&net_clone);
                                         let peer = peer_id.clone();
@@ -503,7 +503,7 @@ impl CallNode {
                     // Each codec MUST match its sender; mixing them silently
                     // dropped traffic in the past.
                     if let Ok(NetworkMessage::BlockAnnouncement(_)) =
-                        bincode::deserialize::<NetworkMessage>(&data)
+                        postcard::from_bytes::<NetworkMessage>(&data)
                     {
                         handle_network_message(
                             &peer_id,
@@ -531,7 +531,7 @@ impl CallNode {
                     }
                 } else if channel == LIGHT_CLIENT_CHANNEL {
                     if let Ok(announcement) =
-                        bincode::deserialize::<crate::light_client::HeaderAnnouncement>(&data)
+                        postcard::from_bytes::<crate::light_client::HeaderAnnouncement>(&data)
                     {
                         if let Some(ref tx) = light_client_tx {
                             let _ = tx.send(LightClientEvent::PeerAnnouncement {
@@ -1167,7 +1167,7 @@ impl CallNode {
                     count: BATCH_SIZE,
                     full_state: false,
                 };
-                match bincode::serialize(&NetworkMessage::SyncRequest(request)) {
+                match postcard::to_allocvec(&NetworkMessage::SyncRequest(request)) {
                     Ok(req_data) => { network.broadcast(SYNC_CHANNEL, req_data).await; }
                     Err(e) => tracing::warn!(error = ?e, "failed to serialize sync request"),
                 }
@@ -1210,7 +1210,7 @@ impl CallNode {
                                 continue;
                             }
                             if let Ok(NetworkMessage::SyncResponse(response)) =
-                                bincode::deserialize(&data)
+                                postcard::from_bytes(&data)
                             {
                                 received_any = true;
                                 responses_received += 1;

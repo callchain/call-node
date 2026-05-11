@@ -698,7 +698,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         source_tx_hash: [u8; 32],
         proof_bytes: &[u8],
     ) -> bool {
-        let fraud_proof: FraudProof = match bincode::deserialize(proof_bytes) {
+        let fraud_proof: FraudProof = match postcard::from_bytes(proof_bytes) {
             Ok(fp) => fp,
             Err(_) => return false,
         };
@@ -1598,7 +1598,7 @@ mod tests {
             proof_type: crate::external::types::FraudProofType::TxNonExistence,
             mpt_nodes: vec![leaf_rlp],
         };
-        let proof_bytes = bincode::serialize(&fraud_proof).unwrap();
+        let proof_bytes = postcard::to_allocvec(&fraud_proof).unwrap();
 
         // initiateChallenge with the cryptographically valid proof
         let input = IProtocolBridge::initiateChallengeCall {

@@ -54,7 +54,7 @@ impl LightClientService {
                         self.check_prover_key_rotation(&mut last_applied_key_version);
                     }
                     let announcement = HeaderAnnouncement { header, signatures };
-                    let msg = match bincode::serialize(&announcement) {
+                    let msg = match postcard::to_allocvec(&announcement) {
                         Ok(m) => m,
                         Err(e) => {
                             tracing::warn!(error = %e, "light_client: serialize failed");
