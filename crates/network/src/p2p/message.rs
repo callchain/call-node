@@ -208,6 +208,88 @@ pub struct OraclePriceSubmission {
 }
 
 /// CRC32 helper used by TransactionMessage and wire protocol.
+// ── Property-based tests ──────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_transaction_message_postcard_roundtrip(
+            data in prop::collection::vec(any::<u8>(), 0..256),
+            hash in prop::array::uniform32(any::<u8>()),
+        ) {
+            let msg = TransactionMessage::new(data, TxHash::from(hash));
+            let encoded = postcard::to_allocvec(&msg).expect("serialize");
+            let decoded: TransactionMessage = postcard::from_bytes(&encoded).expect("deserialize");
+            prop_assert_eq!(msg.data, decoded.data);
+            prop_assert_eq!(msg.hash, decoded.hash);
+            prop_assert_eq!(msg.checksum, decoded.checksum);
+        }
+
+        #[test]
+        fn prop_block_announcement_postcard_roundtrip(
+            block_hash in prop::array::uniform32(any::<u8>()),
+            height in any::<u64>(),
+            proposer in any::<u32>(),
+            timestamp_millis in any::<u64>(),
+        ) {
+            let msg = BlockAnnouncement {
+                block_hash: BlockHash::from(block_hash),
+                height,
+                proposer,
+                timestamp_millis,
+            };
+            let encoded = postcard::to_allocvec(&msg).expect("serialize");
+            let decoded: BlockAnnouncement = postcard::from_bytes(&encoded).expect("deserialize");
+            prop_assert_eq!(msg.block_hash, decoded.block_hash);
+            prop_assert_eq!(msg.height, decoded.height);
+            prop_assert_eq!(msg.proposer, decoded.proposer);
+            prop_assert_eq!(msg.timestamp_millis, decoded.timestamp_millis);
+        }
+
+        #[test]
+        fn prop_sync_request_postcard_roundtrip(
+            start_height in any::<u64>(),
+            count in any::<u64>(),
+            full_state in any::<bool>(),
+        ) {
+            let msg = SyncRequest { start_height, count, full_state };
+            let encoded = postcard::to_allocvec(&msg).expect("serialize");
+            let decoded: SyncRequest = postcard::from_bytes(&encoded).expect("deserialize");
+            prop_assert_eq!(msg.start_height, decoded.start_height);
+            prop_assert_eq!(msg.count, decoded.count);
+            prop_assert_eq!(msg.full_state, decoded.full_state);
+        }
+
+        #[test]
+        fn prop_handshake_postcard_roundtrip(
+            version in any::<u32>(),
+            chain_id in any::<u64>(),
+            best_height in any::<u64>(),
+            best_hash in prop::array::uniform32(any::<u8>()),
+            capabilities in any::<u32>(),
+        ) {
+            let msg = Handshake {
+                version,
+                chain_id,
+                best_height,
+                best_hash: BlockHash::from(best_hash),
+                capabilities,
+            };
+            let encoded = postcard::to_allocvec(&msg).expect("serialize");
+            let decoded: Handshake = postcard::from_bytes(&encoded).expect("deserialize");
+            prop_assert_eq!(msg.version, decoded.version);
+            prop_assert_eq!(msg.chain_id, decoded.chain_id);
+            prop_assert_eq!(msg.best_height, decoded.best_height);
+            prop_assert_eq!(msg.best_hash, decoded.best_hash);
+            prop_assert_eq!(msg.capabilities, decoded.capabilities);
+        }
+    }
+}
+
 pub(crate) fn crc32_fast(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {

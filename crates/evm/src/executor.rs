@@ -990,4 +990,43 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    // ── Property-based tests (proptest) ───────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_evm_transaction_postcard_roundtrip(
+            caller in prop::array::uniform20(any::<u8>()),
+            nonce in any::<u64>(),
+            gas_limit in any::<u64>(),
+            gas_price in any::<u128>(),
+            to in prop::option::of(prop::array::uniform20(any::<u8>())),
+            value in prop::array::uniform32(any::<u8>()),
+            data in prop::collection::vec(any::<u8>(), 0..256),
+            chain_id in any::<u64>(),
+        ) {
+            let tx = EvmTransaction {
+                caller: call_primitives::Address::from(caller),
+                nonce,
+                gas_limit,
+                gas_price,
+                to: to.map(call_primitives::Address::from),
+                value: U256::from_be_bytes(value),
+                data: Bytes::from(data),
+                chain_id,
+            };
+            let encoded = postcard::to_allocvec(&tx).expect("serialize");
+            let decoded: EvmTransaction = postcard::from_bytes(&encoded).expect("deserialize");
+            prop_assert_eq!(tx.caller, decoded.caller);
+            prop_assert_eq!(tx.nonce, decoded.nonce);
+            prop_assert_eq!(tx.gas_limit, decoded.gas_limit);
+            prop_assert_eq!(tx.gas_price, decoded.gas_price);
+            prop_assert_eq!(tx.to, decoded.to);
+            prop_assert_eq!(tx.value, decoded.value);
+            prop_assert_eq!(tx.data, decoded.data);
+            prop_assert_eq!(tx.chain_id, decoded.chain_id);
+        }
+    }
 }

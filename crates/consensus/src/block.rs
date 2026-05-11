@@ -395,5 +395,79 @@ fn decode_evm_tx(raw: &[u8]) -> Result<EvmTransaction, ()> {
     Err(())
 }
 
+// ── Property-based tests ──────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_block_header_serde_roundtrip(
+            parent_hash in prop::array::uniform32(any::<u8>()),
+            height in any::<u64>(),
+            ts in any::<u64>(),
+            state_root in prop::array::uniform32(any::<u8>()),
+            prop_id in any::<u32>(),
+            sig_bytes in prop::collection::vec(any::<u8>(), 65),
+            major in any::<u16>(),
+            minor in any::<u16>(),
+            patch in any::<u16>(),
+        ) {
+            let header = BlockHeader {
+                parent_hash: BlockHash::from(parent_hash),
+                height,
+                timestamp_millis: ts.saturating_add(1u64),
+                state_root: Hash::from(state_root),
+                proposer: prop_id.saturating_add(1u32),
+                signature: {
+                    let arr: [u8; 65] = sig_bytes.try_into().expect("invariant: 65-byte signature");
+                    BlockSignature::from(arr)
+                },
+                version: ProtocolVersion::new(major, minor, patch),
+                bls_aggregate_signature: None,
+                bls_signer_bitmap: Vec::new(),
+            };
+            let json = serde_json::to_vec(&header).expect("serialize");
+            let decoded: BlockHeader = serde_json::from_slice(&json).expect("deserialize");
+            prop_assert_eq!(header.parent_hash, decoded.parent_hash);
+            prop_assert_eq!(header.height, decoded.height);
+            prop_assert_eq!(header.timestamp_millis, decoded.timestamp_millis);
+            prop_assert_eq!(header.state_root, decoded.state_root);
+            prop_assert_eq!(header.proposer, decoded.proposer);
+            prop_assert_eq!(header.signature.0, decoded.signature.0);
+            prop_assert_eq!(header.version, decoded.version);
+        }
+
+        #[test]
+        fn prop_block_serde_roundtrip(
+            parent_hash in prop::array::uniform32(any::<u8>()),
+            height in any::<u64>(),
+            timestamp_millis in any::<u64>(),
+            proposer in any::<u32>(),
+            version_major in any::<u16>(),
+            version_minor in any::<u16>(),
+            version_patch in any::<u16>(),
+            tx_count in 0usize..10usize,
+        ) {
+            let version = ProtocolVersion::new(version_major, version_minor, version_patch);
+            let block = Block::new(
+                height,
+                BlockHash::from(parent_hash),
+                timestamp_millis.saturating_add(1),
+                proposer.saturating_add(1),
+                version,
+                vec![vec![1, 2, 3]; tx_count],
+            );
+            let json = serde_json::to_vec(&block).expect("serialize");
+            let decoded: Block = serde_json::from_slice(&json).expect("deserialize");
+            prop_assert_eq!(block.header.height, decoded.header.height);
+            prop_assert_eq!(block.header.parent_hash, decoded.header.parent_hash);
+            prop_assert_eq!(block.evm_txs.len(), decoded.evm_txs.len());
+        }
+    }
+}
+
 // ── Consensus Error (re-exported for block validation) ────────────────
 // Defined in validator.rs, re-exported via lib.rs

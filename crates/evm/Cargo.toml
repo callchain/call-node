@@ -47,3 +47,5 @@ reth-primitives-traits.workspace = true
 hex = "0.4"
 
 [dev-dependencies]
+proptest.workspace = true
+postcard.workspace = true
