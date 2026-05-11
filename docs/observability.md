@@ -98,7 +98,7 @@ Span recording functions:
 - `record_tx_span()`: tx type, duration, accepted/rejected, mempool size
 - `record_p2p_span()`: direction, message type, bytes, peer count
 
-### 3. Structured Logging (`logging.rs`)
+### 3. Structured Logging (`logging/file_log.rs`)
 
 `LogEntry` supports:
 - Levels: Trace, Debug, Info, Warn, Error
@@ -111,7 +111,9 @@ Span recording functions:
 - Retention: configurable days
 - Default: Info level, text format, 100MB rotation, 30-day retention
 
-### 4. Audit Log (`logging.rs`)
+**Wired into boot sequence:** `main.rs:init_logging()` constructs a `LogConfig` from `NodeConfig` and passes a `FileLogLayer` to `init_opentelemetry_tracing_with_file()`. The file logger runs in a background tokio task that handles all disk I/O and rotation checks every 60s, decoupled from the tracing hot path via an unbounded MPSC channel.
+
+### 4. Audit Log (`logging/audit.rs`)
 
 `AuditLog` provides:
 - Append-only entries with block height, tx index, tx type, action, fee payer, before/after state
@@ -120,7 +122,7 @@ Span recording functions:
 - Entry verification via Merkle proof extraction
 - Compliance report export (CSV)
 
-**Wired into block execution:** `AuditLog::append()` is called during block processing for all protocol transactions (`lib.rs:1851`) and shielded transactions (`lib.rs:2518`).
+**Wired into block execution:** `AuditLog::append()` is called after every committed/finalized block in both the solo block producer (`block_producer.rs`) and the BFT event loop (`bft_loop.rs`). Each `AuditEntry` captures block height, tx count, state root, and block hash. The log file is opened during `CallNode::new()`.
 
 ### 5. Alert System (`telemetry.rs`)
 
@@ -151,9 +153,13 @@ Returns HTTP 200 `{"status": "healthy", "checks": {...}}` or HTTP 503 `{"status"
 
 | File | Role |
 |------|------|
-| `crates/node/src/telemetry.rs` | `TelemetryRegistry`, metrics server, OTel tracing, alert rules, alert dispatcher, health check |
-| `crates/node/src/logging.rs` | `LogEntry`, `AuditLog`, `LogConfig`, rotation, retention, compliance export |
-| `crates/node/src/main.rs` | Boot sequence — initializes telemetry, alert task, and metrics server |
+| `crates/node/src/telemetry.rs` | `TelemetryRegistry`, metrics server, alert rules, alert dispatcher, health check |
+| `crates/node/src/telemetry/otel.rs` | OpenTelemetry tracing initialization with optional file logging layer |
+| `crates/node/src/logging.rs` | Module root — re-exports audit, compliance, config, entry, rotation |
+| `crates/node/src/logging/file_log.rs` | `FileLogLayer` — tracing subscriber layer with background file writer + rotation |
+| `crates/node/src/logging/audit.rs` | `AuditLog`, `AuditEntry`, Merkle root, file persistence |
+| `crates/node/src/logging/compliance.rs` | `export_compliance_report()` and `report_to_csv()` |
+| `crates/node/src/main.rs` | Boot sequence — constructs `LogConfig`, initializes telemetry + alert task + metrics server |
 
 ---
 
@@ -163,8 +169,9 @@ Returns HTTP 200 `{"status": "healthy", "checks": {...}}` or HTTP 503 `{"status"
 |-----------|--------|-------|
 | Prometheus metrics endpoint | Ready | Atomic counters wired to hot path, histogram summaries, label support |
 | OpenTelemetry tracing | Partial | Initialized on boot, but span functions not called in production paths |
-| Structured logging | Ready | JSON/text formats, rotation, retention |
-| Audit log | Ready | Wired into block execution, Merkle proofs, file persistence, compliance report with dynamic timestamps and asset symbol |
+| Structured logging | Ready | JSON/text formats, rotation, retention — fully wired into boot via `FileLogLayer` |
+| Audit log | Ready | Append-only writes on every block commit (solo + BFT), Merkle proofs, file persistence |
+| Compliance CSV export | Ready | `call_exportComplianceReport` RPC endpoint wired via callback in `RpcState` |
 | Alert rules | Ready | Time-based consensus stall detection, continuous evaluation, deduplication, webhook/Slack dispatch |
 | Health check | Ready | DB heartbeat, P2P, sync status with degraded response |
 | Latency histograms | Ready | Rolling 10k-sample windows with p50/p95/p99 |

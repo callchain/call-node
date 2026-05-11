@@ -289,6 +289,27 @@ impl CallNode {
                 .map_err(|e| format!("failed to open audit log: {e}"))?,
         ));
 
+        // Wire compliance exporter callback into RpcState
+        {
+            let audit_log_clone = Arc::clone(&audit_log);
+            if let Ok(mut exporter) = state.compliance_exporter.write() {
+                *exporter = Some(Arc::new(
+                    move |asset_id: u64, asset_symbol: String, genesis_time: u64, block_time_secs: u64, address_filter: Option<call_primitives::Address>| {
+                        let log = audit_log_clone.read().map_err(|e| format!("lock poisoned: {e}"))?;
+                        let entries = crate::logging::export_compliance_report(
+                            &*log,
+                            asset_id,
+                            &asset_symbol,
+                            genesis_time,
+                            block_time_secs,
+                            address_filter,
+                        );
+                        Ok(crate::logging::report_to_csv(&entries))
+                    },
+                ));
+            }
+        }
+
         Ok(Self {
             state,
             mempool,

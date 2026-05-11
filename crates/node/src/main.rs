@@ -7,8 +7,8 @@ use call_node::boot::boot_node;
 use call_node::cli::{CliArgs, Commands, WalletCommand};
 use call_node::config::NodeConfig;
 use call_node::telemetry::{
-    init_opentelemetry_tracing, start_alert_task, start_metrics_server, AlertDispatcher,
-    HealthState,
+    init_opentelemetry_tracing_with_file, start_alert_task, start_metrics_server,
+    AlertDispatcher, HealthState,
 };
 use call_node::wallet;
 use clap::Parser;
@@ -142,8 +142,33 @@ async fn handle_wallet(
     }
 }
 
-/// Initialize logging with OpenTelemetry tracing integration (per spec §21.3 + §20)
+/// Initialize logging with OpenTelemetry tracing + optional file layer (per spec §21.3 + §20)
 fn init_logging(config: &NodeConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let level = &config.logging.level;
-    init_opentelemetry_tracing("call-node", level)
+    let log_level = &config.logging.level;
+
+    let log_format = match config.logging.format.as_str() {
+        "json" => call_node::logging::LogFormat::Json,
+        _ => call_node::logging::LogFormat::Text,
+    };
+
+    let log_path = config.storage.data_dir.join("logs").join("node.log");
+    let log_config = call_node::logging::LogConfig {
+        level: match log_level.as_str() {
+            "trace" => call_node::logging::LogLevel::Trace,
+            "debug" => call_node::logging::LogLevel::Debug,
+            "warn" => call_node::logging::LogLevel::Warn,
+            "error" => call_node::logging::LogLevel::Error,
+            _ => call_node::logging::LogLevel::Info,
+        },
+        format: log_format,
+        output: call_node::logging::LogOutput::File(log_path),
+        rotation: call_node::logging::LogRotation::Size(100 * 1024 * 1024),
+        retention_days: 30,
+        audit_enabled: true,
+        audit_path: config.storage.data_dir.join("audit.log"),
+    };
+
+    let file_layer = call_node::logging::file_log::FileLogLayer::new(log_config.clone()).ok();
+
+    init_opentelemetry_tracing_with_file("call-node", log_level, file_layer)
 }

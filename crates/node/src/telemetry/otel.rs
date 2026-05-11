@@ -24,6 +24,15 @@ pub fn init_opentelemetry_tracing(
     service_name: &str,
     log_level: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    init_opentelemetry_tracing_with_file(service_name, log_level, None)
+}
+
+/// Initialize OpenTelemetry tracing with an optional file logging layer.
+pub fn init_opentelemetry_tracing_with_file(
+    service_name: &str,
+    log_level: &str,
+    file_layer: Option<crate::logging::file_log::FileLogLayer>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set up propagator for distributed tracing
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
@@ -48,15 +57,23 @@ pub fn init_opentelemetry_tracing(
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::try_new("info")
             .expect("invariant: default log level 'info' is valid"));
 
-    let subscriber = Registry::default()
-        .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
-        )
-        .with(OpenTelemetryLayer::new(tracer));
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()));
 
-    tracing::subscriber::set_global_default(subscriber)?;
+    if let Some(file_layer) = file_layer {
+        let subscriber = Registry::default()
+            .with(filter)
+            .with(fmt_layer)
+            .with(OpenTelemetryLayer::new(tracer))
+            .with(file_layer);
+        tracing::subscriber::set_global_default(subscriber)?;
+    } else {
+        let subscriber = Registry::default()
+            .with(filter)
+            .with(fmt_layer)
+            .with(OpenTelemetryLayer::new(tracer));
+        tracing::subscriber::set_global_default(subscriber)?;
+    }
 
     Ok(())
 }

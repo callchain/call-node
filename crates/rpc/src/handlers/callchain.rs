@@ -76,6 +76,29 @@ pub fn register_callchain_rpc(
         })
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // call_exportComplianceReport
+    module
+        .register_async_method("call_exportComplianceReport", |params, state, _ctx| async move {
+            let call_obj: serde_json::Value = params.one().map_err(|e| invalid_params(e.to_string()))?;
+            let asset_id = call_obj.get("assetId").and_then(|v| v.as_u64()).unwrap_or(1);
+            let asset_symbol = call_obj.get("assetSymbol").and_then(|v| v.as_str()).unwrap_or("CALL").to_string();
+            let genesis_time = call_obj.get("genesisTime").and_then(|v| v.as_u64()).unwrap_or(0);
+            let block_time_secs = call_obj.get("blockTimeSecs").and_then(|v| v.as_u64()).unwrap_or(2);
+            let address_filter = call_obj.get("addressFilter").and_then(|v| v.as_str()).and_then(|s| s.parse::<Address>().ok());
+
+            let exporter = state.compliance_exporter.read().map_err(|_| resource_unavailable("lock poisoned"))?;
+            match exporter.as_ref() {
+                Some(f) => {
+                    match f(asset_id, asset_symbol, genesis_time, block_time_secs, address_filter) {
+                        Ok(csv) => Ok::<_, ErrorObjectOwned>(serde_json::json!({ "csv": csv })),
+                        Err(e) => Err(internal_error(e)),
+                    }
+                }
+                None => Err(method_not_available("compliance exporter not configured")),
+            }
+        })
+        .map_err(|e| internal_error(e.to_string()))?;
+
     // call_totalBalance
     module
         .register_async_method("call_totalBalance", |params, state, _ctx| async move {

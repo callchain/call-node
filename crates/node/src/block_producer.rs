@@ -33,7 +33,7 @@ pub(crate) async fn block_production_loop(
     mut prune_state: PruneState,
     subscriptions: SubscriptionManager,
     telemetry: Arc<crate::telemetry::TelemetryRegistry>,
-    _audit_log: Arc<RwLock<crate::logging::AuditLog>>,
+    audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     oracle_tracker: Arc<RwLock<OracleTracker>>,
     governance_advancer: GovernanceAdvancer,
     snapshot_retention_blocks: u64,
@@ -270,6 +270,24 @@ pub(crate) async fn block_production_loop(
                 tracing::warn!(error = ?e, "failed to save provider after epoch churn");
             }
         }
+
+        // Append block commit to audit log
+        {
+            let entry = crate::logging::AuditEntry {
+                block_height: height,
+                tx_index: 0,
+                tx_type: "Block".into(),
+                action: "commit".into(),
+                agent_id: None,
+                fee_payer: None,
+                before_state: serde_json::json!({ "tx_count": result.total_tx_count() }),
+                after_state: serde_json::json!({ "state_root": format!("{:?}", block.header.state_root) }),
+                tx_hash: block.header.hash(),
+                shielded_details: None,
+            };
+            let _ = audit_log.write().unwrap_or_else(|e| e.into_inner()).append(entry);
+        }
+
         telemetry.record_block_produced();
         telemetry.record_block_committed();
         let block_duration = block_start.elapsed().as_millis() as u64;

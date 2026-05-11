@@ -136,7 +136,7 @@ pub(crate) async fn bft_event_loop(
     network: Option<Arc<dyn Network>>,
     data_dir: PathBuf,
     telemetry: Arc<crate::telemetry::TelemetryRegistry>,
-    _audit_log: Arc<RwLock<crate::logging::AuditLog>>,
+    audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     epoch_number: u64,
     exit_tx: oneshot::Sender<EpochRotationReason>,
     subset_pubkeys: Vec<[u8; 32]>,
@@ -554,6 +554,24 @@ pub(crate) async fn bft_event_loop(
                             tracing::warn!(error = ?e, "failed to save provider after epoch churn");
                         }
                     }
+
+                    // Append block finalize to audit log
+                    {
+                        let entry = crate::logging::AuditEntry {
+                            block_height: height,
+                            tx_index: 0,
+                            tx_type: "Block".into(),
+                            action: "finalize".into(),
+                            agent_id: None,
+                            fee_payer: None,
+                            before_state: serde_json::json!({ "tx_count": result.total_tx_count() }),
+                            after_state: serde_json::json!({ "state_root": format!("{:?}", block.header.state_root) }),
+                            tx_hash: block.header.hash(),
+                            shielded_details: None,
+                        };
+                        let _ = audit_log.write().unwrap_or_else(|e| e.into_inner()).append(entry);
+                    }
+
                     telemetry.record_block_committed();
                     record_block_span(&telemetry, height, block_start.elapsed().as_millis() as u64);
 
