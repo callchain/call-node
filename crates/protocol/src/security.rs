@@ -73,10 +73,11 @@ impl ReplayProtector {
 
         // Bound the set size to prevent memory DoS
         if self.seen_hashes.len() > self.max_seen {
-            // Remove ~25% of entries when over limit
+            // Remove ~25% of entries when over limit, but never evict the just-inserted hash
             let to_remove: Vec<_> = self
                 .seen_hashes
                 .iter()
+                .filter(|&&h| h != hash)
                 .take(self.max_seen / 4)
                 .copied()
                 .collect();
