@@ -63,13 +63,18 @@ impl AssetPrecompile {
         }
     }
 
-    fn get_balance(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_balance(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(
             calldata,
             800,
             storage,
-            |call, storage| {
-                let mut store = AssetStorage::new(StorageRef::new(storage));
+            |call, _storage| {
+                let mut store = AssetStorage::new(sr);
                 let balance = store.read_balance(call.assetId, call.account);
                 Ok(balance)
             },
@@ -80,10 +85,11 @@ impl AssetPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         storage.deduct_gas(1000)?;
         let call = dispatch::decode_call::<IProtocolAsset::getAssetInfoCall>(calldata)?;
-        let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
+        let mut store = AssetStorage::new(sr);
         let meta = store.read_meta(call.assetId);
 
         let mut out = [0u8; 192];
@@ -105,6 +111,7 @@ impl AssetPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAsset::transferCall, _>(
             calldata,
@@ -114,7 +121,7 @@ impl AssetPrecompile {
                 let from = require_caller(msg_sender)?;
                 Self::check_compliance(call.assetId, &from, storage)?;
                 Self::check_compliance(call.assetId, &call.to, storage)?;
-                let mut store = AssetStorage::new(StorageRef::new(storage));
+                let mut store = AssetStorage::new(sr);
                 store
                     .transfer(call.assetId, from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -141,6 +148,7 @@ impl AssetPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         let call = dispatch::decode_call::<IProtocolAsset::batchTransferCall>(calldata)?;
         if call.to.len() != call.amounts.len() {
@@ -151,7 +159,9 @@ impl AssetPrecompile {
         if call.to.is_empty() {
             return Err(PrecompileError::Other("empty batch".into()));
         }
-        let total_gas = 5000u64 * call.to.len() as u64;
+        let total_gas = 5000u64
+            .checked_mul(call.to.len() as u64)
+            .ok_or(PrecompileError::Other("batch gas overflow".into()))?;
         storage.deduct_gas(total_gas)?;
 
         let from = require_caller(msg_sender)?;
@@ -162,7 +172,7 @@ impl AssetPrecompile {
 
         let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts).collect();
         let cp = storage.checkpoint();
-        let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
+        let mut store = AssetStorage::new(sr);
         store
             .batch_transfer(call.assetId, from, &pairs)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -188,14 +198,15 @@ impl AssetPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAsset::approveCall, _>(
             calldata,
             3000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let owner = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(StorageRef::new(storage));
+                let mut store = AssetStorage::new(sr);
                 store.approve(call.assetId, owner, call.spender, call.amount);
                 Ok(())
             },
@@ -207,6 +218,7 @@ impl AssetPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAsset::transferFromCall, _>(
             calldata,
@@ -216,7 +228,7 @@ impl AssetPrecompile {
                 let spender = require_caller(msg_sender)?;
                 Self::check_compliance(call.assetId, &call.from, storage)?;
                 Self::check_compliance(call.assetId, &call.to, storage)?;
-                let mut store = AssetStorage::new(StorageRef::new(storage));
+                let mut store = AssetStorage::new(sr);
                 store
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -243,14 +255,15 @@ impl AssetPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAsset::mintCall, _>(
             calldata,
             10000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(StorageRef::new(storage));
+                let mut store = AssetStorage::new(sr);
                 store
                     .mint(call.assetId, caller, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -264,14 +277,15 @@ impl AssetPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAsset::burnCall, _>(
             calldata,
             8000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(StorageRef::new(storage));
+                let mut store = AssetStorage::new(sr);
                 store
                     .burn(call.assetId, caller, call.from, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -285,14 +299,15 @@ impl AssetPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate::<IProtocolAsset::registerCall, _, _>(
             calldata,
             50000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AssetStorage::new(StorageRef::new(storage));
+                let mut store = AssetStorage::new(sr);
                 let asset_id = store
                     .register(
                         &call.symbol,
@@ -321,22 +336,23 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
         }
         let selector: [u8; 4] = calldata[..4]
             .try_into()
-            .expect("slice length checked above");
+            .unwrap_or([0u8; 4]);
+        let sr = StorageRef::new(storage);
         match selector {
-            IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata, storage),
-            IProtocolAsset::getAssetInfoCall::SELECTOR => self.get_asset_info(calldata, storage),
-            IProtocolAsset::transferCall::SELECTOR => self.transfer(calldata, msg_sender, storage),
+            IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata, storage, sr),
+            IProtocolAsset::getAssetInfoCall::SELECTOR => self.get_asset_info(calldata, storage, sr),
+            IProtocolAsset::transferCall::SELECTOR => self.transfer(calldata, msg_sender, storage, sr),
             IProtocolAsset::batchTransferCall::SELECTOR => {
-                self.batch_transfer(calldata, msg_sender, storage)
+                self.batch_transfer(calldata, msg_sender, storage, sr)
             }
-            IProtocolAsset::approveCall::SELECTOR => self.approve(calldata, msg_sender, storage),
+            IProtocolAsset::approveCall::SELECTOR => self.approve(calldata, msg_sender, storage, sr),
             IProtocolAsset::transferFromCall::SELECTOR => {
-                self.transfer_from(calldata, msg_sender, storage)
+                self.transfer_from(calldata, msg_sender, storage, sr)
             }
-            IProtocolAsset::mintCall::SELECTOR => self.mint(calldata, msg_sender, storage),
-            IProtocolAsset::issuerMintCall::SELECTOR => self.mint(calldata, msg_sender, storage),
-            IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender, storage),
-            IProtocolAsset::registerCall::SELECTOR => self.register(calldata, msg_sender, storage),
+            IProtocolAsset::mintCall::SELECTOR => self.mint(calldata, msg_sender, storage, sr),
+            IProtocolAsset::issuerMintCall::SELECTOR => self.mint(calldata, msg_sender, storage, sr),
+            IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender, storage, sr),
+            IProtocolAsset::registerCall::SELECTOR => self.register(calldata, msg_sender, storage, sr),
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }

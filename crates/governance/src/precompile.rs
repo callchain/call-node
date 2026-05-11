@@ -884,6 +884,7 @@ impl GovernancePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolGovernance::submitProposalCall, _>(
             calldata,
@@ -891,8 +892,8 @@ impl GovernancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut gov_store = GovernanceStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();
                 let proposal_id = gov_store
                     .submit_proposal(
@@ -928,6 +929,7 @@ impl GovernancePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolGovernance::voteCall, _>(
             calldata,
@@ -935,7 +937,7 @@ impl GovernancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+                let mut gov_store = GovernanceStorage::new(sr);
 
                 // Compute voting power based on proposal type
                 let proposal_type = gov_store.read_proposal_u8(call.proposalId, b"proposal_type");
@@ -943,14 +945,14 @@ impl GovernancePrecompile {
 
                 // Validator check (1=1 for validator proposals, joint voting)
                 let validator_id = {
-                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    let mut validator_store = ValidatorStorage::new(sr);
                     validator_store.read_validator_id(caller)
                 };
                 let is_validator = validator_id != 0;
 
                 // CALL balance check
                 let call_balance = {
-                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    let mut asset_store = AssetStorage::new(sr);
                     asset_store.read_balance(CALL_ASSET_ID, caller)
                 };
 
@@ -1029,13 +1031,14 @@ impl GovernancePrecompile {
         calldata: &[u8],
         _msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolGovernance::queueCall, _>(
             calldata,
             20_000,
             storage,
             |call, storage| {
-                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+                let mut gov_store = GovernanceStorage::new(sr);
                 let block_number = storage.block_number();
                 gov_store
                     .queue(call.proposalId, block_number)
@@ -1063,6 +1066,7 @@ impl GovernancePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolGovernance::executeCall, _>(
             calldata,
@@ -1070,14 +1074,14 @@ impl GovernancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut gov_store = GovernanceStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
 
                 // Authorization check: proposer or validator
                 let proposer = gov_store.read_proposal_proposer(call.proposalId);
                 let is_proposer = caller == proposer;
                 let is_validator = {
-                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    let mut validator_store = ValidatorStorage::new(sr);
                     validator_store.read_validator_id(caller) != 0
                 };
                 if !is_proposer && !is_validator {
@@ -1112,6 +1116,7 @@ impl GovernancePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolGovernance::emergencyPauseCall, _>(
             calldata,
@@ -1122,7 +1127,7 @@ impl GovernancePrecompile {
 
                 // Verify caller is a registered validator
                 let validator_id = {
-                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    let mut validator_store = ValidatorStorage::new(sr);
                     validator_store.read_validator_id(caller)
                 };
                 if validator_id == 0 {
@@ -1131,7 +1136,7 @@ impl GovernancePrecompile {
                     ));
                 }
 
-                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+                let mut gov_store = GovernanceStorage::new(sr);
                 gov_store.emergency_pause(call.reason.into(), caller);
 
                 // Emit EmergencyPaused(pauser, reason)
@@ -1156,6 +1161,7 @@ impl GovernancePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolGovernance::emergencyResumeCall, _>(
             calldata,
@@ -1166,7 +1172,7 @@ impl GovernancePrecompile {
 
                 // Verify caller is a registered validator
                 let validator_id = {
-                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    let mut validator_store = ValidatorStorage::new(sr);
                     validator_store.read_validator_id(caller)
                 };
                 if validator_id == 0 {
@@ -1175,7 +1181,7 @@ impl GovernancePrecompile {
                     ));
                 }
 
-                let mut gov_store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+                let mut gov_store = GovernanceStorage::new(sr);
                 gov_store.emergency_resume();
 
                 // Emit EmergencyResumed(resumer)
@@ -1198,13 +1204,14 @@ impl GovernancePrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolGovernance::getProposalStatusCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = GovernanceStorage::new(sr);
                 Ok(U256::from(store.read_proposal_status(call.proposalId)))
             },
         )
@@ -1214,13 +1221,14 @@ impl GovernancePrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolGovernance::getProposalVotesCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = GovernanceStorage::new(sr);
                 let votes_for = store.read_vote_tally(call.proposalId, b"votes_for");
                 let votes_against = store.read_vote_tally(call.proposalId, b"votes_against");
                 let votes_abstain = store.read_vote_tally(call.proposalId, b"votes_abstain");
@@ -1229,13 +1237,13 @@ impl GovernancePrecompile {
         )
     }
 
-    fn is_paused(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn is_paused(&self, calldata: &[u8], storage: &mut dyn StorageProvider, sr: StorageRef) -> PrecompileResult {
         dispatch::view::<IProtocolGovernance::isPausedCall, _, _>(
             calldata,
             1000,
             storage,
-            |_call, storage| {
-                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+            |_call, _storage| {
+                let mut store = GovernanceStorage::new(sr);
                 Ok(U256::from(if store.is_paused() { 1u8 } else { 0u8 }))
             },
         )
@@ -1245,13 +1253,14 @@ impl GovernancePrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolGovernance::getProposalCountCall, _, _>(
             calldata,
             1000,
             storage,
-            |_call, storage| {
-                let mut store = GovernanceStorage::new(StorageRef::new(&mut *storage));
+            |_call, _storage| {
+                let mut store = GovernanceStorage::new(sr);
                 Ok(store.read_proposal_count())
             },
         )
@@ -1269,30 +1278,31 @@ impl call_precompile::StatefulPrecompile for GovernancePrecompile {
             return Err(PrecompileError::Other("too short".into()));
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let sr = StorageRef::new(storage);
         match selector {
             IProtocolGovernance::submitProposalCall::SELECTOR => {
-                self.submit_proposal(calldata, msg_sender, storage)
+                self.submit_proposal(calldata, msg_sender, storage, sr)
             }
-            IProtocolGovernance::voteCall::SELECTOR => self.vote(calldata, msg_sender, storage),
-            IProtocolGovernance::queueCall::SELECTOR => self.queue(calldata, msg_sender, storage),
+            IProtocolGovernance::voteCall::SELECTOR => self.vote(calldata, msg_sender, storage, sr),
+            IProtocolGovernance::queueCall::SELECTOR => self.queue(calldata, msg_sender, storage, sr),
             IProtocolGovernance::executeCall::SELECTOR => {
-                self.execute(calldata, msg_sender, storage)
+                self.execute(calldata, msg_sender, storage, sr)
             }
             IProtocolGovernance::emergencyPauseCall::SELECTOR => {
-                self.emergency_pause(calldata, msg_sender, storage)
+                self.emergency_pause(calldata, msg_sender, storage, sr)
             }
             IProtocolGovernance::emergencyResumeCall::SELECTOR => {
-                self.emergency_resume(calldata, msg_sender, storage)
+                self.emergency_resume(calldata, msg_sender, storage, sr)
             }
             IProtocolGovernance::getProposalStatusCall::SELECTOR => {
-                self.get_proposal_status(calldata, storage)
+                self.get_proposal_status(calldata, storage, sr)
             }
             IProtocolGovernance::getProposalVotesCall::SELECTOR => {
-                self.get_proposal_votes(calldata, storage)
+                self.get_proposal_votes(calldata, storage, sr)
             }
-            IProtocolGovernance::isPausedCall::SELECTOR => self.is_paused(calldata, storage),
+            IProtocolGovernance::isPausedCall::SELECTOR => self.is_paused(calldata, storage, sr),
             IProtocolGovernance::getProposalCountCall::SELECTOR => {
-                self.get_proposal_count(calldata, storage)
+                self.get_proposal_count(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }

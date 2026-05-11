@@ -371,6 +371,7 @@ impl SwitchPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolSwitch::switchToEvmCall, _>(
             calldata,
@@ -378,7 +379,7 @@ impl SwitchPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = SwitchStorage::new(StorageRef::new(&mut *storage));
+                let mut store = SwitchStorage::new(sr);
                 store
                     .switch_to_evm(call.assetId, call.to, call.amount, caller, storage)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -392,6 +393,7 @@ impl SwitchPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolSwitch::switchToProtocolCall, _>(
             calldata,
@@ -399,7 +401,7 @@ impl SwitchPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = SwitchStorage::new(StorageRef::new(&mut *storage));
+                let mut store = SwitchStorage::new(sr);
                 store
                     .switch_to_protocol(call.assetId, call.to, call.amount, caller, storage)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -423,12 +425,13 @@ impl call_precompile::StatefulPrecompile for SwitchPrecompile {
         let selector: [u8; 4] = calldata[..4]
             .try_into()
             .expect("slice length checked above");
+        let sr = StorageRef::new(storage);
         match selector {
             IProtocolSwitch::switchToEvmCall::SELECTOR => {
-                self.switch_to_evm(calldata, msg_sender, storage)
+                self.switch_to_evm(calldata, msg_sender, storage, sr)
             }
             IProtocolSwitch::switchToProtocolCall::SELECTOR => {
-                self.switch_to_protocol(calldata, msg_sender, storage)
+                self.switch_to_protocol(calldata, msg_sender, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }

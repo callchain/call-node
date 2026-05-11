@@ -723,6 +723,7 @@ impl Clone for StorageRef {
 
 impl call_protocol::storage_backend::StorageBackend for StorageRef {
     fn load(&mut self, address: Address, slot: U256) -> U256 {
+        debug_assert!(!self.ptr.is_null(), "StorageRef::load called with null pointer");
         // SAFETY: `self.ptr` was created from a valid `&mut dyn StorageProvider`
         // that lives for the entire precompile call.  We dereference it here
         // only to dispatch a single method call; no alias is created.
@@ -730,6 +731,7 @@ impl call_protocol::storage_backend::StorageBackend for StorageRef {
     }
 
     fn store(&mut self, address: Address, slot: U256, value: U256) {
+        debug_assert!(!self.ptr.is_null(), "StorageRef::store called with null pointer");
         // SAFETY: same as `load` above.
         unsafe {
             let _ = (*self.ptr).sstore(address, slot, value);

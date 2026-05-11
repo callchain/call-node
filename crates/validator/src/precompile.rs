@@ -34,15 +34,16 @@ impl ValidatorPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolValidator::stakeCall, _>(
             calldata,
             20000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut validator_store = ValidatorStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 validator_store
                     .stake(&mut asset_store, call.pubkey.into(), call.amount, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -56,6 +57,7 @@ impl ValidatorPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolValidator::unstakeCall, _>(
             calldata,
@@ -63,7 +65,7 @@ impl ValidatorPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                let mut validator_store = ValidatorStorage::new(sr);
                 let block_number = storage.block_number();
                 validator_store
                     .unstake(call.validatorId, caller, block_number)
@@ -78,6 +80,7 @@ impl ValidatorPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolValidator::claimUnbondedCall, _>(
             calldata,
@@ -85,8 +88,8 @@ impl ValidatorPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut validator_store = ValidatorStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();
                 validator_store
                     .claim_unbonded(&mut asset_store, call.validatorId, caller, block_number)
@@ -100,13 +103,14 @@ impl ValidatorPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolValidator::getValidatorStakeCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = ValidatorStorage::new(sr);
                 Ok(store.read_stake(call.validator))
             },
         )
@@ -116,13 +120,14 @@ impl ValidatorPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolValidator::getValidatorStatusCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = ValidatorStorage::new(sr);
                 Ok(U256::from(store.read_status(call.validator)))
             },
         )
@@ -132,13 +137,14 @@ impl ValidatorPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolValidator::getValidatorPubkeyCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = ValidatorStorage::new(sr);
                 Ok(store.read_pubkey(call.validator))
             },
         )
@@ -148,13 +154,14 @@ impl ValidatorPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolValidator::getUnbondHeightCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = ValidatorStorage::new(sr);
                 Ok(store.read_unbond_height(call.validator))
             },
         )
@@ -164,13 +171,14 @@ impl ValidatorPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolValidator::getValidatorByIndexCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = ValidatorStorage::new(sr);
                 Ok(store.read_validator_by_index(call.index))
             },
         )
@@ -190,29 +198,30 @@ impl call_precompile::StatefulPrecompile for ValidatorPrecompile {
         }
         let selector: [u8; 4] = calldata[..4]
             .try_into()
-            .expect("slice length checked above");
+            .unwrap_or([0u8; 4]);
+        let sr = StorageRef::new(storage);
         match selector {
-            IProtocolValidator::stakeCall::SELECTOR => self.stake(calldata, msg_sender, storage),
+            IProtocolValidator::stakeCall::SELECTOR => self.stake(calldata, msg_sender, storage, sr),
             IProtocolValidator::unstakeCall::SELECTOR => {
-                self.unstake(calldata, msg_sender, storage)
+                self.unstake(calldata, msg_sender, storage, sr)
             }
             IProtocolValidator::claimUnbondedCall::SELECTOR => {
-                self.claim_unbonded(calldata, msg_sender, storage)
+                self.claim_unbonded(calldata, msg_sender, storage, sr)
             }
             IProtocolValidator::getValidatorStakeCall::SELECTOR => {
-                self.get_validator_stake(calldata, storage)
+                self.get_validator_stake(calldata, storage, sr)
             }
             IProtocolValidator::getValidatorStatusCall::SELECTOR => {
-                self.get_validator_status(calldata, storage)
+                self.get_validator_status(calldata, storage, sr)
             }
             IProtocolValidator::getValidatorPubkeyCall::SELECTOR => {
-                self.get_validator_pubkey(calldata, storage)
+                self.get_validator_pubkey(calldata, storage, sr)
             }
             IProtocolValidator::getUnbondHeightCall::SELECTOR => {
-                self.get_unbond_height(calldata, storage)
+                self.get_unbond_height(calldata, storage, sr)
             }
             IProtocolValidator::getValidatorByIndexCall::SELECTOR => {
-                self.get_validator_by_index(calldata, storage)
+                self.get_validator_by_index(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }

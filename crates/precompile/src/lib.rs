@@ -11,7 +11,10 @@
 //! - `0x207` Switch: switchToEvm, switchToProtocol
 //! - `0x209` Agent: register, grant, revoke
 
+#![deny(unsafe_code)]
+
 pub mod dispatch;
+#[allow(unsafe_code)]
 pub mod storage;
 pub mod utils;
 

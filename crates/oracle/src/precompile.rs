@@ -192,38 +192,53 @@ sol! {
 pub struct OraclePrecompile;
 
 impl OraclePrecompile {
-    fn get_price(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_price(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolOracle::getPriceCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = OracleStorage::new(sr);
                 Ok(store.read_price(call.assetId))
             },
         )
     }
 
-    fn get_twap(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn get_twap(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolOracle::getTWAPCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = OracleStorage::new(sr);
                 Ok(store.read_twap(call.assetId))
             },
         )
     }
 
-    fn is_stale(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
+    fn is_stale(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
         let current_ts = storage.timestamp().to::<u64>();
         dispatch::view::<IProtocolOracle::isStaleCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = OracleStorage::new(sr);
                 Ok(U256::from(if store.is_stale(call.assetId, current_ts) {
                     1u8
                 } else {
@@ -238,6 +253,7 @@ impl OraclePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolOracle::submitPriceCall, _>(
             calldata,
@@ -248,7 +264,7 @@ impl OraclePrecompile {
 
                 // Verify caller is a registered validator
                 let validator_id = {
-                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    let mut validator_store = ValidatorStorage::new(sr);
                     validator_store.read_validator_id(caller)
                 };
                 if validator_id == 0 {
@@ -257,7 +273,7 @@ impl OraclePrecompile {
                     ));
                 }
 
-                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+                let mut store = OracleStorage::new(sr);
                 store.submit_price(call.assetId, call.price, call.timestamp, call.blockNumber);
 
                 // Emit PriceSubmitted event
@@ -285,17 +301,18 @@ impl OraclePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolOracle::setTrackedAssetsCall, _>(
             calldata,
             50_000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
 
                 // Verify caller is a registered validator
                 let validator_id = {
-                    let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                    let mut validator_store = ValidatorStorage::new(sr);
                     validator_store.read_validator_id(caller)
                 };
                 if validator_id == 0 {
@@ -304,7 +321,7 @@ impl OraclePrecompile {
                     ));
                 }
 
-                let mut store = OracleStorage::new(StorageRef::new(&mut *storage));
+                let mut store = OracleStorage::new(sr);
                 store.set_tracked_assets(call.assetIds.to_vec());
 
                 Ok(())
@@ -324,15 +341,16 @@ impl call_precompile::StatefulPrecompile for OraclePrecompile {
             return Err(PrecompileError::Other("invalid input".into()));
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let sr = StorageRef::new(storage);
         match selector {
-            IProtocolOracle::getPriceCall::SELECTOR => self.get_price(calldata, storage),
-            IProtocolOracle::getTWAPCall::SELECTOR => self.get_twap(calldata, storage),
-            IProtocolOracle::isStaleCall::SELECTOR => self.is_stale(calldata, storage),
+            IProtocolOracle::getPriceCall::SELECTOR => self.get_price(calldata, storage, sr),
+            IProtocolOracle::getTWAPCall::SELECTOR => self.get_twap(calldata, storage, sr),
+            IProtocolOracle::isStaleCall::SELECTOR => self.is_stale(calldata, storage, sr),
             IProtocolOracle::submitPriceCall::SELECTOR => {
-                self.submit_price(calldata, msg_sender, storage)
+                self.submit_price(calldata, msg_sender, storage, sr)
             }
             IProtocolOracle::setTrackedAssetsCall::SELECTOR => {
-                self.set_tracked_assets(calldata, msg_sender, storage)
+                self.set_tracked_assets(calldata, msg_sender, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }

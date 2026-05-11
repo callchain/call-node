@@ -5,9 +5,9 @@
 //!
 //! Typical usage in a precompile method:
 //! ```ignore
-//! fn get_balance(&self, calldata: &[u8], storage: &mut dyn StorageProvider) -> PrecompileResult {
-//!     dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(calldata, 800, storage, |call, storage| {
-//!         let mut store = AssetStorage::new(StorageRef::new(&mut *storage));
+//! fn get_balance(&self, calldata: &[u8], storage: &mut dyn StorageProvider, sr: StorageRef) -> PrecompileResult {
+//!     dispatch::view::<IProtocolAsset::getBalanceCall, _, _>(calldata, 800, storage, |call, _storage| {
+//!         let mut store = AssetStorage::new(sr);
 //!         Ok(store.read_balance(call.assetId, call.account))
 //!     })
 //! }

@@ -344,13 +344,14 @@ impl ShieldedPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolShielded::depositCall, _>(
             calldata,
             50000,
             storage,
-            |call, storage| {
-                let mut store = ShieldedStorage::new(StorageRef::new(storage));
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
                 store
                     .deposit(
                         call.assetId,
@@ -369,13 +370,14 @@ impl ShieldedPrecompile {
         calldata: &[u8],
         _msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolShielded::withdrawCall, _>(
             calldata,
             50000,
             storage,
-            |call, storage| {
-                let mut store = ShieldedStorage::new(StorageRef::new(storage));
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
                 store
                     .withdraw(
                         call.assetId,
@@ -396,13 +398,14 @@ impl ShieldedPrecompile {
         calldata: &[u8],
         _msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolShielded::transferCall, _>(
             calldata,
             50000,
             storage,
-            |call, storage| {
-                let mut store = ShieldedStorage::new(StorageRef::new(storage));
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
                 let nullifiers: Vec<[u8; 32]> =
                     call.nullifiers.iter().map(|n| (*n).into()).collect();
                 let commitments: Vec<[u8; 32]> =
@@ -419,13 +422,14 @@ impl ShieldedPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::getMerkleRootCall, _, _>(
             calldata,
             1000,
             storage,
-            |_call, storage| {
-                let mut store = ShieldedStorage::new(StorageRef::new(storage));
+            |_call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
                 Ok(store.get_merkle_root())
             },
         )
@@ -435,13 +439,14 @@ impl ShieldedPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::getCommitmentCountCall, _, _>(
             calldata,
             1000,
             storage,
-            |_call, storage| {
-                let mut store = ShieldedStorage::new(StorageRef::new(storage));
+            |_call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
                 Ok(store.get_commitment_count())
             },
         )
@@ -451,13 +456,14 @@ impl ShieldedPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::getCommitmentCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = ShieldedStorage::new(StorageRef::new(storage));
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
                 Ok(store.get_commitment(call.index))
             },
         )
@@ -467,13 +473,14 @@ impl ShieldedPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolShielded::isNullifierSpentCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = ShieldedStorage::new(StorageRef::new(storage));
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
                 Ok(store.is_nullifier_spent(call.nullifier.into()))
             },
         )
@@ -491,25 +498,26 @@ impl call_precompile::StatefulPrecompile for ShieldedPrecompile {
             return Err(PrecompileError::Other("too short".into()));
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let sr = StorageRef::new(storage);
         match selector {
-            IProtocolShielded::depositCall::SELECTOR => self.deposit(calldata, msg_sender, storage),
+            IProtocolShielded::depositCall::SELECTOR => self.deposit(calldata, msg_sender, storage, sr),
             IProtocolShielded::withdrawCall::SELECTOR => {
-                self.withdraw(calldata, msg_sender, storage)
+                self.withdraw(calldata, msg_sender, storage, sr)
             }
             IProtocolShielded::transferCall::SELECTOR => {
-                self.transfer(calldata, msg_sender, storage)
+                self.transfer(calldata, msg_sender, storage, sr)
             }
             IProtocolShielded::getMerkleRootCall::SELECTOR => {
-                self.get_merkle_root(calldata, storage)
+                self.get_merkle_root(calldata, storage, sr)
             }
             IProtocolShielded::getCommitmentCountCall::SELECTOR => {
-                self.get_commitment_count(calldata, storage)
+                self.get_commitment_count(calldata, storage, sr)
             }
             IProtocolShielded::getCommitmentCall::SELECTOR => {
-                self.get_commitment(calldata, storage)
+                self.get_commitment(calldata, storage, sr)
             }
             IProtocolShielded::isNullifierSpentCall::SELECTOR => {
-                self.is_nullifier_spent(calldata, storage)
+                self.is_nullifier_spent(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }

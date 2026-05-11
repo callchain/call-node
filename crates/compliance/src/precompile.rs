@@ -27,14 +27,15 @@ impl CompliancePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolCompliance::updateComplianceCall, _>(
             calldata,
             6000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = ComplianceStorage::new(StorageRef::new(storage));
+                let mut store = ComplianceStorage::new(sr);
                 store
                     .update_compliance(call.assetId, call.target, call.status, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -47,13 +48,14 @@ impl CompliancePrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolCompliance::checkComplianceCall, _, _>(
             calldata,
             1000,
             storage,
-            |call, storage| {
-                let mut store = ComplianceStorage::new(StorageRef::new(storage));
+            |call, _storage| {
+                let mut store = ComplianceStorage::new(sr);
                 Ok(store.check_compliance(call.assetId, call.target))
             },
         )
@@ -74,12 +76,13 @@ impl call_precompile::StatefulPrecompile for CompliancePrecompile {
         let selector: [u8; 4] = calldata[..4]
             .try_into()
             .expect("slice length checked above");
+        let sr = StorageRef::new(storage);
         match selector {
             IProtocolCompliance::updateComplianceCall::SELECTOR => {
-                self.update_compliance(calldata, msg_sender, storage)
+                self.update_compliance(calldata, msg_sender, storage, sr)
             }
             IProtocolCompliance::checkComplianceCall::SELECTOR => {
-                self.check_compliance(calldata, storage)
+                self.check_compliance(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }

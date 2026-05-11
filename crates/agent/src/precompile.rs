@@ -39,6 +39,7 @@ impl AgentPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::registerAgentCall, _>(
             calldata,
@@ -46,7 +47,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+                let mut store = AgentStorage::new(sr);
                 let block_number = storage.block_number();
                 store
                     .register_agent(
@@ -67,6 +68,7 @@ impl AgentPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::grantBalanceCall, _>(
             calldata,
@@ -77,7 +79,7 @@ impl AgentPrecompile {
 
                 // Step 1: validate agent exists and caller is owner
                 {
-                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    let mut agent_store = AgentStorage::new(sr);
                     if !agent_store.agent_exists(call.agentId) {
                         return Err(PrecompileError::Other(
                             AgentError::NotFound.to_string().into(),
@@ -90,7 +92,7 @@ impl AgentPrecompile {
 
                 // Step 2: deduct balance from caller
                 {
-                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    let mut asset_store = AssetStorage::new(sr);
                     asset_store
                         .deduct_balance(call.assetId, caller, call.amount)
                         .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -98,7 +100,7 @@ impl AgentPrecompile {
 
                 // Step 3: add balance to agent
                 {
-                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    let mut agent_store = AgentStorage::new(sr);
                     let agent_bal = agent_store
                         .read_agent_balance(call.agentId, call.assetId)
                         .checked_add(call.amount)
@@ -122,14 +124,15 @@ impl AgentPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::revokeBalanceCall, _>(
             calldata,
             6000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+                let mut store = AgentStorage::new(sr);
                 store
                     .revoke_balance(call.agentId, call.assetId, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -143,6 +146,7 @@ impl AgentPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::payCall, _>(
             calldata,
@@ -154,7 +158,7 @@ impl AgentPrecompile {
 
                 // Step 1: validate, check perms, compute new agent balance
                 let new_agent_bal = {
-                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    let mut agent_store = AgentStorage::new(sr);
                     if !agent_store.agent_exists(call.agentId) {
                         return Err(PrecompileError::Other(
                             AgentError::NotFound.to_string().into(),
@@ -183,7 +187,7 @@ impl AgentPrecompile {
 
                 // Step 2: add balance to recipient
                 {
-                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    let mut asset_store = AssetStorage::new(sr);
                     asset_store
                         .add_balance(call.assetId, call.to, call.amount)
                         .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -206,6 +210,7 @@ impl AgentPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::batchPayCall, _>(
             calldata,
@@ -230,7 +235,7 @@ impl AgentPrecompile {
 
                 // Step 1: validate, check perms, compute new agent balance
                 let new_agent_bal = {
-                    let mut agent_store = AgentStorage::new(StorageRef::new(&mut *storage));
+                    let mut agent_store = AgentStorage::new(sr);
                     if !agent_store.agent_exists(call.agentId) {
                         return Err(PrecompileError::Other(
                             AgentError::NotFound.to_string().into(),
@@ -261,7 +266,7 @@ impl AgentPrecompile {
 
                 // Step 2: add balances to recipients
                 {
-                    let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                    let mut asset_store = AssetStorage::new(sr);
                     for (recipient, amount) in call.to.iter().zip(call.amounts.iter()) {
                         asset_store
                             .add_balance(call.assetId, *recipient, *amount)
@@ -286,6 +291,7 @@ impl AgentPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::withdrawBalanceCall, _>(
             calldata,
@@ -293,7 +299,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+                let mut store = AgentStorage::new(sr);
                 let block_number = storage.block_number();
                 store
                     .withdraw_balance(
@@ -314,14 +320,15 @@ impl AgentPrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::revokeAgentCall, _>(
             calldata,
             20000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+                let mut store = AgentStorage::new(sr);
                 store
                     .revoke_agent(call.agentId, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -334,13 +341,14 @@ impl AgentPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentOwnerCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = AgentStorage::new(sr);
                 Ok(store.read_owner(call.agentId))
             },
         )
@@ -350,13 +358,14 @@ impl AgentPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentBalanceCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = AgentStorage::new(sr);
                 Ok(store.read_agent_balance(call.agentId, call.assetId))
             },
         )
@@ -366,13 +375,14 @@ impl AgentPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentNameCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = AgentStorage::new(sr);
                 Ok(store.read_name(call.agentId))
             },
         )
@@ -382,13 +392,14 @@ impl AgentPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentUrlCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = AgentStorage::new(sr);
                 Ok(store.read_url(call.agentId))
             },
         )
@@ -398,13 +409,14 @@ impl AgentPrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolAgent::getAgentPermsCall, _, _>(
             calldata,
             2000,
             storage,
-            |call, storage| {
-                let mut store = AgentStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = AgentStorage::new(sr);
                 Ok(store.read_perms(call.agentId))
             },
         )
@@ -425,31 +437,42 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
         let selector: [u8; 4] = calldata[..4]
             .try_into()
             .expect("slice length checked above");
+        let sr = StorageRef::new(storage);
         match selector {
             IProtocolAgent::registerAgentCall::SELECTOR => {
-                self.register_agent(calldata, msg_sender, storage)
+                self.register_agent(calldata, msg_sender, storage, sr)
             }
             IProtocolAgent::grantBalanceCall::SELECTOR => {
-                self.grant_balance(calldata, msg_sender, storage)
+                self.grant_balance(calldata, msg_sender, storage, sr)
             }
             IProtocolAgent::revokeBalanceCall::SELECTOR => {
-                self.revoke_balance(calldata, msg_sender, storage)
+                self.revoke_balance(calldata, msg_sender, storage, sr)
             }
-            IProtocolAgent::payCall::SELECTOR => self.pay(calldata, msg_sender, storage),
-            IProtocolAgent::batchPayCall::SELECTOR => self.batch_pay(calldata, msg_sender, storage),
+            IProtocolAgent::payCall::SELECTOR => self.pay(calldata, msg_sender, storage, sr),
+            IProtocolAgent::batchPayCall::SELECTOR => {
+                self.batch_pay(calldata, msg_sender, storage, sr)
+            }
             IProtocolAgent::withdrawBalanceCall::SELECTOR => {
-                self.withdraw_balance(calldata, msg_sender, storage)
+                self.withdraw_balance(calldata, msg_sender, storage, sr)
             }
             IProtocolAgent::revokeAgentCall::SELECTOR => {
-                self.revoke_agent(calldata, msg_sender, storage)
+                self.revoke_agent(calldata, msg_sender, storage, sr)
             }
-            IProtocolAgent::getAgentOwnerCall::SELECTOR => self.get_agent_owner(calldata, storage),
+            IProtocolAgent::getAgentOwnerCall::SELECTOR => {
+                self.get_agent_owner(calldata, storage, sr)
+            }
             IProtocolAgent::getAgentBalanceCall::SELECTOR => {
-                self.get_agent_balance(calldata, storage)
+                self.get_agent_balance(calldata, storage, sr)
             }
-            IProtocolAgent::getAgentNameCall::SELECTOR => self.get_agent_name(calldata, storage),
-            IProtocolAgent::getAgentUrlCall::SELECTOR => self.get_agent_url(calldata, storage),
-            IProtocolAgent::getAgentPermsCall::SELECTOR => self.get_agent_perms(calldata, storage),
+            IProtocolAgent::getAgentNameCall::SELECTOR => {
+                self.get_agent_name(calldata, storage, sr)
+            }
+            IProtocolAgent::getAgentUrlCall::SELECTOR => {
+                self.get_agent_url(calldata, storage, sr)
+            }
+            IProtocolAgent::getAgentPermsCall::SELECTOR => {
+                self.get_agent_perms(calldata, storage, sr)
+            }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }

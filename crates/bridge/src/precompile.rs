@@ -782,13 +782,14 @@ impl BridgePrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolBridge::getTotalDepositsCall, _, _>(
             calldata,
             1500,
             storage,
-            |_call, storage| {
-                let mut store = BridgeStorage::new(StorageRef::new(&mut *storage));
+            |_call, _storage| {
+                let mut store = BridgeStorage::new(sr);
                 Ok(store.get_total_deposits())
             },
         )
@@ -798,13 +799,14 @@ impl BridgePrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolBridge::getTotalWithdrawalsCall, _, _>(
             calldata,
             1500,
             storage,
-            |_call, storage| {
-                let mut store = BridgeStorage::new(StorageRef::new(&mut *storage));
+            |_call, _storage| {
+                let mut store = BridgeStorage::new(sr);
                 Ok(store.get_total_withdrawals())
             },
         )
@@ -815,15 +817,16 @@ impl BridgePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::bridgeToEvmCall, _>(
             calldata,
             30000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 bridge_store
                     .bridge_to_evm(&mut asset_store, call.assetId, call.to, call.amount, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -837,14 +840,15 @@ impl BridgePrecompile {
         calldata: &[u8],
         _msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::bridgeToProtocolCall, _>(
             calldata,
             30000,
             storage,
-            |call, storage| {
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 bridge_store
                     .bridge_to_protocol(&mut asset_store, call.assetId, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -858,6 +862,7 @@ impl BridgePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::externalDepositCall, _>(
             calldata,
@@ -865,8 +870,8 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let validator = require_caller(msg_sender)?;
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 let block_height = storage.block_number();
                 bridge_store
                     .external_deposit(
@@ -889,15 +894,16 @@ impl BridgePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::externalWithdrawCall, _>(
             calldata,
             30000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 bridge_store
                     .external_withdraw(&mut asset_store, call.assetId, call.amount, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -911,14 +917,15 @@ impl BridgePrecompile {
         calldata: &[u8],
         _msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::depositCall, _>(
             calldata,
             30000,
             storage,
-            |call, storage| {
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 bridge_store
                     .deposit(
                         &mut asset_store,
@@ -939,6 +946,7 @@ impl BridgePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::initiateChallengeCall, _>(
             calldata,
@@ -946,8 +954,8 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let challenger = require_caller(msg_sender)?;
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();
                 bridge_store
                     .initiate_challenge(
@@ -968,15 +976,16 @@ impl BridgePrecompile {
         calldata: &[u8],
         _msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::resolveChallengeCall, _>(
             calldata,
             100000,
             storage,
             |call, storage| {
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
-                let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut *storage));
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
+                let mut validator_store = ValidatorStorage::new(sr);
                 let block_number = storage.block_number();
                 bridge_store
                     .resolve_challenge(
@@ -995,13 +1004,14 @@ impl BridgePrecompile {
         &self,
         calldata: &[u8],
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::view::<IProtocolBridge::getChallengeStatusCall, _, _>(
             calldata,
             1500,
             storage,
-            |call, storage| {
-                let mut store = BridgeStorage::new(StorageRef::new(&mut *storage));
+            |call, _storage| {
+                let mut store = BridgeStorage::new(sr);
                 let status = store.read_challenge_status(call.sourceTxHash.into());
                 let deadline = store.read_challenge_deadline(call.sourceTxHash.into());
                 let bond = store.read_challenge_bond_for_tx(call.sourceTxHash.into());
@@ -1016,15 +1026,16 @@ impl BridgePrecompile {
         calldata: &[u8],
         msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
+        sr: StorageRef,
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::withdrawChallengeBondCall, _>(
             calldata,
             5000,
             storage,
-            |call, storage| {
+            |call, _storage| {
                 let caller = require_caller(msg_sender)?;
-                let mut bridge_store = BridgeStorage::new(StorageRef::new(&mut *storage));
-                let mut asset_store = AssetStorage::new(StorageRef::new(&mut *storage));
+                let mut bridge_store = BridgeStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 bridge_store
                     .withdraw_challenge_bond(&mut asset_store, call.sourceTxHash.into(), caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -1045,37 +1056,40 @@ impl call_precompile::StatefulPrecompile for BridgePrecompile {
             return Err(PrecompileError::Other("invalid input".into()));
         }
         let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+        let sr = StorageRef::new(storage);
         match selector {
             IProtocolBridge::getTotalDepositsCall::SELECTOR => {
-                self.get_total_deposits(calldata, storage)
+                self.get_total_deposits(calldata, storage, sr)
             }
             IProtocolBridge::getTotalWithdrawalsCall::SELECTOR => {
-                self.get_total_withdrawals(calldata, storage)
+                self.get_total_withdrawals(calldata, storage, sr)
             }
             IProtocolBridge::bridgeToEvmCall::SELECTOR => {
-                self.bridge_to_evm(calldata, msg_sender, storage)
+                self.bridge_to_evm(calldata, msg_sender, storage, sr)
             }
             IProtocolBridge::bridgeToProtocolCall::SELECTOR => {
-                self.bridge_to_protocol(calldata, msg_sender, storage)
+                self.bridge_to_protocol(calldata, msg_sender, storage, sr)
             }
             IProtocolBridge::externalDepositCall::SELECTOR => {
-                self.external_deposit(calldata, msg_sender, storage)
+                self.external_deposit(calldata, msg_sender, storage, sr)
             }
             IProtocolBridge::externalWithdrawCall::SELECTOR => {
-                self.external_withdraw(calldata, msg_sender, storage)
+                self.external_withdraw(calldata, msg_sender, storage, sr)
             }
-            IProtocolBridge::depositCall::SELECTOR => self.deposit(calldata, msg_sender, storage),
+            IProtocolBridge::depositCall::SELECTOR => {
+                self.deposit(calldata, msg_sender, storage, sr)
+            }
             IProtocolBridge::initiateChallengeCall::SELECTOR => {
-                self.initiate_challenge(calldata, msg_sender, storage)
+                self.initiate_challenge(calldata, msg_sender, storage, sr)
             }
             IProtocolBridge::resolveChallengeCall::SELECTOR => {
-                self.resolve_challenge(calldata, msg_sender, storage)
+                self.resolve_challenge(calldata, msg_sender, storage, sr)
             }
             IProtocolBridge::getChallengeStatusCall::SELECTOR => {
-                self.get_challenge_status(calldata, storage)
+                self.get_challenge_status(calldata, storage, sr)
             }
             IProtocolBridge::withdrawChallengeBondCall::SELECTOR => {
-                self.withdraw_challenge_bond(calldata, msg_sender, storage)
+                self.withdraw_challenge_bond(calldata, msg_sender, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
