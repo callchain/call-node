@@ -10,7 +10,7 @@ use alloy_primitives::{keccak256, B256};
 use alloy_rlp::Header;
 
 /// Merkle-Patricia Trie proof verification error.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum MptError {
     #[error("invalid RLP encoding")]
     InvalidRlp,

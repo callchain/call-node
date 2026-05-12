@@ -929,6 +929,131 @@ mod tests {
         );
     }
 
+    /// 100K-block performance test — runs in CI, validates latency at medium scale.
+    #[test]
+    fn test_eth_get_logs_performance_100k_blocks() {
+        let state = make_test_state();
+        state.set_current_block(200_000);
+
+        let target_addr = test_addr(0x42);
+        let other_addrs: Vec<Address> = (1..=20).map(test_addr).collect();
+
+        // 100K blocks, 1 receipt per block, 2 logs per receipt
+        let mut total_target_logs = 0;
+        for block in 1u64..=100_000 {
+            let tx_input = block.to_le_bytes().to_vec();
+            let tx = TxHash::from(call_crypto::keccak256(&tx_input).0);
+            let logs: Vec<LogEntry> = (0..2)
+                .map(|log_idx| {
+                    let addr = if (block + log_idx) % 10 == 0 {
+                        total_target_logs += 1;
+                        target_addr
+                    } else {
+                        other_addrs[((block + log_idx) % 20) as usize]
+                    };
+                    make_log(addr, log_idx as u8, vec![block as u8, log_idx as u8])
+                })
+                .collect();
+            state.store_receipt(tx, make_receipt_with_logs(block, tx, logs));
+        }
+
+        // Address-filtered query across full 100K range
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x186a0",
+            "address": format!("{:?}", target_addr)
+        });
+        let start = std::time::Instant::now();
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        let elapsed_indexed = start.elapsed();
+        assert_eq!(
+            logs.len(),
+            total_target_logs,
+            "indexed query should return all target logs"
+        );
+        assert!(
+            elapsed_indexed < std::time::Duration::from_secs(5),
+            "indexed eth_getLogs over 100K blocks took too long: {:?}",
+            elapsed_indexed
+        );
+
+        // Full scan over 1,000 blocks
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x3e8"
+        });
+        let start = std::time::Instant::now();
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        let elapsed_scan = start.elapsed();
+        assert_eq!(logs.len(), 1_000 * 2, "full scan over 1K blocks = 2K logs");
+        assert!(
+            elapsed_scan < std::time::Duration::from_secs(5),
+            "full scan eth_getLogs over 1K blocks took too long: {:?}",
+            elapsed_scan
+        );
+    }
+
+    /// 1M-block stress test — ignored by default, run manually with `cargo test -- --ignored`.
+    #[ignore = "slow: 1M block stress test"]
+    #[test]
+    fn test_eth_get_logs_performance_1m_blocks() {
+        let state = make_test_state();
+        state.set_current_block(2_000_000);
+
+        let target_addr = test_addr(0x42);
+        let other_addrs: Vec<Address> = (1..=20).map(test_addr).collect();
+
+        // 1M blocks, 1 receipt per block, 1 log per receipt
+        let mut total_target_logs = 0;
+        for block in 1u64..=1_000_000 {
+            let tx_input = block.to_le_bytes().to_vec();
+            let tx = TxHash::from(call_crypto::keccak256(&tx_input).0);
+            let addr = if block % 10 == 0 {
+                total_target_logs += 1;
+                target_addr
+            } else {
+                other_addrs[(block % 20) as usize]
+            };
+            let log = make_log(addr, (block % 255) as u8, vec![block as u8]);
+            state.store_receipt(tx, make_receipt_with_logs(block, tx, vec![log]));
+        }
+
+        // Address-filtered query across full 1M range
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0xf4240",
+            "address": format!("{:?}", target_addr)
+        });
+        let start = std::time::Instant::now();
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        let elapsed_indexed = start.elapsed();
+        assert_eq!(
+            logs.len(),
+            total_target_logs,
+            "indexed query should return all target logs"
+        );
+        assert!(
+            elapsed_indexed < std::time::Duration::from_secs(30),
+            "indexed eth_getLogs over 1M blocks took too long: {:?}",
+            elapsed_indexed
+        );
+
+        // Full scan over 1,000 blocks
+        let filter = serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "0x3e8"
+        });
+        let start = std::time::Instant::now();
+        let logs = crate::standard::get_logs_from_filter(&filter, &state).unwrap();
+        let elapsed_scan = start.elapsed();
+        assert_eq!(logs.len(), 1_000, "full scan over 1K blocks = 1K logs");
+        assert!(
+            elapsed_scan < std::time::Duration::from_secs(30),
+            "full scan eth_getLogs over 1K blocks in 1M dataset took too long: {:?}",
+            elapsed_scan
+        );
+    }
+
     #[test]
     fn test_eth_get_logs_no_logs_in_range() {
         let state = make_test_state();

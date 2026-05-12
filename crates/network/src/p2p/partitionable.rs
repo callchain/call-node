@@ -9,21 +9,27 @@ use crate::p2p::trait_::Network;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// A queued message with its scheduled delivery time (for latency simulation).
+type TimedMessage = (String, u64, Vec<u8>, Instant);
 
 /// Shared routing state for a partitioned network.
 ///
 /// Every node in the simulation holds a clone of the same `PartitionRouter`.
 /// The router maintains a separate receive buffer for each node and applies
-/// partition / drop rules at enqueue time.
+/// partition / drop / delay rules at enqueue time.
 pub struct PartitionRouter {
-    /// Per-node receive buffers: node_id -> FIFO queue of (sender, channel, data)
-    buffers: Mutex<HashMap<String, VecDeque<(String, u64, Vec<u8>)>>>,
+    /// Per-node receive buffers: node_id -> FIFO queue of (sender, channel, data, deliver_after)
+    buffers: Mutex<HashMap<String, VecDeque<TimedMessage>>>,
     /// node_id -> partition_group_id.  Nodes in different groups cannot exchange
     /// messages (with the exception of `send_to` when the caller explicitly
     /// targets a cross-group peer – that is also blocked).
     partition_groups: Mutex<HashMap<String, String>>,
     /// Global drop rate as a fraction of 1_000_000 (e.g. 100_000 = 10 %).
     drop_rate: AtomicU64,
+    /// Base latency in milliseconds applied to every delivered message.
+    delay_ms: AtomicU64,
     /// Deterministic PRNG seed for drop decisions.  Incremented on every
     /// broadcast so tests are reproducible when run single-threaded.
     seed: AtomicU64,
@@ -35,6 +41,7 @@ impl PartitionRouter {
             buffers: Mutex::new(HashMap::new()),
             partition_groups: Mutex::new(HashMap::new()),
             drop_rate: AtomicU64::new(0),
+            delay_ms: AtomicU64::new(0),
             seed: AtomicU64::new(1),
         }
     }
@@ -63,6 +70,11 @@ impl PartitionRouter {
         self.drop_rate.store(scaled, Ordering::Relaxed);
     }
 
+    /// Set base latency (delay) in milliseconds applied to every delivered message.
+    pub fn set_delay_ms(&self, ms: u64) {
+        self.delay_ms.store(ms, Ordering::Relaxed);
+    }
+
     /// Return true if the next message should be dropped.
     fn should_drop(&self) -> bool {
         let rate = self.drop_rate.load(Ordering::Relaxed);
@@ -73,6 +85,12 @@ impl PartitionRouter {
         // Simple LCG for deterministic “randomness” in tests.
         let next = s.wrapping_mul(1103515245).wrapping_add(12345);
         (next % 1_000_000) < rate
+    }
+
+    /// Compute the scheduled delivery time for a message given current delay settings.
+    fn delivery_time(&self) -> Instant {
+        let ms = self.delay_ms.load(Ordering::Relaxed);
+        Instant::now() + Duration::from_millis(ms)
     }
 
     /// Deliver a message from `from_node` to `to_node` if they are in the same
@@ -91,7 +109,7 @@ impl PartitionRouter {
         }
         let mut buffers = self.buffers.lock().expect("lock poisoned");
         if let Some(q) = buffers.get_mut(to_node) {
-            q.push_back((from_node.to_string(), channel, data));
+            q.push_back((from_node.to_string(), channel, data, self.delivery_time()));
         }
     }
 
@@ -113,33 +131,57 @@ impl PartitionRouter {
         }
     }
 
-    /// Pop the oldest message for `node_id`, if any.
+    /// Pop the oldest *deliverable* message for `node_id`, if any.
+    /// Messages whose delay has not yet elapsed remain in the buffer.
     pub fn receive(&self, node_id: &str) -> Option<(String, u64, Vec<u8>)> {
+        let now = Instant::now();
         let mut buffers = self.buffers.lock().expect("lock poisoned");
-        buffers.get_mut(node_id)?.pop_front()
+        let q = buffers.get_mut(node_id)?;
+        if q.front().map(|m| m.3 <= now).unwrap_or(false) {
+            let (s, c, d, _) = q.pop_front()?;
+            Some((s, c, d))
+        } else {
+            None
+        }
     }
 
-    /// Number of messages waiting for `node_id`.
+    /// Number of messages waiting for `node_id` (including delayed ones).
     pub fn pending_count(&self, node_id: &str) -> usize {
         let buffers = self.buffers.lock().expect("lock poisoned");
         buffers.get(node_id).map(|q| q.len()).unwrap_or(0)
     }
 
-    /// Drain all pending messages for `node_id`.
-    pub fn drain(&self, node_id: &str) -> Vec<(String, u64, Vec<u8>)> {
-        let mut buffers = self.buffers.lock().expect("lock poisoned");
+    /// Number of *deliverable* messages (delay elapsed) for `node_id`.
+    pub fn deliverable_count(&self, node_id: &str) -> usize {
+        let now = Instant::now();
+        let buffers = self.buffers.lock().expect("lock poisoned");
         buffers
-            .get_mut(node_id)
-            .map(|q| q.drain(..).collect())
-            .unwrap_or_default()
+            .get(node_id)
+            .map(|q| q.iter().take_while(|m| m.3 <= now).count())
+            .unwrap_or(0)
     }
 
-    /// Remove all messages from every buffer.
+    /// Drain all *deliverable* messages for `node_id`. Delayed messages remain.
+    pub fn drain(&self, node_id: &str) -> Vec<(String, u64, Vec<u8>)> {
+        let now = Instant::now();
+        let mut buffers = self.buffers.lock().expect("lock poisoned");
+        let q = match buffers.get_mut(node_id) {
+            Some(q) => q,
+            None => return Vec::new(),
+        };
+        // Split at the first delayed message
+        let split_idx = q.iter().position(|m| m.3 > now).unwrap_or(q.len());
+        q.drain(..split_idx).map(|(s, c, d, _)| (s, c, d)).collect()
+    }
+
+    /// Remove all *deliverable* messages from every buffer. Delayed messages remain.
     pub fn drain_all(&self) -> Vec<(String, u64, Vec<u8>)> {
+        let now = Instant::now();
         let mut buffers = self.buffers.lock().expect("lock poisoned");
         let mut out = Vec::new();
         for q in buffers.values_mut() {
-            out.extend(q.drain(..));
+            let split_idx = q.iter().position(|m| m.3 > now).unwrap_or(q.len());
+            out.extend(q.drain(..split_idx).map(|(s, c, d, _)| (s, c, d)));
         }
         out
     }

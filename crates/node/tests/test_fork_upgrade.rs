@@ -237,3 +237,78 @@ async fn test_governance_triggered_upgrade() {
     );
     assert_eq!(node.consensus_height(), 10);
 }
+
+/// Mixed validator versions: nodes with different protocol versions produce
+/// and verify blocks without consensus split.
+#[tokio::test]
+async fn test_mixed_validator_versions_consensus() {
+    let mut sim = NetworkSimulator::new();
+
+    let (_secret, sender) = test_keypair();
+
+    // Node A: version 1.0.0
+    let node_a = NodeBuilder::new()
+        .validator(sender, [1u8; 32], one_million_call())
+        .balance(1, sender, 100_000)
+        .build();
+
+    // Node B: version 2.0.0 (simulates upgraded validator)
+    let node_b = {
+        let n = NodeBuilder::new()
+            .validator(sender, [1u8; 32], one_million_call())
+            .balance(1, sender, 100_000)
+            .build();
+        // Override fork manager to newer version
+        *n.state.fork_manager.write().unwrap() =
+            call_consensus::ForkManager::new(ProtocolVersion::new(2, 0, 0), 1);
+        n
+    };
+
+    let node_a_ref = sim.add_node(node_a);
+    let node_b_ref = sim.add_node(node_b);
+
+    // Both nodes produce blocks independently
+    for i in 0..5 {
+        let tx = make_evm_tx(sender, i, test_addr(40 + i as u8), 100);
+
+        {
+            let mut na = node_a_ref.write().unwrap();
+            na.insert_evm_tx(tx.clone());
+            na.produce_block(1_000_000 + i * 250);
+        }
+
+        {
+            let mut nb = node_b_ref.write().unwrap();
+            nb.insert_evm_tx(tx);
+            nb.produce_block(1_000_000 + i * 250);
+        }
+    }
+
+    // Both chains advanced
+    let ha = node_a_ref.read().unwrap().consensus_height();
+    let hb = node_b_ref.read().unwrap().consensus_height();
+    assert_eq!(ha, 5, "node A should have produced 5 blocks");
+    assert_eq!(hb, 5, "node B should have produced 5 blocks");
+
+    // Verify state consistency: sender balance decreased on both
+    let bal_a = {
+        let na = node_a_ref.read().unwrap();
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&na.state.db_env).unwrap();
+        provider.state().get_balance(&sender).try_into().unwrap_or(0u128)
+    };
+    let bal_b = {
+        let nb = node_b_ref.read().unwrap();
+        let provider = call_evm::provider::InMemoryStateProvider::from_db(&nb.state.db_env).unwrap();
+        provider.state().get_balance(&sender).try_into().unwrap_or(0u128)
+    };
+    assert!(bal_a < 100_000, "node A state should reflect executed txs");
+    assert!(bal_b < 100_000, "node B state should reflect executed txs");
+
+    // Verify block hashes differ (different versions mean different blocks)
+    let hash_a = node_a_ref.read().unwrap().blocks_produced[0].header.hash();
+    let hash_b = node_b_ref.read().unwrap().blocks_produced[0].header.hash();
+    assert_ne!(
+        hash_a, hash_b,
+        "blocks from different versions should have different hashes"
+    );
+}

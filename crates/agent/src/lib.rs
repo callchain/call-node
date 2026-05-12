@@ -1,5 +1,7 @@
+pub mod domain_verification;
 pub mod precompile;
 
+pub use domain_verification::{verify_domain, verify_domain_dns_txt, verify_domain_http_file};
 pub use precompile::AgentPrecompile;
 
 use call_asset::AssetStorage;
@@ -753,5 +755,38 @@ mod tests {
         assert_eq!(limit, per_tx_limit);
         assert_eq!(expiry, expires_at);
         assert_eq!(f, flags);
+    }
+
+    #[test]
+    fn test_grant_balance_u128_overflow_rejected() {
+        let backend = TestBackend::new();
+        let mut agent_store = AgentStorage::new(backend.clone());
+        let mut asset_store = AssetStorage::new(backend.clone());
+        let caller = Address::repeat_byte(0x22);
+
+        // Register agent and seed caller balance
+        agent_store
+            .register_agent("test", "https://test.com", [0u8; 32], caller, 1)
+            .unwrap();
+        asset_store.write_balance(1, caller, u128::MAX);
+
+        // Grant u128::MAX to agent (should succeed from zero)
+        agent_store
+            .grant_balance(&mut asset_store, 0, 1, u128::MAX, caller)
+            .unwrap();
+        assert_eq!(agent_store.read_agent_balance(0, 1), u128::MAX);
+
+        // Caller now has 0 balance. Try to grant 1 more — should overflow.
+        // We need to give caller 1 more token first
+        asset_store.write_balance(1, caller, 1);
+        let result = agent_store.grant_balance(&mut asset_store, 0, 1, 1, caller);
+        assert!(
+            matches!(result, Err(AgentError::BalanceOverflow)),
+            "grant_balance with u128::MAX + 1 should return BalanceOverflow, got {:?}",
+            result
+        );
+
+        // Agent balance should remain at u128::MAX
+        assert_eq!(agent_store.read_agent_balance(0, 1), u128::MAX);
     }
 }

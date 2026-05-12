@@ -2,7 +2,7 @@ use super::*;
 use call_consensus::exec::state_accessors;
 use call_consensus::BlockExecutionResult;
 use call_network::{BlockAnnouncement, EpochBoundarySignal, InMemoryNetwork, SyncResponse};
-use call_primitives::{Address, Ed25519PublicKey};
+use call_primitives::{Address, B256, Ed25519PublicKey};
 use std::sync::OnceLock;
 
 use alloy_sol_types::SolCall;
@@ -1746,6 +1746,192 @@ async fn test_agent_grant_and_pay_in_block() {
         state_accessors::read_balance(provider.state(), call_agent::CALL_ASSET_ID, recipient),
         1_000
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── Beacon sync background task tests (gap #25) ─────────────────────
+
+/// Build a mock LightClientUpdate with real BLS signatures from generated keys.
+fn build_mock_light_client_update_for_node(
+    signing_root: B256,
+) -> (call_light_client::LightClientUpdate, Vec<call_crypto::BlsSecretKey>) {
+    use call_crypto::{bls_generate, bls_sign_beacon, BlsPublicKey, BlsSecretKey, BlsSignature};
+
+    const PARTICIPANTS: usize = 350;
+
+    let mut secrets = Vec::with_capacity(PARTICIPANTS);
+    let mut pubkeys = Vec::with_capacity(call_light_client::SYNC_COMMITTEE_SIZE);
+
+    for i in 0..call_light_client::SYNC_COMMITTEE_SIZE {
+        if i < PARTICIPANTS {
+            let (sk, pk) = bls_generate().unwrap();
+            secrets.push(sk);
+            pubkeys.push(pk);
+        } else {
+            pubkeys.push(BlsPublicKey([0u8; 48]));
+        }
+    }
+
+    let mut agg_pk = [0u8; 48];
+    agg_pk.copy_from_slice(&pubkeys[0].0);
+    let sync_committee = call_light_client::SyncCommittee {
+        pubkeys: pubkeys.clone(),
+        aggregate_pubkey: BlsPublicKey(agg_pk),
+    };
+
+    let attested_header = call_light_client::BeaconBlockHeader {
+        slot: 100,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x01),
+        state_root: B256::repeat_byte(0x02),
+        body_root: B256::repeat_byte(0x03),
+    };
+    let finalized_header = call_light_client::BeaconBlockHeader {
+        slot: 98,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x04),
+        state_root: B256::repeat_byte(0x05),
+        body_root: B256::repeat_byte(0x06),
+    };
+
+    let mut bits = [0u8; 64];
+    for i in 0..PARTICIPANTS {
+        let byte_idx = i / 8;
+        let bit_idx = i % 8;
+        bits[byte_idx] |= 1 << bit_idx;
+    }
+
+    let sigs: Vec<BlsSignature> = secrets
+        .iter()
+        .map(|sk| bls_sign_beacon(sk, signing_root.as_slice()))
+        .collect();
+
+    let agg_sig = call_crypto::bls_aggregate(&sigs).unwrap();
+
+    let sync_aggregate = call_light_client::SyncAggregate {
+        sync_committee_bits: bits,
+        sync_committee_signature: agg_sig,
+    };
+
+    let update = call_light_client::LightClientUpdate {
+        attested_header,
+        next_sync_committee: sync_committee,
+        next_sync_committee_branch: [B256::ZERO; call_light_client::NEXT_SYNC_COMMITTEE_BRANCH_DEPTH],
+        finalized_header,
+        finality_branch: [B256::ZERO; call_light_client::FINALIZED_BRANCH_DEPTH],
+        sync_aggregate,
+        signature_slot: 101,
+    };
+
+    (update, secrets)
+}
+
+#[tokio::test]
+async fn test_beacon_sync_task_spawns_with_light_client() {
+    let tmp = std::env::temp_dir().join(format!("call-node-beacon-test-{}", std::process::id()));
+    let mut node = CallNode::new(tmp.clone()).expect("node creation");
+
+    let genesis = call_light_client::GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let beacon_config = call_light_client::BeaconConfig {
+        fork_version: [0, 0, 0, 1],
+        genesis_validators_root: B256::repeat_byte(0xBB),
+    };
+    let lc = call_light_client::EthLightClient::init_with_beacon_config(genesis, Some(beacon_config));
+    node.eth_light_client = Some(Arc::new(std::sync::RwLock::new(lc)));
+
+    // Start beacon sync task with invalid URL (will fail fast) and short interval
+    node.start_beacon_sync_task("http://127.0.0.1:1".to_string(), 1);
+    assert!(
+        node.beacon_sync_handle.is_some(),
+        "beacon_sync_handle should be set after start_beacon_sync_task"
+    );
+
+    // Wait for at least one tick to fire
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // Stop should abort cleanly
+    let _ = node.stop().await;
+    assert!(node.beacon_sync_handle.is_none(), "beacon_sync_handle should be cleared after stop");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn test_beacon_sync_task_returns_early_without_light_client() {
+    let tmp = std::env::temp_dir().join(format!(
+        "call-node-beacon-no-lc-test-{}",
+        std::process::id()
+    ));
+    let mut node = CallNode::new(tmp.clone()).expect("node creation");
+
+    assert!(node.eth_light_client.is_none());
+
+    node.start_beacon_sync_task("http://127.0.0.1:1".to_string(), 1);
+    assert!(
+        node.beacon_sync_handle.is_none(),
+        "beacon_sync_handle should NOT be set when eth_light_client is None"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn test_beacon_sync_task_applies_update_and_sets_finalized_block() {
+    let tmp = std::env::temp_dir().join(format!(
+        "call-node-beacon-apply-test-{}",
+        std::process::id()
+    ));
+    let mut node = CallNode::new(tmp.clone()).expect("node creation");
+
+    let genesis = call_light_client::GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let beacon_config = call_light_client::BeaconConfig {
+        fork_version: [0, 0, 0, 1],
+        genesis_validators_root: B256::repeat_byte(0xBB),
+    };
+    let mut client = call_light_client::EthLightClient::init_with_beacon_config(
+        genesis,
+        Some(beacon_config.clone()),
+    );
+
+    // Compute signing root and build mock update
+    let attested_header = call_light_client::BeaconBlockHeader {
+        slot: 100,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x01),
+        state_root: B256::repeat_byte(0x02),
+        body_root: B256::repeat_byte(0x03),
+    };
+    let signing_root = call_light_client::compute_sync_committee_signing_root(
+        &attested_header,
+        beacon_config.fork_version,
+        beacon_config.genesis_validators_root,
+    );
+
+    let (update, _secrets) = build_mock_light_client_update_for_node(signing_root);
+
+    // Manually apply the update (simulating what the background task does)
+    let result = client.apply_light_client_update(update);
+    assert!(result.is_ok(), "apply_light_client_update should succeed: {:?}", result);
+
+    let (finalized_slot, finalized_root) = result.unwrap();
+    assert_eq!(finalized_slot, 98);
+    client.set_finalized_block(finalized_slot, finalized_root);
+
+    // Verify is_consensus_verified reflects the finalized block
+    assert!(client.is_consensus_verified(98), "block 98 should be consensus-verified");
+    assert!(client.is_consensus_verified(97), "block 97 should also be consensus-verified");
+    assert!(!client.is_consensus_verified(99), "block 99 should NOT be consensus-verified");
+
+    node.eth_light_client = Some(Arc::new(std::sync::RwLock::new(client)));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

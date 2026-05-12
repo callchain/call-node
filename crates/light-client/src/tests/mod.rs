@@ -763,6 +763,92 @@ fn test_apply_light_client_update_rejects_insufficient_participation() {
     );
 }
 
+/// Build a typed receipt (EIP-2718) with a bridge event log.
+/// `receipt_type` should be 0x01 (EIP-2930) or 0x02 (EIP-1559).
+fn make_typed_receipt_rlp(receipt_type: u8) -> Vec<u8> {
+    use alloy_primitives::Address;
+
+    let recipient = Address::repeat_byte(0x42);
+    let source_tx_hash = B256::repeat_byte(0xAB);
+
+    let mut topics = Vec::new();
+    topics.push(rlp_encode_short_bytes(&BRIDGE_DEPOSIT_EVENT_SIG.0));
+    topics.push(rlp_encode_short_bytes(&source_tx_hash.0));
+    let mut recipient_padded = [0u8; 32];
+    recipient_padded[12..].copy_from_slice(recipient.as_slice());
+    topics.push(rlp_encode_short_bytes(&recipient_padded));
+    let topics_rlp = encode_rlp_list(&topics);
+
+    let mut data = Vec::new();
+    data.push(rlp_encode_short_bytes(&[0x01]));
+    data.push(rlp_encode_short_bytes(&[0x01]));
+    data.push(vec![0x80]);
+    data.push(rlp_encode_short_bytes(&[0x01]));
+    data.push(rlp_encode_short_bytes(&[0x03, 0xE8]));
+    let data_rlp = encode_rlp_list(&data);
+
+    let address = vec![0xC0u8; 20];
+    let log = encode_rlp_list(&[rlp_encode_short_bytes(&address), topics_rlp, data_rlp]);
+    let logs_rlp = encode_rlp_list(&[log]);
+
+    let body = encode_rlp_list(&[
+        rlp_encode_short_bytes(&[0x01]),
+        rlp_encode_short_bytes(&[0x52, 0x08]),
+        vec![0x80],
+        logs_rlp,
+    ]);
+
+    let mut receipt = Vec::with_capacity(1 + body.len());
+    receipt.push(receipt_type);
+    receipt.extend_from_slice(&body);
+    receipt
+}
+
+#[test]
+fn test_parse_receipt_logs_eip2930_type_1() {
+    let receipt_rlp = make_typed_receipt_rlp(0x01);
+    let logs = crate::ethereum::proof::parse_receipt_logs(&receipt_rlp).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].address, vec![0xC0u8; 20]);
+    assert_eq!(logs[0].topics.len(), 3);
+    assert_eq!(logs[0].topics[0], BRIDGE_DEPOSIT_EVENT_SIG);
+}
+
+#[test]
+fn test_parse_receipt_logs_eip1559_type_2() {
+    let receipt_rlp = make_typed_receipt_rlp(0x02);
+    let logs = crate::ethereum::proof::parse_receipt_logs(&receipt_rlp).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].address, vec![0xC0u8; 20]);
+    assert_eq!(logs[0].topics.len(), 3);
+    assert_eq!(logs[0].topics[0], BRIDGE_DEPOSIT_EVENT_SIG);
+}
+
+#[test]
+fn test_parse_receipt_logs_eip4844_type_3() {
+    let receipt_rlp = make_typed_receipt_rlp(0x03);
+    let logs = crate::ethereum::proof::parse_receipt_logs(&receipt_rlp).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].address, vec![0xC0u8; 20]);
+    assert_eq!(logs[0].topics.len(), 3);
+}
+
+#[test]
+fn test_typed_receipt_bridge_event_parsing() {
+    let receipt_rlp = make_typed_receipt_rlp(0x02);
+    let logs = crate::ethereum::proof::parse_receipt_logs(&receipt_rlp).unwrap();
+    let event = crate::ethereum::proof::parse_bridge_event_from_logs(&logs).unwrap();
+    assert_eq!(event.source_chain, 1);
+    assert_eq!(event.asset_id, 1);
+    assert_eq!(event.amount, 1000);
+}
+
+#[test]
+fn test_parse_receipt_logs_empty_rejected() {
+    let result = crate::ethereum::proof::parse_receipt_logs(b"");
+    assert!(result.is_err());
+}
+
 #[test]
 fn test_init_with_beacon_config_stores_config() {
     let genesis = GenesisState {
@@ -844,4 +930,457 @@ fn test_is_consensus_verified_with_finalized() {
     // Advance finalized to 1003
     client.set_finalized_block(1003, hash3);
     assert!(client.is_consensus_verified(1003));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Reorg handling: orphaned headers, rollback, and resync
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_reorg_longer_chain_rollback_and_adoption() {
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+
+    // Build canonical chain A: 1001 → 1002 → 1003
+    let rlp_a1 = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+    let h_a1 = EthHeader::from_rlp(rlp_a1);
+    let hash_a1 = h_a1.block_hash;
+    client.submit_header(h_a1).unwrap();
+
+    let rlp_a2 = make_test_header_rlp(hash_a1, 1002, tx_root, receipt_root);
+    let h_a2 = EthHeader::from_rlp(rlp_a2);
+    let hash_a2 = h_a2.block_hash;
+    client.submit_header(h_a2).unwrap();
+
+    let rlp_a3 = make_test_header_rlp(hash_a2, 1003, tx_root, receipt_root);
+    let h_a3 = EthHeader::from_rlp(rlp_a3);
+    let hash_a3 = h_a3.block_hash;
+    client.submit_header(h_a3).unwrap();
+
+    assert_eq!(client.latest_block(), 1003);
+    assert_eq!(client.get_header(1003).unwrap().block_hash, hash_a3);
+
+    // Build longer competing chain B that forks at block 1001:
+    // submit block 1004 with parent = hash_a1 (block 1001).
+    // This triggers reorg: fork_point = 1001, unwinds 1002 and 1003.
+    let receipt_root_b = B256::repeat_byte(0xBB);
+    let rlp_b4 = make_test_header_rlp(hash_a1, 1004, tx_root, receipt_root_b);
+    let h_b4 = EthHeader::from_rlp(rlp_b4);
+    let hash_b4 = h_b4.block_hash;
+
+    client.submit_header(h_b4).unwrap();
+
+    // 1002 and 1003 were unwound; 1004 is now canonical
+    assert!(client.get_header(1002).is_none(), "old 1002 should be unwound");
+    assert!(client.get_header(1003).is_none(), "old 1003 should be unwound");
+    assert_eq!(client.latest_block(), 1004);
+    assert_eq!(client.get_header(1004).unwrap().block_hash, hash_b4);
+
+    // Extend chain B with 1005
+    let rlp_b5 = make_test_header_rlp(hash_b4, 1005, tx_root, receipt_root_b);
+    let h_b5 = EthHeader::from_rlp(rlp_b5);
+    let hash_b5 = h_b5.block_hash;
+    client.submit_header(h_b5).unwrap();
+    assert_eq!(client.latest_block(), 1005);
+    assert_eq!(client.get_header(1005).unwrap().block_hash, hash_b5);
+}
+
+#[test]
+fn test_reorg_resubmit_unwound_headers() {
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+
+    // Build canonical chain: 1001 → 1002 → 1003
+    let rlp1 = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+    let h1 = EthHeader::from_rlp(rlp1);
+    let hash1 = h1.block_hash;
+    client.submit_header(h1.clone()).unwrap();
+
+    let rlp2 = make_test_header_rlp(hash1, 1002, tx_root, receipt_root);
+    let h2 = EthHeader::from_rlp(rlp2);
+    let hash2 = h2.block_hash;
+    client.submit_header(h2.clone()).unwrap();
+
+    let rlp3 = make_test_header_rlp(hash2, 1003, tx_root, receipt_root);
+    let h3 = EthHeader::from_rlp(rlp3);
+    let hash3 = h3.block_hash;
+    client.submit_header(h3.clone()).unwrap();
+
+    // Trigger reorg: submit block 1004 with parent = hash1 (block 1001).
+    // Fork point = 1001; unwinds 1002 and 1003.
+    let receipt_root_fork = B256::repeat_byte(0xCC);
+    let rlp_fork4 = make_test_header_rlp(hash1, 1004, tx_root, receipt_root_fork);
+    let h_fork4 = EthHeader::from_rlp(rlp_fork4);
+
+    // Use handle_reorg directly to capture unwound headers
+    let unwound = client.handle_reorg(h_fork4).unwrap();
+
+    // Unwound should contain h2 and h3 (blocks above fork point 1001)
+    assert_eq!(unwound.len(), 2, "should unwind 2 headers above fork point 1001");
+    let unwound_hashes: Vec<B256> = unwound.iter().map(|h| h.block_hash).collect();
+    assert!(unwound_hashes.contains(&hash2));
+    assert!(unwound_hashes.contains(&hash3));
+
+    // Latest block should now be the fork block 1004
+    assert_eq!(client.latest_block(), 1004);
+
+    // Old 1002 and 1003 are gone
+    assert!(client.get_header(1002).is_none());
+    assert!(client.get_header(1003).is_none());
+
+    // Resubmit the unwound headers — they should form a valid chain again
+    // First resubmit h2 (its parent hash1 is still verified at block 1001)
+    client.submit_header(h2.clone()).unwrap();
+    assert_eq!(client.get_header(1002).unwrap().block_hash, hash2);
+
+    // Then resubmit h3 (its parent h2 is now verified again at block 1002)
+    client.submit_header(h3.clone()).unwrap();
+    assert_eq!(client.get_header(1003).unwrap().block_hash, hash3);
+    assert_eq!(client.latest_block(), 1004);
+}
+
+#[test]
+fn test_reorg_buffered_headers_flushed_after_rollback() {
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+    let tx_root = B256::repeat_byte(0x01);
+    let receipt_root = B256::repeat_byte(0x02);
+
+    // Build canonical chain: 1001 → 1002 → 1003
+    let rlp1 = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+    let h1 = EthHeader::from_rlp(rlp1);
+    let hash1 = h1.block_hash;
+    client.submit_header(h1).unwrap();
+
+    let rlp2 = make_test_header_rlp(hash1, 1002, tx_root, receipt_root);
+    let h2 = EthHeader::from_rlp(rlp2);
+    let hash2 = h2.block_hash;
+    client.submit_header(h2).unwrap();
+
+    let rlp3 = make_test_header_rlp(hash2, 1003, tx_root, receipt_root);
+    let h3 = EthHeader::from_rlp(rlp3);
+    let hash3 = h3.block_hash;
+    client.submit_header(h3).unwrap();
+
+    // Buffer a future header 1066 whose parent is 1065 (not yet known).
+    // Block 1066 is within 64 of latest (1003), so it will be buffered.
+    // Using a block number whose parent won't exist after reorg ensures the
+    // buffered header is never incorrectly flushed by flush_buffer (which only
+    // checks parent block number existence, not hash match).
+    let fake_hash_1065 = B256::repeat_byte(0x99);
+    let rlp1066_buffered = make_test_header_rlp(fake_hash_1065, 1066, tx_root, receipt_root);
+    let h1066_buffered = EthHeader::from_rlp(rlp1066_buffered);
+    client.submit_header(h1066_buffered.clone()).unwrap();
+    assert_eq!(client.buffer_len(), 1);
+
+    // Trigger reorg at block 1004 with parent = hash2 (block 1002).
+    // This skips 1003: fork_point = 1002, unwinds 1003, inserts 1004.
+    let receipt_root_fork = B256::repeat_byte(0xDD);
+    let rlp_fork4 = make_test_header_rlp(hash2, 1004, tx_root, receipt_root_fork);
+    let h_fork4 = EthHeader::from_rlp(rlp_fork4);
+    let hash_fork4 = h_fork4.block_hash;
+    client.submit_header(h_fork4).unwrap();
+
+    // 1003 should be unwound
+    assert!(client.get_header(1003).is_none(), "old 1003 should be unwound");
+    assert_eq!(client.latest_block(), 1004);
+
+    // The buffered 1066 is still there (its parent 1065 is still not verified)
+    assert_eq!(client.buffer_len(), 1);
+
+    // Submit a new 1005 whose parent is the forked 1004 — should be accepted directly
+    let rlp5_correct = make_test_header_rlp(hash_fork4, 1005, tx_root, receipt_root);
+    let h5_correct = EthHeader::from_rlp(rlp5_correct);
+    client.submit_header(h5_correct.clone()).unwrap();
+
+    // Buffered 1066 still there; new 1005 inserted directly
+    assert_eq!(client.buffer_len(), 1, "buffered 1066 still waiting for parent 1065");
+    assert_eq!(client.latest_block(), 1005);
+    assert_eq!(client.get_header(1005).unwrap().block_hash, h5_correct.block_hash);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MPT proof verification with multi-node tries against real headers
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_tx_inclusion_proof_with_branch_node() {
+    use crate::verifier::{make_branch_node_rlp, make_leaf_node_rlp};
+
+    // Build a tx trie with 3 transactions, using a branch node as root
+    let tx1_hash = B256::repeat_byte(0x1A);
+    let tx2_hash = B256::repeat_byte(0x2B);
+    let tx3_hash = B256::repeat_byte(0x3C);
+
+    // Leaf for tx1 at nibble path [1, 0, ...] (key = 0x1A, nibbles = [1, 10, ...])
+    // Branch consumes first nibble (1), leaf contains remaining 63 nibbles
+    let tx1_key = crate::verifier::bytes_to_nibbles(&tx1_hash.0);
+    let tx1_leaf = make_leaf_node_rlp(&tx1_key[1..], b"tx1_data");
+    let tx1_hash_node = keccak256(&tx1_leaf);
+
+    // Leaf for tx2 at nibble path [2, 11, ...]
+    let tx2_key = crate::verifier::bytes_to_nibbles(&tx2_hash.0);
+    let tx2_leaf = make_leaf_node_rlp(&tx2_key[1..], b"tx2_data");
+    let tx2_hash_node = keccak256(&tx2_leaf);
+
+    // Leaf for tx3 at nibble path [3, 12, ...]
+    let tx3_key = crate::verifier::bytes_to_nibbles(&tx3_hash.0);
+    let tx3_leaf = make_leaf_node_rlp(&tx3_key[1..], b"tx3_data");
+    let tx3_hash_node = keccak256(&tx3_leaf);
+
+    // Branch node: children at nibbles 1, 2, 3
+    let mut children: [Option<B256>; 16] = [None; 16];
+    children[1] = Some(tx1_hash_node);
+    children[2] = Some(tx2_hash_node);
+    children[3] = Some(tx3_hash_node);
+    let branch_rlp = make_branch_node_rlp(&children, None);
+    let tx_root = keccak256(&branch_rlp);
+
+    // Build and submit header
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+
+    let receipt_root = B256::repeat_byte(0x02);
+    let rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    client.submit_header(header).unwrap();
+
+    // Verify tx2 inclusion — proof traverses branch → leaf
+    let tx_proof = TxInclusionProof::new(vec![
+        MptProofNode { rlp_bytes: branch_rlp.clone() },
+        MptProofNode { rlp_bytes: tx2_leaf.clone() },
+    ]);
+    let result = client.verify_tx_inclusion(1001, tx2_hash, &tx_proof);
+    assert!(result.is_ok(), "tx inclusion with branch node should succeed: {:?}", result);
+
+    // Verify tx1 inclusion
+    let tx_proof = TxInclusionProof::new(vec![
+        MptProofNode { rlp_bytes: branch_rlp.clone() },
+        MptProofNode { rlp_bytes: tx1_leaf.clone() },
+    ]);
+    let result = client.verify_tx_inclusion(1001, tx1_hash, &tx_proof);
+    assert!(result.is_ok(), "tx1 inclusion should succeed: {:?}", result);
+
+    // Verify tx3 inclusion
+    let tx_proof = TxInclusionProof::new(vec![
+        MptProofNode { rlp_bytes: branch_rlp },
+        MptProofNode { rlp_bytes: tx3_leaf },
+    ]);
+    let result = client.verify_tx_inclusion(1001, tx3_hash, &tx_proof);
+    assert!(result.is_ok(), "tx3 inclusion should succeed: {:?}", result);
+}
+
+#[test]
+fn test_receipt_proof_with_extension_and_branch() {
+    use crate::verifier::{
+        make_branch_node_rlp, make_extension_node_rlp, make_leaf_node_rlp, rlp_encode_short_bytes,
+    };
+    use alloy_primitives::Address;
+
+    // Build a bridge event receipt
+    let recipient = Address::repeat_byte(0x42);
+    let source_tx_hash = B256::repeat_byte(0xAB);
+
+    let mut topics = Vec::new();
+    topics.push(rlp_encode_short_bytes(&BRIDGE_DEPOSIT_EVENT_SIG.0));
+    topics.push(rlp_encode_short_bytes(&source_tx_hash.0));
+    let mut recipient_padded = [0u8; 32];
+    recipient_padded[12..].copy_from_slice(recipient.as_slice());
+    topics.push(rlp_encode_short_bytes(&recipient_padded));
+    let topics_rlp = encode_rlp_list(&topics);
+
+    let mut data = Vec::new();
+    data.push(rlp_encode_short_bytes(&[0x01]));
+    data.push(rlp_encode_short_bytes(&[0x01]));
+    data.push(vec![0x80]);
+    data.push(rlp_encode_short_bytes(&[0x01]));
+    data.push(rlp_encode_short_bytes(&[0x03, 0xE8]));
+    let data_rlp = encode_rlp_list(&data);
+
+    let address = vec![0xC0u8; 20];
+    let log = encode_rlp_list(&[rlp_encode_short_bytes(&address), topics_rlp, data_rlp]);
+    let logs_rlp = encode_rlp_list(&[log]);
+
+    let receipt_rlp = encode_rlp_list(&[
+        rlp_encode_short_bytes(&[0x01]),
+        rlp_encode_short_bytes(&[0x52, 0x08]),
+        vec![0x80],
+        logs_rlp,
+    ]);
+
+    // Build a receipt trie with extension → branch → leaf structure.
+    // Receipt index = 5. In RLP, index key = [0x05] (single byte).
+    // Nibbles for key [0x05] = [0, 5].
+    // Extension covers nibble [0], branch at nibble [5], leaf has empty remaining key.
+
+    let index_key = crate::ethereum::proof::rlp_encode_u64(5);
+    let key_nibbles = crate::verifier::bytes_to_nibbles(&index_key);
+
+    // Leaf with empty remaining key after branch
+    let leaf_rlp = make_leaf_node_rlp(&[], &receipt_rlp);
+    let leaf_hash = keccak256(&leaf_rlp);
+
+    // Branch with child at nibble 5 pointing to leaf
+    let mut children: [Option<B256>; 16] = [None; 16];
+    children[5] = Some(leaf_hash);
+    let branch_rlp = make_branch_node_rlp(&children, None);
+    let branch_hash = keccak256(&branch_rlp);
+
+    // Extension covering nibble [0] pointing to branch
+    let ext_rlp = make_extension_node_rlp(&[0], branch_hash);
+    let receipt_root = keccak256(&ext_rlp);
+
+    // Build and submit header
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+
+    let tx_root = B256::repeat_byte(0x01);
+    let rlp = make_test_header_rlp(anchor, 1001, tx_root, receipt_root);
+    let header = EthHeader::from_rlp(rlp);
+    client.submit_header(header).unwrap();
+
+    // Verify receipt proof: extension → branch → leaf
+    let receipt_proof = ReceiptProof {
+        receipt_index: 5,
+        nodes: vec![
+            MptProofNode { rlp_bytes: ext_rlp },
+            MptProofNode { rlp_bytes: branch_rlp },
+            MptProofNode { rlp_bytes: leaf_rlp },
+        ],
+    };
+
+    let event = client
+        .verify_receipt_and_parse_bridge_event(1001, &receipt_proof)
+        .unwrap();
+    assert_eq!(event.recipient, recipient);
+    assert_eq!(event.source_tx_hash, source_tx_hash);
+    assert_eq!(event.asset_id, 1);
+    assert_eq!(event.amount, 1000);
+}
+
+#[test]
+fn test_tx_inclusion_proof_missing_tx_rejected() {
+    use crate::verifier::{make_branch_node_rlp, make_leaf_node_rlp};
+
+    // Build a tx trie with only tx1
+    let tx1_hash = B256::repeat_byte(0x1A);
+    let tx1_key = crate::verifier::bytes_to_nibbles(&tx1_hash.0);
+    let tx1_leaf = make_leaf_node_rlp(&tx1_key, b"tx1_data");
+    let tx1_hash_node = keccak256(&tx1_leaf);
+
+    let mut children: [Option<B256>; 16] = [None; 16];
+    children[1] = Some(tx1_hash_node);
+    let branch_rlp = make_branch_node_rlp(&children, None);
+    let tx_root = keccak256(&branch_rlp);
+
+    let anchor = B256::repeat_byte(0xAA);
+    let genesis = GenesisState {
+        anchor_hash: anchor,
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let mut client = EthLightClient::init(genesis);
+
+    let rlp = make_test_header_rlp(anchor, 1001, tx_root, B256::repeat_byte(0x02));
+    let header = EthHeader::from_rlp(rlp);
+    client.submit_header(header).unwrap();
+
+    // Try to prove tx2 (which is not in the trie) — should fail
+    let tx2_hash = B256::repeat_byte(0x2B);
+    let tx2_key = crate::verifier::bytes_to_nibbles(&tx2_hash.0);
+    // Need a leaf for the proof that has the wrong key
+    let wrong_leaf = make_leaf_node_rlp(&tx2_key, b"tx2_data");
+    let tx_proof = TxInclusionProof::new(vec![
+        MptProofNode { rlp_bytes: branch_rlp },
+        MptProofNode { rlp_bytes: wrong_leaf },
+    ]);
+
+    let result = client.verify_tx_inclusion(1001, tx2_hash, &tx_proof);
+    assert!(
+        matches!(result, Err(LightClientError::TxNotFound)),
+        "missing tx should return TxNotFound, got {:?}",
+        result
+    );
+}
+
+// ── Property-based tests (gap #31) ──────────────────────────────────
+
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn prop_decode_rlp_field_never_panics(data in prop::collection::vec(any::<u8>(), 0..256), idx in 0usize..20usize) {
+        // decode_rlp_field must never panic, regardless of input
+        let _ = crate::types::decode_rlp_field(&data, idx);
+    }
+
+    #[test]
+    fn prop_eth_header_hash_roundtrip(data in prop::collection::vec(any::<u8>(), 0..256)) {
+        let header = EthHeader::from_rlp(data.clone());
+        let expected = keccak256(&data);
+        assert_eq!(header.block_hash, expected);
+    }
+
+    #[test]
+    fn prop_verify_mpt_proof_never_panics(
+        root_hash in prop::array::uniform32(any::<u8>()),
+        key in prop::collection::vec(any::<u8>(), 0..64),
+        proof in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..128), 0..8)
+    ) {
+        let root = B256::from(root_hash);
+        let result = verify_mpt_proof(root, &key, &proof);
+        // Must return Ok or Err, never panic
+        let _ = result;
+    }
+
+    #[test]
+    fn prop_mpt_empty_proof_returns_none(
+        root_hash in prop::array::uniform32(any::<u8>()),
+        key in prop::collection::vec(any::<u8>(), 0..64)
+    ) {
+        let root = B256::from(root_hash);
+        let result = verify_mpt_proof(root, &key, &[]);
+        assert_eq!(result, Ok(None), "empty proof should always return Ok(None)");
+    }
+
+    #[test]
+    fn prop_mpt_proof_result_is_deterministic(
+        root_hash in prop::array::uniform32(any::<u8>()),
+        key in prop::collection::vec(any::<u8>(), 0..64),
+        proof in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..128), 0..8)
+    ) {
+        let root = B256::from(root_hash);
+        let r1 = verify_mpt_proof(root, &key, &proof);
+        let r2 = verify_mpt_proof(root, &key, &proof);
+        assert_eq!(r1, r2, "verify_mpt_proof must be deterministic");
+    }
 }

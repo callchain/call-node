@@ -170,6 +170,133 @@ mod tests {
         assert!(csv.contains("Transfer"));
     }
 
+    fn make_audit_entry_with_assets(
+        block: u64,
+        tx_idx: u32,
+        before: serde_json::Value,
+        after: serde_json::Value,
+    ) -> AuditEntry {
+        AuditEntry {
+            block_height: block,
+            tx_index: tx_idx,
+            tx_type: "Transfer".into(),
+            action: "execute".into(),
+            agent_id: None,
+            fee_payer: Some(test_addr(1)),
+            before_state: before,
+            after_state: after,
+            tx_hash: test_hash(tx_idx as u8),
+            shielded_details: None,
+        }
+    }
+
+    #[test]
+    fn test_compliance_report_symbol_accuracy_per_asset_id() {
+        let mut log = AuditLog::new();
+
+        // Entry with asset_id=1 (CALL)
+        log.append(make_audit_entry_with_assets(
+            1,
+            0,
+            serde_json::json!({"1": 1000}),
+            serde_json::json!({"1": 900}),
+        ))
+        .unwrap();
+
+        // Entry with asset_id=2 (USDC)
+        log.append(make_audit_entry_with_assets(
+            1,
+            1,
+            serde_json::json!({"2": 500}),
+            serde_json::json!({"2": 400}),
+        ))
+        .unwrap();
+
+        // Mixed entry: both assets changed
+        log.append(make_audit_entry_with_assets(
+            2,
+            0,
+            serde_json::json!({"1": 100, "2": 200}),
+            serde_json::json!({"1": 90, "2": 190}),
+        ))
+        .unwrap();
+
+        // Report for asset_id=1 should only include entries where asset 1 changed
+        // Entries 0 and 2 have asset 1; entry 1 does not.
+        let report_call = export_compliance_report(&log, 1, "CALL", 1_700_000_000, 2, None);
+        assert_eq!(report_call.len(), 2, "asset_id=1 appears in entries 0 and 2");
+        for entry in &report_call {
+            assert_eq!(entry.asset_id, 1);
+            assert_eq!(entry.asset_symbol, "CALL", "asset_id=1 must map to CALL");
+        }
+
+        // Report for asset_id=2 should only include entries where asset 2 changed
+        // Entries 1 and 2 have asset 2; entry 0 does not.
+        let report_usdc = export_compliance_report(&log, 2, "USDC", 1_700_000_000, 2, None);
+        assert_eq!(report_usdc.len(), 2, "asset_id=2 appears in entries 1 and 2");
+        for entry in &report_usdc {
+            assert_eq!(entry.asset_id, 2);
+            assert_eq!(entry.asset_symbol, "USDC", "asset_id=2 must map to USDC, not CALL");
+        }
+
+        // Verify CSV contains correct symbols
+        let csv_call = report_to_csv(&report_call);
+        assert!(csv_call.contains("CALL"));
+        assert!(!csv_call.contains("USDC"));
+
+        let csv_usdc = report_to_csv(&report_usdc);
+        assert!(csv_usdc.contains("USDC"));
+        assert!(!csv_usdc.contains("CALL"));
+    }
+
+    #[test]
+    fn test_compliance_report_asset_id_filtering_excludes_unrelated() {
+        let mut log = AuditLog::new();
+
+        // Only asset_id=3 appears
+        log.append(make_audit_entry_with_assets(
+            1,
+            0,
+            serde_json::json!({"3": 1000}),
+            serde_json::json!({"3": 500}),
+        ))
+        .unwrap();
+
+        // Request report for asset_id=7 — should be empty
+        let report = export_compliance_report(&log, 7, "WETH", 1_700_000_000, 2, None);
+        assert!(report.is_empty(), "asset_id=7 should have no matching entries");
+    }
+
+    #[test]
+    fn test_compliance_report_amount_computed_from_state_delta() {
+        let mut log = AuditLog::new();
+
+        log.append(make_audit_entry_with_assets(
+            1,
+            0,
+            serde_json::json!({"1": 10000}),
+            serde_json::json!({"1": 7500}),
+        ))
+        .unwrap();
+
+        let report = export_compliance_report(&log, 1, "CALL", 1_700_000_000, 2, None);
+        assert_eq!(report.len(), 1);
+        // amount = after - before (saturating); 7500 - 10000 would underflow, so 0
+        assert_eq!(report[0].amount, "0", "negative delta saturates to 0");
+
+        // Reverse: increasing balance
+        let mut log2 = AuditLog::new();
+        log2.append(make_audit_entry_with_assets(
+            1,
+            0,
+            serde_json::json!({"1": 500}),
+            serde_json::json!({"1": 3000}),
+        ))
+        .unwrap();
+        let report2 = export_compliance_report(&log2, 1, "CALL", 1_700_000_000, 2, None);
+        assert_eq!(report2[0].amount, "2500", "positive delta = 3000 - 500");
+    }
+
     #[test]
     fn test_log_rotation() {
         let dir = std::env::temp_dir().join("call-rotation-test");
@@ -210,6 +337,93 @@ mod tests {
 
         // Should rotate at 40 byte threshold
         assert!(should_rotate(&path, &LogRotation::Size(40)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_log_rotation_rapid_sequence() {
+        let dir = std::env::temp_dir().join("call-rapid-rotate-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rapid.log");
+
+        // Perform 10 rapid rotations
+        for i in 0..10 {
+            std::fs::write(&path, format!("batch-{i}")).unwrap();
+            rotate_log(&path).unwrap();
+        }
+
+        // Verify all rotated files exist with correct sequential numbering
+        for i in 1..=10 {
+            let rotated = dir.join(format!("rapid.{i}"));
+            assert!(rotated.exists(), "rotated file rapid.{i} should exist");
+        }
+
+        // Verify the newest data is in .1 (most recent rotation)
+        assert_eq!(
+            std::fs::read_to_string(&dir.join("rapid.1")).unwrap(),
+            "batch-9"
+        );
+        // And oldest in .10
+        assert_eq!(
+            std::fs::read_to_string(&dir.join("rapid.10")).unwrap(),
+            "batch-0"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_removes_stale() {
+        let dir = std::env::temp_dir().join("call-cleanup-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cleanup.log");
+
+        // Create rotated files
+        for i in 1..=5 {
+            let rotated = dir.join(format!("cleanup.{i}"));
+            std::fs::write(&rotated, format!("data-{i}")).unwrap();
+        }
+
+        // Fresh files should NOT be removed even with 0-day retention
+        // because age is 0 and cutoff is 0 (age > cutoff requires age >= 1)
+        let removed = cleanup_old_logs(&path, 0).unwrap();
+        assert_eq!(removed, 0, "fresh files should not be removed");
+
+        // Sleep to ensure files are older than 0 seconds
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let removed = cleanup_old_logs(&path, 0).unwrap();
+        assert_eq!(removed, 5, "all 5 rotated files should be removed after 1s");
+
+        for i in 1..=5 {
+            assert!(!dir.join(format!("cleanup.{i}")).exists());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rotate_log_fails_on_readonly_dir() {
+        // Simulate disk-full by using a read-only directory
+        let dir = std::env::temp_dir().join("call-readonly-rotate-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("readonly.log");
+        std::fs::write(&path, "some data").unwrap();
+
+        // Make directory read-only
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        let original_perms = perms.clone();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        // Rotation should fail because it cannot create the new file
+        let result = rotate_log(&path);
+
+        // Restore permissions before assertions so cleanup works
+        std::fs::set_permissions(&dir, original_perms).unwrap();
+
+        assert!(result.is_err(), "rotation in read-only dir should fail");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -286,5 +500,60 @@ mod tests {
         assert_eq!(lines.len(), 2); // header + 1 data row
         assert!(lines[0].contains("timestamp"));
         assert!(lines[1].contains("Transfer"));
+    }
+
+    // ── FileLogLayer high-volume test (gap #27) ───────────────────────
+
+    #[tokio::test]
+    async fn test_file_log_layer_sustained_high_volume() {
+        let dir = std::env::temp_dir().join(format!("call-filelog-volume-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("volume.log");
+
+        let config = LogConfig {
+            level: LogLevel::Info,
+            format: LogFormat::Text,
+            output: LogOutput::File(path.clone()),
+            rotation: LogRotation::Size(1024 * 1024), // 1MB — won't trigger during test
+            retention_days: 1,
+            audit_enabled: false,
+            audit_path: dir.join("audit.log"),
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::logging::file_log::start_file_logger_task(rx, config).unwrap();
+
+        const COUNT: usize = 10_000;
+
+        // Pump 10K log entries rapidly
+        for i in 0..COUNT {
+            let entry = LogEntry::new(LogLevel::Info, "test", &format!("log-line-{i}"));
+            let _ = tx.send(entry);
+        }
+
+        // Drop sender so the channel eventually closes (task keeps ticking)
+        drop(tx);
+
+        // Wait for background task to drain the queue
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Verify all lines were written
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+        assert!(
+            lines.len() >= COUNT,
+            "expected at least {COUNT} log lines, got {}",
+            lines.len()
+        );
+
+        // Verify first and last lines are present
+        assert!(lines[0].contains("log-line-0"), "first line should contain log-line-0");
+        assert!(
+            lines[COUNT - 1].contains(&format!("log-line-{}", COUNT - 1)),
+            "last line should contain log-line-{}",
+            COUNT - 1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

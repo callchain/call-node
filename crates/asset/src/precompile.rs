@@ -362,7 +362,8 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
 mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
-    use call_precompile::{slot_balance, u128_to_u256, StatefulPrecompile, StorageRef};
+    use call_precompile::storage::storage_slot;
+    use call_precompile::{slot_balance, slot_compliance, u128_to_u256, StatefulPrecompile, StorageRef, COMPLIANCE_ADDRESS};
     use call_primitives::Address;
 
     #[test]
@@ -534,5 +535,141 @@ mod tests {
         assert_eq!(store.read_balance(1, owner), 950);
         assert_eq!(store.read_balance(1, recipient), 50);
         assert_eq!(store.read_allowance(1, owner, spender), 50);
+    }
+
+    #[test]
+    fn test_asset_precompile_batch_transfer_all_allowed() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+        let r1 = Address::repeat_byte(0x11);
+        let r2 = Address::repeat_byte(0x22);
+        let r3 = Address::repeat_byte(0x33);
+
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
+            .unwrap();
+        provider.balance_add(from, U256::from(1000)).unwrap();
+
+        let mut precompile = AssetPrecompile;
+
+        let input = IProtocolAsset::batchTransferCall {
+            assetId: 1,
+            to: vec![r1, r2, r3],
+            amounts: vec![100, 200, 300],
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(
+            result.is_ok(),
+            "batch transfer failed: {:?}",
+            result.err()
+        );
+
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        assert_eq!(store.read_balance(1, from), 400);
+        assert_eq!(store.read_balance(1, r1), 100);
+        assert_eq!(store.read_balance(1, r2), 200);
+        assert_eq!(store.read_balance(1, r3), 300);
+    }
+
+    #[test]
+    fn test_asset_precompile_batch_transfer_blocked_recipient_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+        let allowed = Address::repeat_byte(0x11);
+        let blocked = Address::repeat_byte(0x22);
+
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
+            .unwrap();
+        provider.balance_add(from, U256::from(1000)).unwrap();
+
+        // Set compliance policy ID = 1 for asset 1
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(1, b"compliance"),
+                U256::from(1u64),
+            )
+            .unwrap();
+
+        // Mark `blocked` as non-compliant (status = 1)
+        provider
+            .sstore(
+                COMPLIANCE_ADDRESS,
+                slot_compliance(blocked, 1),
+                U256::from(1u64),
+            )
+            .unwrap();
+
+        let mut precompile = AssetPrecompile;
+
+        // Batch transfer includes the blocked recipient — should fail entirely
+        let input = IProtocolAsset::batchTransferCall {
+            assetId: 1,
+            to: vec![allowed, blocked],
+            amounts: vec![100, 200],
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(
+            result.is_err(),
+            "batch transfer with blocked recipient should fail"
+        );
+
+        // Verify no balances changed (atomic failure)
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        assert_eq!(store.read_balance(1, from), 1000);
+        assert_eq!(store.read_balance(1, allowed), 0);
+        assert_eq!(store.read_balance(1, blocked), 0);
+    }
+
+    #[test]
+    fn test_asset_precompile_batch_transfer_first_allowed_second_blocked() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+        let allowed = Address::repeat_byte(0x11);
+        let blocked = Address::repeat_byte(0x22);
+
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
+            .unwrap();
+        provider.balance_add(from, U256::from(1000)).unwrap();
+
+        // Set compliance policy ID = 1 for asset 1
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(1, b"compliance"),
+                U256::from(1u64),
+            )
+            .unwrap();
+
+        // Mark `blocked` as non-compliant (status = 1)
+        provider
+            .sstore(
+                COMPLIANCE_ADDRESS,
+                slot_compliance(blocked, 1),
+                U256::from(1u64),
+            )
+            .unwrap();
+
+        let mut precompile = AssetPrecompile;
+
+        // Blocked recipient is SECOND in the list — should still fail
+        let input = IProtocolAsset::batchTransferCall {
+            assetId: 1,
+            to: vec![allowed, blocked],
+            amounts: vec![100, 200],
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(
+            result.is_err(),
+            "batch transfer with blocked recipient at position 1 should fail"
+        );
     }
 }

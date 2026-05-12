@@ -174,3 +174,39 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: false
+
+  mutants:
+    name: Mutation Testing
+    runs-on: ubuntu-latest
+    # Run on manual trigger or weekly schedule (mutation testing is slow)
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Set up swap
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Run mutation tests
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: cargo mutants --profile=mutants
+      - name: Upload mutants report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants.out/

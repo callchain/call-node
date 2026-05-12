@@ -13,7 +13,7 @@ use crate::logging::helpers::format_timestamp;
 use crate::logging::rotation;
 
 /// Start a background task that receives log entries and writes them to file.
-fn start_file_logger_task(
+pub(crate) fn start_file_logger_task(
     mut rx: mpsc::UnboundedReceiver<LogEntry>,
     config: LogConfig,
 ) -> Result<(), String> {

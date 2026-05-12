@@ -986,4 +986,243 @@ mod tests {
         assert!(ready.contains(&7));
         assert_eq!(ready.len(), 2);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ForkManager persistence tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_fork_manager_serde_roundtrip() {
+        let (mut fm, validators) = make_fork_manager(21);
+        fm.set_timelock_blocks(500);
+        fm.require_validator_readiness = true;
+
+        // Schedule multiple upgrades
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(1, 1, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        fm.schedule_governance_upgrade(ProtocolVersion::new(1, 2, 0), 1200, 42, 100)
+            .unwrap();
+
+        // Signal readiness for one upgrade
+        fm.signal_upgrade_readiness(0, ProtocolVersion::new(1, 1, 0))
+            .unwrap();
+        fm.signal_upgrade_readiness(1, ProtocolVersion::new(1, 1, 0))
+            .unwrap();
+
+        // Serialize and deserialize
+        let bytes = bincode::serialize(&fm).unwrap();
+        let restored: ForkManager = bincode::deserialize(&bytes).unwrap();
+
+        // Verify current version preserved
+        assert_eq!(restored.current_version, fm.current_version);
+        assert_eq!(restored.current_version(), ProtocolVersion::new(1, 0, 0));
+
+        // Verify scheduled upgrades retained
+        assert_eq!(restored.scheduled_upgrades.len(), 2);
+        let entry1 = &restored.scheduled_upgrades[0];
+        assert_eq!(entry1.version, ProtocolVersion::new(1, 1, 0));
+        assert_eq!(entry1.activation_height, 100);
+        assert!(!entry1.applied);
+        assert_eq!(entry1.proposal_id, None);
+
+        let entry2 = &restored.scheduled_upgrades[1];
+        assert_eq!(entry2.version, ProtocolVersion::new(1, 2, 0));
+        assert_eq!(entry2.activation_height, 1200);
+        assert!(!entry2.applied);
+        assert_eq!(entry2.proposal_id, Some(42));
+        assert_eq!(entry2.approved_at_height, Some(100));
+
+        // Verify timelock preserved
+        assert_eq!(restored.timelock_blocks, 500);
+
+        // Verify total validators preserved
+        assert_eq!(restored.total_validators, 21);
+
+        // Verify validator keys preserved
+        assert_eq!(restored.validator_keys.len(), 21);
+        for (vid, pubkey, _) in &validators {
+            assert_eq!(restored.validator_keys.get(vid), Some(pubkey));
+        }
+
+        // Verify validator readiness preserved
+        assert_eq!(
+            restored.validator_readiness.get(&ProtocolVersion::new(1, 1, 0)).unwrap().len(),
+            2
+        );
+        assert!(restored
+            .validator_readiness
+            .get(&ProtocolVersion::new(1, 1, 0))
+            .unwrap()
+            .contains(&0));
+        assert!(restored
+            .validator_readiness
+            .get(&ProtocolVersion::new(1, 1, 0))
+            .unwrap()
+            .contains(&1));
+
+        // Verify require_validator_readiness preserved
+        assert!(restored.require_validator_readiness);
+    }
+
+    #[test]
+    fn test_fork_manager_persistence_upgrades_survive_restart() {
+        let (mut fm, _validators) = make_fork_manager(21);
+
+        // Schedule an upgrade that hasn't been applied yet
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(2, 0, 0),
+            activation_height: 1000,
+            applied: false,
+            proposal_id: Some(1),
+            approved_at_height: Some(100),
+        });
+
+        // "Restart": serialize and deserialize
+        let bytes = serde_json::to_vec(&fm).unwrap();
+        let mut restored: ForkManager = serde_json::from_slice(&bytes).unwrap();
+
+        // Before activation height, upgrade should still be pending
+        assert_eq!(restored.current_version(), ProtocolVersion::new(1, 0, 0));
+        let next = restored.next_upgrade(500).unwrap();
+        assert_eq!(next.version, ProtocolVersion::new(2, 0, 0));
+        assert_eq!(next.activation_height, 1000);
+
+        // After restart, applying the upgrade at height 1000 should work
+        let applied = restored.check_upgrades_at_height(1000);
+        assert_eq!(applied, Some(ProtocolVersion::new(2, 0, 0)));
+        assert_eq!(restored.current_version(), ProtocolVersion::new(2, 0, 0));
+
+        // The upgrade should be marked applied
+        assert!(restored.scheduled_upgrades[0].applied);
+    }
+
+    #[test]
+    fn test_fork_manager_persistence_rollback_nonces_survive() {
+        let (mut fm, validators) = make_fork_manager(21);
+
+        let target_height = 500u64;
+        let target_version = ProtocolVersion::new(1, 0, 0);
+
+        // Submit a few rollback signatures to advance nonces
+        for i in 0..3 {
+            let (vid, _, signing_key) = &validators[i as usize];
+            let sig = ed25519_sign(
+                signing_key,
+                &rollback_message_hash(*vid, target_height, target_version, 0),
+            );
+            fm.submit_rollback_signature(*vid, target_height, target_version, 0, sig)
+                .unwrap();
+        }
+
+        // Verify nonces incremented
+        assert_eq!(fm.rollback_nonces.get(&0), Some(&1));
+        assert_eq!(fm.rollback_nonces.get(&1), Some(&1));
+        assert_eq!(fm.rollback_nonces.get(&2), Some(&1));
+
+        // Serialize and deserialize
+        let bytes = bincode::serialize(&fm).unwrap();
+        let restored: ForkManager = bincode::deserialize(&bytes).unwrap();
+
+        // Verify rollback nonces survived restart
+        assert_eq!(restored.rollback_nonces.get(&0), Some(&1));
+        assert_eq!(restored.rollback_nonces.get(&1), Some(&1));
+        assert_eq!(restored.rollback_nonces.get(&2), Some(&1));
+        assert_eq!(restored.rollback_nonces.get(&3), None);
+
+        // Verify active rollback survived
+        assert!(restored.rollback_progress().is_some());
+        let (sigs, quorum) = restored.rollback_progress().unwrap();
+        assert_eq!(sigs, 3);
+        assert_eq!(quorum, 14);
+    }
+
+    #[test]
+    fn test_fork_manager_persistence_rollback_history_survive() {
+        let (mut fm, validators) = make_fork_manager(21);
+
+        let target_height = 500u64;
+        let target_version = ProtocolVersion::new(1, 0, 0);
+
+        // Submit enough signatures to reach quorum
+        for i in 0..14 {
+            let (vid, _, signing_key) = &validators[i as usize];
+            let sig = ed25519_sign(
+                signing_key,
+                &rollback_message_hash(*vid, target_height, target_version, 0),
+            );
+            let result = fm
+                .submit_rollback_signature(*vid, target_height, target_version, 0, sig)
+                .unwrap();
+            if i == 13 {
+                let result = result.expect("quorum reached");
+                fm.execute_rollback(result, 600);
+            }
+        }
+
+        // Verify rollback history recorded
+        assert_eq!(fm.rollback_history.len(), 1);
+        assert_eq!(fm.rollback_history[0].target_height, 500);
+        assert_eq!(fm.rollback_history[0].target_version, target_version);
+        assert_eq!(fm.rollback_history[0].signature_count, 14);
+        assert_eq!(fm.rollback_history[0].executed_at_height, 600);
+
+        // Serialize and deserialize
+        let bytes = bincode::serialize(&fm).unwrap();
+        let restored: ForkManager = bincode::deserialize(&bytes).unwrap();
+
+        // Verify rollback history survived
+        assert_eq!(restored.rollback_history.len(), 1);
+        assert_eq!(restored.rollback_history[0].target_height, 500);
+        assert_eq!(restored.rollback_history[0].target_version, target_version);
+        assert_eq!(restored.rollback_history[0].signature_count, 14);
+        assert_eq!(restored.rollback_history[0].total_validators, 21);
+        assert_eq!(restored.rollback_history[0].executed_at_height, 600);
+    }
+
+    #[test]
+    fn test_fork_manager_persistence_partially_applied_upgrades() {
+        let mut fm = ForkManager::new(ProtocolVersion::new(1, 0, 0), 1);
+
+        // Schedule two upgrades, apply the first one
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(1, 1, 0),
+            activation_height: 100,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+        fm.schedule_upgrade(UpgradeEntry {
+            version: ProtocolVersion::new(1, 2, 0),
+            activation_height: 200,
+            applied: false,
+            proposal_id: None,
+            approved_at_height: None,
+        });
+
+        // Apply first upgrade
+        fm.check_upgrades_at_height(100);
+        assert_eq!(fm.current_version(), ProtocolVersion::new(1, 1, 0));
+        assert!(fm.scheduled_upgrades[0].applied);
+        assert!(!fm.scheduled_upgrades[1].applied);
+
+        // Serialize and deserialize
+        let bytes = serde_json::to_vec(&fm).unwrap();
+        let mut restored: ForkManager = serde_json::from_slice(&bytes).unwrap();
+
+        // Verify applied flag survived for first upgrade
+        assert!(restored.scheduled_upgrades[0].applied);
+        assert!(!restored.scheduled_upgrades[1].applied);
+        assert_eq!(restored.current_version(), ProtocolVersion::new(1, 1, 0));
+
+        // Second upgrade should still apply after restart
+        let applied = restored.check_upgrades_at_height(200);
+        assert_eq!(applied, Some(ProtocolVersion::new(1, 2, 0)));
+        assert_eq!(restored.current_version(), ProtocolVersion::new(1, 2, 0));
+        assert!(restored.scheduled_upgrades[1].applied);
+    }
 }

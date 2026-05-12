@@ -319,3 +319,95 @@ fn test_otel_spans_safe_without_global_init() {
     // Rejected tx should still increment the registry counter
     assert_eq!(registry.mempool_tx_rejected.load(Ordering::Relaxed), 1);
 }
+
+// ── OpenTelemetry span emission tests (gap #26) ─────────────────────
+
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use opentelemetry_sdk::export::trace::{ExportResult, SpanData, SpanExporter};
+use opentelemetry_sdk::trace::TracerProvider;
+
+#[derive(Debug, Clone)]
+struct CaptureExporter {
+    spans: Arc<Mutex<Vec<SpanData>>>,
+}
+
+impl CaptureExporter {
+    fn new() -> Self {
+        Self {
+            spans: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn get_spans(&self) -> Vec<SpanData> {
+        self.spans.lock().unwrap().clone()
+    }
+}
+
+impl SpanExporter for CaptureExporter {
+    fn export(
+        &mut self,
+        batch: Vec<SpanData>,
+    ) -> Pin<Box<dyn std::future::Future<Output = ExportResult> + Send + 'static>> {
+        self.spans.lock().unwrap().extend(batch);
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
+fn setup_test_tracer() -> (TracerProvider, CaptureExporter) {
+    let exporter = CaptureExporter::new();
+    let provider = TracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    (provider, exporter)
+}
+
+/// Single combined test to avoid OnceLock isolation issues across tests.
+/// Verifies block, tx, and p2p spans are all emitted to the collector.
+#[test]
+fn test_otel_spans_emitted_to_collector() {
+    let (provider, exporter) = setup_test_tracer();
+
+    // Set global provider once. If another test already set it, this fails —
+    // but we run all assertions in one test so isolation is guaranteed.
+    let _ = crate::telemetry::otel::GLOBAL_PROVIDER.set(provider);
+
+    let registry = TelemetryRegistry::new(std::env::temp_dir());
+    registry.record_block_produced();
+    registry.record_block_committed();
+
+    super::record_block_span(&registry, 42, 150);
+    super::record_tx_span(&registry, "evm", 25, true);
+    super::record_p2p_span(&registry, "sent", "block_announcement", 1024);
+
+    // Force flush spans
+    if let Some(ref provider) = crate::telemetry::otel::GLOBAL_PROVIDER.get() {
+        let _ = provider.force_flush();
+    }
+
+    let spans = exporter.get_spans();
+    assert!(!spans.is_empty(), "spans should be emitted to collector");
+
+    // Block span
+    let block_span = spans.iter().find(|s| s.name.as_ref() == "block_produced");
+    assert!(block_span.is_some(), "should find a 'block_produced' span");
+    let span = block_span.unwrap();
+    let height_attr = span.attributes.iter().find(|a| a.key.as_ref() == "block.height");
+    assert!(height_attr.is_some());
+    assert_eq!(height_attr.unwrap().value, opentelemetry::Value::I64(42));
+    let duration_attr = span.attributes.iter().find(|a| a.key.as_ref() == "block.duration_ms");
+    assert!(duration_attr.is_some());
+    assert_eq!(duration_attr.unwrap().value, opentelemetry::Value::I64(150));
+
+    // Tx span
+    let tx_span = spans.iter().find(|s| s.name.as_ref() == "tx_processed");
+    assert!(tx_span.is_some(), "should find a 'tx_processed' span");
+
+    // P2P span
+    let p2p_span = spans.iter().find(|s| s.name.as_ref() == "p2p_message");
+    assert!(p2p_span.is_some(), "should find a 'p2p_message' span");
+    let span = p2p_span.unwrap();
+    let bytes_attr = span.attributes.iter().find(|a| a.key.as_ref() == "p2p.bytes");
+    assert!(bytes_attr.is_some());
+    assert_eq!(bytes_attr.unwrap().value, opentelemetry::Value::I64(1024));
+}

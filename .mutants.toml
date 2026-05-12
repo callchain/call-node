@@ -1,0 +1,33 @@
+# cargo-mutants configuration
+# Run with: cargo mutants --profile=mutants
+# Docs: https://mutants.rs/config.html
+
+# Key crates to mutation-test (hot paths from gap #33)
+# Excluded: call-evm (large, external revm), call-shielded (ZK circuits, slow)
+# Excluded: tempo (external dependency)
+test_tool = "cargo"
+build_tool = "cargo"
+
+[profile.mutants]
+# Only test crates that have unit tests and are part of the workspace
+test_tool = "cargo"
+build_tool = "cargo"
+
+# Exclude crates that are too slow or externally dependent
+exclude = [
+    "tempo",
+    "call-evm",
+    "call-shielded",
+]
+
+# Exclude generated files and test-only code
+glob = [
+    "crates/*/src/**/*.rs",
+]
+
+# Only run tests that are fast enough for mutation testing
+# (proptest and criterion benchmarks are excluded automatically)
+test_args = ["--lib", "--", "--test-threads=2"]
+
+# Cap iterations to keep CI runtime bounded
+timeout = 300

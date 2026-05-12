@@ -170,3 +170,70 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    use super::calculate_overhead;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_overhead_zero_ops_equals_base(base in 0u64..10_000_000u64) {
+            assert_eq!(calculate_overhead(base, 0, 0), base);
+        }
+
+        #[test]
+        fn prop_overhead_monotonic_sloads(
+            base in 0u64..1_000_000u64,
+            sloads_a in 0u64..1_000_000u64,
+            sloads_b in 0u64..1_000_000u64,
+            sstores in 0u64..100_000u64
+        ) {
+            let result_a = calculate_overhead(base, sloads_a, sstores);
+            let result_b = calculate_overhead(base, sloads_b, sstores);
+            if sloads_a <= sloads_b {
+                assert!(result_a <= result_b, "overhead must be monotonic in sloads");
+            } else {
+                assert!(result_a >= result_b, "overhead must be monotonic in sloads");
+            }
+        }
+
+        #[test]
+        fn prop_overhead_monotonic_sstores(
+            base in 0u64..1_000_000u64,
+            sloads in 0u64..1_000_000u64,
+            sstores_a in 0u64..100_000u64,
+            sstores_b in 0u64..100_000u64
+        ) {
+            let result_a = calculate_overhead(base, sloads, sstores_a);
+            let result_b = calculate_overhead(base, sloads, sstores_b);
+            if sstores_a <= sstores_b {
+                assert!(result_a <= result_b, "overhead must be monotonic in sstores");
+            } else {
+                assert!(result_a >= result_b, "overhead must be monotonic in sstores");
+            }
+        }
+
+        #[test]
+        fn prop_overhead_never_underflows(
+            base in 0u64..u64::MAX,
+            sloads in 0u64..u64::MAX,
+            sstores in 0u64..u64::MAX
+        ) {
+            let result = calculate_overhead(base, sloads, sstores);
+            assert!(result >= base || result == u64::MAX, "saturating add should never go below base unless overflowed to MAX");
+        }
+
+        #[test]
+        fn prop_overhead_components_additive(
+            base in 0u64..100_000u64,
+            sloads in 0u64..10_000u64,
+            sstores in 0u64..1_000u64
+        ) {
+            // For values that don't saturate, overhead should equal base + 50*sloads + 500*sstores
+            let expected = base + sloads * 50 + sstores * 500;
+            let result = calculate_overhead(base, sloads, sstores);
+            assert_eq!(result, expected, "non-saturating inputs must produce exact sum");
+        }
+    }
+}

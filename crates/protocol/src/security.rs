@@ -429,6 +429,86 @@ mod tests {
         assert!(protector.check_and_record(hash)); // now accepted again
     }
 
+    #[test]
+    fn test_replay_protector_just_inserted_never_evicted() {
+        let max_seen = 16;
+        let mut protector = ReplayProtector::new(max_seen);
+
+        // Fill to capacity
+        for i in 0..max_seen {
+            protector.check_and_record(TxHash::repeat_byte(i as u8));
+        }
+
+        // Insert a specific "precious" hash that triggers eviction
+        let precious = TxHash::repeat_byte(255);
+        protector.check_and_record(precious);
+
+        // The precious hash must survive eviction
+        assert!(
+            !protector.check_and_record(precious),
+            "just-inserted hash should never be evicted"
+        );
+
+        // Size should be max_seen + 1 - (max_seen / 4) = 17 - 4 = 13
+        assert_eq!(protector.seen_hashes.len(), 13);
+    }
+
+    #[test]
+    fn test_replay_protector_no_false_evictions_under_pressure() {
+        let max_seen = 32;
+        let mut protector = ReplayProtector::new(max_seen);
+
+        // Seed with some hashes
+        for i in 0..max_seen {
+            protector.check_and_record(TxHash::repeat_byte(i as u8));
+        }
+
+        // Apply sustained pressure: each insertion evicts ~25% of older hashes
+        for round in 0..20 {
+            let new_hash = TxHash::repeat_byte((200 + round) as u8);
+            assert!(
+                protector.check_and_record(new_hash),
+                "round {round}: new hash should be accepted"
+            );
+
+            // The newest hash must always be protected
+            assert!(
+                !protector.check_and_record(new_hash),
+                "round {round}: newest hash should still be a replay"
+            );
+
+            // Set size must never exceed max_seen + 1
+            assert!(
+                protector.seen_hashes.len() <= max_seen + 1,
+                "round {round}: size {} exceeded bound {}",
+                protector.seen_hashes.len(),
+                max_seen + 1
+            );
+        }
+    }
+
+    #[test]
+    fn test_replay_protector_eviction_count_exact() {
+        let max_seen = 40;
+        let mut protector = ReplayProtector::new(max_seen);
+
+        // Fill exactly to capacity
+        for i in 0..max_seen {
+            protector.check_and_record(TxHash::repeat_byte(i as u8));
+        }
+        assert_eq!(protector.seen_hashes.len(), max_seen);
+
+        // Trigger eviction — should remove exactly max_seen / 4 = 10 hashes
+        protector.check_and_record(TxHash::repeat_byte(255));
+        let expected = max_seen + 1 - (max_seen / 4); // 41 - 10 = 31
+        assert_eq!(
+            protector.seen_hashes.len(),
+            expected,
+            "eviction should remove exactly max_seen/4 = {} entries",
+            max_seen / 4
+        );
+    }
+
     // ── Property-based tests (proptest) ───────────────────────────────
 
     use proptest::prelude::*;

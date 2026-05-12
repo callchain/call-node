@@ -519,6 +519,11 @@ impl PartitionSimulator {
         self.router.set_drop_rate(rate);
     }
 
+    /// Set base network latency in milliseconds applied to every delivered message.
+    pub fn set_delay_ms(&self, ms: u64) {
+        self.router.set_delay_ms(ms);
+    }
+
     /// Produce a block on `node_idx`.
     pub fn produce_block(&mut self, node_idx: usize, timestamp: u64) -> Option<Block> {
         if let Ok(mut node) = self.nodes[node_idx].write() {

@@ -279,6 +279,9 @@ pub struct GossipManager {
     limits: NetworkLimits,
     /// Pending transactions to propagate (ordered by priority)
     pending: Vec<PropagatedTx>,
+    /// Globally banned peers (persisted across reconnects).
+    /// Key = peer_id, Value = when the ban was issued.
+    banned_peers: HashMap<String, Instant>,
 }
 
 impl GossipManager {
@@ -289,11 +292,25 @@ impl GossipManager {
             peers: HashMap::new(),
             limits,
             pending: Vec::new(),
+            banned_peers: HashMap::new(),
         }
     }
 
-    /// Register a new peer
+    /// Register a new peer.
+    /// Rejects reconnects from globally banned peers whose ban has not expired.
     pub fn add_peer(&mut self, peer_id: String) -> Result<(), NetworkError> {
+        // Check global ban list first
+        if let Some(&banned_at) = self.banned_peers.get(&peer_id) {
+            let ban_duration = Duration::from_secs(self.limits.ban_duration_seconds);
+            if banned_at.elapsed() < ban_duration {
+                return Err(NetworkError::PeerBanned {
+                    reason: "reconnect rejected during ban window".into(),
+                });
+            }
+            // Ban expired — remove from global list
+            self.banned_peers.remove(&peer_id);
+        }
+
         if self.peers.len() >= self.limits.max_peers as usize {
             return Err(NetworkError::PeerLimitReached {
                 current: self.peers.len(),
@@ -305,13 +322,21 @@ impl GossipManager {
         Ok(())
     }
 
-    /// Remove a peer
+    /// Remove a peer.
+    /// If the peer was banned, the ban is preserved in the global list so
+    /// reconnects during the ban window are rejected.
     pub fn remove_peer(&mut self, peer_id: &str) {
-        self.peers.remove(peer_id);
+        if let Some(peer) = self.peers.remove(peer_id) {
+            if peer.banned {
+                self.banned_peers
+                    .insert(peer_id.to_string(), peer.banned_at.unwrap_or_else(Instant::now));
+            }
+        }
     }
 
     /// Process an incoming transaction from a peer.
     /// Returns the transaction if it's new and valid.
+    /// Automatically bans peers that exceed their rate limit.
     pub fn process_incoming_tx(
         &mut self,
         peer_id: &str,
@@ -328,7 +353,20 @@ impl GossipManager {
             })?;
         let ban_duration = Duration::from_secs(self.limits.ban_duration_seconds);
         peer.check_ban_expiry(ban_duration);
-        peer.record_message()?;
+
+        // Record message; auto-ban on rate limit exceed
+        match peer.record_message() {
+            Ok(()) => {}
+            Err(NetworkError::RateLimitExceeded) => {
+                peer.ban("rate_limit_exceeded".into());
+                self.banned_peers
+                    .insert(peer_id.to_string(), Instant::now());
+                return Err(NetworkError::PeerBanned {
+                    reason: "rate_limit_exceeded".into(),
+                });
+            }
+            Err(other) => return Err(other),
+        }
 
         // Check message size
         if data.len() > self.limits.max_message_size as usize {
@@ -713,5 +751,98 @@ mod tests {
         // Sending from removed peer should fail
         let result = manager.process_incoming_tx("p1", vec![1], test_hash(1), TxPriority::High);
         assert!(matches!(result, Err(NetworkError::PeerNotFound { .. })));
+    }
+
+    #[test]
+    fn test_gossip_manager_rate_limit_triggers_auto_ban() {
+        // Set very low rate limit (2 msg/sec) so we can exceed it quickly
+        let limits = NetworkLimits::new(10, 2, 1024, 1000, 3600);
+        let mut manager = GossipManager::new(limits);
+        manager.add_peer("peer_1".into()).unwrap();
+
+        // Consume the 2 allowed messages
+        for i in 0..2 {
+            let result = manager.process_incoming_tx(
+                "peer_1",
+                vec![i as u8],
+                test_hash(i),
+                TxPriority::High,
+            );
+            assert!(result.is_ok(), "message {i} should be accepted");
+        }
+
+        // 3rd message exceeds rate limit → auto-ban
+        let result = manager.process_incoming_tx(
+            "peer_1",
+            vec![2],
+            test_hash(2),
+            TxPriority::High,
+        );
+        assert!(
+            matches!(result, Err(NetworkError::PeerBanned { ref reason }) if reason == "rate_limit_exceeded"),
+            "rate limit exceed should trigger auto-ban, got {:?}",
+            result
+        );
+
+        // Peer should be marked banned locally
+        let peer = manager.peers.get("peer_1").unwrap();
+        assert!(peer.banned, "peer should be banned after rate limit exceed");
+
+        // Peer should also be in the global banned list
+        assert!(manager.banned_peers.contains_key("peer_1"));
+    }
+
+    #[test]
+    fn test_gossip_manager_banned_peer_reconnect_rejected() {
+        let limits = NetworkLimits::new(10, 100, 1024, 1000, 3600);
+        let mut manager = GossipManager::new(limits);
+        manager.add_peer("peer_1".into()).unwrap();
+
+        // Ban the peer
+        if let Some(peer) = manager.peers.get_mut("peer_1") {
+            peer.ban("malicious".into());
+        }
+
+        // Remove peer (simulating disconnect)
+        manager.remove_peer("peer_1");
+        assert_eq!(manager.peer_count(), 0);
+        // Ban should be preserved globally
+        assert!(manager.banned_peers.contains_key("peer_1"));
+
+        // Attempt to reconnect — should be rejected during ban window
+        let result = manager.add_peer("peer_1".into());
+        assert!(
+            matches!(result, Err(NetworkError::PeerBanned { ref reason }) if reason == "reconnect rejected during ban window"),
+            "reconnect from banned peer should be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_gossip_manager_ban_expiry_allows_reconnect() {
+        let limits = NetworkLimits::new(10, 100, 1024, 1000, 1); // 1-second ban duration
+        let mut manager = GossipManager::new(limits);
+        manager.add_peer("peer_1".into()).unwrap();
+
+        // Ban the peer and set banned_at far in the past so ban is expired
+        if let Some(peer) = manager.peers.get_mut("peer_1") {
+            peer.ban("test_ban".into());
+            peer.banned_at = Some(Instant::now() - Duration::from_secs(2));
+        }
+
+        // Remove peer (simulating disconnect)
+        manager.remove_peer("peer_1");
+        assert_eq!(manager.peer_count(), 0);
+
+        // Wait a tiny bit to ensure ban has expired
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Attempt to reconnect — ban has expired, should succeed
+        let result = manager.add_peer("peer_1".into());
+        assert!(result.is_ok(), "reconnect should be allowed after ban expiry");
+        assert_eq!(manager.peer_count(), 1);
+
+        // Global ban entry should have been cleaned up
+        assert!(!manager.banned_peers.contains_key("peer_1"));
     }
 }

@@ -16,3 +16,9 @@ call-asset.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 revm-precompile.workspace = true
+hickory-resolver = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+
+[features]
+default = []
+domain-verify = ["dep:hickory-resolver", "dep:ureq"]

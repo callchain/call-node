@@ -161,7 +161,7 @@ fn decode_rlp_item(data: &[u8]) -> Option<(&[u8], usize)> {
 
 /// Decode field at index `idx` from an RLP-encoded Ethereum header.
 /// Returns the raw payload bytes of the field.
-fn decode_rlp_field(data: &[u8], idx: usize) -> Option<&[u8]> {
+pub(crate) fn decode_rlp_field(data: &[u8], idx: usize) -> Option<&[u8]> {
     if data.is_empty() {
         return None;
     }

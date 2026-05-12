@@ -24,3 +24,9 @@ serde_json = { workspace = true, optional = true }
 eth-sync = ["dep:ureq", "dep:serde_json"]
 
 [dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "mpt_verify"
+harness = false

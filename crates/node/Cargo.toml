@@ -69,3 +69,8 @@ rand.workspace = true
 [dev-dependencies]
 alloy-sol-types.workspace = true
 call-agent.workspace = true
+criterion = { workspace = true }
+
+[[bench]]
+name = "block_production"
+harness = false
