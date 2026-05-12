@@ -12,6 +12,7 @@ use call_precompile::{
     dispatch, ok_empty, require_caller, slot_asset_meta, slot_compliance, write_string32,
     StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
 };
+use call_precompile::erc20_reader::read_erc20_metadata;
 use call_primitives::{Address, U256};
 use call_protocol::CALL_ASSET_ID;
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -28,7 +29,7 @@ sol! {
         function issuerMint(uint64 assetId, address to, uint128 amount) external;
         function burn(uint64 assetId, address from, uint128 amount) external;
         function register(string calldata symbol, string calldata name, uint8 decimals, uint128 maxSupply) external returns (uint64 assetId);
-        function registerErc20(address evmContract, string calldata symbol, string calldata name, uint8 decimals, uint128 maxSupply) external returns (uint64 assetId);
+        function registerErc20(address evmContract) external returns (uint64 assetId);
     }
 }
 
@@ -334,17 +335,19 @@ impl AssetPrecompile {
             calldata,
             50000,
             storage,
-            |call, _storage| {
-                let caller = require_caller(msg_sender)?;
+            |call, storage| {
+                let _caller = require_caller(msg_sender)?;
+                let meta = read_erc20_metadata(storage, call.evmContract)
+                    .map_err(|e| PrecompileError::Other(format!("ERC-20 read failed: {e}").into()))?;
                 let mut store = AssetStorage::new(sr);
                 let asset_id = store
                     .register_erc20(
                         call.evmContract,
-                        &call.symbol,
-                        &call.name,
-                        call.decimals,
-                        call.maxSupply,
-                        caller,
+                        &meta.symbol,
+                        &meta.name,
+                        meta.decimals,
+                        0,               // uncapped
+                        Address::ZERO,   // no issuer can mint
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(asset_id)
@@ -711,5 +714,73 @@ mod tests {
             result.is_err(),
             "batch transfer with blocked recipient at position 1 should fail"
         );
+    }
+
+    #[test]
+    fn test_asset_precompile_register_erc20_reads_metadata() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0xAA);
+
+        // Set dummy code so the contract is not rejected.
+        provider.set_code(contract, alloy_primitives::bytes!("6000"));
+
+        // Helper: encode a short Solidity string into a U256 storage word.
+        // Data is left-aligned (high bytes), length*2 in the low byte.
+        let encode_short = |s: &str| {
+            let len = s.len();
+            assert!(len <= 31, "short string only");
+            let mut bytes = [0u8; 32];
+            bytes[..len].copy_from_slice(s.as_bytes());
+            bytes[31] = (len * 2) as u8;
+            U256::from_be_bytes::<32>(bytes)
+        };
+
+        // OZ v5 layout: name@0, symbol@1, decimals@2
+        provider
+            .sstore(contract, U256::from(0), encode_short("Wrapped Ether"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(1), encode_short("WETH"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(2), U256::from(18))
+            .unwrap();
+
+        let input = IProtocolAsset::registerErc20Call {
+            evmContract: contract,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_ok(),
+            "registerErc20 failed: {:?}",
+            result.err()
+        );
+
+        // Decode returned asset_id (should be 1 since it's the first registration)
+        let output = result.unwrap();
+        let asset_id = u64::from_be_bytes([
+            output.bytes[24],
+            output.bytes[25],
+            output.bytes[26],
+            output.bytes[27],
+            output.bytes[28],
+            output.bytes[29],
+            output.bytes[30],
+            output.bytes[31],
+        ]);
+        assert_eq!(asset_id, 1);
+
+        // Verify metadata was stored correctly.
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        let meta = store.read_meta(asset_id);
+        assert_eq!(meta.name, "Wrapped Ether");
+        assert_eq!(meta.symbol, "WETH");
+        assert_eq!(meta.decimals, 18);
+        assert_eq!(meta.issuer, Address::ZERO); // issuer = zero address
+        assert_eq!(meta.max_supply, 0); // uncapped
     }
 }

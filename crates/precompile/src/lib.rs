@@ -14,6 +14,7 @@
 #![deny(unsafe_code)]
 
 pub mod dispatch;
+pub mod erc20_reader;
 #[allow(unsafe_code)]
 pub mod storage;
 pub mod utils;

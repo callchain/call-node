@@ -32,14 +32,15 @@ All four steps are atomic. If any step fails, the transaction reverts and no par
 
 ## ERC-20 Asset Registration
 
-For assets that already exist as ERC-20 tokens on the EVM layer, use `registerErc20(address,string,string,uint8,uint128)` on the Asset precompile (`0x201`). This binds an existing ERC-20 contract to a protocol `asset_id`, enabling bidirectional switching via the Switch precompile (`0x207`).
+For assets that already exist as ERC-20 tokens on the EVM layer, use `registerErc20(address)` on the Asset precompile (`0x201`). This binds an existing ERC-20 contract to a protocol `asset_id`, enabling bidirectional switching via the Switch precompile (`0x207`).
 
 ### Execution Flow
 
-1. **Asset allocation**: Same as protocol-only registration — allocate a monotonically increasing `asset_id`.
-2. **Metadata storage**: Store `symbol`, `name`, `decimals`, `issuer = sender`, `protocol_supply = 0`, `evm_supply = 0`, `max_supply`.
-3. **ERC-20 binding**: Store `evm_contract_address` from the caller-provided address. This address is used by the Switch precompile for `switchToEvm` / `switchToProtocol`.
-4. **Has-ERC-20 flag**: Set `has_erc20 = 1` in asset metadata. This flag is checked by the Switch precompile — only assets with `has_erc20 == 1` (or CALL, `asset_id == 1`) can be switched.
+1. **Metadata read**: The precompile reads `name`, `symbol`, and `decimals` directly from the ERC-20 contract's EVM storage slots (supports OpenZeppelin v4 and v5 layouts).
+2. **Asset allocation**: Allocate a monotonically increasing `asset_id`.
+3. **Metadata storage**: Store the discovered `symbol`, `name`, `decimals`, `issuer = Address::ZERO` (no one can mint), `protocol_supply = 0`, `evm_supply = 0`, `max_supply = 0` (uncapped).
+4. **ERC-20 binding**: Store `evm_contract_address` from the caller-provided address. This address is used by the Switch precompile for `switchToEvm` / `switchToProtocol`.
+5. **Has-ERC-20 flag**: Set `has_erc20 = 1` in asset metadata. This flag is checked by the Switch precompile — only assets with `has_erc20 == 1` (or CALL, `asset_id == 1`) can be switched.
 
 ### Protocol-Only vs ERC-20 Backed
 
@@ -47,9 +48,11 @@ For assets that already exist as ERC-20 tokens on the EVM layer, use `registerEr
 |----------|---------------------------|--------------------------------|
 | `has_erc20` | `0` | `1` |
 | `evm_contract_address` | `None` | Set from caller argument |
+| `issuer` | `msg.sender` | `Address::ZERO` (no one can mint) |
+| `max_supply` | Caller-specified | `0` (uncapped) |
 | `switchToEvm` | ❌ Rejected | ✅ Allowed |
 | `switchToProtocol` | ❌ Rejected | ✅ Allowed |
-| `mint` / `burn` | ✅ Allowed (issuer only) | ✅ Allowed (protocol-layer only) |
+| `mint` / `burn` | ✅ Allowed (issuer only) | ❌ Not allowed (issuer = ZERO) |
 | `transfer` | ✅ Allowed | ✅ Allowed |
 
 Protocol-only assets live entirely within the Callchain protocol layer and cannot interact with EVM contracts. ERC-20 backed assets bridge between protocol and EVM via the Switch precompile.
@@ -340,7 +343,7 @@ All asset operations are also available via the **Asset precompile (`0x201`)**:
 | `Mint` | `mint(uint64,address,uint128)` | `0x201` |
 | `Burn` | `burn(uint64,address,uint128)` | `0x201` |
 | `RegisterAsset` | `register(string,string,uint8,uint128)` | `0x201` |
-| `RegisterErc20` | `registerErc20(address,string,string,uint8,uint128)` | `0x201` |
+| `RegisterErc20` | `registerErc20(address)` | `0x201` |
 
 See [precompile.md](precompile.md) for the full ABI.
 

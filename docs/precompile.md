@@ -116,6 +116,9 @@ interface IProtocolAsset {
         uint128 maxSupply
     ) external returns (uint64 assetId);
 
+    function registerErc20(address evmContract)
+        external returns (uint64 assetId);
+
     function mint(uint64 assetId, address to, uint128 amount)
         external; // issuer only
 
@@ -486,6 +489,7 @@ Gas is computed at two layers:
 | `approve` | 4,000 | + sload + sstore |
 | `transferFrom` | 5,500 | + 3 sloads + 2 sstores |
 | `register` | 50,000 | + contract deployment gas |
+| `registerErc20` | 50,000 | + ERC-20 metadata reads (sloads) |
 | `mint` | 6,000 | + sload + sstore + supply update |
 | `issuerMint` | 6,000 | + EVM contract call |
 | `burn` | 5,000 | + sload + sstore + supply update |
