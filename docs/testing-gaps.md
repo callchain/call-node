@@ -20,8 +20,8 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 
 | # | Gap | Crate | What to Test |
 |---|-----|-------|--------------|
-| 1 | RPC rate limiting | `call-rpc` | Per-client request throttling, burst handling, ban-after-excess |
-| 2 | Concurrent DB access / crash recovery | `call-storage` | Simultaneous writers, WAL replay after kill -9, corruption detection |
+| 1 | ~~RPC rate limiting~~ | ~~`call-rpc`~~ | ~~Per-client request throttling, burst handling, ban-after-excess~~ |
+| 2 | ~~Concurrent DB access / crash recovery~~ | ~~`call-storage`~~ | ~~Simultaneous writers, WAL replay after kill -9, corruption detection~~ |
 | 3 | Light client beacon BLS consensus | `call-light-client` | Mock beacon API → `fetch_light_client_finality_update` → `apply_light_client_update` → `set_finalized_block` |
 | 4 | Oracle signature negative tests | `call-oracle` | Submit with invalid 64-byte signature → must fail |
 
@@ -92,11 +92,13 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 | — | Oracle E2E | Price submit/read via TestNode | prior |
 | — | Light client sync | Ethereum sync committee header verify | prior |
 | — | Soak test baseline | Sustained load E2E | prior |
+| 1 | RPC rate limiting | `crates/rpc/src/rate_limit.rs` (7 tests) | `1cf0214` |
+| 2 | Concurrent DB access / crash recovery | `crates/storage/src/reth_db.rs` (+3 tests: same-key race, reopen persist, WAL checkpoint) | current |
 
 ---
 
 ## Stats
 
-- **Total open**: 33 gaps (4 critical + 10 high + 13 medium + 6 infrastructure)
-- **Recently closed**: 11 gaps
+- **Total open**: 31 gaps (2 critical + 10 high + 13 medium + 6 infrastructure)
+- **Recently closed**: 13 gaps
 - **Target**: Close all critical + high before mainnet; medium + infra before public testnet

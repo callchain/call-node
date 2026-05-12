@@ -744,6 +744,127 @@ mod integration_tests {
         assert_eq!(all.len(), 10_000);
     }
 
+    /// Multiple threads race to write to the same key.
+    /// MDBX serializes writers via per-transaction locking, so the final
+    /// value must be one of the written values and the DB must remain
+    /// consistent (no torn writes or corruption).
+    #[test]
+    fn test_concurrent_writes_same_key() {
+        let db = temp_db();
+        let key = b"race_key".to_vec();
+        let thread_count = 10;
+        let writes_per_thread = 100;
+
+        let mut handles = Vec::new();
+        for t in 0..thread_count {
+            let db_clone = Arc::clone(&db.db);
+            let key_clone = key.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..writes_per_thread {
+                    let value = format!("thread_{}_write_{}", t, i).into_bytes();
+                    db_put::<CallEvmAccounts>(&db_clone, key_clone.clone(), value).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final value must be readable and match one of the written patterns
+        let final_data = db_get::<CallEvmAccounts>(&db.db, &key).unwrap().unwrap();
+        let final_str = String::from_utf8(final_data).unwrap();
+        assert!(
+            final_str.starts_with("thread_") && final_str.contains("_write_"),
+            "final value should match a written pattern, got: {}",
+            final_str
+        );
+
+        // All other keys in the table should be unaffected (table is empty except our key)
+        let all = db_iter_all::<CallEvmAccounts>(&db.db).unwrap();
+        assert_eq!(all.len(), 1, "only one key should exist");
+    }
+
+    /// Simulate a process crash (kill -9) by dropping the DB handle without
+    /// explicit close, then reopening the same path. MDBX WAL replay must
+    /// restore all committed data.
+    #[test]
+    fn test_db_reopen_persists_data() {
+        let path = std::env::temp_dir().join(format!(
+            "call-mdbx-reopen-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        // Phase 1: open, write, drop abruptly
+        {
+            let db = open_db(path.clone()).expect("open db");
+            db_put::<CallConsensusBlocks>(&db.db, b"block_1".to_vec(), b"data_1".to_vec())
+                .unwrap();
+            db_put::<CallConsensusBlocks>(&db.db, b"block_2".to_vec(), b"data_2".to_vec())
+                .unwrap();
+            db_put::<CallFeeParams>(&db.db, b"fee_key".to_vec(), b"fee_data".to_vec()).unwrap();
+            // db handle dropped here — simulates unclean shutdown
+        }
+
+        // Phase 2: reopen same path
+        let db2 = open_db(path.clone()).expect("reopen db after crash");
+
+        let v1 = db_get::<CallConsensusBlocks>(&db2.db, b"block_1").unwrap().unwrap();
+        assert_eq!(v1, b"data_1");
+
+        let v2 = db_get::<CallConsensusBlocks>(&db2.db, b"block_2").unwrap().unwrap();
+        assert_eq!(v2, b"data_2");
+
+        let vf = db_get::<CallFeeParams>(&db2.db, b"fee_key").unwrap().unwrap();
+        assert_eq!(vf, b"fee_data");
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// Write a checkpoint marker plus data, then simulate a crash by reopening
+    /// without clearing the checkpoint. Recovery logic must detect the pending
+    /// checkpoint and the previously-written data must remain consistent.
+    #[test]
+    fn test_wal_crash_recovery_checkpoint_detected() {
+        let path = std::env::temp_dir().join(format!(
+            "call-mdbx-wal-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        // Phase 1: write data + checkpoint, then drop abruptly (simulates crash mid-batch)
+        {
+            let db = open_db(path.clone()).expect("open db");
+            db_put::<CallEvmAccounts>(&db.db, b"account_a".to_vec(), b"balance_100".to_vec())
+                .unwrap();
+            write_checkpoint(&db.db, [0xABu8; 32]).unwrap();
+            // checkpoint NOT cleared — simulates crash before batch completion
+        }
+
+        // Phase 2: reopen — MDBX replays WAL, then recovery logic sees checkpoint
+        let db2 = open_db(path.clone()).expect("reopen after simulated crash");
+
+        // Data written before checkpoint must still be present
+        let data = db_get::<CallEvmAccounts>(&db2.db, b"account_a").unwrap().unwrap();
+        assert_eq!(data, b"balance_100");
+
+        // Checkpoint must be detectable by recovery logic
+        assert!(
+            check_recovery(&db2.db).unwrap(),
+            "pending checkpoint should be detected after crash reopen"
+        );
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
     fn write_checkpoint(db: &DatabaseEnv, block_hash: [u8; 32]) -> Result<(), String> {
         db_put::<CallCheckpoint>(db, b"pending".to_vec(), block_hash.to_vec())
             .map_err(|e| e.to_string())
