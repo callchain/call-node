@@ -91,7 +91,10 @@ pub(crate) async fn handle_network_message(
             let announcement = match postcard::from_bytes::<NetworkMessage>(data) {
                 Ok(NetworkMessage::BlockAnnouncement(a)) => a,
                 Ok(NetworkMessage::EpochBoundarySignal(signal)) => {
-                    let mut peer_heights = state.peer_heights.write().unwrap_or_else(|e| e.into_inner());
+                    let mut peer_heights = state
+                        .peer_heights
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
                     peer_heights.insert(peer_id.to_string(), signal.height);
                     tracing::debug!(
                         peer_id,
@@ -257,7 +260,8 @@ pub(crate) async fn handle_network_message(
                         signature: submission.signature,
                         sources: submission.sources,
                     };
-                    let mut tracker_guard = tracker_clone.write().unwrap_or_else(|e| e.into_inner());
+                    let mut tracker_guard =
+                        tracker_clone.write().unwrap_or_else(|e| e.into_inner());
                     // Build validator set and config from EVM state
                     let (config, validators) = {
                         let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
@@ -312,8 +316,7 @@ pub(crate) async fn handle_network_message(
                                         aggregated.block_number,
                                         aggregated.submission_count as u64,
                                     );
-                                    if let Err(e) =
-                                        provider.state().save_to_db(&state_clone.db_env)
+                                    if let Err(e) = provider.state().save_to_db(&state_clone.db_env)
                                     {
                                         tracing::warn!(error = %e, "oracle: failed to save aggregated price to DB");
                                     } else {
@@ -354,7 +357,10 @@ pub(crate) async fn handle_network_message(
                 );
                 let state_clone = Arc::clone(state);
                 tokio::spawn(async move {
-                    let mut fm = state_clone.fork_manager.write().unwrap_or_else(|e| e.into_inner());
+                    let mut fm = state_clone
+                        .fork_manager
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
                     // Only schedule if we don't already have this exact upgrade pending
                     let already_scheduled = fm.scheduled_upgrades.iter().any(|e| {
                         e.version == announcement.version

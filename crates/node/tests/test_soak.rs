@@ -292,7 +292,12 @@ async fn test_soak_sustained_high_tps_with_profiling() {
     while start.elapsed().as_secs() < duration_secs {
         // Continuously inject new txs to sustain load
         for _ in 0..50 {
-            let tx = make_tx(sender, next_nonce, test_addr((next_nonce % 100) as u8 + 50), 1);
+            let tx = make_tx(
+                sender,
+                next_nonce,
+                test_addr((next_nonce % 100) as u8 + 50),
+                1,
+            );
             next_nonce += 1;
             let node = nodes[0].read().unwrap();
             node.insert_evm_tx(tx);

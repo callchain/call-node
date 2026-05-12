@@ -51,7 +51,10 @@ async fn apply_rollback_plan(
 
     // 1. Reset in-memory block height
     {
-        let mut current_block = state.current_block.write().unwrap_or_else(|e| e.into_inner());
+        let mut current_block = state
+            .current_block
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         *current_block = plan.target_height;
     }
 
@@ -109,7 +112,10 @@ async fn apply_rollback_plan(
     prune_state.retain_up_to(plan.target_height);
 
     // 11. Persist the structural rollback marker to DB
-    let _ = save_fork_state(db_env, &state.fork_manager.read().unwrap_or_else(|e| e.into_inner()));
+    let _ = save_fork_state(
+        db_env,
+        &state.fork_manager.read().unwrap_or_else(|e| e.into_inner()),
+    );
 
     tracing::info!(
         target_height = plan.target_height,
@@ -158,10 +164,12 @@ pub(crate) async fn bft_event_loop(
             let count = call_consensus::exec::state_accessors::read_validator_count(&provider);
             let mut map = std::collections::HashMap::new();
             for id in 1..=count {
-                let addr = call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
+                let addr =
+                    call_consensus::exec::state_accessors::read_validator_addr(&provider, id);
                 if addr != Address::ZERO {
-                    let pk =
-                        call_consensus::exec::state_accessors::read_validator_pubkey(&provider, addr);
+                    let pk = call_consensus::exec::state_accessors::read_validator_pubkey(
+                        &provider, addr,
+                    );
                     if let Ok(pk) = commonware_cryptography::ed25519::PublicKey::decode(&pk[..]) {
                         map.insert(pk, id as u32);
                     }
@@ -186,7 +194,11 @@ pub(crate) async fn bft_event_loop(
 
     loop {
         // Check for pending emergency rollback and apply if present
-        let rollback_plan = state.pending_rollback.write().unwrap_or_else(|e| e.into_inner()).take();
+        let rollback_plan = state
+            .pending_rollback
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some(plan) = rollback_plan {
             apply_rollback_plan(
                 &plan,

@@ -638,14 +638,21 @@ fn test_apply_light_client_update_bls_consensus_full_flow() {
         state_root: B256::repeat_byte(0x02),
         body_root: B256::repeat_byte(0x03),
     };
-    let signing_root =
-        crate::beacon::compute_sync_committee_signing_root(&attested_header, beacon_config.fork_version, beacon_config.genesis_validators_root);
+    let signing_root = crate::beacon::compute_sync_committee_signing_root(
+        &attested_header,
+        beacon_config.fork_version,
+        beacon_config.genesis_validators_root,
+    );
 
     let (update, _secrets) = build_mock_light_client_update(signing_root);
 
     // Apply the update — BLS verification should pass
     let result = client.apply_light_client_update(update);
-    assert!(result.is_ok(), "BLS consensus update should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "BLS consensus update should succeed: {:?}",
+        result
+    );
 
     let (finalized_slot, finalized_root) = result.unwrap();
     assert_eq!(finalized_slot, 98);
@@ -678,8 +685,11 @@ fn test_apply_light_client_update_rejects_invalid_signature() {
         state_root: B256::repeat_byte(0x02),
         body_root: B256::repeat_byte(0x03),
     };
-    let signing_root =
-        crate::beacon::compute_sync_committee_signing_root(&attested_header, beacon_config.fork_version, beacon_config.genesis_validators_root);
+    let signing_root = crate::beacon::compute_sync_committee_signing_root(
+        &attested_header,
+        beacon_config.fork_version,
+        beacon_config.genesis_validators_root,
+    );
 
     let (mut update, _secrets) = build_mock_light_client_update(signing_root);
 
@@ -688,7 +698,10 @@ fn test_apply_light_client_update_rejects_invalid_signature() {
 
     let result = client.apply_light_client_update(update);
     assert!(
-        matches!(result, Err(LightClientError::SyncCommitteeSignatureInvalid(_))),
+        matches!(
+            result,
+            Err(LightClientError::SyncCommitteeSignatureInvalid(_))
+        ),
         "tampered signature should be rejected, got {:?}",
         result
     );
@@ -716,12 +729,16 @@ fn test_apply_light_client_update_rejects_insufficient_participation() {
         state_root: B256::repeat_byte(0x02),
         body_root: B256::repeat_byte(0x03),
     };
-    let signing_root =
-        crate::beacon::compute_sync_committee_signing_root(&attested_header, beacon_config.fork_version, beacon_config.genesis_validators_root);
+    let signing_root = crate::beacon::compute_sync_committee_signing_root(
+        &attested_header,
+        beacon_config.fork_version,
+        beacon_config.genesis_validators_root,
+    );
 
     // Build a sync committee with only 1 real key and the rest zeros
     let (sk, pk) = bls_generate().unwrap();
-    let mut pubkeys = vec![call_crypto::BlsPublicKey([0u8; 48]); crate::beacon::SYNC_COMMITTEE_SIZE];
+    let mut pubkeys =
+        vec![call_crypto::BlsPublicKey([0u8; 48]); crate::beacon::SYNC_COMMITTEE_SIZE];
     pubkeys[0] = pk;
 
     let sync_committee = SyncCommittee {
@@ -757,7 +774,10 @@ fn test_apply_light_client_update_rejects_insufficient_participation() {
 
     let result = client.apply_light_client_update(update);
     assert!(
-        matches!(result, Err(LightClientError::InsufficientSyncParticipation { .. })),
+        matches!(
+            result,
+            Err(LightClientError::InsufficientSyncParticipation { .. })
+        ),
         "insufficient participation should be rejected, got {:?}",
         result
     );
@@ -978,8 +998,14 @@ fn test_reorg_longer_chain_rollback_and_adoption() {
     client.submit_header(h_b4).unwrap();
 
     // 1002 and 1003 were unwound; 1004 is now canonical
-    assert!(client.get_header(1002).is_none(), "old 1002 should be unwound");
-    assert!(client.get_header(1003).is_none(), "old 1003 should be unwound");
+    assert!(
+        client.get_header(1002).is_none(),
+        "old 1002 should be unwound"
+    );
+    assert!(
+        client.get_header(1003).is_none(),
+        "old 1003 should be unwound"
+    );
     assert_eq!(client.latest_block(), 1004);
     assert_eq!(client.get_header(1004).unwrap().block_hash, hash_b4);
 
@@ -1030,7 +1056,11 @@ fn test_reorg_resubmit_unwound_headers() {
     let unwound = client.handle_reorg(h_fork4).unwrap();
 
     // Unwound should contain h2 and h3 (blocks above fork point 1001)
-    assert_eq!(unwound.len(), 2, "should unwind 2 headers above fork point 1001");
+    assert_eq!(
+        unwound.len(),
+        2,
+        "should unwind 2 headers above fork point 1001"
+    );
     let unwound_hashes: Vec<B256> = unwound.iter().map(|h| h.block_hash).collect();
     assert!(unwound_hashes.contains(&hash2));
     assert!(unwound_hashes.contains(&hash3));
@@ -1101,7 +1131,10 @@ fn test_reorg_buffered_headers_flushed_after_rollback() {
     client.submit_header(h_fork4).unwrap();
 
     // 1003 should be unwound
-    assert!(client.get_header(1003).is_none(), "old 1003 should be unwound");
+    assert!(
+        client.get_header(1003).is_none(),
+        "old 1003 should be unwound"
+    );
     assert_eq!(client.latest_block(), 1004);
 
     // The buffered 1066 is still there (its parent 1065 is still not verified)
@@ -1113,9 +1146,16 @@ fn test_reorg_buffered_headers_flushed_after_rollback() {
     client.submit_header(h5_correct.clone()).unwrap();
 
     // Buffered 1066 still there; new 1005 inserted directly
-    assert_eq!(client.buffer_len(), 1, "buffered 1066 still waiting for parent 1065");
+    assert_eq!(
+        client.buffer_len(),
+        1,
+        "buffered 1066 still waiting for parent 1065"
+    );
     assert_eq!(client.latest_block(), 1005);
-    assert_eq!(client.get_header(1005).unwrap().block_hash, h5_correct.block_hash);
+    assert_eq!(
+        client.get_header(1005).unwrap().block_hash,
+        h5_correct.block_hash
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1171,24 +1211,40 @@ fn test_tx_inclusion_proof_with_branch_node() {
 
     // Verify tx2 inclusion — proof traverses branch → leaf
     let tx_proof = TxInclusionProof::new(vec![
-        MptProofNode { rlp_bytes: branch_rlp.clone() },
-        MptProofNode { rlp_bytes: tx2_leaf.clone() },
+        MptProofNode {
+            rlp_bytes: branch_rlp.clone(),
+        },
+        MptProofNode {
+            rlp_bytes: tx2_leaf.clone(),
+        },
     ]);
     let result = client.verify_tx_inclusion(1001, tx2_hash, &tx_proof);
-    assert!(result.is_ok(), "tx inclusion with branch node should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "tx inclusion with branch node should succeed: {:?}",
+        result
+    );
 
     // Verify tx1 inclusion
     let tx_proof = TxInclusionProof::new(vec![
-        MptProofNode { rlp_bytes: branch_rlp.clone() },
-        MptProofNode { rlp_bytes: tx1_leaf.clone() },
+        MptProofNode {
+            rlp_bytes: branch_rlp.clone(),
+        },
+        MptProofNode {
+            rlp_bytes: tx1_leaf.clone(),
+        },
     ]);
     let result = client.verify_tx_inclusion(1001, tx1_hash, &tx_proof);
     assert!(result.is_ok(), "tx1 inclusion should succeed: {:?}", result);
 
     // Verify tx3 inclusion
     let tx_proof = TxInclusionProof::new(vec![
-        MptProofNode { rlp_bytes: branch_rlp },
-        MptProofNode { rlp_bytes: tx3_leaf },
+        MptProofNode {
+            rlp_bytes: branch_rlp,
+        },
+        MptProofNode {
+            rlp_bytes: tx3_leaf,
+        },
     ]);
     let result = client.verify_tx_inclusion(1001, tx3_hash, &tx_proof);
     assert!(result.is_ok(), "tx3 inclusion should succeed: {:?}", result);
@@ -1273,8 +1329,12 @@ fn test_receipt_proof_with_extension_and_branch() {
         receipt_index: 5,
         nodes: vec![
             MptProofNode { rlp_bytes: ext_rlp },
-            MptProofNode { rlp_bytes: branch_rlp },
-            MptProofNode { rlp_bytes: leaf_rlp },
+            MptProofNode {
+                rlp_bytes: branch_rlp,
+            },
+            MptProofNode {
+                rlp_bytes: leaf_rlp,
+            },
         ],
     };
 
@@ -1320,8 +1380,12 @@ fn test_tx_inclusion_proof_missing_tx_rejected() {
     // Need a leaf for the proof that has the wrong key
     let wrong_leaf = make_leaf_node_rlp(&tx2_key, b"tx2_data");
     let tx_proof = TxInclusionProof::new(vec![
-        MptProofNode { rlp_bytes: branch_rlp },
-        MptProofNode { rlp_bytes: wrong_leaf },
+        MptProofNode {
+            rlp_bytes: branch_rlp,
+        },
+        MptProofNode {
+            rlp_bytes: wrong_leaf,
+        },
     ]);
 
     let result = client.verify_tx_inclusion(1001, tx2_hash, &tx_proof);

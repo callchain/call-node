@@ -1051,7 +1051,11 @@ mod tests {
 
         // Verify validator readiness preserved
         assert_eq!(
-            restored.validator_readiness.get(&ProtocolVersion::new(1, 1, 0)).unwrap().len(),
+            restored
+                .validator_readiness
+                .get(&ProtocolVersion::new(1, 1, 0))
+                .unwrap()
+                .len(),
             2
         );
         assert!(restored

@@ -224,7 +224,11 @@ mod tests {
         // Report for asset_id=1 should only include entries where asset 1 changed
         // Entries 0 and 2 have asset 1; entry 1 does not.
         let report_call = export_compliance_report(&log, 1, "CALL", 1_700_000_000, 2, None);
-        assert_eq!(report_call.len(), 2, "asset_id=1 appears in entries 0 and 2");
+        assert_eq!(
+            report_call.len(),
+            2,
+            "asset_id=1 appears in entries 0 and 2"
+        );
         for entry in &report_call {
             assert_eq!(entry.asset_id, 1);
             assert_eq!(entry.asset_symbol, "CALL", "asset_id=1 must map to CALL");
@@ -233,10 +237,17 @@ mod tests {
         // Report for asset_id=2 should only include entries where asset 2 changed
         // Entries 1 and 2 have asset 2; entry 0 does not.
         let report_usdc = export_compliance_report(&log, 2, "USDC", 1_700_000_000, 2, None);
-        assert_eq!(report_usdc.len(), 2, "asset_id=2 appears in entries 1 and 2");
+        assert_eq!(
+            report_usdc.len(),
+            2,
+            "asset_id=2 appears in entries 1 and 2"
+        );
         for entry in &report_usdc {
             assert_eq!(entry.asset_id, 2);
-            assert_eq!(entry.asset_symbol, "USDC", "asset_id=2 must map to USDC, not CALL");
+            assert_eq!(
+                entry.asset_symbol, "USDC",
+                "asset_id=2 must map to USDC, not CALL"
+            );
         }
 
         // Verify CSV contains correct symbols
@@ -264,7 +275,10 @@ mod tests {
 
         // Request report for asset_id=7 — should be empty
         let report = export_compliance_report(&log, 7, "WETH", 1_700_000_000, 2, None);
-        assert!(report.is_empty(), "asset_id=7 should have no matching entries");
+        assert!(
+            report.is_empty(),
+            "asset_id=7 should have no matching entries"
+        );
     }
 
     #[test]
@@ -547,7 +561,10 @@ mod tests {
         );
 
         // Verify first and last lines are present
-        assert!(lines[0].contains("log-line-0"), "first line should contain log-line-0");
+        assert!(
+            lines[0].contains("log-line-0"),
+            "first line should contain log-line-0"
+        );
         assert!(
             lines[COUNT - 1].contains(&format!("log-line-{}", COUNT - 1)),
             "last line should contain log-line-{}",

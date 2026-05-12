@@ -1237,7 +1237,12 @@ impl GovernancePrecompile {
         )
     }
 
-    fn is_paused(&self, calldata: &[u8], storage: &mut dyn StorageProvider, sr: StorageRef) -> PrecompileResult {
+    fn is_paused(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
         dispatch::view::<IProtocolGovernance::isPausedCall, _, _>(
             calldata,
             1000,
@@ -1277,14 +1282,18 @@ impl call_precompile::StatefulPrecompile for GovernancePrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("too short".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().expect("invariant: 4-byte selector");
+        let selector: [u8; 4] = calldata[..4]
+            .try_into()
+            .expect("invariant: 4-byte selector");
         let sr = StorageRef::new(storage);
         match selector {
             IProtocolGovernance::submitProposalCall::SELECTOR => {
                 self.submit_proposal(calldata, msg_sender, storage, sr)
             }
             IProtocolGovernance::voteCall::SELECTOR => self.vote(calldata, msg_sender, storage, sr),
-            IProtocolGovernance::queueCall::SELECTOR => self.queue(calldata, msg_sender, storage, sr),
+            IProtocolGovernance::queueCall::SELECTOR => {
+                self.queue(calldata, msg_sender, storage, sr)
+            }
             IProtocolGovernance::executeCall::SELECTOR => {
                 self.execute(calldata, msg_sender, storage, sr)
             }

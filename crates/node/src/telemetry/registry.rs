@@ -154,7 +154,10 @@ impl TelemetryRegistry {
     pub fn record_block_committed(&self) {
         self.consensus_blocks_committed
             .fetch_add(1, Ordering::Relaxed);
-        *self.last_block_committed_at.write().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        *self
+            .last_block_committed_at
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
     }
 
     /// Seconds since the last committed block, or `None` if no block has been committed.
@@ -177,7 +180,10 @@ impl TelemetryRegistry {
                 // If start_time can't go back that far, use a very old reference.
                 Instant::now() - Duration::from_secs(secs)
             });
-        *self.last_block_committed_at.write().unwrap_or_else(|e| e.into_inner()) = Some(past);
+        *self
+            .last_block_committed_at
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(past);
     }
 
     /// Record a consensus timeout
@@ -220,7 +226,10 @@ impl TelemetryRegistry {
 
     /// Record block production latency in milliseconds
     pub fn record_block_latency(&self, duration_ms: u64) {
-        let mut h = self.block_latency_ms.write().unwrap_or_else(|e| e.into_inner());
+        let mut h = self
+            .block_latency_ms
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         h.push(duration_ms);
         if h.len() > 10_000 {
             h.remove(0);
@@ -229,7 +238,10 @@ impl TelemetryRegistry {
 
     /// Record transaction execution latency in milliseconds
     pub fn record_tx_latency(&self, duration_ms: u64) {
-        let mut h = self.tx_latency_ms.write().unwrap_or_else(|e| e.into_inner());
+        let mut h = self
+            .tx_latency_ms
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         h.push(duration_ms);
         if h.len() > 10_000 {
             h.remove(0);
@@ -238,7 +250,10 @@ impl TelemetryRegistry {
 
     /// Record P2P operation latency in milliseconds
     pub fn record_p2p_latency(&self, duration_ms: u64) {
-        let mut h = self.p2p_latency_ms.write().unwrap_or_else(|e| e.into_inner());
+        let mut h = self
+            .p2p_latency_ms
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         h.push(duration_ms);
         if h.len() > 10_000 {
             h.remove(0);
@@ -332,7 +347,10 @@ impl TelemetryRegistry {
 
         // Histograms
         {
-            let mut block_lat = self.block_latency_ms.write().unwrap_or_else(|e| e.into_inner());
+            let mut block_lat = self
+                .block_latency_ms
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             block_lat.sort_unstable();
             output.push_str("# HELP block_latency_ms Block production latency in milliseconds\n# TYPE block_latency_ms summary\n");
             output.push_str(&format!(
@@ -350,7 +368,10 @@ impl TelemetryRegistry {
             output.push_str(&format!("block_latency_ms_count {}\n", block_lat.len()));
         }
         {
-            let mut tx_lat = self.tx_latency_ms.write().unwrap_or_else(|e| e.into_inner());
+            let mut tx_lat = self
+                .tx_latency_ms
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             tx_lat.sort_unstable();
             output.push_str("# HELP tx_latency_ms Transaction execution latency in milliseconds\n# TYPE tx_latency_ms summary\n");
             output.push_str(&format!(
@@ -368,7 +389,10 @@ impl TelemetryRegistry {
             output.push_str(&format!("tx_latency_ms_count {}\n", tx_lat.len()));
         }
         {
-            let mut p2p_lat = self.p2p_latency_ms.write().unwrap_or_else(|e| e.into_inner());
+            let mut p2p_lat = self
+                .p2p_latency_ms
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             p2p_lat.sort_unstable();
             output.push_str("# HELP p2p_latency_ms P2P operation latency in milliseconds\n# TYPE p2p_latency_ms summary\n");
             output.push_str(&format!(

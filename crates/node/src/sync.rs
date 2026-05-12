@@ -71,7 +71,10 @@ pub(crate) fn apply_synced_blocks(
             let heights = state.peer_heights.read().unwrap_or_else(|e| e.into_inner());
             heights.values().copied().max().unwrap_or(initial_height)
         };
-        let mut sp = state.sync_progress.write().unwrap_or_else(|e| e.into_inner());
+        let mut sp = state
+            .sync_progress
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if sp.is_none() {
             *sp = Some(call_rpc::handlers::SyncProgress {
                 starting_block: initial_height,
@@ -285,7 +288,11 @@ pub(crate) fn apply_synced_blocks(
     // If so, signal the BFT event loop to restart into the new epoch.
     if applied > 0 {
         let new_height = state.get_current_block();
-        let epoch_length = state.consensus_params.read().unwrap_or_else(|e| e.into_inner()).epoch_length;
+        let epoch_length = state
+            .consensus_params
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .epoch_length;
         let old_epoch = initial_height / epoch_length;
         let new_epoch = new_height / epoch_length;
         if new_epoch > old_epoch {

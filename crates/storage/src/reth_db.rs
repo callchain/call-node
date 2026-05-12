@@ -803,10 +803,8 @@ mod integration_tests {
         // Phase 1: open, write, drop abruptly
         {
             let db = open_db(path.clone()).expect("open db");
-            db_put::<CallConsensusBlocks>(&db.db, b"block_1".to_vec(), b"data_1".to_vec())
-                .unwrap();
-            db_put::<CallConsensusBlocks>(&db.db, b"block_2".to_vec(), b"data_2".to_vec())
-                .unwrap();
+            db_put::<CallConsensusBlocks>(&db.db, b"block_1".to_vec(), b"data_1".to_vec()).unwrap();
+            db_put::<CallConsensusBlocks>(&db.db, b"block_2".to_vec(), b"data_2".to_vec()).unwrap();
             db_put::<CallFeeParams>(&db.db, b"fee_key".to_vec(), b"fee_data".to_vec()).unwrap();
             // db handle dropped here — simulates unclean shutdown
         }
@@ -814,13 +812,19 @@ mod integration_tests {
         // Phase 2: reopen same path
         let db2 = open_db(path.clone()).expect("reopen db after crash");
 
-        let v1 = db_get::<CallConsensusBlocks>(&db2.db, b"block_1").unwrap().unwrap();
+        let v1 = db_get::<CallConsensusBlocks>(&db2.db, b"block_1")
+            .unwrap()
+            .unwrap();
         assert_eq!(v1, b"data_1");
 
-        let v2 = db_get::<CallConsensusBlocks>(&db2.db, b"block_2").unwrap().unwrap();
+        let v2 = db_get::<CallConsensusBlocks>(&db2.db, b"block_2")
+            .unwrap()
+            .unwrap();
         assert_eq!(v2, b"data_2");
 
-        let vf = db_get::<CallFeeParams>(&db2.db, b"fee_key").unwrap().unwrap();
+        let vf = db_get::<CallFeeParams>(&db2.db, b"fee_key")
+            .unwrap()
+            .unwrap();
         assert_eq!(vf, b"fee_data");
 
         let _ = std::fs::remove_dir_all(&path);
@@ -853,7 +857,9 @@ mod integration_tests {
         let db2 = open_db(path.clone()).expect("reopen after simulated crash");
 
         // Data written before checkpoint must still be present
-        let data = db_get::<CallEvmAccounts>(&db2.db, b"account_a").unwrap().unwrap();
+        let data = db_get::<CallEvmAccounts>(&db2.db, b"account_a")
+            .unwrap()
+            .unwrap();
         assert_eq!(data, b"balance_100");
 
         // Checkpoint must be detectable by recovery logic

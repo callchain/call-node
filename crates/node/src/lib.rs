@@ -254,7 +254,10 @@ impl CallNode {
         *state.receipts.write().unwrap_or_else(|e| e.into_inner()) = receipts;
 
         // Inject loaded fork state
-        *state.fork_manager.write().unwrap_or_else(|e| e.into_inner()) = fork_manager;
+        *state
+            .fork_manager
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = fork_manager;
 
         // Seed governance config defaults into EVM on fresh start
         if fresh_start {
@@ -270,7 +273,10 @@ impl CallNode {
         let governance_advancer = governance_advancer::GovernanceAdvancer;
 
         // Sync consensus params from SimplexConsensus into RpcState for governance updates
-        *state.consensus_params.write().unwrap_or_else(|e| e.into_inner()) = *consensus.params();
+        *state
+            .consensus_params
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = *consensus.params();
 
         // Sync current_block from consensus height so RPCs report correct block number after restart
         state.set_current_block(consensus.current_height());
@@ -294,8 +300,14 @@ impl CallNode {
             let audit_log_clone = Arc::clone(&audit_log);
             if let Ok(mut exporter) = state.compliance_exporter.write() {
                 *exporter = Some(Arc::new(
-                    move |asset_id: u64, asset_symbol: String, genesis_time: u64, block_time_secs: u64, address_filter: Option<call_primitives::Address>| {
-                        let log = audit_log_clone.read().map_err(|e| format!("lock poisoned: {e}"))?;
+                    move |asset_id: u64,
+                          asset_symbol: String,
+                          genesis_time: u64,
+                          block_time_secs: u64,
+                          address_filter: Option<call_primitives::Address>| {
+                        let log = audit_log_clone
+                            .read()
+                            .map_err(|e| format!("lock poisoned: {e}"))?;
                         let entries = crate::logging::export_compliance_report(
                             &*log,
                             asset_id,
@@ -439,13 +451,16 @@ impl CallNode {
                         let peer_for_resp = peer_id.clone();
                         tokio::spawn(async move {
                             if let Some(response) = handle_sync_request(&db_env_owned, &request) {
-                                match postcard::to_allocvec(&NetworkMessage::SyncResponse(response)) {
+                                match postcard::to_allocvec(&NetworkMessage::SyncResponse(response))
+                                {
                                     Ok(resp_data) => {
                                         net_for_resp
                                             .send_to(SYNC_CHANNEL, vec![peer_for_resp], resp_data)
                                             .await;
                                     }
-                                    Err(e) => tracing::warn!(error = ?e, "failed to serialize sync response"),
+                                    Err(e) => {
+                                        tracing::warn!(error = ?e, "failed to serialize sync response")
+                                    }
                                 }
                             }
                         });
@@ -639,7 +654,12 @@ impl CallNode {
         );
         light_client.set_bls_pubkeys(bls_pubkeys);
 
-        let epoch_length = self.state.consensus_params.read().unwrap_or_else(|e| e.into_inner()).epoch_length;
+        let epoch_length = self
+            .state
+            .consensus_params
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .epoch_length;
 
         let service = LightClientService {
             event_rx: rx,
@@ -670,14 +690,14 @@ impl CallNode {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                match call_light_client::sync::fetch_light_client_finality_update(&beacon_url)
-                {
+                match call_light_client::sync::fetch_light_client_finality_update(&beacon_url) {
                     Ok(update) => {
                         let mut client = lc.write().unwrap_or_else(|e| e.into_inner());
                         match client.apply_light_client_update(update) {
                             Ok((slot, root)) => {
                                 match call_light_client::sync::fetch_beacon_block_execution_number(
-                                    &beacon_url, slot,
+                                    &beacon_url,
+                                    slot,
                                 ) {
                                     Ok(exec_block) => {
                                         client.set_finalized_block(exec_block, root);
@@ -1107,7 +1127,10 @@ impl CallNode {
             tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Start from persisted consensus height (more accurate than scanning blocks dir)
-            let consensus_height = consensus.read().unwrap_or_else(|e| e.into_inner()).current_height();
+            let consensus_height = consensus
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .current_height();
             let disk_height = find_latest_height(&db_env);
             let mut local_height = consensus_height.max(disk_height);
             tracing::info!(
@@ -1127,7 +1150,10 @@ impl CallNode {
                     let heights = state.peer_heights.read().unwrap_or_else(|e| e.into_inner());
                     heights.values().copied().max().unwrap_or(local_height)
                 };
-                let mut sp = state.sync_progress.write().unwrap_or_else(|e| e.into_inner());
+                let mut sp = state
+                    .sync_progress
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
                 *sp = Some(call_rpc::handlers::SyncProgress {
                     starting_block: local_height,
                     current_block: local_height,
@@ -1137,7 +1163,9 @@ impl CallNode {
 
             // Build light client from current validator set once at the start
             let (trusted_validators, total_validators, bls_pubkeys) = {
-                let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                let provider = match call_evm::provider::InMemoryStateProvider::from_db(
+                    &state.db_env,
+                ) {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!(error = %e, "sync: failed to load EVM state for validator set");
@@ -1189,7 +1217,9 @@ impl CallNode {
                     full_state: false,
                 };
                 match postcard::to_allocvec(&NetworkMessage::SyncRequest(request)) {
-                    Ok(req_data) => { network.broadcast(SYNC_CHANNEL, req_data).await; }
+                    Ok(req_data) => {
+                        network.broadcast(SYNC_CHANNEL, req_data).await;
+                    }
                     Err(e) => tracing::warn!(error = ?e, "failed to serialize sync request"),
                 }
 
@@ -1312,7 +1342,8 @@ impl CallNode {
 
                                 // Push fee history entry for light-client sync path
                                 {
-                                    let fee_params = state.fee_params.read().unwrap_or_else(|e| e.into_inner());
+                                    let fee_params =
+                                        state.fee_params.read().unwrap_or_else(|e| e.into_inner());
                                     let base_fee = fee_params.base_fee;
                                     let max_gas = fee_params.max_gas_per_block.max(1);
                                     drop(fee_params);
@@ -1356,15 +1387,16 @@ impl CallNode {
 
                                 if let Ok(mut c) = consensus.write() {
                                     let _ = c.commit_block(&block, &result);
-                                    let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(
-                                        &state.db_env,
-                                    ) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "sync: failed to load EVM state for round advance");
-                                            continue;
-                                        }
-                                    };
+                                    let mut provider =
+                                        match call_evm::provider::InMemoryStateProvider::from_db(
+                                            &state.db_env,
+                                        ) {
+                                            Ok(p) => p,
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "sync: failed to load EVM state for round advance");
+                                                continue;
+                                            }
+                                        };
                                     c.advance_round(&mut provider);
                                     let _ = provider.save_to_db(&state.db_env);
                                 }
@@ -1421,7 +1453,10 @@ impl CallNode {
             }
 
             // Clear sync progress — node is fully synced (or gave up)
-            *state.sync_progress.write().unwrap_or_else(|e| e.into_inner()) = None;
+            *state
+                .sync_progress
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = None;
 
             if local_height > 0 {
                 tracing::info!(height = local_height, "sync: completed");

@@ -40,7 +40,10 @@ fn rlp_encode_short_bytes(data: &[u8]) -> Vec<u8> {
         out
     } else {
         let len_bytes = data.len().to_be_bytes();
-        let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+        let skip = len_bytes
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(len_bytes.len());
         let num_len_bytes = len_bytes.len() - skip;
         let mut out = Vec::with_capacity(1 + num_len_bytes + data.len());
         out.push(0xB7 + num_len_bytes as u8);
@@ -57,7 +60,10 @@ fn rlp_encode_list(items: &[Vec<u8>]) -> Vec<u8> {
         out.push(0xC0 + total_len as u8);
     } else {
         let len_bytes = total_len.to_be_bytes();
-        let skip = len_bytes.iter().position(|&b| b != 0).unwrap_or(len_bytes.len());
+        let skip = len_bytes
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(len_bytes.len());
         let num_len_bytes = len_bytes.len() - skip;
         out.push(0xF7 + num_len_bytes as u8);
         out.extend_from_slice(&len_bytes[skip..]);
@@ -119,7 +125,12 @@ fn build_extension_leaf_proof() -> (B256, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
     let leaf_hash = keccak256(&leaf_rlp);
     let ext_rlp = make_extension_node_rlp(&[0], leaf_hash);
     let root = keccak256(&ext_rlp);
-    (root, key_bytes.to_vec(), vec![ext_rlp, leaf_rlp], value.to_vec())
+    (
+        root,
+        key_bytes.to_vec(),
+        vec![ext_rlp, leaf_rlp],
+        value.to_vec(),
+    )
 }
 
 fn build_branch_leaf_proof() -> (B256, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
@@ -132,7 +143,12 @@ fn build_branch_leaf_proof() -> (B256, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
     children[5] = Some(leaf_hash);
     let branch_rlp = make_branch_node_rlp(&children, None);
     let root = keccak256(&branch_rlp);
-    (root, key_bytes.to_vec(), vec![branch_rlp, leaf_rlp], value.to_vec())
+    (
+        root,
+        key_bytes.to_vec(),
+        vec![branch_rlp, leaf_rlp],
+        value.to_vec(),
+    )
 }
 
 fn build_deep_proof() -> (B256, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
@@ -155,7 +171,12 @@ fn build_deep_proof() -> (B256, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
     let ext_rlp = make_extension_node_rlp(&[0], branch_hash);
     let root = keccak256(&ext_rlp);
 
-    (root, key_bytes.to_vec(), vec![ext_rlp, branch_rlp, leaf_rlp], value.to_vec())
+    (
+        root,
+        key_bytes.to_vec(),
+        vec![ext_rlp, branch_rlp, leaf_rlp],
+        value.to_vec(),
+    )
 }
 
 // ── Benchmarks ──

@@ -34,10 +34,7 @@ fn make_evm_tx(nonce: u64, sender: Address) -> EvmTransaction {
 }
 
 fn setup_node() -> (CallNode, Address) {
-    let tmp = PathBuf::from(format!(
-        "/tmp/call-bench-node-{}",
-        std::process::id()
-    ));
+    let tmp = PathBuf::from(format!("/tmp/call-bench-node-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
 
     let node = CallNode::new(tmp.clone()).expect("node creation");
@@ -85,21 +82,31 @@ fn build_block(node: &CallNode, evm_txs: Vec<EvmTransaction>) -> Block {
     let height = node.consensus.read().unwrap().current_height();
     let version = node.state.fork_manager.read().unwrap().current_version();
 
-    let evm_tx_data: Vec<Vec<u8>> = evm_txs.into_iter().map(|e| {
-        // Minimal RLP encoding for benchmark tx
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&e.nonce.to_be_bytes());
-        buf.extend_from_slice(&e.gas_price.to_be_bytes());
-        buf.extend_from_slice(&e.gas_limit.to_be_bytes());
-        if let Some(to) = e.to {
-            buf.extend_from_slice(to.as_slice());
-        }
-        buf.extend_from_slice(e.value.to_be_bytes_vec().as_slice());
-        buf.extend_from_slice(e.data.as_ref());
-        buf
-    }).collect();
+    let evm_tx_data: Vec<Vec<u8>> = evm_txs
+        .into_iter()
+        .map(|e| {
+            // Minimal RLP encoding for benchmark tx
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&e.nonce.to_be_bytes());
+            buf.extend_from_slice(&e.gas_price.to_be_bytes());
+            buf.extend_from_slice(&e.gas_limit.to_be_bytes());
+            if let Some(to) = e.to {
+                buf.extend_from_slice(to.as_slice());
+            }
+            buf.extend_from_slice(e.value.to_be_bytes_vec().as_slice());
+            buf.extend_from_slice(e.data.as_ref());
+            buf
+        })
+        .collect();
 
-    Block::new(height, node.parent_hash, 1_000, proposer, version, evm_tx_data)
+    Block::new(
+        height,
+        node.parent_hash,
+        1_000,
+        proposer,
+        version,
+        evm_tx_data,
+    )
 }
 
 fn bench_block_execution(c: &mut Criterion) {

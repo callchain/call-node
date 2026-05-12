@@ -2,7 +2,7 @@ use super::*;
 use call_consensus::exec::state_accessors;
 use call_consensus::BlockExecutionResult;
 use call_network::{BlockAnnouncement, EpochBoundarySignal, InMemoryNetwork, SyncResponse};
-use call_primitives::{Address, B256, Ed25519PublicKey};
+use call_primitives::{Address, Ed25519PublicKey, B256};
 use std::sync::OnceLock;
 
 use alloy_sol_types::SolCall;
@@ -1106,8 +1106,8 @@ async fn test_epoch_boundary_signal_updates_peer_heights() {
         epoch: 1,
         sender_pubkey: [0xAB; 32],
     };
-    let data =
-        postcard::to_allocvec(&NetworkMessage::EpochBoundarySignal(signal)).expect("serialize signal");
+    let data = postcard::to_allocvec(&NetworkMessage::EpochBoundarySignal(signal))
+        .expect("serialize signal");
 
     let network: Arc<dyn Network> = Arc::new(InMemoryNetwork::new());
     let sync_inflight: SyncInflight =
@@ -1755,7 +1755,10 @@ async fn test_agent_grant_and_pay_in_block() {
 /// Build a mock LightClientUpdate with real BLS signatures from generated keys.
 fn build_mock_light_client_update_for_node(
     signing_root: B256,
-) -> (call_light_client::LightClientUpdate, Vec<call_crypto::BlsSecretKey>) {
+) -> (
+    call_light_client::LightClientUpdate,
+    Vec<call_crypto::BlsSecretKey>,
+) {
     use call_crypto::{bls_generate, bls_sign_beacon, BlsPublicKey, BlsSecretKey, BlsSignature};
 
     const PARTICIPANTS: usize = 350;
@@ -1817,7 +1820,8 @@ fn build_mock_light_client_update_for_node(
     let update = call_light_client::LightClientUpdate {
         attested_header,
         next_sync_committee: sync_committee,
-        next_sync_committee_branch: [B256::ZERO; call_light_client::NEXT_SYNC_COMMITTEE_BRANCH_DEPTH],
+        next_sync_committee_branch: [B256::ZERO;
+            call_light_client::NEXT_SYNC_COMMITTEE_BRANCH_DEPTH],
         finalized_header,
         finality_branch: [B256::ZERO; call_light_client::FINALIZED_BRANCH_DEPTH],
         sync_aggregate,
@@ -1841,7 +1845,8 @@ async fn test_beacon_sync_task_spawns_with_light_client() {
         fork_version: [0, 0, 0, 1],
         genesis_validators_root: B256::repeat_byte(0xBB),
     };
-    let lc = call_light_client::EthLightClient::init_with_beacon_config(genesis, Some(beacon_config));
+    let lc =
+        call_light_client::EthLightClient::init_with_beacon_config(genesis, Some(beacon_config));
     node.eth_light_client = Some(Arc::new(std::sync::RwLock::new(lc)));
 
     // Start beacon sync task with invalid URL (will fail fast) and short interval
@@ -1856,7 +1861,10 @@ async fn test_beacon_sync_task_spawns_with_light_client() {
 
     // Stop should abort cleanly
     let _ = node.stop().await;
-    assert!(node.beacon_sync_handle.is_none(), "beacon_sync_handle should be cleared after stop");
+    assert!(
+        node.beacon_sync_handle.is_none(),
+        "beacon_sync_handle should be cleared after stop"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -1920,16 +1928,29 @@ async fn test_beacon_sync_task_applies_update_and_sets_finalized_block() {
 
     // Manually apply the update (simulating what the background task does)
     let result = client.apply_light_client_update(update);
-    assert!(result.is_ok(), "apply_light_client_update should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "apply_light_client_update should succeed: {:?}",
+        result
+    );
 
     let (finalized_slot, finalized_root) = result.unwrap();
     assert_eq!(finalized_slot, 98);
     client.set_finalized_block(finalized_slot, finalized_root);
 
     // Verify is_consensus_verified reflects the finalized block
-    assert!(client.is_consensus_verified(98), "block 98 should be consensus-verified");
-    assert!(client.is_consensus_verified(97), "block 97 should also be consensus-verified");
-    assert!(!client.is_consensus_verified(99), "block 99 should NOT be consensus-verified");
+    assert!(
+        client.is_consensus_verified(98),
+        "block 98 should be consensus-verified"
+    );
+    assert!(
+        client.is_consensus_verified(97),
+        "block 97 should also be consensus-verified"
+    );
+    assert!(
+        !client.is_consensus_verified(99),
+        "block 99 should NOT be consensus-verified"
+    );
 
     node.eth_light_client = Some(Arc::new(std::sync::RwLock::new(client)));
 

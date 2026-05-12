@@ -87,7 +87,11 @@ async fn health_handler(State(state): State<HealthState>) -> impl IntoResponse {
     }
 
     // Sync check
-    let height = state.consensus.read().unwrap_or_else(|e| e.into_inner()).current_height();
+    let height = state
+        .consensus
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .current_height();
     if height > 0 {
         checks.insert("sync", "ok".to_string());
     } else {

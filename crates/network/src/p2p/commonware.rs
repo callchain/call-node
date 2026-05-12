@@ -526,7 +526,12 @@ impl Network for CommonwareNetwork {
         }
 
         let recipients = if pub_keys.len() == 1 {
-            Recipients::One(pub_keys.into_iter().next().expect("invariant: exactly one pubkey"))
+            Recipients::One(
+                pub_keys
+                    .into_iter()
+                    .next()
+                    .expect("invariant: exactly one pubkey"),
+            )
         } else {
             Recipients::Some(pub_keys)
         };

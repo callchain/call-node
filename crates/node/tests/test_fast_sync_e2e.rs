@@ -10,7 +10,7 @@ mod e2e;
 use e2e::harness::*;
 
 use call_primitives::{Address, Ed25519PublicKey};
-use call_storage::pruner::{FastSyncFlow, produce_state_snapshot};
+use call_storage::pruner::{produce_state_snapshot, FastSyncFlow};
 use call_storage::{PruneState, StateRoots};
 
 fn test_addr(n: u8) -> Address {
@@ -97,17 +97,17 @@ async fn test_fast_sync_restore_then_catch_up() {
 #[test]
 fn test_incremental_sync_returns_zero_by_design() {
     let result = call_storage::pruner::FastSyncFlow::incremental_sync(100, 200).unwrap();
-    assert_eq!(result, 0, "incremental_sync is a no-op in the storage crate");
+    assert_eq!(
+        result, 0,
+        "incremental_sync is a no-op in the storage crate"
+    );
 }
 
 /// Simulate a fast sync pipeline end-to-end: save snapshot, list,
 /// load, and verify restore consistency.
 #[test]
 fn test_fast_sync_pipeline_snapshot_to_disk() {
-    let tmp = std::env::temp_dir().join(format!(
-        "call-fast-sync-pipeline-{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("call-fast-sync-pipeline-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
 
     let mut prune_state = PruneState::new();

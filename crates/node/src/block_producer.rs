@@ -55,7 +55,12 @@ pub(crate) async fn block_production_loop(
         interval.tick().await;
 
         // 1. Select transactions from mempool (EVM-only)
-        let selection = { mempool.write().unwrap_or_else(|e| e.into_inner()).select_transactions() };
+        let selection = {
+            mempool
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .select_transactions()
+        };
         telemetry.set_mempool_size(selection.evm_txs.len());
 
         // 2. Build block
@@ -110,7 +115,10 @@ pub(crate) async fn block_production_loop(
             mp.confirm_transactions(&evm_hashes);
             // Also notify mempool defense so per-address tx_counts are decremented
             drop(mp);
-            let mut defense = state.mempool_defense.write().unwrap_or_else(|e| e.into_inner());
+            let mut defense = state
+                .mempool_defense
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             for evm in &result.evm_tx_results {
                 defense.on_tx_confirmed(evm.caller);
             }
@@ -119,7 +127,13 @@ pub(crate) async fn block_production_loop(
         // 3c. Finalize bridge deposits whose challenge period has expired
         {
             let mut provider =
-                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                        return;
+                    }
+                };
             let config = BridgeConfig::default();
             let finalized =
                 call_consensus::exec::state_accessors::finalize_pending_external_deposits_evm(
@@ -130,7 +144,10 @@ pub(crate) async fn block_production_loop(
             if finalized > 0 {
                 tracing::info!(count = finalized, "bridge: deposits finalized and credited");
             }
-            if let Err(e) = provider.state_mut().save_to_db(&state.db_env) { tracing::warn!(error = %e, "block producer: failed to save EVM state"); return; };
+            if let Err(e) = provider.state_mut().save_to_db(&state.db_env) {
+                tracing::warn!(error = %e, "block producer: failed to save EVM state");
+                return;
+            };
         }
 
         // 3b. Sign the block (if validator with signing key)
@@ -155,8 +172,15 @@ pub(crate) async fn block_production_loop(
         if is_oracle_boundary {
             if let Some(ref net) = network {
                 let tracked = {
-                    let provider =
-                        match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    let provider = match call_evm::provider::InMemoryStateProvider::from_db(
+                        &state.db_env,
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                     let count = call_consensus::exec::state_accessors::read_oracle_tracked_count(
                         provider.state(),
                     );
@@ -179,8 +203,12 @@ pub(crate) async fn block_production_loop(
                         requester_id: proposer_id,
                     };
                     match postcard::to_allocvec(&NetworkMessage::OraclePriceRequest(request)) {
-                        Ok(msg) => { net.broadcast(ORACLE_CHANNEL, msg).await; }
-                        Err(e) => tracing::warn!(error = ?e, "block producer: failed to serialize oracle request"),
+                        Ok(msg) => {
+                            net.broadcast(ORACLE_CHANNEL, msg).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = ?e, "block producer: failed to serialize oracle request")
+                        }
                     }
                     // Configurable delay to allow validators to respond
                     let delay_ms = state
@@ -206,7 +234,13 @@ pub(crate) async fn block_production_loop(
             let outliers: Vec<u32> = tracker_guard.last_outliers().to_vec();
             if !outliers.is_empty() {
                 let mut provider =
-                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                 let mut c = consensus.write().unwrap_or_else(|e| e.into_inner());
                 for vid in &outliers {
                     if let Err(e) = c.handle_oracle_outlier(provider.state_mut(), *vid) {
@@ -214,7 +248,10 @@ pub(crate) async fn block_production_loop(
                     }
                 }
                 tracing::info!(outliers = ?outliers, "slashed oracle outliers");
-                if let Err(e) = provider.state_mut().save_to_db(&state.db_env) { tracing::warn!(error = %e, "block producer: failed to save EVM state"); return; };
+                if let Err(e) = provider.state_mut().save_to_db(&state.db_env) {
+                    tracing::warn!(error = %e, "block producer: failed to save EVM state");
+                    return;
+                };
             }
             drop(tracker_guard);
 
@@ -222,24 +259,47 @@ pub(crate) async fn block_production_loop(
             let contributions = {
                 let mut tracker_guard = oracle_tracker.write().unwrap_or_else(|e| e.into_inner());
                 let reward_pool = {
-                    let provider =
-                        match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    let provider = match call_evm::provider::InMemoryStateProvider::from_db(
+                        &state.db_env,
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                     call_consensus::exec::state_accessors::read_oracle_reward_pool(provider.state())
                 };
                 let rewards = tracker_guard.distribute_rewards(reward_pool);
                 if !rewards.is_empty() {
-                    let mut provider =
-                        match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    let mut provider = match call_evm::provider::InMemoryStateProvider::from_db(
+                        &state.db_env,
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                     call_consensus::exec::state_accessors::zero_oracle_reward_pool(
                         provider.state_mut(),
                     );
-                    if let Err(e) = provider.state_mut().save_to_db(&state.db_env) { tracing::warn!(error = %e, "block producer: failed to save EVM state"); return; };
+                    if let Err(e) = provider.state_mut().save_to_db(&state.db_env) {
+                        tracing::warn!(error = %e, "block producer: failed to save EVM state");
+                        return;
+                    };
                 }
                 rewards
             };
             if !contributions.is_empty() {
                 let mut provider =
-                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                 let mut c = consensus.write().unwrap_or_else(|e| e.into_inner());
                 for (vid, amount) in &contributions {
                     if let Err(e) = c.distribute_oracle_reward(provider.state_mut(), *vid, *amount)
@@ -248,7 +308,10 @@ pub(crate) async fn block_production_loop(
                     }
                 }
                 tracing::info!(count = contributions.len(), "distributed oracle rewards");
-                if let Err(e) = provider.state_mut().save_to_db(&state.db_env) { tracing::warn!(error = %e, "block producer: failed to save EVM state"); return; };
+                if let Err(e) = provider.state_mut().save_to_db(&state.db_env) {
+                    tracing::warn!(error = %e, "block producer: failed to save EVM state");
+                    return;
+                };
             }
 
             // Clear tracking after slashing and reward distribution
@@ -264,7 +327,13 @@ pub(crate) async fn block_production_loop(
                 continue;
             }
             let mut provider =
-                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                        return;
+                    }
+                };
             c.advance_round(&mut provider);
             if let Err(e) = provider.save_to_db(&state.db_env) {
                 tracing::warn!(error = ?e, "failed to save provider after epoch churn");
@@ -285,7 +354,10 @@ pub(crate) async fn block_production_loop(
                 tx_hash: block.header.hash(),
                 shielded_details: None,
             };
-            let _ = audit_log.write().unwrap_or_else(|e| e.into_inner()).append(entry);
+            let _ = audit_log
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .append(entry);
         }
 
         telemetry.record_block_produced();
@@ -296,7 +368,10 @@ pub(crate) async fn block_production_loop(
 
         // 7a. Check and apply any scheduled protocol upgrades at this height
         {
-            let mut fm = state.fork_manager.write().unwrap_or_else(|e| e.into_inner());
+            let mut fm = state
+                .fork_manager
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(new_version) = fm.check_upgrades_at_height(height) {
                 tracing::info!(height, ?new_version, "protocol upgrade activated");
             }
@@ -350,9 +425,18 @@ pub(crate) async fn block_production_loop(
         // 10b. Advance governance proposal state machine
         {
             let mut provider =
-                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                        return;
+                    }
+                };
             let events = governance_advancer.advance(provider.state_mut(), new_height);
-            if let Err(e) = provider.state_mut().save_to_db(&state.db_env) { tracing::warn!(error = %e, "block producer: failed to save EVM state"); return; };
+            if let Err(e) = provider.state_mut().save_to_db(&state.db_env) {
+                tracing::warn!(error = %e, "block producer: failed to save EVM state");
+                return;
+            };
             drop(provider);
             for event in events {
                 let (event_str, proposal_id) = match &event {
@@ -511,20 +595,38 @@ pub(crate) async fn block_production_loop(
         if new_height % prune_config.snapshot_interval == 0 {
             let evm_root = {
                 let provider =
-                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                 let root = provider.state().compute_state_root();
                 call_primitives::Hash::from(root.0)
             };
 
             let shielded_root = {
                 let provider =
-                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                 call_consensus::exec::state_accessors::read_shielded_merkle_root(provider.state())
             };
 
             let agent_root = {
                 let provider =
-                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+                    match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                            return;
+                        }
+                    };
                 let count =
                     call_consensus::exec::state_accessors::read_agent_count(provider.state());
                 let mut agents = std::collections::HashMap::new();
@@ -574,8 +676,13 @@ pub(crate) async fn block_production_loop(
 
         // 14a. Save block state snapshot for historical queries
         {
-            let provider =
-                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+            let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                    return;
+                }
+            };
             if let Err(ref e) = save_block_snapshot(db_env, new_height, provider.state()) {
                 tracing::warn!(error = %e, height = new_height, "failed to save block snapshot");
             }
@@ -595,8 +702,13 @@ pub(crate) async fn block_production_loop(
 
         // 16. Update current proposer address for eth_coinbase
         {
-            let provider =
-                match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) { Ok(p) => p, Err(e) => { tracing::warn!(error = %e, "block producer: failed to load EVM state"); return; } };
+            let provider = match call_evm::provider::InMemoryStateProvider::from_db(&state.db_env) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "block producer: failed to load EVM state");
+                    return;
+                }
+            };
             let proposer_addr = call_consensus::exec::state_accessors::read_validator_addr(
                 provider.state(),
                 proposer as u64,
@@ -639,7 +751,9 @@ pub(crate) async fn block_production_loop(
                     telemetry.record_p2p_bytes_sent(msg.len());
                     record_p2p_span(&telemetry, "sent", "block_announcement", msg.len());
                 }
-                Err(e) => tracing::warn!(error = ?e, "block producer: failed to serialize block announcement"),
+                Err(e) => {
+                    tracing::warn!(error = ?e, "block producer: failed to serialize block announcement")
+                }
             }
 
             // 17a. Gossip scheduled upgrade announcement if one exists
@@ -661,7 +775,9 @@ pub(crate) async fn block_production_loop(
                         telemetry.record_p2p_bytes_sent(msg.len());
                         record_p2p_span(&telemetry, "sent", "upgrade_announcement", msg.len());
                     }
-                    Err(e) => tracing::warn!(error = ?e, "block producer: failed to serialize upgrade announcement"),
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "block producer: failed to serialize upgrade announcement")
+                    }
                 }
             }
         }

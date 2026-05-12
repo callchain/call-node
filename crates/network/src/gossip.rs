@@ -328,8 +328,10 @@ impl GossipManager {
     pub fn remove_peer(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.remove(peer_id) {
             if peer.banned {
-                self.banned_peers
-                    .insert(peer_id.to_string(), peer.banned_at.unwrap_or_else(Instant::now));
+                self.banned_peers.insert(
+                    peer_id.to_string(),
+                    peer.banned_at.unwrap_or_else(Instant::now),
+                );
             }
         }
     }
@@ -772,12 +774,7 @@ mod tests {
         }
 
         // 3rd message exceeds rate limit → auto-ban
-        let result = manager.process_incoming_tx(
-            "peer_1",
-            vec![2],
-            test_hash(2),
-            TxPriority::High,
-        );
+        let result = manager.process_incoming_tx("peer_1", vec![2], test_hash(2), TxPriority::High);
         assert!(
             matches!(result, Err(NetworkError::PeerBanned { ref reason }) if reason == "rate_limit_exceeded"),
             "rate limit exceed should trigger auto-ban, got {:?}",
@@ -839,7 +836,10 @@ mod tests {
 
         // Attempt to reconnect — ban has expired, should succeed
         let result = manager.add_peer("peer_1".into());
-        assert!(result.is_ok(), "reconnect should be allowed after ban expiry");
+        assert!(
+            result.is_ok(),
+            "reconnect should be allowed after ban expiry"
+        );
         assert_eq!(manager.peer_count(), 1);
 
         // Global ban entry should have been cleaned up

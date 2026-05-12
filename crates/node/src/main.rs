@@ -7,8 +7,8 @@ use call_node::boot::boot_node;
 use call_node::cli::{CliArgs, Commands, WalletCommand};
 use call_node::config::NodeConfig;
 use call_node::telemetry::{
-    init_opentelemetry_tracing_with_file, start_alert_task, start_metrics_server,
-    AlertDispatcher, HealthState,
+    init_opentelemetry_tracing_with_file, start_alert_task, start_metrics_server, AlertDispatcher,
+    HealthState,
 };
 use call_node::wallet;
 use clap::Parser;
@@ -119,18 +119,12 @@ async fn handle_wallet(
         } => wallet::send_payment(from_key, to, *asset_id, *amount, *nonce, rpc_url).await,
         WalletCommand::ServerInfo { rpc_url } => wallet::server_info(rpc_url).await,
         WalletCommand::Mempool { rpc_url } => wallet::mempool_stats(rpc_url).await,
-        WalletCommand::StoreKeyring {
-            key,
-            service,
-            user,
-        } => {
+        WalletCommand::StoreKeyring { key, service, user } => {
             #[cfg(feature = "keyring")]
             {
                 call_crypto::KeyringSigner::store_key(service, user, key)
                     .map_err(|e| format!("failed to store key in keyring: {e}"))?;
-                println!(
-                    "Key stored successfully in OS keyring (service={service}, user={user})"
-                );
+                println!("Key stored successfully in OS keyring (service={service}, user={user})");
                 Ok(())
             }
             #[cfg(not(feature = "keyring"))]

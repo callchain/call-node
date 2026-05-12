@@ -467,9 +467,7 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
             IProtocolAgent::getAgentNameCall::SELECTOR => {
                 self.get_agent_name(calldata, storage, sr)
             }
-            IProtocolAgent::getAgentUrlCall::SELECTOR => {
-                self.get_agent_url(calldata, storage, sr)
-            }
+            IProtocolAgent::getAgentUrlCall::SELECTOR => self.get_agent_url(calldata, storage, sr),
             IProtocolAgent::getAgentPermsCall::SELECTOR => {
                 self.get_agent_perms(calldata, storage, sr)
             }

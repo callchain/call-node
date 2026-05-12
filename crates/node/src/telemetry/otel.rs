@@ -48,14 +48,17 @@ pub fn init_opentelemetry_tracing_with_file(
 
     // Store provider for shutdown
     let _ = GLOBAL_PROVIDER.set(provider);
-    let provider = GLOBAL_PROVIDER.get().expect("invariant: init_telemetry called before get_tracer");
+    let provider = GLOBAL_PROVIDER
+        .get()
+        .expect("invariant: init_telemetry called before get_tracer");
 
     let tracer = opentelemetry::trace::TracerProvider::tracer(provider, "call-node");
 
     // Build the tracing subscriber with OpenTelemetry layer
-    let filter = tracing_subscriber::EnvFilter::try_new(log_level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::try_new("info")
-            .expect("invariant: default log level 'info' is valid"));
+    let filter = tracing_subscriber::EnvFilter::try_new(log_level).unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::try_new("info")
+            .expect("invariant: default log level 'info' is valid")
+    });
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()));

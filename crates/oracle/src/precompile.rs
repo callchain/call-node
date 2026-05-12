@@ -340,7 +340,9 @@ impl call_precompile::StatefulPrecompile for OraclePrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4].try_into().expect("invariant: 4-byte selector");
+        let selector: [u8; 4] = calldata[..4]
+            .try_into()
+            .expect("invariant: 4-byte selector");
         let sr = StorageRef::new(storage);
         match selector {
             IProtocolOracle::getPriceCall::SELECTOR => self.get_price(calldata, storage, sr),

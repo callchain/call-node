@@ -525,9 +525,7 @@ impl NodeConfig {
         if self.light_client.beacon_url.is_some()
             && self.light_client.genesis_validators_root.is_none()
         {
-            return Err(
-                "--genesis-validators-root required when --beacon-url is set".into(),
-            );
+            return Err("--genesis-validators-root required when --beacon-url is set".into());
         }
         Ok(())
     }

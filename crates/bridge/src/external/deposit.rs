@@ -371,9 +371,11 @@ pub fn process_light_client_deposit_evm<B: StorageBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{keccak256, Address, B256};
-    use call_light_client::{EthHeader, GenesisState, MptProofNode, ReceiptProof, TxInclusionProof};
     use crate::ExternalChain;
+    use alloy_primitives::{keccak256, Address, B256};
+    use call_light_client::{
+        EthHeader, GenesisState, MptProofNode, ReceiptProof, TxInclusionProof,
+    };
 
     // ── Mock storage backend ─────────────────────────────────────────────
 
@@ -384,7 +386,10 @@ mod tests {
 
     impl StorageBackend for MockStorage {
         fn load(&mut self, address: Address, slot: U256) -> U256 {
-            self.slots.get(&(address, slot)).copied().unwrap_or(U256::ZERO)
+            self.slots
+                .get(&(address, slot))
+                .copied()
+                .unwrap_or(U256::ZERO)
         }
         fn store(&mut self, address: Address, slot: U256, value: U256) {
             self.slots.insert((address, slot), value);
@@ -544,11 +549,11 @@ mod tests {
 
         // Data: [source_chain, source_block, sender, asset_id, amount]
         let data_rlp = rlp_list(&[
-            rlp_short(&[0x01]),                   // source_chain = 1
-            rlp_u64(60003),                       // source_block
-            vec![0x80],                           // sender (empty)
-            rlp_u64(asset_id),                     // asset_id from parameter
-            rlp_u128(amount),                     // amount
+            rlp_short(&[0x01]), // source_chain = 1
+            rlp_u64(60003),     // source_block
+            vec![0x80],         // sender (empty)
+            rlp_u64(asset_id),  // asset_id from parameter
+            rlp_u128(amount),   // amount
         ]);
 
         // Log: [address, topics, data]
@@ -679,13 +684,8 @@ mod tests {
         // Finalize block 1001 — now it should pass consensus verification
         light_client.set_finalized_block(1001, header_hash);
 
-        let result = process_light_client_deposit_evm(
-            &mut light_client,
-            &op,
-            &mut backend,
-            &config,
-            1,
-        );
+        let result =
+            process_light_client_deposit_evm(&mut light_client, &op, &mut backend, &config, 1);
 
         assert!(
             result.is_ok(),
@@ -695,7 +695,10 @@ mod tests {
 
         let queued = result.unwrap();
         match queued {
-            ExternalDepositResult::Queued { source_tx_hash: stx, .. } => {
+            ExternalDepositResult::Queued {
+                source_tx_hash: stx,
+                ..
+            } => {
                 assert_eq!(stx, source_tx_hash);
             }
         }
@@ -708,7 +711,11 @@ mod tests {
         source_tx_hash: B256,
         asset_id: u64,
         amount: u128,
-    ) -> (ExternalBridgeOp, call_light_client::EthLightClient, EthHeader) {
+    ) -> (
+        ExternalBridgeOp,
+        call_light_client::EthLightClient,
+        EthHeader,
+    ) {
         let genesis = GenesisState {
             anchor_hash: anchor,
             anchor_block: block_number - 1,
@@ -749,9 +756,8 @@ mod tests {
         let recipient = Address::repeat_byte(0x42);
         let source_tx_hash = B256::repeat_byte(0xAB);
 
-        let (op, mut light_client, header) = make_light_client_deposit_op(
-            anchor, 1001, recipient, source_tx_hash, 99, 1000,
-        );
+        let (op, mut light_client, header) =
+            make_light_client_deposit_op(anchor, 1001, recipient, source_tx_hash, 99, 1000);
 
         light_client.set_finalized_block(1001, header.block_hash);
 
@@ -761,9 +767,8 @@ mod tests {
         };
         let mut backend = MockStorage::default();
 
-        let result = process_light_client_deposit_evm(
-            &mut light_client, &op, &mut backend, &config, 1,
-        );
+        let result =
+            process_light_client_deposit_evm(&mut light_client, &op, &mut backend, &config, 1);
 
         assert!(
             matches!(result, Err(BridgeError::ExternalAssetNotAllowed(99))),
@@ -780,9 +785,8 @@ mod tests {
         let asset_id = 1u64;
         let amount = 1000u128;
 
-        let (op, mut light_client, header) = make_light_client_deposit_op(
-            anchor, 1001, recipient, source_tx_hash, asset_id, amount,
-        );
+        let (op, mut light_client, header) =
+            make_light_client_deposit_op(anchor, 1001, recipient, source_tx_hash, asset_id, amount);
 
         light_client.set_finalized_block(1001, header.block_hash);
 
@@ -792,15 +796,13 @@ mod tests {
         };
         let mut backend = MockStorage::default();
 
-        let result = process_light_client_deposit_evm(
-            &mut light_client, &op, &mut backend, &config, 1,
-        );
+        let result =
+            process_light_client_deposit_evm(&mut light_client, &op, &mut backend, &config, 1);
         assert!(result.is_ok(), "first deposit should succeed");
 
         // Second deposit with the SAME header triggers duplicate rejection
-        let result = process_light_client_deposit_evm(
-            &mut light_client, &op, &mut backend, &config, 2,
-        );
+        let result =
+            process_light_client_deposit_evm(&mut light_client, &op, &mut backend, &config, 2);
         assert!(
             matches!(
                 result,
@@ -819,9 +821,8 @@ mod tests {
         let asset_id = 1u64;
         let amount = 5000u128;
 
-        let (op, mut light_client, header) = make_light_client_deposit_op(
-            anchor, 1001, recipient, source_tx_hash, asset_id, amount,
-        );
+        let (op, mut light_client, header) =
+            make_light_client_deposit_op(anchor, 1001, recipient, source_tx_hash, asset_id, amount);
 
         light_client.set_finalized_block(1001, header.block_hash);
 
@@ -833,9 +834,8 @@ mod tests {
         };
         let mut backend = MockStorage::default();
 
-        let result = process_light_client_deposit_evm(
-            &mut light_client, &op, &mut backend, &config, 1,
-        );
+        let result =
+            process_light_client_deposit_evm(&mut light_client, &op, &mut backend, &config, 1);
         assert!(
             matches!(result, Err(BridgeError::ExceedsDailyLimit(1, 0, 1000))),
             "expected ExceedsDailyLimit, got {:?}",
@@ -851,9 +851,8 @@ mod tests {
         let asset_id = 1u64;
         let amount = 1000u128;
 
-        let (op, mut light_client, header) = make_light_client_deposit_op(
-            anchor, 1001, recipient, source_tx_hash, asset_id, amount,
-        );
+        let (op, mut light_client, header) =
+            make_light_client_deposit_op(anchor, 1001, recipient, source_tx_hash, asset_id, amount);
 
         light_client.set_finalized_block(1001, header.block_hash);
 
@@ -866,7 +865,11 @@ mod tests {
         let current_block = 10u64;
 
         let result = process_light_client_deposit_evm(
-            &mut light_client, &op, &mut backend, &config, current_block,
+            &mut light_client,
+            &op,
+            &mut backend,
+            &config,
+            current_block,
         );
         assert!(result.is_ok(), "deposit should succeed");
 
@@ -876,29 +879,27 @@ mod tests {
         );
         assert_eq!(read_bridge_pending_count(&mut backend), 1);
 
-        let status = backend.load(
-            BRIDGE_ADDRESS,
-            slot_bridge_pending_status(*source_tx_hash),
-        );
+        let status = backend.load(BRIDGE_ADDRESS, slot_bridge_pending_status(*source_tx_hash));
         assert_eq!(status, U256::from(1u8));
 
-        let stored_recipient = call_precompile::u256_to_address(
-            backend.load(BRIDGE_ADDRESS, slot_bridge_pending_recipient(*source_tx_hash))
-        );
+        let stored_recipient = call_precompile::u256_to_address(backend.load(
+            BRIDGE_ADDRESS,
+            slot_bridge_pending_recipient(*source_tx_hash),
+        ));
         assert_eq!(stored_recipient, recipient);
 
         let stored_asset = call_precompile::u256_to_u64(
-            backend.load(BRIDGE_ADDRESS, slot_bridge_pending_asset(*source_tx_hash))
+            backend.load(BRIDGE_ADDRESS, slot_bridge_pending_asset(*source_tx_hash)),
         );
         assert_eq!(stored_asset, asset_id);
 
         let stored_amount = call_precompile::u256_to_u128(
-            backend.load(BRIDGE_ADDRESS, slot_bridge_pending_amount(*source_tx_hash))
+            backend.load(BRIDGE_ADDRESS, slot_bridge_pending_amount(*source_tx_hash)),
         );
         assert_eq!(stored_amount, amount);
 
         let stored_block = call_precompile::u256_to_u64(
-            backend.load(BRIDGE_ADDRESS, slot_bridge_pending_block(*source_tx_hash))
+            backend.load(BRIDGE_ADDRESS, slot_bridge_pending_block(*source_tx_hash)),
         );
         assert_eq!(stored_block, current_block);
     }

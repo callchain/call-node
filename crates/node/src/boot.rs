@@ -17,8 +17,8 @@ use rand::rngs::OsRng;
 use std::sync::Arc;
 use tracing::info;
 
-use call_light_client::{BeaconConfig, EthLightClient, GenesisState};
 use alloy_primitives::B256;
+use call_light_client::{BeaconConfig, EthLightClient, GenesisState};
 
 /// Result type for boot sequence
 pub type BootResult = Result<CallNode, String>;
@@ -92,10 +92,7 @@ async fn load_validator_signer(keys: &crate::config::KeysConfig) -> Result<Signe
     } else if let Some(ref service) = keys.keyring_service {
         #[cfg(feature = "keyring")]
         {
-            let user = keys
-                .keyring_user
-                .clone()
-                .ok_or("--keyring-user required")?;
+            let user = keys.keyring_user.clone().ok_or("--keyring-user required")?;
             let signer = call_crypto::KeyringSigner::new(service, &user)
                 .map_err(|e| format!("failed to load key from OS keyring: {e}"))?;
             info!(service, user, "validator key loaded from OS keyring");
@@ -125,8 +122,8 @@ fn load_checkpoint_file(
 ) -> Result<(u64, call_light_client::SyncCommittee), String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read checkpoint file: {e}"))?;
-    let file: CheckpointFile =
-        serde_json::from_str(&content).map_err(|e| format!("failed to parse checkpoint JSON: {e}"))?;
+    let file: CheckpointFile = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse checkpoint JSON: {e}"))?;
 
     if file.pubkeys.len() != call_light_client::SYNC_COMMITTEE_SIZE {
         return Err(format!(
@@ -139,19 +136,20 @@ fn load_checkpoint_file(
     let mut pubkeys = Vec::with_capacity(file.pubkeys.len());
     for (i, pk_hex) in file.pubkeys.iter().enumerate() {
         let hex = pk_hex.trim_start_matches("0x");
-        let bytes = hex::decode(hex)
-            .map_err(|e| format!("invalid hex in pubkey {i}: {e}"))?;
+        let bytes = hex::decode(hex).map_err(|e| format!("invalid hex in pubkey {i}: {e}"))?;
         if bytes.len() != 48 {
             return Err(format!("pubkey {i} is {} bytes, expected 48", bytes.len()));
         }
         pubkeys.push(call_crypto::BlsPublicKey(
-            bytes.try_into().map_err(|_| format!("pubkey {i} conversion failed"))?,
+            bytes
+                .try_into()
+                .map_err(|_| format!("pubkey {i} conversion failed"))?,
         ));
     }
 
     let agg_hex = file.aggregate_pubkey.trim_start_matches("0x");
-    let agg_bytes = hex::decode(agg_hex)
-        .map_err(|e| format!("invalid hex in aggregate_pubkey: {e}"))?;
+    let agg_bytes =
+        hex::decode(agg_hex).map_err(|e| format!("invalid hex in aggregate_pubkey: {e}"))?;
     if agg_bytes.len() != 48 {
         return Err(format!(
             "aggregate_pubkey is {} bytes, expected 48",
@@ -237,10 +235,11 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
             let signer_guard = node.state.signer.read().map_err(|_| "lock poisoned")?;
             if let Some(ref s) = *signer_guard {
                 let validator_addr = s.address();
-                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-                    &node.state.db_env,
-                )
-                .map_err(|e| format!("failed to load EVM state for BLS pubkey registration: {e}"))?;
+                let mut provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env)
+                        .map_err(|e| {
+                            format!("failed to load EVM state for BLS pubkey registration: {e}")
+                        })?;
                 let validator_id = call_consensus::exec::state_accessors::read_validator_id_by_addr(
                     provider.state(),
                     validator_addr,
@@ -362,10 +361,9 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
 
             // Seed governance config defaults into EVM
             {
-                let mut provider = call_evm::provider::InMemoryStateProvider::from_db(
-                    &node.state.db_env,
-                )
-                .map_err(|e| format!("failed to load EVM state for gov seed: {e}"))?;
+                let mut provider =
+                    call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env)
+                        .map_err(|e| format!("failed to load EVM state for gov seed: {e}"))?;
                 call_consensus::exec::state_accessors::seed_gov_config(provider.state_mut());
                 provider
                     .state()
@@ -471,10 +469,11 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
                 // the consensus network try to dial nodes that aren't running a
                 // BFT engine at all.
                 let validator_pubkeys: std::collections::HashSet<Vec<u8>> = {
-                    let provider = call_evm::provider::InMemoryStateProvider::from_db(
-                        &node.state.db_env,
-                    )
-                    .map_err(|e| format!("failed to load EVM state for validator pubkeys: {e}"))?;
+                    let provider =
+                        call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env)
+                            .map_err(|e| {
+                                format!("failed to load EVM state for validator pubkeys: {e}")
+                            })?;
                     let count = call_consensus::exec::state_accessors::read_validator_count(
                         provider.state(),
                     );

@@ -110,7 +110,10 @@ mod tests {
 
         // Wait for window to expire
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        assert!(rl.check(ip), "request after window expiry should be allowed");
+        assert!(
+            rl.check(ip),
+            "request after window expiry should be allowed"
+        );
     }
 
     #[tokio::test]

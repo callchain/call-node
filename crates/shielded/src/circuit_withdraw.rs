@@ -192,7 +192,9 @@ impl ConstraintSynthesizer<Fr> for WithdrawCircuit {
             if value_fr.is_zero() {
                 Err(SynthesisError::Unsatisfiable)
             } else {
-                Ok(value_fr.inverse().expect("invariant: non-zero field element has inverse"))
+                Ok(value_fr
+                    .inverse()
+                    .expect("invariant: non-zero field element has inverse"))
             }
         })?;
         let one = FpVar::new_constant(cs.clone(), Fr::from(1u64))?;

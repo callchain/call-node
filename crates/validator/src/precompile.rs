@@ -196,12 +196,12 @@ impl call_precompile::StatefulPrecompile for ValidatorPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4]
-            .try_into()
-            .unwrap_or([0u8; 4]);
+        let selector: [u8; 4] = calldata[..4].try_into().unwrap_or([0u8; 4]);
         let sr = StorageRef::new(storage);
         match selector {
-            IProtocolValidator::stakeCall::SELECTOR => self.stake(calldata, msg_sender, storage, sr),
+            IProtocolValidator::stakeCall::SELECTOR => {
+                self.stake(calldata, msg_sender, storage, sr)
+            }
             IProtocolValidator::unstakeCall::SELECTOR => {
                 self.unstake(calldata, msg_sender, storage, sr)
             }

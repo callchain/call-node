@@ -80,7 +80,9 @@ impl LocalSigner {
         Self::from_raw_key(key)
     }
 
-    pub(crate) fn derive_pubkey_and_address(key: &[u8; 32]) -> Result<(PublicKey, Address), SignerError> {
+    pub(crate) fn derive_pubkey_and_address(
+        key: &[u8; 32],
+    ) -> Result<(PublicKey, Address), SignerError> {
         let signing_key = k256::ecdsa::SigningKey::from_slice(key)
             .map_err(|e| SignerError::SigningFailed(format!("invalid key: {e}")))?;
         let verifying_key = signing_key.verifying_key();
@@ -343,17 +345,12 @@ impl KeyringSigner {
     /// Store a 32-byte hex key into the given keyring entry.
     ///
     /// Useful for testing with mock credentials.
-    pub fn store_key_with_entry(
-        entry: &keyring::Entry,
-        hex_key: &str,
-    ) -> Result<(), SignerError> {
+    pub fn store_key_with_entry(entry: &keyring::Entry, hex_key: &str) -> Result<(), SignerError> {
         let bytes = hex::decode(hex_key.trim_start_matches("0x"))
             .map_err(|e| SignerError::SigningFailed(format!("invalid hex: {e}")))?;
 
         if bytes.len() != 32 {
-            return Err(SignerError::SigningFailed(
-                "key must be 32 bytes".into(),
-            ));
+            return Err(SignerError::SigningFailed("key must be 32 bytes".into()));
         }
 
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);

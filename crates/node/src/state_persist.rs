@@ -106,7 +106,8 @@ pub(crate) fn save_receipts(
         .iter()
         .map(|(k, v)| {
             let key: Vec<u8> = k.as_slice().to_vec();
-            let value: Vec<u8> = serde_json::to_vec(v).expect("invariant: JSON serialization never fails for Receipt");
+            let value: Vec<u8> = serde_json::to_vec(v)
+                .expect("invariant: JSON serialization never fails for Receipt");
             (key, value)
         })
         .collect();
@@ -127,7 +128,8 @@ pub(crate) fn save_receipts(
         .map(|(block, hashes)| {
             (
                 block.to_be_bytes().to_vec(),
-                serde_json::to_vec(hashes).expect("invariant: JSON serialization never fails for Vec<B256>"),
+                serde_json::to_vec(hashes)
+                    .expect("invariant: JSON serialization never fails for Vec<B256>"),
             )
         })
         .collect();
@@ -709,7 +711,10 @@ mod tests {
         let mut receipts = std::collections::HashMap::new();
         let tx1 = call_primitives::TxHash::from([0x11u8; 32]);
         let tx2 = call_primitives::TxHash::from([0x22u8; 32]);
-        receipts.insert(tx1, make_receipt(tx1, 10, call_primitives::ExecutionStatus::Success));
+        receipts.insert(
+            tx1,
+            make_receipt(tx1, 10, call_primitives::ExecutionStatus::Success),
+        );
         receipts.insert(
             tx2,
             make_receipt(
@@ -766,12 +771,10 @@ mod tests {
         assert_eq!(loaded_receipts.len(), 2);
         assert_eq!(loaded_receipts.get(&tx1).unwrap().block_number, 10);
         assert_eq!(loaded_receipts.get(&tx2).unwrap().block_number, 20);
-        assert!(
-            matches!(
-                &loaded_receipts.get(&tx2).unwrap().status,
-                call_primitives::ExecutionStatus::Reverted { reason } if reason == "out of gas"
-            )
-        );
+        assert!(matches!(
+            &loaded_receipts.get(&tx2).unwrap().status,
+            call_primitives::ExecutionStatus::Reverted { reason } if reason == "out of gas"
+        ));
 
         // Fork state
         let mut loaded_fm = load_fork_state(&db_path).unwrap().unwrap();
@@ -780,7 +783,10 @@ mod tests {
             call_primitives::ProtocolVersion::new(1, 0, 0)
         );
         let upgrade = loaded_fm.check_upgrades_at_height(100);
-        assert_eq!(upgrade, Some(call_primitives::ProtocolVersion::new(1, 1, 0)));
+        assert_eq!(
+            upgrade,
+            Some(call_primitives::ProtocolVersion::new(1, 1, 0))
+        );
     }
 
     /// Test that an incomplete persist (checkpoint marker left behind) is

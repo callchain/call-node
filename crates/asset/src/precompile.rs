@@ -334,25 +334,33 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
         if calldata.len() < 4 {
             return Err(PrecompileError::Other("invalid input".into()));
         }
-        let selector: [u8; 4] = calldata[..4]
-            .try_into()
-            .unwrap_or([0u8; 4]);
+        let selector: [u8; 4] = calldata[..4].try_into().unwrap_or([0u8; 4]);
         let sr = StorageRef::new(storage);
         match selector {
             IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata, storage, sr),
-            IProtocolAsset::getAssetInfoCall::SELECTOR => self.get_asset_info(calldata, storage, sr),
-            IProtocolAsset::transferCall::SELECTOR => self.transfer(calldata, msg_sender, storage, sr),
+            IProtocolAsset::getAssetInfoCall::SELECTOR => {
+                self.get_asset_info(calldata, storage, sr)
+            }
+            IProtocolAsset::transferCall::SELECTOR => {
+                self.transfer(calldata, msg_sender, storage, sr)
+            }
             IProtocolAsset::batchTransferCall::SELECTOR => {
                 self.batch_transfer(calldata, msg_sender, storage, sr)
             }
-            IProtocolAsset::approveCall::SELECTOR => self.approve(calldata, msg_sender, storage, sr),
+            IProtocolAsset::approveCall::SELECTOR => {
+                self.approve(calldata, msg_sender, storage, sr)
+            }
             IProtocolAsset::transferFromCall::SELECTOR => {
                 self.transfer_from(calldata, msg_sender, storage, sr)
             }
             IProtocolAsset::mintCall::SELECTOR => self.mint(calldata, msg_sender, storage, sr),
-            IProtocolAsset::issuerMintCall::SELECTOR => self.mint(calldata, msg_sender, storage, sr),
+            IProtocolAsset::issuerMintCall::SELECTOR => {
+                self.mint(calldata, msg_sender, storage, sr)
+            }
             IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender, storage, sr),
-            IProtocolAsset::registerCall::SELECTOR => self.register(calldata, msg_sender, storage, sr),
+            IProtocolAsset::registerCall::SELECTOR => {
+                self.register(calldata, msg_sender, storage, sr)
+            }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
     }
@@ -361,9 +369,12 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompile::storage::HashMapStorageProvider;
     use call_precompile::storage::storage_slot;
-    use call_precompile::{slot_balance, slot_compliance, u128_to_u256, StatefulPrecompile, StorageRef, COMPLIANCE_ADDRESS};
+    use call_precompile::storage::HashMapStorageProvider;
+    use call_precompile::{
+        slot_balance, slot_compliance, u128_to_u256, StatefulPrecompile, StorageRef,
+        COMPLIANCE_ADDRESS,
+    };
     use call_primitives::Address;
 
     #[test]
@@ -560,11 +571,7 @@ mod tests {
         .abi_encode();
 
         let result = precompile.call(&input, from, &mut provider);
-        assert!(
-            result.is_ok(),
-            "batch transfer failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "batch transfer failed: {:?}", result.err());
 
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
         assert_eq!(store.read_balance(1, from), 400);

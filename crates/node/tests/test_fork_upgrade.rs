@@ -293,13 +293,23 @@ async fn test_mixed_validator_versions_consensus() {
     // Verify state consistency: sender balance decreased on both
     let bal_a = {
         let na = node_a_ref.read().unwrap();
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&na.state.db_env).unwrap();
-        provider.state().get_balance(&sender).try_into().unwrap_or(0u128)
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&na.state.db_env).unwrap();
+        provider
+            .state()
+            .get_balance(&sender)
+            .try_into()
+            .unwrap_or(0u128)
     };
     let bal_b = {
         let nb = node_b_ref.read().unwrap();
-        let provider = call_evm::provider::InMemoryStateProvider::from_db(&nb.state.db_env).unwrap();
-        provider.state().get_balance(&sender).try_into().unwrap_or(0u128)
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&nb.state.db_env).unwrap();
+        provider
+            .state()
+            .get_balance(&sender)
+            .try_into()
+            .unwrap_or(0u128)
     };
     assert!(bal_a < 100_000, "node A state should reflect executed txs");
     assert!(bal_b < 100_000, "node B state should reflect executed txs");

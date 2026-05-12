@@ -254,8 +254,15 @@ pub struct RpcState {
     /// Local in-memory keystore for eth_sign / eth_sendTransaction.
     pub keystore: LocalKeystore,
     /// Compliance CSV export callback — set by call-node after AuditLog creation.
-    pub compliance_exporter:
-        RwLock<Option<Arc<dyn Fn(u64, String, u64, u64, Option<Address>) -> Result<String, String> + Send + Sync>>>,
+    pub compliance_exporter: RwLock<
+        Option<
+            Arc<
+                dyn Fn(u64, String, u64, u64, Option<Address>) -> Result<String, String>
+                    + Send
+                    + Sync,
+            >,
+        >,
+    >,
 }
 
 impl RpcState {

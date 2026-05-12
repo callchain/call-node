@@ -322,10 +322,10 @@ fn test_otel_spans_safe_without_global_init() {
 
 // ── OpenTelemetry span emission tests (gap #26) ─────────────────────
 
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use opentelemetry_sdk::export::trace::{ExportResult, SpanData, SpanExporter};
 use opentelemetry_sdk::trace::TracerProvider;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 struct CaptureExporter {
@@ -392,10 +392,16 @@ fn test_otel_spans_emitted_to_collector() {
     let block_span = spans.iter().find(|s| s.name.as_ref() == "block_produced");
     assert!(block_span.is_some(), "should find a 'block_produced' span");
     let span = block_span.unwrap();
-    let height_attr = span.attributes.iter().find(|a| a.key.as_ref() == "block.height");
+    let height_attr = span
+        .attributes
+        .iter()
+        .find(|a| a.key.as_ref() == "block.height");
     assert!(height_attr.is_some());
     assert_eq!(height_attr.unwrap().value, opentelemetry::Value::I64(42));
-    let duration_attr = span.attributes.iter().find(|a| a.key.as_ref() == "block.duration_ms");
+    let duration_attr = span
+        .attributes
+        .iter()
+        .find(|a| a.key.as_ref() == "block.duration_ms");
     assert!(duration_attr.is_some());
     assert_eq!(duration_attr.unwrap().value, opentelemetry::Value::I64(150));
 
@@ -407,7 +413,10 @@ fn test_otel_spans_emitted_to_collector() {
     let p2p_span = spans.iter().find(|s| s.name.as_ref() == "p2p_message");
     assert!(p2p_span.is_some(), "should find a 'p2p_message' span");
     let span = p2p_span.unwrap();
-    let bytes_attr = span.attributes.iter().find(|a| a.key.as_ref() == "p2p.bytes");
+    let bytes_attr = span
+        .attributes
+        .iter()
+        .find(|a| a.key.as_ref() == "p2p.bytes");
     assert!(bytes_attr.is_some());
     assert_eq!(bytes_attr.unwrap().value, opentelemetry::Value::I64(1024));
 }

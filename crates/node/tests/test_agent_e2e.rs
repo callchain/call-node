@@ -301,8 +301,7 @@ fn test_agent_lifecycle_in_block() {
             call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
         let owner_slot = slot_agent_owner(0);
         let stored = provider.state().get_storage(&AGENT_ADDRESS, owner_slot);
-        let agent_owner =
-            call_primitives::Address::from_slice(&stored.to_be_bytes::<32>()[12..32]);
+        let agent_owner = call_primitives::Address::from_slice(&stored.to_be_bytes::<32>()[12..32]);
         assert_eq!(
             agent_owner,
             call_primitives::Address::ZERO,

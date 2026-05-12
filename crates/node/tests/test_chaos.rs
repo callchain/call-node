@@ -65,7 +65,13 @@ async fn test_chaos_random_node_restart() {
     for i in 0..3 {
         let node = sim.node(0);
         let mut n = node.write().unwrap();
-        n.insert_evm_tx(make_evm_tx(&secret, val_addr, i, test_addr(10 + i as u8), 100));
+        n.insert_evm_tx(make_evm_tx(
+            &secret,
+            val_addr,
+            i,
+            test_addr(10 + i as u8),
+            100,
+        ));
         n.produce_block(1_000_000 + i * 250);
     }
 
@@ -80,7 +86,13 @@ async fn test_chaos_random_node_restart() {
     for i in 3..6 {
         let node = sim.node(0);
         let mut n = node.write().unwrap();
-        n.insert_evm_tx(make_evm_tx(&secret, val_addr, i, test_addr(10 + i as u8), 100));
+        n.insert_evm_tx(make_evm_tx(
+            &secret,
+            val_addr,
+            i,
+            test_addr(10 + i as u8),
+            100,
+        ));
         n.produce_block(1_000_000 + i * 250);
     }
 
@@ -93,13 +105,22 @@ async fn test_chaos_random_node_restart() {
 
     // Node 2 should now receive the backlog of messages
     let pending = sim.pending_messages(2);
-    assert!(pending > 0, "restarted node should have pending messages to catch up");
+    assert!(
+        pending > 0,
+        "restarted node should have pending messages to catch up"
+    );
 
     // Network continues to advance after rejoin
     for i in 6..9 {
         let node = sim.node(0);
         let mut n = node.write().unwrap();
-        n.insert_evm_tx(make_evm_tx(&secret, val_addr, i, test_addr(10 + i as u8), 100));
+        n.insert_evm_tx(make_evm_tx(
+            &secret,
+            val_addr,
+            i,
+            test_addr(10 + i as u8),
+            100,
+        ));
         n.produce_block(1_000_000 + i * 250);
     }
 
@@ -211,10 +232,7 @@ async fn test_chaos_message_drops_10_30_percent() {
     tokio::task::yield_now().await;
     let received2 = sim.pending_messages(1);
     // Previous 100 + new 100, some dropped from both batches
-    assert!(
-        received2 > received,
-        "more messages should have been sent"
-    );
+    assert!(received2 > received, "more messages should have been sent");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -258,7 +276,10 @@ async fn test_chaos_combined_latency_drops_and_restart() {
     }
 
     let height = sim.node(0).read().unwrap().consensus_height();
-    assert_eq!(height, 10, "node 0 should have produced 10 blocks despite chaos");
+    assert_eq!(
+        height, 10,
+        "node 0 should have produced 10 blocks despite chaos"
+    );
 
     // "Restart" node 1 while chaos is active
     sim.isolate_node(1);
@@ -342,5 +363,8 @@ async fn test_chaos_rapid_partition_heal_cycles() {
         sim.heal_all_partitions();
     }
 
-    assert_eq!(blocks_produced, 5, "all blocks should produce despite rapid partitions");
+    assert_eq!(
+        blocks_produced, 5,
+        "all blocks should produce despite rapid partitions"
+    );
 }
