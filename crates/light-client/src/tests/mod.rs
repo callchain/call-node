@@ -535,6 +535,234 @@ fn test_malicious_parent_hash_chain_break() {
 // Beacon chain BLS consensus verification tests
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Build a mock LightClientUpdate with a valid BLS aggregate signature from
+/// a known sync committee. This simulates the full beacon consensus flow:
+/// bootstrap sync committee → apply update → verify BLS → set finalized.
+fn build_mock_light_client_update(
+    signing_root: B256,
+) -> (LightClientUpdate, Vec<call_crypto::BlsSecretKey>) {
+    use call_crypto::{bls_generate, bls_sign_beacon, BlsPublicKey, BlsSecretKey, BlsSignature};
+
+    const PARTICIPANTS: usize = 350; // > 342 minimum
+
+    // Generate real keypairs for participants
+    let mut secrets = Vec::with_capacity(PARTICIPANTS);
+    let mut pubkeys = Vec::with_capacity(crate::beacon::SYNC_COMMITTEE_SIZE);
+
+    for i in 0..crate::beacon::SYNC_COMMITTEE_SIZE {
+        if i < PARTICIPANTS {
+            let (sk, pk) = bls_generate().unwrap();
+            secrets.push(sk);
+            pubkeys.push(pk);
+        } else {
+            pubkeys.push(BlsPublicKey([0u8; 48]));
+        }
+    }
+
+    // Create sync committee
+    let mut agg_pk = [0u8; 48];
+    agg_pk.copy_from_slice(&pubkeys[0].0);
+    let sync_committee = SyncCommittee {
+        pubkeys: pubkeys.clone(),
+        aggregate_pubkey: BlsPublicKey(agg_pk),
+    };
+
+    // Build attested and finalized headers
+    let attested_header = BeaconBlockHeader {
+        slot: 100,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x01),
+        state_root: B256::repeat_byte(0x02),
+        body_root: B256::repeat_byte(0x03),
+    };
+    let finalized_header = BeaconBlockHeader {
+        slot: 98,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x04),
+        state_root: B256::repeat_byte(0x05),
+        body_root: B256::repeat_byte(0x06),
+    };
+
+    // Set participation bits for first PARTICIPANTS validators
+    let mut bits = [0u8; 64];
+    for i in 0..PARTICIPANTS {
+        let byte_idx = i / 8;
+        let bit_idx = i % 8;
+        bits[byte_idx] |= 1 << bit_idx;
+    }
+
+    // Sign with all participants using beacon DST
+    let mut sigs: Vec<BlsSignature> = secrets
+        .iter()
+        .map(|sk| bls_sign_beacon(sk, signing_root.as_slice()))
+        .collect();
+
+    let agg_sig = call_crypto::bls_aggregate(&sigs).unwrap();
+
+    let sync_aggregate = SyncAggregate {
+        sync_committee_bits: bits,
+        sync_committee_signature: agg_sig,
+    };
+
+    let update = LightClientUpdate {
+        attested_header,
+        next_sync_committee: sync_committee,
+        next_sync_committee_branch: [B256::ZERO; crate::beacon::NEXT_SYNC_COMMITTEE_BRANCH_DEPTH],
+        finalized_header,
+        finality_branch: [B256::ZERO; crate::beacon::FINALIZED_BRANCH_DEPTH],
+        sync_aggregate,
+        signature_slot: 101,
+    };
+
+    (update, secrets)
+}
+
+#[test]
+fn test_apply_light_client_update_bls_consensus_full_flow() {
+    let genesis = GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let beacon_config = BeaconConfig {
+        fork_version: [0, 0, 0, 1],
+        genesis_validators_root: B256::repeat_byte(0xBB),
+    };
+    let mut client = EthLightClient::init_with_beacon_config(genesis, Some(beacon_config.clone()));
+
+    // Compute signing root from attested header
+    let attested_header = BeaconBlockHeader {
+        slot: 100,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x01),
+        state_root: B256::repeat_byte(0x02),
+        body_root: B256::repeat_byte(0x03),
+    };
+    let signing_root =
+        crate::beacon::compute_sync_committee_signing_root(&attested_header, beacon_config.fork_version, beacon_config.genesis_validators_root);
+
+    let (update, _secrets) = build_mock_light_client_update(signing_root);
+
+    // Apply the update — BLS verification should pass
+    let result = client.apply_light_client_update(update);
+    assert!(result.is_ok(), "BLS consensus update should succeed: {:?}", result);
+
+    let (finalized_slot, finalized_root) = result.unwrap();
+    assert_eq!(finalized_slot, 98);
+
+    // Map beacon slot to execution block and mark consensus-verified
+    client.set_finalized_block(finalized_slot, finalized_root);
+
+    assert!(client.is_consensus_verified(finalized_slot));
+    assert!(client.is_consensus_verified(finalized_slot - 1));
+    assert!(!client.is_consensus_verified(finalized_slot + 1));
+}
+
+#[test]
+fn test_apply_light_client_update_rejects_invalid_signature() {
+    let genesis = GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let beacon_config = BeaconConfig {
+        fork_version: [0, 0, 0, 1],
+        genesis_validators_root: B256::repeat_byte(0xBB),
+    };
+    let mut client = EthLightClient::init_with_beacon_config(genesis, Some(beacon_config.clone()));
+
+    let attested_header = BeaconBlockHeader {
+        slot: 100,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x01),
+        state_root: B256::repeat_byte(0x02),
+        body_root: B256::repeat_byte(0x03),
+    };
+    let signing_root =
+        crate::beacon::compute_sync_committee_signing_root(&attested_header, beacon_config.fork_version, beacon_config.genesis_validators_root);
+
+    let (mut update, _secrets) = build_mock_light_client_update(signing_root);
+
+    // Tamper the signature — flip a byte
+    update.sync_aggregate.sync_committee_signature.0[0] ^= 0xFF;
+
+    let result = client.apply_light_client_update(update);
+    assert!(
+        matches!(result, Err(LightClientError::SyncCommitteeSignatureInvalid(_))),
+        "tampered signature should be rejected, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_apply_light_client_update_rejects_insufficient_participation() {
+    use call_crypto::{bls_generate, bls_sign_beacon};
+
+    let genesis = GenesisState {
+        anchor_hash: B256::repeat_byte(0xAA),
+        anchor_block: 1000,
+        state_root: B256::ZERO,
+    };
+    let beacon_config = BeaconConfig {
+        fork_version: [0, 0, 0, 1],
+        genesis_validators_root: B256::repeat_byte(0xBB),
+    };
+    let mut client = EthLightClient::init_with_beacon_config(genesis, Some(beacon_config.clone()));
+
+    let attested_header = BeaconBlockHeader {
+        slot: 100,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x01),
+        state_root: B256::repeat_byte(0x02),
+        body_root: B256::repeat_byte(0x03),
+    };
+    let signing_root =
+        crate::beacon::compute_sync_committee_signing_root(&attested_header, beacon_config.fork_version, beacon_config.genesis_validators_root);
+
+    // Build a sync committee with only 1 real key and the rest zeros
+    let (sk, pk) = bls_generate().unwrap();
+    let mut pubkeys = vec![call_crypto::BlsPublicKey([0u8; 48]); crate::beacon::SYNC_COMMITTEE_SIZE];
+    pubkeys[0] = pk;
+
+    let sync_committee = SyncCommittee {
+        pubkeys: pubkeys.clone(),
+        aggregate_pubkey: pk,
+    };
+
+    let finalized_header = BeaconBlockHeader {
+        slot: 98,
+        proposer_index: 0,
+        parent_root: B256::repeat_byte(0x04),
+        state_root: B256::repeat_byte(0x05),
+        body_root: B256::repeat_byte(0x06),
+    };
+
+    // Only validator 0 participated — sign with just 1 key
+    let mut bits = [0u8; 64];
+    bits[0] = 0b0000_0001;
+    let sig = bls_sign_beacon(&sk, signing_root.as_slice());
+
+    let update = LightClientUpdate {
+        attested_header: attested_header.clone(),
+        next_sync_committee: sync_committee,
+        next_sync_committee_branch: [B256::ZERO; crate::beacon::NEXT_SYNC_COMMITTEE_BRANCH_DEPTH],
+        finalized_header,
+        finality_branch: [B256::ZERO; crate::beacon::FINALIZED_BRANCH_DEPTH],
+        sync_aggregate: SyncAggregate {
+            sync_committee_bits: bits,
+            sync_committee_signature: sig,
+        },
+        signature_slot: 101,
+    };
+
+    let result = client.apply_light_client_update(update);
+    assert!(
+        matches!(result, Err(LightClientError::InsufficientSyncParticipation { .. })),
+        "insufficient participation should be rejected, got {:?}",
+        result
+    );
+}
+
 #[test]
 fn test_init_with_beacon_config_stores_config() {
     let genesis = GenesisState {

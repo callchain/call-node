@@ -65,6 +65,16 @@ pub fn bls_sign(secret: &BlsSecretKey, msg: &[u8]) -> BlsSignature {
     BlsSignature(sig.to_bytes())
 }
 
+/// Sign a message with BLS12-381 using the Ethereum beacon chain DST.
+///
+/// This is the counterpart to [`bls_verify_aggregate_beacon`] and must be
+/// used when producing signatures that will be verified by the beacon chain
+/// sync committee verifier.
+pub fn bls_sign_beacon(secret: &BlsSecretKey, msg: &[u8]) -> BlsSignature {
+    let sig = secret.inner.sign(msg, DST_BEACON, &[]);
+    BlsSignature(sig.to_bytes())
+}
+
 /// Verify a single BLS signature
 pub fn bls_verify(pubkey: &BlsPublicKey, msg: &[u8], sig: &BlsSignature) -> Result<(), BlsError> {
     let pk = BlstPublicKey::uncompress(&pubkey.0).map_err(|_| BlsError::InvalidPublicKey)?;
