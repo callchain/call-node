@@ -16,6 +16,8 @@ ignore = [
     "RUSTSEC-2026-0098",  # rustls-webpki URI name constraints
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard name constraints
     "RUSTSEC-2026-0104",  # x509-parser CRL parsing panic
+    "RUSTSEC-2023-0089",  # atomic-polyfill unmaintained (transitive via ark-ec)
+    "RUSTSEC-2026-0119",  # hickory-proto O(n²) name compression (needs hickory-resolver >=0.26)
 ]
 
 [bans]
