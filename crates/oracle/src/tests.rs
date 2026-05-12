@@ -295,6 +295,34 @@ fn test_oracle_invalid_signature_all_zeros() {
 }
 
 #[test]
+fn test_oracle_invalid_signature_wrong_validator_id() {
+    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (vid_a, _, signing_key_a) = &validators[0];
+    let (vid_b, _, _) = &validators[1];
+    let pair = PricePair::new(1, 0);
+    let block = 1000u64;
+    let timestamp = block * 1000;
+
+    // Sign with validator A's key but for validator B's ID in the message
+    let sig = sign_oracle_submission(signing_key_a, *vid_b, pair, 2_000_000, block, timestamp);
+
+    // Submit as validator B — signature was made with A's key but B's validator_id in message
+    let submission = OracleSubmission {
+        validator_id: *vid_b,
+        pair,
+        price: 2_000_000,
+        block_number: block,
+        timestamp,
+        signature: sig,
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        tracker.submit_price(submission, &config, &validator_map),
+        Err(OracleError::InvalidSignature)
+    ));
+}
+
+#[test]
 fn test_oracle_invalid_signature_random_bytes() {
     let (mut tracker, validators, config, validator_map) = make_tracker();
     let (vid, _, _) = &validators[0];

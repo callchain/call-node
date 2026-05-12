@@ -23,7 +23,7 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 | 1 | ~~RPC rate limiting~~ | ~~`call-rpc`~~ | ~~Per-client request throttling, burst handling, ban-after-excess~~ |
 | 2 | ~~Concurrent DB access / crash recovery~~ | ~~`call-storage`~~ | ~~Simultaneous writers, WAL replay after kill -9, corruption detection~~ |
 | 3 | ~~Light client beacon BLS consensus~~ | ~~`call-light-client`~~ | ~~Mock beacon API → `fetch_light_client_finality_update` → `apply_light_client_update` → `set_finalized_block`~~ |
-| 4 | Oracle signature negative tests | `call-oracle` | Submit with invalid 64-byte signature → must fail |
+| 4 | ~~Oracle signature negative tests~~ | ~~`call-oracle`~~ | ~~Submit with invalid 64-byte signature → must fail~~ |
 
 ---
 
@@ -94,12 +94,13 @@ This file tracks only **open (unresolved) testing gaps**. When a gap is closed:
 | — | Soak test baseline | Sustained load E2E | prior |
 | 1 | RPC rate limiting | `crates/rpc/src/rate_limit.rs` (7 tests) | `1cf0214` |
 | 2 | Concurrent DB access / crash recovery | `crates/storage/src/reth_db.rs` (+3 tests: same-key race, reopen persist, WAL checkpoint) | `713aa29` |
-| 3 | Light client beacon BLS consensus | `crates/light-client/src/tests/mod.rs` (+3 tests: full flow, invalid sig, insufficient participation) + `bls_sign_beacon` | current |
+| 3 | Light client beacon BLS consensus | `crates/light-client/src/tests/mod.rs` (+3 tests: full flow, invalid sig, insufficient participation) + `bls_sign_beacon` | `12a8ccb` |
+| 4 | Oracle signature negative tests | `crates/oracle/src/tests.rs` (+1 test: wrong validator_id; existing: wrong key, tampered price/block, all-zeros, random bytes) | current |
 
 ---
 
 ## Stats
 
-- **Total open**: 30 gaps (1 critical + 10 high + 13 medium + 6 infrastructure)
-- **Recently closed**: 14 gaps
+- **Total open**: 29 gaps (0 critical + 10 high + 13 medium + 6 infrastructure)
+- **Recently closed**: 15 gaps
 - **Target**: Close all critical + high before mainnet; medium + infra before public testnet

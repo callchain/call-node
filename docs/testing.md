@@ -85,7 +85,7 @@ The Callchain test suite spans unit tests (per-crate), integration tests (cross-
 | 5 | ~~**No concurrent access/corruption recovery tests**~~ | ~~No tests for concurrent DB writes, crash recovery, or WAL behavior.~~ | **RESOLVED** — `crates/storage/src/reth_db.rs` (+3 tests: same-key race, reopen persist, WAL checkpoint) |
 | 6 | ~~**No network partition tests**~~ | ~~E2E tests use local harness~~ | **RESOLVED** — `crates/node/tests/test_network_partition.rs` (7 tests) |
 | 7 | ~~**No light client beacon BLS consensus verification tests**~~ | ~~`apply_light_client_update` and `bls_verify_aggregate_beacon` exist but no E2E test verifies beacon sync committee signature validation against live or mock beacon API.~~ | **RESOLVED** — `crates/light-client/src/tests/mod.rs` (3 tests: full flow, invalid sig, insufficient participation) |
-| 8 | **No oracle signature verification negative tests** | Oracle price submissions accept any 64-byte signature. No negative test exists with invalid signature data. | Partial — `test_oracle_e2e.rs` covers positive path only |
+| 8 | ~~**No oracle signature verification negative tests**~~ | ~~Oracle price submissions accept any 64-byte signature. No negative test exists with invalid signature data.~~ | **RESOLVED** — `crates/oracle/src/tests.rs` (6 tests: wrong key, tampered price/block/validator_id, all-zeros, random bytes) |
 
 ### High Gaps
 
