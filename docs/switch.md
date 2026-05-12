@@ -44,15 +44,16 @@ Internal bridge operations are **atomic** and execute within a single block. If 
 
 ## Asset Bridging Rules
 
-The internal bridge treats assets differently based on `asset_id`:
+The internal bridge treats assets differently based on `asset_id` and `has_erc20`:
 
-| Asset ID | Asset Type | Deposit Behavior | Withdraw Behavior |
-|----------|-----------|------------------|-------------------|
-| `0` | Virtual USD | **Rejected** | **Rejected** |
-| `1` | CALL (native) | Deduct protocol balance → **Add native EVM balance** (`evm_state.set_balance`) | Deduct native EVM balance → **Credit protocol balance** |
-| `>=2` | User-defined asset | Deduct protocol balance → **Mint ERC-20 wrapped token** (`bridgeMint`) | **Burn ERC-20 wrapped token** (`bridgeBurn`) → Credit protocol balance |
+| Asset ID | Asset Type | `has_erc20` | Deposit Behavior | Withdraw Behavior |
+|----------|-----------|-------------|------------------|-------------------|
+| `0` | Virtual USD | — | **Rejected** | **Rejected** |
+| `1` | CALL (native) | — | Deduct protocol balance → **Add native EVM balance** (`evm_state.set_balance`) | Deduct native EVM balance → **Credit protocol balance** |
+| `>=2` | Protocol-only | `0` | **Rejected** — `AssetHasNoErc20Bridge` | **Rejected** — `AssetHasNoErc20Bridge` |
+| `>=2` | ERC-20 backed | `1` | Deduct protocol balance → **Mint ERC-20 wrapped token** (`bridgeMint`) | **Burn ERC-20 wrapped token** (`bridgeBurn`) → Credit protocol balance |
 
-**Key design decision:** CALL (asset_id=1) bridges as **native EVM gas balance**, not as a wrapped ERC-20. This allows bridged CALL to be used directly for EVM transaction gas and native transfers. User-defined assets are always bridged as wrapped ERC-20 contracts deployed via `EvmExecutor::deploy_erc20_template`.
+**Key design decision:** CALL (asset_id=1) bridges as **native EVM gas balance**, not as a wrapped ERC-20. This allows bridged CALL to be used directly for EVM transaction gas and native transfers. User-defined assets must be registered via `registerErc20` (setting `has_erc20 = 1`) to enable switching. Protocol-only assets registered via `register` (`has_erc20 = 0`) cannot leave the protocol layer.
 
 ### Supply Tracking
 
@@ -70,12 +71,12 @@ Bridge operations update `Asset.evm_supply` in `AssetRegistry`:
 
 ## Precompile Alternative
 
-The **Switch precompile at `0x207`** provides the same bridging functionality via standard EVM transactions:
+The **Switch precompile at `0x207`** provides the same bridging functionality via standard EVM transactions, with an important restriction: **only ERC-20 backed assets (`has_erc20 == 1`) and CALL (`asset_id == 1`) are accepted**. Protocol-only assets (`has_erc20 == 0`) are rejected with `AssetHasNoErc20Bridge`.
 
-| Operation | Precompile Function | Gas |
-|---|---|---|
-| `SwitchToEvm` | `switchToEvm(uint64,address,uint128)` | 30,000 |
-| `SwitchToProtocol` | `switchToProtocol(uint64,address,uint128)` | 30,000 |
+| Operation | Precompile Function | Gas | Restrictions |
+|---|---|---|---|
+| `SwitchToEvm` | `switchToEvm(uint64,address,uint128)` | 30,000 | `asset_id == 1` or `has_erc20 == 1` |
+| `SwitchToProtocol` | `switchToProtocol(uint64,address,uint128)` | 30,000 | `asset_id == 1` or `has_erc20 == 1` |
 
 Solidity contracts and MetaMask can call these functions directly. See [precompile.md](precompile.md) for the full ABI.
 
@@ -138,12 +139,13 @@ Bridge precompiles receive:
 
 1. **Reject asset_id == 0** (virtual USD)
 2. **Validate asset registered** in `AssetRegistry`
-3. **Check bridge not paused** for this asset
-4. **Check per-tx limit** against `BridgeConfig::max_per_tx`
-5. **Check daily limit** — auto-resets per `blocks_per_day`
-6. **Check protocol balance** sufficient
-7. **Deduct protocol balance**
-8. **Bridge to EVM:**
+3. **Check `has_erc20`** — reject protocol-only assets (`has_erc20 == 0` and `asset_id != 1`)
+4. **Check bridge not paused** for this asset
+5. **Check per-tx limit** against `BridgeConfig::max_per_tx`
+6. **Check daily limit** — auto-resets per `blocks_per_day`
+7. **Check protocol balance** sufficient
+8. **Deduct protocol balance**
+9. **Bridge to EVM:**
    - If `asset_id == 1`: `evm_state.set_balance(to, current + amount)`
    - If `asset_id >= 2`: `evm_executor.evm_call_bridge_mint(sender, contract_addr, evm_state, to, amount)`
 9. **Record deposit** in `bridge_state`
@@ -153,10 +155,11 @@ Bridge precompiles receive:
 
 1. **Reject asset_id == 0** (virtual USD)
 2. **Validate asset registered**
-3. **Check bridge not paused**
-4. **Check per-tx limit**
-5. **Check daily limit**
-6. **Withdraw from EVM:**
+3. **Check `has_erc20`** — reject protocol-only assets
+4. **Check bridge not paused**
+5. **Check per-tx limit**
+6. **Check daily limit**
+7. **Withdraw from EVM:**
    - If `asset_id == 1`: check `evm_state.get_balance(sender) >= amount`, then `evm_state.set_balance(sender, balance - amount)`
    - If `asset_id >= 2`: `evm_executor.evm_call_bridge_burn(sender, contract_addr, evm_state, amount)`
 7. **Credit protocol balance** to `to`
@@ -320,7 +323,7 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 | Component | Status | Notes |
 |-----------|--------|-------|
 | CALL native bridging | Ready | asset_id==1 uses `evm_state.set_balance` directly; no ERC-20 contract needed |
-| User asset ERC-20 bridging | Ready | Requires `AssetRegistry::evm_contract_address` registration; `evm_call_bridge_mint` / `evm_call_bridge_burn` |
+| User asset ERC-20 bridging | Ready | Requires `registerErc20` (sets `has_erc20 = 1` and `evm_contract_address`); `evm_call_bridge_mint` / `evm_call_bridge_burn` |
 | Virtual USD rejection | Ready | asset_id==0 explicitly rejected in both deposit and withdraw paths |
 | Atomic rollback | Ready | Snapshot of account + evm_state + bridge_state before each tx; full restore on failure |
 | Rate limiting | Ready | Per-tx and daily limits enforced; auto-reset per `blocks_per_day` |

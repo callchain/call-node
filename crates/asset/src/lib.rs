@@ -315,10 +315,60 @@ impl<B: StorageBackend> AssetStorage<B> {
         self.store_meta_u256(asset_id, b"compliance", U256::from(0));
         self.store_meta_u256(asset_id, b"registered_at", U256::from(0));
         // Default ERC-20 storage layout slots (OpenZeppelin-style: balanceOf mapping base = 4, totalSupply = 3)
+        self.store_meta_u256(asset_id, b"has_erc20", U256::from(0));
         self.store_meta_u256(asset_id, b"erc20_balance_of_slot", U256::from(4));
         self.store_meta_u256(asset_id, b"erc20_total_supply_slot", U256::from(3));
 
         Ok(asset_id)
+    }
+
+    /// Register an ERC-20-backed asset: binds an existing EVM ERC-20 contract
+    /// to a protocol asset_id. This asset can be switched between EVM and protocol.
+    pub fn register_erc20(
+        &mut self,
+        evm_contract: Address,
+        symbol: &str,
+        name: &str,
+        decimals: u8,
+        max_supply: Balance,
+        issuer: Address,
+    ) -> Result<u64, AssetError> {
+        let next_id_slot = U256::from(0);
+        let asset_id = self
+            .backend
+            .load(ASSET_ADDRESS, next_id_slot)
+            .try_into()
+            .map(|v: u128| v as u64)
+            .unwrap_or(0);
+        let asset_id = if asset_id == 0 { 1 } else { asset_id };
+        let next_id = asset_id.checked_add(1).ok_or(AssetError::BalanceOverflow)?;
+        self.backend
+            .store(ASSET_ADDRESS, next_id_slot, U256::from(next_id));
+
+        self.store_meta_string(asset_id, b"symbol", symbol);
+        self.store_meta_string(asset_id, b"name", name);
+        self.store_meta_u256(asset_id, b"decimals", U256::from(decimals));
+        self.store_meta_u256(asset_id, b"issuer", address_to_u256(issuer));
+        self.store_meta_u256(asset_id, b"max_supply", u128_to_u256(max_supply));
+        self.store_meta_u256(asset_id, b"supply", U256::from(0));
+        self.store_meta_u256(asset_id, b"status", U256::from(0));
+        self.store_meta_u256(asset_id, b"compliance", U256::from(0));
+        self.store_meta_u256(asset_id, b"registered_at", U256::from(0));
+        self.store_meta_u256(asset_id, b"has_erc20", U256::from(1));
+        self.store_meta_u256(asset_id, b"evm_contract", address_to_u256(evm_contract));
+        self.store_meta_u256(asset_id, b"erc20_balance_of_slot", U256::from(4));
+        self.store_meta_u256(asset_id, b"erc20_total_supply_slot", U256::from(3));
+
+        Ok(asset_id)
+    }
+
+    /// Check whether an asset has an ERC-20 bridge (has_erc20 == 1).
+    /// CALL (asset_id == 1) always returns false; it uses native balance.
+    pub fn has_erc20(&mut self, asset_id: u64) -> bool {
+        if asset_id == call_protocol::CALL_ASSET_ID {
+            return false;
+        }
+        self.load_meta_u8(asset_id, b"has_erc20") == 1
     }
 }
 

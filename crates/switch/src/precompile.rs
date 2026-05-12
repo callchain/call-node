@@ -27,6 +27,7 @@ pub const SWITCH_ADDRESS: Address =
 #[derive(Debug)]
 pub enum SwitchError {
     AssetNotActive,
+    AssetHasNoErc20Bridge,
     EvmContractNotRegistered,
     InsufficientProtocolBalance,
     InsufficientEvmBalance,
@@ -45,6 +46,9 @@ impl std::fmt::Display for SwitchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SwitchError::AssetNotActive => write!(f, "asset not active"),
+            SwitchError::AssetHasNoErc20Bridge => {
+                write!(f, "asset has no ERC-20 bridge; use protocol-only operations")
+            }
             SwitchError::EvmContractNotRegistered => {
                 write!(f, "EVM contract not registered for asset")
             }
@@ -172,6 +176,21 @@ impl<B: StorageBackend> SwitchStorage<B> {
         Ok(())
     }
 
+    fn check_has_erc20(&mut self, asset_id: u64) -> Result<(), SwitchError> {
+        // CALL (asset_id == 1) is always allowed — it bridges as native EVM balance.
+        if asset_id == call_protocol::CALL_ASSET_ID {
+            return Ok(());
+        }
+        let has_erc20 = self
+            .backend
+            .load(ASSET_ADDRESS, slot_asset_meta(asset_id, b"has_erc20"))
+            .to_be_bytes::<32>()[31];
+        if has_erc20 != 1 {
+            return Err(SwitchError::AssetHasNoErc20Bridge);
+        }
+        Ok(())
+    }
+
     // ── ERC-20 storage layout (read from asset metadata, with defaults) ─
 
     /// Read the ERC-20 `balanceOf` mapping base slot for an asset from ASSET_ADDRESS metadata.
@@ -279,12 +298,13 @@ impl<B: StorageBackend> SwitchStorage<B> {
             return Err(SwitchError::ToCannotBeZero);
         }
         self.check_asset_active(asset_id)?;
+        self.check_has_erc20(asset_id)?;
 
         // 1. Deduct protocol balance from sender
         self.sub_protocol_bal(asset_id, sender, amount)?;
 
         // 2. Credit EVM side
-        if asset_id == 1 {
+        if asset_id == call_protocol::CALL_ASSET_ID {
             // CALL: add native EVM balance
             storage
                 .balance_add(to, U256::from(amount))
@@ -322,9 +342,10 @@ impl<B: StorageBackend> SwitchStorage<B> {
             return Err(SwitchError::ToCannotBeZero);
         }
         self.check_asset_active(asset_id)?;
+        self.check_has_erc20(asset_id)?;
 
         // 1. Deduct EVM side
-        if asset_id == 1 {
+        if asset_id == call_protocol::CALL_ASSET_ID {
             // CALL: subtract native EVM balance from sender
             storage
                 .balance_sub(sender, U256::from(amount))
@@ -561,6 +582,14 @@ mod tests {
                 address_to_u256(contract),
             )
             .unwrap();
+        // Mark asset as ERC-20 backed (has_erc20 = 1)
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"has_erc20"),
+                U256::from(1),
+            )
+            .unwrap();
         // Seed supply tracking
         provider
             .sstore(
@@ -637,6 +666,14 @@ mod tests {
                 ASSET_ADDRESS,
                 slot_evm_contract(asset_id),
                 address_to_u256(contract),
+            )
+            .unwrap();
+        // Mark asset as ERC-20 backed (has_erc20 = 1)
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"has_erc20"),
+                U256::from(1),
             )
             .unwrap();
         // Seed ERC-20 totalSupply (default slot 3)

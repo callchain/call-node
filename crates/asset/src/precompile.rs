@@ -28,6 +28,7 @@ sol! {
         function issuerMint(uint64 assetId, address to, uint128 amount) external;
         function burn(uint64 assetId, address from, uint128 amount) external;
         function register(string calldata symbol, string calldata name, uint8 decimals, uint128 maxSupply) external returns (uint64 assetId);
+        function registerErc20(address evmContract, string calldata symbol, string calldata name, uint8 decimals, uint128 maxSupply) external returns (uint64 assetId);
     }
 }
 
@@ -321,6 +322,35 @@ impl AssetPrecompile {
             },
         )
     }
+
+    fn register_erc20(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate::<IProtocolAsset::registerErc20Call, _, _>(
+            calldata,
+            50000,
+            storage,
+            |call, _storage| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = AssetStorage::new(sr);
+                let asset_id = store
+                    .register_erc20(
+                        call.evmContract,
+                        &call.symbol,
+                        &call.name,
+                        call.decimals,
+                        call.maxSupply,
+                        caller,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(asset_id)
+            },
+        )
+    }
 }
 
 impl call_precompile::StatefulPrecompile for AssetPrecompile {
@@ -360,6 +390,9 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
             IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender, storage, sr),
             IProtocolAsset::registerCall::SELECTOR => {
                 self.register(calldata, msg_sender, storage, sr)
+            }
+            IProtocolAsset::registerErc20Call::SELECTOR => {
+                self.register_erc20(calldata, msg_sender, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
