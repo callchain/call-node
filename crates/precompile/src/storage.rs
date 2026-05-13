@@ -88,6 +88,21 @@ pub trait StorageProvider {
 
     /// Read the native EVM balance of an address.
     fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError>;
+
+    /// Read the deployed bytecode of an address.
+    fn code_get(&mut self, address: Address) -> Result<alloy_primitives::Bytes, PrecompileError>;
+
+    /// Read storage without gas deduction (for nested EVM calls).
+    fn raw_sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError>;
+
+    /// Read balance without gas deduction (for nested EVM calls).
+    fn raw_balance_get(&mut self, address: Address) -> Result<U256, PrecompileError>;
+
+    /// Read code without gas deduction (for nested EVM calls).
+    fn raw_code_get(&mut self, address: Address) -> Result<alloy_primitives::Bytes, PrecompileError>;
+
+    /// Write storage without gas deduction (for applying nested EVM state diffs).
+    fn raw_sstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError>;
 }
 
 // ── Production: EvmStorageProvider ────────────────────────────────────
@@ -313,6 +328,74 @@ where
         Ok(balance)
     }
 
+    fn code_get(&mut self, address: Address) -> Result<alloy_primitives::Bytes, PrecompileError> {
+        let code = {
+            let account = self.journal.load_account(address).map_err(|e| {
+                PrecompileError::Other(format!("load_account error: {:?}", e).into())
+            })?;
+            account
+                .data
+                .info
+                .code
+                .as_ref()
+                .map(|c| c.original_bytes())
+                .unwrap_or_default()
+        };
+        self.deduct_gas(100)?;
+        Ok(code)
+    }
+
+    fn raw_sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
+        let _ = self
+            .journal
+            .load_account(address)
+            .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+        let result = self
+            .journal
+            .sload(address, key)
+            .map_err(|e| PrecompileError::Other(format!("sload error: {:?}", e).into()))?;
+        Ok(result.data)
+    }
+
+    fn raw_balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
+        let account = self
+            .journal
+            .load_account(address)
+            .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+        Ok(account.data.info.balance)
+    }
+
+    fn raw_code_get(&mut self, address: Address) -> Result<alloy_primitives::Bytes, PrecompileError> {
+        let account = self
+            .journal
+            .load_account(address)
+            .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+        Ok(account
+            .data
+            .info
+            .code
+            .as_ref()
+            .map(|c| c.original_bytes())
+            .unwrap_or_default())
+    }
+
+    fn raw_sstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
+        if self.is_static {
+            return Err(PrecompileError::Other(
+                "static call cannot mutate state".into(),
+            ));
+        }
+        let _ = self
+            .journal
+            .load_account(address)
+            .map_err(|e| PrecompileError::Other(format!("load_account error: {:?}", e).into()))?;
+        let _ = self
+            .journal
+            .sstore(address, key, value)
+            .map_err(|e| PrecompileError::Other(format!("sstore error: {:?}", e).into()))?;
+        Ok(())
+    }
+
     fn reset_gas_counters(&mut self) {
         self.sload_count = 0;
         self.sstore_count = 0;
@@ -364,6 +447,7 @@ pub struct HashMapStorageProvider {
     transient: HashMap<(Address, U256), U256>,
     events: HashMap<Address, Vec<LogData>>,
     balances: HashMap<Address, U256>,
+    codes: HashMap<Address, alloy_primitives::Bytes>,
     gas_remaining: u64,
     gas_refunded: i64,
     gas_limit: u64,
@@ -380,6 +464,7 @@ pub struct HashMapStorageProvider {
         HashMap<(Address, U256), U256>,
         HashMap<Address, Vec<LogData>>,
         HashMap<Address, U256>,
+        HashMap<Address, alloy_primitives::Bytes>,
         HashMap<(Address, U256), U256>,
         u64,
         i64,
@@ -448,6 +533,14 @@ impl HashMapStorageProvider {
 
     pub fn get_balance(&self, address: Address) -> U256 {
         self.balances.get(&address).copied().unwrap_or_default()
+    }
+
+    pub fn set_code(&mut self, address: Address, code: alloy_primitives::Bytes) {
+        self.codes.insert(address, code);
+    }
+
+    pub fn get_code(&self, address: Address) -> alloy_primitives::Bytes {
+        self.codes.get(&address).cloned().unwrap_or_default()
     }
 }
 
@@ -528,6 +621,7 @@ impl StorageProvider for HashMapStorageProvider {
             self.transient.clone(),
             self.events.clone(),
             self.balances.clone(),
+            self.codes.clone(),
             self.accessed_slots.clone(),
             self.gas_remaining,
             self.gas_refunded,
@@ -547,6 +641,7 @@ impl StorageProvider for HashMapStorageProvider {
             transient,
             events,
             balances,
+            codes,
             accessed_slots,
             gas_remaining,
             gas_refunded,
@@ -558,6 +653,7 @@ impl StorageProvider for HashMapStorageProvider {
             self.transient = transient;
             self.events = events;
             self.balances = balances;
+            self.codes = codes;
             self.accessed_slots = accessed_slots;
             self.gas_remaining = gas_remaining;
             self.gas_refunded = gas_refunded;
@@ -637,6 +733,32 @@ impl StorageProvider for HashMapStorageProvider {
     fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
         self.deduct_gas(100)?;
         Ok(self.balances.get(&address).copied().unwrap_or_default())
+    }
+
+    fn code_get(&mut self, address: Address) -> Result<alloy_primitives::Bytes, PrecompileError> {
+        self.deduct_gas(100)?;
+        Ok(self.codes.get(&address).cloned().unwrap_or_default())
+    }
+
+    fn raw_sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
+        Ok(self
+            .persistent
+            .get(&(address, key))
+            .copied()
+            .unwrap_or_default())
+    }
+
+    fn raw_balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
+        Ok(self.balances.get(&address).copied().unwrap_or_default())
+    }
+
+    fn raw_code_get(&mut self, address: Address) -> Result<alloy_primitives::Bytes, PrecompileError> {
+        Ok(self.codes.get(&address).cloned().unwrap_or_default())
+    }
+
+    fn raw_sstore(&mut self, address: Address, key: U256, value: U256) -> Result<(), PrecompileError> {
+        self.persistent.insert((address, key), value);
+        Ok(())
     }
 
     fn reset_gas_counters(&mut self) {

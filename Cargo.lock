@@ -1882,6 +1882,8 @@ dependencies = [
  "call-precompile",
  "call-primitives",
  "call-protocol",
+ "hex",
+ "revm",
  "revm-precompile",
 ]
 

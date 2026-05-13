@@ -10,8 +10,10 @@ use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
     dispatch, ok_empty, require_caller, slot_asset_meta, slot_compliance, write_string32,
-    StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
+    StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS, WRAPPED_TOKEN_FACTORY_ADDRESS,
 };
+use call_precompile::erc20_reader::read_erc20_metadata;
+use call_precompile::evm_caller::{execute_evm_call, apply_state_changes, StorageProviderDb};
 use call_primitives::{Address, U256};
 use call_protocol::CALL_ASSET_ID;
 use revm_precompile::{PrecompileError, PrecompileResult};
@@ -25,9 +27,16 @@ sol! {
         function approve(uint64 assetId, address spender, uint128 amount) external;
         function transferFrom(uint64 assetId, address from, address to, uint128 amount) external;
         function mint(uint64 assetId, address to, uint128 amount) external;
-        function issuerMint(uint64 assetId, address to, uint128 amount) external;
         function burn(uint64 assetId, address from, uint128 amount) external;
         function register(string calldata symbol, string calldata name, uint8 decimals, uint128 maxSupply) external returns (uint64 assetId);
+        function registerErc20(address evmContract) external returns (uint64 assetId);
+        function createWrapper(uint64 assetId) external returns (address wrapperContract);
+    }
+}
+
+sol! {
+    interface IWrappedTokenFactory {
+        function createWrapper(string calldata name, string calldata symbol, uint8 decimals, uint256 assetId) external returns (address wrapperContract);
     }
 }
 
@@ -321,6 +330,113 @@ impl AssetPrecompile {
             },
         )
     }
+
+    fn register_erc20(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate::<IProtocolAsset::registerErc20Call, _, _>(
+            calldata,
+            50000,
+            storage,
+            |call, storage| {
+                let _caller = require_caller(msg_sender)?;
+                let meta = read_erc20_metadata(storage, call.evmContract)
+                    .map_err(|e| PrecompileError::Other(format!("ERC-20 read failed: {e}").into()))?;
+                let mut store = AssetStorage::new(sr);
+                let asset_id = store
+                    .register_erc20(
+                        call.evmContract,
+                        &meta.symbol,
+                        &meta.name,
+                        meta.decimals,
+                        0,               // uncapped
+                        Address::ZERO,   // no issuer can mint
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(asset_id)
+            },
+        )
+    }
+
+    fn create_wrapper(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate::<IProtocolAsset::createWrapperCall, _, _>(
+            calldata,
+            100_000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = AssetStorage::new(sr);
+
+                // 1. Verify caller is issuer
+                let meta = store.read_meta(call.assetId);
+                if meta.issuer != caller {
+                    return Err(PrecompileError::Other("not asset issuer".into()));
+                }
+
+                // 2. Verify has_erc20 == 0 (not yet bound)
+                if store.has_erc20(call.assetId) {
+                    return Err(PrecompileError::Other("asset already has ERC-20 bridge".into()));
+                }
+
+                // 3. Build factory call
+                let factory_call = IWrappedTokenFactory::createWrapperCall {
+                    name: meta.name,
+                    symbol: meta.symbol,
+                    decimals: meta.decimals,
+                    assetId: U256::from(call.assetId),
+                };
+                let data = factory_call.abi_encode();
+
+                // 4. Execute nested EVM call from ASSET_ADDRESS to factory
+                let mut db = StorageProviderDb { provider: storage };
+                let (result, state) = execute_evm_call(
+                    &mut db,
+                    ASSET_ADDRESS,
+                    WRAPPED_TOKEN_FACTORY_ADDRESS,
+                    data.into(),
+                )?;
+
+                let wrapper_addr = match result {
+                    revm::context_interface::result::ExecutionResult::Success { output, .. } => {
+                        let bytes = match output {
+                            revm::context_interface::result::Output::Call(b) => b,
+                            revm::context_interface::result::Output::Create(b, _) => b,
+                        };
+                        let decoded = IWrappedTokenFactory::createWrapperCall::abi_decode_returns(&bytes, true)
+                            .map_err(|e| PrecompileError::Other(format!("factory decode failed: {e}").into()))?;
+                        decoded.wrapperContract
+                    }
+                    _ => {
+                        return Err(PrecompileError::Other("factory call failed".into()));
+                    }
+                };
+
+                if wrapper_addr == Address::ZERO {
+                    return Err(PrecompileError::Other("factory returned zero address".into()));
+                }
+
+                // 5. Apply nested state changes
+                apply_state_changes(storage, state)?;
+
+                // 6. Set metadata: has_erc20=1, evm_contract, dominance=1 (PROTOCOL)
+                store.set_has_erc20(call.assetId, 1);
+                store.set_evm_contract(call.assetId, wrapper_addr);
+                store.set_dominance(call.assetId, 1);
+
+                Ok(wrapper_addr)
+            },
+        )
+    }
 }
 
 impl call_precompile::StatefulPrecompile for AssetPrecompile {
@@ -354,12 +470,15 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
                 self.transfer_from(calldata, msg_sender, storage, sr)
             }
             IProtocolAsset::mintCall::SELECTOR => self.mint(calldata, msg_sender, storage, sr),
-            IProtocolAsset::issuerMintCall::SELECTOR => {
-                self.mint(calldata, msg_sender, storage, sr)
-            }
             IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender, storage, sr),
             IProtocolAsset::registerCall::SELECTOR => {
                 self.register(calldata, msg_sender, storage, sr)
+            }
+            IProtocolAsset::registerErc20Call::SELECTOR => {
+                self.register_erc20(calldata, msg_sender, storage, sr)
+            }
+            IProtocolAsset::createWrapperCall::SELECTOR => {
+                self.create_wrapper(calldata, msg_sender, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
@@ -677,6 +796,152 @@ mod tests {
         assert!(
             result.is_err(),
             "batch transfer with blocked recipient at position 1 should fail"
+        );
+    }
+
+    #[test]
+    fn test_asset_precompile_register_erc20_reads_metadata() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0xAA);
+
+        // Set dummy code so the contract is not rejected.
+        provider.set_code(contract, alloy_primitives::bytes!("6000"));
+
+        // Helper: encode a short Solidity string into a U256 storage word.
+        // Data is left-aligned (high bytes), length*2 in the low byte.
+        let encode_short = |s: &str| {
+            let len = s.len();
+            assert!(len <= 31, "short string only");
+            let mut bytes = [0u8; 32];
+            bytes[..len].copy_from_slice(s.as_bytes());
+            bytes[31] = (len * 2) as u8;
+            U256::from_be_bytes::<32>(bytes)
+        };
+
+        // OZ v5 layout: name@0, symbol@1, decimals@2
+        provider
+            .sstore(contract, U256::from(0), encode_short("Wrapped Ether"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(1), encode_short("WETH"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(2), U256::from(18))
+            .unwrap();
+
+        let input = IProtocolAsset::registerErc20Call {
+            evmContract: contract,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_ok(),
+            "registerErc20 failed: {:?}",
+            result.err()
+        );
+
+        // Decode returned asset_id (should be 1 since it's the first registration)
+        let output = result.unwrap();
+        let asset_id = u64::from_be_bytes([
+            output.bytes[24],
+            output.bytes[25],
+            output.bytes[26],
+            output.bytes[27],
+            output.bytes[28],
+            output.bytes[29],
+            output.bytes[30],
+            output.bytes[31],
+        ]);
+        assert_eq!(asset_id, 1);
+
+        // Verify metadata was stored correctly.
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        let meta = store.read_meta(asset_id);
+        assert_eq!(meta.name, "Wrapped Ether");
+        assert_eq!(meta.symbol, "WETH");
+        assert_eq!(meta.decimals, 18);
+        assert_eq!(meta.issuer, Address::ZERO); // issuer = zero address
+        assert_eq!(meta.max_supply, 0); // uncapped
+    }
+
+    #[test]
+    fn test_create_wrapper_not_issuer_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let issuer = Address::repeat_byte(0x11);
+        let attacker = Address::repeat_byte(0x99);
+
+        // Register asset
+        let input = IProtocolAsset::registerCall {
+            symbol: "GOLD".into(),
+            name: "Gold".into(),
+            decimals: 18,
+            maxSupply: 10000,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, issuer, &mut provider).unwrap();
+        let asset_id = u64::from_be_bytes([
+            result.bytes[24], result.bytes[25], result.bytes[26], result.bytes[27],
+            result.bytes[28], result.bytes[29], result.bytes[30], result.bytes[31],
+        ]);
+        assert_eq!(asset_id, 1);
+
+        // Attacker tries createWrapper
+        let input = IProtocolAsset::createWrapperCall { assetId: 1 }.abi_encode();
+        let result = precompile.call(&input, attacker, &mut provider);
+        assert!(
+            result.is_err(),
+            "createWrapper by non-issuer should fail: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_create_wrapper_already_has_erc20_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let issuer = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0xAA);
+
+        // Register ERC-20-backed asset
+        provider.set_code(contract, alloy_primitives::bytes!("6000"));
+        let encode_short = |s: &str| {
+            let len = s.len();
+            assert!(len <= 31, "short string only");
+            let mut bytes = [0u8; 32];
+            bytes[..len].copy_from_slice(s.as_bytes());
+            bytes[31] = (len * 2) as u8;
+            U256::from_be_bytes::<32>(bytes)
+        };
+        provider
+            .sstore(contract, U256::from(0), encode_short("Wrapped Ether"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(1), encode_short("WETH"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(2), U256::from(18))
+            .unwrap();
+
+        let input = IProtocolAsset::registerErc20Call {
+            evmContract: contract,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, issuer, &mut provider);
+        assert!(result.is_ok(), "registerErc20 failed: {:?}", result.err());
+
+        // Issuer tries createWrapper on already-backed asset
+        let input = IProtocolAsset::createWrapperCall { assetId: 1 }.abi_encode();
+        let result = precompile.call(&input, issuer, &mut provider);
+        assert!(
+            result.is_err(),
+            "createWrapper on asset with existing ERC-20 should fail: {:?}",
+            result
         );
     }
 }

@@ -45,6 +45,10 @@ class CallchainNode:
     def get_balance(self, asset_id: int, address: str) -> Dict:
         return self._call("call_protocolBalance", [asset_id, address])
 
+    def eth_get_balance(self, address: str, block_tag: str = "latest") -> str:
+        """Query EVM balance for an address."""
+        return self._call("eth_getBalance", [address, block_tag])
+
     def get_nonce(self, address: str) -> int:
         """Query the current protocol nonce for an address."""
         result = self._call("call_getNonce", [address])

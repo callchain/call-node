@@ -125,6 +125,8 @@ All precompiles use **dynamic gas metering**: `gas_used = base_gas + sloads * 50
 | `transfer` | `0x201` | `transfer(uint64,address,uint128)` | 5,000 |
 | `batchTransfer` | `0x201` | `batchTransfer(uint64,address[],uint128[])` | 5,000 |
 | `register` | `0x201` | `register(string,string,uint8,uint128)` | 50,000 |
+| `registerErc20` | `0x201` | `registerErc20(address)` | 50,000 |
+| `createWrapper` | `0x201` | `createWrapper(uint64)` | 100,000 |
 | `mint` | `0x201` | `mint(uint64,address,uint128)` | 6,000 |
 | `burn` | `0x201` | `burn(uint64,address,uint128)` | 5,000 |
 | `registerAgent` | `0x209` | `registerAgent(bytes32,string,string)` | 6,000 |
@@ -140,7 +142,6 @@ All precompiles use **dynamic gas metering**: `gas_used = base_gas + sloads * 50
 | `externalBridgeWithdraw` | `0x103` | `externalBridgeWithdraw(uint64,address,...)` | 8,000 |
 | `switchToEvm` | `0x207` | `switchToEvm(uint64,address,uint128)` | 8,000 |
 | `switchToProtocol` | `0x207` | `switchToProtocol(uint64,address,uint128)` | 8,000 |
-| `issuerMint` | `0x201` | `issuerMint(uint64,address,uint128)` | 6,000 |
 | `stake` | `0x204` | `stake(bytes,uint128)` | 20,000 |
 | `unstake` | `0x204` | `unstake(uint64)` | 20,000 |
 | `claimUnbonded` | `0x204` | `claimUnbonded(uint64)` | 15,000 |

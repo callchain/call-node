@@ -72,11 +72,12 @@ contract WrappedToken {
         emit Transfer(address(0), _to, _value);
     }
 
-    function bridgeBurn(uint256 _value) public {
-        require(balanceOf[msg.sender] >= _value, "insufficient balance");
+    function bridgeBurn(address from, uint256 _value) public {
+        require(msg.sender == bridge, "only bridge");
+        require(balanceOf[from] >= _value, "insufficient balance");
         totalSupply -= _value;
-        balanceOf[msg.sender] -= _value;
-        emit Transfer(msg.sender, address(0), _value);
+        balanceOf[from] -= _value;
+        emit Transfer(from, address(0), _value);
     }
 
     function issuerMint(address _to, uint256 _value) public {
