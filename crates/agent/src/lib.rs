@@ -269,6 +269,7 @@ impl<B: StorageBackend> AgentStorage<B> {
 
     pub fn revoke_balance(
         &mut self,
+        asset_store: &mut AssetStorage<B>,
         agent_id: u64,
         asset_id: u64,
         caller: Address,
@@ -278,11 +279,13 @@ impl<B: StorageBackend> AgentStorage<B> {
         }
         self.check_owner(agent_id, caller)?;
 
-        self.backend.store(
-            AGENT_ADDRESS,
-            slot_agent_balance(agent_id, asset_id),
-            U256::ZERO,
-        );
+        let current_bal = self.read_agent_balance(agent_id, asset_id);
+        self.write_agent_balance(agent_id, asset_id, 0);
+        if current_bal > 0 {
+            asset_store
+                .add_balance(asset_id, caller, current_bal)
+                .map_err(|_| AgentError::BalanceOverflow)?;
+        }
         Ok(())
     }
 
@@ -367,6 +370,7 @@ impl<B: StorageBackend> AgentStorage<B> {
 
     pub fn withdraw_balance(
         &mut self,
+        asset_store: &mut AssetStorage<B>,
         agent_id: u64,
         asset_id: u64,
         amount: u128,
@@ -385,6 +389,10 @@ impl<B: StorageBackend> AgentStorage<B> {
             .checked_sub(amount)
             .ok_or(AgentError::InsufficientBalance)?;
         self.write_agent_balance(agent_id, asset_id, agent_bal);
+
+        asset_store
+            .add_balance(asset_id, caller, amount)
+            .map_err(|_| AgentError::BalanceOverflow)?;
         Ok(())
     }
 
@@ -575,15 +583,17 @@ mod tests {
 
         // Withdraw
         agent_store
-            .withdraw_balance(0, CALL_ASSET_ID, 500, caller, 1)
+            .withdraw_balance(&mut asset_store, 0, CALL_ASSET_ID, 500, caller, 1)
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 3_500);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 5_500);
 
         // Revoke balance
         agent_store
-            .revoke_balance(0, CALL_ASSET_ID, caller)
+            .revoke_balance(&mut asset_store, 0, CALL_ASSET_ID, caller)
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 0);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 9_000);
     }
 
     #[test]
@@ -727,7 +737,7 @@ mod tests {
             Err(AgentError::NotFound)
         ));
         assert!(matches!(
-            agent_store.revoke_balance(0, 1, caller),
+            agent_store.revoke_balance(&mut asset_store, 0, 1, caller),
             Err(AgentError::NotFound)
         ));
         assert!(matches!(
@@ -735,7 +745,7 @@ mod tests {
             Err(AgentError::NotFound)
         ));
         assert!(matches!(
-            agent_store.withdraw_balance(0, 1, 100, caller, 1),
+            agent_store.withdraw_balance(&mut asset_store, 0, 1, 100, caller, 1),
             Err(AgentError::NotFound)
         ));
         assert!(matches!(

@@ -36,7 +36,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 | `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded`, `getValidatorStake`, `getValidatorStatus`, `getValidatorPubkey`, `getUnbondHeight`, `getValidatorByIndex` |
 | `0x205` | **Compliance** | `updateCompliance`, `checkCompliance` |
 | `0x207` | **Switch** | `switchToEvm`, `switchToProtocol` |
-| `0x209` | **Agent** | `register`, `grant`, `revoke` |
+| `0x209` | **Agent** | `registerAgent`, `grantBalance`, `revokeBalance`, `pay`, `batchPay`, `withdrawBalance`, `revokeAgent`, `getAgentOwner`, `getAgentBalance`, `getAgentName`, `getAgentUrl`, `getAgentPerms` |
 
 > **Deprecated addresses**: `0x102` (Balance, merged into `0x201`), `0x208` (ExternalBridge, merged into `0x103`).
 
@@ -226,33 +226,51 @@ interface IProtocolOracle {
 
 **File**: `crates/agent/src/precompile.rs`
 
-Agent registration and balance management.
+Agent registration and delegated balance management. Agents are sub-accounts that hold protocol balance on behalf of an owner, with configurable spending permissions.
 
 ### Solidity Interface
 
 ```solidity
 interface IProtocolAgent {
-    function register(
-        bytes calldata pubkey,
-        string calldata name,
-        string calldata url
-    ) external returns (uint64 agentId);
+    // Write
+    function registerAgent(string name, string url, bytes32 pubkeyHash) external;
+    function grantBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
+    function revokeBalance(uint64 agentId, uint64 assetId) external;
+    function pay(uint64 agentId, uint64 assetId, address to, uint128 amount) external;
+    function batchPay(uint64 agentId, uint64 assetId, address[] to, uint128[] amounts) external;
+    function withdrawBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
+    function revokeAgent(uint64 agentId) external;
 
-    // owner only
-    function grant(uint64 agentId, uint64 assetId, uint128 amount)
-        external;
-
-    // owner only
-    function revoke(uint64 agentId, uint64 assetId)
-        external;
+    // Read
+    function getAgentOwner(uint64 agentId) external view returns (address);
+    function getAgentBalance(uint64 agentId, uint64 assetId) external view returns (uint128);
+    function getAgentName(uint64 agentId) external view returns (bytes32);
+    function getAgentUrl(uint64 agentId) external view returns (bytes32);
+    function getAgentPerms(uint64 agentId) external view returns (uint256);
 }
 ```
 
 ### Behavior
 
-- `register`: Registers a new agent with the caller as owner. Deducts base registration fee.
-- `grant`: Owner deducts from their own protocol balance and grants to agent's sub-account.
-- `revoke`: Owner revokes agent's balance for a specific asset.
+- `registerAgent`: Registers a new agent with the caller as owner. Agent ID is auto-incremented.
+- `grantBalance` (owner only): Deducts from owner's protocol balance and credits agent's sub-account balance.
+- `revokeBalance` (owner only): Returns agent's entire balance for the asset back to the owner's protocol balance, then clears the agent balance.
+- `pay` (owner only): Deducts from agent balance and credits recipient's protocol balance. Enforces per-transaction limit and asset permissions.
+- `batchPay` (owner only): Batch version of `pay`. Each amount is checked against the per-transaction limit.
+- `withdrawBalance` (owner only): Withdraws a specific amount from agent balance back to owner's protocol balance.
+- `revokeAgent` (owner only): Permanently revokes the agent by zeroing all metadata slots (owner, pubkey, name, url, perms, registered_at). Does not automatically return balances -- call `revokeBalance` for each asset first.
+
+### Permissions
+
+Agent permissions are packed into a single `U256`:
+
+| Bytes | Field | Description |
+|-------|-------|-------------|
+| 0-15 | `per_tx_limit` | Max amount per `pay`/`batchPay` transaction (u128) |
+| 16-23 | `expires_at` | Block number after which agent is disabled (0 = never) |
+| 31 | `flags` | Bit 0 = allow CALL (asset 1) payments |
+
+Default on registration: `per_tx_limit=1_000`, `expires_at=0`, `flags=1`.
 
 ---
 
@@ -507,9 +525,18 @@ Gas is computed at two layers:
 | `isStale` | 800 | + sload |
 | `submitPrice` | 3,000 | + sstore |
 | `setTrackedAssets` | 3,000 | + sstores |
-| `register` (agent) | 6,000 | + sstore |
-| `grant` | 6,000 | + balance transfer |
-| `revoke` | 6,000 | + balance transfer |
+| `registerAgent` | 6,000 | + sstore |
+| `grantBalance` | 6,000 | + balance transfer |
+| `revokeBalance` | 6,000 | + balance transfer (returns to owner) |
+| `pay` | 30,000 | + balance transfer + perm check |
+| `batchPay` | 30,000 | + per-recipient balance transfer |
+| `withdrawBalance` | 50,000 | + balance transfer (returns to owner) |
+| `revokeAgent` | 20,000 | + multiple sstores |
+| `getAgentOwner` | 2,000 | + sload |
+| `getAgentBalance` | 2,000 | + sload |
+| `getAgentName` | 2,000 | + sload |
+| `getAgentUrl` | 2,000 | + sload |
+| `getAgentPerms` | 2,000 | + sload |
 | `deposit` (shielded) | 50,000 | + Merkle tree update |
 | `withdraw` (shielded) | 50,000 | + ZK verification |
 | `transfer` (shielded) | 100,000 | + ZK verification |

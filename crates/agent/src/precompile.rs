@@ -133,8 +133,9 @@ impl AgentPrecompile {
             |call, _storage| {
                 let caller = require_caller(msg_sender)?;
                 let mut store = AgentStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 store
-                    .revoke_balance(call.agentId, call.assetId, caller)
+                    .revoke_balance(&mut asset_store, call.agentId, call.assetId, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(())
             },
@@ -300,9 +301,11 @@ impl AgentPrecompile {
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
                 let mut store = AgentStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();
                 store
                     .withdraw_balance(
+                        &mut asset_store,
                         call.agentId,
                         call.assetId,
                         call.amount,
@@ -480,7 +483,7 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
 mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
-    use call_precompile::{slot_balance, u128_to_u256, StatefulPrecompile, ASSET_ADDRESS};
+    use call_precompile::{slot_balance, u128_to_u256, u256_to_u128, StatefulPrecompile, ASSET_ADDRESS};
     use call_primitives::Address;
 
     #[test]
@@ -632,5 +635,10 @@ mod tests {
             buf
         });
         assert_eq!(bal, 0);
+
+        // Owner balance should be restored: 10_000 - 5_000 + 4_000 = 9_000
+        let owner_slot = slot_balance(crate::CALL_ASSET_ID, sender);
+        let owner_bal = provider.sload(ASSET_ADDRESS, owner_slot).unwrap();
+        assert_eq!(u256_to_u128(owner_bal), 9_000);
     }
 }
