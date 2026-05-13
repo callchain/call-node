@@ -34,9 +34,9 @@ const SELECTOR_TRANSFER: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 /// `keccak256("transferFrom(address,address,uint256)")[:4]`
 const SELECTOR_TRANSFER_FROM: [u8; 4] = [0x23, 0xb8, 0x72, 0xdd];
 /// `keccak256("bridgeMint(address,uint256)")[:4]`
-const SELECTOR_BRIDGE_MINT: [u8; 4] = [0x66, 0xa1, 0xbc, 0x4b];
+const SELECTOR_BRIDGE_MINT: [u8; 4] = [0x8c, 0x2a, 0x99, 0x3e];
 /// `keccak256("bridgeBurn(address,uint256)")[:4]`
-const SELECTOR_BRIDGE_BURN: [u8; 4] = [0x79, 0x14, 0x21, 0x54];
+const SELECTOR_BRIDGE_BURN: [u8; 4] = [0x74, 0xf4, 0xf5, 0x47];
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -296,7 +296,8 @@ impl SwitchPrecompile {
                     let (result, state) = execute_evm_call(&mut db, SWITCH_ADDRESS, contract, data)?;
                     match result {
                         revm::context_interface::result::ExecutionResult::Success { output, .. } => {
-                            if !decode_abi_bool(&output) {
+                            // bridgeMint / bridgeBurn are void; only escrow transfer returns bool
+                            if dominance != 1 && !decode_abi_bool(&output) {
                                 return Err(PrecompileError::Other("ERC-20 call returned false".into()));
                             }
                             apply_state_changes(storage, state)?;
@@ -357,7 +358,8 @@ impl SwitchPrecompile {
                     let (result, state) = execute_evm_call(&mut db, SWITCH_ADDRESS, contract, data)?;
                     match result {
                         revm::context_interface::result::ExecutionResult::Success { output, .. } => {
-                            if !decode_abi_bool(&output) {
+                            // bridgeBurn / transferFrom: bridgeBurn is void, only escrow returns bool
+                            if dominance != 1 && !decode_abi_bool(&output) {
                                 return Err(PrecompileError::Other("ERC-20 call returned false".into()));
                             }
                             apply_state_changes(storage, state)?;
@@ -1162,6 +1164,8 @@ mod tests {
         let bytecode = hex::decode(WRAPPED_TOKEN_RUNTIME.trim())
             .expect("valid runtime hex");
         provider.set_code(contract, alloy_primitives::Bytes::from(bytecode));
+        // Set bridge address so bridgeMint accepts calls from Switch precompile
+        provider.set(contract, U256::from(6), address_to_u256(SWITCH_ADDRESS));
 
         let mut input = vec![0u8; 100];
         input[0..4].copy_from_slice(&IProtocolSwitch::switchToEvmCall::SELECTOR);
@@ -1243,6 +1247,10 @@ mod tests {
         let bytecode = hex::decode(WRAPPED_TOKEN_RUNTIME.trim())
             .expect("valid runtime hex");
         provider.set_code(contract, alloy_primitives::Bytes::from(bytecode));
+        // Set bridge address so bridgeBurn accepts calls from Switch precompile
+        provider.set(contract, U256::from(6), address_to_u256(SWITCH_ADDRESS));
+        // Seed totalSupply to match the seeded balance (required for burn math)
+        provider.set(contract, U256::from(3), u128_to_u256(500));
 
         // Seed sender with ERC-20 tokens by writing balanceOf directly
         let sender_bal_slot = mapping_slot(4, sender);
@@ -1275,7 +1283,7 @@ mod tests {
             .get(contract, total_supply_slot)
             .map(u256_to_u128)
             .unwrap_or(0);
-        assert_eq!(total_supply, 0);
+        assert_eq!(total_supply, 300);
 
         // Protocol balance credited to recipient
         let recipient_bal = provider
@@ -1327,6 +1335,10 @@ mod tests {
         let bytecode = hex::decode(WRAPPED_TOKEN_RUNTIME.trim())
             .expect("valid runtime hex");
         provider.set_code(contract, alloy_primitives::Bytes::from(bytecode));
+        // Set bridge address so bridgeBurn accepts calls from Switch precompile
+        provider.set(contract, U256::from(6), address_to_u256(SWITCH_ADDRESS));
+        // Seed totalSupply to match the seeded balance (required for burn math)
+        provider.set(contract, U256::from(3), u128_to_u256(100));
 
         // Sender has only 100 ERC-20 tokens
         let sender_bal_slot = mapping_slot(4, sender);
