@@ -61,11 +61,9 @@ interface IProtocolAsset {
   3. `AssetStorage::transfer()`:
      - `deduct_balance(assetId, from, amount)` — decrement `from`'s balance slot
      - `add_balance(assetId, to, amount)` — increment `to`'s balance slot
-  4. **CALL asset special handling** (if `assetId == 1`):
-     - `balance_sub(from, amount)` — deduct native EVM balance
-     - `balance_add(to, amount)` — credit native EVM balance
 - **Gas**: 5000 + storage overhead
 - **Atomicity**: `mutate_void` checkpoint — any failure rolls back all changes
+- **Note**: `transfer` operates on **protocol balances only**. It does not modify native EVM balances, even for CALL (`asset_id == 1`). Native EVM balance for CALL is managed separately; see [CALL.md](CALL.md).
 
 #### `batchTransfer(assetId, to[], amounts[])` — mutate
 
@@ -74,8 +72,8 @@ interface IProtocolAsset {
   2. Total gas = `5000 * len`
   3. Compliance check on `from` and all recipients
   4. Loop: call `transfer()` for each pair
-  5. If CALL asset: compute total amount, adjust native EVM balances once
 - **Gas**: 5000 per recipient
+- **Note**: Operates on **protocol balances only**, never native EVM balances.
 
 #### `approve(assetId, spender, amount)` — mutate
 
@@ -92,8 +90,8 @@ interface IProtocolAsset {
   3. Verify allowance: `read_allowance(assetId, from, spender) >= amount`
   4. Decrement allowance
   5. Execute `transfer(assetId, from, to, amount)`
-  6. CALL asset: sync native EVM balances
 - **Gas**: 6000
+- **Note**: Operates on **protocol balances only**, never native EVM balances.
 
 #### `mint(assetId, to, amount)` — mutate
 
@@ -499,7 +497,23 @@ Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`. This is 
 - **Supply changes only via system path**: Block rewards, validator incentives, and other protocol-level issuance update validator balances directly in EVM storage, not through user-signed precompile calls.
 - **Protocol-controlled monetary policy**: The chain itself controls how much CALL enters circulation.
 
-After genesis block execution, `protocol_supply` for CALL must be initialized to the total distributed amount. Subsequent block rewards update it via validator reward paths in EVM storage.
+### CALL (asset_id = 1) — EVM-Only Genesis Distribution
+
+Unlike other assets, CALL is distributed **only as native EVM balance** at genesis. Protocol-layer balance slots for CALL are **not seeded** for regular accounts. This means:
+
+- `eth_getBalance(addr)` returns the genesis CALL allocation (native EVM balance).
+- `getBalance(1, addr)` on the Asset precompile returns `0` until the user explicitly calls `switchToProtocol`.
+- Total CALL holdings = native balance + protocol balance (sum of both stores).
+
+See [CALL.md](CALL.md) for the full dual-balance architecture.
+
+### Non-CALL Assets — Dual Balance Seeding
+
+All other genesis assets receive **both protocol and native EVM balances** at genesis:
+- Protocol balance via `seed_balance()` in AssetStorage slots.
+- Native EVM balance via `set_balance()` in EVM state.
+
+This ensures non-CALL assets can be used in both protocol operations (e.g., `transfer`, `stake`) and EVM transactions immediately after genesis.
 
 Genesis assets should use `max_supply = 0` (uncapped) because protocol-level issuance has its own economic rules.
 

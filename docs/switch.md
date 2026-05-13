@@ -90,7 +90,9 @@ Syncs the nested EVM's `EvmState` back to the outer `StorageProvider`:
        - **If `dominance == 0` (EVM)**: Build `transfer(to, amount)` calldata — transfer from `0x207` escrow
        - **If `dominance == 1` (PROTOCOL)**: Build `bridgeMint(to, amount)` calldata — mint new tokens
        - `execute_evm_call()` — run nested EVM call from `0x207`
-       - Verify result is `Success` and returns `true` (`decode_abi_bool`)
+       - Verify result is `Success`
+       - For escrow (`dominance == 0`): check `decode_abi_bool` on return data (ERC-20 `transfer` returns `bool`)
+       - For mint/burn (`dominance == 1`): skip bool check (`bridgeMint` is void, no return value)
        - `apply_state_changes()` — write nested EVM state diffs back
   6. `checkpoint_commit()` on success; `checkpoint_revert()` on any failure
 - **Gas**: 20000 + nested EVM call gas
@@ -111,7 +113,9 @@ Syncs the nested EVM's `EvmState` back to the outer `StorageProvider`:
        - **If `dominance == 0` (EVM)**: Build `transferFrom(caller, 0x207, amount)` calldata — move tokens into escrow
        - **If `dominance == 1` (PROTOCOL)**: Build `bridgeBurn(caller, amount)` calldata — destroy caller's tokens
        - `execute_evm_call()` — run nested EVM call
-       - Verify result is `Success` and returns `true`
+       - Verify result is `Success`
+       - For escrow (`dominance == 0`): check `decode_abi_bool` on return data (ERC-20 `transferFrom` returns `bool`)
+       - For burn (`dominance == 1`): skip bool check (`bridgeBurn` is void, no return value)
        - `apply_state_changes()` — write state diffs back
   5. **`add_protocol_bal(assetId, to, amount)`** — credit recipient's protocol balance
   6. Atomic commit or rollback
@@ -492,7 +496,7 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 |------|------|
 | `crates/bridge/src/deposit.rs` | `execute_deposit` — Protocol → EVM (BridgeOp::DepositToEvm) |
 | `crates/bridge/src/withdraw.rs` | `execute_withdraw` — EVM → Protocol (BridgeOp::WithdrawToProtocol) |
-| `crates/consensus/src/block.rs` | `execute_bridge_precompile` — inline execution for user bridge precompile calls |
+| `crates/consensus/src/block.rs` | Block execution pipeline — EVM tx execution, system settlement, state root computation |
 | `crates/bridge/src/precompile.rs` | Bridge precompile functions (`externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit`) |
 | `crates/switch/src/precompile.rs` | Switch precompile functions (`switchToEvm`, `switchToProtocol`) |
 | `crates/rpc/src/callchain.rs` | `call_bridgeToEvm` and `call_bridgeToProtocol` RPC handlers |
