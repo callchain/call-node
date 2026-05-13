@@ -370,6 +370,22 @@ impl<B: StorageBackend> AssetStorage<B> {
         }
         self.load_meta_u8(asset_id, b"has_erc20") == 1
     }
+
+    pub fn set_has_erc20(&mut self, asset_id: u64, value: u8) {
+        self.store_meta_u256(asset_id, b"has_erc20", U256::from(value));
+    }
+
+    pub fn set_evm_contract(&mut self, asset_id: u64, addr: Address) {
+        self.store_meta_u256(asset_id, b"evm_contract", address_to_u256(addr));
+    }
+
+    pub fn dominance(&mut self, asset_id: u64) -> u8 {
+        self.load_meta_u8(asset_id, b"dominance")
+    }
+
+    pub fn set_dominance(&mut self, asset_id: u64, value: u8) {
+        self.store_meta_u256(asset_id, b"dominance", U256::from(value));
+    }
 }
 
 fn address_to_u256(addr: Address) -> U256 {

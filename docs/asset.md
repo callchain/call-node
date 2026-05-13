@@ -24,6 +24,7 @@ interface IProtocolAsset {
     function burn(uint64 assetId, address from, uint128 amount) external;
     function register(string calldata symbol, string calldata name, uint8 decimals, uint128 maxSupply) external returns (uint64 assetId);
     function registerErc20(address evmContract) external returns (uint64 assetId);
+    function createWrapper(uint64 assetId) external returns (address wrapperContract);
 }
 ```
 
@@ -142,9 +143,28 @@ interface IProtocolAsset {
      - max_supply = 0 (uncapped)
      - has_erc20 = 1
      - evm_contract = caller-provided address
+     - dominance = 0 (EVM)
   5. Return `asset_id`
 - **Gas**: 50000 + nested EVM call gas
-- **Notes**: Binds an existing ERC-20 contract to a protocol asset_id, enabling Switch precompile bridging.
+- **Notes**: Binds an existing ERC-20 contract to a protocol asset_id, enabling Switch precompile bridging. `dominance` is set to `EVM (0)` — the external ERC-20 contract controls supply. Switch uses escrow `transfer`/`transferFrom`.
+
+#### `createWrapper(assetId)` — mutate
+
+- **Flow**:
+  1. `require_caller(msg_sender)`
+  2. Read asset metadata; verify `caller == issuer`
+  3. Verify `has_erc20 == 0` (not yet bound)
+  4. **Nested EVM call** to `WrappedTokenFactory.createWrapper(name, symbol, decimals, assetId)`
+  5. Parse returned wrapper contract address
+  6. Store metadata:
+     - `has_erc20 = 1`
+     - `evm_contract = returned address`
+     - `dominance = 1` (PROTOCOL)
+  7. **No automatic supply migration** — protocol supply stays in protocol; users manually switch via `switchToEvm`
+  8. `apply_state_changes()` + checkpoint commit
+- **Gas**: 100000 (includes contract deployment via `CREATE`)
+- **Security**: Only the asset issuer can call. `dominance` is immutable once set.
+- **Result**: Protocol-dominant wrapper asset. Switch precompile uses `bridgeMint`/`bridgeBurn` for real-time supply sync.
 
 ---
 
@@ -187,20 +207,34 @@ The metadata read is implemented via a temporary revm instance that reuses the l
 - **Static context**: All metadata calls are static calls (`STATICCALL` semantics). The nested EVM is configured with `is_static = true`, ensuring no state mutations are permitted.
 - **Fallback**: If `name()` or `symbol()` returns empty data, reverts, or produces invalid ABI encoding, the reader falls back to direct storage slot reading. This preserves compatibility with contracts that do not expose standard view functions but follow known storage layouts.
 
-### Protocol-Only vs ERC-20 Backed
+### Asset Types Comparison
 
-| Property | Protocol-Only (`register`) | ERC-20 Backed (`registerErc20`) |
-|----------|---------------------------|--------------------------------|
-| `has_erc20` | `0` | `1` |
-| `evm_contract_address` | `None` | Set from caller argument |
-| `issuer` | `msg.sender` | `Address::ZERO` (no one can mint) |
-| `max_supply` | Caller-specified | `0` (uncapped) |
-| `switchToEvm` | ❌ Rejected | ✅ Allowed |
-| `switchToProtocol` | ❌ Rejected | ✅ Allowed |
-| `mint` / `burn` | ✅ Allowed (issuer only) | ❌ Not allowed (issuer = ZERO) |
-| `transfer` | ✅ Allowed | ✅ Allowed |
+| Property | Protocol-Only (`register`) | ERC-20 Backed (`registerErc20`) | Protocol-Dominant Wrapper (`createWrapper`) |
+|----------|---------------------------|--------------------------------|---------------------------------------------|
+| `has_erc20` | `0` | `1` | `1` |
+| `evm_contract_address` | `None` | Set from caller argument | Deployed by `WrappedTokenFactory` |
+| `dominance` | unset | `0` (EVM) | `1` (PROTOCOL) |
+| `issuer` | `msg.sender` | `Address::ZERO` (no one can mint) | `msg.sender` (issuer retains mint/burn) |
+| `max_supply` | Caller-specified | `0` (uncapped) | Preserved from `register()` |
+| `switchToEvm` | ❌ Rejected | ✅ Allowed (escrow) | ✅ Allowed (`bridgeMint`) |
+| `switchToProtocol` | ❌ Rejected | ✅ Allowed (escrow) | ✅ Allowed (`bridgeBurn`) |
+| `mint` / `burn` | ✅ Allowed (issuer only) | ❌ Not allowed | ✅ Allowed (issuer only) |
+| `transfer` | ✅ Allowed | ✅ Allowed | ✅ Allowed |
 
-Protocol-only assets live entirely within the Callchain protocol layer and cannot interact with EVM contracts. ERC-20 backed assets bridge between protocol and EVM via the Switch precompile.
+- **Protocol-only**: Lives entirely within the Callchain protocol layer. Cannot interact with EVM contracts.
+- **ERC-20 backed**: Binds an existing external ERC-20 contract. Switch uses **escrow model** (`transfer`/`transferFrom` via `0x207`). Supply controlled by external contract.
+- **Protocol-dominant wrapper**: Deploys a system `WrappedToken` via `WrappedTokenFactory`. Switch uses **mint/burn model** (`bridgeMint`/`bridgeBurn`). Supply fully controlled by protocol issuer.
+
+### Dominance
+
+`dominance` is an immutable metadata field set when an ERC-20 bridge is first established:
+
+| Value | Name | Meaning | Switch Behavior |
+|-------|------|---------|----------------|
+| `0` | `EVM` | External ERC-20 controls supply | Escrow: `transfer`/`transferFrom` via `0x207` |
+| `1` | `PROTOCOL` | Protocol controls supply | Mint/burn: `bridgeMint`/`bridgeBurn` |
+
+`dominance` is **immutable** — once set, it cannot be changed. This prevents a malicious external contract from being swapped in after registration. If an issuer regrets their choice, they must register a new asset.
 
 ### Why an EVM Transaction Instead of Direct RPC
 
@@ -263,6 +297,7 @@ pub struct Asset {
     pub registered_at: u64,
     pub has_erc20: bool,                    // true if asset has an ERC-20 bridge
     pub evm_contract_address: Option<Address>, // set at registration time, immutable
+    pub dominance: u8,                      // 0=EVM (escrow), 1=PROTOCOL (mint/burn), unset if has_erc20=0
 }
 ```
 
@@ -288,7 +323,11 @@ The EVM `WrappedToken` contract does **not** enforce the cap — the asset preco
 
 ## Bridge Invariants
 
-For any asset with an active EVM bridge:
+The Switch precompile (`0x207`) maintains different invariants depending on the asset's `dominance`:
+
+### Escrow Model (EVM-dominant, `dominance = 0`)
+
+For ERC-20 backed assets registered via `registerErc20`:
 
 ```
 sum(ERC-20 transferred out of 0x207 via switchToEvm)
@@ -296,14 +335,24 @@ sum(ERC-20 transferred out of 0x207 via switchToEvm)
   == balanceOf[0x207]
 ```
 
-This invariant is maintained by the Switch precompile (`0x207`) using an **escrow model**:
-
 - `switchToEvm`: Deducts the caller's protocol balance, then transfers ERC-20 tokens from the `0x207` escrow to the recipient via `transfer`.
 - `switchToProtocol`: Transfers ERC-20 tokens from the caller into the `0x207` escrow via `transferFrom`, then credits the corresponding protocol balance to the recipient.
+- The escrow must hold sufficient tokens for `switchToEvm` to succeed. Liquidity is injected when users call `switchToProtocol` or when anyone directly transfers ERC-20 tokens to `0x207`.
 
-The escrow must hold sufficient tokens for `switchToEvm` to succeed. Liquidity is injected when users call `switchToProtocol` or when anyone directly transfers ERC-20 tokens to `0x207`.
+### Mint/Burn Model (PROTOCOL-dominant, `dominance = 1`)
 
-There is no separate protocol-layer ledger. All balances — both escrow holdings and "protocol" native balances — are tracked in EVM storage.
+For protocol-dominant wrapper assets created via `createWrapper`:
+
+```
+protocol_supply + evm_supply == all_supply
+```
+
+- `switchToEvm`: Deducts the caller's protocol balance, then calls `bridgeMint(to, amount)` on the system `WrappedToken` to create new ERC-20 tokens.
+- `switchToProtocol`: Calls `bridgeBurn(amount)` on the system `WrappedToken` to destroy the caller's ERC-20 tokens, then credits the corresponding protocol balance.
+- **No escrow required**. The Switch precompile does not need to hold a token balance. Supply is synchronized in real time during each switch.
+- The `WrappedToken` contract's `bridgeMint`/`bridgeBurn` functions require `msg.sender == bridge` (i.e., `0x207`), ensuring only the Switch precompile can create or destroy tokens.
+
+There is no separate protocol-layer ledger. All balances — protocol native balances, escrow holdings (for EVM-dominant), and ERC-20 supplies — are tracked in EVM storage.
 
 ## EVM Wrapped Token Reference Template
 
@@ -359,11 +408,12 @@ contract WrappedToken {
         emit Transfer(address(0), _to, _value);
     }
 
-    function bridgeBurn(uint256 _value) public {
-        require(balanceOf[msg.sender] >= _value, "insufficient balance");
+    function bridgeBurn(address from, uint256 _value) public {
+        require(msg.sender == bridge, "only bridge");
+        require(balanceOf[from] >= _value, "insufficient balance");
         totalSupply -= _value;
-        balanceOf[msg.sender] -= _value;
-        emit Transfer(msg.sender, address(0), _value);
+        balanceOf[from] -= _value;
+        emit Transfer(from, address(0), _value);
     }
 
     function issuerMint(address _to, uint256 _value) public {
@@ -490,6 +540,7 @@ All asset operations are also available via the **Asset precompile (`0x201`)**:
 | `Burn` | `burn(uint64,address,uint128)` | `0x201` |
 | `RegisterAsset` | `register(string,string,uint8,uint128)` | `0x201` |
 | `RegisterErc20` | `registerErc20(address)` | `0x201` |
+| `CreateWrapper` | `createWrapper(uint64)` | `0x201` |
 
 See [precompile.md](precompile.md) for the full ABI.
 

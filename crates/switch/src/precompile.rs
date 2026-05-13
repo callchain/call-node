@@ -10,17 +10,15 @@
 //!   - CALL (asset_id = 1): native EVM balance via balance_add / balance_sub
 //!   - Other assets: ERC-20 transfer / transferFrom via nested EVM execution
 
-use alloy_primitives::{keccak256, Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
     dispatch, require_caller, slot_asset_meta, slot_balance, slot_evm_contract,
     storage::StorageProvider, u128_to_u256, u256_to_address, u256_to_u128, StorageRef,
     ASSET_ADDRESS,
 };
+use call_precompile::evm_caller::{execute_evm_call, apply_state_changes, StorageProviderDb};
 use call_protocol::storage_backend::StorageBackend;
-use revm::database_interface::Database;
-use revm::primitives::{B256, TxKind};
-use revm::{ExecuteEvm, MainBuilder, MainContext};
 use revm_precompile::{PrecompileError, PrecompileResult};
 
 pub const SWITCH_ADDRESS: Address =
@@ -35,6 +33,10 @@ const NESTED_CALL_GAS_LIMIT: u64 = 100_000;
 const SELECTOR_TRANSFER: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 /// `keccak256("transferFrom(address,address,uint256)")[:4]`
 const SELECTOR_TRANSFER_FROM: [u8; 4] = [0x23, 0xb8, 0x72, 0xdd];
+/// `keccak256("bridgeMint(address,uint256)")[:4]`
+const SELECTOR_BRIDGE_MINT: [u8; 4] = [0x66, 0xa1, 0xbc, 0x4b];
+/// `keccak256("bridgeBurn(address,uint256)")[:4]`
+const SELECTOR_BRIDGE_BURN: [u8; 4] = [0x79, 0x14, 0x21, 0x54];
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -172,139 +174,15 @@ impl<B: StorageBackend> SwitchStorage<B> {
         }
         Ok(())
     }
-}
 
-// ── Database adapter for nested EVM calls ─────────────────────────────
-
-struct StorageProviderDb<'a> {
-    provider: &'a mut dyn StorageProvider,
-}
-
-impl<'a> Database for StorageProviderDb<'a> {
-    type Error = revm::database_interface::ErasedError;
-
-    fn basic(
-        &mut self,
-        address: Address,
-    ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
-        let balance = self
-            .provider
-            .raw_balance_get(address)
-            .map_err(revm::database_interface::ErasedError::new)?;
-        let code = self
-            .provider
-            .raw_code_get(address)
-            .map_err(revm::database_interface::ErasedError::new)?;
-        let code_hash = if code.is_empty() {
-            keccak256(&[])
-        } else {
-            keccak256(&code)
-        };
-        let code = if code.is_empty() {
-            None
-        } else {
-            Some(revm::state::Bytecode::new_legacy(code))
-        };
-        Ok(Some(revm::state::AccountInfo {
-            balance,
-            nonce: 0,
-            code_hash,
-            code,
-            account_id: None,
-        }))
-    }
-
-    fn code_by_hash(
-        &mut self,
-        _hash: B256,
-    ) -> Result<revm::state::Bytecode, Self::Error> {
-        Ok(revm::state::Bytecode::default())
-    }
-
-    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        self.provider
-            .raw_sload(address, index)
-            .map_err(revm::database_interface::ErasedError::new)
-    }
-
-    fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
-        Ok(B256::ZERO)
-    }
-}
-
-// ── Nested EVM call helpers ───────────────────────────────────────────
-
-fn execute_evm_call(
-    db: &mut StorageProviderDb,
-    contract: Address,
-    data: Bytes,
-) -> Result<(revm::context_interface::result::ExecutionResult, revm::state::EvmState), PrecompileError> {
-    let block_number = db.provider.block_number();
-    let timestamp = db.provider.timestamp();
-
-    let tx_env = revm::context::TxEnv::builder()
-        .caller(SWITCH_ADDRESS)
-        .gas_limit(NESTED_CALL_GAS_LIMIT)
-        .gas_price(0)
-        .kind(TxKind::Call(contract))
-        .value(U256::ZERO)
-        .data(data)
-        .build()
-        .map_err(|e| PrecompileError::Other(format!("tx build: {e:?}").into()))?;
-
-    let result = {
-        let ctx = revm::Context::mainnet()
-            .with_db(&mut *db)
-            .modify_cfg_chained(|cfg| {
-                cfg.set_spec(revm::primitives::hardfork::SpecId::CANCUN)
-            });
-        let mut evm = ctx.build_mainnet();
-        let mut block_env = revm::context::BlockEnv::default();
-        block_env.number = U256::from(block_number);
-        block_env.timestamp = timestamp;
-        evm.set_block(block_env);
-        evm.transact(tx_env)
-            .map_err(|e| PrecompileError::Other(format!("evm call: {e:?}").into()))?
-    };
-
-    let gas_spent = match &result.result {
-        revm::context_interface::result::ExecutionResult::Success { gas, .. } => gas.spent(),
-        revm::context_interface::result::ExecutionResult::Revert { gas, .. } => gas.spent(),
-        revm::context_interface::result::ExecutionResult::Halt { gas, .. } => gas.spent(),
-    };
-    db.provider.deduct_gas(gas_spent)?;
-
-    Ok((result.result, result.state))
-}
-
-fn apply_state_changes(
-    storage: &mut dyn StorageProvider,
-    state: revm::state::EvmState,
-) -> Result<(), PrecompileError> {
-    for (address, account) in state {
-        if !account.status.is_touched() {
-            continue;
+    pub fn read_dominance(&mut self, asset_id: u64) -> u8 {
+        if asset_id == call_protocol::CALL_ASSET_ID {
+            return 0; // CALL uses native balance, no dominance concept
         }
-
-        // Apply storage changes
-        for (slot, storage_slot) in account.storage {
-            if storage_slot.present_value != storage_slot.original_value {
-                storage.raw_sstore(address, slot, storage_slot.present_value)?;
-            }
-        }
-
-        // Apply balance changes
-        let old_balance = account.original_info.balance;
-        let new_balance = account.info.balance;
-        if old_balance != new_balance {
-            if new_balance > old_balance {
-                storage.balance_add(address, new_balance - old_balance)?;
-            } else {
-                storage.balance_sub(address, old_balance - new_balance)?;
-            }
-        }
+        self.backend
+            .load(ASSET_ADDRESS, slot_asset_meta(asset_id, b"dominance"))
+            .to_be_bytes::<32>()[31]
     }
-    Ok(())
 }
 
 fn encode_transfer(to: Address, amount: u128) -> Bytes {
@@ -321,6 +199,22 @@ fn encode_transfer_from(from: Address, to: Address, amount: u128) -> Bytes {
     data[16..36].copy_from_slice(from.as_slice());
     data[48..68].copy_from_slice(to.as_slice());
     data[68..100].copy_from_slice(&U256::from(amount).to_be_bytes::<32>());
+    Bytes::from(data)
+}
+
+fn encode_bridge_mint(to: Address, amount: u128) -> Bytes {
+    let mut data = vec![0u8; 68];
+    data[0..4].copy_from_slice(&SELECTOR_BRIDGE_MINT);
+    data[16..36].copy_from_slice(to.as_slice());
+    data[36..68].copy_from_slice(&U256::from(amount).to_be_bytes::<32>());
+    Bytes::from(data)
+}
+
+fn encode_bridge_burn(from: Address, amount: u128) -> Bytes {
+    let mut data = vec![0u8; 68];
+    data[0..4].copy_from_slice(&SELECTOR_BRIDGE_BURN);
+    data[16..36].copy_from_slice(from.as_slice());
+    data[36..68].copy_from_slice(&U256::from(amount).to_be_bytes::<32>());
     Bytes::from(data)
 }
 
@@ -392,17 +286,22 @@ impl SwitchPrecompile {
                         return Err(PrecompileError::Other("no code at ERC-20 contract".into()));
                     }
 
-                    let data = encode_transfer(call.to, call.amount);
+                    let dominance = store.read_dominance(call.assetId);
+                    let data = if dominance == 1 {
+                        encode_bridge_mint(call.to, call.amount)
+                    } else {
+                        encode_transfer(call.to, call.amount)
+                    };
                     let mut db = StorageProviderDb { provider: storage };
-                    let (result, state) = execute_evm_call(&mut db, contract, data)?;
+                    let (result, state) = execute_evm_call(&mut db, SWITCH_ADDRESS, contract, data)?;
                     match result {
                         revm::context_interface::result::ExecutionResult::Success { output, .. } => {
                             if !decode_abi_bool(&output) {
-                                return Err(PrecompileError::Other("ERC-20 transfer returned false".into()));
+                                return Err(PrecompileError::Other("ERC-20 call returned false".into()));
                             }
                             apply_state_changes(storage, state)?;
                         }
-                        _ => return Err(PrecompileError::Other("ERC-20 transfer failed".into())),
+                        _ => return Err(PrecompileError::Other("ERC-20 call failed".into())),
                     }
                 }
                 Ok(())
@@ -448,17 +347,22 @@ impl SwitchPrecompile {
                         return Err(PrecompileError::Other("no code at ERC-20 contract".into()));
                     }
 
-                    let data = encode_transfer_from(caller, SWITCH_ADDRESS, call.amount);
+                    let dominance = store.read_dominance(call.assetId);
+                    let data = if dominance == 1 {
+                        encode_bridge_burn(caller, call.amount)
+                    } else {
+                        encode_transfer_from(caller, SWITCH_ADDRESS, call.amount)
+                    };
                     let mut db = StorageProviderDb { provider: storage };
-                    let (result, state) = execute_evm_call(&mut db, contract, data)?;
+                    let (result, state) = execute_evm_call(&mut db, SWITCH_ADDRESS, contract, data)?;
                     match result {
                         revm::context_interface::result::ExecutionResult::Success { output, .. } => {
                             if !decode_abi_bool(&output) {
-                                return Err(PrecompileError::Other("ERC-20 transferFrom returned false".into()));
+                                return Err(PrecompileError::Other("ERC-20 call returned false".into()));
                             }
                             apply_state_changes(storage, state)?;
                         }
-                        _ => return Err(PrecompileError::Other("ERC-20 transferFrom failed".into())),
+                        _ => return Err(PrecompileError::Other("ERC-20 call failed".into())),
                     }
                 }
 
@@ -1202,5 +1106,255 @@ mod tests {
             .map(u256_to_u128)
             .unwrap_or(0);
         assert_eq!(recipient_bal, 300);
+    }
+
+    // ── Protocol-dominant (mint/burn) success path tests ────────────────
+
+    #[test]
+    fn test_switch_to_evm_erc20_protocol_dominant_success() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+        let contract = addr(0xAA);
+        let asset_id = 2u64;
+
+        // Register asset as active with ERC-20 bridge and PROTOCOL dominance
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(0),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"has_erc20"),
+                U256::from(1),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_evm_contract(asset_id),
+                address_to_u256(contract),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"dominance"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        // Seed protocol balance for sender
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(asset_id, sender),
+                u128_to_u256(1000),
+            )
+            .unwrap();
+
+        // Deploy WrappedToken runtime bytecode
+        let bytecode = hex::decode(WRAPPED_TOKEN_RUNTIME.trim())
+            .expect("valid runtime hex");
+        provider.set_code(contract, alloy_primitives::Bytes::from(bytecode));
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToEvmCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&300u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_ok(),
+            "switchToEvm PROTOCOL-dominant should succeed: {:?}",
+            result.err()
+        );
+
+        // Protocol balance deducted
+        let sender_bal = provider
+            .get(ASSET_ADDRESS, slot_balance(asset_id, sender))
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(sender_bal, 700);
+
+        // Recipient credited with newly minted ERC-20 tokens
+        let recipient_bal_slot = mapping_slot(4, recipient);
+        let recipient_bal = provider
+            .get(contract, recipient_bal_slot)
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(recipient_bal, 300);
+
+        // totalSupply increased
+        let total_supply_slot = U256::from(3);
+        let total_supply = provider
+            .get(contract, total_supply_slot)
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(total_supply, 300);
+    }
+
+    #[test]
+    fn test_switch_to_protocol_erc20_protocol_dominant_success() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+        let contract = addr(0xAA);
+        let asset_id = 3u64;
+
+        // Register asset as active with ERC-20 bridge and PROTOCOL dominance
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(0),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"has_erc20"),
+                U256::from(1),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_evm_contract(asset_id),
+                address_to_u256(contract),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"dominance"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        // Deploy WrappedToken runtime bytecode
+        let bytecode = hex::decode(WRAPPED_TOKEN_RUNTIME.trim())
+            .expect("valid runtime hex");
+        provider.set_code(contract, alloy_primitives::Bytes::from(bytecode));
+
+        // Seed sender with ERC-20 tokens by writing balanceOf directly
+        let sender_bal_slot = mapping_slot(4, sender);
+        provider.set(contract, sender_bal_slot, u128_to_u256(500));
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&200u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_ok(),
+            "switchToProtocol PROTOCOL-dominant should succeed: {:?}",
+            result.err()
+        );
+
+        // Sender ERC-20 balance reduced (burned)
+        let sender_bal = provider
+            .get(contract, sender_bal_slot)
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(sender_bal, 300);
+
+        // totalSupply decreased
+        let total_supply_slot = U256::from(3);
+        let total_supply = provider
+            .get(contract, total_supply_slot)
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(total_supply, 0);
+
+        // Protocol balance credited to recipient
+        let recipient_bal = provider
+            .get(ASSET_ADDRESS, slot_balance(asset_id, recipient))
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(recipient_bal, 200);
+    }
+
+    #[test]
+    fn test_switch_to_protocol_erc20_protocol_dominant_insufficient_balance_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+        let contract = addr(0xAA);
+        let asset_id = 3u64;
+
+        // Register asset as active with ERC-20 bridge and PROTOCOL dominance
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(0),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"has_erc20"),
+                U256::from(1),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_evm_contract(asset_id),
+                address_to_u256(contract),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"dominance"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        // Deploy WrappedToken runtime bytecode
+        let bytecode = hex::decode(WRAPPED_TOKEN_RUNTIME.trim())
+            .expect("valid runtime hex");
+        provider.set_code(contract, alloy_primitives::Bytes::from(bytecode));
+
+        // Sender has only 100 ERC-20 tokens
+        let sender_bal_slot = mapping_slot(4, sender);
+        provider.set(contract, sender_bal_slot, u128_to_u256(100));
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&200u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_err(),
+            "switchToProtocol PROTOCOL-dominant should fail with insufficient balance"
+        );
+
+        // Balances unchanged
+        let sender_bal = provider
+            .get(contract, sender_bal_slot)
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(sender_bal, 100);
+
+        let recipient_bal = provider
+            .get(ASSET_ADDRESS, slot_balance(asset_id, recipient))
+            .map(u256_to_u128)
+            .unwrap_or(0);
+        assert_eq!(recipient_bal, 0);
     }
 }

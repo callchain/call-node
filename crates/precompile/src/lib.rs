@@ -15,6 +15,7 @@
 
 pub mod dispatch;
 pub mod erc20_reader;
+pub mod evm_caller;
 #[allow(unsafe_code)]
 pub mod storage;
 pub mod utils;
@@ -46,6 +47,10 @@ pub const SWITCH_ADDRESS: Address = address!("0000000000000000000000000000000000
 
 /// Agent precompile address (0x209).
 pub const AGENT_ADDRESS: Address = address!("0000000000000000000000000000000000000209");
+
+/// WrappedTokenFactory address (0x20A).
+/// Deployed at genesis; deploys system WrappedToken contracts for protocol-dominant assets.
+pub const WRAPPED_TOKEN_FACTORY_ADDRESS: Address = address!("000000000000000000000000000000000000020a");
 
 // Re-export types needed by external precompile implementations
 pub use alloy_primitives::Bytes;

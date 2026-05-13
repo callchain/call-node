@@ -119,6 +119,9 @@ interface IProtocolAsset {
     function registerErc20(address evmContract)
         external returns (uint64 assetId);
 
+    function createWrapper(uint64 assetId)
+        external returns (address wrapperContract);
+
     function mint(uint64 assetId, address to, uint128 amount)
         external; // issuer only
 
@@ -132,7 +135,9 @@ interface IProtocolAsset {
 - `transfer`: Deducts from sender's protocol balance, credits recipient. Checks compliance on both parties.
 - `batchTransfer`: Executes multiple transfers atomically.
 - `approve` / `transferFrom`: Protocol-level allowance system (separate from ERC-20 allowances).
-- `register`: Registers a new asset in `AssetStorage` and auto-deploys a `WrappedToken` ERC-20 contract.
+- `register`: Registers a new asset in `AssetStorage`. Creates a protocol-only asset (`has_erc20 = 0`).
+- `registerErc20`: Binds an existing external ERC-20 contract (`dominance = 0`).
+- `createWrapper`: Deploys a system `WrappedToken` for a protocol-only asset (`dominance = 1`). Only callable by the asset issuer.
 - `mint`: Only callable by the asset's registered issuer. Mints on the protocol layer.
 - `burn`: Any holder can burn their own balance.
 
@@ -162,9 +167,15 @@ interface IProtocolSwitch {
 
 - `switchToEvm`:
   1. Deduct protocol balance from caller
-  2. Mint wrapped ERC-20 token on EVM layer
+  2. Credit EVM side:
+     - If `assetId == 1` (CALL): add native EVM balance
+     - If `dominance == 0` (EVM): transfer ERC-20 from `0x207` escrow
+     - If `dominance == 1` (PROTOCOL): `bridgeMint` new ERC-20 tokens
 - `switchToProtocol`:
-  1. Burn wrapped ERC-20 token on EVM layer
+  1. Deduct EVM side:
+     - If `assetId == 1` (CALL): subtract native EVM balance
+     - If `dominance == 0` (EVM): `transferFrom` into `0x207` escrow
+     - If `dominance == 1` (PROTOCOL): `bridgeBurn` ERC-20 tokens
   2. Credit protocol balance to recipient
 - Asset ID `1` (native CALL) bridges as native EVM balance (not wrapped ERC-20).
 
@@ -486,6 +497,7 @@ Gas is computed at two layers:
 | `transferFrom` | 5,500 | + 3 sloads + 2 sstores |
 | `register` | 50,000 | + contract deployment gas |
 | `registerErc20` | 50,000 | + ERC-20 metadata reads (sloads) |
+| `createWrapper` | 100,000 | + contract deployment gas (CREATE) |
 | `mint` | 6,000 | + sload + sstore + supply update |
 | `burn` | 5,000 | + sload + sstore + supply update |
 | `switchToEvm` | 8,000 | + EVM contract call |

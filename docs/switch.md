@@ -15,7 +15,12 @@ Internal bridge operations are **atomic** and execute within a single block. If 
 
 Address: `0x0000000000000000000000000000000000000207`
 
-The Switch precompile provides bidirectional bridging between protocol balance and EVM assets using an **escrow model**. All state changes are atomic via checkpoint/rollback.
+The Switch precompile provides bidirectional bridging between protocol balance and EVM assets. Two models are supported depending on the asset's `dominance`:
+
+- **Escrow model** (`dominance = 0`, EVM-dominant): The Switch precompile (`0x207`) holds ERC-20 tokens in its own balance. Used for external ERC-20 contracts registered via `registerErc20`.
+- **Mint/burn model** (`dominance = 1`, PROTOCOL-dominant): The Switch precompile creates or destroys ERC-20 tokens in real time via `bridgeMint`/`bridgeBurn`. Used for system wrapper contracts deployed via `createWrapper`.
+
+All state changes are atomic via checkpoint/rollback.
 
 ### ABI Interface
 
@@ -81,13 +86,16 @@ Syncs the nested EVM's `EvmState` back to the outer `StorageProvider`:
      - If `assetId == 1` (CALL): `balance_add(to, amount)` — native EVM balance
      - Otherwise (ERC-20):
        - `code_get(contract)` — verify contract has code
-       - Build `transfer(to, amount)` calldata
+       - Read `dominance` from asset metadata
+       - **If `dominance == 0` (EVM)**: Build `transfer(to, amount)` calldata — transfer from `0x207` escrow
+       - **If `dominance == 1` (PROTOCOL)**: Build `bridgeMint(to, amount)` calldata — mint new tokens
        - `execute_evm_call()` — run nested EVM call from `0x207`
        - Verify result is `Success` and returns `true` (`decode_abi_bool`)
        - `apply_state_changes()` — write nested EVM state diffs back
   6. `checkpoint_commit()` on success; `checkpoint_revert()` on any failure
 - **Gas**: 20000 + nested EVM call gas
-- **Escrow requirement**: `0x207` must hold enough ERC-20 tokens. If escrow balance is insufficient, the nested `transfer` reverts and the entire operation rolls back (protocol balance restored).
+- **Escrow requirement (EVM-dominant)**: `0x207` must hold enough ERC-20 tokens. If escrow balance is insufficient, the nested `transfer` reverts and the entire operation rolls back (protocol balance restored).
+- **Mint requirement (PROTOCOL-dominant)**: No escrow needed. `bridgeMint` creates new tokens. The `WrappedToken` contract enforces `msg.sender == bridge` (i.e., `0x207`).
 
 #### `switchToProtocol(assetId, to, amount)` — EVM → Protocol
 
@@ -99,14 +107,17 @@ Syncs the nested EVM's `EvmState` back to the outer `StorageProvider`:
      - If `assetId == 1` (CALL): `balance_sub(caller, amount)` — native EVM balance
      - Otherwise (ERC-20):
        - `code_get(contract)` — verify contract has code
-       - Build `transferFrom(caller, 0x207, amount)` calldata
+       - Read `dominance` from asset metadata
+       - **If `dominance == 0` (EVM)**: Build `transferFrom(caller, 0x207, amount)` calldata — move tokens into escrow
+       - **If `dominance == 1` (PROTOCOL)**: Build `bridgeBurn(caller, amount)` calldata — destroy caller's tokens
        - `execute_evm_call()` — run nested EVM call
        - Verify result is `Success` and returns `true`
        - `apply_state_changes()` — write state diffs back
   5. **`add_protocol_bal(assetId, to, amount)`** — credit recipient's protocol balance
   6. Atomic commit or rollback
 - **Gas**: 20000 + nested EVM call gas
-- **Approve requirement**: User must first call `approve(0x207, amount)` on the ERC-20 contract. Without approval, `transferFrom` reverts and the entire operation rolls back.
+- **Approve requirement (EVM-dominant)**: User must first call `approve(0x207, amount)` on the ERC-20 contract. Without approval, `transferFrom` reverts and the entire operation rolls back.
+- **Balance requirement (PROTOCOL-dominant)**: Caller must hold enough ERC-20 tokens. `bridgeBurn` checks `balanceOf[from] >= amount` in the contract (where `from` is the caller).
 
 ### Atomicity Guarantee
 
@@ -130,23 +141,27 @@ This means:
 
 ## Architecture
 
-The bridge uses an **escrow model**: the Switch precompile address (`0x207`) holds ERC-20 tokens in its own balance. Protocol balance and EVM balance are kept synchronized by moving tokens into and out of this escrow.
+The bridge supports two models depending on `dominance`:
+
+### Escrow Model (`dominance = 0`, EVM-dominant)
+
+The Switch precompile address (`0x207`) holds ERC-20 tokens in its own balance. Protocol balance and EVM balance are kept synchronized by moving tokens into and out of this escrow.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Internal Bridge (Protocol ↔ EVM)                          │
+│  Internal Bridge (Protocol ↔ EVM) — Escrow Model           │
 │                                                             │
 │  ┌──────────────┐        ┌──────────────────────────────┐  │
 │  │ AccountState │        │ EvmState                     │  │
 │  │ (protocol)   │◄──────►│ (EVM layer)                  │  │
 │  └──────────────┘        └──────────────────────────────┘  │
 │         ▲                           ▲                       │
-│         │    BridgeToEvm            │   BridgeToProtocol     │
+│         │    switchToEvm            │   switchToProtocol     │
 │         │    (deduct protocol       │   (transferFrom to     │
 │         │     → transfer ERC-20     │    0x207 escrow        │
 │         │      from 0x207 escrow)   │    → credit protocol)  │
 │         │                           │                       │
-│  ┌──────┴───────────────────────────┴──────┐               │
+│  └──────┴───────────────────────────┴──────┐               │
 │  │ Block::execute (Step 3)                  │               │
 │  │  execute_bridge_precompile()             │               │
 │  │  - snapshot/rollback atomicity           │               │
@@ -159,36 +174,81 @@ The bridge uses an **escrow model**: the Switch precompile address (`0x207`) hol
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Mint/Burn Model (`dominance = 1`, PROTOCOL-dominant)
+
+No escrow is needed. The Switch precompile creates or destroys ERC-20 tokens in real time via `bridgeMint`/`bridgeBurn`. Supply is synchronized per-switch.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Internal Bridge (Protocol ↔ EVM) — Mint/Burn Model        │
+│                                                             │
+│  ┌──────────────┐        ┌──────────────────────────────┐  │
+│  │ AccountState │        │ EvmState                     │  │
+│  │ (protocol)   │◄──────►│ (EVM layer)                  │  │
+│  └──────────────┘        └──────────────────────────────┘  │
+│         ▲                           ▲                       │
+│         │    switchToEvm            │   switchToProtocol     │
+│         │    (deduct protocol       │   (bridgeBurn          │
+│         │     → bridgeMint)         │    → credit protocol)  │
+│         │                           │                       │
+│  └──────┴───────────────────────────┴──────┐               │
+│  │ Block::execute (Step 3)                  │               │
+│  │  execute_bridge_precompile()             │               │
+│  │  - snapshot/rollback atomicity           │               │
+│  └──────────────────────────────────────────┘               │
+│                                                             │
+│  No escrow balance required. WrappedToken.bridgeMint        │
+│  and bridgeBurn are called by 0x207 directly.               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## Asset Bridging Rules
 
-The internal bridge treats assets differently based on `asset_id` and `has_erc20`:
+The internal bridge treats assets differently based on `asset_id`, `has_erc20`, and `dominance`:
 
-| Asset ID | Asset Type | `has_erc20` | Deposit Behavior | Withdraw Behavior |
-|----------|-----------|-------------|------------------|-------------------|
-| `0` | Virtual USD | — | **Rejected** | **Rejected** |
-| `1` | CALL (native) | — | Deduct protocol balance → **Add native EVM balance** (`evm_state.set_balance`) | Deduct native EVM balance → **Credit protocol balance** |
-| `>=2` | Protocol-only | `0` | **Rejected** — `AssetHasNoErc20Bridge` | **Rejected** — `AssetHasNoErc20Bridge` |
-| `>=2` | ERC-20 backed | `1` | Deduct protocol balance → **Transfer ERC-20 from `0x207` escrow to user** (`transfer`) | **Transfer ERC-20 from user to `0x207` escrow** (`transferFrom`) → Credit protocol balance |
+| Asset ID | Asset Type | `has_erc20` | `dominance` | Deposit Behavior (`switchToEvm`) | Withdraw Behavior (`switchToProtocol`) |
+|----------|-----------|-------------|-------------|----------------------------------|----------------------------------------|
+| `0` | Virtual USD | — | — | **Rejected** | **Rejected** |
+| `1` | CALL (native) | — | — | Deduct protocol balance → **Add native EVM balance** (`evm_state.set_balance`) | Deduct native EVM balance → **Credit protocol balance** |
+| `>=2` | Protocol-only | `0` | unset | **Rejected** — `AssetHasNoErc20Bridge` | **Rejected** — `AssetHasNoErc20Bridge` |
+| `>=2` | ERC-20 backed | `1` | `0` (EVM) | Deduct protocol balance → **Transfer ERC-20 from `0x207` escrow to user** (`transfer`) | **Transfer ERC-20 from user to `0x207` escrow** (`transferFrom`) → Credit protocol balance |
+| `>=2` | Protocol wrapper | `1` | `1` (PROTOCOL) | Deduct protocol balance → **Mint ERC-20 to user** (`bridgeMint`) | **Burn ERC-20 from user** (`bridgeBurn`) → Credit protocol balance |
 
-**Key design decision:** CALL (asset_id=1) bridges as **native EVM gas balance**, not as a wrapped ERC-20. This allows bridged CALL to be used directly for EVM transaction gas and native transfers. User-defined assets must be registered via `registerErc20` (setting `has_erc20 = 1`) to enable switching. Protocol-only assets registered via `register` (`has_erc20 = 0`) cannot leave the protocol layer.
+**Key design decision:** CALL (asset_id=1) bridges as **native EVM gas balance**, not as a wrapped ERC-20. This allows bridged CALL to be used directly for EVM transaction gas and native transfers. User-defined assets must have `has_erc20 = 1` to enable switching. This can be achieved via:
+- `registerErc20(address)` — binds an external ERC-20 contract (`dominance = 0`, escrow model)
+- `createWrapper(assetId)` — deploys a system `WrappedToken` (`dominance = 1`, mint/burn model)
 
-### Escrow Model
+Protocol-only assets registered via `register` (`has_erc20 = 0`) cannot leave the protocol layer until `createWrapper` is called.
+
+### Escrow Model (`dominance = 0`, EVM-dominant)
 
 The Switch precompile (`0x207`) acts as an escrow holder for ERC-20 backed assets:
 
 - **Deposit (`switchToEvm`)**: The protocol balance is deducted from the sender, and the Switch precompile transfers ERC-20 tokens from its own escrow balance to the recipient. The escrow must hold sufficient tokens, or the transfer reverts.
 - **Withdraw (`switchToProtocol`)**: The user's ERC-20 tokens are transferred into the `0x207` escrow via `transferFrom`. The user must first `approve(0x207, amount)` on the ERC-20 contract. After the tokens are received, the protocol balance is credited to the recipient.
 
+### Mint/Burn Model (`dominance = 1`, PROTOCOL-dominant)
+
+No escrow is needed. The Switch precompile creates or destroys ERC-20 tokens in real time:
+
+- **Deposit (`switchToEvm`)**: The protocol balance is deducted from the sender, and the Switch precompile calls `bridgeMint(to, amount)` on the system `WrappedToken` to create new ERC-20 tokens for the recipient.
+- **Withdraw (`switchToProtocol`)**: The Switch precompile calls `bridgeBurn(caller, amount)` on the system `WrappedToken` to destroy the caller's ERC-20 tokens, then credits the corresponding protocol balance to the recipient. The caller must hold enough ERC-20 tokens.
+
+The `WrappedToken` contract enforces `msg.sender == bridge` (i.e., `0x207`) for `bridgeMint`/`bridgeBurn`, ensuring only the Switch precompile can create or destroy tokens.
+
 ### Liquidity Requirement
 
-ERC-20 escrow bridging requires the Switch precompile (`0x207`) to hold a token balance before any `switchToEvm` deposit can succeed. Liquidity is injected into escrow through:
+**Escrow model (`dominance = 0`)**: The Switch precompile (`0x207`) must hold a token balance before any `switchToEvm` deposit can succeed. Liquidity is injected into escrow through:
 
 1. **User-initiated withdrawals**: `switchToProtocol` transfers tokens from the user into `0x207`.
 2. **Direct transfer**: Anyone can `transfer(0x207, amount)` on the ERC-20 contract to seed the pool.
 
 If escrow balance is insufficient, `switchToEvm` reverts atomically and no state changes are committed.
+
+**Mint/burn model (`dominance = 1`)**: No escrow balance is required. Tokens are created on demand during `switchToEvm` and destroyed during `switchToProtocol`. No liquidity risk exists.
 
 ---
 

@@ -476,13 +476,18 @@ impl EvmExecutor {
         caller: Address,
         contract: Address,
         state: &mut InMemoryStateProvider,
+        from: Address,
         amount: U256,
     ) -> Result<EvmExecutionResult, EvmError> {
-        // keccak256("bridgeBurn(uint256)")[:4]
+        // keccak256("bridgeBurn(address,uint256)")[:4]
         let selector: FixedBytes<4> =
-            FixedBytes::from_slice(&keccak256("bridgeBurn(uint256)")[..4]);
+            FixedBytes::from_slice(&keccak256("bridgeBurn(address,uint256)")[..4]);
         let mut data = Vec::new();
         data.extend_from_slice(&selector[..]);
+        // ABI-encode address (left-padded to 32 bytes)
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[12..32].copy_from_slice(from.as_slice());
+        data.extend_from_slice(&addr_bytes);
         // ABI-encode uint256
         data.extend_from_slice(&amount.to_be_bytes::<32>());
 
