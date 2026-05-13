@@ -423,31 +423,36 @@ contract WrappedToken {
 }
 ```
 
-Note: The `bridge` address is passed as a constructor argument and must match the protocol bridge address (`Address::repeat_byte(0xFF)`) used in `SwitchToEvm`. The contract does **not** enforce `max_supply` — cap checks happen in protocol `Block::execute` where both `protocol_supply` and `evm_supply` are visible.
+Note: The `bridge` address is passed as a constructor argument and must match the Switch precompile address (`0x207`). The contract does **not** enforce `max_supply` — cap checks happen in protocol `Block::execute` where both `protocol_supply` and `evm_supply` are visible.
 
-## EVM Issuer Mint
+## Issuer Mint / Burn
 
-Asset issuers can mint wrapped ERC-20 tokens directly on the EVM layer via the Asset precompile (`0x201`) `mint` function:
+The Asset precompile (`0x201`) allows asset issuers to mint and burn protocol-layer balances directly.
 
 ```solidity
-function mint(uint64 assetId, address to, uint128 amount) external returns (bool);
+function mint(uint64 assetId, address to, uint128 amount) external;
+function burn(uint64 assetId, address from, uint128 amount) external;
 ```
 
-### Execution Flow
+### Execution Flow (mint)
 
-1. **Issuer verification**: `msg.sender == asset.issuer`.
-2. **Asset status check**: `asset.status == AssetStatus::Active`.
-3. **Cap check**: `asset.all_supply() + amount <= max_supply` (protocol layer).
-4. **EVM call**: The precompile calls `evm_executor.evm_call_issuer_mint(issuer, contract_addr, evm_state, to, amount)`.
-5. **Supply tracking**: `registry.add_evm_supply(asset_id, amount)`.
+1. **Issuer verification**: `msg.sender == asset.issuer`
+2. **Cap check**: `supply + amount <= max_supply` (if `max_supply > 0`)
+3. **Increment supply** and **credit protocol balance** to `to`
 
-No protocol-layer balance is created. The minted tokens exist only on EVM and can be withdrawn back to protocol via `switchToProtocol` (`0x207`).
+### Execution Flow (burn)
+
+1. **Issuer verification**: `msg.sender == asset.issuer`
+2. If `caller != from`: check and deduct allowance
+3. **Decrement supply** and **deduct protocol balance** from `from`
 
 ### Security Properties
 
-- Only the asset issuer can call `mint`.
-- The cap is enforced at the protocol layer, not in the EVM contract (the contract has no visibility into `protocol_supply`).
-- Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`, which has no private key. Therefore, no one can mint genesis assets. Supply changes for genesis assets happen only through validator rewards in EVM storage.
+- Only the asset issuer can call `mint` / `burn`.
+- The cap is enforced at the protocol layer (`supply` tracked in EVM storage under `0x201`).
+- Genesis assets (e.g., CALL, asset_id = 1) use `issuer = Address::ZERO`, which has no private key. Therefore, no one can mint or burn genesis assets.
+- For protocol-dominant wrapper assets (`createWrapper`), the issuer retains `mint`/`burn` rights on the protocol layer, while `bridgeMint`/`bridgeBurn` on the EVM layer is reserved for the Switch precompile (`0x207`).
+- **Important**: `mint` creates **protocol balance only**, not EVM ERC-20 tokens. To get ERC-20 tokens on EVM, users must `switchToEvm` after minting.
 
 ## Governance Parameters
 
@@ -456,28 +461,26 @@ The following parameters affect asset registration and can be updated via govern
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `asset_registration_fee` | `1_000_000` CALL | Fee paid by the issuer to register an asset |
-| `register_evm_bridge` | `false` | Not currently implemented; `register()` creates protocol-only assets |
 
 ## Delisting and Lifecycle
 
 Assets can transition through the following states:
 
-| Status | `Mint` (issuer) | `Burn` (issuer) | `Transfer` | `SwitchToEvm` | `SwitchToProtocol` | `EvmIssuerMint` |
-|--------|-----------------|-----------------|------------|---------------|--------------------|-----------------|
-| `Active` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `Frozen` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `Delisted` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Status | `Mint` / `Burn` | `Transfer` | `SwitchToEvm` | `SwitchToProtocol` |
+|--------|-------------------|------------|---------------|--------------------|
+| `Active` | ✅ | ✅ | ✅ | ✅ |
+| `Frozen` | ❌ | ❌ | ❌ | ❌ |
+| `Delisted` | ❌ | ❌ | ❌ | ❌ |
 
 - **Active**: All operations permitted.
 - **Frozen**: All user-facing operations are blocked. Can be unfrozen by the issuer via the Asset precompile.
 - **Delisted**: Permanently retired by the issuer. Cannot be unfrozen.
 
-State transitions are controlled by the asset issuer through precompile calls:
-- `freezeAsset(assetId)` — caller must be issuer; reversible.
-- `unfreezeAsset(assetId)` — caller must be issuer; only works on `Frozen` assets.
-- `delistAsset(assetId)` — caller must be issuer; permanent.
+**Note**: Asset status checks are currently enforced in the **Switch precompile** (`0x207`). The Asset precompile (`0x201`) does not yet reject `transfer` / `mint` / `burn` on frozen or delisted assets — this enforcement should be added for consistency.
 
-Governance can also pause the entire chain via `GovernanceEmergencyPause`.
+State transitions are controlled by writing to the asset metadata `status` slot. Precompile methods for issuer-initiated freeze/unfreeze/delist are not yet implemented — governance or direct storage updates are required.
+
+Governance can pause the entire chain via `GovernanceEmergencyPause`.
 
 ## AssetRegistry Persistence
 

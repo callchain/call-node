@@ -166,14 +166,12 @@ The Switch precompile address (`0x207`) holds ERC-20 tokens in its own balance. 
 │         │      from 0x207 escrow)   │    → credit protocol)  │
 │         │                           │                       │
 │  └──────┴───────────────────────────┴──────┐               │
-│  │ Block::execute (Step 3)                  │               │
-│  │  execute_bridge_precompile()             │               │
-│  │  - snapshot/rollback atomicity           │               │
+│  │ Switch precompile (0x207)                │               │
+│  │  - checkpoint / rollback atomicity       │               │
 │  └──────────────────────────────────────────┘               │
 │                                                             │
-│  Two entry points:                                          │
-│  1. BridgeOp in block.bridge_operations (agent/block lvl)  │
-│  2. EVM transaction calling Switch precompile (user-init)  │
+│  Entry point:                                               │
+│  EVM transaction calling Switch precompile (user-initiated) │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -196,9 +194,8 @@ No escrow is needed. The Switch precompile creates or destroys ERC-20 tokens in 
 │         │     → bridgeMint)         │    → credit protocol)  │
 │         │                           │                       │
 │  └──────┴───────────────────────────┴──────┐               │
-│  │ Block::execute (Step 3)                  │               │
-│  │  execute_bridge_precompile()             │               │
-│  │  - snapshot/rollback atomicity           │               │
+│  │ Switch precompile (0x207)                │               │
+│  │  - checkpoint / rollback atomicity       │               │
 │  └──────────────────────────────────────────┘               │
 │                                                             │
 │  No escrow balance required. WrappedToken.bridgeMint        │
@@ -260,233 +257,16 @@ If escrow balance is insufficient, `switchToEvm` reverts atomically and no state
 
 The **Switch precompile at `0x207`** provides the same bridging functionality via standard EVM transactions, with an important restriction: **only ERC-20 backed assets (`has_erc20 == 1`) and CALL (`asset_id == 1`) are accepted**. Protocol-only assets (`has_erc20 == 0`) are rejected with `AssetHasNoErc20Bridge`.
 
-| Operation | Precompile Function | Gas | Restrictions |
+| Operation | Precompile Function | Base Gas | Restrictions |
 |---|---|---|---|
-| `SwitchToEvm` | `switchToEvm(uint64,address,uint128)` | 30,000 | `asset_id == 1` or `has_erc20 == 1` |
-| `SwitchToProtocol` | `switchToProtocol(uint64,address,uint128)` | 30,000 | `asset_id == 1` or `has_erc20 == 1` |
+| `SwitchToEvm` | `switchToEvm(uint64,address,uint128)` | 20,000 (+ nested EVM call gas) | `asset_id == 1` or `has_erc20 == 1` |
+| `SwitchToProtocol` | `switchToProtocol(uint64,address,uint128)` | 20,000 (+ nested EVM call gas) | `asset_id == 1` or `has_erc20 == 1` |
 
-Solidity contracts and MetaMask can call these functions directly. See [precompile.md](precompile.md) for the full ABI.
+Solidity contracts and MetaMask can call these functions directly by sending an EVM transaction to `0x207`. See [precompile.md](precompile.md) for the full ABI.
 
-## Entry Points
+### Atomicity
 
-### 1. Block-Level BridgeOp (Agent / Block Producer)
-
-`BridgeOp` variants are included in the dedicated `bridge_operations` field of `Block`. These are typically constructed by Agents or block producers for automated bridging workflows.
-
-```rust
-pub enum BridgeOp {
-    DepositToEvm { asset_id, from, to, amount },
-    WithdrawToProtocol { asset_id, from, to, amount },
-}
-```
-
-Execution happens during `Block::execute` (Step 3, after EVM transactions and protocol transactions):
-
-- `DepositToEvm`: `call_bridge::execute_deposit` deducts protocol balance, then transfers ERC-20 from the `0x207` escrow to the recipient (or sets native balance for CALL).
-- `WithdrawToProtocol`: `call_bridge::execute_withdraw` transfers ERC-20 from the user into the `0x207` escrow via `transferFrom` (or deducts native balance for CALL), then credits protocol balance.
-
-Both operations are rate-limited and support atomic rollback via snapshots.
-
-### 2. User-Facing Precompile Calls
-
-Ordinary users can initiate bridging by calling the Switch precompile (`0x207`) via a standard EVM transaction:
-
-```solidity
-// Protocol → EVM: deduct protocol balance, transfer ERC-20 from 0x207 escrow
-function switchToEvm(uint64 assetId, address to, uint128 amount) external returns (bool);
-
-// EVM → Protocol: transfer ERC-20 from user to 0x207 escrow, credit protocol balance
-function switchToProtocol(uint64 assetId, address to, uint128 amount) external returns (bool);
-```
-
-These calls are executed by revm during `Block::execute`. The Switch precompile receives the caller address from the EVM context, accesses `AccountState` and `AssetRegistry` via the state hook, and performs the cross-layer transfer atomically.
-
-**Gas cost:** Both `switchToEvm` and `switchToProtocol` cost **8,000 gas**.
-
----
-
-## Inline Execution in Block::execute
-
-### Bridge Precompile Detection
-
-During block execution, bridge-related EVM calls to precompiles (`0x103`, `0x207`) are handled by the respective precompile functions. The Switch precompile (`0x207`) handles `switchToEvm` / `switchToProtocol`, while the Bridge precompile (`0x103`) handles `externalBridgeDeposit` / `externalBridgeWithdraw` / `challengeBridgeDeposit`.
-
-Bridge precompiles receive:
-- `caller`: the EVM caller address (from revm context)
-- `account`: mutable `AccountState`
-- `bridge_state`: mutable `BridgeStateManager`
-- `config`: `BridgeConfig`
-- `validators`: current validator set (for external bridge)
-- `current_block_height`: current block number
-- `evm_state`: mutable `EvmState`
-- `evm_executor`: `EvmExecutor` for contract calls
-- `registry`: `AssetRegistry` for contract address lookup
-
-### BridgeToEvm Execution Flow
-
-1. **Reject asset_id == 0** (virtual USD)
-2. **Validate asset registered** in `AssetRegistry`
-3. **Check `has_erc20`** — reject protocol-only assets (`has_erc20 == 0` and `asset_id != 1`)
-4. **Check bridge not paused** for this asset
-5. **Check per-tx limit** against `BridgeConfig::max_per_tx`
-6. **Check daily limit** — auto-resets per `blocks_per_day`
-7. **Check protocol balance** sufficient
-8. **Deduct protocol balance**
-9. **Bridge to EVM:**
-   - If `asset_id == 1`: `evm_state.set_balance(to, current + amount)`
-   - If `asset_id >= 2`: nested EVM call `ERC20.transfer(to, amount)` from `0x207` escrow
-9. **Record deposit** in `bridge_state`
-10. If EVM operation reverts → entire transaction fails, snapshot rollback restores protocol balance
-
-### BridgeToProtocol Execution Flow
-
-1. **Reject asset_id == 0** (virtual USD)
-2. **Validate asset registered**
-3. **Check `has_erc20`** — reject protocol-only assets
-4. **Check bridge not paused**
-5. **Check per-tx limit**
-6. **Check daily limit**
-7. **Withdraw from EVM:**
-   - If `asset_id == 1`: check `evm_state.get_balance(sender) >= amount`, then `evm_state.set_balance(sender, balance - amount)`
-   - If `asset_id >= 2`: nested EVM call `ERC20.transferFrom(sender, 0x207, amount)` to move tokens into escrow
-7. **Credit protocol balance** to `to`
-8. **Record withdrawal** in `bridge_state`
-9. If EVM operation reverts → entire transaction fails, snapshot rollback
-
-### Atomic Rollback
-
-`Block::execute` takes snapshots before processing each transaction:
-
-```rust
-let balance_snapshot = account.clone();
-let evm_snapshot = evm_state.clone();
-let bridge_snapshot = bridge_state.clone();
-```
-
-If any bridge precompile call fails, all three states are restored:
-
-```rust
-*account = balance_snapshot;
-*evm_state = evm_snapshot;
-*bridge_state = bridge_snapshot;
-```
-
-This ensures that a failed `BridgeToEvm` does not leave the user's protocol balance deducted without corresponding EVM credit, and a failed `BridgeToProtocol` does not burn EVM tokens without protocol credit.
-
----
-
-## RPC Endpoints
-
-### `call_bridgeToEvm`
-
-Submit a user-initiated bridge from protocol to EVM.
-
-**Parameters:**
-```json
-{
-  "sender": "0x...",
-  "to": "0x...",
-  "assetId": 1,
-  "amount": "1000000000000000000",
-  "nonce": 123,
-  "signature": "0x..."
-}
-```
-
-**Response:**
-```json
-{
-  "txHash": "0x...",
-  "status": "pending"
-}
-```
-
-### `call_bridgeToProtocol`
-
-Submit a user-initiated withdrawal from EVM to protocol.
-
-**Parameters:**
-```json
-{
-  "sender": "0x...",
-  "to": "0x...",
-  "assetId": 1,
-  "amount": "1000000000000000000",
-  "nonce": 123,
-  "signature": "0x..."
-}
-```
-
-Both endpoints build an EVM transaction calling the Switch precompile (`0x207`) with:
-- `gas_limit = 30_000`
-- Standard EIP-1559 fee fields
-- ABI-encoded `switchToEvm` or `switchToProtocol` call data
-
-The signature is a standard Ethereum ECDSA signature over the RLP-encoded EVM transaction.
-
----
-
-## Python Test Helpers
-
-### `tests/signer.py`
-
-```python
-def sign_bridge_to_evm(
-    private_key: str,
-    sender: str,
-    nonce: int,
-    asset_id: int,
-    to: str,
-    amount: int,
-    gas_limit: int = 25_000,
-    max_fee: int = 250_000,
-) -> dict:
-    """Build a signed BridgeToEvm payload."""
-
-def sign_bridge_to_protocol(
-    private_key: str,
-    sender: str,
-    nonce: int,
-    asset_id: int,
-    to: str,
-    amount: int,
-    gas_limit: int = 25_000,
-    max_fee: int = 250_000,
-) -> dict:
-    """Build a signed BridgeToProtocol payload."""
-```
-
-Both helpers:
-1. Build an EVM transaction calling the Switch precompile (`0x207`)
-2. Compute `tx_hash` via `compute_tx_hash()` (matching Rust canonical hash)
-3. Sign with `sign_raw()` (raw secp256k1, **not** EIP-191)
-4. Return a dict ready for the RPC client
-
-### `tests/rpc_client.py`
-
-```python
-def bridge_to_evm(self, params: Dict) -> Dict:
-    return self._call("call_bridgeToEvm", [params])
-
-def bridge_to_protocol(self, params: Dict) -> Dict:
-    return self._call("call_bridgeToProtocol", [params])
-```
-
----
-
-## Rate Limiting & Safety
-
-The internal bridge shares `BridgeStateManager` rate limits with the external bridge:
-
-| Parameter | Default | Purpose |
-|-----------|---------|---------|
-| `max_per_tx` | 1,000 tokens | Maximum single bridge amount |
-| `daily_limit_per_asset` | 10,000 tokens | Daily volume cap per asset |
-| `blocks_per_day` | 345,600 | ~1 day at 250ms block time (daily limit reset cadence) |
-
-**Daily usage auto-reset:** `check_and_update_daily_limit` clears usage when `current_block >= daily_usage_reset_at + blocks_per_day`.
-
-**Bridge pause:** Individual assets can be paused via `bridge_state.pause_asset(asset_id)`. Paused assets reject all bridge operations.
+Both methods execute inside `dispatch::mutate_void`, which creates a checkpoint before the handler and either commits or reverts on completion. This means if any step fails (e.g., protocol balance deduction succeeds but the nested EVM call reverts), **all state changes are rolled back automatically**. No manual snapshot/rollback is required in `Block::execute`.
 
 ---
 
@@ -494,14 +274,14 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 
 | File | Role |
 |------|------|
-| `crates/bridge/src/deposit.rs` | `execute_deposit` — Protocol → EVM (BridgeOp::DepositToEvm) |
-| `crates/bridge/src/withdraw.rs` | `execute_withdraw` — EVM → Protocol (BridgeOp::WithdrawToProtocol) |
+| `crates/switch/src/precompile.rs` | Switch precompile (`switchToEvm`, `switchToProtocol`) |
+| `crates/switch/src/precompile.rs` | `SwitchStorage` — protocol balance add/sub, asset metadata reads |
+| `crates/asset/src/precompile.rs` | Asset precompile (`register`, `registerErc20`, `createWrapper`) |
+| `crates/asset/src/lib.rs` | `AssetStorage` — dominance, supply, balance, metadata management |
+| `crates/precompile/src/evm_caller.rs` | `execute_evm_call`, `apply_state_changes`, `StorageProviderDb` |
+| `crates/evm/contracts/WrappedToken.sol` | Reference ERC-20 with `bridgeMint` / `bridgeBurn` |
 | `crates/consensus/src/block.rs` | Block execution pipeline — EVM tx execution, system settlement, state root computation |
-| `crates/bridge/src/precompile.rs` | Bridge precompile functions (`externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit`) |
-| `crates/switch/src/precompile.rs` | Switch precompile functions (`switchToEvm`, `switchToProtocol`) |
-| `crates/rpc/src/callchain.rs` | `call_bridgeToEvm` and `call_bridgeToProtocol` RPC handlers |
-| `tests/signer.py` | Python signing helpers for EVM bridge transactions |
-| `tests/rpc_client.py` | Python RPC client methods for bridge endpoints |
+| `crates/chainspec/src/genesis.rs` | Genesis asset registration and balance seeding |
 
 ---
 
@@ -510,10 +290,11 @@ The internal bridge shares `BridgeStateManager` rate limits with the external br
 | Component | Status | Notes |
 |-----------|--------|-------|
 | CALL native bridging | Ready | asset_id==1 uses `evm_state.set_balance` directly; no ERC-20 contract needed |
-| User asset ERC-20 bridging | Ready | Requires `registerErc20` (sets `has_erc20 = 1` and `evm_contract_address`); nested EVM `transfer`/`transferFrom` via escrow model |
+| User asset ERC-20 bridging (escrow) | Ready | Requires `registerErc20`; nested EVM `transfer`/`transferFrom` via `0x207` escrow |
+| User asset ERC-20 bridging (mint/burn) | Ready | Requires `createWrapper`; nested EVM `bridgeMint`/`bridgeBurn` |
 | Virtual USD rejection | Ready | asset_id==0 explicitly rejected in both deposit and withdraw paths |
-| Atomic rollback | Ready | Snapshot of account + evm_state + bridge_state before each tx; full restore on failure |
-| Rate limiting | Ready | Per-tx and daily limits enforced; auto-reset per `blocks_per_day` |
-| Bridge pause | Ready | Per-asset pause via `BridgeStateManager` |
-| User-facing RPC | Ready | `call_bridgeToEvm` and `call_bridgeToProtocol` with signature verification and mempool submission |
-| E2E test helpers | Ready | Python signing and RPC wrappers in `tests/signer.py` and `tests/rpc_client.py` |
+| Atomic rollback | Ready | `dispatch::mutate_void` checkpoint/rollback inside precompile; no manual snapshot needed |
+| Rate limiting | Not implemented | Per-tx and daily limits are not enforced in the Switch precompile |
+| Bridge pause | Not implemented | Per-asset pause is not enforced in the Switch precompile |
+| User-facing RPC | Not implemented | No dedicated bridge RPC endpoints; users send `eth_sendRawTransaction` to `0x207` directly |
+| E2E test helpers | Not implemented | Python signing and RPC wrappers not yet available |
