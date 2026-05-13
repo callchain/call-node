@@ -26,6 +26,10 @@ sol! {
         function getAgentName(uint64 agentId) external view returns (bytes32);
         function getAgentUrl(uint64 agentId) external view returns (bytes32);
         function getAgentPerms(uint64 agentId) external view returns (uint256);
+        function createSession(uint64 agentId, address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
+        function revokeSession(uint64 agentId, uint64 sessionId) external;
+        function isSessionValid(uint64 agentId, uint64 sessionId) external view returns (uint64);
+        function executeSessionTransfer(uint64 agentId, uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
     }
 }
 
@@ -424,6 +428,110 @@ impl AgentPrecompile {
             },
         )
     }
+
+    fn create_session(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate::<IProtocolAgent::createSessionCall, _, _>(
+            calldata,
+            10000,
+            storage,
+            |call, _storage| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = AgentStorage::new(sr);
+                let session_id = store
+                    .create_session(
+                        call.agentId,
+                        call.delegate,
+                        call.perTxLimit,
+                        call.dailyLimit,
+                        call.expiresAt,
+                        caller,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(session_id)
+            },
+        )
+    }
+
+    fn revoke_session(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAgent::revokeSessionCall, _>(
+            calldata,
+            6000,
+            storage,
+            |call, _storage| {
+                let caller = require_caller(msg_sender)?;
+                let mut store = AgentStorage::new(sr);
+                store
+                    .revoke_session(call.agentId, call.sessionId, caller)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
+    }
+
+    fn is_session_valid(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolAgent::isSessionValidCall, _, _>(
+            calldata,
+            2000,
+            storage,
+            |call, storage| {
+                let mut store = AgentStorage::new(sr);
+                let block_number = storage.block_number();
+                let valid = store.is_session_valid(call.agentId, call.sessionId, block_number);
+                Ok(if valid { 1u64 } else { 0u64 })
+            },
+        )
+    }
+
+    fn execute_session_transfer(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate_void::<IProtocolAgent::executeSessionTransferCall, _>(
+            calldata,
+            30000,
+            storage,
+            |call, storage| {
+                let caller = require_caller(msg_sender)?;
+                let block_number = storage.block_number();
+
+                let mut agent_store = AgentStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
+                agent_store
+                    .execute_session_transfer(
+                        &mut asset_store,
+                        call.agentId,
+                        call.sessionId,
+                        call.assetId,
+                        call.to,
+                        call.amount,
+                        caller,
+                        block_number,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                Ok(())
+            },
+        )
+    }
 }
 
 impl call_precompile::StatefulPrecompile for AgentPrecompile {
@@ -473,6 +581,18 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
             IProtocolAgent::getAgentUrlCall::SELECTOR => self.get_agent_url(calldata, storage, sr),
             IProtocolAgent::getAgentPermsCall::SELECTOR => {
                 self.get_agent_perms(calldata, storage, sr)
+            }
+            IProtocolAgent::createSessionCall::SELECTOR => {
+                self.create_session(calldata, msg_sender, storage, sr)
+            }
+            IProtocolAgent::revokeSessionCall::SELECTOR => {
+                self.revoke_session(calldata, msg_sender, storage, sr)
+            }
+            IProtocolAgent::isSessionValidCall::SELECTOR => {
+                self.is_session_valid(calldata, storage, sr)
+            }
+            IProtocolAgent::executeSessionTransferCall::SELECTOR => {
+                self.execute_session_transfer(calldata, msg_sender, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
@@ -640,5 +760,194 @@ mod tests {
         let owner_slot = slot_balance(crate::CALL_ASSET_ID, sender);
         let owner_bal = provider.sload(ASSET_ADDRESS, owner_slot).unwrap();
         assert_eq!(u256_to_u128(owner_bal), 9_000);
+    }
+
+    #[test]
+    fn test_agent_precompile_session_lifecycle() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let owner = Address::repeat_byte(0x22);
+        let delegate = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x44);
+
+        // Seed owner balance
+        let owner_slot = slot_balance(crate::CALL_ASSET_ID, owner);
+        provider
+            .sstore(ASSET_ADDRESS, owner_slot, u128_to_u256(10_000))
+            .unwrap();
+
+        let mut precompile = AgentPrecompile;
+
+        // registerAgent
+        let input = IProtocolAgent::registerAgentCall {
+            name: "Agent".into(),
+            url: "url".into(),
+            pubkeyHash: [0xCCu8; 32].into(),
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        // grantBalance(agentId=0, assetId=1, amount=5_000)
+        let input = IProtocolAgent::grantBalanceCall {
+            agentId: 0,
+            assetId: crate::CALL_ASSET_ID,
+            amount: 5_000,
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        // createSession(agentId=0, delegate, perTxLimit=1_000, dailyLimit=2_000, expiresAt=100)
+        let input = IProtocolAgent::createSessionCall {
+            agentId: 0,
+            delegate,
+            perTxLimit: 1_000,
+            dailyLimit: 2_000,
+            expiresAt: 100,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, owner, &mut provider);
+        assert!(result.is_ok(), "createSession failed: {:?}", result.err());
+        let session_id = u64::from_be_bytes({
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&result.unwrap().bytes[24..32]);
+            buf
+        });
+        assert_eq!(session_id, 0);
+
+        // isSessionValid(agentId=0, sessionId=0) at block 50
+        let input = IProtocolAgent::isSessionValidCall {
+            agentId: 0,
+            sessionId: 0,
+        }
+        .abi_encode();
+        provider.set_block_number(50);
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let valid = u64::from_be_bytes({
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&result.bytes[24..32]);
+            buf
+        });
+        assert_eq!(valid, 1);
+
+        // executeSessionTransfer(agentId=0, sessionId=0, assetId=1, to=recipient, amount=800)
+        let input = IProtocolAgent::executeSessionTransferCall {
+            agentId: 0,
+            sessionId: 0,
+            assetId: crate::CALL_ASSET_ID,
+            to: recipient,
+            amount: 800,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, delegate, &mut provider);
+        assert!(
+            result.is_ok(),
+            "executeSessionTransfer failed: {:?}",
+            result.err()
+        );
+
+        // Agent balance should be 4_200
+        let input = IProtocolAgent::getAgentBalanceCall {
+            agentId: 0,
+            assetId: crate::CALL_ASSET_ID,
+        }
+        .abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let bal = u128::from_be_bytes({
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&result.bytes[16..32]);
+            buf
+        });
+        assert_eq!(bal, 4_200);
+
+        // Recipient balance should be 800
+        let recipient_slot = slot_balance(crate::CALL_ASSET_ID, recipient);
+        let recipient_bal = provider.sload(ASSET_ADDRESS, recipient_slot).unwrap();
+        assert_eq!(u256_to_u128(recipient_bal), 800);
+
+        // revokeSession(agentId=0, sessionId=0)
+        let input = IProtocolAgent::revokeSessionCall {
+            agentId: 0,
+            sessionId: 0,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, owner, &mut provider);
+        assert!(result.is_ok(), "revokeSession failed: {:?}", result.err());
+
+        // isSessionValid should now return 0
+        let input = IProtocolAgent::isSessionValidCall {
+            agentId: 0,
+            sessionId: 0,
+        }
+        .abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let valid = u64::from_be_bytes({
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&result.bytes[24..32]);
+            buf
+        });
+        assert_eq!(valid, 0);
+    }
+
+    #[test]
+    fn test_agent_precompile_session_expired_rejected() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let owner = Address::repeat_byte(0x22);
+        let delegate = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x44);
+
+        let owner_slot = slot_balance(crate::CALL_ASSET_ID, owner);
+        provider
+            .sstore(ASSET_ADDRESS, owner_slot, u128_to_u256(10_000))
+            .unwrap();
+
+        let mut precompile = AgentPrecompile;
+
+        let input = IProtocolAgent::registerAgentCall {
+            name: "Agent".into(),
+            url: "url".into(),
+            pubkeyHash: [0xCCu8; 32].into(),
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        let input = IProtocolAgent::grantBalanceCall {
+            agentId: 0,
+            assetId: crate::CALL_ASSET_ID,
+            amount: 5_000,
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        let input = IProtocolAgent::createSessionCall {
+            agentId: 0,
+            delegate,
+            perTxLimit: 1_000,
+            dailyLimit: 2_000,
+            expiresAt: 100,
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        // Block 101 > expiresAt 100
+        provider.set_block_number(101);
+
+        let input = IProtocolAgent::executeSessionTransferCall {
+            agentId: 0,
+            sessionId: 0,
+            assetId: crate::CALL_ASSET_ID,
+            to: recipient,
+            amount: 500,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, delegate, &mut provider);
+        assert!(
+            result.is_err(),
+            "expected expired session to be rejected"
+        );
     }
 }

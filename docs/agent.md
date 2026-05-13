@@ -16,14 +16,18 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 
 | Operation | Function | Gas |
 |---|---|---|
-| Register agent | `register(bytes32,string,string)` | 6,000 + storage |
-| Grant balance | `grant(uint64,uint64,uint128)` | 6,000 + storage |
-| Revoke balance | `revoke(uint64,uint64)` | 6,000 + storage |
-| Pay | `pay(uint64,uint64,address,uint128)` | 6,000 + storage |
-| Batch pay | `batchPay(uint64,uint64,address[],uint128[])` | 6,000 + storage |
-| Withdraw balance | `withdrawBalance(uint64,uint64,uint128)` | 6,000 + storage |
+| Register agent | `registerAgent(string,string,bytes32)` | 6,000 + storage |
+| Grant balance | `grantBalance(uint64,uint64,uint128)` | 6,000 + storage |
+| Revoke balance | `revokeBalance(uint64,uint64)` | 6,000 + storage |
+| Pay | `pay(uint64,uint64,address,uint128)` | 30,000 + storage |
+| Batch pay | `batchPay(uint64,uint64,address[],uint128[])` | 30,000 + storage |
+| Withdraw balance | `withdrawBalance(uint64,uint64,uint128)` | 50,000 + storage |
+| Create session | `createSession(uint64,address,uint128,uint128,uint64)` | 10,000 + storage |
+| Revoke session | `revokeSession(uint64,uint64)` | 6,000 + storage |
+| Is session valid | `isSessionValid(uint64,uint64)` | 2,000 + storage |
+| Execute session transfer | `executeSessionTransfer(uint64,uint64,uint64,address,uint128)` | 30,000 + storage |
 
-Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`, where `base_gas = 6,000` for all agent operations.
+Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`.
 
 See [precompile.md](precompile.md) for the full ABI.
 
@@ -96,6 +100,50 @@ The actual implementation enforces only basic limits:
 
 There is no `daily_limit`, `allowed_counterparties`, `allowed_protocols`, `expires_at`, or per-precompile permission checking.
 
+### 3a. Session Keys
+
+Session keys allow an agent owner to delegate limited, time-bound spending authority to an external address (delegate). The delegate can then initiate transfers from the agent's balance without requiring the owner to sign every transaction.
+
+#### Session Lifecycle
+
+1. **Create**: Owner calls `createSession(agentId, delegate, perTxLimit, dailyLimit, expiresAt)` → returns `sessionId`
+2. **Execute**: Delegate calls `executeSessionTransfer(agentId, sessionId, assetId, to, amount)` → transfers from agent balance to recipient
+3. **Revoke**: Owner calls `revokeSession(agentId, sessionId)` → immediately invalidates the session
+4. **Auto-expire**: Sessions automatically become invalid after `expiresAt` block
+
+#### Session Constraints
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `delegate` | `address` | The EOA address authorized to execute on behalf of the agent |
+| `perTxLimit` | `uint128` | Maximum amount per single `executeSessionTransfer` |
+| `dailyLimit` | `uint128` | Maximum cumulative amount per day (~17,280 blocks) |
+| `expiresAt` | `uint64` | Block number after which the session is invalid (0 = never) |
+
+#### Storage Layout
+
+Session data is stored under `AGENT_ADDRESS (0x209)`:
+
+```
+slot_session_count(agent_id)                  → uint64
+slot_session_delegate(agent_id, session_id)   → address
+slot_session_limits(agent_id, session_id)     → packed(perTxLimit, dailyLimit)
+slot_session_expires(agent_id, session_id)    → uint64
+slot_session_spent(agent_id, session_id)      → uint128
+slot_session_last_day(agent_id, session_id)   → uint64
+```
+
+#### Gas
+
+| Method | Base Gas |
+|--------|----------|
+| `createSession` | 10,000 |
+| `revokeSession` | 6,000 |
+| `isSessionValid` | 2,000 |
+| `executeSessionTransfer` | 30,000 |
+
+Note: Gas is paid by the delegate (EVM `msg.sender`) when calling `executeSessionTransfer`. The transferred amount is deducted from the agent's balance, not the delegate's.
+
 ### 4. Agent Balances
 
 Agent balances are stored as EVM storage slots under `0x209`:
@@ -111,8 +159,8 @@ Agent balances are stored as EVM storage slots under `0x209`:
 
 | File | Role |
 |------|------|
-| `lib.rs` | `AgentStorage`, `AgentError`, `AgentRegistration`, balance and nonce helpers |
-| `precompile.rs` | Precompile dispatch for `0x209`, selector decoding, EVM storage integration |
+| `lib.rs` | `AgentStorage`, `AgentError`, `AgentRegistration`, balance and nonce helpers, session key storage |
+| `precompile.rs` | Precompile dispatch for `0x209`, selector decoding, EVM storage integration, session key dispatch |
 
 ---
 
@@ -122,8 +170,9 @@ Agent balances are stored as EVM storage slots under `0x209`:
 |-----------|--------|-------|
 | Agent registration | 🟢 Ready | Name uniqueness, metadata storage, agent revocation |
 | Permissions | 🟡 Partial | Basic per-tx limit and asset allowlist only |
+| Session keys | 🟢 Ready | Create/revoke/validate/execute with per-tx and daily limits, expiration |
 | Balance management | 🟢 Ready | Grant deducts from owner, overflow-protected credit, underflow-protected deduct |
-| Payments | 🟢 Ready | Single and batch pay from agent balance |
+| Payments | 🟢 Ready | Single and batch pay from agent balance, session-key delegated transfers |
 | Persistence | 🟢 Ready | All state in EVM storage under `0x209`, committed with EVM state root |
 
 ---
