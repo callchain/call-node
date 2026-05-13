@@ -43,8 +43,8 @@ Callchain is a high-performance Layer-1 blockchain featuring a **unified EVM exe
           └──────────┬───┘
                      ▼
             Internal Bridge
-           (Protocol-Level Internal Bridge)
-           lock-and-release Mechanism
+           (Switch Precompile 0x207)
+           Escrow or Mint/Burn per Asset
 ```
 
 ---
@@ -187,8 +187,9 @@ struct Asset {
     total_supply: u128,             // protocol-layer total supply
     policy: CompliancePolicy,       // compliance policy
     registered_at: u64,             // registration timestamp
-    evm_contract: Address,          // corresponding ERC-20 contract address
-    bridge_reserve: u128,           // balance in the bridge pool
+    evm_contract: Address,          // bound ERC-20 contract address (zero if none)
+    has_erc20: u8,                  // 0 = protocol-only, 1 = ERC-20 bound
+    dominance: u8,                  // 0 = EVM-dominant (escrow), 1 = PROTOCOL-dominant (mint/burn)
     status: AssetStatus,
 }
 
@@ -217,9 +218,16 @@ Upon registration:
 1. Deduct registration fee (to prevent spam registration)
 2. Assign unique AssetId
 3. Create protocol-layer balance mapping, `balances[issuer] = initial_supply`
-4. Automatically deploy corresponding ERC-20 contract on the EVM layer
-5. ERC-20 contract initial supply is 0 (all assets start at the protocol layer)
-6. Bridge contract receives mint/burn authority for the token
+4. Asset starts as **protocol-only** (`has_erc20 = 0`, `dominance` unset)
+
+**Binding to EVM (optional, issuer-only):**
+
+After registration, the issuer can bind the asset to the EVM layer through one of two paths:
+
+- **`registerErc20(contract)`** (`0x201`): Bind an existing external ERC-20 contract. Sets `has_erc20 = 1`, `dominance = 0` (EVM-dominant, escrow model). The Switch precompile (`0x207`) must hold tokens in escrow for deposits.
+- **`createWrapper(assetId)`** (`0x201`): Deploy a system `WrappedToken` contract. Sets `has_erc20 = 1`, `dominance = 1` (PROTOCOL-dominant, mint/burn model). The Switch precompile can mint/burn tokens on demand.
+
+`dominance` is immutable once set. Both paths require `caller == asset.issuer` and `has_erc20 == 0`.
 
 ### 3.3 Balance Management
 
@@ -290,7 +298,7 @@ All protocol operations are invoked via standard EVM transactions calling precom
 |---------|----------|
 | `0x101` | Oracle (price feeds, TWAP) |
 | `0x103` | External bridge (deposit/withdraw/challenge) |
-| `0x201` | Asset (transfer, batchTransfer, approve, transferFrom, mint, burn, register) |
+| `0x201` | Asset (transfer, batchTransfer, approve, transferFrom, mint, burn, register, registerErc20, createWrapper) |
 | `0x202` | Shielded pool (deposit, transfer, withdraw) |
 | `0x203` | Governance (propose, vote, queue, execute, emergency pause/resume) |
 | `0x204` | Validator staking (stake, unstake, claimUnbonded) |
@@ -332,7 +340,7 @@ interface IProtocolTransfer {
 // Usage from a contract or wallet
 contract Example {
     IProtocolTransfer constant TRANSFER =
-        IProtocolTransfer(0x0000000000000000000000000000000000000102);
+        IProtocolTransfer(0x0000000000000000000000000000000000000201);
 
     function pay(uint64 assetId, address recipient, uint128 amount) external {
         TRANSFER.transfer(assetId, recipient, amount, "");
@@ -412,7 +420,7 @@ fn dispatch_precompile(address: Address, input: &[u8], gas_limit: u64, storage: 
     match address {
         0x101 => oracle_handler(input, gas_limit, storage),
         0x103 => bridge_handler(input, gas_limit, storage),
-        0x201 => asset_handler(input, gas_limit, storage),   // transfer, batchTransfer, approve, mint, burn, register
+        0x201 => asset_handler(input, gas_limit, storage),   // transfer, batchTransfer, approve, mint, burn, register, registerErc20, createWrapper
         0x202 => shielded_handler(input, gas_limit, storage),
         0x203 => governance_handler(input, gas_limit, storage),
         0x204 => validator_handler(input, gas_limit, storage),
@@ -1112,50 +1120,43 @@ Based on **Reth + Revm**, embedded as a library in the same process.
 
 ### 4.2 ERC-20 Contracts for Assets
 
-Each registered protocol asset has a corresponding ERC-20 contract on the EVM layer. This contract maintains **independent EVM-layer balances**, converted to/from protocol-layer balances through the internal bridge.
+Only protocol assets with `has_erc20 = 1` have a corresponding ERC-20 contract on the EVM layer. There are two binding models depending on `dominance`:
+
+**Escrow model (`dominance = 0`, EVM-dominant):**
+- Used for external ERC-20 contracts registered via `registerErc20(address)`.
+- The Switch precompile (`0x207`) holds tokens in its own balance as escrow.
+- Switching protocol → EVM uses `transfer(to, amount)` from the escrow.
+- Switching EVM → protocol uses `transferFrom(caller, 0x207, amount)` into escrow.
+
+**Mint/burn model (`dominance = 1`, PROTOCOL-dominant):**
+- Used for system `WrappedToken` contracts deployed via `createWrapper(assetId)`.
+- No escrow is needed. The Switch precompile mints/burns tokens on demand.
+- `bridgeMint(to, amount)` and `bridgeBurn(from, amount)` are restricted to `msg.sender == 0x207`.
+
+Protocol-only assets (`has_erc20 = 0`) cannot leave the protocol layer until an issuer binds them via one of the two paths above.
 
 ```solidity
-/// ERC-20 contract corresponding to a protocol asset
-/// Maintains independent EVM-layer balances, converted to/from protocol layer via bridge
-contract AssetToken is IERC20 {
+/// System WrappedToken for PROTOCOL-dominant assets (dominance = 1)
+/// Deployed via createWrapper(assetId) at 0x201
+contract WrappedToken is IERC20 {
     uint8 public immutable decimals;
     string public name;
     string public symbol;
     uint256 public totalSupply;
+    address public immutable bridge;      // Switch precompile 0x207
 
-    // EVM-layer independent balances
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
 
-    // Only the bridge contract can mint/burn
     modifier onlyBridge() {
-        require(msg.sender == BRIDGE_CONTRACT, "Only bridge");
+        require(msg.sender == bridge, "Only bridge");
         _;
     }
 
-    function balanceOf(address account) external view returns (uint256) {
-        return _balances[account];
-    }
+    function transfer(address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
 
-    function transfer(address to, uint256 amount) external returns (bool) {
-        _balances[msg.sender] -= amount;
-        _balances[to] += amount;
-        return true;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        _allowances[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        _allowances[from][msg.sender] -= amount;
-        _balances[from] -= amount;
-        _balances[to] += amount;
-        return true;
-    }
-
-    // Bridge interface
     function bridgeMint(address to, uint256 amount) external onlyBridge {
         _balances[to] += amount;
         totalSupply += amount;
@@ -1180,117 +1181,85 @@ In addition to ERC-20 contracts corresponding to protocol assets, the EVM layer 
 
 ---
 
-## 5. Internal Bridge
+## 5. Internal Bridge (Switch Precompile)
 
 ### 5.1 Design
 
-Protocol-layer balances and EVM-layer balances are **two independent ledgers**, converted through an internal bridge contract.
+Protocol-layer balances and EVM-layer balances are **two independent ledgers**. The **Switch precompile at `0x207`** provides bidirectional bridging between them. All state changes are atomic via checkpoint/rollback.
 
-```
-Protocol Layer              EVM Layer
-─────────                ─────────
-Asset: USDX              ERC-20: USDX
-balances[A] = 100        balanceOf(A) = 0
-                         (independent balance)
+Two models are supported depending on the asset's `dominance`:
 
-A bridges to EVM layer:
-  balances[A] = 0        balanceOf(A) = 100
-                         (lock-and-release)
+- **Escrow model** (`dominance = 0`, EVM-dominant): The Switch precompile holds ERC-20 tokens in its own balance. Used for external contracts registered via `registerErc20`.
+- **Mint/burn model** (`dominance = 1`, PROTOCOL-dominant): The Switch precompile creates or destroys ERC-20 tokens in real time via `bridgeMint`/`bridgeBurn`. Used for system wrappers deployed via `createWrapper`.
 
-A bridges back to protocol layer:
-  balances[A] = 100      balanceOf(A) = 0
-```
+CALL (asset_id = 1) is a special case: it bridges as **native EVM gas balance** (`evm_state.set_balance`), not as an ERC-20.
 
-### 5.2 Bridge Operations
+### 5.2 Switch Precompile Interface
 
-Bridge operations are standard EVM transactions calling the bridge precompile (`0x103`).
-All state (pending deposits, pool balances, challenge windows) lives in EVM storage
-under the bridge precompile address. There is no separate protocol-layer balance.
-
-```rust
-/// Bridge precompile input (ABI-encoded)
-enum BridgeCall {
-    /// Cross-chain deposit: record incoming deposit, release to recipient
-    Deposit { asset_id: AssetId, recipient: Address, amount: u128, proof: Vec<u8> },
-    /// Cross-chain withdrawal: lock funds, emit outbound event
-    Withdraw { asset_id: AssetId, amount: u128, destination: Vec<u8> },
-    /// Challenge a fraudulent deposit
-    Challenge { deposit_id: u64, evidence: Vec<u8> },
+```solidity
+interface IProtocolSwitch {
+    function switchToEvm(uint64 assetId, address to, uint128 amount) external;
+    function switchToProtocol(uint64 assetId, address to, uint128 amount) external;
 }
 ```
 
-### 5.3 Bridge Execution
+Both functions are called via standard EVM transactions to `0x207`.
 
-**Deposit (cross-chain → Callchain):**
+### 5.3 SwitchToEvm (Protocol → EVM)
+
+**Flow:**
+1. Validate `amount > 0` and `to != Address::ZERO`
+2. `check_asset_active(assetId)` — asset must be Active
+3. `check_has_erc20(assetId)` — must support EVM bridge (or `assetId == 1` for CALL)
+4. `sub_protocol_bal(assetId, caller, amount)` — deduct caller's protocol balance
+5. Credit EVM side:
+   - If `assetId == 1` (CALL): `balance_add(to, amount)` — native EVM balance
+   - Otherwise (ERC-20): read `dominance`, execute nested EVM call from `0x207`
+     - `dominance == 0`: `transfer(to, amount)` from escrow
+     - `dominance == 1`: `bridgeMint(to, amount)` — mint new tokens
+6. `checkpoint_commit()` on success; `checkpoint_revert()` on any failure
+
+**Gas:** 20,000 + nested EVM call gas
+
+### 5.4 SwitchToProtocol (EVM → Protocol)
+
+**Flow:**
+1. Validate `amount > 0` and `to != Address::ZERO`
+2. `check_asset_active(assetId)`
+3. `check_has_erc20(assetId)`
+4. Deduct EVM side:
+   - If `assetId == 1` (CALL): `balance_sub(caller, amount)` — native EVM balance
+   - Otherwise (ERC-20): read `dominance`, execute nested EVM call from `0x207`
+     - `dominance == 0`: `transferFrom(caller, 0x207, amount)` into escrow
+     - `dominance == 1`: `bridgeBurn(caller, amount)` — destroy caller's tokens
+5. `add_protocol_bal(assetId, to, amount)` — credit recipient's protocol balance
+6. Atomic commit or rollback
+
+**Gas:** 20,000 + nested EVM call gas
+
+### 5.5 Atomicity
+
+Both methods execute inside `dispatch::mutate_void`:
 
 ```rust
-fn execute_deposit(input: &BridgeCall, storage: &StorageRef) -> Result<()> {
-    // 1. Verify deposit proof (light-client or merkle proof)
-    verify_deposit_proof(&input.proof)?;
-
-    // 2. Check pool balance in EVM storage
-    let pool = read_pool_balance(input.asset_id, storage)?;
-    ensure!(pool >= input.amount, InsufficientPoolBalance);
-
-    // 3. Transfer from bridge pool to recipient via asset precompile (0x201)
-    transfer_balance(input.asset_id, BRIDGE_ADDRESS, input.recipient, input.amount, storage)?;
-
-    // 4. Emit deposit event log
-    emit_bridge_deposit_log(input.asset_id, input.recipient, input.amount);
-
-    Ok(())
+let checkpoint = storage.checkpoint();
+let result = handler(decoded, storage);
+if result.is_ok() && gas_sufficient {
+    storage.checkpoint_commit(checkpoint);
+} else {
+    storage.checkpoint_revert(checkpoint);
 }
 ```
 
-**Withdraw (Callchain → cross-chain):**
+This means:
+- `switchToEvm`: if protocol balance was deducted but ERC-20 call fails → **all state restored**
+- `switchToProtocol`: if ERC-20 call succeeds but protocol balance credit fails → **all state restored**
 
-```rust
-fn execute_withdraw(input: &BridgeCall, storage: &StorageRef) -> Result<()> {
-    // 1. Transfer from caller to bridge pool via asset precompile (0x201)
-    transfer_balance(input.asset_id, msg_sender(), BRIDGE_ADDRESS, input.amount, storage)?;
+### 5.6 Liquidity Requirement
 
-    // 2. Record outbound withdrawal in EVM storage
-    record_outbound_withdrawal(input.asset_id, msg_sender(), input.amount, input.destination, storage)?;
+**Escrow model (`dominance = 0`):** The Switch precompile (`0x207`) must hold a token balance before any `switchToEvm` deposit can succeed. Liquidity is injected through user-initiated withdrawals (`switchToProtocol`) or direct `transfer` to `0x207`.
 
-    // 3. Emit withdrawal event log
-    emit_bridge_withdraw_log(input.asset_id, msg_sender(), input.amount);
-
-    Ok(())
-}
-```
-
-### 5.4 Bridge Timing
-
-```
-Bridge operations are standard EVM transactions calling the bridge precompile (0x103).
-There is no separate bridge execution step — they execute atomically within the EVM
-alongside all other transactions in the block.
-
-1. EVM transactions execute (including bridge precompile calls at 0x103)
-   → Users call the bridge precompile for cross-chain deposits/withdrawals
-   → State changes are applied immediately in the same transaction
-```
-
-All bridge state (pending deposits, challenges, pool balances) lives in EVM storage
-under the bridge precompile address.
-
-### 5.5 User Experience
-
-```
-Scenario: User A wants to participate in EVM-layer DeFi
-
-Wallet handles automatically:
-  1. Detects A's USDX is on the protocol layer
-  2. User initiates swap operation
-  3. Wallet automatically attaches bridge_deposit operation
-  4. Same transaction completes: bridge → swap
-  5. User doesn't need to be aware of "which layer I'm on"
-
-Frontend displays unified balance:
-  Total USDX: 100
-  ├── Protocol: 30 (available for fast payments)
-  └── EVM: 70 (available for DeFi)
-```
+**Mint/burn model (`dominance = 1`):** No escrow balance is required. Tokens are created on demand during `switchToEvm` and destroyed during `switchToProtocol`.
 
 ---
 
@@ -2417,6 +2386,14 @@ CALL is Callchain's native token, serving the triple role of Gas, staking, and g
 | Issuance | None, fixed supply |
 | Deflationary Mechanism | 50% transaction fee burn |
 
+**Dual-Balance Model:**
+
+CALL operates under an independent dual-balance architecture:
+- **EVM native balance**: Used for gas payment and native EVM transfers. Genesis allocates CALL as EVM balance only.
+- **Protocol balance**: Tracked in `AssetStorage` (asset_id = 1). Used for protocol-layer transfers via the Asset precompile (`0x201`).
+
+The two balances are **never automatically synchronized**. A user's total CALL is the sum of both layers. The Switch precompile (`0x207`) provides `switchToEvm` and `switchToProtocol` as the manual migration path between layers.
+
 **Initial Allocation:**
 
 | Category | Proportion | Amount | Lock-up |
@@ -2439,7 +2416,7 @@ All protocol-layer transactions pay Gas in CALL. Uses an **EIP-1559-like dynamic
 | Approve / Mint / Burn | 5,000 gas | Approve/mint/burn |
 | Each recipient in BatchTransfer | 1,000 gas | Per payee in batch payment |
 | BatchTransfer Memo | memo_bytes × 1 gas | Batch memo additional fee |
-| BridgeDeposit | 10,000 gas | Internal bridge deposit |
+| SwitchToEvm / SwitchToProtocol | 20,000 gas (+ nested EVM call gas) | Internal bridge via Switch precompile (0x207) |
 | ShieldedDeposit / Withdraw | 20,000 gas | Includes ZK proof verification |
 | ShieldedTransfer | 50,000 gas | Includes ZK proof verification |
 | Agent precompiles | Above × 0.5 | Agent exclusive discount |
@@ -3379,13 +3356,14 @@ The genesis configuration is provided in JSON format:
 
 ```
 1. Parse genesis.json
-2. Initialize protocol-layer balances: for each GenesisAsset, balances[issuer] = initial_supply
-3. Deploy corresponding ERC-20 contracts to EVM layer (initial supply 0)
-4. Register initial validator set
-5. Register initial Gas payment currencies to FeeCurrencyRegistry
-6. Create genesis block (height=0, parent_hash=0x0)
-7. Compute initial state root (EVM state root)
-8. Nodes begin running consensus from height 0
+2. For each GenesisAsset:
+   - If CALL (asset_id = 1): set native EVM balance only (`evm_state.set_balance`)
+   - Otherwise: set both protocol-layer balance and native EVM balance
+3. Register initial validator set
+4. Register initial Gas payment currencies to FeeCurrencyRegistry
+5. Create genesis block (height=0, parent_hash=0x0)
+6. Compute initial state root (EVM state root)
+7. Nodes begin running consensus from height 0
 ```
 
 ---
