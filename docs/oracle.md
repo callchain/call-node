@@ -49,8 +49,6 @@ Prices use **6 decimal places** (e.g. `$2.00` = `2_000_000`).
 │  │ 3. Collect OraclePriceSubmission responses   │       │
 │  │ 4. Aggregate via OracleTracker               │       │
 │  │ 5. Call submitPrice on precompile 0x101      │       │
-│  │ 6. Slash outliers via consensus              │       │
-│  │ 7. Distribute rewards to contributors         │       │
 │  └──────────────────────────────────────────────┘       │
 └─────────────────────┬───────────────────────────────────┘
                       │
@@ -88,14 +86,15 @@ The **Oracle precompile at `0x101`** exposes both read and write operations:
 
 | Operation | Function | Type | Gas |
 |---|---|---|---|
-| Read | `getPrice(uint64)` | view | base + storage |
-| Read | `getTWAP(uint64,uint64)` | view | base + storage |
-| Read | `isStale(uint64,uint64)` | view | base + storage |
-| Write | `submitPrice(uint64,uint128,uint64,uint64,bytes,bytes[])` | — | base + storage |
+| Read | `getPrice(uint64)` | view | 1,000 |
+| Read | `getTWAP(uint64)` | view | 1,000 |
+| Read | `isStale(uint64)` | view | 1,000 |
+| Write | `submitPrice(uint64,uint128,uint64,uint64)` | mutate | 30,000 |
+| Write | `setTrackedAssets(uint64[])` | mutate | 50,000 |
 
-Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`.
+Gas is fixed per operation.
 
-`submitPrice` allows registered validators to submit prices directly via EVM transactions (e.g., from a Solidity contract or MetaMask). In practice, the block producer aggregates submissions via `OracleTracker` and writes the result to EVM storage via `submitPrice`. See [precompile.md](precompile.md) for the full ABI.
+`submitPrice` requires the caller to be a registered validator (`validator_id != 0`). Each validator's submission is written directly to EVM storage; the caller is responsible for providing an accurate price. In practice, the block producer aggregates multiple validator submissions via `OracleTracker`, computes the median, and writes the aggregated result via `submitPrice`. See [precompile.md](precompile.md) for the full ABI.
 
 ---
 
@@ -134,19 +133,16 @@ Dynamic: `ceil(2/3 * n)` where `n` is the active validator count. Minimum 1, cap
 1. Sort all submitted prices ascending
 2. Compute median at index `prices.len() / 2`
 3. Detect outliers: any price deviating > 500 bps (5%) from median
-4. Strike outlier validators (increment `outlier_count` in EVM storage)
-5. Disable validators after 10 strikes (`is_active = false` in EVM storage)
-6. Store `AggregatedPrice` (pair, median, submission count, outlier count) in EVM storage via `submitPrice`
-7. Record non-outlier submitters in `current_contributors`
-8. Append median to TWAP history in EVM storage
-9. Prune history beyond 24h window
+4. Record outlier validator IDs in `last_outliers` (transient, in-memory only)
+5. Record non-outlier submitters in `current_contributors`
+
+Note: Outlier detection is currently in-memory only. Persistent strikes, automatic disabling, and slashing are not yet implemented.
 
 ### Period Advance
 
 Called by block proposer at each `ORACLE_UPDATE_INTERVAL` (every 1000 blocks):
 
 - For pairs without quorum: carry forward the last known price (graceful degradation)
-- Prune TWAP history beyond window
 - Clear pending for all pairs
 
 ---
@@ -206,28 +202,29 @@ This eliminates the semantic ambiguity of the old single-lookup model and makes 
 
 ### Rewards
 
-- Block fees allocate a share to the oracle reward pool in EVM storage (configured via `oracle_fee_share_bps` in `FeeParams`)
-- At each oracle period boundary, rewards distribute proportionally among `current_contributors`
-- First contributor absorbs remainder to avoid dust loss
-- Pool resets to 0 after distribution
+`OracleTracker::distribute_rewards(reward_pool)` distributes rewards proportionally among `current_contributors` (validators whose submissions were included in the last quorum aggregation and were not flagged as outliers). First contributor absorbs the remainder to avoid dust loss.
+
+Note: The actual funding of the reward pool and invocation of `distribute_rewards` during block production is not yet implemented.
 
 ### Penalties
 
-- Outlier submissions (> 5% deviation from median) earn the validator a strike
-- After 10 strikes, the validator is disabled from oracle participation
-- Separately, `SimplexConsensus.slash_oracle_outlier()` slashes 0.1% of the validator's self-stake per outlier event
-- Disabled validators can be reset via governance (no `OracleManager::reset_validator()`)
+Outlier submissions (> 5% deviation from median) are detected during aggregation and recorded in `last_outliers` (transient, in-memory only). Persistent strikes, automatic disabling, and stake slashing are not yet implemented.
 
 ---
 
 ## TWAP Calculation
 
-Time-weighted average price over the configured window (default 24 hours):
+The precompute implements an **incremental cumulative average** (not a time-weighted average):
 
-- Each historical price entry is weighted by its duration of validity (time until the next price update, or until `current_timestamp` for the most recent entry)
-- Uses `U256` arithmetic to avoid overflow
-- Single entry within window returns that price directly
-- TWAP is computed per `PricePair`
+```rust
+new_twap = (old_twap * count + price) / (count + 1)
+```
+
+- `count` increments with each `submitPrice` call
+- First submission: `twap = price`
+- Subsequent submissions: cumulative mean of all submitted prices
+- Stored per `asset_id` in EVM storage
+- The `ORACLE_TWAP_WINDOW_SECS` constant (24 hours) defines the intended policy window but is not enforced by the current TWAP computation
 
 ---
 
@@ -237,18 +234,21 @@ Time-weighted average price over the configured window (default 24 hours):
 
 The precompile reads canonical price and TWAP data from EVM storage under `0x101`. There is no `set_live_oracle()` or live `OracleManager` instance.
 
-### Selectors
+### ABI Interface
 
-| Function | Selector | Input | Output |
-|---|---|---|---|
-| `getPrice` | `0x763e4d8c` | `uint64 asset_id` | `uint128 price` (0 if unknown) |
-| `getTWAP` | `0xabcdef01` | `uint64 asset_id, uint64 current_timestamp` | `uint128 twap` (0 if unknown) |
-| `isStale` | `0x12345678` | `uint64 asset_id, uint64 current_timestamp` | `bool` |
-| `getOracleStatus` | `0x9abcde01` | `uint64 asset_id, uint64 current_timestamp` | `(uint8 status, uint128 price, uint64 timestamp)` |
+```solidity
+interface IProtocolOracle {
+    function getPrice(uint64 assetId) external view returns (uint128);
+    function getTWAP(uint64 assetId) external view returns (uint128);
+    function isStale(uint64 assetId) external view returns (uint8);
+    function submitPrice(uint64 assetId, uint128 price, uint64 timestamp, uint64 blockNumber) external;
+    function setTrackedAssets(uint64[] assetIds) external;
+}
+```
 
-**Note**: The precompile ABI accepts a single `asset_id` and implicitly quotes in USD (`quote = 0`). For cross-asset pairs (e.g. USDC/CALL), use the `OracleState` API directly.
+Selectors are generated automatically by `alloy_sol_types` from the interface definition above.
 
-Status codes: `0 = Disabled` (no price), `1 = Stale`, `2 = Active`
+**Note**: The precompile ABI accepts a single `asset_id` and implicitly quotes in USD (`quote = 0`). For cross-asset pairs (e.g. USDC/CALL), use the `OracleTracker` API directly.
 
 ---
 
@@ -260,8 +260,9 @@ Status codes: `0 = Disabled` (no price), `1 = Stale`, `2 = Active`
 | `ORACLE_PERIOD_SECS` | 240 | Oracle period in seconds |
 | `ORACLE_OUTLIER_THRESHOLD_BPS` | 500 | Outlier threshold: 5% deviation |
 | `ORACLE_OUTLIER_TOLERANCE` | 10 | Strikes before validator disabled |
-| `ORACLE_TWAP_WINDOW_SECS` | 86,400 | TWAP window: 24 hours |
-| `ORACLE_STALENESS_SECS` | 900 | Staleness threshold: 15 minutes |
+| `ORACLE_TWAP_WINDOW_SECS` | 86,400 | TWAP window: 24 hours (policy constant; not enforced by current TWAP computation) |
+| `ORACLE_STALENESS_SECS` | 900 | Staleness threshold: 15 minutes (OracleConfig default) |
+| `STALE_THRESHOLD_SECS` | 3,600 | Staleness threshold used by precompile `isStale`: 1 hour |
 | `ORACLE_MIN_DATA_SOURCES` | 2 | Minimum independent sources per submission |
 
 ---
@@ -290,8 +291,13 @@ pub trait PriceFetcher: Send + Sync {
 crates/oracle/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs          # OracleTracker, PriceFetcher, types, errors
-    └── tracker.rs      # OracleTracker implementation
+    ├── lib.rs           # Types, OracleConfig, OracleError
+    ├── precompile.rs    # OraclePrecompile (0x101), OracleStorage
+    ├── tracker.rs       # OracleTracker, aggregation logic
+    ├── fetcher.rs       # PriceFetcher trait, HttpPriceFetcher
+    ├── crypto.rs        # Ed25519 signing helpers
+    ├── constants.rs     # Oracle constants
+    └── tests.rs         # Additional tests
 ```
 
 ### Dependencies
@@ -319,12 +325,12 @@ crates/oracle/
 
 ## Genesis Initialization
 
-Oracle is boot-strapped during genesis:
+Oracle state is initialized during genesis:
 
-1. Genesis config specifies `oracle_assets: Vec<u64>` — tracked asset IDs (all implicitly quoted in USD, i.e. `quote = 0`)
-2. Genesis validators are registered into oracle validator state in EVM storage with their Ed25519 public keys
-3. `OracleConfig` is initialized from genesis parameters (or defaults) in EVM storage
-4. `set_tracked_assets(asset_ids)` converts each ID to `PricePair { base: id, quote: 0 }` and stores in EVM storage
+1. Genesis config may specify `oracle_assets: Vec<u64>` — tracked asset IDs (all implicitly quoted in USD, i.e. `quote = 0`)
+2. `set_tracked_assets(asset_ids)` stores the tracked list in EVM storage under `0x101`
+
+Note: Validator registration for oracle purposes reuses the validator staking precompile (`0x204`). There is no separate oracle validator registry.
 
 ---
 
@@ -335,4 +341,4 @@ Oracle is boot-strapped during genesis:
 - **Node restart**: `OracleTracker` state is lost (pending submissions, contributors, outliers). Canonical prices and TWAP history are restored from EVM storage on the next block.
 - **Empty tracked pairs**: Price request broadcast is skipped; no wasted P2P traffic.
 - **Single validator**: Quorum is 1; validator's own price is the median.
-- **CALL/USD missing**: `get_call_price()` falls back to hardcoded `$2.00` (`2_000_000`).
+- **CALL/USD missing**: Contracts reading `getPrice(1)` receive `0` until the first price is submitted.
