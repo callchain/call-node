@@ -30,7 +30,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 |---------|------|-----------|
 | `0x101` | **Oracle** | `getPrice`, `getTWAP`, `isStale`, `submitPrice`, `setTrackedAssets` |
 | `0x103` | **Bridge** | `getTotalDeposits`, `getTotalWithdrawals`, `externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit` |
-| `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `register`, `mint`, `issuerMint`, `burn` |
+| `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `register`, `mint`, `burn` |
 | `0x202` | **Shielded** | `deposit`, `withdraw`, `transfer` |
 | `0x203` | **Governance** | `submitProposal`, `vote`, `queue`, `execute`, `emergencyPause`, `emergencyResume`, `getProposalStatus`, `getProposalVotes`, `isPaused`, `getProposalCount` |
 | `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded`, `getValidatorStake`, `getValidatorStatus`, `getValidatorPubkey`, `getUnbondHeight`, `getValidatorByIndex` |
@@ -122,9 +122,6 @@ interface IProtocolAsset {
     function mint(uint64 assetId, address to, uint128 amount)
         external; // issuer only
 
-    function issuerMint(uint64 assetId, address to, uint128 amount)
-        external; // issuer only, mints on EVM layer
-
     function burn(uint64 assetId, address from, uint128 amount)
         external; // any holder
 }
@@ -137,7 +134,6 @@ interface IProtocolAsset {
 - `approve` / `transferFrom`: Protocol-level allowance system (separate from ERC-20 allowances).
 - `register`: Registers a new asset in `AssetStorage` and auto-deploys a `WrappedToken` ERC-20 contract.
 - `mint`: Only callable by the asset's registered issuer. Mints on the protocol layer.
-- `issuerMint`: Only callable by the asset's registered issuer. Mints wrapped ERC-20 tokens directly on the EVM layer (no protocol balance created).
 - `burn`: Any holder can burn their own balance.
 
 ---
@@ -491,7 +487,6 @@ Gas is computed at two layers:
 | `register` | 50,000 | + contract deployment gas |
 | `registerErc20` | 50,000 | + ERC-20 metadata reads (sloads) |
 | `mint` | 6,000 | + sload + sstore + supply update |
-| `issuerMint` | 6,000 | + EVM contract call |
 | `burn` | 5,000 | + sload + sstore + supply update |
 | `switchToEvm` | 8,000 | + EVM contract call |
 | `switchToProtocol` | 8,000 | + EVM contract call |

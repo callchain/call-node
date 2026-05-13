@@ -502,42 +502,6 @@ impl EvmExecutor {
         Ok(result)
     }
 
-    /// Helper: EVM call for issuer mint operations on WrappedToken
-    pub fn evm_call_issuer_mint(
-        &self,
-        caller: Address,
-        contract: Address,
-        state: &mut InMemoryStateProvider,
-        to: Address,
-        amount: U256,
-    ) -> Result<EvmExecutionResult, EvmError> {
-        // keccak256("issuerMint(address,uint256)")[:4]
-        let selector: FixedBytes<4> =
-            FixedBytes::from_slice(&keccak256("issuerMint(address,uint256)")[..4]);
-        let mut data = Vec::new();
-        data.extend_from_slice(&selector[..]);
-        // ABI-encode address (32 bytes, left-padded)
-        let mut addr_bytes = [0u8; 32];
-        addr_bytes[12..].copy_from_slice(to.as_slice());
-        data.extend_from_slice(&addr_bytes);
-        // ABI-encode uint256
-        data.extend_from_slice(&amount.to_be_bytes::<32>());
-
-        let tx = EvmTransaction {
-            caller,
-            nonce: state.get_nonce(&caller),
-            gas_limit: 500_000,
-            gas_price: 10,
-            to: Some(contract),
-            value: U256::ZERO,
-            data: Bytes::from(data),
-            chain_id: self.chain_id,
-        };
-
-        let (result, revm_state) = self.execute_tx_db(tx, &mut *state, 0, 0)?;
-        state.apply_from_revm_state(&revm_state);
-        Ok(result)
-    }
 }
 
 // ── Transaction Validation ────────────────────────────────────────────

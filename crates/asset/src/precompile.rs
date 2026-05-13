@@ -26,7 +26,6 @@ sol! {
         function approve(uint64 assetId, address spender, uint128 amount) external;
         function transferFrom(uint64 assetId, address from, address to, uint128 amount) external;
         function mint(uint64 assetId, address to, uint128 amount) external;
-        function issuerMint(uint64 assetId, address to, uint128 amount) external;
         function burn(uint64 assetId, address from, uint128 amount) external;
         function register(string calldata symbol, string calldata name, uint8 decimals, uint128 maxSupply) external returns (uint64 assetId);
         function registerErc20(address evmContract) external returns (uint64 assetId);
@@ -387,9 +386,6 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
                 self.transfer_from(calldata, msg_sender, storage, sr)
             }
             IProtocolAsset::mintCall::SELECTOR => self.mint(calldata, msg_sender, storage, sr),
-            IProtocolAsset::issuerMintCall::SELECTOR => {
-                self.mint(calldata, msg_sender, storage, sr)
-            }
             IProtocolAsset::burnCall::SELECTOR => self.burn(calldata, msg_sender, storage, sr),
             IProtocolAsset::registerCall::SELECTOR => {
                 self.register(calldata, msg_sender, storage, sr)

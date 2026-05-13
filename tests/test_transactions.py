@@ -30,6 +30,8 @@ from signer import (
     sign_evm_precompile_stake,
     sign_evm_precompile_unstake,
     sign_evm_precompile_claim_unbonded,
+    sign_evm_precompile_switch_to_evm,
+    sign_evm_precompile_switch_to_protocol,
     build_evm_batch_transfer_data,
     sign_evm_transaction,
 )
@@ -459,6 +461,114 @@ def test_bridge_withdraw_error_handling(cluster, accounts):
         print("  [OK] bridge withdraw error handling works")
 
 
+# ── Tests: Switch (Protocol ↔ EVM) ────────────────────────────────────
+
+
+def test_switch_to_evm(cluster, accounts):
+    """Move CALL from protocol balance to native EVM balance via Switch precompile (0x207)."""
+    sender = accounts[3]
+    amount = 10**17  # 0.1 CALL
+    asset_id = 1
+
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
+
+    # Query balances before
+    protocol_before = get_balance_int(cluster.nodes[0], asset_id, sender["address"])
+    evm_before_hex = cluster.nodes[0].eth_get_balance(sender["address"])
+    evm_before = int(evm_before_hex, 16) if isinstance(evm_before_hex, str) else 0
+
+    raw_tx = sign_evm_precompile_switch_to_evm(
+        private_key=sender["private_key"],
+        evm_nonce=evm_nonce,
+        asset_id=asset_id,
+        to=sender["address"],
+        amount=amount,
+    )
+
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
+    print(f"  submitted switchToEvm tx: {tx_hash}")
+
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "switchToEvm tx not found in any block within 30s")
+    status = receipt.get("status", "N/A")
+    assert_true(status == "0x1", f"switchToEvm tx reverted: status={status}")
+    print(f"  tx confirmed, status={status}")
+
+    # Sync nodes before querying state
+    target_height = int(cluster.nodes[0].block_number(), 16)
+    for node in cluster.nodes:
+        wait_for_height(node, target_height)
+
+    # Verify protocol balance decreased
+    protocol_after = get_balance_int(cluster.nodes[0], asset_id, sender["address"])
+    assert_true(protocol_after == protocol_before - amount,
+                f"protocol balance mismatch: {protocol_before} -> {protocol_after}, expected {protocol_before - amount}")
+
+    # Verify EVM balance increased
+    evm_after_hex = cluster.nodes[0].eth_get_balance(sender["address"])
+    evm_after = int(evm_after_hex, 16) if isinstance(evm_after_hex, str) else 0
+    assert_true(evm_after == evm_before + amount,
+                f"EVM balance mismatch: {evm_before} -> {evm_after}, expected {evm_before + amount}")
+
+    print(f"  [OK] switchToEvm — protocol {protocol_before} -> {protocol_after}, EVM {evm_before} -> {evm_after}")
+
+
+def test_switch_to_protocol(cluster, accounts):
+    """Move CALL from native EVM balance back to protocol balance via Switch precompile (0x207)."""
+    sender = accounts[3]
+    recipient = accounts[2]
+    amount = 5 * 10**16  # 0.05 CALL (half of what was switched to EVM)
+    asset_id = 1
+
+    sync_evm_nonce(sender["address"], cluster.nodes[0])
+    evm_nonce = _next_evm_nonce(sender["address"])
+
+    # Query balances before
+    evm_before_hex = cluster.nodes[0].eth_get_balance(sender["address"])
+    evm_before = int(evm_before_hex, 16) if isinstance(evm_before_hex, str) else 0
+    protocol_before = get_balance_int(cluster.nodes[0], asset_id, recipient["address"])
+
+    assert_true(evm_before >= amount, f"insufficient EVM balance for switch: {evm_before} < {amount}")
+
+    raw_tx = sign_evm_precompile_switch_to_protocol(
+        private_key=sender["private_key"],
+        evm_nonce=evm_nonce,
+        asset_id=asset_id,
+        to=recipient["address"],
+        amount=amount,
+    )
+
+    tx_hash = cluster.nodes[0].send_raw_transaction(raw_tx)
+    assert_true(tx_hash and tx_hash.startswith("0x"), f"missing txHash in result: {tx_hash}")
+    print(f"  submitted switchToProtocol tx: {tx_hash}")
+
+    receipt = wait_for_tx(cluster, tx_hash, timeout=30)
+    assert_true(receipt is not None, "switchToProtocol tx not found in any block within 30s")
+    status = receipt.get("status", "N/A")
+    assert_true(status == "0x1", f"switchToProtocol tx reverted: status={status}")
+    print(f"  tx confirmed, status={status}")
+
+    # Sync nodes
+    target_height = int(cluster.nodes[0].block_number(), 16)
+    for node in cluster.nodes:
+        wait_for_height(node, target_height)
+
+    # Verify EVM balance decreased
+    evm_after_hex = cluster.nodes[0].eth_get_balance(sender["address"])
+    evm_after = int(evm_after_hex, 16) if isinstance(evm_after_hex, str) else 0
+    assert_true(evm_after == evm_before - amount,
+                f"EVM balance mismatch: {evm_before} -> {evm_after}, expected {evm_before - amount}")
+
+    # Verify protocol balance increased
+    protocol_after = get_balance_int(cluster.nodes[0], asset_id, recipient["address"])
+    assert_true(protocol_after == protocol_before + amount,
+                f"protocol balance mismatch: {protocol_before} -> {protocol_after}, expected {protocol_before + amount}")
+
+    print(f"  [OK] switchToProtocol — EVM {evm_before} -> {evm_after}, protocol {protocol_before} -> {protocol_after}")
+
+
 # ── Tests: Validator Management ───────────────────────────────────────
 
 
@@ -658,6 +768,8 @@ TEST_FUNCTIONS = [
     test_compliance_policy,
     test_bridge_deposit_error_handling,
     test_bridge_withdraw_error_handling,
+    test_switch_to_evm,
+    test_switch_to_protocol,
     test_validator_join,
     test_validator_leave,
     test_transfer_balance_change_after_block,

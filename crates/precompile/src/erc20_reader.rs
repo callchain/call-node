@@ -1,24 +1,41 @@
 //! ERC-20 metadata reader for precompiles.
 //!
-//! Reads `name`, `symbol`, and `decimals` directly from an ERC-20 contract's
-//! EVM storage slots, supporting both OpenZeppelin v4 and v5 layouts.
+//! Reads `name`, `symbol`, and `decimals` via actual EVM static calls to the
+//! target contract. Falls back to direct storage slot reading (OpenZeppelin v4/v5)
+//! if the EVM calls do not return valid data.
 //!
-//! # Storage Layout Detection
+//! # Why EVM calls?
 //!
-//! | Version | `_name` | `_symbol` | `_decimals` |
-//! |---------|---------|-----------|-------------|
-//! | OZ v5   | slot 0  | slot 1    | slot 2      |
-//! | OZ v4   | slot 3  | slot 4    | not stored (assume 18) |
-//!
-//! The reader tries v5 first (slots 0, 1, 2). If slot 0 does not contain a
-//! valid string, it falls back to v4 (slots 3, 4).
+//! Direct storage slot reading is fragile: it only works for contracts that follow
+//! exact OZ layouts. EVM static calls work for any contract that correctly implements
+//! the ERC-20 metadata interface, including proxies, computed properties, and
+//! non-standard storage layouts.
 
-use alloy_primitives::{keccak256, Address, U256};
+use alloy_primitives::{keccak256, Address, Bytes, U256};
+use revm::database_interface::Database;
+use revm::primitives::{B256, TxKind};
+use revm::{ExecuteEvm, MainBuilder, MainContext};
 use revm_precompile::PrecompileError;
 
 use crate::storage::StorageProvider;
 
-/// ERC-20 metadata discovered from contract storage.
+// ── ABI selectors ─────────────────────────────────────────────────────
+
+/// `keccak256("name()")[:4]`
+const SELECTOR_NAME: [u8; 4] = [0x06, 0xfd, 0xde, 0x03];
+/// `keccak256("symbol()")[:4]`
+const SELECTOR_SYMBOL: [u8; 4] = [0x95, 0xd8, 0x9b, 0x41];
+/// `keccak256("decimals()")[:4]`
+const SELECTOR_DECIMALS: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];
+
+// ── Gas budget ────────────────────────────────────────────────────────
+
+/// Maximum gas allowed for a single nested metadata view call.
+const NESTED_CALL_GAS_LIMIT: u64 = 100_000;
+
+// ── Public API ────────────────────────────────────────────────────────
+
+/// ERC-20 metadata discovered from contract storage or EVM calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Erc20Metadata {
     pub name: String,
@@ -26,20 +43,225 @@ pub struct Erc20Metadata {
     pub decimals: u8,
 }
 
-/// Read ERC-20 metadata from contract storage.
+/// Read ERC-20 metadata from a contract.
 ///
-/// Tries OpenZeppelin v5 layout first, then v4. Returns an error if the
-/// contract does not appear to follow either layout.
+/// Tries EVM static calls first (`name()`, `symbol()`, `decimals()`). If the
+/// contract does not return valid ABI-encoded data, falls back to direct
+/// storage slot reading (OpenZeppelin v5 then v4 layouts).
 pub fn read_erc20_metadata(
     storage: &mut dyn StorageProvider,
     contract: Address,
 ) -> Result<Erc20Metadata, PrecompileError> {
-    // Ensure the contract has code.
     let code = storage.code_get(contract)?;
     if code.is_empty() {
         return Err(PrecompileError::Other("no code at address".into()));
     }
 
+    // Primary path: actual EVM static calls.
+    if let Some(meta) = try_evm_call_metadata(storage, contract)? {
+        if !meta.name.is_empty() && !meta.symbol.is_empty() {
+            return Ok(meta);
+        }
+    }
+
+    // Fallback: direct storage slot reading.
+    try_storage_slot_metadata(storage, contract)
+}
+
+// ── EVM call path ─────────────────────────────────────────────────────
+
+/// Attempt to read metadata via nested EVM static calls.
+fn try_evm_call_metadata(
+    storage: &mut dyn StorageProvider,
+    contract: Address,
+) -> Result<Option<Erc20Metadata>, PrecompileError> {
+    let mut db = StorageProviderDb { provider: storage };
+
+    let name =
+        match execute_static_call(&mut db, contract, Bytes::from_static(&SELECTOR_NAME))? {
+            Some(data) => match decode_abi_string(&data) {
+                Ok(s) if !s.is_empty() => s,
+                _ => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+
+    let symbol =
+        match execute_static_call(&mut db, contract, Bytes::from_static(&SELECTOR_SYMBOL))? {
+            Some(data) => match decode_abi_string(&data) {
+                Ok(s) if !s.is_empty() => s,
+                _ => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+
+    let decimals =
+        match execute_static_call(&mut db, contract, Bytes::from_static(&SELECTOR_DECIMALS))? {
+            Some(data) => decode_abi_uint8(&data),
+            None => 18,
+        };
+
+    Ok(Some(Erc20Metadata {
+        name,
+        symbol,
+        decimals,
+    }))
+}
+
+/// Execute a single static call through a nested revm instance.
+///
+/// Deducts the **actual gas spent** from the outer `StorageProvider`.
+fn execute_static_call(
+    db: &mut StorageProviderDb,
+    contract: Address,
+    data: Bytes,
+) -> Result<Option<Bytes>, PrecompileError> {
+    let block_number = db.provider.block_number();
+    let timestamp = db.provider.timestamp();
+
+    let tx_env = revm::context::TxEnv::builder()
+        .caller(Address::ZERO)
+        .gas_limit(NESTED_CALL_GAS_LIMIT)
+        .gas_price(0)
+        .kind(TxKind::Call(contract))
+        .value(U256::ZERO)
+        .data(data)
+        .build()
+        .map_err(|e| PrecompileError::Other(format!("tx build: {e:?}").into()))?;
+
+    let result = {
+        let ctx = revm::Context::mainnet()
+            .with_db(&mut *db)
+            .modify_cfg_chained(|cfg| {
+                cfg.set_spec(revm::primitives::hardfork::SpecId::CANCUN)
+            });
+        let mut evm = ctx.build_mainnet();
+        let mut block_env = revm::context::BlockEnv::default();
+        block_env.number = U256::from(block_number);
+        block_env.timestamp = timestamp;
+        evm.set_block(block_env);
+        evm.transact(tx_env)
+            .map_err(|e| PrecompileError::Other(format!("evm call: {e:?}").into()))?
+    };
+
+    // Deduct actual gas spent from the outer provider budget.
+    let gas_spent = match &result.result {
+        revm::context_interface::result::ExecutionResult::Success { gas, .. } => gas.spent(),
+        revm::context_interface::result::ExecutionResult::Revert { gas, .. } => gas.spent(),
+        revm::context_interface::result::ExecutionResult::Halt { gas, .. } => gas.spent(),
+    };
+    db.provider.deduct_gas(gas_spent)?;
+
+    match result.result {
+        revm::context_interface::result::ExecutionResult::Success { output, .. } => {
+            let bytes = match output {
+                revm::context_interface::result::Output::Call(b) => b,
+                revm::context_interface::result::Output::Create(b, _) => b,
+            };
+            Ok(if bytes.is_empty() { None } else { Some(bytes) })
+        }
+        _ => Ok(None),
+    }
+}
+
+// ── Database adapter ──────────────────────────────────────────────────
+
+/// [`Database`] implementation backed by a [`StorageProvider`].
+///
+/// Uses `raw_*` methods so that gas is **not** double-counted: the nested EVM
+/// tracks its own gas, and only the final `gas.spent()` is deducted from the
+/// outer provider.
+struct StorageProviderDb<'a> {
+    provider: &'a mut dyn StorageProvider,
+}
+
+impl<'a> Database for StorageProviderDb<'a> {
+    type Error = revm::database_interface::ErasedError;
+
+    fn basic(
+        &mut self,
+        address: Address,
+    ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        let balance = self
+            .provider
+            .raw_balance_get(address)
+            .map_err(revm::database_interface::ErasedError::new)?;
+        let code = self
+            .provider
+            .raw_code_get(address)
+            .map_err(revm::database_interface::ErasedError::new)?;
+        let code_hash = if code.is_empty() {
+            keccak256(&[])
+        } else {
+            keccak256(&code)
+        };
+        let code = if code.is_empty() {
+            None
+        } else {
+            Some(revm::state::Bytecode::new_legacy(code))
+        };
+        Ok(Some(revm::state::AccountInfo {
+            balance,
+            nonce: 0,
+            code_hash,
+            code,
+            account_id: None,
+        }))
+    }
+
+    fn code_by_hash(
+        &mut self,
+        _hash: B256,
+    ) -> Result<revm::state::Bytecode, Self::Error> {
+        Ok(revm::state::Bytecode::default())
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        self.provider
+            .raw_sload(address, index)
+            .map_err(revm::database_interface::ErasedError::new)
+    }
+
+    fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
+        Ok(B256::ZERO)
+    }
+}
+
+// ── ABI decoding ──────────────────────────────────────────────────────
+
+/// Decode an ABI-encoded `string` return value.
+fn decode_abi_string(data: &[u8]) -> Result<String, PrecompileError> {
+    if data.len() < 64 {
+        return Err(PrecompileError::Other("string return too short".into()));
+    }
+    let offset = U256::from_be_slice(&data[0..32]).to::<usize>();
+    if offset + 32 > data.len() {
+        return Err(PrecompileError::Other("string offset out of bounds".into()));
+    }
+    let len = U256::from_be_slice(&data[offset..offset + 32]).to::<usize>();
+    if offset + 32 + len > data.len() {
+        return Err(PrecompileError::Other("string length out of bounds".into()));
+    }
+    let str_bytes = &data[offset + 32..offset + 32 + len];
+    String::from_utf8(str_bytes.to_vec())
+        .map_err(|_| PrecompileError::Other("invalid utf8 in string return".into()))
+}
+
+/// Decode an ABI-encoded `uint8` return value.
+fn decode_abi_uint8(data: &[u8]) -> u8 {
+    if data.len() >= 32 {
+        data[31]
+    } else {
+        18
+    }
+}
+
+// ── Fallback: direct storage slot reading ─────────────────────────────
+
+fn try_storage_slot_metadata(
+    storage: &mut dyn StorageProvider,
+    contract: Address,
+) -> Result<Erc20Metadata, PrecompileError> {
     // Try OZ v5 layout first.
     if let Some(name) = read_solidity_string(storage, contract, U256::from(0))? {
         if let Some(symbol) = read_solidity_string(storage, contract, U256::from(1))? {
@@ -58,7 +280,6 @@ pub fn read_erc20_metadata(
     if let Some(name) = read_solidity_string(storage, contract, U256::from(3))? {
         if let Some(symbol) = read_solidity_string(storage, contract, U256::from(4))? {
             if !name.is_empty() && !symbol.is_empty() {
-                // OZ v4 ERC20 does not store decimals; default to 18.
                 return Ok(Erc20Metadata {
                     name,
                     symbol,
@@ -69,7 +290,7 @@ pub fn read_erc20_metadata(
     }
 
     Err(PrecompileError::Other(
-        "unable to read ERC-20 metadata from contract storage".into(),
+        "unable to read ERC-20 metadata from contract".into(),
     ))
 }
 

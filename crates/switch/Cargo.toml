@@ -16,3 +16,7 @@ call-asset.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 revm-precompile.workspace = true
+revm.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

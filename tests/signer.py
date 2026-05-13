@@ -103,6 +103,26 @@ def build_evm_vote_data(proposal_id: int, vote: int) -> str:
     return "0x" + (selector + encoded).hex()
 
 
+def build_evm_switch_to_evm_data(asset_id: int, to: str, amount: int) -> str:
+    """Build ABI-encoded call data for switchToEvm(uint64,address,uint128) on 0x207."""
+    selector = bytes.fromhex("4a4883bc")
+    encoded = encode(
+        ["uint64", "address", "uint128"],
+        [asset_id, to, amount],
+    )
+    return "0x" + (selector + encoded).hex()
+
+
+def build_evm_switch_to_protocol_data(asset_id: int, to: str, amount: int) -> str:
+    """Build ABI-encoded call data for switchToProtocol(uint64,address,uint128) on 0x207."""
+    selector = bytes.fromhex("7aa6732c")
+    encoded = encode(
+        ["uint64", "address", "uint128"],
+        [asset_id, to, amount],
+    )
+    return "0x" + (selector + encoded).hex()
+
+
 def sign_evm_transaction(
     private_key: str,
     nonce: int,
@@ -133,6 +153,7 @@ ASSET_ADDRESS = "0x0000000000000000000000000000000000000201"
 VALIDATOR_ADDRESS = "0x0000000000000000000000000000000000000204"
 GOVERNANCE_ADDRESS = "0x0000000000000000000000000000000000000203"
 AGENT_ADDRESS = "0x0000000000000000000000000000000000000209"
+SWITCH_ADDRESS = "0x0000000000000000000000000000000000000207"
 
 
 def sign_evm_precompile_transfer(
@@ -279,5 +300,43 @@ def sign_evm_precompile_vote(
     return sign_evm_transaction(
         private_key, evm_nonce,
         to=GOVERNANCE_ADDRESS,
+        data=data, gas=gas, gas_price=gas_price, chain_id=chain_id,
+    )
+
+
+def sign_evm_precompile_switch_to_evm(
+    private_key: str,
+    evm_nonce: int,
+    asset_id: int,
+    to: str,
+    amount: int,
+    gas: int = 100_000,
+    gas_price: int = 1000,
+    chain_id: int = 1,
+) -> str:
+    """Sign an EVM transaction calling switchToEvm() on Switch precompile (0x207)."""
+    data = build_evm_switch_to_evm_data(asset_id, to, amount)
+    return sign_evm_transaction(
+        private_key, evm_nonce,
+        to=SWITCH_ADDRESS,
+        data=data, gas=gas, gas_price=gas_price, chain_id=chain_id,
+    )
+
+
+def sign_evm_precompile_switch_to_protocol(
+    private_key: str,
+    evm_nonce: int,
+    asset_id: int,
+    to: str,
+    amount: int,
+    gas: int = 100_000,
+    gas_price: int = 1000,
+    chain_id: int = 1,
+) -> str:
+    """Sign an EVM transaction calling switchToProtocol() on Switch precompile (0x207)."""
+    data = build_evm_switch_to_protocol_data(asset_id, to, amount)
+    return sign_evm_transaction(
+        private_key, evm_nonce,
+        to=SWITCH_ADDRESS,
         data=data, gas=gas, gas_price=gas_price, chain_id=chain_id,
     )
