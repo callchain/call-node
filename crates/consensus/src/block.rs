@@ -3,7 +3,6 @@
 //! Block and BlockHeader types with hash, validation, and execution.
 
 use call_crypto::keccak256;
-use call_evm::EvmTransaction;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_protocol::gas::FeeParams;
 use serde::{Deserialize, Serialize};
@@ -190,34 +189,6 @@ impl Block {
         current_block_height: u64,
         db_env: Option<&reth_db::DatabaseEnv>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        // Pre-bridge Protocol→EVM gas so every tx has sufficient EVM balance.
-        for raw_tx in &self.evm_txs {
-            if let Ok(tx) = decode_evm_tx(raw_tx) {
-                let gas_cost = call_evm::U256::from(tx.gas_limit)
-                    .saturating_mul(call_evm::U256::from(tx.gas_price));
-                let evm_balance = provider.state().get_balance(&tx.caller);
-                if evm_balance < gas_cost {
-                    let needed: u128 = (gas_cost - evm_balance).try_into().unwrap_or(u128::MAX);
-                    let protocol_balance = state_accessors::read_balance(
-                        provider.state(),
-                        call_protocol::CALL_ASSET_ID,
-                        tx.caller,
-                    );
-                    if protocol_balance >= needed {
-                        let new_protocol = protocol_balance - needed;
-                        state_accessors::seed_balance(
-                            provider.state_mut(),
-                            call_protocol::CALL_ASSET_ID,
-                            tx.caller,
-                            new_protocol,
-                        );
-                        let new_evm = evm_balance + call_evm::U256::from(needed);
-                        provider.state_mut().set_balance(tx.caller, new_evm);
-                    }
-                }
-            }
-        }
-
         let provider_for_exec = provider.clone();
         let (block_tx_result, revm_delta) = call_evm::block_executor::execute_block_transactions(
             &self.evm_txs,
@@ -337,62 +308,6 @@ impl BlockExecutionResult {
 /// Update base fee after block execution (delegates to protocol layer)
 pub(crate) fn update_base_fee_after_block(params: &mut FeeParams, gas_used: u64) {
     call_protocol::gas::update_base_fee(params, gas_used);
-}
-
-/// Attempt to decode raw EVM transaction bytes into a structured EvmTransaction.
-/// Supports RLP-encoded Legacy and EIP-1559 transactions.
-/// Falls back to JSON deserialization for backward compatibility with test data.
-/// Returns Err if the bytes cannot be parsed as a valid EVM tx.
-fn decode_evm_tx(raw: &[u8]) -> Result<EvmTransaction, ()> {
-    use alloy_consensus::{Transaction, TxEnvelope};
-    use alloy_rlp::Decodable;
-
-    if raw.is_empty() {
-        return Err(());
-    }
-
-    // 1) Try RLP / EIP-2718 enveloped decoding (real wallet transactions)
-    if let Ok(envelope) = TxEnvelope::decode(&mut &raw[..]) {
-        match envelope {
-            TxEnvelope::Legacy(signed) => {
-                let tx = signed.tx();
-                let caller = signed.recover_signer().map_err(|_| ())?;
-                return Ok(EvmTransaction {
-                    caller,
-                    nonce: tx.nonce(),
-                    gas_limit: tx.gas_limit(),
-                    gas_price: tx.gas_price().unwrap_or(0),
-                    to: tx.to(),
-                    value: tx.value(),
-                    data: tx.input().clone(),
-                    chain_id: tx.chain_id().unwrap_or(1),
-                });
-            }
-            TxEnvelope::Eip1559(signed) => {
-                let tx = signed.tx();
-                let caller = signed.recover_signer().map_err(|_| ())?;
-                return Ok(EvmTransaction {
-                    caller,
-                    nonce: tx.nonce(),
-                    gas_limit: tx.gas_limit(),
-                    gas_price: tx.max_fee_per_gas(),
-                    to: tx.to(),
-                    value: tx.value(),
-                    data: tx.input().clone(),
-                    chain_id: tx.chain_id().unwrap_or(1),
-                });
-            }
-            // Unsupported transaction types (EIP-2930, EIP-4844, EIP-7702)
-            _ => return Err(()),
-        }
-    }
-
-    // 2) Fallback: JSON-serialized EvmTransaction (test data / internal tooling)
-    if let Ok(tx) = serde_json::from_slice::<EvmTransaction>(raw) {
-        return Ok(tx);
-    }
-
-    Err(())
 }
 
 // ── Property-based tests ──────────────────────────────────────────────

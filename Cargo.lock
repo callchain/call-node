@@ -1376,6 +1376,7 @@ dependencies = [
  "call-primitives",
  "call-protocol",
  "proptest",
+ "revm",
  "revm-precompile",
 ]
 

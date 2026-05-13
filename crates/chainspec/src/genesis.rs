@@ -264,10 +264,17 @@ impl GenesisExecutor {
         Ok(())
     }
 
-    /// Register assets and distribute initial balances (EVM only)
+    /// Register assets and distribute initial balances.
+    ///
+    /// For CALL (asset_id == 1): balances are issued **only** as native EVM
+    /// balance. Protocol-layer slots are left at zero. Users must call
+    /// `switchToProtocol` to move CALL into the protocol layer.
+    ///
+    /// For other assets: both protocol and EVM balances are seeded (they may
+    /// already be bridged via `registerErc20` or `createWrapper`).
     fn register_assets(&self, evm_state: &mut InMemoryStateProvider) -> Result<(), GenesisError> {
         for asset in &self.genesis.initial_assets {
-            // Distribute initial balances (EVM only)
+            let is_call = asset.asset_id == call_protocol::CALL_ASSET_ID;
             let mut total_allocated: Balance = 0;
             for (address_str, amount) in &asset.distribution {
                 let addr = parse_address(address_str)?;
@@ -275,11 +282,14 @@ impl GenesisExecutor {
                     .checked_add(*amount)
                     .ok_or_else(|| GenesisError::ExecutionFailed("supply overflow".into()))?;
 
-                // Seed EVM asset storage so get_balance reads from EVM state root
-                state_accessors::seed_balance(evm_state, asset.asset_id, addr, *amount);
-
-                // Seed native EVM balance for gas payment
-                evm_state.set_balance(addr, U256::from(*amount));
+                if is_call {
+                    // CALL: native EVM balance only — no protocol slot
+                    evm_state.set_balance(addr, U256::from(*amount));
+                } else {
+                    // Other assets: seed both protocol and EVM balances
+                    state_accessors::seed_balance(evm_state, asset.asset_id, addr, *amount);
+                    evm_state.set_balance(addr, U256::from(*amount));
+                }
                 evm_state.create_account(addr);
             }
 
@@ -492,6 +502,19 @@ mod tests {
                     map
                 },
             })
+            .with_asset(GenesisAsset {
+                asset_id: 2,
+                symbol: "GOLD".to_string(),
+                name: "Gold Token".to_string(),
+                decimals: 18,
+                initial_supply: 1_000_000,
+                distribution: {
+                    let mut map = HashMap::new();
+                    map.insert(addr_hex(&test_addr(3)), 500_000);
+                    map.insert(addr_hex(&test_addr(4)), 500_000);
+                    map
+                },
+            })
             .with_fee_currency(GenesisFeeCurrency {
                 symbol: "CALL".to_string(),
                 asset_id: 1,
@@ -511,7 +534,7 @@ mod tests {
         let parsed = Genesis::from_json(&json).unwrap();
         assert_eq!(parsed.chain_id, 1);
         assert_eq!(parsed.chain_name, "callchain-test");
-        assert_eq!(parsed.initial_assets.len(), 1);
+        assert_eq!(parsed.initial_assets.len(), 2);
         assert_eq!(parsed.validators.len(), 1);
     }
 
@@ -532,13 +555,43 @@ mod tests {
         let executor = GenesisExecutor::new(genesis);
         let state = executor.execute().unwrap();
 
-        let bal1 =
+        // CALL (asset_id=1): protocol balance is NOT seeded at genesis
+        let bal1_proto =
             call_consensus::exec::state_accessors::read_balance(&state.evm_state, 1, test_addr(1));
-        assert_eq!(bal1, 500_000_000 * 10u128.pow(18));
+        assert_eq!(bal1_proto, 0);
 
-        let bal2 =
+        let bal2_proto =
             call_consensus::exec::state_accessors::read_balance(&state.evm_state, 1, test_addr(2));
-        assert_eq!(bal2, 500_000_000 * 10u128.pow(18));
+        assert_eq!(bal2_proto, 0);
+
+        // CALL: native EVM balance IS seeded at genesis
+        let bal1_native = state.evm_state.get_balance(&test_addr(1));
+        assert_eq!(bal1_native, U256::from(500_000_000 * 10u128.pow(18)));
+
+        let bal2_native = state.evm_state.get_balance(&test_addr(2));
+        assert_eq!(bal2_native, U256::from(500_000_000 * 10u128.pow(18)));
+    }
+
+    #[test]
+    fn test_genesis_non_call_asset_dual_balance() {
+        let genesis = make_test_genesis();
+        let executor = GenesisExecutor::new(genesis);
+        let state = executor.execute().unwrap();
+
+        // Non-CALL asset (asset_id=2): both protocol and native balances seeded
+        let bal3_proto =
+            call_consensus::exec::state_accessors::read_balance(&state.evm_state, 2, test_addr(3));
+        assert_eq!(bal3_proto, 500_000);
+
+        let bal4_proto =
+            call_consensus::exec::state_accessors::read_balance(&state.evm_state, 2, test_addr(4));
+        assert_eq!(bal4_proto, 500_000);
+
+        let bal3_native = state.evm_state.get_balance(&test_addr(3));
+        assert_eq!(bal3_native, U256::from(500_000));
+
+        let bal4_native = state.evm_state.get_balance(&test_addr(4));
+        assert_eq!(bal4_native, U256::from(500_000));
     }
 
     #[test]

@@ -409,6 +409,7 @@ impl call_precompile::StatefulPrecompile for SwitchPrecompile {
 mod tests {
     use super::*;
     use call_precompile::storage::HashMapStorageProvider;
+    use alloy_primitives::keccak256;
     use call_precompile::{
         address_to_u256, slot_asset_meta, u128_to_u256, u256_to_u128, StatefulPrecompile,
         StorageRef,

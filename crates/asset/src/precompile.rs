@@ -15,7 +15,6 @@ use call_precompile::{
 use call_precompile::erc20_reader::read_erc20_metadata;
 use call_precompile::evm_caller::{execute_evm_call, apply_state_changes, StorageProviderDb};
 use call_primitives::{Address, U256};
-use call_protocol::CALL_ASSET_ID;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
 sol! {
@@ -134,19 +133,6 @@ impl AssetPrecompile {
                 store
                     .transfer(call.assetId, from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                // Bridge CALL transfers to native EVM balance
-                if call.assetId == CALL_ASSET_ID {
-                    storage
-                        .balance_sub(from, U256::from(call.amount))
-                        .map_err(|e| {
-                            PrecompileError::Other(format!("native balance sub: {e}").into())
-                        })?;
-                    storage
-                        .balance_add(call.to, U256::from(call.amount))
-                        .map_err(|e| {
-                            PrecompileError::Other(format!("native balance add: {e}").into())
-                        })?;
-                }
                 Ok(())
             },
         )
@@ -185,18 +171,6 @@ impl AssetPrecompile {
         store
             .batch_transfer(call.assetId, from, &pairs)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-        // Bridge CALL transfers to native EVM balance
-        if call.assetId == CALL_ASSET_ID {
-            let total: u128 = pairs.iter().map(|(_, amt)| *amt).sum();
-            storage
-                .balance_sub(from, U256::from(total))
-                .map_err(|e| PrecompileError::Other(format!("native balance sub: {e}").into()))?;
-            for (to, amount) in &pairs {
-                storage.balance_add(*to, U256::from(*amount)).map_err(|e| {
-                    PrecompileError::Other(format!("native balance add: {e}").into())
-                })?;
-            }
-        }
         storage.checkpoint_commit(cp);
 
         ok_empty(storage)
@@ -241,19 +215,6 @@ impl AssetPrecompile {
                 store
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                // Bridge CALL transfers to native EVM balance
-                if call.assetId == CALL_ASSET_ID {
-                    storage
-                        .balance_sub(call.from, U256::from(call.amount))
-                        .map_err(|e| {
-                            PrecompileError::Other(format!("native balance sub: {e}").into())
-                        })?;
-                    storage
-                        .balance_add(call.to, U256::from(call.amount))
-                        .map_err(|e| {
-                            PrecompileError::Other(format!("native balance add: {e}").into())
-                        })?;
-                }
                 Ok(())
             },
         )
@@ -412,9 +373,9 @@ impl AssetPrecompile {
                             revm::context_interface::result::Output::Call(b) => b,
                             revm::context_interface::result::Output::Create(b, _) => b,
                         };
-                        let decoded = IWrappedTokenFactory::createWrapperCall::abi_decode_returns(&bytes, true)
+                        let decoded = IWrappedTokenFactory::createWrapperCall::abi_decode_returns(&bytes)
                             .map_err(|e| PrecompileError::Other(format!("factory decode failed: {e}").into()))?;
-                        decoded.wrapperContract
+                        decoded
                     }
                     _ => {
                         return Err(PrecompileError::Other("factory call failed".into()));
@@ -530,8 +491,6 @@ mod tests {
         provider
             .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
             .unwrap();
-        // Seed native EVM balance for CALL (asset_id=1) bridging
-        provider.balance_add(from, U256::from(1000)).unwrap();
 
         let input = IProtocolAsset::transferCall {
             assetId: 1,
@@ -547,6 +506,10 @@ mod tests {
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
         assert_eq!(store.read_balance(1, from), 500);
         assert_eq!(store.read_balance(1, to), 500);
+
+        // Native EVM balance must NOT be affected by protocol transfer
+        assert_eq!(provider.get_balance(from), U256::ZERO);
+        assert_eq!(provider.get_balance(to), U256::ZERO);
     }
 
     #[test]
@@ -633,8 +596,6 @@ mod tests {
         provider
             .sstore(ASSET_ADDRESS, slot_balance(1, owner), u128_to_u256(1000))
             .unwrap();
-        // Seed native EVM balance for CALL (asset_id=1) bridging
-        provider.balance_add(owner, U256::from(1000)).unwrap();
 
         let mut precompile = AssetPrecompile;
 
@@ -678,7 +639,6 @@ mod tests {
         provider
             .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
             .unwrap();
-        provider.balance_add(from, U256::from(1000)).unwrap();
 
         let mut precompile = AssetPrecompile;
 
@@ -709,7 +669,6 @@ mod tests {
         provider
             .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
             .unwrap();
-        provider.balance_add(from, U256::from(1000)).unwrap();
 
         // Set compliance policy ID = 1 for asset 1
         provider
@@ -762,7 +721,6 @@ mod tests {
         provider
             .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
             .unwrap();
-        provider.balance_add(from, U256::from(1000)).unwrap();
 
         // Set compliance policy ID = 1 for asset 1
         provider
