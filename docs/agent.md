@@ -16,7 +16,7 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 
 | Operation | Function | Gas |
 |---|---|---|
-| Register agent | `registerAgent(string,string,bytes32)` | 6,000 + storage |
+| Register agent | `registerAgent(string,string,address)` | 6,000 + storage |
 | Grant balance | `grantBalance(uint64,uint64,uint128)` | 6,000 + storage |
 | Revoke balance | `revokeBalance(uint64,uint64)` | 6,000 + storage |
 | Pay | `pay(uint64,uint64,address,uint128)` | 30,000 + storage |
@@ -81,6 +81,7 @@ Agents are caller-authenticated only (`msg.sender` is the owner). There are no a
 `AgentRegistration` fields:
 - `agent_id`: auto-incremented unique ID
 - `owner`: Address that controls the agent
+- `agent_address`: EOA address authorized to perform `pay` and `batchPay` on behalf of the agent
 - `name`, `url`: descriptive metadata
 - `registered_at`: Block number of registration
 

@@ -14,7 +14,7 @@ use revm_precompile::{PrecompileError, PrecompileResult};
 
 sol! {
     interface IProtocolAgent {
-        function registerAgent(string name, string url, bytes32 pubkeyHash) external;
+        function registerAgent(string name, string url, address agentAddress) external;
         function grantBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
         function revokeBalance(uint64 agentId, uint64 assetId) external;
         function pay(uint64 agentId, uint64 assetId, address to, uint128 amount) external;
@@ -22,6 +22,7 @@ sol! {
         function withdrawBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
         function revokeAgent(uint64 agentId) external;
         function getAgentOwner(uint64 agentId) external view returns (address);
+        function getAgentAddress(uint64 agentId) external view returns (address);
         function getAgentBalance(uint64 agentId, uint64 assetId) external view returns (uint128);
         function getAgentName(uint64 agentId) external view returns (bytes32);
         function getAgentUrl(uint64 agentId) external view returns (bytes32);
@@ -57,7 +58,7 @@ impl AgentPrecompile {
                     .register_agent(
                         &call.name,
                         &call.url,
-                        call.pubkeyHash.into(),
+                        call.agentAddress,
                         caller,
                         block_number,
                     )
@@ -170,7 +171,7 @@ impl AgentPrecompile {
                         ));
                     }
                     agent_store
-                        .check_owner(call.agentId, caller)
+                        .check_owner_or_agent(call.agentId, caller)
                         .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                     let (per_tx_limit, _, _) = agent_store
                         .require_perms(call.agentId, call.assetId, block_number)
@@ -247,7 +248,7 @@ impl AgentPrecompile {
                         ));
                     }
                     agent_store
-                        .check_owner(call.agentId, caller)
+                        .check_owner_or_agent(call.agentId, caller)
                         .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                     let (per_tx_limit, _, _) = agent_store
                         .require_perms(call.agentId, call.assetId, block_number)
@@ -408,6 +409,23 @@ impl AgentPrecompile {
             |call, _storage| {
                 let mut store = AgentStorage::new(sr);
                 Ok(store.read_url(call.agentId))
+            },
+        )
+    }
+
+    fn get_agent_address(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolAgent::getAgentAddressCall, _, _>(
+            calldata,
+            2000,
+            storage,
+            |call, _storage| {
+                let mut store = AgentStorage::new(sr);
+                Ok(store.read_agent_address(call.agentId))
             },
         )
     }
@@ -579,6 +597,9 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
                 self.get_agent_name(calldata, storage, sr)
             }
             IProtocolAgent::getAgentUrlCall::SELECTOR => self.get_agent_url(calldata, storage, sr),
+            IProtocolAgent::getAgentAddressCall::SELECTOR => {
+                self.get_agent_address(calldata, storage, sr)
+            }
             IProtocolAgent::getAgentPermsCall::SELECTOR => {
                 self.get_agent_perms(calldata, storage, sr)
             }
@@ -621,11 +642,11 @@ mod tests {
 
         let mut precompile = AgentPrecompile;
 
-        // registerAgent(name, url, pubkeyHash)
+        // registerAgent(name, url, agentAddress)
         let input = IProtocolAgent::registerAgentCall {
             name: "TestAgent".into(),
             url: "http://test.com".into(),
-            pubkeyHash: [0xBBu8; 32].into(),
+            agentAddress: Address::repeat_byte(0xBB),
         }
         .abi_encode();
 
@@ -653,6 +674,14 @@ mod tests {
             .call(&input, Address::ZERO, &mut provider)
             .unwrap();
         assert_eq!(&result.bytes[0..15], b"http://test.com");
+
+        // getAgentAddress(0)
+        let input = IProtocolAgent::getAgentAddressCall { agentId: 0 }.abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let addr = Address::from_slice(&result.bytes[12..32]);
+        assert_eq!(addr, Address::repeat_byte(0xBB));
     }
 
     #[test]
@@ -673,7 +702,7 @@ mod tests {
         let input = IProtocolAgent::registerAgentCall {
             name: "Agent".into(),
             url: "url".into(),
-            pubkeyHash: [0xCCu8; 32].into(),
+            agentAddress: Address::repeat_byte(0xCC),
         }
         .abi_encode();
         precompile.call(&input, sender, &mut provider).unwrap();
@@ -781,7 +810,7 @@ mod tests {
         let input = IProtocolAgent::registerAgentCall {
             name: "Agent".into(),
             url: "url".into(),
-            pubkeyHash: [0xCCu8; 32].into(),
+            agentAddress: Address::repeat_byte(0xCC),
         }
         .abi_encode();
         precompile.call(&input, owner, &mut provider).unwrap();
@@ -910,7 +939,7 @@ mod tests {
         let input = IProtocolAgent::registerAgentCall {
             name: "Agent".into(),
             url: "url".into(),
-            pubkeyHash: [0xCCu8; 32].into(),
+            agentAddress: Address::repeat_byte(0xCC),
         }
         .abi_encode();
         precompile.call(&input, owner, &mut provider).unwrap();
@@ -949,5 +978,70 @@ mod tests {
             result.is_err(),
             "expected expired session to be rejected"
         );
+    }
+
+    #[test]
+    fn test_agent_address_can_pay() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let owner = Address::repeat_byte(0x22);
+        let agent = Address::repeat_byte(0xCC);
+        let recipient = Address::repeat_byte(0x44);
+
+        let owner_slot = slot_balance(crate::CALL_ASSET_ID, owner);
+        provider
+            .sstore(ASSET_ADDRESS, owner_slot, u128_to_u256(10_000))
+            .unwrap();
+
+        let mut precompile = AgentPrecompile;
+
+        // registerAgent with agentAddress
+        let input = IProtocolAgent::registerAgentCall {
+            name: "Agent".into(),
+            url: "url".into(),
+            agentAddress: agent,
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        // grantBalance
+        let input = IProtocolAgent::grantBalanceCall {
+            agentId: 0,
+            assetId: crate::CALL_ASSET_ID,
+            amount: 5_000,
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        // pay called by agent address (not owner)
+        let input = IProtocolAgent::payCall {
+            agentId: 0,
+            assetId: crate::CALL_ASSET_ID,
+            to: recipient,
+            amount: 800,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, agent, &mut provider);
+        assert!(result.is_ok(), "agent pay failed: {:?}", result.err());
+
+        // Agent balance should be 4_200
+        let input = IProtocolAgent::getAgentBalanceCall {
+            agentId: 0,
+            assetId: crate::CALL_ASSET_ID,
+        }
+        .abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let bal = u128::from_be_bytes({
+            let mut buf = [0u8; 16];
+            buf.copy_from_slice(&result.bytes[16..32]);
+            buf
+        });
+        assert_eq!(bal, 4_200);
+
+        // Recipient balance should be 800
+        let recipient_slot = slot_balance(crate::CALL_ASSET_ID, recipient);
+        let recipient_bal = provider.sload(ASSET_ADDRESS, recipient_slot).unwrap();
+        assert_eq!(u256_to_u128(recipient_bal), 800);
     }
 }
