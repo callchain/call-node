@@ -239,7 +239,7 @@ interface IProtocolAgent {
     function pay(uint64 assetId, address to, uint128 amount) external;
     function batchPay(uint64 assetId, address[] to, uint128[] amounts) external;
     function revokeAgent(uint64 agentId) external;
-    function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
+    function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt, uint128 maxTotalSpend, uint64 minIntervalBlocks, uint64 effectiveAt, uint64 maxExecutions, uint64[] allowedAssets, address[] allowedRecipients) external returns (uint64);
     function revokeSession(uint64 sessionId) external;
     function executeSession(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
 
@@ -261,9 +261,9 @@ interface IProtocolAgent {
 - `pay` (agent only): Deducts from agent balance and credits recipient's protocol balance. Enforces per-transaction limit and asset permissions. The agent is looked up from `msg.sender` via reverse index.
 - `batchPay` (agent only): Batch version of `pay`. Each amount is checked against the per-transaction limit. The agent is looked up from `msg.sender` via reverse index.
 - `revokeAgent` (owner only): Permanently revokes the agent by zeroing all metadata slots (owner, agentAddress, name, url, perms, registered_at) and clearing the reverse index. Does not automatically return balances -- call `revokeBalance` for each asset first.
-- `createSession` (owner only): Creates a time/amount-limited session key for a delegate address. Session is independent of agents; funds are drawn directly from the owner's balance.
+- `createSession` (owner only): Creates a scoped session key for a delegate address. Session is independent of agents; funds are drawn directly from the owner's balance. All policy fields (`maxTotalSpend`, `minIntervalBlocks`, `effectiveAt`, `maxExecutions`, `allowedAssets`, `allowedRecipients`) are optional — set to `0` or empty arrays to disable.
 - `revokeSession` (owner only): Immediately invalidates a session.
-- `executeSession` (delegate only): Transfers from owner balance to recipient within session limits.
+- `executeSession` (delegate only): Transfers from owner balance to recipient within session limits and optional policies.
 
 ### Permissions
 
@@ -536,7 +536,7 @@ Gas is computed at two layers:
 | `pay` | 30,000 | + balance transfer + perm check |
 | `batchPay` | 30,000 | + per-recipient balance transfer |
 | `revokeAgent` | 20,000 | + multiple sstores |
-| `createSession` | 10,000 | + sstore |
+| `createSession` | 10,000 | + multiple sstores (scales with array lengths) |
 | `revokeSession` | 6,000 | + sstore |
 | `executeSession` | 30,000 | + balance transfer + session check |
 | `getAgentOwner` | 2,000 | + sload |

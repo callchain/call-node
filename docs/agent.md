@@ -21,10 +21,10 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 | Revoke balance | `revokeBalance(uint64,uint64)` | 6,000 + storage |
 | Pay | `pay(uint64,address,uint128)` | 30,000 + storage |
 | Batch pay | `batchPay(uint64,address[],uint128[])` | 30,000 + storage |
-| Create session | `createSession(address,uint128,uint128,uint64)` | 10,000 + storage |
+| Create session | `createSession(address,uint128,uint128,uint64,uint128,uint64,uint64,uint64,uint64[],address[])` | 10,000 + storage |
 | Revoke session | `revokeSession(uint64)` | 6,000 + storage |
 | Is session valid | `isSessionValid(uint64)` | 2,000 + storage |
-| Execute session transfer | `executeSession(uint64,uint64,address,uint128)` | 30,000 + storage |
+| Execute session | `executeSession(uint64,uint64,address,uint128)` | 30,000 + storage |
 
 Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`.
 
@@ -105,32 +105,51 @@ Session keys allow any address (owner) to delegate limited, time-bound spending 
 
 #### Session Lifecycle
 
-1. **Create**: Owner calls `createSession(delegate, perTxLimit, dailyLimit, expiresAt)` → returns `sessionId`
+1. **Create**: Owner calls `createSession(delegate, perTxLimit, dailyLimit, expiresAt, maxTotalSpend, minIntervalBlocks, effectiveAt, maxExecutions, allowedAssets, allowedRecipients)` → returns `sessionId`
 2. **Execute**: Delegate calls `executeSession(sessionId, assetId, to, amount)` → transfers from owner balance to recipient
 3. **Revoke**: Owner calls `revokeSession(sessionId)` → immediately invalidates the session
 4. **Auto-expire**: Sessions automatically become invalid after `expiresAt` block
 
 #### Session Constraints
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `delegate` | `address` | The EOA address authorized to execute on behalf of the owner |
-| `perTxLimit` | `uint128` | Maximum amount per single `executeSession` |
-| `dailyLimit` | `uint128` | Maximum cumulative amount per day (~17,280 blocks) |
-| `expiresAt` | `uint64` | Block number after which the session is invalid (0 = never) |
+| Field | Type | Description | Optional |
+|-------|------|-------------|----------|
+| `delegate` | `address` | The EOA address authorized to execute on behalf of the owner | No |
+| `perTxLimit` | `uint128` | Maximum amount per single `executeSession` | No |
+| `dailyLimit` | `uint128` | Maximum cumulative amount per day (~17,280 blocks) | No |
+| `expiresAt` | `uint64` | Block number after which the session is invalid (0 = never) | Yes |
+| `maxTotalSpend` | `uint128` | Lifetime cumulative spending cap (0 = unlimited) | Yes |
+| `minIntervalBlocks` | `uint64` | Minimum blocks between two executions (0 = no limit) | Yes |
+| `effectiveAt` | `uint64` | Block number before which the session is inactive (0 = immediate) | Yes |
+| `maxExecutions` | `uint64` | Maximum number of `executeSession` calls (0 = unlimited) | Yes |
+| `allowedAssets` | `uint64[]` | Whitelist of permitted asset IDs (empty = any asset) | Yes |
+| `allowedRecipients` | `address[]` | Whitelist of permitted recipient addresses (empty = any address) | Yes |
+
+All optional constraints are disabled when set to `0` or an empty array. The `executeSession` validation chain checks constraints in this order: existence → delegate → expiresAt → effectiveAt → minIntervalBlocks → maxExecutions → perTxLimit → dailyLimit → maxTotalSpend → allowedAssets → allowedRecipients.
 
 #### Storage Layout
 
 Session data is stored under `AGENT_ADDRESS (0x209)` with globally unique session IDs:
 
 ```
-slot_session_count()                  → uint64
-slot_session_owner(session_id)        → address
-slot_session_delegate(session_id)     → address
-slot_session_limits(session_id)       → packed(perTxLimit, dailyLimit)
-slot_session_expires(session_id)      → uint64
-slot_session_spent(session_id)        → uint128
-slot_session_last_day(session_id)     → uint64
+slot_session_count()                         → uint64
+slot_session_owner(session_id)               → address
+slot_session_delegate(session_id)            → address
+slot_session_limits(session_id)              → packed(perTxLimit, dailyLimit)
+slot_session_expires(session_id)             → uint64
+slot_session_spent(session_id)               → uint128
+slot_session_last_day(session_id)            → uint64
+slot_session_allowed_assets_count(session_id) → uint64
+slot_session_allowed_asset(session_id, i)    → uint64
+slot_session_allowed_recipients_count(session_id) → uint64
+slot_session_allowed_recipient(session_id, i) → address
+slot_session_max_total_spend(session_id)     → uint128
+slot_session_min_interval_blocks(session_id) → uint64
+slot_session_effective_at(session_id)        → uint64
+slot_session_max_executions(session_id)      → uint64
+slot_session_execution_count(session_id)     → uint64
+slot_session_last_execution_block(session_id) → uint64
+slot_session_total_spent(session_id)         → uint128
 ```
 
 #### Gas
@@ -170,7 +189,7 @@ Agent balances are stored as EVM storage slots under `0x209`:
 |-----------|--------|-------|
 | Agent registration | 🟢 Ready | Name uniqueness, metadata storage, agent revocation |
 | Permissions | 🟡 Partial | Basic per-tx limit and asset allowlist only |
-| Session keys | 🟢 Ready | Create/revoke/validate/execute with per-tx and daily limits, expiration |
+| Session keys | 🟢 Ready | Create/revoke/validate/execute with 10 optional/permanent constraints |
 | Balance management | 🟢 Ready | Grant deducts from owner, overflow-protected credit, underflow-protected deduct |
 | Payments | 🟢 Ready | Single and batch pay from agent balance, session-key delegated transfers |
 | Persistence | 🟢 Ready | All state in EVM storage under `0x209`, committed with EVM state root |

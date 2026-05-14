@@ -26,7 +26,7 @@ sol! {
         function getAgentName(uint64 agentId) external view returns (bytes32);
         function getAgentUrl(uint64 agentId) external view returns (bytes32);
         function getAgentPerms(uint64 agentId) external view returns (uint256);
-        function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
+        function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt, uint128 maxTotalSpend, uint64 minIntervalBlocks, uint64 effectiveAt, uint64 maxExecutions, uint64[] allowedAssets, address[] allowedRecipients) external returns (uint64);
         function revokeSession(uint64 sessionId) external;
         function isSessionValid(uint64 sessionId) external view returns (uint64);
         function executeSession(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
@@ -352,6 +352,12 @@ impl AgentPrecompile {
                         call.perTxLimit,
                         call.dailyLimit,
                         call.expiresAt,
+                        call.allowedAssets.as_slice(),
+                        call.allowedRecipients.as_slice(),
+                        call.maxTotalSpend,
+                        call.minIntervalBlocks,
+                        call.effectiveAt,
+                        call.maxExecutions,
                         caller,
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -701,6 +707,12 @@ mod tests {
             perTxLimit: 1_000,
             dailyLimit: 2_000,
             expiresAt: 100,
+            maxTotalSpend: 0,
+            minIntervalBlocks: 0,
+            effectiveAt: 0,
+            maxExecutions: 0,
+            allowedAssets: vec![].into(),
+            allowedRecipients: vec![].into(),
         }
         .abi_encode();
         let result = precompile.call(&input, owner, &mut provider);
@@ -804,6 +816,12 @@ mod tests {
             perTxLimit: 1_000,
             dailyLimit: 2_000,
             expiresAt: 100,
+            maxTotalSpend: 0,
+            minIntervalBlocks: 0,
+            effectiveAt: 0,
+            maxExecutions: 0,
+            allowedAssets: vec![].into(),
+            allowedRecipients: vec![].into(),
         }
         .abi_encode();
         precompile.call(&input, owner, &mut provider).unwrap();
