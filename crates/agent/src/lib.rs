@@ -100,48 +100,32 @@ pub const BLOCKS_PER_DAY: u64 = 17280;
 
 // ── Session storage slot helpers ──────────────────────────────────────
 
-pub fn slot_session_count(agent_id: u64) -> U256 {
-    storage_slot(&[b"scount", &agent_id.to_be_bytes()[..]])
+pub fn slot_session_count() -> U256 {
+    storage_slot(&[b"scount"])
 }
 
-pub fn slot_session_delegate(agent_id: u64, session_id: u64) -> U256 {
-    storage_slot(&[
-        b"sdelegate",
-        &agent_id.to_be_bytes()[..],
-        &session_id.to_be_bytes()[..],
-    ])
+pub fn slot_session_owner(session_id: u64) -> U256 {
+    storage_slot(&[b"sowner", &session_id.to_be_bytes()[..]])
 }
 
-pub fn slot_session_limits(agent_id: u64, session_id: u64) -> U256 {
-    storage_slot(&[
-        b"slimits",
-        &agent_id.to_be_bytes()[..],
-        &session_id.to_be_bytes()[..],
-    ])
+pub fn slot_session_delegate(session_id: u64) -> U256 {
+    storage_slot(&[b"sdelegate", &session_id.to_be_bytes()[..]])
 }
 
-pub fn slot_session_expires(agent_id: u64, session_id: u64) -> U256 {
-    storage_slot(&[
-        b"sexpires",
-        &agent_id.to_be_bytes()[..],
-        &session_id.to_be_bytes()[..],
-    ])
+pub fn slot_session_limits(session_id: u64) -> U256 {
+    storage_slot(&[b"slimits", &session_id.to_be_bytes()[..]])
 }
 
-pub fn slot_session_spent(agent_id: u64, session_id: u64) -> U256 {
-    storage_slot(&[
-        b"sspent",
-        &agent_id.to_be_bytes()[..],
-        &session_id.to_be_bytes()[..],
-    ])
+pub fn slot_session_expires(session_id: u64) -> U256 {
+    storage_slot(&[b"sexpires", &session_id.to_be_bytes()[..]])
 }
 
-pub fn slot_session_last_day(agent_id: u64, session_id: u64) -> U256 {
-    storage_slot(&[
-        b"slastday",
-        &agent_id.to_be_bytes()[..],
-        &session_id.to_be_bytes()[..],
-    ])
+pub fn slot_session_spent(session_id: u64) -> U256 {
+    storage_slot(&[b"sspent", &session_id.to_be_bytes()[..]])
+}
+
+pub fn slot_session_last_day(session_id: u64) -> U256 {
+    storage_slot(&[b"slastday", &session_id.to_be_bytes()[..]])
 }
 
 // ── Permission packing ────────────────────────────────────────────────
@@ -506,95 +490,100 @@ impl<B: StorageBackend> AgentStorage<B> {
 
     // ── Session operations ────────────────────────────────────────────
 
-    pub fn read_session_count(&mut self, agent_id: u64) -> u64 {
-        u256_to_u64(self.backend.load(AGENT_ADDRESS, slot_session_count(agent_id)))
+    pub fn read_session_count(&mut self) -> u64 {
+        u256_to_u64(self.backend.load(AGENT_ADDRESS, slot_session_count()))
     }
 
-    pub fn read_session_delegate(&mut self, agent_id: u64, session_id: u64) -> Address {
+    pub fn read_session_owner(&mut self, session_id: u64) -> Address {
         u256_to_address(
             self.backend
-                .load(AGENT_ADDRESS, slot_session_delegate(agent_id, session_id)),
+                .load(AGENT_ADDRESS, slot_session_owner(session_id)),
         )
     }
 
-    pub fn read_session_limits(&mut self, agent_id: u64, session_id: u64) -> (u128, u128) {
+    pub fn read_session_delegate(&mut self, session_id: u64) -> Address {
+        u256_to_address(
+            self.backend
+                .load(AGENT_ADDRESS, slot_session_delegate(session_id)),
+        )
+    }
+
+    pub fn read_session_limits(&mut self, session_id: u64) -> (u128, u128) {
         let limits = self
             .backend
-            .load(AGENT_ADDRESS, slot_session_limits(agent_id, session_id));
+            .load(AGENT_ADDRESS, slot_session_limits(session_id));
         unpack_session_limits(limits)
     }
 
-    pub fn read_session_expires(&mut self, agent_id: u64, session_id: u64) -> u64 {
+    pub fn read_session_expires(&mut self, session_id: u64) -> u64 {
         u256_to_u64(
             self.backend
-                .load(AGENT_ADDRESS, slot_session_expires(agent_id, session_id)),
+                .load(AGENT_ADDRESS, slot_session_expires(session_id)),
         )
     }
 
-    pub fn read_session_spent(&mut self, agent_id: u64, session_id: u64) -> u128 {
+    pub fn read_session_spent(&mut self, session_id: u64) -> u128 {
         u256_to_u128(
             self.backend
-                .load(AGENT_ADDRESS, slot_session_spent(agent_id, session_id)),
+                .load(AGENT_ADDRESS, slot_session_spent(session_id)),
         )
     }
 
-    pub fn read_session_last_day(&mut self, agent_id: u64, session_id: u64,
-    ) -> u64 {
+    pub fn read_session_last_day(&mut self, session_id: u64) -> u64 {
         u256_to_u64(
             self.backend
-                .load(AGENT_ADDRESS, slot_session_last_day(agent_id, session_id)),
+                .load(AGENT_ADDRESS, slot_session_last_day(session_id)),
         )
     }
 
-    pub fn session_exists(&mut self, agent_id: u64, session_id: u64) -> bool {
-        self.read_session_delegate(agent_id, session_id) != Address::ZERO
+    pub fn session_exists(&mut self, session_id: u64) -> bool {
+        self.read_session_owner(session_id) != Address::ZERO
     }
 
     pub fn create_session(
         &mut self,
-        agent_id: u64,
         delegate: Address,
         per_tx_limit: u128,
         daily_limit: u128,
         expires_at: u64,
         caller: Address,
     ) -> Result<u64, AgentError> {
-        if !self.agent_exists(agent_id) {
-            return Err(AgentError::NotFound);
-        }
-        self.check_owner(agent_id, caller)?;
-
-        let count = self.read_session_count(agent_id);
+        let count = self.read_session_count();
         let session_id = count;
 
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_count(agent_id),
+            slot_session_count(),
             u64_to_u256(count + 1),
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_delegate(agent_id, session_id),
+            slot_session_owner(session_id),
+            address_to_u256(caller),
+        );
+        self.backend.store(
+            AGENT_ADDRESS,
+            slot_session_delegate(session_id),
             address_to_u256(delegate),
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_limits(agent_id, session_id),
+            slot_session_limits(session_id),
             pack_session_limits(per_tx_limit, daily_limit),
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_expires(agent_id, session_id),
+            slot_session_expires(session_id),
             u64_to_u256(expires_at),
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_spent(agent_id, session_id),
+            slot_session_spent(session_id),
             U256::ZERO,
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_last_day(agent_id, session_id),
+            slot_session_last_day(session_id),
             U256::ZERO,
         );
 
@@ -603,38 +592,45 @@ impl<B: StorageBackend> AgentStorage<B> {
 
     pub fn revoke_session(
         &mut self,
-        agent_id: u64,
         session_id: u64,
         caller: Address,
     ) -> Result<(), AgentError> {
-        if !self.agent_exists(agent_id) {
-            return Err(AgentError::NotFound);
+        let owner = self.read_session_owner(session_id);
+        if owner == Address::ZERO {
+            return Err(AgentError::SessionNotFound);
         }
-        self.check_owner(agent_id, caller)?;
+        if owner != caller {
+            return Err(AgentError::NotOwner);
+        }
 
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_delegate(agent_id, session_id),
+            slot_session_owner(session_id),
             U256::ZERO,
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_limits(agent_id, session_id),
+            slot_session_delegate(session_id),
             U256::ZERO,
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_expires(agent_id, session_id),
+            slot_session_limits(session_id),
             U256::ZERO,
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_spent(agent_id, session_id),
+            slot_session_expires(session_id),
             U256::ZERO,
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_last_day(agent_id, session_id),
+            slot_session_spent(session_id),
+            U256::ZERO,
+        );
+        self.backend.store(
+            AGENT_ADDRESS,
+            slot_session_last_day(session_id),
             U256::ZERO,
         );
 
@@ -643,17 +639,13 @@ impl<B: StorageBackend> AgentStorage<B> {
 
     pub fn is_session_valid(
         &mut self,
-        agent_id: u64,
         session_id: u64,
         current_block: u64,
     ) -> bool {
-        if !self.agent_exists(agent_id) {
+        if !self.session_exists(session_id) {
             return false;
         }
-        if !self.session_exists(agent_id, session_id) {
-            return false;
-        }
-        let expires_at = self.read_session_expires(agent_id, session_id);
+        let expires_at = self.read_session_expires(session_id);
         if expires_at != 0 && current_block > expires_at {
             return false;
         }
@@ -663,7 +655,6 @@ impl<B: StorageBackend> AgentStorage<B> {
     pub fn execute_session_transfer(
         &mut self,
         asset_store: &mut AssetStorage<B>,
-        agent_id: u64,
         session_id: u64,
         asset_id: u64,
         to: Address,
@@ -671,30 +662,27 @@ impl<B: StorageBackend> AgentStorage<B> {
         caller: Address,
         current_block: u64,
     ) -> Result<(), AgentError> {
-        if !self.agent_exists(agent_id) {
-            return Err(AgentError::NotFound);
-        }
-        if !self.session_exists(agent_id, session_id) {
+        if !self.session_exists(session_id) {
             return Err(AgentError::SessionNotFound);
         }
 
-        let delegate = self.read_session_delegate(agent_id, session_id);
+        let delegate = self.read_session_delegate(session_id);
         if caller != delegate {
             return Err(AgentError::InvalidDelegate);
         }
 
-        let expires_at = self.read_session_expires(agent_id, session_id);
+        let expires_at = self.read_session_expires(session_id);
         if expires_at != 0 && current_block > expires_at {
             return Err(AgentError::SessionNotFound);
         }
 
-        let (per_tx_limit, daily_limit) = self.read_session_limits(agent_id, session_id);
+        let (per_tx_limit, daily_limit) = self.read_session_limits(session_id);
         if amount > per_tx_limit {
             return Err(AgentError::AmountExceedsLimit);
         }
 
-        let last_day = self.read_session_last_day(agent_id, session_id);
-        let spent = self.read_session_spent(agent_id, session_id);
+        let last_day = self.read_session_last_day(session_id);
+        let spent = self.read_session_spent(session_id);
         let current_day = current_block / BLOCKS_PER_DAY;
 
         let (current_spent, new_last_day) = if current_day > last_day {
@@ -709,20 +697,19 @@ impl<B: StorageBackend> AgentStorage<B> {
 
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_spent(agent_id, session_id),
+            slot_session_spent(session_id),
             u128_to_u256(current_spent + amount),
         );
         self.backend.store(
             AGENT_ADDRESS,
-            slot_session_last_day(agent_id, session_id),
+            slot_session_last_day(session_id),
             u64_to_u256(new_last_day),
         );
 
-        let agent_bal = self
-            .read_agent_balance(agent_id, asset_id)
-            .checked_sub(amount)
-            .ok_or(AgentError::InsufficientBalance)?;
-        self.write_agent_balance(agent_id, asset_id, agent_bal);
+        let owner = self.read_session_owner(session_id);
+        asset_store
+            .deduct_balance(asset_id, owner, amount)
+            .map_err(|_| AgentError::InsufficientBalance)?;
 
         asset_store
             .add_balance(asset_id, to, amount)
@@ -1116,16 +1103,17 @@ mod tests {
             .unwrap();
 
         let session_id = store
-            .create_session(0, delegate, 1_000, 5_000, 100, owner)
+            .create_session(delegate, 1_000, 5_000, 100, owner)
             .unwrap();
         assert_eq!(session_id, 0);
 
-        assert_eq!(store.read_session_count(0), 1);
-        assert_eq!(store.read_session_delegate(0, 0), delegate);
-        assert_eq!(store.read_session_limits(0, 0), (1_000, 5_000));
-        assert_eq!(store.read_session_expires(0, 0), 100);
-        assert_eq!(store.read_session_spent(0, 0), 0);
-        assert_eq!(store.read_session_last_day(0, 0), 0);
+        assert_eq!(store.read_session_count(), 1);
+        assert_eq!(store.read_session_owner(0), owner);
+        assert_eq!(store.read_session_delegate(0), delegate);
+        assert_eq!(store.read_session_limits(0), (1_000, 5_000));
+        assert_eq!(store.read_session_expires(0), 100);
+        assert_eq!(store.read_session_spent(0), 0);
+        assert_eq!(store.read_session_last_day(0), 0);
     }
 
     #[test]
@@ -1138,9 +1126,10 @@ mod tests {
         store
             .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
+        store.create_session(delegate, 1_000, 5_000, 100, owner).unwrap();
 
         assert!(matches!(
-            store.create_session(0, delegate, 1_000, 5_000, 100, Address::repeat_byte(0x99)),
+            store.revoke_session(0, Address::repeat_byte(0x99)),
             Err(AgentError::NotOwner)
         ));
     }
@@ -1152,15 +1141,12 @@ mod tests {
         let owner = Address::repeat_byte(0x22);
         let delegate = Address::repeat_byte(0x33);
 
-        store
-            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
-            .unwrap();
-        store.create_session(0, delegate, 1_000, 5_000, 100, owner).unwrap();
+        store.create_session(delegate, 1_000, 5_000, 100, owner).unwrap();
 
-        store.revoke_session(0, 0, owner).unwrap();
-        assert!(!store.session_exists(0, 0));
-        assert_eq!(store.read_session_delegate(0, 0), Address::ZERO);
-        assert_eq!(store.read_session_limits(0, 0), (0, 0));
+        store.revoke_session(0, owner).unwrap();
+        assert!(!store.session_exists(0));
+        assert_eq!(store.read_session_delegate(0), Address::ZERO);
+        assert_eq!(store.read_session_limits(0), (0, 0));
     }
 
     #[test]
@@ -1173,11 +1159,11 @@ mod tests {
         store
             .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
-        store.create_session(0, delegate, 1_000, 5_000, 100, owner).unwrap();
+        store.create_session(delegate, 1_000, 5_000, 100, owner).unwrap();
 
-        assert!(store.is_session_valid(0, 0, 50));
-        assert!(!store.is_session_valid(0, 0, 101));
-        assert!(!store.is_session_valid(0, 1, 50));
+        assert!(store.is_session_valid(0, 50));
+        assert!(!store.is_session_valid(0, 101));
+        assert!(!store.is_session_valid(1, 50));
     }
 
     #[test]
@@ -1189,21 +1175,14 @@ mod tests {
         let delegate = Address::repeat_byte(0x33);
         let recipient = Address::repeat_byte(0x44);
 
-        agent_store
-            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
-            .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, owner)
-            .unwrap();
-        agent_store
-            .create_session(0, delegate, 1_000, 5_000, 100, owner)
+            .create_session(delegate, 1_000, 5_000, 100, owner)
             .unwrap();
 
         agent_store
             .execute_session_transfer(
                 &mut asset_store,
-                0,
                 0,
                 CALL_ASSET_ID,
                 recipient,
@@ -1213,9 +1192,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 4_200);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, owner), 9_200);
         assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient), 800);
-        assert_eq!(agent_store.read_session_spent(0, 0), 800);
+        assert_eq!(agent_store.read_session_spent(0), 800);
     }
 
     #[test]
@@ -1235,13 +1214,12 @@ mod tests {
             .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, owner)
             .unwrap();
         agent_store
-            .create_session(0, delegate, 1_000, 5_000, 100, owner)
+            .create_session(delegate, 1_000, 5_000, 100, owner)
             .unwrap();
 
         assert!(matches!(
             agent_store.execute_session_transfer(
                 &mut asset_store,
-                0,
                 0,
                 CALL_ASSET_ID,
                 recipient,
@@ -1267,17 +1245,13 @@ mod tests {
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, owner)
-            .unwrap();
-        agent_store
-            .create_session(0, delegate, 1_000, 1_500, 0, owner)
+            .create_session(delegate, 1_000, 1_500, 0, owner)
             .unwrap();
 
         // First transfer: 1_000
         agent_store
             .execute_session_transfer(
                 &mut asset_store,
-                0,
                 0,
                 CALL_ASSET_ID,
                 recipient,
@@ -1291,7 +1265,6 @@ mod tests {
         assert!(matches!(
             agent_store.execute_session_transfer(
                 &mut asset_store,
-                0,
                 0,
                 CALL_ASSET_ID,
                 recipient,
@@ -1307,7 +1280,6 @@ mod tests {
         agent_store
             .execute_session_transfer(
                 &mut asset_store,
-                0,
                 0,
                 CALL_ASSET_ID,
                 recipient,
@@ -1333,16 +1305,12 @@ mod tests {
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, owner)
-            .unwrap();
-        agent_store
-            .create_session(0, delegate, 1_000, 5_000, 100, owner)
+            .create_session(delegate, 1_000, 5_000, 100, owner)
             .unwrap();
 
         assert!(matches!(
             agent_store.execute_session_transfer(
                 &mut asset_store,
-                0,
                 0,
                 CALL_ASSET_ID,
                 recipient,
@@ -1368,16 +1336,12 @@ mod tests {
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, owner)
-            .unwrap();
-        agent_store
-            .create_session(0, delegate, 1_000, 5_000, 100, owner)
+            .create_session(delegate, 1_000, 5_000, 100, owner)
             .unwrap();
 
         assert!(matches!(
             agent_store.execute_session_transfer(
                 &mut asset_store,
-                0,
                 0,
                 CALL_ASSET_ID,
                 recipient,

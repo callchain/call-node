@@ -21,10 +21,10 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 | Revoke balance | `revokeBalance(uint64,uint64)` | 6,000 + storage |
 | Pay | `pay(uint64,address,uint128)` | 30,000 + storage |
 | Batch pay | `batchPay(uint64,address[],uint128[])` | 30,000 + storage |
-| Create session | `createSession(uint64,address,uint128,uint128,uint64)` | 10,000 + storage |
-| Revoke session | `revokeSession(uint64,uint64)` | 6,000 + storage |
-| Is session valid | `isSessionValid(uint64,uint64)` | 2,000 + storage |
-| Execute session transfer | `executeSessionTransfer(uint64,uint64,uint64,address,uint128)` | 30,000 + storage |
+| Create session | `createSession(address,uint128,uint128,uint64)` | 10,000 + storage |
+| Revoke session | `revokeSession(uint64)` | 6,000 + storage |
+| Is session valid | `isSessionValid(uint64)` | 2,000 + storage |
+| Execute session transfer | `executeSessionTransfer(uint64,uint64,address,uint128)` | 30,000 + storage |
 
 Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`.
 
@@ -42,12 +42,12 @@ See [precompile.md](precompile.md) for the full ABI.
 │  │ AgentStorage<B: StorageBackend>                      │  │
 │  │                                                      │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
-│  │  │ AgentRegistry│  │ AgentBalances│  │ AgentNonces │  │  Reverse    │  │
-│  │  │ - agents    │  │ - (owner,id,│  │ - (owner,id)│  │  Index      │  │
-│  │  │ - by_owner  │  │   asset)→amt│  │ → nonce     │  │  (address   │  │
-│  │  │ - by_name   │  │ - grant     │  │ - increment │  │   → id)     │  │
-│  │  │ - by_addr   │  │ - revoke    │  │             │  │             │  │
-│  │  │             │  │ - deduct    │  │             │  │             │  │
+│  │  │ AgentRegistry│  │ AgentBalances│  │  Sessions   │  │  Reverse    │  │
+│  │  │ - agents    │  │ - (owner,id,│  │ - global id │  │  Index      │  │
+│  │  │ - by_owner  │  │   asset)→amt│  │ - owner     │  │  (address   │  │
+│  │  │ - by_name   │  │ - grant     │  │ - delegate  │  │   → id)     │  │
+│  │  │ - by_addr   │  │ - revoke    │  │ - limits    │  │             │  │
+│  │  │             │  │ - deduct    │  │ - spent     │  │             │  │
 │  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  │
 │  │                                                      │  │
 │  │  Reads / writes EVM storage slots under AGENT_ADDRESS │  │
@@ -101,35 +101,36 @@ There is no `daily_limit`, `allowed_counterparties`, `allowed_protocols`, `expir
 
 ### 3a. Session Keys
 
-Session keys allow an agent owner to delegate limited, time-bound spending authority to an external address (delegate). The delegate can then initiate transfers from the agent's balance without requiring the owner to sign every transaction.
+Session keys allow any address (owner) to delegate limited, time-bound spending authority to an external address (delegate). The delegate can then initiate transfers from the owner's balance without requiring the owner to sign every transaction. Sessions are independent of agents — they operate directly on the owner's funds.
 
 #### Session Lifecycle
 
-1. **Create**: Owner calls `createSession(agentId, delegate, perTxLimit, dailyLimit, expiresAt)` → returns `sessionId`
-2. **Execute**: Delegate calls `executeSessionTransfer(agentId, sessionId, assetId, to, amount)` → transfers from agent balance to recipient
-3. **Revoke**: Owner calls `revokeSession(agentId, sessionId)` → immediately invalidates the session
+1. **Create**: Owner calls `createSession(delegate, perTxLimit, dailyLimit, expiresAt)` → returns `sessionId`
+2. **Execute**: Delegate calls `executeSessionTransfer(sessionId, assetId, to, amount)` → transfers from owner balance to recipient
+3. **Revoke**: Owner calls `revokeSession(sessionId)` → immediately invalidates the session
 4. **Auto-expire**: Sessions automatically become invalid after `expiresAt` block
 
 #### Session Constraints
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `delegate` | `address` | The EOA address authorized to execute on behalf of the agent |
+| `delegate` | `address` | The EOA address authorized to execute on behalf of the owner |
 | `perTxLimit` | `uint128` | Maximum amount per single `executeSessionTransfer` |
 | `dailyLimit` | `uint128` | Maximum cumulative amount per day (~17,280 blocks) |
 | `expiresAt` | `uint64` | Block number after which the session is invalid (0 = never) |
 
 #### Storage Layout
 
-Session data is stored under `AGENT_ADDRESS (0x209)`:
+Session data is stored under `AGENT_ADDRESS (0x209)` with globally unique session IDs:
 
 ```
-slot_session_count(agent_id)                  → uint64
-slot_session_delegate(agent_id, session_id)   → address
-slot_session_limits(agent_id, session_id)     → packed(perTxLimit, dailyLimit)
-slot_session_expires(agent_id, session_id)    → uint64
-slot_session_spent(agent_id, session_id)      → uint128
-slot_session_last_day(agent_id, session_id)   → uint64
+slot_session_count()                  → uint64
+slot_session_owner(session_id)        → address
+slot_session_delegate(session_id)     → address
+slot_session_limits(session_id)       → packed(perTxLimit, dailyLimit)
+slot_session_expires(session_id)      → uint64
+slot_session_spent(session_id)        → uint128
+slot_session_last_day(session_id)     → uint64
 ```
 
 #### Gas
@@ -141,7 +142,7 @@ slot_session_last_day(agent_id, session_id)   → uint64
 | `isSessionValid` | 2,000 |
 | `executeSessionTransfer` | 30,000 |
 
-Note: Gas is paid by the delegate (EVM `msg.sender`) when calling `executeSessionTransfer`. The transferred amount is deducted from the agent's balance, not the delegate's.
+Note: Gas is paid by the delegate (EVM `msg.sender`) when calling `executeSessionTransfer`. The transferred amount is deducted from the owner's balance, not the delegate's.
 
 ### 4. Agent Balances
 

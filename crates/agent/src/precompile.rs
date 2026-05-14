@@ -26,10 +26,10 @@ sol! {
         function getAgentName(uint64 agentId) external view returns (bytes32);
         function getAgentUrl(uint64 agentId) external view returns (bytes32);
         function getAgentPerms(uint64 agentId) external view returns (uint256);
-        function createSession(uint64 agentId, address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
-        function revokeSession(uint64 agentId, uint64 sessionId) external;
-        function isSessionValid(uint64 agentId, uint64 sessionId) external view returns (uint64);
-        function executeSessionTransfer(uint64 agentId, uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
+        function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
+        function revokeSession(uint64 sessionId) external;
+        function isSessionValid(uint64 sessionId) external view returns (uint64);
+        function executeSessionTransfer(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
     }
 }
 
@@ -348,7 +348,6 @@ impl AgentPrecompile {
                 let mut store = AgentStorage::new(sr);
                 let session_id = store
                     .create_session(
-                        call.agentId,
                         call.delegate,
                         call.perTxLimit,
                         call.dailyLimit,
@@ -376,7 +375,7 @@ impl AgentPrecompile {
                 let caller = require_caller(msg_sender)?;
                 let mut store = AgentStorage::new(sr);
                 store
-                    .revoke_session(call.agentId, call.sessionId, caller)
+                    .revoke_session(call.sessionId, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(())
             },
@@ -396,7 +395,7 @@ impl AgentPrecompile {
             |call, storage| {
                 let mut store = AgentStorage::new(sr);
                 let block_number = storage.block_number();
-                let valid = store.is_session_valid(call.agentId, call.sessionId, block_number);
+                let valid = store.is_session_valid(call.sessionId, block_number);
                 Ok(if valid { 1u64 } else { 0u64 })
             },
         )
@@ -422,7 +421,6 @@ impl AgentPrecompile {
                 agent_store
                     .execute_session_transfer(
                         &mut asset_store,
-                        call.agentId,
                         call.sessionId,
                         call.assetId,
                         call.to,
@@ -697,18 +695,8 @@ mod tests {
         .abi_encode();
         precompile.call(&input, owner, &mut provider).unwrap();
 
-        // grantBalance(agentId=0, assetId=1, amount=5_000)
-        let input = IProtocolAgent::grantBalanceCall {
-            agentId: 0,
-            assetId: crate::CALL_ASSET_ID,
-            amount: 5_000,
-        }
-        .abi_encode();
-        precompile.call(&input, owner, &mut provider).unwrap();
-
-        // createSession(agentId=0, delegate, perTxLimit=1_000, dailyLimit=2_000, expiresAt=100)
+        // createSession(delegate, perTxLimit=1_000, dailyLimit=2_000, expiresAt=100)
         let input = IProtocolAgent::createSessionCall {
-            agentId: 0,
             delegate,
             perTxLimit: 1_000,
             dailyLimit: 2_000,
@@ -724,9 +712,8 @@ mod tests {
         });
         assert_eq!(session_id, 0);
 
-        // isSessionValid(agentId=0, sessionId=0) at block 50
+        // isSessionValid(sessionId=0) at block 50
         let input = IProtocolAgent::isSessionValidCall {
-            agentId: 0,
             sessionId: 0,
         }
         .abi_encode();
@@ -741,9 +728,8 @@ mod tests {
         });
         assert_eq!(valid, 1);
 
-        // executeSessionTransfer(agentId=0, sessionId=0, assetId=1, to=recipient, amount=800)
+        // executeSessionTransfer(sessionId=0, assetId=1, to=recipient, amount=800)
         let input = IProtocolAgent::executeSessionTransferCall {
-            agentId: 0,
             sessionId: 0,
             assetId: crate::CALL_ASSET_ID,
             to: recipient,
@@ -757,30 +743,18 @@ mod tests {
             result.err()
         );
 
-        // Agent balance should be 4_200
-        let input = IProtocolAgent::getAgentBalanceCall {
-            agentId: 0,
-            assetId: crate::CALL_ASSET_ID,
-        }
-        .abi_encode();
-        let result = precompile
-            .call(&input, Address::ZERO, &mut provider)
-            .unwrap();
-        let bal = u128::from_be_bytes({
-            let mut buf = [0u8; 16];
-            buf.copy_from_slice(&result.bytes[16..32]);
-            buf
-        });
-        assert_eq!(bal, 4_200);
+        // Owner balance should be 9_200 (10_000 - 800)
+        let owner_slot = slot_balance(crate::CALL_ASSET_ID, owner);
+        let owner_bal = provider.sload(ASSET_ADDRESS, owner_slot).unwrap();
+        assert_eq!(u256_to_u128(owner_bal), 9_200);
 
         // Recipient balance should be 800
         let recipient_slot = slot_balance(crate::CALL_ASSET_ID, recipient);
         let recipient_bal = provider.sload(ASSET_ADDRESS, recipient_slot).unwrap();
         assert_eq!(u256_to_u128(recipient_bal), 800);
 
-        // revokeSession(agentId=0, sessionId=0)
+        // revokeSession(sessionId=0)
         let input = IProtocolAgent::revokeSessionCall {
-            agentId: 0,
             sessionId: 0,
         }
         .abi_encode();
@@ -789,7 +763,6 @@ mod tests {
 
         // isSessionValid should now return 0
         let input = IProtocolAgent::isSessionValidCall {
-            agentId: 0,
             sessionId: 0,
         }
         .abi_encode();
@@ -826,16 +799,7 @@ mod tests {
         .abi_encode();
         precompile.call(&input, owner, &mut provider).unwrap();
 
-        let input = IProtocolAgent::grantBalanceCall {
-            agentId: 0,
-            assetId: crate::CALL_ASSET_ID,
-            amount: 5_000,
-        }
-        .abi_encode();
-        precompile.call(&input, owner, &mut provider).unwrap();
-
         let input = IProtocolAgent::createSessionCall {
-            agentId: 0,
             delegate,
             perTxLimit: 1_000,
             dailyLimit: 2_000,
@@ -848,7 +812,6 @@ mod tests {
         provider.set_block_number(101);
 
         let input = IProtocolAgent::executeSessionTransferCall {
-            agentId: 0,
             sessionId: 0,
             assetId: crate::CALL_ASSET_ID,
             to: recipient,

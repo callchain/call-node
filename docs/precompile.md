@@ -239,9 +239,9 @@ interface IProtocolAgent {
     function pay(uint64 assetId, address to, uint128 amount) external;
     function batchPay(uint64 assetId, address[] to, uint128[] amounts) external;
     function revokeAgent(uint64 agentId) external;
-    function createSession(uint64 agentId, address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external;
-    function revokeSession(uint64 agentId, uint64 sessionId) external;
-    function executeSessionTransfer(uint64 agentId, uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
+    function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
+    function revokeSession(uint64 sessionId) external;
+    function executeSessionTransfer(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
 
     // Read
     function getAgentOwner(uint64 agentId) external view returns (address);
@@ -249,7 +249,7 @@ interface IProtocolAgent {
     function getAgentName(uint64 agentId) external view returns (bytes32);
     function getAgentUrl(uint64 agentId) external view returns (bytes32);
     function getAgentPerms(uint64 agentId) external view returns (uint256);
-    function isSessionValid(uint64 agentId, uint64 sessionId) external view returns (uint64);
+    function isSessionValid(uint64 sessionId) external view returns (uint64);
 }
 ```
 
@@ -261,9 +261,9 @@ interface IProtocolAgent {
 - `pay` (agent only): Deducts from agent balance and credits recipient's protocol balance. Enforces per-transaction limit and asset permissions. The agent is looked up from `msg.sender` via reverse index.
 - `batchPay` (agent only): Batch version of `pay`. Each amount is checked against the per-transaction limit. The agent is looked up from `msg.sender` via reverse index.
 - `revokeAgent` (owner only): Permanently revokes the agent by zeroing all metadata slots (owner, agentAddress, name, url, perms, registered_at) and clearing the reverse index. Does not automatically return balances -- call `revokeBalance` for each asset first.
-- `createSession` (owner only): Creates a time/amount-limited session key for a delegate address.
+- `createSession` (owner only): Creates a time/amount-limited session key for a delegate address. Session is independent of agents; funds are drawn directly from the owner's balance.
 - `revokeSession` (owner only): Immediately invalidates a session.
-- `executeSessionTransfer` (delegate only): Transfers from agent balance to recipient within session limits.
+- `executeSessionTransfer` (delegate only): Transfers from owner balance to recipient within session limits.
 
 ### Permissions
 
