@@ -66,15 +66,15 @@ See [precompile.md](precompile.md) for the full ABI.
 `AgentStorage<B: StorageBackend>` is the single struct that manages all agent state. It reads and writes EVM storage slots under the agent precompile address (`0x209`) using `StorageRef`.
 
 Implemented operations:
-- `register_agent(owner, name, url)` — registers a new agent, returns `agent_id`
+- `register_agent(owner, name, url, agent_address)` — registers a new agent, returns `agent_id`
 - `grant_balance(owner, agent_id, asset_id, amount)` — credits agent balance, deducts from owner
 - `revoke_balance(owner, agent_id, asset_id)` — revokes all agent balance for an asset
-- `pay(owner, agent_id, asset_id, recipient, amount)` — pays from agent balance to recipient
-- `batch_pay(owner, agent_id, asset_id, recipients[], amounts[])` — batch payment from agent balance
+- `pay(agent, agent_id, asset_id, recipient, amount)` — agent address pays from agent balance to recipient
+- `batch_pay(agent, agent_id, asset_id, recipients[], amounts[])` — agent address batch payment from agent balance
 - `withdraw_balance(owner, agent_id, asset_id, amount)` — withdraws from agent balance back to owner
 - `revoke_agent(owner, agent_id)` — deregisters an agent
 
-Agents are caller-authenticated only (`msg.sender` is the owner). There are no agent-level signatures.
+All operations are caller-authenticated via `msg.sender`. `pay` and `batchPay` can only be called by the registered `agent_address`, not the owner.
 
 ### 2. Agent Registration
 

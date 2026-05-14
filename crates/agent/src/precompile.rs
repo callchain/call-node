@@ -171,7 +171,7 @@ impl AgentPrecompile {
                         ));
                     }
                     agent_store
-                        .check_owner_or_agent(call.agentId, caller)
+                        .check_agent(call.agentId, caller)
                         .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                     let (per_tx_limit, _, _) = agent_store
                         .require_perms(call.agentId, call.assetId, block_number)
@@ -248,7 +248,7 @@ impl AgentPrecompile {
                         ));
                     }
                     agent_store
-                        .check_owner_or_agent(call.agentId, caller)
+                        .check_agent(call.agentId, caller)
                         .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                     let (per_tx_limit, _, _) = agent_store
                         .require_perms(call.agentId, call.assetId, block_number)
@@ -696,13 +696,14 @@ mod tests {
             .sstore(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000))
             .unwrap();
 
+        let agent = Address::repeat_byte(0xCC);
         let mut precompile = AgentPrecompile;
 
         // registerAgent
         let input = IProtocolAgent::registerAgentCall {
             name: "Agent".into(),
             url: "url".into(),
-            agentAddress: Address::repeat_byte(0xCC),
+            agentAddress: agent,
         }
         .abi_encode();
         precompile.call(&input, sender, &mut provider).unwrap();
@@ -733,7 +734,7 @@ mod tests {
         });
         assert_eq!(bal, 5_000);
 
-        // pay(agentId=0, assetId=1, to=recipient, amount=1_000)
+        // pay(agentId=0, assetId=1, to=recipient, amount=1_000) — called by agent
         let input = IProtocolAgent::payCall {
             agentId: 0,
             assetId: crate::CALL_ASSET_ID,
@@ -741,7 +742,7 @@ mod tests {
             amount: 1_000,
         }
         .abi_encode();
-        let result = precompile.call(&input, sender, &mut provider);
+        let result = precompile.call(&input, agent, &mut provider);
         assert!(result.is_ok(), "pay failed: {:?}", result.err());
 
         // getAgentBalance(0, 1) should be 4_000

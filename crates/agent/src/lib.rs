@@ -253,14 +253,13 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
-    pub fn check_owner_or_agent(
+    pub fn check_agent(
         &mut self,
         agent_id: u64,
         caller: Address,
     ) -> Result<(), AgentError> {
-        let owner = self.read_owner(agent_id);
         let agent = self.read_agent_address(agent_id);
-        if caller != owner && caller != agent {
+        if caller != agent {
             return Err(AgentError::NotOwner);
         }
         Ok(())
@@ -389,7 +388,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         if !self.agent_exists(agent_id) {
             return Err(AgentError::NotFound);
         }
-        self.check_owner_or_agent(agent_id, caller)?;
+        self.check_agent(agent_id, caller)?;
 
         let (per_tx_limit, _, _) = self.require_perms(agent_id, asset_id, current_block)?;
         if amount > per_tx_limit {
@@ -429,7 +428,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         if !self.agent_exists(agent_id) {
             return Err(AgentError::NotFound);
         }
-        self.check_owner_or_agent(agent_id, caller)?;
+        self.check_agent(agent_id, caller)?;
 
         let (per_tx_limit, _, _) = self.require_perms(agent_id, asset_id, current_block)?;
 
@@ -865,21 +864,22 @@ mod tests {
         let mut agent_store = AgentStorage::new(backend.clone());
         let mut asset_store = AssetStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
+        let agent = Address::repeat_byte(0xBB);
         let recipient = Address::repeat_byte(0x33);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", agent, caller, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
 
-        // Grant
+        // Grant (owner only)
         agent_store
             .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, caller)
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 5_000);
         assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 5_000);
 
-        // Pay
+        // Pay (agent only)
         agent_store
             .pay(
                 &mut asset_store,
@@ -887,21 +887,21 @@ mod tests {
                 CALL_ASSET_ID,
                 recipient,
                 1_000,
-                caller,
+                agent,
                 1,
             )
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 4_000);
         assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient), 1_000);
 
-        // Withdraw
+        // Withdraw (owner only)
         agent_store
             .withdraw_balance(&mut asset_store, 0, CALL_ASSET_ID, 500, caller, 1)
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 3_500);
         assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 5_500);
 
-        // Revoke balance
+        // Revoke balance (owner only)
         agent_store
             .revoke_balance(&mut asset_store, 0, CALL_ASSET_ID, caller)
             .unwrap();
@@ -915,11 +915,12 @@ mod tests {
         let mut agent_store = AgentStorage::new(backend.clone());
         let mut asset_store = AssetStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
+        let agent = Address::repeat_byte(0xBB);
         let r1 = Address::repeat_byte(0x33);
         let r2 = Address::repeat_byte(0x44);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", agent, caller, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
         agent_store
@@ -933,7 +934,7 @@ mod tests {
                 CALL_ASSET_ID,
                 &[r1, r2],
                 &[500, 800],
-                caller,
+                agent,
                 1,
             )
             .unwrap();
@@ -948,9 +949,10 @@ mod tests {
         let mut agent_store = AgentStorage::new(backend.clone());
         let mut asset_store = AssetStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
+        let agent = Address::repeat_byte(0xBB);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", agent, caller, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
         agent_store
@@ -964,7 +966,7 @@ mod tests {
                 CALL_ASSET_ID,
                 &[Address::repeat_byte(0x33)],
                 &[1_000, 2_000],
-                caller,
+                agent,
                 1,
             ),
             Err(AgentError::ArrayLengthMismatch)
@@ -977,9 +979,10 @@ mod tests {
         let mut agent_store = AgentStorage::new(backend.clone());
         let mut asset_store = AssetStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
+        let agent = Address::repeat_byte(0xBB);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", agent, caller, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
         agent_store
@@ -987,7 +990,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            agent_store.batch_pay(&mut asset_store, 0, CALL_ASSET_ID, &[], &[], caller, 1,),
+            agent_store.batch_pay(&mut asset_store, 0, CALL_ASSET_ID, &[], &[], agent, 1,),
             Err(AgentError::EmptyBatch)
         ));
     }
@@ -998,9 +1001,10 @@ mod tests {
         let mut agent_store = AgentStorage::new(backend.clone());
         let mut asset_store = AssetStorage::new(backend.clone());
         let caller = Address::repeat_byte(0x22);
+        let agent = Address::repeat_byte(0xBB);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", agent, caller, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, caller, 10_000);
         agent_store
@@ -1015,7 +1019,7 @@ mod tests {
                 CALL_ASSET_ID,
                 Address::repeat_byte(0x33),
                 2_000,
-                caller,
+                agent,
                 1,
             ),
             Err(AgentError::AmountExceedsLimit)
