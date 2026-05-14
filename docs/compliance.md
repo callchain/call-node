@@ -98,10 +98,25 @@ Any non-zero status is treated as restricted. Specific values (1, 2, 3...) may b
 | Asset (`0x201`) | `transfer` | `to` (sender already blocked at Layer 1) |
 | Asset (`0x201`) | `batchTransfer` | all `to` addresses |
 | Asset (`0x201`) | `transferFrom` | `from` and `to` (spender = caller, already at Layer 1) |
+| Asset (`0x201`) | `mint` | `to` |
+| Asset (`0x201`) | `burn` | `from` |
+| Agent (`0x209`) | `grantBalance` | `caller` (owner) |
+| Agent (`0x209`) | `revokeBalance` | `caller` (owner) |
 | Agent (`0x209`) | `pay` | `to` |
 | Agent (`0x209`) | `batchPay` | all `to` addresses |
-| Switch (`0x207`) | `switchToEvm` | `to` |
-| Switch (`0x207`) | `switchToProtocol` | `to` |
+| Agent (`0x209`) | `executeSessionTransfer` | `to` |
+| Bridge (`0x103`) | `externalBridgeDeposit` | `recipient` |
+| Bridge (`0x103`) | `externalBridgeWithdraw` | `caller` |
+| Bridge (`0x103`) | `deposit` (internal) | `targetAddress` |
+| Bridge (`0x103`) | `initiateChallenge` | `challenger` |
+| Bridge (`0x103`) | `withdrawChallengeBond` | `caller` |
+| Shielded (`0x202`) | `deposit` | `caller` (msg_sender) |
+| Shielded (`0x202`) | `withdraw` | `target` |
+| Switch (`0x207`) | `switchToEvm` | `caller` and `to` |
+| Switch (`0x207`) | `switchToProtocol` | `caller` and `to` |
+| Validator (`0x204`) | `stake` | `caller` |
+| Validator (`0x204`) | `claimUnbonded` | `caller` |
+| Governance (`0x203`) | `submitProposal` | `proposer` (caller) |
 
 **Effect**: Even if a transaction passes Layer 1, protocol-level value transfers to/from restricted addresses are blocked at the precompile level.
 
@@ -239,7 +254,13 @@ For emergency response. If the governance timelock is too slow for an urgent san
 | `crates/compliance/src/precompile.rs` | `CompliancePrecompile`, ABI dispatch, admin enforcement |
 | `crates/evm/src/executor.rs` | EVM handler layer: caller blocklist check |
 | `crates/asset/src/precompile.rs` | Asset transfer: `to`/`from` compliance checks |
-| `crates/governance/src/precompile.rs` | Proposal type 4: `execute` writes compliance state |
+| `crates/agent/src/precompile.rs` | Agent pay/grant/revoke/session compliance checks |
+| `crates/bridge/src/precompile.rs` | Bridge deposit/withdraw/challenge compliance checks |
+| `crates/shielded/src/precompile.rs` | Shielded deposit/withdraw compliance checks |
+| `crates/switch/src/precompile.rs` | Switch caller/recipient compliance checks |
+| `crates/validator/src/precompile.rs` | Validator stake/claim compliance checks |
+| `crates/governance/src/precompile.rs` | Proposal submit + type 4 execute |
+| `crates/precompile/src/utils.rs` | Shared `check_compliance` helper |
 
 ---
 

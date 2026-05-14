@@ -132,14 +132,14 @@ interface IProtocolAsset {
 
 ### Behavior
 
-- `transfer`: Deducts from sender's protocol balance, credits recipient. Checks compliance on both parties.
+- `transfer`: Deducts from sender's protocol balance, credits recipient. Checks compliance on `to`.
 - `batchTransfer`: Executes multiple transfers atomically.
 - `approve` / `transferFrom`: Protocol-level allowance system (separate from ERC-20 allowances).
 - `register`: Registers a new asset in `AssetStorage`. Creates a protocol-only asset (`has_erc20 = 0`).
 - `registerErc20`: Binds an existing external ERC-20 contract (`dominance = 0`).
 - `createWrapper`: Deploys a system `WrappedToken` for a protocol-only asset (`dominance = 1`). Only callable by the asset issuer.
-- `mint`: Only callable by the asset's registered issuer. Mints on the protocol layer.
-- `burn`: Any holder can burn their own balance.
+- `mint`: Only callable by the asset's registered issuer. Mints on the protocol layer. Checks compliance on `to`.
+- `burn`: Any holder can burn their own balance. Checks compliance on `from`.
 
 ---
 
@@ -166,17 +166,19 @@ interface IProtocolSwitch {
 ### Behavior
 
 - `switchToEvm`:
-  1. Deduct protocol balance from caller
-  2. Credit EVM side:
+  1. Check compliance on `caller` and `to`
+  2. Deduct protocol balance from caller
+  3. Credit EVM side:
      - If `assetId == 1` (CALL): add native EVM balance
      - If `dominance == 0` (EVM): transfer ERC-20 from `0x207` escrow
      - If `dominance == 1` (PROTOCOL): `bridgeMint` new ERC-20 tokens
 - `switchToProtocol`:
-  1. Deduct EVM side:
+  1. Check compliance on `caller` and `to`
+  2. Deduct EVM side:
      - If `assetId == 1` (CALL): subtract native EVM balance
      - If `dominance == 0` (EVM): `transferFrom` into `0x207` escrow
      - If `dominance == 1` (PROTOCOL): `bridgeBurn` ERC-20 tokens
-  2. Credit protocol balance to recipient
+  3. Credit protocol balance to recipient
 - Asset ID `1` (native CALL) bridges as native EVM balance (not wrapped ERC-20).
 
 ---
@@ -256,10 +258,10 @@ interface IProtocolAgent {
 ### Behavior
 
 - `registerAgent`: Registers a new agent with the caller as owner. Agent ID is auto-incremented. `agentAddress` must be unique (one agent per address) and non-zero.
-- `grantBalance` (owner only): Deducts from owner's protocol balance and credits agent's sub-account balance.
-- `revokeBalance` (owner only): Returns agent's entire balance for the asset back to the owner's protocol balance, then clears the agent balance.
-- `pay` (agent only): Deducts from agent balance and credits recipient's protocol balance. Enforces per-transaction limit and asset permissions. The agent is looked up from `msg.sender` via reverse index.
-- `batchPay` (agent only): Batch version of `pay`. Each amount is checked against the per-transaction limit. The agent is looked up from `msg.sender` via reverse index.
+- `grantBalance` (owner only): Checks compliance on caller. Deducts from owner's protocol balance and credits agent's sub-account balance.
+- `revokeBalance` (owner only): Checks compliance on caller. Returns agent's entire balance for the asset back to the owner's protocol balance, then clears the agent balance.
+- `pay` (agent only): Deducts from agent balance and credits recipient's protocol balance. Checks compliance on `to`. Enforces per-transaction limit and asset permissions. The agent is looked up from `msg.sender` via reverse index.
+- `batchPay` (agent only): Batch version of `pay`. Checks compliance on all `to` addresses. Each amount is checked against the per-transaction limit. The agent is looked up from `msg.sender` via reverse index.
 - `revokeAgent` (owner only): Permanently revokes the agent by zeroing all metadata slots (owner, agentAddress, name, url, perms, registered_at) and clearing the reverse index. Does not automatically return balances -- call `revokeBalance` for each asset first.
 - `createSession` (owner only): Creates a scoped session key for a delegate address. Session is independent of agents; funds are drawn directly from the owner's balance. All policy fields (`maxTotalSpend`, `minIntervalBlocks`, `effectiveAt`, `maxExecutions`, `allowedAssets`, `allowedRecipients`) are optional — set to `0` or empty arrays to disable.
 - `revokeSession` (owner only): Immediately invalidates a session.
@@ -316,8 +318,8 @@ interface IProtocolShielded {
 
 ### Behavior
 
-- `deposit`: Deducts transparent balance, appends commitment to the Merkle tree.
-- `withdraw`: Verifies ZK proof and nullifier, credits transparent balance.
+- `deposit`: Checks compliance on caller. Deducts transparent balance, appends commitment to the Merkle tree.
+- `withdraw`: Checks compliance on `target`. Verifies ZK proof and nullifier, credits transparent balance.
 - `transfer`: Verifies ZK proof, spends nullifiers, appends new commitments. Groth16 proof verification is compute-intensive.
 
 ---
@@ -360,9 +362,9 @@ interface IProtocolValidator {
 
 ### Behavior
 
-- `stake`: Deducts CALL from sender's balance, registers validator in `ValidatorStorage`.
+- `stake`: Checks compliance on caller. Deducts CALL from sender's balance, registers validator in `ValidatorStorage`.
 - `unstake`: Initiates unstake, moves stake to unbonding queue.
-- `claimUnbonded`: Claims matured unbonded stake back to sender's balance.
+- `claimUnbonded`: Checks compliance on caller. Claims matured unbonded stake back to sender's balance.
 - Query functions read validator state directly from EVM storage slots.
 
 ---
@@ -416,7 +418,7 @@ interface IProtocolGovernance {
 
 ### Behavior
 
-- `submitProposal`: Requires `proposal_deposit` CALL (governable, default 10,000 CALL). Creates a new governance proposal stored in EVM storage under `GOVERNANCE_ADDRESS`.
+- `submitProposal`: Checks compliance on proposer (caller). Requires `proposal_deposit` CALL (governable, default 10,000 CALL). Creates a new governance proposal stored in EVM storage under `GOVERNANCE_ADDRESS`.
 - `vote`: Casts a vote (1=For, 2=Against, 3=Abstain) on an active proposal.
 - `queue`: Queues a passed proposal for execution after the timelock.
 - `execute`: Executes a queued proposal's payload (requires `current_block >= execution_block`).
@@ -470,9 +472,9 @@ interface IProtocolBridge {
 
 ### Behavior
 
-- `externalBridgeDeposit`: Verifies validator signatures, queues deposit in challenge period, then mints on Callchain.
-- `externalBridgeWithdraw`: Burns Callchain assets, queues withdrawal for validator attestation.
-- `challengeBridgeDeposit`: Anyone can challenge a fraudulent deposit during the challenge period.
+- `externalBridgeDeposit`: Checks compliance on recipient. Verifies validator signatures, queues deposit in challenge period, then mints on Callchain.
+- `externalBridgeWithdraw`: Checks compliance on caller. Burns Callchain assets, queues withdrawal for validator attestation.
+- `challengeBridgeDeposit`: Checks compliance on challenger. Anyone can challenge a fraudulent deposit during the challenge period.
 
 ---
 
@@ -480,26 +482,31 @@ interface IProtocolBridge {
 
 **File**: `crates/compliance/src/precompile.rs`
 
-Per-asset compliance policy enforcement.
+Global, governance-managed address compliance. Status is per-address (not per-asset).
 
 ### Solidity Interface
 
 ```solidity
 interface IProtocolCompliance {
-    // issuer only
-    function updateCompliance(uint64 assetId, address target, uint8 status)
+    // governance only
+    function updateCompliance(address target, uint8 status)
         external;
 
-    function checkCompliance(uint64 assetId, address target)
-        external view returns (uint8);
+    function checkCompliance(address target)
+        external view returns (bool);
+
+    // admin only
+    function setComplianceAdmin(address newAdmin)
+        external;
 }
 ```
 
 ### Behavior
 
-- `updateCompliance`: Asset issuer sets address compliance status (0=Clear, 1=UnderReview, 2=Flagged, 3=Restricted).
-- `checkCompliance`: Returns the compliance status for an address under an asset's policy.
-- `Restricted` status blocks all value-moving operations for that address unconditionally.
+- `updateCompliance`: Only callable by Governance (`0x203`). Sets global compliance status for `target`. Writes to `COMPLIANCE_ADDRESS` storage.
+- `checkCompliance`: Returns `true` if address is clear (status = 0), `false` if restricted (status > 0).
+- `setComplianceAdmin`: Only callable by current admin. Allows emergency security council to act faster than governance timelock.
+- Any non-zero status is treated as restricted. All value-moving precompiles enforce compliance before executing transfers.
 
 ---
 
