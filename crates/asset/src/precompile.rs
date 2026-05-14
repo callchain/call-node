@@ -9,7 +9,7 @@ use crate::AssetStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
-    dispatch, ok_empty, require_caller, slot_asset_meta, slot_compliance, write_string32,
+    dispatch, ok_empty, require_caller, slot_compliance, write_string32,
     StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS, WRAPPED_TOKEN_FACTORY_ADDRESS,
 };
 use call_precompile::erc20_reader::read_erc20_metadata;
@@ -44,23 +44,13 @@ sol! {
 pub struct AssetPrecompile;
 
 impl AssetPrecompile {
-    /// Check compliance for an address against the asset's compliance policy.
+    /// Check global compliance for an address.
     fn check_compliance(
-        asset_id: u64,
         addr: &Address,
         storage: &mut dyn StorageProvider,
     ) -> Result<(), PrecompileError> {
-        let policy_id = storage
-            .sload(ASSET_ADDRESS, slot_asset_meta(asset_id, b"compliance"))
-            .map(|v| v.to_be_bytes::<32>()[31] as u64)
-            .unwrap_or(0);
-
-        if policy_id == 0 {
-            return Ok(());
-        }
-
         let status = storage
-            .sload(COMPLIANCE_ADDRESS, slot_compliance(*addr, policy_id as u8))
+            .sload(COMPLIANCE_ADDRESS, slot_compliance(*addr))
             .map(|v| v.to_be_bytes::<32>()[31])
             .unwrap_or(0);
 
@@ -127,8 +117,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let from = require_caller(msg_sender)?;
-                Self::check_compliance(call.assetId, &from, storage)?;
-                Self::check_compliance(call.assetId, &call.to, storage)?;
+                Self::check_compliance(&call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .transfer(call.assetId, from, call.to, call.amount)
@@ -160,9 +149,8 @@ impl AssetPrecompile {
         storage.deduct_gas(total_gas)?;
 
         let from = require_caller(msg_sender)?;
-        Self::check_compliance(call.assetId, &from, storage)?;
         for to in &call.to {
-            Self::check_compliance(call.assetId, to, storage)?;
+            Self::check_compliance(to, storage)?;
         }
 
         let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts).collect();
@@ -209,8 +197,8 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let spender = require_caller(msg_sender)?;
-                Self::check_compliance(call.assetId, &call.from, storage)?;
-                Self::check_compliance(call.assetId, &call.to, storage)?;
+                Self::check_compliance(&call.from, storage)?;
+                Self::check_compliance(&call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
@@ -671,19 +659,11 @@ mod tests {
             .unwrap();
 
         // Set compliance policy ID = 1 for asset 1
-        provider
-            .sstore(
-                ASSET_ADDRESS,
-                slot_asset_meta(1, b"compliance"),
-                U256::from(1u64),
-            )
-            .unwrap();
-
         // Mark `blocked` as non-compliant (status = 1)
         provider
             .sstore(
                 COMPLIANCE_ADDRESS,
-                slot_compliance(blocked, 1),
+                slot_compliance(blocked),
                 U256::from(1u64),
             )
             .unwrap();
@@ -722,20 +702,11 @@ mod tests {
             .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
             .unwrap();
 
-        // Set compliance policy ID = 1 for asset 1
-        provider
-            .sstore(
-                ASSET_ADDRESS,
-                slot_asset_meta(1, b"compliance"),
-                U256::from(1u64),
-            )
-            .unwrap();
-
         // Mark `blocked` as non-compliant (status = 1)
         provider
             .sstore(
                 COMPLIANCE_ADDRESS,
-                slot_compliance(blocked, 1),
+                slot_compliance(blocked),
                 U256::from(1u64),
             )
             .unwrap();

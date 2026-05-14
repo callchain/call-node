@@ -310,9 +310,9 @@ pub fn slot_validator_by_addr(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"validator_id"])
 }
 
-/// Compute compliance storage slot for an address under a policy.
-pub fn slot_compliance(addr: Address, policy_id: u8) -> U256 {
-    storage_slot(&[addr.as_slice(), &[policy_id]])
+/// Compute global compliance storage slot for an address.
+pub fn slot_compliance(addr: Address) -> U256 {
+    storage_slot(&[addr.as_slice()])
 }
 
 // ── Balance helpers ───────────────────────────────────────────────────

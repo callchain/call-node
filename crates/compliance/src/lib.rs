@@ -3,7 +3,7 @@ pub mod precompile;
 pub use precompile::CompliancePrecompile;
 
 use call_precompile::{
-    storage::storage_slot, u256_to_address, u8_to_u256, ASSET_ADDRESS, COMPLIANCE_ADDRESS,
+    slot_compliance, u8_to_u256, COMPLIANCE_ADDRESS, GOVERNANCE_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -11,14 +11,14 @@ use call_protocol::storage_backend::StorageBackend;
 /// Error type for compliance operations.
 #[derive(Debug)]
 pub enum ComplianceError {
-    NotIssuer,
+    NotGovernance,
     InvalidStatus,
 }
 
 impl std::fmt::Display for ComplianceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ComplianceError::NotIssuer => write!(f, "not asset issuer"),
+            ComplianceError::NotGovernance => write!(f, "not governance"),
             ComplianceError::InvalidStatus => write!(f, "invalid compliance status value"),
         }
     }
@@ -28,8 +28,9 @@ impl std::error::Error for ComplianceError {}
 
 // ── Storage slot helpers ──────────────────────────────────────────────
 
-pub fn slot_compliance(addr: Address, policy_id: u8) -> U256 {
-    storage_slot(&[addr.as_slice(), &[policy_id]])
+/// Compute the EVM storage slot for the compliance admin address.
+pub fn slot_compliance_admin() -> U256 {
+    call_precompile::storage::storage_slot(&[b"admin"])
 }
 
 // ── ComplianceStorage ─────────────────────────────────────────────────
@@ -46,30 +47,19 @@ impl<B: StorageBackend> ComplianceStorage<B> {
 
     // ── Read operations ───────────────────────────────────────────────
 
-    pub fn read_status(&mut self, addr: Address, policy_id: u8) -> u8 {
+    pub fn read_status(&mut self, addr: Address) -> u8 {
         self.backend
-            .load(COMPLIANCE_ADDRESS, slot_compliance(addr, policy_id))
+            .load(COMPLIANCE_ADDRESS, slot_compliance(addr))
             .to_be_bytes::<32>()[31]
     }
 
-    pub fn read_asset_policy_id(&mut self, asset_id: u64) -> u8 {
-        let policy_slot = storage_slot(&[&asset_id.to_be_bytes()[..], b"compliance"]);
-        self.backend
-            .load(ASSET_ADDRESS, policy_slot)
-            .to_be_bytes::<32>()[31]
+    pub fn read_admin(&mut self) -> Address {
+        let v = self.backend.load(COMPLIANCE_ADDRESS, slot_compliance_admin());
+        Address::from_slice(&v.to_be_bytes::<32>()[12..32])
     }
 
-    pub fn read_asset_issuer(&mut self, asset_id: u64) -> Address {
-        let issuer_slot = storage_slot(&[&asset_id.to_be_bytes()[..], b"issuer"]);
-        u256_to_address(self.backend.load(ASSET_ADDRESS, issuer_slot))
-    }
-
-    pub fn check_compliance(&mut self, asset_id: u64, target: Address) -> bool {
-        let policy_id = self.read_asset_policy_id(asset_id);
-        if policy_id == 0 {
-            return true;
-        }
-        let status = self.read_status(target, policy_id);
+    pub fn check_compliance(&mut self, target: Address) -> bool {
+        let status = self.read_status(target);
         // Clear (0) = pass, anything else = fail
         status == 0
     }
@@ -78,20 +68,43 @@ impl<B: StorageBackend> ComplianceStorage<B> {
 
     pub fn update_compliance(
         &mut self,
-        asset_id: u64,
         target: Address,
         status_u8: u8,
         caller: Address,
     ) -> Result<(), ComplianceError> {
-        let issuer = self.read_asset_issuer(asset_id);
-        if issuer != caller {
-            return Err(ComplianceError::NotIssuer);
+        if caller != GOVERNANCE_ADDRESS {
+            return Err(ComplianceError::NotGovernance);
         }
 
-        let policy_id = self.read_asset_policy_id(asset_id);
-        let slot = slot_compliance(target, policy_id);
+        let slot = slot_compliance(target);
         self.backend
             .store(COMPLIANCE_ADDRESS, slot, u8_to_u256(status_u8));
+        Ok(())
+    }
+
+    pub fn set_admin(
+        &mut self,
+        new_admin: Address,
+        caller: Address,
+    ) -> Result<(), ComplianceError> {
+        let current_admin = self.read_admin();
+        // If admin is not set (zero address), allow GOVERNANCE_ADDRESS to set it
+        let expected = if current_admin == Address::ZERO {
+            GOVERNANCE_ADDRESS
+        } else {
+            current_admin
+        };
+        if caller != expected {
+            return Err(ComplianceError::NotGovernance);
+        }
+
+        let mut bytes = [0u8; 32];
+        bytes[12..32].copy_from_slice(new_admin.as_slice());
+        self.backend.store(
+            COMPLIANCE_ADDRESS,
+            slot_compliance_admin(),
+            U256::from_be_bytes::<32>(bytes),
+        );
         Ok(())
     }
 }
@@ -99,8 +112,6 @@ impl<B: StorageBackend> ComplianceStorage<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompile::storage::storage_slot;
-    use call_precompile::u8_to_u256;
     use call_primitives::Address;
     use call_protocol::storage_backend::StorageBackend;
     use std::cell::RefCell;
@@ -140,194 +151,103 @@ mod tests {
     }
 
     #[test]
-    fn test_check_compliance_no_policy() {
+    fn test_check_compliance_default_clear() {
         let backend = TestBackend::new();
         let mut store = ComplianceStorage::new(backend);
-        // No policy registered for asset_id=999 => always compliant
-        assert!(store.check_compliance(999, Address::repeat_byte(0x22)));
+        // No status set => defaults to 0 (clear)
+        assert!(store.check_compliance(Address::repeat_byte(0x22)));
     }
 
     #[test]
-    fn test_check_compliance_clear_and_restricted() {
+    fn test_check_compliance_restricted() {
         let mut backend = TestBackend::new();
-        let issuer = Address::repeat_byte(0x11);
-        let target = Address::repeat_byte(0x22);
-
-        // Seed asset with issuer and policy_id=1
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
-            address_to_u256_word(issuer),
-        );
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
-            u8_to_u256(1),
-        );
-
-        let mut store = ComplianceStorage::new(backend.clone());
-
-        // Default status = 0 (clear) => compliant
-        assert!(store.check_compliance(1, target));
-
-        // Update status to restricted (3)
-        let mut store = ComplianceStorage::new(backend.clone());
-        store.update_compliance(1, target, 3, issuer).unwrap();
-
-        let mut store = ComplianceStorage::new(backend);
-        assert!(!store.check_compliance(1, target));
-    }
-
-    #[test]
-    fn test_update_compliance_not_issuer() {
-        let mut backend = TestBackend::new();
-        let issuer = Address::repeat_byte(0x11);
-
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
-            address_to_u256_word(issuer),
-        );
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
-            u8_to_u256(1),
-        );
-
-        let mut store = ComplianceStorage::new(backend);
-        let result =
-            store.update_compliance(1, Address::repeat_byte(0x22), 3, Address::repeat_byte(0x99));
-        assert!(matches!(result, Err(ComplianceError::NotIssuer)));
-    }
-
-    #[test]
-    fn test_read_asset_issuer() {
-        let mut backend = TestBackend::new();
-        let issuer = Address::repeat_byte(0x11);
-
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&42u64.to_be_bytes()[..], b"issuer"]),
-            address_to_u256_word(issuer),
-        );
-
-        let mut store = ComplianceStorage::new(backend);
-        assert_eq!(store.read_asset_issuer(42), issuer);
-    }
-
-    #[test]
-    fn test_read_asset_policy_id() {
-        let mut backend = TestBackend::new();
-
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&42u64.to_be_bytes()[..], b"compliance"]),
-            u8_to_u256(7),
-        );
-
-        let mut store = ComplianceStorage::new(backend);
-        assert_eq!(store.read_asset_policy_id(42), 7);
-    }
-
-    #[test]
-    fn test_check_compliance_multiple_targets() {
-        let mut backend = TestBackend::new();
-        let issuer = Address::repeat_byte(0x11);
-        let target_a = Address::repeat_byte(0x22);
-        let target_b = Address::repeat_byte(0x33);
-
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
-            address_to_u256_word(issuer),
-        );
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
-            u8_to_u256(1),
-        );
-
-        let mut store = ComplianceStorage::new(backend.clone());
-        // Both start clear (status=0)
-        assert!(store.check_compliance(1, target_a));
-        assert!(store.check_compliance(1, target_b));
-
-        // Restrict target_a only
-        let mut store = ComplianceStorage::new(backend.clone());
-        store.update_compliance(1, target_a, 3, issuer).unwrap();
-
-        let mut store = ComplianceStorage::new(backend);
-        assert!(!store.check_compliance(1, target_a));
-        assert!(store.check_compliance(1, target_b));
-    }
-
-    #[test]
-    fn test_update_compliance_various_status_values() {
-        let mut backend = TestBackend::new();
-        let issuer = Address::repeat_byte(0x11);
         let target = Address::repeat_byte(0x22);
 
         backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
-            address_to_u256_word(issuer),
-        );
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
-            u8_to_u256(1),
+            COMPLIANCE_ADDRESS,
+            slot_compliance(target),
+            u8_to_u256(3),
         );
 
-        // Status 0 = clear (compliant)
-        let mut store = ComplianceStorage::new(backend.clone());
-        store.update_compliance(1, target, 0, issuer).unwrap();
-        let mut store = ComplianceStorage::new(backend.clone());
-        assert!(store.check_compliance(1, target));
-
-        // Status 1 = fail
-        let mut store = ComplianceStorage::new(backend.clone());
-        store.update_compliance(1, target, 1, issuer).unwrap();
-        let mut store = ComplianceStorage::new(backend.clone());
-        assert!(!store.check_compliance(1, target));
-
-        // Status 255 = fail (any non-zero)
-        let mut store = ComplianceStorage::new(backend.clone());
-        store.update_compliance(1, target, 255, issuer).unwrap();
         let mut store = ComplianceStorage::new(backend);
-        assert!(!store.check_compliance(1, target));
+        assert!(!store.check_compliance(target));
     }
 
     #[test]
-    fn test_check_compliance_different_policy_ids() {
+    fn test_update_compliance_by_governance() {
         let mut backend = TestBackend::new();
-        let issuer = Address::repeat_byte(0x11);
         let target = Address::repeat_byte(0x22);
 
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
-            address_to_u256_word(issuer),
-        );
-        backend.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
-            u8_to_u256(1),
-        );
+        let mut store = ComplianceStorage::new(backend);
+        store.update_compliance(target, 1, GOVERNANCE_ADDRESS).unwrap();
+        assert!(!store.check_compliance(target));
+    }
 
-        // Set status under policy_id=1
+    #[test]
+    fn test_update_compliance_not_governance_fails() {
+        let backend = TestBackend::new();
+        let target = Address::repeat_byte(0x22);
+
+        let mut store = ComplianceStorage::new(backend);
+        let result = store.update_compliance(target, 1, Address::repeat_byte(0x99));
+        assert!(matches!(result, Err(ComplianceError::NotGovernance)));
+    }
+
+    #[test]
+    fn test_update_compliance_then_clear() {
+        let mut backend = TestBackend::new();
+        let target = Address::repeat_byte(0x22);
+
         let mut store = ComplianceStorage::new(backend.clone());
-        store.update_compliance(1, target, 3, issuer).unwrap();
+        store.update_compliance(target, 3, GOVERNANCE_ADDRESS).unwrap();
+        assert!(!store.check_compliance(target));
 
-        // If asset's policy_id changes to 2, old restrictions don't apply
-        let mut backend2 = backend.clone();
-        backend2.store(
-            ASSET_ADDRESS,
-            storage_slot(&[&1u64.to_be_bytes()[..], b"compliance"]),
-            u8_to_u256(2),
+        let mut store = ComplianceStorage::new(backend);
+        store.update_compliance(target, 0, GOVERNANCE_ADDRESS).unwrap();
+        assert!(store.check_compliance(target));
+    }
+
+    #[test]
+    fn test_set_admin_initial_by_governance() {
+        let backend = TestBackend::new();
+        let new_admin = Address::repeat_byte(0x44);
+
+        let mut store = ComplianceStorage::new(backend);
+        store.set_admin(new_admin, GOVERNANCE_ADDRESS).unwrap();
+        assert_eq!(store.read_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_set_admin_by_current_admin() {
+        let mut backend = TestBackend::new();
+        let admin = Address::repeat_byte(0x44);
+        let new_admin = Address::repeat_byte(0x55);
+
+        backend.store(
+            COMPLIANCE_ADDRESS,
+            slot_compliance_admin(),
+            address_to_u256_word(admin),
         );
-        let mut store = ComplianceStorage::new(backend2);
-        // target has no entry under policy_id=2, so defaults to 0 (clear)
-        assert!(store.check_compliance(1, target));
+
+        let mut store = ComplianceStorage::new(backend);
+        store.set_admin(new_admin, admin).unwrap();
+        assert_eq!(store.read_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_set_admin_unauthorized_fails() {
+        let mut backend = TestBackend::new();
+        let admin = Address::repeat_byte(0x44);
+
+        backend.store(
+            COMPLIANCE_ADDRESS,
+            slot_compliance_admin(),
+            address_to_u256_word(admin),
+        );
+
+        let mut store = ComplianceStorage::new(backend);
+        let result = store.set_admin(Address::repeat_byte(0x55), Address::repeat_byte(0x99));
+        assert!(matches!(result, Err(ComplianceError::NotGovernance)));
     }
 
     #[test]
@@ -337,6 +257,39 @@ mod tests {
 
         let mut store = ComplianceStorage::new(backend);
         // Unset status defaults to 0 (clear/compliant)
-        assert_eq!(store.read_status(target, 1), 0);
+        assert_eq!(store.read_status(target), 0);
+    }
+
+    #[test]
+    fn test_various_status_values() {
+        let mut backend = TestBackend::new();
+        let target = Address::repeat_byte(0x22);
+
+        // Status 0 = clear (compliant)
+        backend.store(
+            COMPLIANCE_ADDRESS,
+            slot_compliance(target),
+            u8_to_u256(0),
+        );
+        let mut store = ComplianceStorage::new(backend.clone());
+        assert!(store.check_compliance(target));
+
+        // Status 1 = fail
+        backend.store(
+            COMPLIANCE_ADDRESS,
+            slot_compliance(target),
+            u8_to_u256(1),
+        );
+        let mut store = ComplianceStorage::new(backend.clone());
+        assert!(!store.check_compliance(target));
+
+        // Status 255 = fail (any non-zero)
+        backend.store(
+            COMPLIANCE_ADDRESS,
+            slot_compliance(target),
+            u8_to_u256(255),
+        );
+        let mut store = ComplianceStorage::new(backend);
+        assert!(!store.check_compliance(target));
     }
 }

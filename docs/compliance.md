@@ -1,174 +1,246 @@
-# CallChain Compliance System
+# CallChain Compliance System (Governance-Managed)
 
-**Crate**: `crates/protocol/` (`call-protocol`)
-**Spec**: §3.4, §7
+**Crate**: `crates/compliance/` (`call-compliance`)
+**Precompile**: `0x205`
+**Governance Proposal Type**: `4` (ComplianceUpdate)
 
 ---
 
-## Goal
+## Overview
 
-Provide a layered, asset-specific compliance framework that:
+The Compliance System provides **global, governance-managed address restrictions** for the Callchain protocol. Unlike the previous asset-specific model, compliance is now **address-level and universal** — a restricted address cannot participate in any value-moving operation across the entire chain, regardless of asset type.
 
-1. Enforces **per-asset compliance policies** — each registered asset declares its own policy (none, blacklist, KYC, whitelist, or custom).
-2. Checks **both sender and recipient** on every value-moving precompile call.
-3. Supports **issuer-managed address compliance** — asset issuers can flag individual addresses as Restricted, UnderReview, etc.
-4. Allows **runtime custom policy handlers** for integrations (e.g. on-chain KYC oracle, geographic restriction).
-5. All compliance state lives in EVM storage and is committed atomically with the EVM state root.
+**Key principles:**
+- **Governance-only management** — Only the Governance precompile (`0x203`) can update compliance status via proposal execution
+- **Global scope** — Compliance status is per-address, not per-asset
+- **Dual-layer enforcement** — Blocked at EVM execution layer + precompile layer for complete coverage
+- **No issuer power** — Asset issuers have no compliance control; all changes go through governance
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Compliance Check Flow                            │
-│                                                                     │
-│  AssetRegistry        Compliance state (EVM)       PrecompileExec  │
-│  ┌────────────┐       ┌──────────────┐        ┌────────────────┐   │
-│  │ asset_id   │──────▶│ policy_id    │        │ Transfer       │   │
-│  │ compliance │       │ (0–4)        │        │ BatchTransfer  │   │
-│  │ _policy    │       │              │        │ TransferFrom   │   │
-│  └────────────┘       │  sanctioned  │        │ Mint / Burn    │   │
-│                       │  kyc_verified│        │ BridgeDeposit  │   │
-│  IssuerState          │  whitelisted │        └────────────────┘   │
-│  ┌────────────┐       │  address_    │               │              │
-│  │ frozen     │       │  states      │               ▼              │
-│  │ (EVM)      │       └──────────────┘    check_compliance_by_      │
-│  └────────────┘                           policy_id(sender + to)    │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Governance-Managed Compliance                         │
+│                                                                         │
+│  ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐   │
+│  │  Governance     │     │  EVM Handler    │     │  Precompile     │   │
+│  │  (0x203)        │────▶│  Layer          │────▶│  Layer          │   │
+│  │                 │     │                 │     │                 │   │
+│  │  submitProposal │     │  tx.caller      │     │  transfer.to    │   │
+│  │  vote           │     │  check          │     │  transferFrom   │   │
+│  │  queue          │     │                 │     │  .from / .to    │   │
+│  │  execute ───────┼────▶│  blocklisted?   │     │  batchPay.to    │   │
+│  │  (type=4)       │     │  → REVERT       │     │  switch.to      │   │
+│  └─────────────────┘     └─────────────────┘     └─────────────────┘   │
+│           │                                        │                    │
+│           ▼                                        ▼                    │
+│    ┌─────────────────────────────────────────────────────┐             │
+│    │  COMPLIANCE_ADDRESS (0x205) Storage                  │             │
+│    │                                                      │             │
+│    │  slot("admin")         → governance_admin address    │             │
+│    │  slot(address)         → status (u8)                 │             │
+│    │                         0 = Clear (default)          │             │
+│    │                         1+ = Restricted              │             │
+│    └─────────────────────────────────────────────────────┘             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Policy Model
+---
 
-Each `Asset` in `AssetRegistry` stores a `compliance_policy: u8`:
+## Precompile API
 
-| policy_id | Policy | Check |
-|---|---|---|
-| 0 | `None` | Always pass |
-| 1 | `OfacBlacklist` | Address NOT in sanctioned set (EVM storage) |
-| 2 | `KycRequired` | Address IS in kyc_verified set (EVM storage) |
-| 3 | `Whitelist` | Address IS in whitelisted set (EVM storage) |
-| 4 | `Custom` | All registered `CustomComplianceHandler`s return `true` |
+The **Compliance precompile at `0x205`** exposes compliance queries and governance-triggered updates.
 
-Policy is set at asset registration (`register_asset`) and can be updated by the issuer via `IssuerAction::UpdatePolicy`.
+### Methods
 
-### Address Compliance Status
-
-Beyond the policy-level checks, each `(address, policy_id)` pair can have a granular status:
-
-| Status | Meaning |
-|---|---|
-| `Clear` | Default — no restriction beyond policy check |
-| `UnderReview` | Informational — policy check still applies |
-| `Flagged` | Informational — policy check still applies |
-| `Restricted` | **Hard block** — transaction fails regardless of policy check |
-
-The Compliance precompile (`0x205`) `updateCompliance(uint64,address,uint8)` allows the asset issuer to set this status for any address under their asset's policy. When `status == Restricted`, `check_compliance_by_policy_id` returns `Err(ProtocolError::Compliance(...))` immediately.
-
-## Precompile Alternative
-
-The **Compliance precompile at `0x205`** provides the same functionality via standard EVM transactions:
-
-| Operation | Precompile Function | Gas |
-|---|---|---|
-| `UpdateCompliance` | `updateCompliance(uint64,address,uint8)` | base + storage |
-| — | `checkCompliance(uint64,address)` (read-only) | base + storage |
+| Operation | Function | Caller | Base Gas |
+|---|---|---|---|
+| Update compliance | `updateCompliance(address target, uint8 status)` | **GOVERNANCE (0x203) only** | 6,000 |
+| Check compliance | `checkCompliance(address target) → bool` | anyone | 1,000 |
+| Set admin | `setComplianceAdmin(address newAdmin)` | **current admin only** | 4,000 |
 
 Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`.
 
-See [precompile.md](precompile.md) for the full ABI.
+### Status Values
 
-### Compliance State in EVM Storage
-
-All compliance state — sanctioned sets, KYC verified sets, whitelisted sets, and per-address compliance statuses — lives in EVM storage slots under the Compliance precompile address (`0x205`). There is no in-memory `ComplianceEngine` struct with `HashSet`s, no `ComplianceEngineSnapshot`, and no separate `CallComplianceState` database table.
-
-State is read and written via `StorageRef` during precompile execution and is committed atomically with the EVM state root. Revm's Journal handles automatic rollback on transaction failure; there is no manual clone/snapshot mechanism.
-
-### Precompile-Level Enforcement
-
-The precompile dispatcher checks compliance on every value-moving precompile call:
-
-| Precompile Call | Compliance Check |
-|---|---|
-| `transfer` | sender + recipient |
-| `batchTransfer` | sender + every recipient |
-| `transferFrom` | sender (spender) + from + to |
-| `mint` | recipient |
-| `burn` | from |
-| `switchToEvm` | recipient |
-| `shieldedDeposit` / `shieldedWithdraw` | target address |
-
-Non-value precompile calls (`approve`, `submitPrice`, `governance*`, `agent*`, `updateCompliance` itself) do not trigger compliance checks.
-
-### RPC Surface
-
-| Method | Type | Description |
+| Status | Value | Meaning |
 |---|---|---|
-| `call_compliancePolicy(asset_id)` | query | Returns the `compliance_policy` u8 for an asset |
+| `Clear` | `0` | Address is compliant (default for unset addresses) |
+| `Restricted` | `1+` | Address is blocked from all value-moving operations |
 
-There is no direct RPC mutation endpoint for compliance state. All changes flow through EVM precompile calls:
-- `updateCompliance(uint64,address,uint8)` on `0x205` — issuer sets address status
-- Asset policy updates are done via the Asset precompile (`0x201`)
+Any non-zero status is treated as restricted. Specific values (1, 2, 3...) may be used for audit/logging purposes but have the same enforcement effect.
 
 ---
 
-## Current Status
+## Enforcement Layers
 
-### What Works
+### Layer 1: EVM Handler (Transaction Entry)
 
-| Component | Status | Details |
+**Location**: `crates/evm/src/executor.rs` — per-transaction validation
+
+**Checks**:
+1. **`tx.caller` is not blocklisted** — Before any EVM execution, verify the transaction sender's compliance status. If restricted, the entire transaction reverts.
+2. **`tx.value` recipient check** — If the transaction carries native value (`tx.value > 0`) and the recipient (`tx.to`) is blocklisted, revert.
+
+**Effect**: A blocklisted address **cannot initiate any EVM transaction** and **cannot receive native CALL transfers**.
+
+### Layer 2: Precompile (Protocol Operations)
+
+**Location**: Precompile dispatch layer
+
+**Checks** for value-moving precompiles:
+
+| Precompile | Method | Checked Addresses |
 |---|---|---|
-| **Policy types** | Ready | All 5 policies (None, OfacBlacklist, KycRequired, Whitelist, Custom) implemented and tested |
-| **Sender + recipient checks** | Ready | `Transfer`, `BatchTransfer`, `TransferFrom` check both sender and recipient compliance |
-| **Per-address status** | Ready | `Clear`/`UnderReview`/`Flagged`/`Restricted` statuses; `Restricted` blocks unconditionally |
-| **Custom handlers** | Ready | `CustomComplianceHandler` trait; all registered handlers must approve |
-| **Issuer authorization** | Ready | `UpdateCompliance` and `UpdatePolicy` require `asset.issuer == sender` |
-| **Atomic rollback** | Ready | Revm Journal handles automatic rollback on transaction failure |
-| **State persistence** | Ready | All state in EVM storage under `0x205`, committed with EVM state root |
+| Asset (`0x201`) | `transfer` | `to` (sender already blocked at Layer 1) |
+| Asset (`0x201`) | `batchTransfer` | all `to` addresses |
+| Asset (`0x201`) | `transferFrom` | `from` and `to` (spender = caller, already at Layer 1) |
+| Agent (`0x209`) | `pay` | `to` |
+| Agent (`0x209`) | `batchPay` | all `to` addresses |
+| Switch (`0x207`) | `switchToEvm` | `to` |
+| Switch (`0x207`) | `switchToProtocol` | `to` |
+
+**Effect**: Even if a transaction passes Layer 1, protocol-level value transfers to/from restricted addresses are blocked at the precompile level.
+
+**Why both layers?**
+- Layer 1 prevents blocklisted addresses from consuming gas / spamming the network
+- Layer 2 catches cases where a blocklisted address is the `from` or `to` in a precompile call where `msg.sender` is not the restricted party (e.g., `transferFrom` where a non-blocklisted spender tries to move funds from a blocklisted address)
 
 ---
 
-## Gaps & Suggestions
+## Governance-Managed Update Flow
 
-### Known Limitations
+Compliance changes flow exclusively through the governance proposal system:
 
-#### Custom Handler Registration
+### Step 1: Submit Proposal
 
-**Problem**: `Box<dyn CustomComplianceHandler>` cannot be serialized. After a node restart, custom handlers must be re-registered.
+```solidity
+IGovernance(0x203).submitProposal(
+    4,                                  // proposalType = ComplianceUpdate
+    "Blacklist address 0xabc...",       // title
+    "Add sanctioned address to...",     // description
+    abi.encode(
+        address(0xabcdef1234...),       // target
+        uint8(1)                        // status = Restricted
+    )
+);
+```
 
-**Impact**: Assets using `CompliancePolicy::Custom` will silently pass all checks until handlers are re-registered.
+- Requires 10,000 CALL deposit
+- Enters `Pending` → `Active` after review period
 
-**Mitigation**: Custom handlers must be re-registered during node initialization. A future improvement could add a registry of named handler factories (e.g. `HashMap<String, fn() -> Box<dyn CustomComplianceHandler>>`) that can be serialized and re-instantiated automatically.
+### Step 2: Vote
 
-#### No Dedicated Compliance RPC Mutations
+```solidity
+IGovernance(0x203).vote(proposalId, 1);  // 1 = For
+```
 
-**Problem**: There are no direct RPC endpoints to add/remove addresses from the blacklist, KYC list, or whitelist. The only way to modify these sets is via the Compliance precompile (`0x205`) `updateCompliance` function, submitted as a standard EVM transaction.
+- Voting power: validator 1=1 + CALL balance weighted
+- No special issuer weight (removed from previous design)
 
-**Impact**: Operators must construct and sign an EVM transaction calling the Compliance precompile to update compliance state.
+### Step 3: Queue
 
-**Status**: By design — compliance mutations go through consensus to ensure auditability and replay protection. The `updateCompliance` precompile call is the intended path.
+```solidity
+IGovernance(0x203).queue(proposalId);
+```
 
-#### Frozen Addresses (IssuerState) Are Separate
+- Requires quorum + more For than Against
+- Enters `Queued` with 100-block timelock
 
-**Problem**: `IssuerState.frozen` (per-asset address freezing) and compliance policy enforcement are separate systems in EVM storage. An address can be frozen for asset A but still pass compliance for asset B.
+### Step 4: Execute
 
-**Impact**: Operators must manage two independent restriction mechanisms.
+```solidity
+IGovernance(0x203).execute(proposalId);
+```
 
-**Status**: By design — `IssuerState` freezing is asset-specific issuer discretion; compliance policy enforcement is policy-driven. They serve different use cases. Both live in EVM storage.
+- After timelock elapsed
+- Writes to `COMPLIANCE_ADDRESS` storage:
+  ```
+  slot(target_address) = status
+  ```
+- Deposit refunded to proposer
+
+### Step 5: Immediate Effect
+
+From the next block, the restricted address:
+- Cannot submit any EVM transaction (Layer 1)
+- Cannot receive native CALL (Layer 1)
+- Cannot be a recipient in any protocol transfer (Layer 2)
+- Cannot have its funds moved by `transferFrom` (Layer 2)
+
+---
+
+## Storage Layout
+
+```
+COMPLIANCE_ADDRESS (0x205):
+  slot("admin")              → address (current admin, defaults to GOVERNANCE_ADDRESS)
+  slot(address_1)            → uint8 status
+  slot(address_2)            → uint8 status
+  ...
+```
+
+All state lives in EVM storage, committed atomically with the EVM state root.
+
+---
+
+## Key Design Decisions
+
+### Why remove asset binding?
+
+**Before**: Each asset had its own `policy_id` and issuer-managed compliance. This meant:
+- Asset issuers could arbitrarily blacklist addresses for their asset
+- No coordination between assets — an address could be blocked for asset A but free for asset B
+- Issuer power was unchecked and centralized per-asset
+
+**After**: Global address-level compliance managed by governance:
+- One unified blacklist for the entire chain
+- No per-asset fragmentation
+- Democratic control through governance voting
+- Simpler mental model: address is either compliant or not
+
+### Why dual-layer enforcement?
+
+EVM handler alone cannot catch all cases:
+- `transferFrom(from, to, amount)`: spender (caller) may be compliant, but `from` or `to` may be restricted
+- Precompile internal transfers (protocol balance slots) don't carry native EVM value
+
+Precompile layer alone is insufficient:
+- Gas consumption: a blocklisted address could still submit transactions that fail at the precompile, wasting block space
+- Native EVM transfers bypass precompiles entirely
+
+### Why keep `setComplianceAdmin`?
+
+For emergency response. If the governance timelock is too slow for an urgent sanction, the current admin (initially governance timelock) can transfer admin to a **security council multi-sig** that can act faster. The multi-sig can later transfer admin back to the timelock.
 
 ---
 
 ## Production Readiness Assessment
 
-| Component | Status | Blocker |
+| Component | Status | Notes |
 |---|---|---|
-| Policy enforcement | Ready | None |
-| Address status tracking | Ready | None |
-| Custom handlers | Ready | Requires re-registration after restart |
-| Persistence | Ready | None |
-| Precompile integration | Ready | None |
+| Global address status | Ready | Single slot per address, no asset coupling |
+| EVM handler layer | Ready | Caller + value recipient checks per tx |
+| Precompile layer | Ready | `from`/`to` checks on value-moving precompiles |
+| Governance integration | Ready | Proposal type 4 execution writes compliance state |
+| Admin transfer | Ready | `setComplianceAdmin` for emergency council |
+| Persistence | Ready | All state in EVM storage under `0x205` |
 
 ---
 
-*Last updated: 2026-05-07*
+## File Map
+
+| File | Role |
+|------|------|
+| `crates/compliance/src/lib.rs` | `ComplianceStorage`, storage slot helpers, status read/write |
+| `crates/compliance/src/precompile.rs` | `CompliancePrecompile`, ABI dispatch, admin enforcement |
+| `crates/evm/src/executor.rs` | EVM handler layer: caller blocklist check |
+| `crates/asset/src/precompile.rs` | Asset transfer: `to`/`from` compliance checks |
+| `crates/governance/src/precompile.rs` | Proposal type 4: `execute` writes compliance state |
+
+---
+
+*Last updated: 2026-05-14*

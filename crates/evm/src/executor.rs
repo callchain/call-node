@@ -9,6 +9,7 @@ use call_agent::AgentPrecompile;
 use call_asset::AssetPrecompile;
 use call_bridge::precompile::BridgePrecompile;
 use call_compliance::CompliancePrecompile;
+use call_precompile::slot_compliance;
 use call_governance::precompile::GovernancePrecompile;
 use call_oracle::precompile::OraclePrecompile;
 use call_precompile::{
@@ -20,6 +21,7 @@ use call_shielded::precompile::ShieldedPrecompile;
 use call_switch::precompile::SwitchPrecompile;
 use call_validator::ValidatorPrecompile;
 use revm::{
+    database_interface::Database,
     primitives::{hardfork::SpecId, Log, TxKind},
     Context, ExecuteEvm, InspectEvm, MainBuilder, MainContext,
 };
@@ -94,13 +96,31 @@ impl EvmExecutor {
     pub fn execute_tx_db<DB: revm::database_interface::Database>(
         &self,
         tx: EvmTransaction,
-        db: DB,
+        mut db: DB,
         block_number: u64,
         base_fee: u128,
     ) -> Result<(EvmExecutionResult, revm::state::EvmState), EvmError>
     where
         DB::Error: core::fmt::Debug,
     {
+        // Compliance check: blocklisted addresses cannot initiate transactions
+        let status = db
+            .storage(COMPLIANCE_ADDRESS, slot_compliance(tx.caller))
+            .map_err(|e| EvmError::ExecutionError(format!("compliance read: {e:?}")))?;
+        if status != U256::ZERO {
+            return Err(EvmError::InvalidTx("caller blocklisted"));
+        }
+        if !tx.value.is_zero() {
+            if let Some(to) = tx.to {
+                let status = db
+                    .storage(COMPLIANCE_ADDRESS, slot_compliance(to))
+                    .map_err(|e| EvmError::ExecutionError(format!("compliance read: {e:?}")))?;
+                if status != U256::ZERO {
+                    return Err(EvmError::InvalidTx("recipient blocklisted"));
+                }
+            }
+        }
+
         let tx_env = revm::context::TxEnv::builder()
             .caller(tx.caller)
             .gas_limit(tx.gas_limit)
@@ -184,7 +204,7 @@ impl EvmExecutor {
     pub fn execute_tx_db_inspected<DB: revm::database_interface::Database>(
         &self,
         tx: EvmTransaction,
-        db: DB,
+        mut db: DB,
         block_number: u64,
         base_fee: u128,
         initial_access_list: Option<alloy_eips::eip2930::AccessList>,
@@ -192,6 +212,24 @@ impl EvmExecutor {
     where
         DB::Error: core::fmt::Debug,
     {
+        // Compliance check: blocklisted addresses cannot initiate transactions
+        let status = db
+            .storage(COMPLIANCE_ADDRESS, slot_compliance(tx.caller))
+            .map_err(|e| EvmError::ExecutionError(format!("compliance read: {e:?}")))?;
+        if status != U256::ZERO {
+            return Err(EvmError::InvalidTx("caller blocklisted"));
+        }
+        if !tx.value.is_zero() {
+            if let Some(to) = tx.to {
+                let status = db
+                    .storage(COMPLIANCE_ADDRESS, slot_compliance(to))
+                    .map_err(|e| EvmError::ExecutionError(format!("compliance read: {e:?}")))?;
+                if status != U256::ZERO {
+                    return Err(EvmError::InvalidTx("recipient blocklisted"));
+                }
+            }
+        }
+
         let tx_env = revm::context::TxEnv::builder()
             .caller(tx.caller)
             .gas_limit(tx.gas_limit)
@@ -320,6 +358,24 @@ impl EvmExecutor {
     where
         DB::Error: core::fmt::Debug,
     {
+        // Compliance check: blocklisted addresses cannot initiate transactions
+        let status = cache_db
+            .storage(COMPLIANCE_ADDRESS, slot_compliance(tx.caller))
+            .map_err(|e| EvmError::ExecutionError(format!("compliance read: {e:?}")))?;
+        if status != U256::ZERO {
+            return Err(EvmError::InvalidTx("caller blocklisted"));
+        }
+        if !tx.value.is_zero() {
+            if let Some(to) = tx.to {
+                let status = cache_db
+                    .storage(COMPLIANCE_ADDRESS, slot_compliance(to))
+                    .map_err(|e| EvmError::ExecutionError(format!("compliance read: {e:?}")))?;
+                if status != U256::ZERO {
+                    return Err(EvmError::InvalidTx("recipient blocklisted"));
+                }
+            }
+        }
+
         let tx_env = revm::context::TxEnv::builder()
             .caller(tx.caller)
             .gas_limit(tx.gas_limit)
@@ -538,6 +594,20 @@ pub fn validate_evm_tx(
     let balance = state.get_balance(&tx.caller);
     if balance < required {
         return Err("insufficient balance");
+    }
+
+    // Compliance check
+    let status = state.get_storage(&COMPLIANCE_ADDRESS, slot_compliance(tx.caller));
+    if status != U256::ZERO {
+        return Err("caller blocklisted");
+    }
+    if !tx.value.is_zero() {
+        if let Some(to) = tx.to {
+            let status = state.get_storage(&COMPLIANCE_ADDRESS, slot_compliance(to));
+            if status != U256::ZERO {
+                return Err("recipient blocklisted");
+            }
+        }
     }
 
     Ok(())

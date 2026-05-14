@@ -7,7 +7,7 @@
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, dispatch, require_caller,
+    address_to_u256, dispatch, require_caller, slot_compliance,
     storage::{storage_slot, StorageProvider},
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
     COMPLIANCE_ADDRESS, VALIDATOR_ADDRESS,
@@ -729,16 +729,15 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 }
             }
             4 => {
-                // ComplianceUpdate: execution_data = ABI-encoded (address target, uint8 policyId, uint8 status)
-                if execution_data.len() >= 96 {
+                // ComplianceUpdate: execution_data = ABI-encoded (address target, uint8 status)
+                if execution_data.len() >= 64 {
                     let mut addr_buf = [0u8; 20];
                     addr_buf.copy_from_slice(&execution_data[12..32]);
                     let target = Address::from_slice(&addr_buf);
-                    let policy_id = execution_data[63];
-                    let status = execution_data[95];
+                    let status = execution_data[63];
                     self.backend.store(
                         COMPLIANCE_ADDRESS,
-                        storage_slot(&[target.as_slice(), &[policy_id]]),
+                        slot_compliance(target),
                         U256::from(status),
                     );
                 }
@@ -969,12 +968,10 @@ impl GovernancePrecompile {
                         voting_power = call_balance;
                     }
                     4 => {
-                        // ComplianceUpdate: joint voting (validator 1 + issuer weight)
+                        // ComplianceUpdate: validator 1=1 + balance weighted
                         if is_validator {
-                            voting_power += 1;
+                            voting_power = voting_power.max(1);
                         }
-                        // Check if caller is an asset issuer (simplified: check if they have issuer-level balance)
-                        // Full issuer check would scan all assets; for now use balance proxy.
                         voting_power = voting_power.max(call_balance);
                     }
                     5 => {
