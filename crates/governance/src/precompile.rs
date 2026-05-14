@@ -7,7 +7,7 @@
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, dispatch, require_caller, slot_compliance,
+    address_to_u256, check_compliance, dispatch, require_caller, slot_compliance,
     storage::{storage_slot, StorageProvider},
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
     COMPLIANCE_ADDRESS, VALIDATOR_ADDRESS,
@@ -891,6 +891,7 @@ impl GovernancePrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 let mut gov_store = GovernanceStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();

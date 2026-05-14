@@ -8,8 +8,8 @@ use alloy_primitives::{address, Address, U256};
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
-    dispatch, slot_balance, storage::storage_slot, u128_to_u256, u256_to_u128, u256_to_u64,
-    u64_to_u256, StorageRef, ASSET_ADDRESS,
+    check_compliance, dispatch, slot_balance, storage::storage_slot, u128_to_u256, u256_to_u128,
+    u256_to_u64, u64_to_u256, StorageRef, ASSET_ADDRESS,
 };
 use call_primitives::Hash;
 use call_protocol::storage_backend::StorageBackend;
@@ -350,7 +350,8 @@ impl ShieldedPrecompile {
             calldata,
             50000,
             storage,
-            |call, _storage| {
+            |call, storage| {
+                check_compliance(msg_sender, storage)?;
                 let mut store = ShieldedStorage::new(sr);
                 store
                     .deposit(
@@ -376,7 +377,8 @@ impl ShieldedPrecompile {
             calldata,
             50000,
             storage,
-            |call, _storage| {
+            |call, storage| {
+                check_compliance(call.target, storage)?;
                 let mut store = ShieldedStorage::new(sr);
                 store
                     .withdraw(

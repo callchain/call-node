@@ -7,7 +7,7 @@
 use crate::ValidatorStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
-use call_precompile::{dispatch, require_caller, storage::StorageProvider, StorageRef};
+use call_precompile::{check_compliance, dispatch, require_caller, storage::StorageProvider, StorageRef};
 use call_primitives::{Address, U256};
 use revm_precompile::{PrecompileError, PrecompileResult};
 
@@ -40,8 +40,9 @@ impl ValidatorPrecompile {
             calldata,
             20000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 let mut validator_store = ValidatorStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 validator_store
@@ -88,6 +89,7 @@ impl ValidatorPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 let mut validator_store = ValidatorStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();

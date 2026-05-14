@@ -13,7 +13,7 @@
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
-    dispatch, require_caller, slot_asset_meta, slot_balance, slot_evm_contract,
+    check_compliance, dispatch, require_caller, slot_asset_meta, slot_balance, slot_evm_contract,
     storage::StorageProvider, u128_to_u256, u256_to_address, u256_to_u128, StorageRef,
     ASSET_ADDRESS,
 };
@@ -256,6 +256,8 @@ impl SwitchPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
+                check_compliance(call.to, storage)?;
                 if call.amount == 0 {
                     return Err(PrecompileError::Other("amount must be > 0".into()));
                 }
@@ -323,6 +325,8 @@ impl SwitchPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
+                check_compliance(call.to, storage)?;
                 if call.amount == 0 {
                     return Err(PrecompileError::Other("amount must be > 0".into()));
                 }

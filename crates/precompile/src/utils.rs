@@ -6,8 +6,8 @@
 use alloy_primitives::{address, Address, U256};
 use revm_precompile::{PrecompileError, PrecompileOutput};
 
-use crate::storage::storage_slot;
-use crate::VALIDATOR_ADDRESS;
+use crate::storage::{storage_slot, StorageProvider};
+use crate::{COMPLIANCE_ADDRESS, VALIDATOR_ADDRESS};
 
 /// Asset precompile address (0x201).
 pub const ASSET_ADDRESS: Address = address!("0000000000000000000000000000000000000201");
@@ -269,6 +269,27 @@ pub fn write_string32(s: &str) -> U256 {
     let len = src.len().min(32);
     bytes[..len].copy_from_slice(&src[..len]);
     U256::from_be_bytes::<32>(bytes)
+}
+
+// ── Compliance helpers ────────────────────────────────────────────────
+
+/// Check global compliance status for an address.
+/// Returns `Ok(())` if the address is clear (status == 0),
+/// or `Err` if restricted (status > 0).
+pub fn check_compliance(
+    addr: Address,
+    storage: &mut dyn StorageProvider,
+) -> Result<(), PrecompileError> {
+    let status = storage
+        .sload(COMPLIANCE_ADDRESS, slot_compliance(addr))
+        .map(|v| v.to_be_bytes::<32>()[31])
+        .unwrap_or(0);
+
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(PrecompileError::Other("compliance check failed".into()))
+    }
 }
 
 // ── Precompile output helpers ─────────────────────────────────────────

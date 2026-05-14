@@ -9,8 +9,8 @@ use crate::AssetStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
-    dispatch, ok_empty, require_caller, slot_compliance, write_string32,
-    StorageRef, ASSET_ADDRESS, COMPLIANCE_ADDRESS, WRAPPED_TOKEN_FACTORY_ADDRESS,
+    check_compliance, dispatch, ok_empty, require_caller, write_string32,
+    StorageRef, ASSET_ADDRESS, WRAPPED_TOKEN_FACTORY_ADDRESS,
 };
 use call_precompile::erc20_reader::read_erc20_metadata;
 use call_precompile::evm_caller::{execute_evm_call, apply_state_changes, StorageProviderDb};
@@ -44,23 +44,6 @@ sol! {
 pub struct AssetPrecompile;
 
 impl AssetPrecompile {
-    /// Check global compliance for an address.
-    fn check_compliance(
-        addr: &Address,
-        storage: &mut dyn StorageProvider,
-    ) -> Result<(), PrecompileError> {
-        let status = storage
-            .sload(COMPLIANCE_ADDRESS, slot_compliance(*addr))
-            .map(|v| v.to_be_bytes::<32>()[31])
-            .unwrap_or(0);
-
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(PrecompileError::Other("compliance check failed".into()))
-        }
-    }
-
     fn get_balance(
         &self,
         calldata: &[u8],
@@ -117,7 +100,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let from = require_caller(msg_sender)?;
-                Self::check_compliance(&call.to, storage)?;
+                check_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .transfer(call.assetId, from, call.to, call.amount)
@@ -150,7 +133,7 @@ impl AssetPrecompile {
 
         let from = require_caller(msg_sender)?;
         for to in &call.to {
-            Self::check_compliance(to, storage)?;
+            check_compliance(*to, storage)?;
         }
 
         let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts).collect();
@@ -197,8 +180,8 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let spender = require_caller(msg_sender)?;
-                Self::check_compliance(&call.from, storage)?;
-                Self::check_compliance(&call.to, storage)?;
+                check_compliance(call.from, storage)?;
+                check_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
@@ -219,8 +202,9 @@ impl AssetPrecompile {
             calldata,
             10000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .mint(call.assetId, caller, call.to, call.amount)
@@ -241,8 +225,9 @@ impl AssetPrecompile {
             calldata,
             8000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(call.from, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .burn(call.assetId, caller, call.from, call.amount)

@@ -7,7 +7,8 @@
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, dispatch, require_caller, slot_asset_meta, storage::storage_slot,
+    address_to_u256, check_compliance, dispatch, require_caller, slot_asset_meta,
+    storage::storage_slot,
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
     ASSET_ADDRESS,
 };
@@ -776,6 +777,7 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let validator = require_caller(msg_sender)?;
+                check_compliance(call.recipient, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 let block_height = storage.block_number();
@@ -806,8 +808,9 @@ impl BridgePrecompile {
             calldata,
             30000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 bridge_store
@@ -829,7 +832,8 @@ impl BridgePrecompile {
             calldata,
             30000,
             storage,
-            |call, _storage| {
+            |call, storage| {
+                check_compliance(call.targetAddress, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 bridge_store
@@ -860,6 +864,7 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let challenger = require_caller(msg_sender)?;
+                check_compliance(challenger, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();
@@ -938,8 +943,9 @@ impl BridgePrecompile {
             calldata,
             5000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 bridge_store

@@ -8,7 +8,7 @@ use crate::{slot_agent_balance, AgentError, AgentStorage, SessionPolicy};
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::storage::StorageProvider;
-use call_precompile::{dispatch, require_caller, u128_to_u256, StorageRef, AGENT_ADDRESS};
+use call_precompile::{check_compliance, dispatch, require_caller, u128_to_u256, StorageRef, AGENT_ADDRESS};
 use call_primitives::Address;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
@@ -80,6 +80,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
 
                 // Step 1: validate agent exists and caller is owner
                 {
@@ -134,8 +135,9 @@ impl AgentPrecompile {
             calldata,
             6000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 let mut store = AgentStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 store
@@ -159,6 +161,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(call.to, storage)?;
                 let block_number = storage.block_number();
                 let mut agent_store = AgentStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
@@ -190,6 +193,9 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                for to in &call.to {
+                    check_compliance(*to, storage)?;
+                }
                 let block_number = storage.block_number();
                 let mut agent_store = AgentStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
@@ -423,6 +429,7 @@ impl AgentPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(call.to, storage)?;
                 let block_number = storage.block_number();
 
                 let mut agent_store = AgentStorage::new(sr);
