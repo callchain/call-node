@@ -20,6 +20,8 @@ fn make_test_evm_tx() -> EvmTransaction {
         nonce: 0,
         gas_limit: 21_000,
         gas_price: 1_000_000_000,
+        max_priority_fee: None,
+        tx_type: 0,
         to: Some(test_addr(2)),
         value: call_primitives::U256::from(100),
         data: call_evm::Bytes::default(),

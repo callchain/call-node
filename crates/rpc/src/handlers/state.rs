@@ -687,6 +687,8 @@ impl RpcState {
             nonce,
             gas_limit,
             gas_price,
+            max_priority_fee: None,
+            tx_type: 0,
             to,
             value,
             data,
@@ -743,6 +745,8 @@ impl RpcState {
             nonce,
             gas_limit,
             gas_price,
+            max_priority_fee: None,
+            tx_type: 0,
             to,
             value,
             data,
@@ -794,6 +798,19 @@ impl RpcState {
             TxEnvelope::Eip2930(signed) => signed.tx().gas_limit(),
             TxEnvelope::Eip7702(signed) => signed.tx().gas_limit(),
             TxEnvelope::Eip4844(signed) => signed.tx().gas_limit(),
+        };
+        let max_priority_fee = match &envelope {
+            TxEnvelope::Legacy(_) | TxEnvelope::Eip2930(_) => None,
+            TxEnvelope::Eip1559(signed) => signed.tx().max_priority_fee_per_gas(),
+            TxEnvelope::Eip7702(signed) => signed.tx().max_priority_fee_per_gas(),
+            TxEnvelope::Eip4844(signed) => signed.tx().max_priority_fee_per_gas(),
+        };
+        let tx_type = match &envelope {
+            TxEnvelope::Legacy(_) => 0,
+            TxEnvelope::Eip2930(_) => 1,
+            TxEnvelope::Eip1559(_) => 2,
+            TxEnvelope::Eip4844(_) => 3,
+            TxEnvelope::Eip7702(_) => 4,
         };
 
         // Validate nonce and balance
@@ -854,6 +871,8 @@ impl RpcState {
             nonce,
             gas_limit,
             gas_price,
+            max_priority_fee,
+            tx_type,
             to: to_addr,
             value,
             data: input,

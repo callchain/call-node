@@ -304,6 +304,8 @@ mod tests {
             nonce,
             gas_limit: 21_000,
             gas_price,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(test_addr(2)),
             value: U256::from(100),
             data,

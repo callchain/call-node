@@ -705,6 +705,8 @@ mod tests {
             nonce: 0,
             gas_limit: 21_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(recipient),
             value: U256::from(100),
             data: Bytes::default(),

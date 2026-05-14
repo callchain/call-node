@@ -58,6 +58,8 @@ pub struct EvmTransaction {
     pub nonce: u64,
     pub gas_limit: u64,
     pub gas_price: u128,
+    pub max_priority_fee: Option<u128>,
+    pub tx_type: u8,
     pub to: Option<Address>,
     pub value: U256,
     pub data: Bytes,
@@ -103,6 +105,7 @@ impl EvmExecutor {
             .caller(tx.caller)
             .gas_limit(tx.gas_limit)
             .gas_price(tx.gas_price)
+            .gas_priority_fee(tx.max_priority_fee)
             .kind(tx.to.map(TxKind::Call).unwrap_or(TxKind::Create))
             .value(tx.value)
             .data(tx.data.clone())
@@ -321,6 +324,7 @@ impl EvmExecutor {
             .caller(tx.caller)
             .gas_limit(tx.gas_limit)
             .gas_price(tx.gas_price)
+            .gas_priority_fee(tx.max_priority_fee)
             .kind(tx.to.map(TxKind::Call).unwrap_or(TxKind::Create))
             .value(tx.value)
             .data(tx.data.clone())
@@ -415,6 +419,8 @@ impl EvmExecutor {
             nonce,
             gas_limit: 10_000_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: None,
             value: U256::ZERO,
             data: init_code,
@@ -459,6 +465,8 @@ impl EvmExecutor {
             nonce: state.get_nonce(&caller),
             gas_limit: 500_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(contract),
             value: U256::ZERO,
             data: Bytes::from(data),
@@ -496,6 +504,8 @@ impl EvmExecutor {
             nonce: state.get_nonce(&caller),
             gas_limit: 500_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(contract),
             value: U256::ZERO,
             data: Bytes::from(data),
@@ -697,6 +707,8 @@ mod tests {
             nonce: 0,
             gas_limit: 21_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(test_addr(2)),
             value: U256::ZERO,
             data: Bytes::default(),
@@ -717,6 +729,8 @@ mod tests {
             nonce: 0,
             gas_limit: 21_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(test_addr(2)),
             value: U256::from(1000),
             data: Bytes::default(),
@@ -750,6 +764,8 @@ mod tests {
             nonce: 0,
             gas_limit: 21_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(test_addr(2)),
             value: U256::from(100),
             data: Bytes::default(),
@@ -833,6 +849,8 @@ mod tests {
             nonce: 0,
             gas_limit: 100_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(contract),
             value: U256::ZERO,
             data: code,
@@ -885,6 +903,8 @@ mod tests {
             nonce: 0,
             gas_limit: 21_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(recipient),
             value: U256::from(100),
             data: Bytes::default(),
@@ -936,6 +956,8 @@ mod tests {
             nonce: 0,
             gas_limit: 21_000,
             gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
             to: Some(test_addr(2)),
             value: U256::from(100),
             data: Bytes::default(),
@@ -981,6 +1003,8 @@ mod tests {
                 nonce,
                 gas_limit,
                 gas_price,
+                max_priority_fee: None,
+                tx_type: 0,
                 to: to.map(call_primitives::Address::from),
                 value: U256::from_be_bytes(value),
                 data: Bytes::from(data),

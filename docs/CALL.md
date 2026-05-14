@@ -17,7 +17,7 @@ Previously, the system attempted to keep both balances in sync: genesis seeded b
 - **Complexity**: Every protocol operation on CALL required conditional native-balance bookkeeping.
 - **Confusion**: Users could not reason about which balance was authoritative.
 
-The new model makes the separation explicit: both balances are real, both are spendable (in their own domain), and migration between them is a deliberate user action via the Switch precompile.
+The new model makes the separation explicit: both balances are real, both are spendable (in their own domain), and migration between them is a deliberate user action via the Switch precompile. However, block execution **does** provide an automatic pre-bridge for gas payment with explicit refund accounting and event emission to prevent divergence.
 
 ## Genesis Initialization
 
@@ -76,19 +76,31 @@ Moves CALL from protocol balance to EVM native balance.
 
 **CALL does not require an ERC-20 wrapper** — it switches directly between the two native balance stores.
 
-## Removed Automatic Sync
+## Automatic Balance Behaviors
+
+### Still Active
+
+- **Block pre-bridge** (`crates/evm/src/block_executor.rs`) automatically moves protocol CALL to EVM native balance when a transaction's native balance is insufficient for gas. This uses a two-event mechanism with explicit refund to prevent divergence:
+  - `GasBridge(address,uint256,uint256,uint256)` — emitted before execution, records the borrowed amount.
+  - `GasBridgeSettled(address,uint256,uint256,uint256)` — emitted after execution, records actual gas cost and refund.
+
+### Removed
 
 The following automatic CALL balance sync behaviors have been removed:
 
 1. **Asset precompile transfer/batchTransfer/transferFrom** no longer mirror CALL moves to native balance.
-2. **Block pre-bridge** (`crates/consensus/src/block.rs`) no longer auto-moves protocol CALL to EVM for gas payment. EVM transactions must have sufficient native balance or they fail.
-3. **Genesis no longer seeds protocol slots** for CALL distribution.
+2. **Genesis no longer seeds protocol slots** for CALL distribution.
 
 ## Impact on Protocol Operations
 
 ### Gas Payment
 
-EVM transactions require sufficient **native EVM balance** to pay for gas. If a user only holds CALL in the protocol layer, they must first `switchToEvm` before sending EVM transactions.
+EVM transactions require sufficient **native EVM balance** to pay for gas. Block execution automatically provides a **two-event pre-bridge** for users whose native balance is insufficient:
+
+1. **Before execution** — If `native_balance < value + gas_limit * gas_price`, the executor deducts the shortfall from the caller's **protocol CALL balance** and credits it to their native EVM balance. A `GasBridge` event is emitted.
+2. **After execution** — The actual gas cost is computed (`gas_used * effective_gas_price`). Any surplus borrowed amount (`borrowed - value - actual_cost`) is returned to the protocol balance. A `GasBridgeSettled` event is emitted with the actual cost and refund.
+
+If a user only holds CALL in the protocol layer, the pre-bridge allows EVM transactions to succeed without manual `switchToEvm`. The protocol balance decreases by exactly the gas consumed (plus any value transferred).
 
 ### Staking
 
@@ -110,7 +122,7 @@ Governance proposal deposits and treasury payouts currently operate on **protoco
 |------|---------------|
 | `crates/chainspec/src/genesis.rs` | Genesis: CALL distributed as native balance only |
 | `crates/asset/src/precompile.rs` | Asset precompile: no CALL→native sync in transfer/transferFrom/batchTransfer |
-| `crates/consensus/src/block.rs` | Block execution: no pre-bridge protocol→EVM for gas |
+| `crates/evm/src/block_executor.rs` | Block execution: two-event pre-bridge protocol→EVM for gas with refund |
 | `crates/switch/src/precompile.rs` | Switch precompile: `switchToEvm` / `switchToProtocol` for CALL migration |
 
 ### Constants
