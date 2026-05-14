@@ -36,7 +36,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 | `0x204` | **Validator** | `stake`, `unstake`, `claimUnbonded`, `getValidatorStake`, `getValidatorStatus`, `getValidatorPubkey`, `getUnbondHeight`, `getValidatorByIndex` |
 | `0x205` | **Compliance** | `updateCompliance`, `checkCompliance` |
 | `0x207` | **Switch** | `switchToEvm`, `switchToProtocol` |
-| `0x209` | **Agent** | `registerAgent`, `grantBalance`, `revokeBalance`, `pay`, `batchPay`, `withdrawBalance`, `revokeAgent`, `getAgentOwner`, `getAgentBalance`, `getAgentName`, `getAgentUrl`, `getAgentPerms` |
+| `0x209` | **Agent** | `registerAgent`, `grantBalance`, `revokeBalance`, `pay`, `batchPay`, `revokeAgent`, `getAgentOwner`, `getAgentBalance`, `getAgentName`, `getAgentUrl`, `getAgentPerms` |
 
 > **Deprecated addresses**: `0x102` (Balance, merged into `0x201`), `0x208` (ExternalBridge, merged into `0x103`).
 
@@ -233,13 +233,15 @@ Agent registration and delegated balance management. Agents are sub-accounts tha
 ```solidity
 interface IProtocolAgent {
     // Write
-    function registerAgent(string name, string url, bytes32 pubkeyHash) external;
+    function registerAgent(string name, string url, address agentAddress) external;
     function grantBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
     function revokeBalance(uint64 agentId, uint64 assetId) external;
-    function pay(uint64 agentId, uint64 assetId, address to, uint128 amount) external;
-    function batchPay(uint64 agentId, uint64 assetId, address[] to, uint128[] amounts) external;
-    function withdrawBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
+    function pay(uint64 assetId, address to, uint128 amount) external;
+    function batchPay(uint64 assetId, address[] to, uint128[] amounts) external;
     function revokeAgent(uint64 agentId) external;
+    function createSession(uint64 agentId, address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external;
+    function revokeSession(uint64 agentId, uint64 sessionId) external;
+    function executeSessionTransfer(uint64 agentId, uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
 
     // Read
     function getAgentOwner(uint64 agentId) external view returns (address);
@@ -247,18 +249,21 @@ interface IProtocolAgent {
     function getAgentName(uint64 agentId) external view returns (bytes32);
     function getAgentUrl(uint64 agentId) external view returns (bytes32);
     function getAgentPerms(uint64 agentId) external view returns (uint256);
+    function isSessionValid(uint64 agentId, uint64 sessionId) external view returns (uint64);
 }
 ```
 
 ### Behavior
 
-- `registerAgent`: Registers a new agent with the caller as owner. Agent ID is auto-incremented.
+- `registerAgent`: Registers a new agent with the caller as owner. Agent ID is auto-incremented. `agentAddress` must be unique (one agent per address) and non-zero.
 - `grantBalance` (owner only): Deducts from owner's protocol balance and credits agent's sub-account balance.
 - `revokeBalance` (owner only): Returns agent's entire balance for the asset back to the owner's protocol balance, then clears the agent balance.
-- `pay` (owner only): Deducts from agent balance and credits recipient's protocol balance. Enforces per-transaction limit and asset permissions.
-- `batchPay` (owner only): Batch version of `pay`. Each amount is checked against the per-transaction limit.
-- `withdrawBalance` (owner only): Withdraws a specific amount from agent balance back to owner's protocol balance.
-- `revokeAgent` (owner only): Permanently revokes the agent by zeroing all metadata slots (owner, pubkey, name, url, perms, registered_at). Does not automatically return balances -- call `revokeBalance` for each asset first.
+- `pay` (agent only): Deducts from agent balance and credits recipient's protocol balance. Enforces per-transaction limit and asset permissions. The agent is looked up from `msg.sender` via reverse index.
+- `batchPay` (agent only): Batch version of `pay`. Each amount is checked against the per-transaction limit. The agent is looked up from `msg.sender` via reverse index.
+- `revokeAgent` (owner only): Permanently revokes the agent by zeroing all metadata slots (owner, agentAddress, name, url, perms, registered_at) and clearing the reverse index. Does not automatically return balances -- call `revokeBalance` for each asset first.
+- `createSession` (owner only): Creates a time/amount-limited session key for a delegate address.
+- `revokeSession` (owner only): Immediately invalidates a session.
+- `executeSessionTransfer` (delegate only): Transfers from agent balance to recipient within session limits.
 
 ### Permissions
 
@@ -530,8 +535,10 @@ Gas is computed at two layers:
 | `revokeBalance` | 6,000 | + balance transfer (returns to owner) |
 | `pay` | 30,000 | + balance transfer + perm check |
 | `batchPay` | 30,000 | + per-recipient balance transfer |
-| `withdrawBalance` | 50,000 | + balance transfer (returns to owner) |
 | `revokeAgent` | 20,000 | + multiple sstores |
+| `createSession` | 10,000 | + sstore |
+| `revokeSession` | 6,000 | + sstore |
+| `executeSessionTransfer` | 30,000 | + balance transfer + session check |
 | `getAgentOwner` | 2,000 | + sload |
 | `getAgentBalance` | 2,000 | + sload |
 | `getAgentName` | 2,000 | + sload |

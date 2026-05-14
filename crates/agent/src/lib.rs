@@ -26,6 +26,7 @@ pub enum AgentError {
     EmptyBatch,
     SessionNotFound,
     InvalidDelegate,
+    AgentAlreadyExists,
 }
 
 impl std::fmt::Display for AgentError {
@@ -42,6 +43,7 @@ impl std::fmt::Display for AgentError {
             AgentError::EmptyBatch => write!(f, "empty batch"),
             AgentError::SessionNotFound => write!(f, "agent: session not found"),
             AgentError::InvalidDelegate => write!(f, "agent: invalid delegate"),
+            AgentError::AgentAlreadyExists => write!(f, "agent: address already registered"),
         }
     }
 }
@@ -87,6 +89,10 @@ pub fn slot_agent_balance(agent_id: u64, asset_id: u64) -> U256 {
         &agent_id.to_be_bytes()[..],
         &asset_id.to_be_bytes()[..],
     ])
+}
+
+pub fn slot_agent_by_address(addr: Address) -> U256 {
+    storage_slot(&[b"agent_by_addr", addr.as_slice()])
 }
 
 /// Approximate blocks per day (5s block time).
@@ -210,6 +216,13 @@ impl<B: StorageBackend> AgentStorage<B> {
         )
     }
 
+    pub fn find_agent_by_address(&mut self, addr: Address) -> u64 {
+        let id = u256_to_u64(
+            self.backend.load(AGENT_ADDRESS, slot_agent_by_address(addr)),
+        );
+        id
+    }
+
     pub fn read_name(&mut self, agent_id: u64) -> [u8; 32] {
         self.backend
             .load(AGENT_ADDRESS, slot_agent_name(agent_id))
@@ -292,6 +305,14 @@ impl<B: StorageBackend> AgentStorage<B> {
         caller: Address,
         current_block: u64,
     ) -> Result<(), AgentError> {
+        if agent_address == Address::ZERO {
+            return Err(AgentError::AgentAlreadyExists);
+        }
+        let existing = self.find_agent_by_address(agent_address);
+        if existing != u64::MAX && self.read_agent_address(existing) == agent_address {
+            return Err(AgentError::AgentAlreadyExists);
+        }
+
         let count = self.read_count();
         let agent_id = count;
         self.backend
@@ -305,6 +326,11 @@ impl<B: StorageBackend> AgentStorage<B> {
             AGENT_ADDRESS,
             slot_agent_address(agent_id),
             address_to_u256(agent_address),
+        );
+        self.backend.store(
+            AGENT_ADDRESS,
+            slot_agent_by_address(agent_address),
+            u64_to_u256(agent_id),
         );
         self.backend.store(
             AGENT_ADDRESS,
@@ -374,21 +400,19 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn pay(
         &mut self,
         asset_store: &mut AssetStorage<B>,
-        agent_id: u64,
         asset_id: u64,
         to: Address,
         amount: u128,
         caller: Address,
         current_block: u64,
     ) -> Result<(), AgentError> {
-        if !self.agent_exists(agent_id) {
+        let agent_id = self.find_agent_by_address(caller);
+        if !self.agent_exists(agent_id) || self.read_agent_address(agent_id) != caller {
             return Err(AgentError::NotFound);
         }
-        self.check_agent(agent_id, caller)?;
 
         let (per_tx_limit, _, _) = self.require_perms(agent_id, asset_id, current_block)?;
         if amount > per_tx_limit {
@@ -407,11 +431,9 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn batch_pay(
         &mut self,
         asset_store: &mut AssetStorage<B>,
-        agent_id: u64,
         asset_id: u64,
         recipients: &[Address],
         amounts: &[u128],
@@ -425,10 +447,10 @@ impl<B: StorageBackend> AgentStorage<B> {
             return Err(AgentError::EmptyBatch);
         }
 
-        if !self.agent_exists(agent_id) {
+        let agent_id = self.find_agent_by_address(caller);
+        if !self.agent_exists(agent_id) || self.read_agent_address(agent_id) != caller {
             return Err(AgentError::NotFound);
         }
-        self.check_agent(agent_id, caller)?;
 
         let (per_tx_limit, _, _) = self.require_perms(agent_id, asset_id, current_block)?;
 
@@ -459,6 +481,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         }
         self.check_owner(agent_id, caller)?;
 
+        let addr = self.read_agent_address(agent_id);
         self.backend
             .store(AGENT_ADDRESS, slot_agent_owner(agent_id), U256::ZERO);
         self.backend
@@ -474,6 +497,10 @@ impl<B: StorageBackend> AgentStorage<B> {
             slot_agent_registered_at(agent_id),
             U256::ZERO,
         );
+        if addr != Address::ZERO {
+            self.backend
+                .store(AGENT_ADDRESS, slot_agent_by_address(addr), U256::ZERO);
+        }
         Ok(())
     }
 
@@ -777,7 +804,7 @@ mod tests {
         let caller = Address::repeat_byte(0x22);
 
         store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), caller, 1)
             .unwrap();
 
         assert!(store.check_owner(0, caller).is_ok());
@@ -794,7 +821,7 @@ mod tests {
         let caller = Address::repeat_byte(0x22);
 
         store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), caller, 1)
             .unwrap();
         // Override perms: expires_at=50
         store.backend.store(
@@ -816,7 +843,7 @@ mod tests {
         let caller = Address::repeat_byte(0x22);
 
         store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), caller, 1)
             .unwrap();
         // Override perms: flags=0 (bit 0 clear = asset 1 not allowed)
         store.backend.store(
@@ -855,7 +882,6 @@ mod tests {
         agent_store
             .pay(
                 &mut asset_store,
-                0,
                 CALL_ASSET_ID,
                 recipient,
                 1_000,
@@ -895,7 +921,6 @@ mod tests {
         agent_store
             .batch_pay(
                 &mut asset_store,
-                0,
                 CALL_ASSET_ID,
                 &[r1, r2],
                 &[500, 800],
@@ -927,7 +952,6 @@ mod tests {
         assert!(matches!(
             agent_store.batch_pay(
                 &mut asset_store,
-                0,
                 CALL_ASSET_ID,
                 &[Address::repeat_byte(0x33)],
                 &[1_000, 2_000],
@@ -955,7 +979,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            agent_store.batch_pay(&mut asset_store, 0, CALL_ASSET_ID, &[], &[], agent, 1,),
+            agent_store.batch_pay(&mut asset_store, CALL_ASSET_ID, &[], &[], agent, 1,),
             Err(AgentError::EmptyBatch)
         ));
     }
@@ -980,7 +1004,6 @@ mod tests {
         assert!(matches!(
             agent_store.pay(
                 &mut asset_store,
-                0,
                 CALL_ASSET_ID,
                 Address::repeat_byte(0x33),
                 2_000,
@@ -998,7 +1021,7 @@ mod tests {
         let caller = Address::repeat_byte(0x22);
 
         store
-            .register_agent("A", "url", Address::ZERO, caller, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), caller, 1)
             .unwrap();
         assert!(store.agent_exists(0));
 
@@ -1023,7 +1046,7 @@ mod tests {
             Err(AgentError::NotFound)
         ));
         assert!(matches!(
-            agent_store.pay(&mut asset_store, 0, 1, Address::ZERO, 100, caller, 1,),
+            agent_store.pay(&mut asset_store, 1, Address::ZERO, 100, caller, 1,),
             Err(AgentError::NotFound)
         ));
         assert!(matches!(
@@ -1055,7 +1078,7 @@ mod tests {
 
         // Register agent and seed caller balance
         agent_store
-            .register_agent("test", "https://test.com", Address::ZERO, caller, 1)
+            .register_agent("test", "https://test.com", Address::repeat_byte(0xBB), caller, 1)
             .unwrap();
         asset_store.write_balance(1, caller, u128::MAX);
 
@@ -1089,7 +1112,7 @@ mod tests {
         let delegate = Address::repeat_byte(0x33);
 
         store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
 
         let session_id = store
@@ -1113,7 +1136,7 @@ mod tests {
         let delegate = Address::repeat_byte(0x33);
 
         store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
 
         assert!(matches!(
@@ -1130,7 +1153,7 @@ mod tests {
         let delegate = Address::repeat_byte(0x33);
 
         store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
         store.create_session(0, delegate, 1_000, 5_000, 100, owner).unwrap();
 
@@ -1148,7 +1171,7 @@ mod tests {
         let delegate = Address::repeat_byte(0x33);
 
         store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
         store.create_session(0, delegate, 1_000, 5_000, 100, owner).unwrap();
 
@@ -1167,7 +1190,7 @@ mod tests {
         let recipient = Address::repeat_byte(0x44);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
@@ -1205,7 +1228,7 @@ mod tests {
         let recipient = Address::repeat_byte(0x44);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
@@ -1240,7 +1263,7 @@ mod tests {
         let recipient = Address::repeat_byte(0x44);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
@@ -1306,7 +1329,7 @@ mod tests {
         let recipient = Address::repeat_byte(0x44);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
@@ -1341,7 +1364,7 @@ mod tests {
         let recipient = Address::repeat_byte(0x44);
 
         agent_store
-            .register_agent("A", "url", Address::ZERO, owner, 1)
+            .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store

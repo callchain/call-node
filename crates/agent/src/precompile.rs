@@ -17,8 +17,8 @@ sol! {
         function registerAgent(string name, string url, address agentAddress) external;
         function grantBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
         function revokeBalance(uint64 agentId, uint64 assetId) external;
-        function pay(uint64 agentId, uint64 assetId, address to, uint128 amount) external;
-        function batchPay(uint64 agentId, uint64 assetId, address[] to, uint128[] amounts) external;
+        function pay(uint64 assetId, address to, uint128 amount) external;
+        function batchPay(uint64 assetId, address[] to, uint128[] amounts) external;
         function revokeAgent(uint64 agentId) external;
         function getAgentOwner(uint64 agentId) external view returns (address);
         function getAgentAddress(uint64 agentId) external view returns (address);
@@ -160,51 +160,18 @@ impl AgentPrecompile {
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
                 let block_number = storage.block_number();
-
-                // Step 1: validate, check perms, compute new agent balance
-                let new_agent_bal = {
-                    let mut agent_store = AgentStorage::new(sr);
-                    if !agent_store.agent_exists(call.agentId) {
-                        return Err(PrecompileError::Other(
-                            AgentError::NotFound.to_string().into(),
-                        ));
-                    }
-                    agent_store
-                        .check_agent(call.agentId, caller)
-                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                    let (per_tx_limit, _, _) = agent_store
-                        .require_perms(call.agentId, call.assetId, block_number)
-                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                    if call.amount > per_tx_limit {
-                        return Err(PrecompileError::Other(
-                            AgentError::AmountExceedsLimit.to_string().into(),
-                        ));
-                    }
-                    agent_store
-                        .read_agent_balance(call.agentId, call.assetId)
-                        .checked_sub(call.amount)
-                        .ok_or_else(|| {
-                            PrecompileError::Other(
-                                AgentError::InsufficientBalance.to_string().into(),
-                            )
-                        })?
-                };
-
-                // Step 2: add balance to recipient
-                {
-                    let mut asset_store = AssetStorage::new(sr);
-                    asset_store
-                        .add_balance(call.assetId, call.to, call.amount)
-                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                }
-
-                // Step 3: update agent balance
-                storage.sstore(
-                    AGENT_ADDRESS,
-                    slot_agent_balance(call.agentId, call.assetId),
-                    u128_to_u256(new_agent_bal),
-                )?;
-
+                let mut agent_store = AgentStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
+                agent_store
+                    .pay(
+                        &mut asset_store,
+                        call.assetId,
+                        call.to,
+                        call.amount,
+                        caller,
+                        block_number,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(())
             },
         )
@@ -219,73 +186,23 @@ impl AgentPrecompile {
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolAgent::batchPayCall, _>(
             calldata,
-            30000, // base gas; per-recipient gas not scaled in dispatch
+            30000,
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
                 let block_number = storage.block_number();
-
-                if call.to.len() != call.amounts.len() {
-                    return Err(PrecompileError::Other(
-                        AgentError::ArrayLengthMismatch.to_string().into(),
-                    ));
-                }
-                if call.to.is_empty() {
-                    return Err(PrecompileError::Other(
-                        AgentError::EmptyBatch.to_string().into(),
-                    ));
-                }
-
-                let total_amount: u128 = call.amounts.iter().copied().sum();
-
-                // Step 1: validate, check perms, compute new agent balance
-                let new_agent_bal = {
-                    let mut agent_store = AgentStorage::new(sr);
-                    if !agent_store.agent_exists(call.agentId) {
-                        return Err(PrecompileError::Other(
-                            AgentError::NotFound.to_string().into(),
-                        ));
-                    }
-                    agent_store
-                        .check_agent(call.agentId, caller)
-                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                    let (per_tx_limit, _, _) = agent_store
-                        .require_perms(call.agentId, call.assetId, block_number)
-                        .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                    for amount in call.amounts.iter() {
-                        if *amount > per_tx_limit {
-                            return Err(PrecompileError::Other(
-                                AgentError::AmountExceedsLimit.to_string().into(),
-                            ));
-                        }
-                    }
-                    agent_store
-                        .read_agent_balance(call.agentId, call.assetId)
-                        .checked_sub(total_amount)
-                        .ok_or_else(|| {
-                            PrecompileError::Other(
-                                AgentError::InsufficientBalance.to_string().into(),
-                            )
-                        })?
-                };
-
-                // Step 2: add balances to recipients
-                {
-                    let mut asset_store = AssetStorage::new(sr);
-                    for (recipient, amount) in call.to.iter().zip(call.amounts.iter()) {
-                        asset_store
-                            .add_balance(call.assetId, *recipient, *amount)
-                            .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                    }
-                }
-
-                // Step 3: update agent balance
-                storage.sstore(
-                    AGENT_ADDRESS,
-                    slot_agent_balance(call.agentId, call.assetId),
-                    u128_to_u256(new_agent_bal),
-                )?;
-
+                let mut agent_store = AgentStorage::new(sr);
+                let mut asset_store = AssetStorage::new(sr);
+                agent_store
+                    .batch_pay(
+                        &mut asset_store,
+                        call.assetId,
+                        &call.to,
+                        &call.amounts,
+                        caller,
+                        block_number,
+                    )
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(())
             },
         )
@@ -699,9 +616,8 @@ mod tests {
         });
         assert_eq!(bal, 5_000);
 
-        // pay(agentId=0, assetId=1, to=recipient, amount=1_000) — called by agent
+        // pay(assetId=1, to=recipient, amount=1_000) — called by agent
         let input = IProtocolAgent::payCall {
-            agentId: 0,
             assetId: crate::CALL_ASSET_ID,
             to: recipient,
             amount: 1_000,
@@ -980,7 +896,6 @@ mod tests {
 
         // pay called by agent address (not owner)
         let input = IProtocolAgent::payCall {
-            agentId: 0,
             assetId: crate::CALL_ASSET_ID,
             to: recipient,
             amount: 800,

@@ -19,8 +19,8 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 | Register agent | `registerAgent(string,string,address)` | 6,000 + storage |
 | Grant balance | `grantBalance(uint64,uint64,uint128)` | 6,000 + storage |
 | Revoke balance | `revokeBalance(uint64,uint64)` | 6,000 + storage |
-| Pay | `pay(uint64,uint64,address,uint128)` | 30,000 + storage |
-| Batch pay | `batchPay(uint64,uint64,address[],uint128[])` | 30,000 + storage |
+| Pay | `pay(uint64,address,uint128)` | 30,000 + storage |
+| Batch pay | `batchPay(uint64,address[],uint128[])` | 30,000 + storage |
 | Create session | `createSession(uint64,address,uint128,uint128,uint64)` | 10,000 + storage |
 | Revoke session | `revokeSession(uint64,uint64)` | 6,000 + storage |
 | Is session valid | `isSessionValid(uint64,uint64)` | 2,000 + storage |
@@ -41,14 +41,14 @@ See [precompile.md](precompile.md) for the full ABI.
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │ AgentStorage<B: StorageBackend>                      │  │
 │  │                                                      │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │  │
-│  │  │ AgentRegistry│  │ AgentBalances│  │ AgentNonces │  │  │
-│  │  │ - agents    │  │ - (owner,id,│  │ - (owner,id)│  │  │
-│  │  │ - by_owner  │  │   asset)→amt│  │ → nonce     │  │  │
-│  │  │ - by_name   │  │ - grant     │  │ - increment │  │  │
-│  │  │             │  │ - revoke    │  │             │  │  │
-│  │  │             │  │ - deduct    │  │             │  │  │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘  │  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
+│  │  │ AgentRegistry│  │ AgentBalances│  │ AgentNonces │  │  Reverse    │  │
+│  │  │ - agents    │  │ - (owner,id,│  │ - (owner,id)│  │  Index      │  │
+│  │  │ - by_owner  │  │   asset)→amt│  │ → nonce     │  │  (address   │  │
+│  │  │ - by_name   │  │ - grant     │  │ - increment │  │   → id)     │  │
+│  │  │ - by_addr   │  │ - revoke    │  │             │  │             │  │
+│  │  │             │  │ - deduct    │  │             │  │             │  │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  │
 │  │                                                      │  │
 │  │  Reads / writes EVM storage slots under AGENT_ADDRESS │  │
 │  │  (0x209) via StorageRef                               │  │
@@ -68,11 +68,11 @@ Implemented operations:
 - `register_agent(owner, name, url, agent_address)` — registers a new agent, returns `agent_id`
 - `grant_balance(owner, agent_id, asset_id, amount)` — credits agent balance, deducts from owner
 - `revoke_balance(owner, agent_id, asset_id)` — revokes all agent balance for an asset
-- `pay(agent, agent_id, asset_id, recipient, amount)` — agent address pays from agent balance to recipient
-- `batch_pay(agent, agent_id, asset_id, recipients[], amounts[])` — agent address batch payment from agent balance
+- `pay(asset_id, recipient, amount)` — agent address pays from its balance to recipient (caller must be registered `agent_address`)
+- `batch_pay(asset_id, recipients[], amounts[])` — agent address batch payment from its balance (caller must be registered `agent_address`)
 - `revoke_agent(owner, agent_id)` — deregisters an agent
 
-All operations are caller-authenticated via `msg.sender`. `pay` and `batchPay` can only be called by the registered `agent_address`, not the owner.
+All operations are caller-authenticated via `msg.sender`. `pay` and `batchPay` look up the agent via reverse index from `msg.sender` and can only be called by the registered `agent_address`, not the owner.
 
 ### 2. Agent Registration
 
@@ -84,9 +84,9 @@ All operations are caller-authenticated via `msg.sender`. `pay` and `batchPay` c
 - `registered_at`: Block number of registration
 
 `AgentStorage` supports:
-- Register by owner with name uniqueness enforcement
-- Lookup by ID, name, or owner
-- Agent revocation
+- Register by owner with **name and `agent_address` uniqueness enforcement** (one agent per address)
+- Lookup by ID, name, owner, or `agent_address` (reverse index)
+- Agent revocation (clears reverse index)
 
 ### 3. Agent Permissions
 
