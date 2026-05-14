@@ -24,7 +24,7 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 | Create session | `createSession(address,uint128,uint128,uint64)` | 10,000 + storage |
 | Revoke session | `revokeSession(uint64)` | 6,000 + storage |
 | Is session valid | `isSessionValid(uint64)` | 2,000 + storage |
-| Execute session transfer | `executeSessionTransfer(uint64,uint64,address,uint128)` | 30,000 + storage |
+| Execute session transfer | `executeSession(uint64,uint64,address,uint128)` | 30,000 + storage |
 
 Gas is dynamically metered: `gas_used = base_gas + sloads*50 + sstores*500`.
 
@@ -106,7 +106,7 @@ Session keys allow any address (owner) to delegate limited, time-bound spending 
 #### Session Lifecycle
 
 1. **Create**: Owner calls `createSession(delegate, perTxLimit, dailyLimit, expiresAt)` → returns `sessionId`
-2. **Execute**: Delegate calls `executeSessionTransfer(sessionId, assetId, to, amount)` → transfers from owner balance to recipient
+2. **Execute**: Delegate calls `executeSession(sessionId, assetId, to, amount)` → transfers from owner balance to recipient
 3. **Revoke**: Owner calls `revokeSession(sessionId)` → immediately invalidates the session
 4. **Auto-expire**: Sessions automatically become invalid after `expiresAt` block
 
@@ -115,7 +115,7 @@ Session keys allow any address (owner) to delegate limited, time-bound spending 
 | Field | Type | Description |
 |-------|------|-------------|
 | `delegate` | `address` | The EOA address authorized to execute on behalf of the owner |
-| `perTxLimit` | `uint128` | Maximum amount per single `executeSessionTransfer` |
+| `perTxLimit` | `uint128` | Maximum amount per single `executeSession` |
 | `dailyLimit` | `uint128` | Maximum cumulative amount per day (~17,280 blocks) |
 | `expiresAt` | `uint64` | Block number after which the session is invalid (0 = never) |
 
@@ -140,9 +140,9 @@ slot_session_last_day(session_id)     → uint64
 | `createSession` | 10,000 |
 | `revokeSession` | 6,000 |
 | `isSessionValid` | 2,000 |
-| `executeSessionTransfer` | 30,000 |
+| `executeSession` | 30,000 |
 
-Note: Gas is paid by the delegate (EVM `msg.sender`) when calling `executeSessionTransfer`. The transferred amount is deducted from the owner's balance, not the delegate's.
+Note: Gas is paid by the delegate (EVM `msg.sender`) when calling `executeSession`. The transferred amount is deducted from the owner's balance, not the delegate's.
 
 ### 4. Agent Balances
 

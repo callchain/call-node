@@ -241,7 +241,7 @@ interface IProtocolAgent {
     function revokeAgent(uint64 agentId) external;
     function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
     function revokeSession(uint64 sessionId) external;
-    function executeSessionTransfer(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
+    function executeSession(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
 
     // Read
     function getAgentOwner(uint64 agentId) external view returns (address);
@@ -263,7 +263,7 @@ interface IProtocolAgent {
 - `revokeAgent` (owner only): Permanently revokes the agent by zeroing all metadata slots (owner, agentAddress, name, url, perms, registered_at) and clearing the reverse index. Does not automatically return balances -- call `revokeBalance` for each asset first.
 - `createSession` (owner only): Creates a time/amount-limited session key for a delegate address. Session is independent of agents; funds are drawn directly from the owner's balance.
 - `revokeSession` (owner only): Immediately invalidates a session.
-- `executeSessionTransfer` (delegate only): Transfers from owner balance to recipient within session limits.
+- `executeSession` (delegate only): Transfers from owner balance to recipient within session limits.
 
 ### Permissions
 
@@ -538,7 +538,7 @@ Gas is computed at two layers:
 | `revokeAgent` | 20,000 | + multiple sstores |
 | `createSession` | 10,000 | + sstore |
 | `revokeSession` | 6,000 | + sstore |
-| `executeSessionTransfer` | 30,000 | + balance transfer + session check |
+| `executeSession` | 30,000 | + balance transfer + session check |
 | `getAgentOwner` | 2,000 | + sload |
 | `getAgentBalance` | 2,000 | + sload |
 | `getAgentName` | 2,000 | + sload |

@@ -29,7 +29,7 @@ sol! {
         function createSession(address delegate, uint128 perTxLimit, uint128 dailyLimit, uint64 expiresAt) external returns (uint64);
         function revokeSession(uint64 sessionId) external;
         function isSessionValid(uint64 sessionId) external view returns (uint64);
-        function executeSessionTransfer(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
+        function executeSession(uint64 sessionId, uint64 assetId, address to, uint128 amount) external;
     }
 }
 
@@ -408,7 +408,7 @@ impl AgentPrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAgent::executeSessionTransferCall, _>(
+        dispatch::mutate_void::<IProtocolAgent::executeSessionCall, _>(
             calldata,
             30000,
             storage,
@@ -492,7 +492,7 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
             IProtocolAgent::isSessionValidCall::SELECTOR => {
                 self.is_session_valid(calldata, storage, sr)
             }
-            IProtocolAgent::executeSessionTransferCall::SELECTOR => {
+            IProtocolAgent::executeSessionCall::SELECTOR => {
                 self.execute_session_transfer(calldata, msg_sender, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
@@ -728,8 +728,8 @@ mod tests {
         });
         assert_eq!(valid, 1);
 
-        // executeSessionTransfer(sessionId=0, assetId=1, to=recipient, amount=800)
-        let input = IProtocolAgent::executeSessionTransferCall {
+        // executeSession(sessionId=0, assetId=1, to=recipient, amount=800)
+        let input = IProtocolAgent::executeSessionCall {
             sessionId: 0,
             assetId: crate::CALL_ASSET_ID,
             to: recipient,
@@ -739,7 +739,7 @@ mod tests {
         let result = precompile.call(&input, delegate, &mut provider);
         assert!(
             result.is_ok(),
-            "executeSessionTransfer failed: {:?}",
+            "executeSession failed: {:?}",
             result.err()
         );
 
@@ -811,7 +811,7 @@ mod tests {
         // Block 101 > expiresAt 100
         provider.set_block_number(101);
 
-        let input = IProtocolAgent::executeSessionTransferCall {
+        let input = IProtocolAgent::executeSessionCall {
             sessionId: 0,
             assetId: crate::CALL_ASSET_ID,
             to: recipient,
