@@ -19,7 +19,6 @@ sol! {
         function revokeBalance(uint64 agentId, uint64 assetId) external;
         function pay(uint64 agentId, uint64 assetId, address to, uint128 amount) external;
         function batchPay(uint64 agentId, uint64 assetId, address[] to, uint128[] amounts) external;
-        function withdrawBalance(uint64 agentId, uint64 assetId, uint128 amount) external;
         function revokeAgent(uint64 agentId) external;
         function getAgentOwner(uint64 agentId) external view returns (address);
         function getAgentAddress(uint64 agentId) external view returns (address);
@@ -292,37 +291,6 @@ impl AgentPrecompile {
         )
     }
 
-    fn withdraw_balance(
-        &self,
-        calldata: &[u8],
-        msg_sender: Address,
-        storage: &mut dyn StorageProvider,
-        sr: StorageRef,
-    ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolAgent::withdrawBalanceCall, _>(
-            calldata,
-            50000,
-            storage,
-            |call, storage| {
-                let caller = require_caller(msg_sender)?;
-                let mut store = AgentStorage::new(sr);
-                let mut asset_store = AssetStorage::new(sr);
-                let block_number = storage.block_number();
-                store
-                    .withdraw_balance(
-                        &mut asset_store,
-                        call.agentId,
-                        call.assetId,
-                        call.amount,
-                        caller,
-                        block_number,
-                    )
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                Ok(())
-            },
-        )
-    }
-
     fn revoke_agent(
         &self,
         calldata: &[u8],
@@ -580,9 +548,6 @@ impl call_precompile::StatefulPrecompile for AgentPrecompile {
             IProtocolAgent::payCall::SELECTOR => self.pay(calldata, msg_sender, storage, sr),
             IProtocolAgent::batchPayCall::SELECTOR => {
                 self.batch_pay(calldata, msg_sender, storage, sr)
-            }
-            IProtocolAgent::withdrawBalanceCall::SELECTOR => {
-                self.withdraw_balance(calldata, msg_sender, storage, sr)
             }
             IProtocolAgent::revokeAgentCall::SELECTOR => {
                 self.revoke_agent(calldata, msg_sender, storage, sr)

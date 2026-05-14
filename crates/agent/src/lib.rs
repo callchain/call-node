@@ -453,34 +453,6 @@ impl<B: StorageBackend> AgentStorage<B> {
         Ok(())
     }
 
-    pub fn withdraw_balance(
-        &mut self,
-        asset_store: &mut AssetStorage<B>,
-        agent_id: u64,
-        asset_id: u64,
-        amount: u128,
-        caller: Address,
-        current_block: u64,
-    ) -> Result<(), AgentError> {
-        if !self.agent_exists(agent_id) {
-            return Err(AgentError::NotFound);
-        }
-        self.check_owner(agent_id, caller)?;
-
-        self.require_perms(agent_id, asset_id, current_block)?;
-
-        let agent_bal = self
-            .read_agent_balance(agent_id, asset_id)
-            .checked_sub(amount)
-            .ok_or(AgentError::InsufficientBalance)?;
-        self.write_agent_balance(agent_id, asset_id, agent_bal);
-
-        asset_store
-            .add_balance(asset_id, caller, amount)
-            .map_err(|_| AgentError::BalanceOverflow)?;
-        Ok(())
-    }
-
     pub fn revoke_agent(&mut self, agent_id: u64, caller: Address) -> Result<(), AgentError> {
         if !self.agent_exists(agent_id) {
             return Err(AgentError::NotFound);
@@ -894,13 +866,6 @@ mod tests {
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 4_000);
         assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient), 1_000);
 
-        // Withdraw (owner only)
-        agent_store
-            .withdraw_balance(&mut asset_store, 0, CALL_ASSET_ID, 500, caller, 1)
-            .unwrap();
-        assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 3_500);
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 5_500);
-
         // Revoke balance (owner only)
         agent_store
             .revoke_balance(&mut asset_store, 0, CALL_ASSET_ID, caller)
@@ -1059,10 +1024,6 @@ mod tests {
         ));
         assert!(matches!(
             agent_store.pay(&mut asset_store, 0, 1, Address::ZERO, 100, caller, 1,),
-            Err(AgentError::NotFound)
-        ));
-        assert!(matches!(
-            agent_store.withdraw_balance(&mut asset_store, 0, 1, 100, caller, 1),
             Err(AgentError::NotFound)
         ));
         assert!(matches!(

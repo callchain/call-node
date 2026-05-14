@@ -21,7 +21,6 @@ The **Agent precompile at `0x209`** exposes agent operations via standard EVM tr
 | Revoke balance | `revokeBalance(uint64,uint64)` | 6,000 + storage |
 | Pay | `pay(uint64,uint64,address,uint128)` | 30,000 + storage |
 | Batch pay | `batchPay(uint64,uint64,address[],uint128[])` | 30,000 + storage |
-| Withdraw balance | `withdrawBalance(uint64,uint64,uint128)` | 50,000 + storage |
 | Create session | `createSession(uint64,address,uint128,uint128,uint64)` | 10,000 + storage |
 | Revoke session | `revokeSession(uint64,uint64)` | 6,000 + storage |
 | Is session valid | `isSessionValid(uint64,uint64)` | 2,000 + storage |
@@ -71,7 +70,6 @@ Implemented operations:
 - `revoke_balance(owner, agent_id, asset_id)` — revokes all agent balance for an asset
 - `pay(agent, agent_id, asset_id, recipient, amount)` — agent address pays from agent balance to recipient
 - `batch_pay(agent, agent_id, asset_id, recipients[], amounts[])` — agent address batch payment from agent balance
-- `withdraw_balance(owner, agent_id, asset_id, amount)` — withdraws from agent balance back to owner
 - `revoke_agent(owner, agent_id)` — deregisters an agent
 
 All operations are caller-authenticated via `msg.sender`. `pay` and `batchPay` can only be called by the registered `agent_address`, not the owner.
