@@ -224,6 +224,33 @@ pub fn unpack_session_limits(limits: U256) -> (u128, u128) {
     (per_tx_limit, daily_limit)
 }
 
+// ── SessionPolicy ─────────────────────────────────────────────────────
+
+/// Optional policy constraints for a session key.
+/// All fields default to "unrestricted" (0 or empty).
+#[derive(Debug, Clone)]
+pub struct SessionPolicy {
+    pub max_total_spend: u128,
+    pub min_interval_blocks: u64,
+    pub effective_at: u64,
+    pub max_executions: u64,
+    pub allowed_assets: Vec<u64>,
+    pub allowed_recipients: Vec<Address>,
+}
+
+impl Default for SessionPolicy {
+    fn default() -> Self {
+        Self {
+            max_total_spend: 0,
+            min_interval_blocks: 0,
+            effective_at: 0,
+            max_executions: 0,
+            allowed_assets: Vec::new(),
+            allowed_recipients: Vec::new(),
+        }
+    }
+}
+
 // ── AgentStorage ──────────────────────────────────────────────────────
 
 /// Business logic for agent operations backed by any StorageBackend.
@@ -677,12 +704,7 @@ impl<B: StorageBackend> AgentStorage<B> {
         per_tx_limit: u128,
         daily_limit: u128,
         expires_at: u64,
-        allowed_assets: &[u64],
-        allowed_recipients: &[Address],
-        max_total_spend: u128,
-        min_interval_blocks: u64,
-        effective_at: u64,
-        max_executions: u64,
+        policy: &SessionPolicy,
         caller: Address,
     ) -> Result<u64, AgentError> {
         let count = self.read_session_count();
@@ -728,9 +750,9 @@ impl<B: StorageBackend> AgentStorage<B> {
         self.backend.store(
             AGENT_ADDRESS,
             slot_session_allowed_assets_count(session_id),
-            u64_to_u256(allowed_assets.len() as u64),
+            u64_to_u256(policy.allowed_assets.len() as u64),
         );
-        for (i, &asset) in allowed_assets.iter().enumerate() {
+        for (i, &asset) in policy.allowed_assets.iter().enumerate() {
             self.backend.store(
                 AGENT_ADDRESS,
                 slot_session_allowed_asset(session_id, i as u64),
@@ -740,9 +762,9 @@ impl<B: StorageBackend> AgentStorage<B> {
         self.backend.store(
             AGENT_ADDRESS,
             slot_session_allowed_recipients_count(session_id),
-            u64_to_u256(allowed_recipients.len() as u64),
+            u64_to_u256(policy.allowed_recipients.len() as u64),
         );
-        for (i, &addr) in allowed_recipients.iter().enumerate() {
+        for (i, &addr) in policy.allowed_recipients.iter().enumerate() {
             self.backend.store(
                 AGENT_ADDRESS,
                 slot_session_allowed_recipient(session_id, i as u64),
@@ -752,22 +774,22 @@ impl<B: StorageBackend> AgentStorage<B> {
         self.backend.store(
             AGENT_ADDRESS,
             slot_session_max_total_spend(session_id),
-            u128_to_u256(max_total_spend),
+            u128_to_u256(policy.max_total_spend),
         );
         self.backend.store(
             AGENT_ADDRESS,
             slot_session_min_interval_blocks(session_id),
-            u64_to_u256(min_interval_blocks),
+            u64_to_u256(policy.min_interval_blocks),
         );
         self.backend.store(
             AGENT_ADDRESS,
             slot_session_effective_at(session_id),
-            u64_to_u256(effective_at),
+            u64_to_u256(policy.effective_at),
         );
         self.backend.store(
             AGENT_ADDRESS,
             slot_session_max_executions(session_id),
-            u64_to_u256(max_executions),
+            u64_to_u256(policy.max_executions),
         );
         self.backend.store(
             AGENT_ADDRESS,
@@ -1415,7 +1437,7 @@ mod tests {
             .unwrap();
 
         let session_id = store
-            .create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner)
             .unwrap();
         assert_eq!(session_id, 0);
 
@@ -1438,7 +1460,7 @@ mod tests {
         store
             .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
-        store.create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner).unwrap();
+        store.create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner).unwrap();
 
         assert!(matches!(
             store.revoke_session(0, Address::repeat_byte(0x99)),
@@ -1453,7 +1475,7 @@ mod tests {
         let owner = Address::repeat_byte(0x22);
         let delegate = Address::repeat_byte(0x33);
 
-        store.create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner).unwrap();
+        store.create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner).unwrap();
 
         store.revoke_session(0, owner).unwrap();
         assert!(!store.session_exists(0));
@@ -1471,7 +1493,7 @@ mod tests {
         store
             .register_agent("A", "url", Address::repeat_byte(0xBB), owner, 1)
             .unwrap();
-        store.create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner).unwrap();
+        store.create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner).unwrap();
 
         assert!(store.is_session_valid(0, 50));
         assert!(!store.is_session_valid(0, 101));
@@ -1489,7 +1511,7 @@ mod tests {
 
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner)
             .unwrap();
 
         agent_store
@@ -1526,7 +1548,7 @@ mod tests {
             .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, owner)
             .unwrap();
         agent_store
-            .create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner)
             .unwrap();
 
         assert!(matches!(
@@ -1557,7 +1579,7 @@ mod tests {
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 1_500, 0, &[], &[], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 1_500, 0, &SessionPolicy::default(), owner)
             .unwrap();
 
         // First transfer: 1_000
@@ -1617,7 +1639,7 @@ mod tests {
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner)
             .unwrap();
 
         assert!(matches!(
@@ -1648,7 +1670,7 @@ mod tests {
             .unwrap();
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 100, &SessionPolicy::default(), owner)
             .unwrap();
 
         assert!(matches!(
@@ -1677,7 +1699,7 @@ mod tests {
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         asset_store.write_balance(2, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 0, &[CALL_ASSET_ID], &[], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 0, &SessionPolicy { allowed_assets: vec![CALL_ASSET_ID], ..SessionPolicy::default() }, owner)
             .unwrap();
 
         // Allowed asset
@@ -1708,7 +1730,7 @@ mod tests {
 
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 0, &[], &[allowed], 0, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 0, &SessionPolicy { allowed_recipients: vec![allowed], ..SessionPolicy::default() }, owner)
             .unwrap();
 
         agent_store
@@ -1736,7 +1758,7 @@ mod tests {
 
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 0, &[], &[], 1_500, 0, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 0, &SessionPolicy { max_total_spend: 1_500, ..SessionPolicy::default() }, owner)
             .unwrap();
 
         agent_store
@@ -1770,7 +1792,7 @@ mod tests {
 
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 0, &[], &[], 0, 5, 0, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 0, &SessionPolicy { min_interval_blocks: 5, ..SessionPolicy::default() }, owner)
             .unwrap();
 
         agent_store
@@ -1804,7 +1826,7 @@ mod tests {
 
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 100, &[], &[], 0, 0, 50, 0, owner)
+            .create_session(delegate, 1_000, 5_000, 100, &SessionPolicy { effective_at: 50, ..SessionPolicy::default() }, owner)
             .unwrap();
 
         assert!(!agent_store.is_session_valid(0, 40));
@@ -1836,7 +1858,7 @@ mod tests {
 
         asset_store.write_balance(CALL_ASSET_ID, owner, 10_000);
         agent_store
-            .create_session(delegate, 1_000, 5_000, 0, &[], &[], 0, 0, 0, 2, owner)
+            .create_session(delegate, 1_000, 5_000, 0, &SessionPolicy { max_executions: 2, ..SessionPolicy::default() }, owner)
             .unwrap();
 
         agent_store

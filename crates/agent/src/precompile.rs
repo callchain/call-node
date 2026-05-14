@@ -4,7 +4,7 @@
 //! [`StorageProvider`]. Business logic lives in [`AgentStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
-use crate::{slot_agent_balance, AgentError, AgentStorage};
+use crate::{slot_agent_balance, AgentError, AgentStorage, SessionPolicy};
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::storage::StorageProvider;
@@ -346,18 +346,21 @@ impl AgentPrecompile {
             |call, _storage| {
                 let caller = require_caller(msg_sender)?;
                 let mut store = AgentStorage::new(sr);
+                let policy = SessionPolicy {
+                    max_total_spend: call.maxTotalSpend,
+                    min_interval_blocks: call.minIntervalBlocks,
+                    effective_at: call.effectiveAt,
+                    max_executions: call.maxExecutions,
+                    allowed_assets: call.allowedAssets.iter().map(|&x| x as u64).collect(),
+                    allowed_recipients: call.allowedRecipients.iter().map(|&x| x).collect(),
+                };
                 let session_id = store
                     .create_session(
                         call.delegate,
                         call.perTxLimit,
                         call.dailyLimit,
                         call.expiresAt,
-                        call.allowedAssets.as_slice(),
-                        call.allowedRecipients.as_slice(),
-                        call.maxTotalSpend,
-                        call.minIntervalBlocks,
-                        call.effectiveAt,
-                        call.maxExecutions,
+                        &policy,
                         caller,
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
