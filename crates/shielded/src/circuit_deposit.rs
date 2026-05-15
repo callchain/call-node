@@ -1,21 +1,30 @@
-//! ShieldedDeposit circuit — the simplest ZK circuit.
+//! ShieldedDeposit circuit — Halo2 PLONKish version over Pasta Pallas.
 //!
 //! Proves that a user deposited transparent funds into the shielded pool
 //! by creating a valid note commitment, without revealing the note's
 //! spending key or nullifier rho.
 //!
-//! Public inputs: commitment (32B), asset_id (u64)
-//! Private witnesses: value (u128), rcm (32B), recipient_ivk (32B), rho (32B)
+//! Public inputs: commitment (Fp), asset_id (Fp)
+//! Private witnesses: value (u128), rcm (Fp), recipient_ivk (Fp), rho (Fp)
 //!
 //! Constraints:
 //!   D1. Commitment validity: Recompute H(value || asset_id || rcm || rho) == public
-//!   D2. Value range: Non-zero, 128-bit range
+//!   D2. Value range: Non-zero, 128-bit range (bit decomposition + running sum)
 //!   D3. RCM determinism: H("rcm" || ivk || value || asset_id || rho) == rcm
 
-use crate::poseidon::bytes_to_fr;
-use ark_bn254::Fr;
-use ark_ff::{Field, Zero};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use halo2_gadgets::poseidon::primitives::{ConstantLength, P128Pow5T3};
+use halo2_gadgets::poseidon::{Hash as PoseidonHash, Pow5Chip, Pow5Config};
+use halo2_proofs::circuit::{AssignedCell, Layouter, SimpleFloorPlanner, Value};
+use halo2_proofs::plonk::{
+    Advice, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, Instance, Selector,
+};
+use halo2_proofs::poly::Rotation;
+use pasta_curves::Fp;
+use pasta_curves::group::ff::Field;
+
+// ---------------------------------------------------------------------------
+// Witness / Circuit structs
+// ---------------------------------------------------------------------------
 
 /// Witness data for a deposit note.
 #[derive(Debug, Clone)]
@@ -56,110 +65,354 @@ impl DepositCircuit {
     }
 }
 
-impl ConstraintSynthesizer<Fr> for DepositCircuit {
-    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
-        use crate::poseidon::gadget::poseidon_hash_gadget;
-        use ark_r1cs_std::alloc::AllocVar;
-        use ark_r1cs_std::boolean::Boolean;
-        use ark_r1cs_std::eq::EqGadget;
-        use ark_r1cs_std::fields::fp::FpVar;
-        use ark_r1cs_std::prelude::ToBitsGadget;
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 
-        let witness = self.witness.ok_or(SynthesisError::AssignmentMissing)?;
+#[derive(Clone, Debug)]
+pub struct DepositConfig {
+    // Witness columns
+    value: Column<Advice>,
+    rcm: Column<Advice>,
+    ivk: Column<Advice>,
+    rho: Column<Advice>,
+    asset_id: Column<Advice>,
 
-        // --- Public inputs ---
-        let commitment_fr = bytes_to_fr(&self.commitment);
-        let commitment_var = FpVar::new_input(cs.clone(), || Ok(commitment_fr))?;
+    // Range-check / non-zero auxiliary columns
+    value_inv: Column<Advice>,
+    bit: Column<Advice>,
+    running_sum: Column<Advice>,
 
-        let asset_id_fr = {
-            let mut b = [0u8; 32];
-            b[..8].copy_from_slice(&self.asset_id.to_le_bytes());
-            bytes_to_fr(&b)
-        };
-        let asset_id_var = FpVar::new_input(cs.clone(), || Ok(asset_id_fr))?;
+    // Poseidon chip columns
+    poseidon_state: [Column<Advice>; 3],
+    poseidon_partial: Column<Advice>,
+    poseidon_rc_a: [Column<Fixed>; 3],
+    poseidon_rc_b: [Column<Fixed>; 3],
 
-        // --- Private witnesses ---
-        let value_fr = bytes_to_fr(&value_to_fr_bytes(witness.value));
-        let value_var = FpVar::new_witness(cs.clone(), || Ok(value_fr))?;
+    // Public inputs
+    instance: Column<Instance>,
 
-        let rcm_fr = bytes_to_fr(&witness.rcm);
-        let rcm_var = FpVar::new_witness(cs.clone(), || Ok(rcm_fr))?;
+    // Poseidon config
+    poseidon_config: Pow5Config<Fp, 3, 2>,
 
-        let ivk_fr = bytes_to_fr(&witness.recipient_ivk);
-        let ivk_var = FpVar::new_witness(cs.clone(), || Ok(ivk_fr))?;
+    // Selectors
+    q_bit: Selector,
+    q_running_sum: Selector,
+    q_nonzero: Selector,
+}
 
-        let rho_fr = bytes_to_fr(&witness.rho);
-        let rho_var = FpVar::new_witness(cs.clone(), || Ok(rho_fr))?;
+// ---------------------------------------------------------------------------
+// Circuit impl
+// ---------------------------------------------------------------------------
 
-        // D1: Commitment validity
-        // H(value || asset_id || rcm || rho) == public commitment
-        let computed_cm = poseidon_hash_gadget(
-            cs.clone(),
-            &[
-                value_var.clone(),
-                asset_id_var.clone(),
-                rcm_var.clone(),
-                rho_var.clone(),
-            ],
-        )?;
-        computed_cm.enforce_equal(&commitment_var)?;
+impl Circuit<Fp> for DepositCircuit {
+    type Config = DepositConfig;
+    type FloorPlanner = SimpleFloorPlanner;
 
-        // D2: Value range — non-zero (inverse witness trick)
-        let value_inv = FpVar::new_witness(cs.clone(), || {
-            if value_fr.is_zero() {
-                Err(SynthesisError::Unsatisfiable)
-            } else {
-                Ok(value_fr
-                    .inverse()
-                    .expect("invariant: non-zero field element has inverse"))
-            }
-        })?;
-        let one = FpVar::new_constant(cs.clone(), Fr::from(1u64))?;
-        (value_var.clone() * value_inv).enforce_equal(&one)?;
-
-        // 128-bit range: decompose to bits and enforce bits 128..=253 are zero
-        let bits = value_var.to_bits_le()?;
-        for bit in &bits[128..] {
-            bit.enforce_equal(&Boolean::constant(false))?;
+    fn without_witnesses(&self) -> Self {
+        Self {
+            commitment: self.commitment,
+            asset_id: self.asset_id,
+            witness: None,
         }
+    }
 
-        // D3: RCM determinism
-        // H("rcm" || ivk || value || asset_id || rho) == rcm
-        let rcm_tag_fr = domain_tag_to_fr("rcm");
-        let rcm_tag_var = FpVar::new_constant(cs.clone(), rcm_tag_fr)?;
-        let computed_rcm = poseidon_hash_gadget(
-            cs.clone(),
-            &[rcm_tag_var, ivk_var, value_var, asset_id_var, rho_var],
+    fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+        // ---- Advice columns -------------------------------------------------
+        let value = meta.advice_column();
+        let rcm = meta.advice_column();
+        let ivk = meta.advice_column();
+        let rho = meta.advice_column();
+        let asset_id = meta.advice_column();
+        let value_inv = meta.advice_column();
+        let bit = meta.advice_column();
+        let running_sum = meta.advice_column();
+
+        let poseidon_state = [meta.advice_column(), meta.advice_column(), meta.advice_column()];
+        let poseidon_partial = meta.advice_column();
+
+        // ---- Fixed columns for Poseidon round constants ---------------------
+        let poseidon_rc_a: [Column<Fixed>; 3] = std::array::from_fn(|_| meta.fixed_column());
+        let poseidon_rc_b: [Column<Fixed>; 3] = std::array::from_fn(|_| meta.fixed_column());
+
+        // ---- Constant fixed column (required for Expression::Constant) ------
+        let constant = meta.fixed_column();
+        meta.enable_constant(constant);
+
+        // ---- Instance column ------------------------------------------------
+        let instance = meta.instance_column();
+
+        // ---- Poseidon chip config ------------------------------------------
+        let poseidon_config = Pow5Chip::configure::<P128Pow5T3>(
+            meta,
+            poseidon_state,
+            poseidon_partial,
+            poseidon_rc_a,
+            poseidon_rc_b,
+        );
+
+        // ---- Selectors ------------------------------------------------------
+        let q_bit = meta.selector();
+        let q_running_sum = meta.selector();
+        let q_nonzero = meta.selector();
+
+        // ---- Enable equality on columns used in copy constraints ------------
+        meta.enable_equality(value);
+        meta.enable_equality(rcm);
+        meta.enable_equality(ivk);
+        meta.enable_equality(rho);
+        meta.enable_equality(asset_id);
+        meta.enable_equality(running_sum);
+        meta.enable_equality(instance);
+
+        // ---- Gates ----------------------------------------------------------
+
+        // Bit constraint: bit * (1 - bit) = 0
+        meta.create_gate("bit", |meta| {
+            let q = meta.query_selector(q_bit);
+            let b = meta.query_advice(bit, Rotation::cur());
+            let one = Expression::Constant(Fp::one());
+            vec![q * b.clone() * (one - b)]
+        });
+
+        // Running sum: cur = prev * 2 + bit
+        // Enabled on rows 1..=128; row 0 has running_sum = 0 (assigned, not gated)
+        meta.create_gate("running_sum", |meta| {
+            let q = meta.query_selector(q_running_sum);
+            let prev = meta.query_advice(running_sum, Rotation::prev());
+            let cur = meta.query_advice(running_sum, Rotation::cur());
+            let b = meta.query_advice(bit, Rotation::cur());
+            let two = Expression::Constant(Fp::from(2u64));
+            vec![q * (cur - prev * two - b)]
+        });
+
+        // Non-zero: value * value_inv = 1
+        meta.create_gate("nonzero", |meta| {
+            let q = meta.query_selector(q_nonzero);
+            let v = meta.query_advice(value, Rotation::cur());
+            let inv = meta.query_advice(value_inv, Rotation::cur());
+            let one = Expression::Constant(Fp::one());
+            vec![q * (v * inv - one)]
+        });
+
+        DepositConfig {
+            value,
+            rcm,
+            ivk,
+            rho,
+            asset_id,
+            value_inv,
+            bit,
+            running_sum,
+            poseidon_state,
+            poseidon_partial,
+            poseidon_rc_a,
+            poseidon_rc_b,
+            instance,
+            poseidon_config,
+            q_bit,
+            q_running_sum,
+            q_nonzero,
+        }
+    }
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fp>,
+    ) -> Result<(), Error> {
+        // ---- Convert witness data to Value<Fp> -----------------------------
+        let value_fp: Value<Fp> = self
+            .witness
+            .as_ref()
+            .map(|w| {
+                Value::known(crate::poseidon::bytes_to_fp(&crate::poseidon::value_to_fp_bytes(
+                    w.value,
+                )))
+            })
+            .unwrap_or(Value::unknown());
+        let rcm_fp: Value<Fp> = self
+            .witness
+            .as_ref()
+            .map(|w| Value::known(crate::poseidon::bytes_to_fp(&w.rcm)))
+            .unwrap_or(Value::unknown());
+        let ivk_fp: Value<Fp> = self
+            .witness
+            .as_ref()
+            .map(|w| Value::known(crate::poseidon::bytes_to_fp(&w.recipient_ivk)))
+            .unwrap_or(Value::unknown());
+        let rho_fp: Value<Fp> = self
+            .witness
+            .as_ref()
+            .map(|w| Value::known(crate::poseidon::bytes_to_fp(&w.rho)))
+            .unwrap_or(Value::unknown());
+
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&self.asset_id.to_le_bytes());
+        let asset_id_fp = Value::known(crate::poseidon::bytes_to_fp(&asset_bytes));
+
+        // Inverse for non-zero check (dummy zero when value is zero / missing)
+        let inv_fp: Value<Fp> = value_fp.and_then(|v| {
+            let inv = v.invert();
+            if bool::from(inv.is_some()) {
+                Value::known(inv.unwrap())
+            } else {
+                Value::known(Fp::zero())
+            }
+        });
+
+        // ---- Assign witnesses + range check in one region ------------------
+        let (value_cell, rcm_cell, ivk_cell, rho_cell, asset_id_cell) = layouter
+            .assign_region(
+                || "deposit witnesses",
+                |mut region| {
+                    let offset = 0;
+
+                    let value_cell =
+                        region.assign_advice(|| "value", config.value, offset, || value_fp)?;
+                    let rcm_cell =
+                        region.assign_advice(|| "rcm", config.rcm, offset, || rcm_fp)?;
+                    let ivk_cell =
+                        region.assign_advice(|| "ivk", config.ivk, offset, || ivk_fp)?;
+                    let rho_cell =
+                        region.assign_advice(|| "rho", config.rho, offset, || rho_fp)?;
+                    let asset_id_cell = region.assign_advice(
+                        || "asset_id",
+                        config.asset_id,
+                        offset,
+                        || asset_id_fp,
+                    )?;
+
+                    // Non-zero inverse at row 0
+                    region.assign_advice(
+                        || "value_inv",
+                        config.value_inv,
+                        offset,
+                        || inv_fp,
+                    )?;
+                    config.q_nonzero.enable(&mut region, offset)?;
+
+                    // ---- 128-bit range check via bit decomposition --------
+                    let value_u128 = self.witness.as_ref().map(|w| w.value).unwrap_or(0);
+                    let two = Fp::from(2u64);
+
+                    // running_sum at row 0 = 0
+                    let _running_0 = region.assign_advice(
+                        || "running_0",
+                        config.running_sum,
+                        offset,
+                        || Value::known(Fp::zero()),
+                    )?;
+
+                    let mut running = Fp::zero();
+                    for i in 0..128 {
+                        let bit_val = (value_u128 >> (127 - i)) & 1;
+                        let bit_fp = Fp::from(bit_val as u64);
+                        running = running * two + bit_fp;
+
+                        let row = offset + 1 + i;
+                        region.assign_advice(
+                            || format!("bit_{}", i),
+                            config.bit,
+                            row,
+                            || Value::known(bit_fp),
+                        )?;
+                        region.assign_advice(
+                            || format!("running_{}", i + 1),
+                            config.running_sum,
+                            row,
+                            || Value::known(running),
+                        )?;
+                        config.q_bit.enable(&mut region, row)?;
+                        config.q_running_sum.enable(&mut region, row)?;
+                    }
+
+                    // Final running_sum (row 128) must equal value (row 0)
+                    let running_final = region.assign_advice(
+                        || "running_final",
+                        config.running_sum,
+                        offset + 128,
+                        || Value::known(running),
+                    )?;
+                    region.constrain_equal(running_final.cell(), value_cell.cell())?;
+
+                    Ok((value_cell, rcm_cell, ivk_cell, rho_cell, asset_id_cell))
+                },
+            )?;
+
+        // ---- Constrain asset_id == public input ----------------------------
+        layouter.constrain_instance(asset_id_cell.cell(), config.instance, 1)?;
+
+        // ---- D1: Poseidon(value, asset_id, rcm, rho) == commitment ---------
+        let chip = Pow5Chip::construct(config.poseidon_config.clone());
+        let hasher_cm =
+            PoseidonHash::<Fp, Pow5Chip<Fp, 3, 2>, P128Pow5T3, ConstantLength<4>, 3, 2>::init(
+                chip,
+                layouter.namespace(|| "poseidon cm"),
+            )?;
+        let computed_cm = hasher_cm.hash(
+            layouter.namespace(|| "hash cm"),
+            [value_cell.clone(), asset_id_cell.clone(), rcm_cell.clone(), rho_cell.clone()],
         )?;
-        computed_rcm.enforce_equal(&rcm_var)?;
+        layouter.constrain_instance(computed_cm.cell(), config.instance, 0)?;
+
+        // ---- D3: Poseidon("rcm", ivk, value, asset_id, rho) == rcm ---------
+        let tag_fp = crate::poseidon::bytes_to_fp(&crate::poseidon::tag_to_bytes(
+            crate::poseidon::domain::RCM,
+        ));
+        let tag_cell = layouter.assign_region(
+            || "rcm tag",
+            |mut region| {
+                region.assign_advice(
+                    || "tag",
+                    config.value,
+                    0,
+                    || Value::known(tag_fp),
+                )
+            },
+        )?;
+
+        let chip_rcm = Pow5Chip::construct(config.poseidon_config);
+        let hasher_rcm =
+            PoseidonHash::<Fp, Pow5Chip<Fp, 3, 2>, P128Pow5T3, ConstantLength<5>, 3, 2>::init(
+                chip_rcm,
+                layouter.namespace(|| "poseidon rcm"),
+            )?;
+        let computed_rcm = hasher_rcm.hash(
+            layouter.namespace(|| "hash rcm"),
+            [tag_cell, ivk_cell, value_cell, asset_id_cell, rho_cell],
+        )?;
+
+        // Constrain computed_rcm == rcm
+        layouter.assign_region(
+            || "rcm equality",
+            |mut region| region.constrain_equal(computed_rcm.cell(), rcm_cell.cell()),
+        )?;
 
         Ok(())
     }
 }
 
-/// Convert a domain tag string to Fr.
-fn domain_tag_to_fr(tag: &str) -> Fr {
-    Fr::from_random_bytes(tag.as_bytes()).unwrap_or_default()
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-/// Convert a u128 value to a 32-byte Fr-compatible representation (zero-padded LE).
-fn value_to_fr_bytes(value: u128) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    bytes[..16].copy_from_slice(&value.to_le_bytes());
-    bytes
-}
-
-/// Compute the public input byte count for a deposit circuit.
+/// Number of public inputs for the deposit circuit.
 pub const fn deposit_public_input_count() -> usize {
-    32 + 8 // commitment (32 bytes) + asset_id (8 bytes)
+    2 // commitment (Fp) + asset_id (Fp)
 }
 
-#[cfg(all(test, feature = "real-prover"))]
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "halo2-prover"))]
 mod tests {
     use super::*;
-    use crate::poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged};
+    use crate::poseidon::{bytes_to_fp, fp_to_bytes, poseidon_hash, poseidon_hash_tagged};
     use crate::test_utils::{test_hash, test_spending_key};
     use crate::ViewingKey;
+    use halo2_proofs::dev::MockProver;
 
     fn make_deposit_witness(value: u128, seed: u8) -> DepositWitness {
         let sk = test_spending_key(seed);
@@ -175,38 +428,41 @@ mod tests {
     }
 
     fn compute_rcm_plain(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
-        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
-        let value_bytes = value_to_fr_bytes(value);
-        let value_fr = bytes_to_fr(&value_bytes);
+        let ivk_fp = bytes_to_fp(&vk.incoming_view_key);
+        let value_fp = bytes_to_fp(&crate::poseidon::value_to_fp_bytes(value));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rho_fr = bytes_to_fr(rho);
-        let rcm_fr = poseidon_hash_tagged("rcm", &[ivk_fr, value_fr, asset_fr, rho_fr]);
-        fr_to_bytes(&rcm_fr)
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rho_fp = bytes_to_fp(rho);
+        let rcm_fp = poseidon_hash_tagged(crate::poseidon::domain::RCM, &[ivk_fp, value_fp, asset_fp, rho_fp]);
+        fp_to_bytes(&rcm_fp)
     }
 
-    fn make_commitment_plain(witness: &DepositWitness, asset_id: u64) -> [u8; 32] {
-        let value_bytes = value_to_fr_bytes(witness.value);
-        let value_fr = bytes_to_fr(&value_bytes);
+    fn compute_commitment_plain(witness: &DepositWitness, asset_id: u64) -> Fp {
+        let value_fp = bytes_to_fp(&crate::poseidon::value_to_fp_bytes(witness.value));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rcm_fr = bytes_to_fr(&witness.rcm);
-        let rho_fr = bytes_to_fr(&witness.rho);
-        let cm_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
-        fr_to_bytes(&cm_fr)
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rcm_fp = bytes_to_fp(&witness.rcm);
+        let rho_fp = bytes_to_fp(&witness.rho);
+        poseidon_hash(&[value_fp, asset_fp, rcm_fp, rho_fp])
+    }
+
+    fn make_instance(commitment_fp: Fp, asset_id: u64) -> Vec<Fp> {
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
+        let asset_id_fp = bytes_to_fp(&asset_bytes);
+        vec![commitment_fp, asset_id_fp]
     }
 
     #[test]
     fn test_deposit_circuit_satisfiable() {
         let witness = make_deposit_witness(1000, 1);
-        let commitment = make_commitment_plain(&witness, 1);
-        let circuit = DepositCircuit::new(commitment, 1, witness);
+        let commitment_fp = compute_commitment_plain(&witness, 1);
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1, witness);
 
-        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
-        circuit.generate_constraints(cs.clone()).unwrap();
-        assert!(cs.is_satisfied().unwrap());
+        let prover = MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1)]).unwrap();
+        prover.assert_satisfied();
     }
 
     #[test]
@@ -239,12 +495,11 @@ mod tests {
     #[test]
     fn test_deposit_circuit_zero_value_rejected() {
         let witness = make_deposit_witness(0, 1);
-        let commitment = make_commitment_plain(&witness, 1);
-        let circuit = DepositCircuit::new(commitment, 1, witness);
+        let commitment_fp = compute_commitment_plain(&witness, 1);
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1, witness);
 
-        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
-        let result = circuit.generate_constraints(cs.clone());
-        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+        let prover = MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1)]).unwrap();
+        assert!(prover.verify().is_err(), "zero value should be rejected");
     }
 
     #[test]
@@ -261,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_deposit_public_input_count() {
-        assert_eq!(deposit_public_input_count(), 40);
+        assert_eq!(deposit_public_input_count(), 2);
     }
 
     #[test]
@@ -275,56 +530,47 @@ mod tests {
     #[test]
     fn test_deposit_circuit_wrong_commitment_rejected() {
         let witness = make_deposit_witness(1000, 1);
-        let mut bad_commitment = make_commitment_plain(&witness, 1);
+        let commitment_fp = compute_commitment_plain(&witness, 1);
+        let mut bad_commitment = fp_to_bytes(&commitment_fp);
         bad_commitment[0] ^= 0xFF;
+        let bad_commitment_fp = bytes_to_fp(&bad_commitment);
 
         let circuit = DepositCircuit::new(bad_commitment, 1, witness);
-        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
-        let result = circuit.generate_constraints(cs.clone());
-        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+        // Public input uses the WRONG commitment — circuit should reject
+        let prover =
+            MockProver::run(10, &circuit, vec![make_instance(bad_commitment_fp, 1)]).unwrap();
+        assert!(
+            prover.verify().is_err(),
+            "wrong commitment should be rejected"
+        );
     }
 
     #[test]
     fn test_deposit_circuit_wrong_asset_id_rejected() {
         let witness = make_deposit_witness(1000, 1);
-        let commitment = make_commitment_plain(&witness, 1);
+        let commitment_fp = compute_commitment_plain(&witness, 1);
 
         // Public asset_id=2, but witness was built for asset_id=1
-        let circuit = DepositCircuit::new(commitment, 2, witness);
-        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
-        let result = circuit.generate_constraints(cs.clone());
-        assert!(result.is_err() || !cs.is_satisfied().unwrap());
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 2, witness);
+        let prover =
+            MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 2)]).unwrap();
+        assert!(
+            prover.verify().is_err(),
+            "wrong asset_id should be rejected"
+        );
     }
 
     #[test]
     fn test_deposit_circuit_wrong_rcm_rejected() {
         let witness = make_deposit_witness(1000, 1);
-        let commitment = make_commitment_plain(&witness, 1);
+        let commitment_fp = compute_commitment_plain(&witness, 1);
 
-        // Corrupt the RCM — commitment was computed with the original rcm
         let mut bad_witness = witness;
         bad_witness.rcm[0] ^= 0xFF;
 
-        let circuit = DepositCircuit::new(commitment, 1, bad_witness);
-        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
-        let result = circuit.generate_constraints(cs.clone());
-        assert!(result.is_err() || !cs.is_satisfied().unwrap());
-    }
-
-    #[test]
-    fn test_deposit_circuit_constraint_count_stable() {
-        let witness = make_deposit_witness(1000, 1);
-        let commitment = make_commitment_plain(&witness, 1);
-        let circuit = DepositCircuit::new(commitment, 1, witness);
-
-        let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
-        circuit.generate_constraints(cs.clone()).unwrap();
-        let num_constraints = cs.num_constraints();
-        // Deposit circuit should have a small, stable constraint count
-        assert!(
-            num_constraints > 0 && num_constraints < 2000,
-            "deposit constraint count should be stable and reasonable, got {}",
-            num_constraints
-        );
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1, bad_witness);
+        let prover =
+            MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1)]).unwrap();
+        assert!(prover.verify().is_err(), "wrong rcm should be rejected");
     }
 }

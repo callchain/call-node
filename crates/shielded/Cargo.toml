@@ -45,8 +45,10 @@ hex = { workspace = true, optional = true }
 default = ["poseidon"]
 poseidon = []
 slow-tests = ["poseidon"]
-# Temporarily keep real-prover as an alias for halo2-prover during migration
-real-prover = ["halo2-prover"]
+# real-prover is temporarily empty during Halo2 migration.
+# The old Groth16 real prover code is being replaced; this feature is kept
+# so that downstream cfg(feature = "real-prover") gates do not break.
+real-prover = []
 halo2-prover = [
     "poseidon",
     "halo2_proofs",

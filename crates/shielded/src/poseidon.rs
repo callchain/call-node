@@ -150,7 +150,7 @@ pub fn poseidon_hash_5(inputs: [Fp; 5]) -> Fp {
 // ---------------------------------------------------------------------------
 
 /// Convert a domain tag string to a 32-byte array.
-fn tag_to_bytes(tag: &str) -> [u8; 32] {
+pub fn tag_to_bytes(tag: &str) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     let tag_bytes = tag.as_bytes();
     let len = tag_bytes.len().min(32);

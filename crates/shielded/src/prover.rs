@@ -750,6 +750,46 @@ pub(crate) use real_prover_impl::setup_withdraw_circuit;
 #[cfg(feature = "real-prover")]
 pub use real_prover_impl::RealProver;
 
+// ============================================================================
+// Halo2Prover stub — will be fully implemented in Phase 5.
+// ============================================================================
+
+#[cfg(feature = "halo2-prover")]
+pub struct Halo2Prover;
+
+#[cfg(feature = "halo2-prover")]
+impl Halo2Prover {
+    pub fn for_version(_version: u32) -> Option<Self> {
+        Some(Self)
+    }
+
+    pub fn verify_deposit(
+        &self,
+        _proof_data: &[u8],
+        _public_inputs: &[u8],
+    ) -> Result<bool, ProverError> {
+        // Stub: always accept during migration.
+        // Phase 5 will wire this to halo2_proofs::plonk::verify_proof.
+        Ok(true)
+    }
+
+    pub fn verify_withdraw(
+        &self,
+        _proof_data: &[u8],
+        _public_inputs: &[u8],
+    ) -> Result<bool, ProverError> {
+        Ok(true)
+    }
+
+    pub fn verify_transfer(
+        &self,
+        _proof_data: &[u8],
+        _public_inputs: &[u8],
+    ) -> Result<bool, ProverError> {
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
