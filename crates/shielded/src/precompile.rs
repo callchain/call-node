@@ -205,12 +205,19 @@ impl<B: StorageBackend> ShieldedStorage<B> {
                 key_version: 0,
             };
 
-            match crate::verify_shielded_proof(&proof, "withdraw", Some(&merkle_root), Some(amount))
+            let target_bytes: [u8; 20] = target.into();
+            match crate::verify_shielded_proof(
+                &proof,
+                "withdraw",
+                Some(&merkle_root),
+                Some(amount),
+                Some(target_bytes),
+            )
             {
                 Ok(true) => {}
                 Ok(false) => return Err(ShieldedError::InvalidZkProof),
                 Err(e) => {
-                    if e.contains("real-prover") {
+                    if e.contains("halo2-prover") {
                         if !crate::verify_zk_proof(&proof) {
                             return Err(ShieldedError::InvalidZkProof);
                         }
@@ -266,11 +273,11 @@ impl<B: StorageBackend> ShieldedStorage<B> {
                 key_version: 0,
             };
 
-            match crate::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None) {
+            match crate::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None, None) {
                 Ok(true) => {}
                 Ok(false) => return Err(ShieldedError::InvalidZkProof),
                 Err(e) => {
-                    if e.contains("real-prover") {
+                    if e.contains("halo2-prover") {
                         if !crate::verify_zk_proof(&proof) {
                             return Err(ShieldedError::InvalidZkProof);
                         }
@@ -593,9 +600,9 @@ mod tests {
         assert_eq!(result.bytes[31], 0);
     }
 
-    /// Withdraw precompile test without real ZK verification (default / non-real-prover).
+    /// Withdraw precompile test without real ZK verification (default / non-halo2-prover).
     /// Skips ZK proof verification and tests core precompile logic directly.
-    #[cfg(not(feature = "real-prover"))]
+    #[cfg(not(feature = "halo2-prover"))]
     #[test]
     fn test_shielded_precompile_withdraw() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
@@ -635,17 +642,16 @@ mod tests {
     }
 
     /// Withdraw precompile test with real Groth16 proof verification.
-    /// Only runs when `real-prover` feature is enabled (e.g. workspace build).
-    #[cfg(feature = "real-prover")]
+    /// Only runs when `halo2-prover` feature is enabled (e.g. workspace build).
+    #[cfg(feature = "halo2-prover")]
     #[test]
     fn test_shielded_precompile_withdraw() {
-        use crate::prover::{setup_withdraw_circuit, RealProver};
+        use crate::prover::{setup_withdraw_circuit, Halo2Prover};
 
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x55);
-        let target = Address::repeat_byte(0x66);
-
         let circuit = setup_withdraw_circuit();
+        let target: Address = circuit.target_address.into();
 
         // Set the merkle root in storage so the precompile merkle check passes
         provider.set(
@@ -654,7 +660,7 @@ mod tests {
             U256::from_be_slice(&circuit.merkle_root),
         );
 
-        let prover = RealProver::global();
+        let prover = Halo2Prover::setup();
         let proof_data = prover.prove_withdraw(&circuit).expect("prove failed");
 
         let mut precompile = ShieldedPrecompile;

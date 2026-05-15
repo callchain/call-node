@@ -1,7 +1,7 @@
 //! ZK prover for shielded transactions (per spec §3.8.4)
 //!
-//! Groth16 prover/verifier interface with ~200B proofs and ~3ms verification.
-//! Provides Halo2 migration path via trait abstraction.
+//! Halo2 prover/verifier over Pasta Pallas with ~5-10KB proofs and ~5-10ms verification.
+//! No trusted setup required — uses Params::new(k) + keygen_vk/keygen_pk.
 
 use crate::{ShieldedCircuit, ZkProof};
 
@@ -31,7 +31,7 @@ impl Prover for MockProver {
             .verify_constraints()
             .map_err(|e| ProverError::ConstraintViolation(format!("{:?}", e)))?;
 
-        // Generate a mock proof (~200 bytes to simulate Groth16)
+        // Generate a mock proof (~200 bytes to simulate old Groth16 size)
         let proof_data = vec![1u8; 200];
 
         Ok(ZkProof {
@@ -64,456 +64,361 @@ pub enum ProverError {
 }
 
 // ============================================================================
-// RealProver — production ark-groth16 prover (gated behind "real-prover")
+// Halo2Prover — production Halo2 prover/verifier (gated behind "halo2-prover")
 // ============================================================================
 
-#[cfg(feature = "real-prover")]
-mod real_prover_impl {
+#[cfg(feature = "halo2-prover")]
+mod halo2_prover_impl {
     use super::ProverError;
     use crate::circuit_deposit::DepositCircuit;
-    use crate::circuit_transfer::TransferCircuit;
+    use crate::circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit};
     use crate::circuit_withdraw::WithdrawCircuit;
-    use crate::proof_ser;
+    use crate::poseidon::{bytes_to_fp, fp_to_bytes, poseidon_hash, poseidon_hash_tagged};
+    use crate::merkle_poseidon::PoseidonMerkleTree;
+    use crate::ViewingKey;
 
-    use ark_bn254::Bn254;
-    use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
-    use ark_snark::SNARK;
+    use halo2_proofs::plonk::{
+        create_proof, keygen_pk, keygen_vk, ProvingKey, SingleVerifier, VerifyingKey,
+        verify_proof,
+    };
+    use halo2_proofs::poly::commitment::Params;
+    use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
+    use pasta_curves::EqAffine;
+    use pasta_curves::Fp;
 
-    /// Real Groth16 prover over BN254.
+    /// Production Halo2 prover/verifier over Pasta Pallas.
     ///
-    /// Holds proving and verifying keys for all three shielded circuit types:
-    /// Deposit, Withdraw, and Transfer. Keys are generated via circuit-specific
-    /// trusted setup (suitable for dev/test; production uses a universal CRS).
+    /// Holds universal parameters (Params) and circuit-specific keys (PK/VK)
+    /// for all three shielded circuit types. No trusted setup required.
     #[derive(Debug, Clone)]
-    pub struct RealProver {
-        transfer_pk: ProvingKey<Bn254>,
-        transfer_vk: VerifyingKey<Bn254>,
-        withdraw_pk: ProvingKey<Bn254>,
-        withdraw_vk: VerifyingKey<Bn254>,
-        deposit_pk: ProvingKey<Bn254>,
-        deposit_vk: VerifyingKey<Bn254>,
+    pub struct Halo2Prover {
+        deposit_params: Params<EqAffine>,
+        deposit_pk: ProvingKey<EqAffine>,
+        deposit_vk: VerifyingKey<EqAffine>,
+
+        withdraw_params: Params<EqAffine>,
+        withdraw_pk: ProvingKey<EqAffine>,
+        withdraw_vk: VerifyingKey<EqAffine>,
+
+        transfer_params: Params<EqAffine>,
+        transfer_pk: ProvingKey<EqAffine>,
+        transfer_vk: VerifyingKey<EqAffine>,
     }
 
-    impl RealProver {
-        /// Global singleton RealProver instance.
-        ///
-        /// With the `production-keys` feature enabled, this first attempts to load
-        /// ceremony-derived keys from `/var/lib/callchain/shielded_keys`. If the
-        /// directory does not exist or the keys are invalid, it falls back to the
-        /// dev-only `circuit_specific_setup` path (which prints a warning).
-        ///
-        /// Without `production-keys`, this always uses the dev trusted-setup path.
+    impl Halo2Prover {
+        /// Global singleton Halo2Prover instance.
         pub fn global() -> &'static Self {
             use std::sync::OnceLock;
-            static INSTANCE: OnceLock<RealProver> = OnceLock::new();
+            static INSTANCE: OnceLock<Halo2Prover> = OnceLock::new();
             INSTANCE.get_or_init(|| {
-                #[cfg(feature = "production-keys")]
-                {
-                    // Try the registry first (populated at boot with version 0)
-                    if let Some(prover) = Self::for_version(0) {
-                        return prover;
-                    }
-                    // Registry empty — try direct load as fallback
-                    match Self::from_production_dir("/var/lib/callchain/shielded_keys") {
-                        Ok(prover) => return prover,
-                        Err(e) => {
-                            eprintln!(
-                                "WARNING: production ZK keys not found at /var/lib/callchain/shielded_keys: {e}. \
-                                 Falling back to dev trusted setup. Run the PoT ceremony before mainnet deployment."
-                            );
-                        }
-                    }
-                }
                 Self::setup()
             })
         }
 
-        /// Run circuit-specific trusted setup for all three circuit types.
+        /// Create a Halo2Prover for a specific key version.
         ///
-        /// Uses a seeded RNG (dev mode) so that setup is reproducible within
-        /// a single process. For production, use a ceremony-generated CRS.
-        pub fn setup() -> Self {
-            use ark_std::rand::rngs::StdRng;
-            use ark_std::rand::SeedableRng;
-            let rng = &mut StdRng::seed_from_u64(42);
-
-            // Use simple circuits for setup — the same circuit shape is used for
-            // key generation. In production the SRS/CRS would be shared.
-            let deposit_circuit = Self::dev_deposit_circuit();
-            let withdraw_circuit = Self::dev_withdraw_circuit();
-            let transfer_circuit = Self::dev_transfer_circuit();
-
-            let (deposit_pk, deposit_vk) =
-                Groth16::<Bn254>::circuit_specific_setup(deposit_circuit, rng)
-                    .expect("invariant: dev circuit setup succeeds");
-            let (withdraw_pk, withdraw_vk) =
-                Groth16::<Bn254>::circuit_specific_setup(withdraw_circuit, rng)
-                    .expect("invariant: dev circuit setup succeeds");
-            let (transfer_pk, transfer_vk) =
-                Groth16::<Bn254>::circuit_specific_setup(transfer_circuit, rng)
-                    .expect("invariant: dev circuit setup succeeds");
-
-            Self {
-                transfer_pk,
-                transfer_vk,
-                withdraw_pk,
-                withdraw_vk,
-                deposit_pk,
-                deposit_vk,
-            }
-        }
-
-        /// Create a RealProver from ceremony-derived verifying keys.
-        ///
-        /// This is the production path — keys come from the Powers of Tau
-        /// ceremony output, meaning no single party knows the toxic waste.
-        #[cfg(feature = "production-keys")]
-        pub fn from_production_keys(keys: crate::ceremony::ProductionKeys) -> Self {
-            Self {
-                transfer_pk: keys
-                    .pk
-                    .as_ref()
-                    .map(|p| p.transfer.clone())
-                    .unwrap_or_else(|| Self::empty_proving_key()),
-                transfer_vk: keys.vk.transfer,
-                withdraw_pk: keys
-                    .pk
-                    .as_ref()
-                    .map(|p| p.withdraw.clone())
-                    .unwrap_or_else(|| Self::empty_proving_key()),
-                withdraw_vk: keys.vk.withdraw,
-                deposit_pk: keys
-                    .pk
-                    .as_ref()
-                    .map(|p| p.deposit.clone())
-                    .unwrap_or_else(|| Self::empty_proving_key()),
-                deposit_vk: keys.vk.deposit,
-            }
-        }
-
-        /// Create a RealProver by loading ceremony-derived keys from disk.
-        #[cfg(feature = "production-keys")]
-        pub fn from_production_dir(
-            keys_dir: impl AsRef<std::path::Path>,
-        ) -> Result<Self, crate::ceremony::KeyLoadError> {
-            let keys = crate::ceremony::ProductionKeys::load(keys_dir)?;
-            Ok(Self::from_production_keys(keys))
-        }
-
-        /// Create a RealProver by loading and verifying keys against genesis hashes.
-        #[cfg(feature = "production-keys")]
-        pub fn from_production_verified(
-            keys_dir: impl AsRef<std::path::Path>,
-            genesis_hashes: &crate::ceremony::GenesisKeyHashes,
-        ) -> Result<Self, crate::ceremony::KeyLoadError> {
-            let keys =
-                crate::ceremony::ProductionKeys::load_with_verification(keys_dir, genesis_hashes)?;
-            Ok(Self::from_production_keys(keys))
-        }
-
-        /// Create a RealProver for a specific key version.
-        ///
-        /// With `production-keys`, looks up the version in the global registry.
-        /// Without `production-keys`, only version 0 is supported (returns a clone
-        /// of the dev-setup global singleton).
+        /// Halo2 uses universal parameters — there is no per-version CRS.
+        /// Only version 0 is supported; all other versions return `None`.
         pub fn for_version(version: u32) -> Option<Self> {
             if version == 0 {
-                return Some(Self::global().clone());
-            }
-            #[cfg(feature = "production-keys")]
-            {
-                let registry = crate::key_registry::ProverRegistry::global();
-                let keys = registry.get(version)?;
-                Some(Self::from_production_keys(keys))
-            }
-            #[cfg(not(feature = "production-keys"))]
-            {
+                Some(Self::global().clone())
+            } else {
                 None
             }
         }
 
-        /// Generate a Groth16 proof for a deposit circuit.
+        /// Generate universal parameters and circuit-specific keys for all three circuits.
+        ///
+        /// Uses `Params::new(k)` where k is the circuit's row count exponent:
+        /// - Deposit: k=10 (1024 rows)
+        /// - Withdraw: k=12 (4096 rows, 32-level Merkle path)
+        /// - Transfer: k=12 (4096 rows, 2-in/2-out)
+        pub fn setup() -> Self {
+            // Deposit circuit (k=10)
+            let deposit_params = Params::new(10);
+            let deposit_circuit = setup_deposit_circuit();
+            let deposit_vk = keygen_vk(&deposit_params, &deposit_circuit)
+                .expect("deposit keygen_vk");
+            let deposit_pk = keygen_pk(&deposit_params, deposit_vk.clone(), &deposit_circuit)
+                .expect("deposit keygen_pk");
+
+            // Withdraw circuit (k=12)
+            let withdraw_params = Params::new(12);
+            let withdraw_circuit = setup_withdraw_circuit();
+            let withdraw_vk = keygen_vk(&withdraw_params, &withdraw_circuit)
+                .expect("withdraw keygen_vk");
+            let withdraw_pk = keygen_pk(&withdraw_params, withdraw_vk.clone(), &withdraw_circuit)
+                .expect("withdraw keygen_pk");
+
+            // Transfer circuit (k=12)
+            let transfer_params = Params::new(12);
+            let transfer_circuit = setup_transfer_circuit();
+            let transfer_vk = keygen_vk(&transfer_params, &transfer_circuit)
+                .expect("transfer keygen_vk");
+            let transfer_pk = keygen_pk(&transfer_params, transfer_vk.clone(), &transfer_circuit)
+                .expect("transfer keygen_pk");
+
+            Self {
+                deposit_params,
+                deposit_pk,
+                deposit_vk,
+                withdraw_params,
+                withdraw_pk,
+                withdraw_vk,
+                transfer_params,
+                transfer_pk,
+                transfer_vk,
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Proof generation
+        // ------------------------------------------------------------------
+
+        /// Generate a Halo2 proof for a deposit circuit.
         pub fn prove_deposit(&self, circuit: &DepositCircuit) -> Result<Vec<u8>, ProverError> {
-            use ark_std::rand::rngs::StdRng;
-            use ark_std::rand::SeedableRng;
-            let rng = &mut StdRng::seed_from_u64(42);
+            let commitment_fp = bytes_to_fp(&circuit.commitment);
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
+            let asset_id_fp = bytes_to_fp(&asset_bytes);
 
-            let proof = Groth16::<Bn254>::prove(&self.deposit_pk, circuit.clone(), rng)
-                .map_err(|e| ProverError::ProofGeneration(e.to_string()))?;
+            let instances: &[&[&[Fp]]] = &[&[&[commitment_fp, asset_id_fp]]];
 
-            Ok(proof_ser::serialize_groth16_proof(proof))
+            let mut transcript =
+                Blake2bWrite::<_, EqAffine, Challenge255<EqAffine>>::init(vec![]);
+            create_proof(
+                &self.deposit_params,
+                &self.deposit_pk,
+                &[circuit.clone()],
+                instances,
+                rand::thread_rng(),
+                &mut transcript,
+            )
+            .map_err(|e| ProverError::ProofGeneration(e.to_string()))?;
+
+            Ok(transcript.finalize())
         }
 
-        /// Generate a Groth16 proof for a withdraw circuit.
+        /// Generate a Halo2 proof for a withdraw circuit.
         pub fn prove_withdraw(&self, circuit: &WithdrawCircuit) -> Result<Vec<u8>, ProverError> {
-            use ark_std::rand::rngs::StdRng;
-            use ark_std::rand::SeedableRng;
-            let rng = &mut StdRng::seed_from_u64(42);
+            let nullifier_fp = bytes_to_fp(&circuit.nullifier);
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
+            let asset_id_fp = bytes_to_fp(&asset_bytes);
+            let value_fp = bytes_to_fp(&crate::poseidon::value_to_fp_bytes(circuit.value));
+            let merkle_root_fp = bytes_to_fp(&circuit.merkle_root);
+            let mut target_bytes = [0u8; 32];
+            target_bytes[..20].copy_from_slice(&circuit.target_address);
+            let target_fp = bytes_to_fp(&target_bytes);
 
-            let proof = Groth16::<Bn254>::prove(&self.withdraw_pk, circuit.clone(), rng)
-                .map_err(|e| ProverError::ProofGeneration(e.to_string()))?;
+            let instances: &[&[&[Fp]]] = &[&[&[
+                nullifier_fp,
+                asset_id_fp,
+                value_fp,
+                merkle_root_fp,
+                target_fp,
+            ]]];
 
-            Ok(proof_ser::serialize_groth16_proof(proof))
+            let mut transcript =
+                Blake2bWrite::<_, EqAffine, Challenge255<EqAffine>>::init(vec![]);
+            create_proof(
+                &self.withdraw_params,
+                &self.withdraw_pk,
+                &[circuit.clone()],
+                instances,
+                rand::thread_rng(),
+                &mut transcript,
+            )
+            .map_err(|e| ProverError::ProofGeneration(e.to_string()))?;
+
+            Ok(transcript.finalize())
         }
 
-        /// Generate a Groth16 proof for a transfer circuit.
+        /// Generate a Halo2 proof for a transfer circuit.
         pub fn prove_transfer(&self, circuit: &TransferCircuit) -> Result<Vec<u8>, ProverError> {
-            use ark_std::rand::rngs::StdRng;
-            use ark_std::rand::SeedableRng;
-            let rng = &mut StdRng::seed_from_u64(42);
+            let nullifier0_fp = bytes_to_fp(&circuit.nullifiers[0]);
+            let nullifier1_fp = bytes_to_fp(&circuit.nullifiers[1]);
+            let commitment0_fp = bytes_to_fp(&circuit.commitments[0]);
+            let commitment1_fp = bytes_to_fp(&circuit.commitments[1]);
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
+            let asset_id_fp = bytes_to_fp(&asset_bytes);
+            let merkle_root_fp = bytes_to_fp(&circuit.merkle_root);
 
-            let proof = Groth16::<Bn254>::prove(&self.transfer_pk, circuit.clone(), rng)
-                .map_err(|e| ProverError::ProofGeneration(e.to_string()))?;
+            let instances: &[&[&[Fp]]] = &[&[&[
+                nullifier0_fp,
+                nullifier1_fp,
+                commitment0_fp,
+                commitment1_fp,
+                asset_id_fp,
+                merkle_root_fp,
+            ]]];
 
-            Ok(proof_ser::serialize_groth16_proof(proof))
+            let mut transcript =
+                Blake2bWrite::<_, EqAffine, Challenge255<EqAffine>>::init(vec![]);
+            create_proof(
+                &self.transfer_params,
+                &self.transfer_pk,
+                &[circuit.clone()],
+                instances,
+                rand::thread_rng(),
+                &mut transcript,
+            )
+            .map_err(|e| ProverError::ProofGeneration(e.to_string()))?;
+
+            Ok(transcript.finalize())
         }
 
-        /// Verify a deposit proof against the verifying key and public inputs.
+        // ------------------------------------------------------------------
+        // Verification
+        // ------------------------------------------------------------------
+
+        /// Verify a deposit proof.
         pub fn verify_deposit(
             &self,
             proof_data: &[u8],
             public_inputs: &[u8],
         ) -> Result<bool, ProverError> {
-            let proof = proof_ser::deserialize_groth16_proof(proof_data)
-                .map_err(|_e| ProverError::ProofVerification)?;
-
-            // Public inputs for deposit: commitment (32B) + asset_id (8B) = 40B
-            let pis = Self::bytes_to_public_inputs(public_inputs);
-
-            let valid = Groth16::<Bn254>::verify(&self.deposit_vk, &pis, &proof)
-                .map_err(|_e| ProverError::ProofVerification)?;
-            Ok(valid)
+            let instances = Self::bytes_to_instances(public_inputs);
+            let strategy = SingleVerifier::new(&self.deposit_params);
+            let mut transcript =
+                Blake2bRead::<_, EqAffine, Challenge255<EqAffine>>::init(proof_data);
+            match verify_proof(
+                &self.deposit_params,
+                &self.deposit_vk,
+                strategy,
+                &[&[&instances]],
+                &mut transcript,
+            ) {
+                Ok(()) => Ok(true),
+                Err(_) => Ok(false),
+            }
         }
 
-        /// Verify a withdraw proof against the verifying key and public inputs.
+        /// Verify a withdraw proof.
         pub fn verify_withdraw(
             &self,
             proof_data: &[u8],
             public_inputs: &[u8],
         ) -> Result<bool, ProverError> {
-            let proof = proof_ser::deserialize_groth16_proof(proof_data)
-                .map_err(|_e| ProverError::ProofVerification)?;
-
-            let pis = Self::bytes_to_public_inputs(public_inputs);
-
-            let valid = Groth16::<Bn254>::verify(&self.withdraw_vk, &pis, &proof)
-                .map_err(|_e| ProverError::ProofVerification)?;
-            Ok(valid)
+            let instances = Self::bytes_to_instances(public_inputs);
+            let strategy = SingleVerifier::new(&self.withdraw_params);
+            let mut transcript =
+                Blake2bRead::<_, EqAffine, Challenge255<EqAffine>>::init(proof_data);
+            match verify_proof(
+                &self.withdraw_params,
+                &self.withdraw_vk,
+                strategy,
+                &[&[&instances]],
+                &mut transcript,
+            ) {
+                Ok(()) => Ok(true),
+                Err(_) => Ok(false),
+            }
         }
 
-        /// Verify a transfer proof against the verifying key and public inputs.
+        /// Verify a transfer proof.
         pub fn verify_transfer(
             &self,
             proof_data: &[u8],
             public_inputs: &[u8],
         ) -> Result<bool, ProverError> {
-            let proof = proof_ser::deserialize_groth16_proof(proof_data)
-                .map_err(|_e| ProverError::ProofVerification)?;
-
-            let pis = Self::bytes_to_public_inputs(public_inputs);
-
-            let valid = Groth16::<Bn254>::verify(&self.transfer_vk, &pis, &proof)
-                .map_err(|_e| ProverError::ProofVerification)?;
-            Ok(valid)
-        }
-
-        /// Get references to the circuit keys (for keygen/save/load).
-        pub fn deposit_keys(&self) -> (&ProvingKey<Bn254>, &VerifyingKey<Bn254>) {
-            (&self.deposit_pk, &self.deposit_vk)
-        }
-
-        pub fn withdraw_keys(&self) -> (&ProvingKey<Bn254>, &VerifyingKey<Bn254>) {
-            (&self.withdraw_pk, &self.withdraw_vk)
-        }
-
-        pub fn transfer_keys(&self) -> (&ProvingKey<Bn254>, &VerifyingKey<Bn254>) {
-            (&self.transfer_pk, &self.transfer_vk)
-        }
-
-        // ------------------------------------------------------------------
-        // Dev circuit stubs for trusted setup — these create valid circuits
-        // with witness data so constraint synthesis succeeds.
-        // ------------------------------------------------------------------
-
-        fn dev_deposit_circuit() -> DepositCircuit {
-            setup_deposit_circuit()
-        }
-
-        fn dev_withdraw_circuit() -> WithdrawCircuit {
-            setup_withdraw_circuit()
-        }
-
-        fn dev_transfer_circuit() -> TransferCircuit {
-            setup_transfer_circuit()
+            let instances = Self::bytes_to_instances(public_inputs);
+            let strategy = SingleVerifier::new(&self.transfer_params);
+            let mut transcript =
+                Blake2bRead::<_, EqAffine, Challenge255<EqAffine>>::init(proof_data);
+            match verify_proof(
+                &self.transfer_params,
+                &self.transfer_vk,
+                strategy,
+                &[&[&instances]],
+                &mut transcript,
+            ) {
+                Ok(()) => Ok(true),
+                Err(_) => Ok(false),
+            }
         }
 
         // ------------------------------------------------------------------
         // Helpers
         // ------------------------------------------------------------------
 
-        /// Convert raw public input bytes to ark_bn254::Fr elements.
-        fn bytes_to_public_inputs(data: &[u8]) -> Vec<ark_bn254::Fr> {
-            use ark_ff::PrimeField;
-            // Each Fr element is 32 bytes (canonical little-endian)
-            data.chunks(32)
+        /// Convert raw public input bytes (32-byte chunks) to Fp elements.
+        fn bytes_to_instances(bytes: &[u8]) -> Vec<Fp> {
+            bytes
+                .chunks(32)
                 .map(|chunk| {
                     let mut buf = [0u8; 32];
                     let len = chunk.len().min(32);
                     buf[..len].copy_from_slice(&chunk[..len]);
-                    ark_bn254::Fr::from_le_bytes_mod_order(&buf)
+                    bytes_to_fp(&buf)
                 })
                 .collect()
-        }
-
-        // ------------------------------------------------------------------
-        // Async wrappers (non-blocking) — use tokio::task::spawn_blocking
-        // so CPU-intensive proof generation does not block the async runtime.
-        // ------------------------------------------------------------------
-
-        /// Async wrapper for `prove_deposit`.
-        pub async fn prove_deposit_async(
-            &self,
-            circuit: DepositCircuit,
-        ) -> Result<Vec<u8>, ProverError> {
-            let prover = self.clone();
-            tokio::task::spawn_blocking(move || prover.prove_deposit(&circuit))
-                .await
-                .map_err(|e| ProverError::ProofGeneration(format!("task panicked: {e}")))?
-        }
-
-        /// Async wrapper for `prove_withdraw`.
-        pub async fn prove_withdraw_async(
-            &self,
-            circuit: WithdrawCircuit,
-        ) -> Result<Vec<u8>, ProverError> {
-            let prover = self.clone();
-            tokio::task::spawn_blocking(move || prover.prove_withdraw(&circuit))
-                .await
-                .map_err(|e| ProverError::ProofGeneration(format!("task panicked: {e}")))?
-        }
-
-        /// Async wrapper for `prove_transfer`.
-        pub async fn prove_transfer_async(
-            &self,
-            circuit: TransferCircuit,
-        ) -> Result<Vec<u8>, ProverError> {
-            let prover = self.clone();
-            tokio::task::spawn_blocking(move || prover.prove_transfer(&circuit))
-                .await
-                .map_err(|e| ProverError::ProofGeneration(format!("task panicked: {e}")))?
-        }
-
-        /// Create a minimal empty proving key for validator-only nodes.
-        ///
-        /// Validators only need verifying keys, not proving keys. This provides
-        /// a placeholder for the proving key fields when loading ceremony VKs.
-        #[allow(dead_code)]
-        fn empty_proving_key() -> ProvingKey<Bn254> {
-            use ark_bn254::{G1Affine, G2Affine};
-            ProvingKey {
-                vk: VerifyingKey {
-                    alpha_g1: G1Affine::default(),
-                    beta_g2: G2Affine::default(),
-                    gamma_g2: G2Affine::default(),
-                    delta_g2: G2Affine::default(),
-                    gamma_abc_g1: vec![],
-                },
-                beta_g1: G1Affine::default(),
-                delta_g1: G1Affine::default(),
-                a_query: vec![],
-                b_g1_query: vec![],
-                b_g2_query: vec![],
-                h_query: vec![],
-                l_query: vec![],
-            }
         }
     }
 
     // ---------------------------------------------------------------------------
-    // Setup helpers: create valid circuits with witness data for trusted setup
+    // Setup helpers: create valid circuits with witness data for key generation
     // ---------------------------------------------------------------------------
 
     use crate::circuit_deposit::DepositWitness;
-    use crate::circuit_transfer::{InputNoteWitness, OutputNoteWitness};
     use crate::circuit_withdraw::WithdrawWitness;
-    use crate::merkle_poseidon::PoseidonMerkleTree;
-    use crate::poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash};
-    use crate::ViewingKey;
+    use crate::poseidon::domain;
 
-    pub(crate) fn setup_spending_key(n: u8) -> [u8; 32] {
+    fn setup_spending_key(n: u8) -> [u8; 32] {
         let mut key = [0u8; 32];
         key[0] = n;
         key
     }
 
-    pub(crate) fn setup_hash(n: u8) -> [u8; 32] {
+    fn setup_hash(n: u8) -> [u8; 32] {
         let mut out = [0u8; 32];
         out[0] = n;
         out
     }
 
-    pub(crate) fn setup_value_to_fr_bytes(value: u128) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
-        bytes[..16].copy_from_slice(&value.to_le_bytes());
-        bytes
-    }
-
-    pub(crate) fn setup_domain_tag_to_bytes(tag: &str) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
-        let tag_bytes = tag.as_bytes();
-        let len = tag_bytes.len().min(32);
-        bytes[..len].copy_from_slice(&tag_bytes[..len]);
-        bytes
-    }
-
-    pub(crate) fn setup_compute_rcm(
+    fn setup_compute_rcm(
         vk: &ViewingKey,
         value: u128,
         asset_id: u64,
         rho: &[u8; 32],
     ) -> [u8; 32] {
-        // Must match the circuit's D3 constraint: poseidon_hash([rcm_tag, ivk, value, asset, rho])
-        let rcm_tag = setup_domain_tag_to_bytes("rcm");
-        let rcm_tag_fr = bytes_to_fr(&rcm_tag);
-        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
-        let value_bytes = setup_value_to_fr_bytes(value);
-        let value_fr = bytes_to_fr(&value_bytes);
+        let ivk_fp = bytes_to_fp(&vk.incoming_view_key);
+        let value_fp = bytes_to_fp(&crate::poseidon::value_to_fp_bytes(value));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rho_fr = bytes_to_fr(rho);
-        let rcm_fr = poseidon_hash(&[rcm_tag_fr, ivk_fr, value_fr, asset_fr, rho_fr]);
-        fr_to_bytes(&rcm_fr)
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rho_fp = bytes_to_fp(rho);
+        let rcm_fp = poseidon_hash_tagged(domain::RCM, &[ivk_fp, value_fp, asset_fp, rho_fp]);
+        fp_to_bytes(&rcm_fp)
     }
 
-    pub(crate) fn setup_derive_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
-        let domain_bytes = setup_domain_tag_to_bytes(domain::FVK_FROM_IVK);
-        let fvk_tag = bytes_to_fr(&domain_bytes);
-        let ivk_fr = bytes_to_fr(ivk);
-        let rho_fr = bytes_to_fr(rho);
-        let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fr]);
-        let nf_fr = poseidon_hash(&[fvk_from_ivk, rho_fr]);
-        fr_to_bytes(&nf_fr)
+    fn setup_derive_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
+        let fvk_tag = bytes_to_fp(&crate::poseidon::tag_to_bytes(domain::FVK_FROM_IVK));
+        let ivk_fp = bytes_to_fp(ivk);
+        let rho_fp = bytes_to_fp(rho);
+        let fvk = poseidon_hash(&[fvk_tag, ivk_fp]);
+        let nf_fp = poseidon_hash(&[fvk, rho_fp]);
+        fp_to_bytes(&nf_fp)
     }
 
-    pub(crate) fn setup_compute_commitment(
+    fn setup_compute_commitment(
         value: u128,
         asset_id: u64,
         rcm: &[u8; 32],
         rho: &[u8; 32],
     ) -> [u8; 32] {
-        let value_bytes = setup_value_to_fr_bytes(value);
-        let value_fr = bytes_to_fr(&value_bytes);
+        let value_fp = bytes_to_fp(&crate::poseidon::value_to_fp_bytes(value));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rcm_fr = bytes_to_fr(rcm);
-        let rho_fr = bytes_to_fr(rho);
-        let cm_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
-        fr_to_bytes(&cm_fr)
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rcm_fp = bytes_to_fp(rcm);
+        let rho_fp = bytes_to_fp(rho);
+        let cm_fp = poseidon_hash(&[value_fp, asset_fp, rcm_fp, rho_fp]);
+        fp_to_bytes(&cm_fp)
     }
 
-    pub(crate) fn setup_deposit_circuit() -> DepositCircuit {
+    pub fn setup_deposit_circuit() -> DepositCircuit {
         let sk = setup_spending_key(1);
         let vk = ViewingKey::generate(&sk);
         let rho = setup_hash(1);
@@ -532,7 +437,7 @@ mod real_prover_impl {
         DepositCircuit::new(commitment, asset_id, witness)
     }
 
-    pub(crate) fn setup_withdraw_circuit() -> WithdrawCircuit {
+    pub fn setup_withdraw_circuit() -> WithdrawCircuit {
         let sk = setup_spending_key(1);
         let vk = ViewingKey::generate(&sk);
         let rho = setup_hash(1);
@@ -558,60 +463,74 @@ mod real_prover_impl {
         };
         let target_address = [1u8; 20];
 
-        WithdrawCircuit::new(
-            nullifier,
-            asset_id,
-            value,
-            target_address,
-            merkle_root,
-            witness,
-        )
+        WithdrawCircuit::new(nullifier, asset_id, value, target_address, merkle_root, witness)
     }
 
-    pub(crate) fn setup_transfer_circuit() -> TransferCircuit {
+    pub fn setup_transfer_circuit() -> TransferCircuit {
         let asset_id: u64 = 1;
 
-        let sk = setup_spending_key(1);
-        let vk = ViewingKey::generate(&sk);
-        let rho_in = setup_hash(10);
-        let rcm_in = setup_compute_rcm(&vk, 1000, asset_id, &rho_in);
-        let nullifier = setup_derive_nullifier(&vk.incoming_view_key, &rho_in);
-        let input_cm = setup_compute_commitment(1000, asset_id, &rcm_in, &rho_in);
-
         let mut tree = PoseidonMerkleTree::new(32);
-        tree.insert(&input_cm);
+        let mut input_notes = Vec::with_capacity(2);
+        let mut nullifiers = Vec::with_capacity(2);
+
+        for i in 0..2 {
+            let sk = setup_spending_key(1 + i as u8);
+            let vk = ViewingKey::generate(&sk);
+            let rho = setup_hash(10 + i as u8);
+            let rcm = setup_compute_rcm(&vk, 500, asset_id, &rho);
+            let cm = setup_compute_commitment(500, asset_id, &rcm, &rho);
+
+            input_notes.push(InputNoteWitness {
+                value: 500,
+                rcm,
+                recipient_ivk: vk.incoming_view_key,
+                rho,
+                spending_key: sk,
+            });
+
+            let nf = setup_derive_nullifier(&vk.incoming_view_key, &rho);
+            nullifiers.push(nf);
+            tree.insert(&cm);
+        }
+
         let merkle_root = tree.root();
-        let merkle_path = tree.proof_for_last();
+        let mut merkle_paths = Vec::with_capacity(2);
+        for i in 0..2 {
+            let proof = tree.proof_for_index(i).unwrap();
+            let mut arr = [([0u8; 32], false); 32];
+            for (j, p) in proof.iter().enumerate() {
+                arr[j] = *p;
+            }
+            merkle_paths.push(arr);
+        }
 
-        let input_witness = InputNoteWitness {
-            value: 1000,
-            rcm: rcm_in,
-            recipient_ivk: vk.incoming_view_key,
-            rho: rho_in,
-            spending_key: sk,
-        };
+        let mut output_notes = Vec::with_capacity(2);
+        let mut commitments = Vec::with_capacity(2);
 
-        let out_sk = setup_spending_key(2);
-        let out_vk = ViewingKey::generate(&out_sk);
-        let rho_out = setup_hash(20);
-        let rcm_out = setup_compute_rcm(&out_vk, 900, asset_id, &rho_out);
-        let output_cm = setup_compute_commitment(900, asset_id, &rcm_out, &rho_out);
+        for j in 0..2 {
+            let sk = setup_spending_key(20 + j as u8);
+            let vk = ViewingKey::generate(&sk);
+            let rho = setup_hash(30 + j as u8);
+            let rcm = setup_compute_rcm(&vk, 500, asset_id, &rho);
+            let cm = setup_compute_commitment(500, asset_id, &rcm, &rho);
 
-        let output_witness = OutputNoteWitness {
-            value: 900,
-            rcm: rcm_out,
-            recipient_ivk: out_vk.incoming_view_key,
-            rho: rho_out,
-        };
+            output_notes.push(OutputNoteWitness {
+                value: 500,
+                rcm,
+                recipient_ivk: vk.incoming_view_key,
+                rho,
+            });
+            commitments.push(cm);
+        }
 
         TransferCircuit::new(
-            vec![nullifier],
-            vec![output_cm],
+            [nullifiers[0], nullifiers[1]],
+            [commitments[0], commitments[1]],
             asset_id,
             merkle_root,
-            vec![input_witness],
-            vec![output_witness],
-            vec![merkle_path],
+            [input_notes[0], input_notes[1]],
+            [output_notes[0], output_notes[1]],
+            [merkle_paths[0], merkle_paths[1]],
         )
     }
 
@@ -620,24 +539,28 @@ mod real_prover_impl {
         use super::*;
 
         #[test]
-        fn test_real_prover_setup_succeeds() {
-            let prover = RealProver::setup();
-            assert!(!prover.deposit_pk.a_query.is_empty());
-            assert!(!prover.withdraw_pk.a_query.is_empty());
-            assert!(!prover.transfer_pk.a_query.is_empty());
+        fn test_halo2_prover_setup_succeeds() {
+            let prover = Halo2Prover::setup();
+            // Keys are non-empty (asserted by setup() success)
+            assert_eq!(prover.deposit_params.k(), 10);
+            assert_eq!(prover.withdraw_params.k(), 12);
+            assert_eq!(prover.transfer_params.k(), 12);
         }
 
         #[test]
-        fn test_real_prover_deposit_proof_cycle() {
-            let prover = RealProver::setup();
+        fn test_halo2_prover_deposit_proof_cycle() {
+            let prover = Halo2Prover::setup();
             let circuit = setup_deposit_circuit();
 
             let proof_data = prover
                 .prove_deposit(&circuit)
                 .expect("deposit prove failed");
-            assert_eq!(proof_data.len(), 128, "Groth16 proof should be 128 bytes");
+            assert!(
+                proof_data.len() > 128,
+                "Halo2 proof should be larger than old Groth16 (128B)"
+            );
 
-            // Deposit circuit public inputs: commitment + asset_id (2 Fr = 64 bytes)
+            // Public inputs: commitment (32B) + asset_id (32B) = 64B
             let mut public_inputs = circuit.commitment.to_vec();
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
@@ -650,25 +573,26 @@ mod real_prover_impl {
         }
 
         #[test]
-        fn test_real_prover_withdraw_proof_cycle() {
-            let prover = RealProver::setup();
+        fn test_halo2_prover_withdraw_proof_cycle() {
+            let prover = Halo2Prover::setup();
             let circuit = setup_withdraw_circuit();
 
             let proof_data = prover
                 .prove_withdraw(&circuit)
                 .expect("withdraw prove failed");
-            assert_eq!(proof_data.len(), 128);
+            assert!(!proof_data.is_empty());
 
-            // Withdraw circuit public inputs: nullifier + asset_id + merkle_root + value (4 Fr = 128 bytes)
+            // Public inputs: nullifier + asset_id + value + merkle_root + target_address (5 Fp = 160B)
             let mut public_inputs = Vec::new();
             public_inputs.extend_from_slice(&circuit.nullifier);
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
             public_inputs.extend_from_slice(&asset_bytes);
+            public_inputs.extend_from_slice(&crate::poseidon::value_to_fp_bytes(circuit.value));
             public_inputs.extend_from_slice(&circuit.merkle_root);
-            let mut value_bytes = [0u8; 32];
-            value_bytes[..16].copy_from_slice(&circuit.value.to_le_bytes());
-            public_inputs.extend_from_slice(&value_bytes);
+            let mut target_bytes = [0u8; 32];
+            target_bytes[..20].copy_from_slice(&circuit.target_address);
+            public_inputs.extend_from_slice(&target_bytes);
 
             let valid = prover
                 .verify_withdraw(&proof_data, &public_inputs)
@@ -677,24 +601,25 @@ mod real_prover_impl {
         }
 
         #[test]
-        fn test_real_prover_transfer_proof_cycle() {
-            let prover = RealProver::setup();
+        fn test_halo2_prover_transfer_proof_cycle() {
+            let prover = Halo2Prover::setup();
             let circuit = setup_transfer_circuit();
 
             let proof_data = prover
                 .prove_transfer(&circuit)
                 .expect("transfer prove failed");
-            assert_eq!(proof_data.len(), 128);
+            assert!(!proof_data.is_empty());
 
-            // Transfer circuit public inputs: asset_id + merkle_root + nullifiers + commitments
-            // For 1 input, 1 output: 4 Fr = 128 bytes
+            // Public inputs: nullifier0 + nullifier1 + commitment0 + commitment1 + asset_id + merkle_root
             let mut public_inputs = Vec::new();
+            public_inputs.extend_from_slice(&circuit.nullifiers[0]);
+            public_inputs.extend_from_slice(&circuit.nullifiers[1]);
+            public_inputs.extend_from_slice(&circuit.commitments[0]);
+            public_inputs.extend_from_slice(&circuit.commitments[1]);
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
             public_inputs.extend_from_slice(&asset_bytes);
             public_inputs.extend_from_slice(&circuit.merkle_root);
-            public_inputs.extend_from_slice(&circuit.nullifiers[0]);
-            public_inputs.extend_from_slice(&circuit.commitments[0]);
 
             let valid = prover
                 .verify_transfer(&proof_data, &public_inputs)
@@ -703,8 +628,8 @@ mod real_prover_impl {
         }
 
         #[test]
-        fn test_real_prover_rejects_corrupted_proof() {
-            let prover = RealProver::setup();
+        fn test_halo2_prover_rejects_corrupted_proof() {
+            let prover = Halo2Prover::setup();
             let circuit = setup_deposit_circuit();
 
             let mut proof_data = prover
@@ -712,7 +637,6 @@ mod real_prover_impl {
                 .expect("invariant: dev circuit setup succeeds");
             proof_data[10] ^= 0xFF;
 
-            // Deposit public inputs: commitment + asset_id (2 Fr = 64 bytes)
             let mut public_inputs = circuit.commitment.to_vec();
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
@@ -726,15 +650,14 @@ mod real_prover_impl {
         }
 
         #[test]
-        fn test_real_prover_wrong_public_inputs_rejected() {
-            let prover = RealProver::setup();
+        fn test_halo2_prover_wrong_public_inputs_rejected() {
+            let prover = Halo2Prover::setup();
             let circuit = setup_deposit_circuit();
 
             let proof_data = prover
                 .prove_deposit(&circuit)
                 .expect("invariant: dev circuit setup succeeds");
 
-            // Wrong public inputs: 64 bytes (2 Fr) of 0xFF
             let public_inputs = vec![0xFFu8; 64];
 
             let valid = prover
@@ -745,50 +668,12 @@ mod real_prover_impl {
     }
 }
 
-#[cfg(all(feature = "real-prover", test))]
-pub(crate) use real_prover_impl::setup_withdraw_circuit;
-#[cfg(feature = "real-prover")]
-pub use real_prover_impl::RealProver;
+#[cfg(feature = "halo2-prover")]
+pub use halo2_prover_impl::{Halo2Prover, setup_deposit_circuit, setup_transfer_circuit, setup_withdraw_circuit};
 
 // ============================================================================
-// Halo2Prover stub — will be fully implemented in Phase 5.
+// MockProver tests (always compiled)
 // ============================================================================
-
-#[cfg(feature = "halo2-prover")]
-pub struct Halo2Prover;
-
-#[cfg(feature = "halo2-prover")]
-impl Halo2Prover {
-    pub fn for_version(_version: u32) -> Option<Self> {
-        Some(Self)
-    }
-
-    pub fn verify_deposit(
-        &self,
-        _proof_data: &[u8],
-        _public_inputs: &[u8],
-    ) -> Result<bool, ProverError> {
-        // Stub: always accept during migration.
-        // Phase 5 will wire this to halo2_proofs::plonk::verify_proof.
-        Ok(true)
-    }
-
-    pub fn verify_withdraw(
-        &self,
-        _proof_data: &[u8],
-        _public_inputs: &[u8],
-    ) -> Result<bool, ProverError> {
-        Ok(true)
-    }
-
-    pub fn verify_transfer(
-        &self,
-        _proof_data: &[u8],
-        _public_inputs: &[u8],
-    ) -> Result<bool, ProverError> {
-        Ok(true)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -861,9 +746,8 @@ mod tests {
 
     #[test]
     fn test_mock_prover_constraint_violation() {
-        // Circuit with value overflow
         let input = test_note(1000, 1, 1);
-        let output = test_note(2000, 1, 2); // > input
+        let output = test_note(2000, 1, 2);
         let circuit = ShieldedCircuit::new(
             vec![input.nullifier()],
             vec![output.commitment()],

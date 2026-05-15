@@ -225,8 +225,8 @@ impl ShieldedTransfer {
         if self.proof.nullifiers.is_empty() && self.proof.commitments.is_empty() {
             return false;
         }
-        // Groth16 proof size bound
-        if self.proof.proof_data.len() > 512 || self.proof.proof_data.is_empty() {
+        // Halo2 IPA proof size bound (~5-10KB typical, 20KB max)
+        if self.proof.proof_data.len() > 20_000 || self.proof.proof_data.is_empty() {
             return false;
         }
         // No duplicate nullifiers
@@ -268,12 +268,14 @@ impl ShieldedTransfer {
 ///
 /// `merkle_root` is required for transfer and withdraw circuits.
 /// `value` is required for withdraw circuits.
+/// `target` is required for withdraw circuits (20-byte EVM address).
 #[cfg(not(feature = "halo2-prover"))]
 pub fn verify_shielded_proof(
     proof: &ZkProof,
     _circuit_type: &str,
     _merkle_root: Option<&[u8; 32]>,
     _value: Option<u128>,
+    _target: Option<[u8; 20]>,
 ) -> Result<bool, String> {
     let _ = proof;
     Err("ZK proof verification requires the `halo2-prover` feature — structural-only validation is not acceptable in production".into())
@@ -285,6 +287,7 @@ pub fn verify_shielded_proof(
     circuit_type: &str,
     merkle_root: Option<&[u8; 32]>,
     value: Option<u128>,
+    target: Option<[u8; 20]>,
 ) -> Result<bool, String> {
     use crate::prover::{Halo2Prover, ProverError};
 
@@ -319,31 +322,35 @@ pub fn verify_shielded_proof(
             let merkle_root =
                 merkle_root.ok_or("merkle_root required for withdraw verification")?;
             let value = value.ok_or("value required for withdraw verification")?;
+            let target = target.ok_or("target required for withdraw verification")?;
             let mut public_inputs = Vec::new();
             public_inputs.extend_from_slice(proof.nullifiers[0].0.as_slice());
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
             public_inputs.extend_from_slice(&asset_bytes);
-            public_inputs.extend_from_slice(merkle_root);
             let mut value_bytes = [0u8; 32];
             value_bytes[..16].copy_from_slice(&value.to_le_bytes());
             public_inputs.extend_from_slice(&value_bytes);
+            public_inputs.extend_from_slice(merkle_root);
+            let mut target_bytes = [0u8; 32];
+            target_bytes[..20].copy_from_slice(&target);
+            public_inputs.extend_from_slice(&target_bytes);
             prover.verify_withdraw(&proof.proof_data, &public_inputs)
         }
         "transfer" => {
             let merkle_root =
                 merkle_root.ok_or("merkle_root required for transfer verification")?;
             let mut public_inputs = Vec::new();
-            let mut asset_bytes = [0u8; 32];
-            asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
-            public_inputs.extend_from_slice(&asset_bytes);
-            public_inputs.extend_from_slice(merkle_root);
             for nf in &proof.nullifiers {
                 public_inputs.extend_from_slice(nf.0.as_slice());
             }
             for cm in &proof.commitments {
                 public_inputs.extend_from_slice(cm.0.as_slice());
             }
+            let mut asset_bytes = [0u8; 32];
+            asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
+            public_inputs.extend_from_slice(&asset_bytes);
+            public_inputs.extend_from_slice(merkle_root);
             prover.verify_transfer(&proof.proof_data, &public_inputs)
         }
         other => return Err(format!("unknown circuit type: {other}")),

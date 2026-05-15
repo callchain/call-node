@@ -1,17 +1,24 @@
-//! Proof serialization placeholder during Halo2 migration.
+//! Proof serialization for Halo2 IPA proofs.
 //!
-//! Groth16 proof serialization has been removed. Halo2 proofs are serialized
-//! via `halo2_proofs::plonk::Prover::create_proof`. This module will be
-//! rewritten in Phase 5.
+//! Halo2 proofs are raw byte vectors produced by `Blake2bWrite::finalize()`.
+//! No special deserialization is required — the verifier reads the proof
+//! bytes directly via `Blake2bRead`. This module provides size constants
+//! and error types for protocol-level validation.
 
-/// Error deserializing a proof.
+/// Error deserializing or validating a proof.
 #[derive(Debug, thiserror::Error)]
 pub enum ProofDeserializeError {
     #[error("proof data too short: expected {expected} bytes, got {got}")]
     TooShort { expected: usize, got: usize },
-    #[error("invalid compressed point: {0}")]
-    InvalidPoint(&'static str),
+    #[error("proof data exceeds maximum size: {0}")]
+    TooLarge(usize),
 }
 
-/// Old Groth16 proof size (128 bytes). Retained for compatibility checks.
-pub const GROTH16_PROOF_SIZE: usize = 128;
+/// Approximate minimum Halo2 IPA proof size (deposit circuit, k=10).
+/// Actual size varies by circuit and transcript; this is a lower bound
+/// for sanity checks (e.g. rejecting empty or truncated proofs).
+pub const HALO2_PROOF_MIN_SIZE: usize = 2_000;
+
+/// Approximate maximum Halo2 IPA proof size (transfer circuit, k=12).
+/// Used as an upper bound for mempool / protocol validation.
+pub const HALO2_PROOF_MAX_SIZE: usize = 20_000;
