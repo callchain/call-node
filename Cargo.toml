@@ -189,6 +189,13 @@ axum = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 
+# ZK proving (Halo2 + Pasta curves)
+halo2_proofs = "0.3"
+halo2_gadgets = "0.3"
+pasta_curves = "0.5"
+ff = "0.13"
+group = "0.13"
+
 # DNS
 hickory-resolver = "0.24"
 

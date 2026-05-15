@@ -1,9 +1,9 @@
-//! Incremental Merkle Tree using Poseidon hash for BN254.
+//! Incremental Merkle Tree using Poseidon hash for Pasta Pallas.
 //!
 //! This is a ZK-circuit-friendly Merkle tree that uses Poseidon hashing
 //! instead of keccak256. The API mirrors `IncrementalMerkleTree` from
 //! `merkle.rs` but operates with `[u8; 32]` bytes internally converted to
-//! `ark_bn254::Fr` for Poseidon hashing.
+//! `pasta_curves::Fp` for Poseidon hashing.
 //!
 //! All operations are gated behind the `poseidon` feature.
 
@@ -17,7 +17,7 @@ use std::cell::RefCell;
 /// Incremental Poseidon Merkle Tree (fixed depth, append-only).
 ///
 /// Stores all tree nodes explicitly for efficient proof generation.
-/// Uses Poseidon hash over BN254 Fr field, suitable for ZK circuit verification.
+/// Uses Poseidon hash over Pasta Pallas Fp field, suitable for Halo2 circuit verification.
 #[derive(Debug, Clone)]
 pub struct PoseidonMerkleTree {
     depth: usize,

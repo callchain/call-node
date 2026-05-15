@@ -35,28 +35,28 @@ pub mod prover;
 
 #[cfg(feature = "production-keys")]
 pub mod ceremony;
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 pub mod circuit_deposit;
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 pub mod circuit_transfer;
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 pub mod circuit_withdraw;
 #[cfg(feature = "production-keys")]
 pub mod key_registry;
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 pub mod keygen;
 pub mod merkle_poseidon;
 pub mod poseidon;
 pub mod precompile;
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 pub mod proof_ser;
 #[cfg(feature = "prover-server")]
 pub mod prover_server;
 
-/// Whether the `real-prover` feature is enabled at compile time.
+/// Whether the `halo2-prover` feature is enabled at compile time.
 /// Tests in downstream crates can use this to skip mock-proof tests
-/// when the real Groth16 verifier is active.
-pub const REAL_PROVER_ENABLED: bool = cfg!(feature = "real-prover");
+/// when the real Halo2 verifier is active.
+pub const REAL_PROVER_ENABLED: bool = cfg!(feature = "halo2-prover");
 
 pub use circuit::*;
 pub use compliance::*;
@@ -119,15 +119,15 @@ pub struct ViewingKey {
 impl ViewingKey {
     /// Generate a viewing key pair from a spending key seed.
     ///
-    /// Uses domain-separated Poseidon hashing over BN254 Fr. Matches the
-    /// R1CS circuit constraint T3: ivk = poseidon_hash_tagged("call/shielded/ivk", [sk_fr]).
+    /// Uses domain-separated Poseidon hashing over Pasta Pallas Fp. Matches the
+    /// Halo2 circuit constraint: ivk = poseidon_hash_tagged("call/shielded/ivk", [sk_fp]).
     pub fn generate(spending_key: &[u8; 32]) -> Self {
-        let sk_fr = poseidon::bytes_to_fr(spending_key);
-        let ivk_fr = poseidon::poseidon_hash_tagged(poseidon::domain::IVK_FROM_SK, &[sk_fr]);
-        let ivk = poseidon::fr_to_bytes(&ivk_fr);
+        let sk_fp = poseidon::bytes_to_fp(spending_key);
+        let ivk_fp = poseidon::poseidon_hash_tagged(poseidon::domain::IVK_FROM_SK, &[sk_fp]);
+        let ivk = poseidon::fp_to_bytes(&ivk_fp);
 
-        let fvk_fr = poseidon::poseidon_hash_tagged(poseidon::domain::FVK_FROM_IVK, &[ivk_fr]);
-        let fvk = poseidon::fr_to_bytes(&fvk_fr);
+        let fvk_fp = poseidon::poseidon_hash_tagged(poseidon::domain::FVK_FROM_IVK, &[ivk_fp]);
+        let fvk = poseidon::fp_to_bytes(&fvk_fp);
 
         Self {
             incoming_view_key: ivk,
@@ -145,12 +145,12 @@ impl ViewingKey {
 
     /// Derive a note commitment nullifier for a given note.
     ///
-    /// Matches the R1CS circuit: nullifier = poseidon_hash([fvk_fr, rho_fr]).
+    /// Matches the Halo2 circuit: nullifier = poseidon_hash([fvk_fp, rho_fp]).
     pub fn derive_nullifier(&self, rho: &[u8; 32]) -> Nullifier {
-        let fvk_fr = poseidon::bytes_to_fr(&self.full_view_key);
-        let rho_fr = poseidon::bytes_to_fr(rho);
-        let nf_fr = poseidon::poseidon_hash(&[fvk_fr, rho_fr]);
-        Nullifier::new(Hash::from_slice(&poseidon::fr_to_bytes(&nf_fr)))
+        let fvk_fp = poseidon::bytes_to_fp(&self.full_view_key);
+        let rho_fp = poseidon::bytes_to_fp(rho);
+        let nf_fp = poseidon::poseidon_hash(&[fvk_fp, rho_fp]);
+        Nullifier::new(Hash::from_slice(&poseidon::fp_to_bytes(&nf_fp)))
     }
 
     /// Verify this viewing key can decrypt a note by attempting
@@ -182,7 +182,7 @@ pub struct ZkProof {
 }
 
 impl ZkProof {
-    /// Serialize proof for storage/transmission (~200B for Groth16)
+    /// Serialize proof for storage/transmission (~5-10KB for Halo2 IPA)
     pub fn serialized_size(&self) -> usize {
         self.proof_data.len() + self.nullifiers.len() * 32 + self.commitments.len() * 32 + 8
         // asset_id
@@ -261,14 +261,14 @@ impl ShieldedTransfer {
     }
 }
 
-/// Verify a ZK proof against the RealProver when the `real-prover` feature is enabled.
+/// Verify a ZK proof against the Halo2Prover when the `halo2-prover` feature is enabled.
 ///
-/// When `real-prover` is NOT enabled, this returns an error — structural-only
+/// When `halo2-prover` is NOT enabled, this returns an error — structural-only
 /// validation is not acceptable in production builds.
 ///
 /// `merkle_root` is required for transfer and withdraw circuits.
 /// `value` is required for withdraw circuits.
-#[cfg(not(feature = "real-prover"))]
+#[cfg(not(feature = "halo2-prover"))]
 pub fn verify_shielded_proof(
     proof: &ZkProof,
     _circuit_type: &str,
@@ -276,24 +276,24 @@ pub fn verify_shielded_proof(
     _value: Option<u128>,
 ) -> Result<bool, String> {
     let _ = proof;
-    Err("ZK proof verification requires the `real-prover` feature — structural-only validation is not acceptable in production".into())
+    Err("ZK proof verification requires the `halo2-prover` feature — structural-only validation is not acceptable in production".into())
 }
 
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 pub fn verify_shielded_proof(
     proof: &ZkProof,
     circuit_type: &str,
     merkle_root: Option<&[u8; 32]>,
     value: Option<u128>,
 ) -> Result<bool, String> {
-    use crate::prover::{ProverError, RealProver};
+    use crate::prover::{Halo2Prover, ProverError};
 
     // First do structural validation
     if !verify_zk_proof(proof) {
         return Ok(false);
     }
 
-    let prover = RealProver::for_version(proof.key_version).ok_or_else(|| {
+    let prover = Halo2Prover::for_version(proof.key_version).ok_or_else(|| {
         format!(
             "no prover keys registered for version {}",
             proof.key_version
@@ -355,13 +355,13 @@ pub fn verify_shielded_proof(
 /// Verify a ZK proof's public inputs against current state.
 ///
 /// Enhanced structural validation (Gap #5 fix):
-/// - Proof data is non-empty and within Groth16 size bounds
+/// - Proof data is non-empty and within Halo2 proof size bounds
 /// - At least one nullifier or commitment is present
 /// - No duplicate nullifiers (replay protection)
 /// - Nullifier/commitment count consistency (deposit: nf=0,cm≥1; withdraw: nf≥1,cm=0; transfer: nf≥1,cm≥1)
 pub fn verify_zk_proof(proof: &ZkProof) -> bool {
-    // 1. Proof data must be non-empty and within Groth16 size bounds
-    if proof.proof_data.is_empty() || proof.proof_data.len() > 512 {
+    // 1. Proof data must be non-empty and within reasonable Halo2 proof bounds
+    if proof.proof_data.is_empty() || proof.proof_data.len() > 20_000 {
         return false;
     }
     // 2. At least one of nullifiers or commitments must be non-empty

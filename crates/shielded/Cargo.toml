@@ -21,24 +21,16 @@ chacha20poly1305 = { version = "0.10", features = ["std"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 
-# ZK proving (arkworks + BN254)
-# Note: ark 0.4 required for poseidon-ark-no-std compatibility
+# ZK proving (Halo2 + Pasta curves)
 # Plain Poseidon hashing (always available — required for shielded pool)
-ark-ff = { version = "0.4" }
-ark-bn254 = { version = "0.4" }
-poseidon-ark-no-std = { version = "0.0.1" }
-# R1CS proving (gated behind `real-prover`)
-ark-std = { version = "0.4", optional = true }
-ark-ec = { version = "0.4", optional = true }
-ark-groth16 = { version = "0.4", optional = true }
-ark-r1cs-std = { version = "0.4", optional = true }
-ark-relations = { version = "0.4", optional = true }
-ark-serialize = { version = "0.4", optional = true }
-ark-snark = { version = "0.4", optional = true }
-ark-crypto-primitives = { version = "0.4", features = ["crh", "merkle_tree", "sponge"], optional = true }
+halo2_gadgets = { workspace = true }
+# Full proving + circuit synthesis (gated behind `halo2-prover`)
+halo2_proofs = { workspace = true, optional = true }
+pasta_curves = { workspace = true }
+ff = { workspace = true }
+group = { workspace = true }
 
-# Ceremony key loading — SHA-256 for verifying key hash verification
-sha2 = { version = "0.10", optional = true }
+# Async runtime for blocking proof generation
 tokio = { workspace = true, optional = true }
 
 # Prover server dependencies (gated behind prover-server feature)
@@ -53,30 +45,16 @@ hex = { workspace = true, optional = true }
 default = ["poseidon"]
 poseidon = []
 slow-tests = ["poseidon"]
-real-prover = [
+# Temporarily keep real-prover as an alias for halo2-prover during migration
+real-prover = ["halo2-prover"]
+halo2-prover = [
     "poseidon",
-    "ark-std",
-    "ark-ec",
-    "ark-groth16",
-    "ark-r1cs-std",
-    "ark-relations",
-    "ark-serialize",
-    "ark-snark",
-    "ark-crypto-primitives",
+    "halo2_proofs",
     "tokio",
 ]
-production-keys = ["real-prover", "sha2"]
-prover-server = ["real-prover", "axum", "tracing", "tracing-subscriber", "clap", "hex"]
-
-[[bin]]
-name = "export_r1cs"
-path = "src/bin/export_r1cs.rs"
-required-features = ["real-prover"]
-
-[[bin]]
-name = "verify_r1cs"
-path = "src/bin/verify_r1cs.rs"
-required-features = ["real-prover"]
+# Temporarily keep production-keys as empty for workspace compatibility during migration
+production-keys = []
+prover-server = ["halo2-prover", "axum", "tracing", "tracing-subscriber", "clap", "hex"]
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -84,4 +62,4 @@ criterion = { workspace = true }
 [[bench]]
 name = "proof_generate"
 harness = false
-required-features = ["real-prover"]
+required-features = ["halo2-prover"]
