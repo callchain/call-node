@@ -196,36 +196,28 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::MerkleRootMismatch);
         }
 
-        if !proof_data.is_empty() {
-            let proof = crate::ZkProof {
-                proof_data,
-                nullifiers: vec![crate::Nullifier::new(Hash::from_slice(&nullifier))],
-                commitments: vec![],
-                asset_id,
-                key_version: 0,
-            };
+        if proof_data.is_empty() {
+            return Err(ShieldedError::InvalidZkProof);
+        }
+        let proof = crate::ZkProof {
+            proof_data,
+            nullifiers: vec![crate::Nullifier::new(Hash::from_slice(&nullifier))],
+            commitments: vec![],
+            asset_id,
+            key_version: 0,
+        };
 
-            let target_bytes: [u8; 20] = target.into();
-            match crate::verify_shielded_proof(
-                &proof,
-                "withdraw",
-                Some(&merkle_root),
-                Some(amount),
-                Some(target_bytes),
-            )
-            {
-                Ok(true) => {}
-                Ok(false) => return Err(ShieldedError::InvalidZkProof),
-                Err(e) => {
-                    if e.contains("halo2-prover") {
-                        if !crate::verify_zk_proof(&proof) {
-                            return Err(ShieldedError::InvalidZkProof);
-                        }
-                    } else {
-                        return Err(ShieldedError::ZkProofError(e));
-                    }
-                }
-            }
+        let target_bytes: [u8; 20] = target.into();
+        match crate::verify_shielded_proof(
+            &proof,
+            "withdraw",
+            Some(&merkle_root),
+            Some(amount),
+            Some(target_bytes),
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Err(ShieldedError::InvalidZkProof),
+            Err(e) => return Err(ShieldedError::ZkProofError(e)),
         }
 
         if self.check_nullifier_spent(nullifier) {
@@ -254,38 +246,32 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::EmptyBatch);
         }
 
-        if !proof_data.is_empty() {
-            let merkle_root = self
-                .sload_shielded(slot_shielded_merkle_root())
-                .to_be_bytes::<32>();
+        if proof_data.is_empty() {
+            return Err(ShieldedError::InvalidZkProof);
+        }
 
-            let proof = crate::ZkProof {
-                proof_data,
-                nullifiers: nullifiers
-                    .iter()
-                    .map(|nf| crate::Nullifier::new(Hash::from_slice(nf)))
-                    .collect(),
-                commitments: commitments
-                    .iter()
-                    .map(|cm| crate::NoteCommitment::new(Hash::from_slice(cm)))
-                    .collect(),
-                asset_id,
-                key_version: 0,
-            };
+        let merkle_root = self
+            .sload_shielded(slot_shielded_merkle_root())
+            .to_be_bytes::<32>();
 
-            match crate::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None, None) {
-                Ok(true) => {}
-                Ok(false) => return Err(ShieldedError::InvalidZkProof),
-                Err(e) => {
-                    if e.contains("halo2-prover") {
-                        if !crate::verify_zk_proof(&proof) {
-                            return Err(ShieldedError::InvalidZkProof);
-                        }
-                    } else {
-                        return Err(ShieldedError::ZkProofError(e));
-                    }
-                }
-            }
+        let proof = crate::ZkProof {
+            proof_data,
+            nullifiers: nullifiers
+                .iter()
+                .map(|nf| crate::Nullifier::new(Hash::from_slice(nf)))
+                .collect(),
+            commitments: commitments
+                .iter()
+                .map(|cm| crate::NoteCommitment::new(Hash::from_slice(cm)))
+                .collect(),
+            asset_id,
+            key_version: 0,
+        };
+
+        match crate::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None, None) {
+            Ok(true) => {}
+            Ok(false) => return Err(ShieldedError::InvalidZkProof),
+            Err(e) => return Err(ShieldedError::ZkProofError(e)),
         }
 
         for nf in &nullifiers {
@@ -600,11 +586,9 @@ mod tests {
         assert_eq!(result.bytes[31], 0);
     }
 
-    /// Withdraw precompile test without real ZK verification (default / non-halo2-prover).
-    /// Skips ZK proof verification and tests core precompile logic directly.
-    #[cfg(not(feature = "halo2-prover"))]
+    /// Empty proof must be rejected regardless of feature flags.
     #[test]
-    fn test_shielded_precompile_withdraw() {
+    fn test_shielded_precompile_withdraw_rejects_empty_proof() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let sender = Address::repeat_byte(0x55);
         let target = Address::repeat_byte(0x66);
@@ -622,23 +606,9 @@ mod tests {
         .abi_encode();
 
         let result = precompile.call(&input, sender, &mut provider);
-        assert!(result.is_ok(), "withdraw failed: {:?}", result.err());
-
-        let input = IProtocolShielded::isNullifierSpentCall {
-            nullifier: [0xBBu8; 32].into(),
-        }
-        .abi_encode();
-        let result = precompile
-            .call(&input, Address::ZERO, &mut provider)
-            .unwrap();
-        assert_eq!(result.bytes[31], 1);
-
-        let target_slot = slot_balance(0, target);
-        let bal = provider
-            .get(ASSET_ADDRESS, target_slot)
-            .map(u256_to_u128)
-            .unwrap_or(0);
-        assert_eq!(bal, 500);
+        assert!(result.is_err(), "withdraw with empty proof should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid ZK proof"), "expected InvalidZkProof, got: {err}");
     }
 
     /// Withdraw precompile test with real Halo2 proof verification.
@@ -695,8 +665,9 @@ mod tests {
         assert_eq!(bal, circuit.value);
     }
 
+    /// Empty proof must be rejected regardless of feature flags.
     #[test]
-    fn test_shielded_precompile_transfer() {
+    fn test_shielded_precompile_transfer_rejects_empty_proof() {
         let mut provider = HashMapStorageProvider::new(5_000_000);
         let sender = Address::repeat_byte(0x55);
 
@@ -708,6 +679,44 @@ mod tests {
         let input = IProtocolShielded::transferCall {
             assetId: 1,
             proof: vec![].into(),
+            nullifiers,
+            commitments,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "transfer with empty proof should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid ZK proof"), "expected InvalidZkProof, got: {err}");
+    }
+
+    /// Transfer precompile test with real Halo2 proof verification.
+    #[cfg(feature = "halo2-prover")]
+    #[test]
+    fn test_shielded_precompile_transfer() {
+        use crate::prover::{setup_transfer_circuit, Halo2Prover};
+
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+
+        let circuit = setup_transfer_circuit();
+        let prover = Halo2Prover::setup();
+        let proof_data = prover.prove_transfer(&circuit).expect("prove failed");
+
+        provider.set(
+            SHIELDED_ADDRESS,
+            slot_shielded_merkle_root(),
+            U256::from_be_slice(&circuit.merkle_root),
+        );
+
+        let mut precompile = ShieldedPrecompile;
+
+        let nullifiers = circuit.nullifiers.iter().map(|n| (*n).into()).collect();
+        let commitments = circuit.commitments.iter().map(|c| (*c).into()).collect();
+
+        let input = IProtocolShielded::transferCall {
+            assetId: circuit.asset_id,
+            proof: proof_data.into(),
             nullifiers,
             commitments,
         }
@@ -728,7 +737,7 @@ mod tests {
         assert_eq!(count, 2);
 
         let input = IProtocolShielded::isNullifierSpentCall {
-            nullifier: [0xCCu8; 32].into(),
+            nullifier: circuit.nullifiers[0].into(),
         }
         .abi_encode();
         let result = precompile
@@ -805,19 +814,33 @@ mod tests {
         assert_eq!(root2, expected_root2);
     }
 
+    /// Transfer merkle-root update test with real Halo2 proof verification.
+    #[cfg(feature = "halo2-prover")]
     #[test]
     fn test_shielded_precompile_transfer_updates_merkle_root() {
+        use crate::prover::{setup_transfer_circuit, Halo2Prover};
+
         let mut provider = HashMapStorageProvider::new(5_000_000);
         let sender = Address::repeat_byte(0x55);
 
+        let circuit = setup_transfer_circuit();
+        let prover = Halo2Prover::setup();
+        let proof_data = prover.prove_transfer(&circuit).expect("prove failed");
+
+        provider.set(
+            SHIELDED_ADDRESS,
+            slot_shielded_merkle_root(),
+            U256::from_be_slice(&circuit.merkle_root),
+        );
+
         let mut precompile = ShieldedPrecompile;
 
-        let nullifiers = vec![[0xCCu8; 32].into()];
-        let commitments = vec![test_commitment(3).into()];
+        let nullifiers = circuit.nullifiers.iter().map(|n| (*n).into()).collect();
+        let commitments = circuit.commitments.iter().map(|c| (*c).into()).collect();
 
         let input = IProtocolShielded::transferCall {
-            assetId: 1,
-            proof: vec![].into(),
+            assetId: circuit.asset_id,
+            proof: proof_data.into(),
             nullifiers,
             commitments,
         }
@@ -836,7 +859,9 @@ mod tests {
         );
 
         let mut tree = crate::PoseidonMerkleTree::new(32);
-        tree.insert(&test_commitment(3));
+        for cm in &circuit.commitments {
+            tree.insert(cm);
+        }
         assert_eq!(root, tree.root());
     }
 }

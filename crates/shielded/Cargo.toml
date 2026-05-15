@@ -42,7 +42,7 @@ clap = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 
 [features]
-default = ["poseidon"]
+default = ["poseidon", "halo2-prover"]
 poseidon = []
 slow-tests = ["poseidon"]
 # Legacy alias — maps to halo2-prover for downstream compatibility.
