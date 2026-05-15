@@ -1,6 +1,6 @@
 //! call-prover — Shielded ZK proving service.
 //!
-//! A dedicated HTTP service that generates Groth16 proofs for shielded
+//! A dedicated HTTP service that generates Halo2 IPA proofs for shielded
 //! transactions (deposit, transfer, withdraw). Runs independently of the
 //! node to keep private keys off the node and allow CPU scaling.
 //!
@@ -9,7 +9,7 @@
 //!   call-prover --listen-addr 0.0.0.0:8550
 //!   call-prover --api-keys key1,key2  # require X-API-Key header
 
-use call_shielded::prover::RealProver;
+use call_shielded::prover::Halo2Prover;
 use call_shielded::prover_server::{build_router, ProverMode, ProverState};
 use clap::Parser;
 use std::{
@@ -51,9 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
 
-    // Initialize prover — uses production keys if available, falls back to dev setup
-    let prover = RealProver::global();
-    let mode = ProverMode::Dev; // RealProver::global() handles production fallback internally
+    // Initialize prover — Halo2 universal params, no trusted setup
+    let prover = Halo2Prover::global();
+    let mode = ProverMode::Dev;
 
     let api_keys: HashSet<String> = args.api_keys.into_iter().collect();
     let auth_enabled = !api_keys.is_empty();

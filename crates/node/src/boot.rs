@@ -203,11 +203,11 @@ pub async fn boot_node(config: &NodeConfig) -> BootResult {
     node.state
         .set_governance_auth(config.governance.require_auth);
 
-    // Step 2b: Initialize shielded ZK prover (production keys if compiled with production-keys feature)
-    #[cfg(feature = "production-keys")]
+    // Step 2b: Initialize shielded ZK prover (Halo2 universal params, no trusted setup)
+    #[cfg(feature = "halo2-prover")]
     {
         info!("initializing shielded prover");
-        let _ = call_shielded::RealProver::global();
+        let _ = call_shielded::Halo2Prover::global();
         info!("shielded prover ready");
     }
 

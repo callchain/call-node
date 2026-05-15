@@ -31,8 +31,8 @@ use crate::{
     circuit_deposit::{DepositCircuit, DepositWitness},
     circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit},
     circuit_withdraw::{WithdrawCircuit, WithdrawWitness},
-    poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash},
-    prover::RealProver,
+    poseidon::{bytes_to_fp, domain, fp_to_bytes, poseidon_hash},
+    prover::Halo2Prover,
     ViewingKey,
 };
 
@@ -40,7 +40,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct ProverState {
-    pub prover: &'static RealProver,
+    pub prover: &'static Halo2Prover,
     pub mode: ProverMode,
     pub api_keys: Arc<HashSet<String>>,
     pub rate_limiter: Arc<Mutex<HashMap<String, TokenBucket>>>,
@@ -269,7 +269,7 @@ async fn health_check(State(state): State<ProverState>) -> Json<HealthResponse> 
     Json(HealthResponse {
         status: "ok",
         mode: state.mode.as_str(),
-        proving_key_loaded: true, // RealProver::global() would have panicked if keys failed to load
+        proving_key_loaded: true, // Halo2Prover::global() would have panicked if setup failed
         queue_depth,
         cache_size,
     })
@@ -466,18 +466,51 @@ async fn handle_transfer(
     let nf_hex: Vec<String> = nullifiers.iter().map(hex::encode).collect();
     let cm_hex: Vec<String> = commitments.iter().map(hex::encode).collect();
 
-    // Build nullifier and commitment lists as raw [u8; 32]
-    let nf_list: Vec<[u8; 32]> = nullifiers;
-    let cm_list: Vec<[u8; 32]> = commitments;
+    // TransferCircuit requires exactly 2 inputs and 2 outputs (fixed-size arrays).
+    // Reject if more than 2, pad with dummy zero-value notes if fewer.
+    if input_witnesses.len() > 2 || output_witnesses.len() > 2 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "transfer supports at most 2 inputs and 2 outputs".into(),
+        ));
+    }
+    while input_witnesses.len() < 2 {
+        input_witnesses.push(InputNoteWitness {
+            value: 0,
+            rcm: [0u8; 32],
+            recipient_ivk: [0u8; 32],
+            rho: [0u8; 32],
+            spending_key: [0u8; 32],
+        });
+        nullifiers.push([0u8; 32]);
+        merkle_paths.push(vec![([0u8; 32], false); 32]);
+    }
+    while output_witnesses.len() < 2 {
+        output_witnesses.push(OutputNoteWitness {
+            value: 0,
+            rcm: [0u8; 32],
+            recipient_ivk: [0u8; 32],
+            rho: [0u8; 32],
+        });
+        commitments.push([0u8; 32]);
+    }
+
+    // Convert Vec merkle paths to fixed-size arrays
+    let mut merkle_paths_arr: [[([u8; 32], bool); 32]; 2] = [[([0u8; 32], false); 32]; 2];
+    for (i, path) in merkle_paths.iter().enumerate() {
+        for (j, entry) in path.iter().enumerate() {
+            merkle_paths_arr[i][j] = *entry;
+        }
+    }
 
     let circuit = TransferCircuit::new(
-        nf_list,
-        cm_list,
+        [nullifiers[0], nullifiers[1]],
+        [commitments[0], commitments[1]],
         req.asset_id,
         merkle_root,
-        input_witnesses,
-        output_witnesses,
-        merkle_paths,
+        [input_witnesses[0], input_witnesses[1]],
+        [output_witnesses[0], output_witnesses[1]],
+        merkle_paths_arr,
     );
 
     state.inflight.fetch_add(1, Ordering::Relaxed);
@@ -646,13 +679,13 @@ pub fn compute_rcm_poseidon(
     asset_id: u64,
     rho: &[u8; 32],
 ) -> [u8; 32] {
-    let rcm_tag = domain_tag_to_fr("rcm");
-    let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
-    let value_fr = value_to_fr_bytes(value);
-    let asset_fr = asset_id_to_fr_bytes(asset_id);
-    let rho_fr = bytes_to_fr(rho);
-    let rcm_fr = poseidon_hash(&[rcm_tag, ivk_fr, value_fr, asset_fr, rho_fr]);
-    fr_to_bytes(&rcm_fr)
+    let rcm_tag = domain_tag_to_fp(domain::RCM);
+    let ivk_fp = bytes_to_fp(&vk.incoming_view_key);
+    let value_fp = value_to_fp_bytes(value);
+    let asset_fp = asset_id_to_fp_bytes(asset_id);
+    let rho_fp = bytes_to_fp(rho);
+    let rcm_fp = poseidon_hash(&[rcm_tag, ivk_fp, value_fp, asset_fp, rho_fp]);
+    fp_to_bytes(&rcm_fp)
 }
 
 /// Compute note commitment using Poseidon hash.
@@ -662,46 +695,46 @@ pub fn compute_commitment_poseidon(
     rcm: &[u8; 32],
     rho: &[u8; 32],
 ) -> [u8; 32] {
-    let value_fr = value_to_fr_bytes(value);
-    let asset_fr = asset_id_to_fr_bytes(asset_id);
-    let rcm_fr = bytes_to_fr(rcm);
-    let rho_fr = bytes_to_fr(rho);
-    let cm_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
-    fr_to_bytes(&cm_fr)
+    let value_fp = value_to_fp_bytes(value);
+    let asset_fp = asset_id_to_fp_bytes(asset_id);
+    let rcm_fp = bytes_to_fp(rcm);
+    let rho_fp = bytes_to_fp(rho);
+    let cm_fp = poseidon_hash(&[value_fp, asset_fp, rcm_fp, rho_fp]);
+    fp_to_bytes(&cm_fp)
 }
 
 /// Compute nullifier using Poseidon hash (matching ViewingKey::derive_nullifier).
 pub fn compute_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
-    let domain_bytes = domain_tag_to_fr_bytes(domain::FVK_FROM_IVK);
-    let fvk_tag = bytes_to_fr(&domain_bytes);
-    let ivk_fr = bytes_to_fr(ivk);
-    let rho_fr = bytes_to_fr(rho);
-    let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fr]);
-    let nf_fr = poseidon_hash(&[fvk_from_ivk, rho_fr]);
-    fr_to_bytes(&nf_fr)
+    let domain_bytes = domain_tag_to_fp_bytes(domain::FVK_FROM_IVK);
+    let fvk_tag = bytes_to_fp(&domain_bytes);
+    let ivk_fp = bytes_to_fp(ivk);
+    let rho_fp = bytes_to_fp(rho);
+    let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fp]);
+    let nf_fp = poseidon_hash(&[fvk_from_ivk, rho_fp]);
+    fp_to_bytes(&nf_fp)
 }
 
-pub fn value_to_fr_bytes(value: u128) -> ark_bn254::Fr {
+pub fn value_to_fp_bytes(value: u128) -> pasta_curves::Fp {
     let mut bytes = [0u8; 32];
     bytes[..16].copy_from_slice(&value.to_le_bytes());
-    bytes_to_fr(&bytes)
+    bytes_to_fp(&bytes)
 }
 
-pub fn asset_id_to_fr_bytes(asset_id: u64) -> ark_bn254::Fr {
+pub fn asset_id_to_fp_bytes(asset_id: u64) -> pasta_curves::Fp {
     let mut bytes = [0u8; 32];
     bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-    bytes_to_fr(&bytes)
+    bytes_to_fp(&bytes)
 }
 
-pub fn domain_tag_to_fr(tag: &str) -> ark_bn254::Fr {
+pub fn domain_tag_to_fp(tag: &str) -> pasta_curves::Fp {
     let mut bytes = [0u8; 32];
     let tag_bytes = tag.as_bytes();
     let len = tag_bytes.len().min(32);
     bytes[..len].copy_from_slice(&tag_bytes[..len]);
-    bytes_to_fr(&bytes)
+    bytes_to_fp(&bytes)
 }
 
-pub fn domain_tag_to_fr_bytes(tag: &str) -> [u8; 32] {
+pub fn domain_tag_to_fp_bytes(tag: &str) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     let tag_bytes = tag.as_bytes();
     let len = tag_bytes.len().min(32);

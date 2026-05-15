@@ -8,7 +8,6 @@ publish.workspace = true
 [features]
 hashi-vault = ["call-crypto/hashi-vault"]
 keyring = ["call-crypto/keyring"]
-production-keys = ["call-shielded/production-keys"]
 
 [lints]
 workspace = true

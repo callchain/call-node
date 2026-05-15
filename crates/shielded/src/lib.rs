@@ -33,18 +33,12 @@ mod notes;
 mod nullifiers;
 pub mod prover;
 
-#[cfg(feature = "production-keys")]
-pub mod ceremony;
 #[cfg(feature = "halo2-prover")]
 pub mod circuit_deposit;
 #[cfg(feature = "halo2-prover")]
 pub mod circuit_transfer;
 #[cfg(feature = "halo2-prover")]
 pub mod circuit_withdraw;
-#[cfg(feature = "production-keys")]
-pub mod key_registry;
-#[cfg(feature = "halo2-prover")]
-pub mod keygen;
 pub mod merkle_poseidon;
 pub mod poseidon;
 pub mod precompile;
@@ -464,51 +458,16 @@ impl ShieldedBlockTracker {
     }
 }
 
-// ── Prover Key Rotation Auto-Pickup ──────────────────────────────────
+// ── Prover Key Version ───────────────────────────────────────────────
 
-/// Get the current prover key version from the global registry.
-///
-/// Returns 0 when `production-keys` is not enabled or the registry is empty.
+/// Halo2 uses universal parameters (Params::new(k)) — no trusted setup or
+/// key rotation ceremony is required. Version 0 is the only valid version.
 pub fn current_prover_key_version() -> u32 {
-    #[cfg(feature = "production-keys")]
-    {
-        crate::key_registry::ProverRegistry::global().current_version()
-    }
-    #[cfg(not(feature = "production-keys"))]
-    {
-        0
-    }
+    0
 }
 
-/// Attempt to load and register prover keys for the given version.
-///
-/// When `production-keys` is enabled, tries to load keys from
-/// `/var/lib/callchain/shielded_keys_v{version}` and registers them with the
-/// global [`ProverRegistry`]. Returns `true` if registration succeeded.
-#[cfg(feature = "production-keys")]
-pub fn try_register_prover_keys(version: u32) -> bool {
-    let path = format!("/var/lib/callchain/shielded_keys_v{version}");
-    let keys = match crate::ceremony::ProductionKeys::load(&path) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!(error = %e, version, path, "prover_key_rotation: failed to load keys");
-            return false;
-        }
-    };
-    match crate::key_registry::ProverRegistry::global().register(version, keys) {
-        Ok(()) => {
-            tracing::info!(version, path, "prover_key_rotation: registered new key set");
-            true
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, version, "prover_key_rotation: registration failed");
-            false
-        }
-    }
-}
-
-/// No-op when `production-keys` is not enabled.
-#[cfg(not(feature = "production-keys"))]
+/// Halo2 universal parameters do not require disk-based key registration.
+/// This function is retained for API compatibility but always returns false.
 pub fn try_register_prover_keys(_version: u32) -> bool {
     false
 }

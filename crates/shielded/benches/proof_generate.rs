@@ -1,34 +1,34 @@
 //! Benchmark: ZK proof generation for shielded transactions
 //!
 //! Measures deposit and transfer proof generation time using
-//! the real Groth16 prover. Requires `real-prover` feature.
+//! the Halo2 IPA prover. Requires `halo2-prover` feature.
 
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 fn bench_proof_deposit(c: &mut Criterion) {
-    use call_shielded::prover::RealProver;
+    use call_shielded::prover::Halo2Prover;
     use call_shielded::{
         circuit_deposit::{DepositCircuit, DepositWitness},
-        poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged},
+        poseidon::{bytes_to_fp, fp_to_bytes, poseidon_hash, poseidon_hash_tagged},
         ViewingKey,
     };
 
-    let prover = RealProver::setup();
+    let prover = Halo2Prover::setup();
 
     // Helper: compute commitment for a deposit note
     fn compute_commitment(value: u128, asset_id: u64, rcm: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
         let mut value_bytes = [0u8; 32];
         value_bytes[..16].copy_from_slice(&value.to_le_bytes());
-        let value_fr = bytes_to_fr(&value_bytes);
+        let value_fp = bytes_to_fp(&value_bytes);
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rcm_fr = bytes_to_fr(rcm);
-        let rho_fr = bytes_to_fr(rho);
-        let cm_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
-        fr_to_bytes(&cm_fr)
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rcm_fp = bytes_to_fp(rcm);
+        let rho_fp = bytes_to_fp(rho);
+        let cm_fp = poseidon_hash(&[value_fp, asset_fp, rcm_fp, rho_fp]);
+        fp_to_bytes(&cm_fp)
     }
 
     c.bench_function("shielded/proof_deposit", |b| {
@@ -40,16 +40,16 @@ fn bench_proof_deposit(c: &mut Criterion) {
             let asset_id = 1u64;
 
             // Compute RCM deterministically
-            let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
+            let ivk_fp = bytes_to_fp(&vk.incoming_view_key);
             let mut value_bytes = [0u8; 32];
             value_bytes[..16].copy_from_slice(&value.to_le_bytes());
-            let value_fr = bytes_to_fr(&value_bytes);
+            let value_fp = bytes_to_fp(&value_bytes);
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-            let asset_fr = bytes_to_fr(&asset_bytes);
-            let rho_fr = bytes_to_fr(&rho);
-            let rcm_fr = poseidon_hash_tagged("rcm", &[ivk_fr, value_fr, asset_fr, rho_fr]);
-            let rcm = fr_to_bytes(&rcm_fr);
+            let asset_fp = bytes_to_fp(&asset_bytes);
+            let rho_fp = bytes_to_fp(&rho);
+            let rcm_fp = poseidon_hash_tagged("rcm", &[ivk_fp, value_fp, asset_fp, rho_fp]);
+            let rcm = fp_to_bytes(&rcm_fp);
 
             let commitment = compute_commitment(value, asset_id, &rcm, &rho);
 
@@ -67,57 +67,57 @@ fn bench_proof_deposit(c: &mut Criterion) {
     });
 }
 
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 fn bench_proof_transfer(c: &mut Criterion) {
-    use call_shielded::prover::RealProver;
+    use call_shielded::prover::Halo2Prover;
     use call_shielded::{
         circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit},
         merkle_poseidon::PoseidonMerkleTree,
-        poseidon::{bytes_to_fr, fr_to_bytes, poseidon_hash, poseidon_hash_tagged},
+        poseidon::{bytes_to_fp, fp_to_bytes, poseidon_hash, poseidon_hash_tagged},
         ViewingKey,
     };
 
-    let prover = RealProver::setup();
+    let prover = Halo2Prover::setup();
 
-    fn value_to_fr_bytes(value: u128) -> [u8; 32] {
+    fn value_to_fp_bytes(value: u128) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         bytes[..16].copy_from_slice(&value.to_le_bytes());
         bytes
     }
 
     fn compute_rcm(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
-        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
-        let value_fr = bytes_to_fr(&value_to_fr_bytes(value));
+        let ivk_fp = bytes_to_fp(&vk.incoming_view_key);
+        let value_fp = bytes_to_fp(&value_to_fp_bytes(value));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rho_fr = bytes_to_fr(rho);
-        let rcm_fr = poseidon_hash_tagged("rcm", &[ivk_fr, value_fr, asset_fr, rho_fr]);
-        fr_to_bytes(&rcm_fr)
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rho_fp = bytes_to_fp(rho);
+        let rcm_fp = poseidon_hash_tagged("rcm", &[ivk_fp, value_fp, asset_fp, rho_fp]);
+        fp_to_bytes(&rcm_fp)
     }
 
     fn compute_commitment(value: u128, asset_id: u64, rcm: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
-        let value_fr = bytes_to_fr(&value_to_fr_bytes(value));
+        let value_fp = bytes_to_fp(&value_to_fp_bytes(value));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rcm_fr = bytes_to_fr(rcm);
-        let rho_fr = bytes_to_fr(rho);
-        let cm_fr = poseidon_hash(&[value_fr, asset_fr, rcm_fr, rho_fr]);
-        fr_to_bytes(&cm_fr)
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rcm_fp = bytes_to_fp(rcm);
+        let rho_fp = bytes_to_fp(rho);
+        let cm_fp = poseidon_hash(&[value_fp, asset_fp, rcm_fp, rho_fp]);
+        fp_to_bytes(&cm_fp)
     }
 
     fn derive_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
-        let fvk_tag = bytes_to_fr(&{
+        let fvk_tag = bytes_to_fp(&{
             let mut b = [0u8; 32];
             b[..16].copy_from_slice("fvk_from_ivk".as_bytes());
             b
         });
-        let ivk_fr = bytes_to_fr(ivk);
-        let rho_fr = bytes_to_fr(rho);
-        let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fr]);
-        let nf_fr = poseidon_hash(&[fvk_from_ivk, rho_fr]);
-        fr_to_bytes(&nf_fr)
+        let ivk_fp = bytes_to_fp(ivk);
+        let rho_fp = bytes_to_fp(rho);
+        let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fp]);
+        let nf_fp = poseidon_hash(&[fvk_from_ivk, rho_fp]);
+        fp_to_bytes(&nf_fp)
     }
 
     c.bench_function("shielded/proof_transfer", |b| {
@@ -173,16 +173,16 @@ fn bench_proof_transfer(c: &mut Criterion) {
     });
 }
 
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 criterion_group!(benches, bench_proof_deposit, bench_proof_transfer);
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 criterion_main!(benches);
 
-#[cfg(not(feature = "real-prover"))]
+#[cfg(not(feature = "halo2-prover"))]
 fn main() {
-    eprintln!("This benchmark requires the `real-prover` feature.");
+    eprintln!("This benchmark requires the `halo2-prover` feature.");
     eprintln!(
-        "Run with: cargo bench -p call-shielded --bench proof_generate --features real-prover"
+        "Run with: cargo bench -p call-shielded --bench proof_generate --features halo2-prover"
     );
     std::process::exit(1);
 }

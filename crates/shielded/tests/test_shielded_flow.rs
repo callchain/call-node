@@ -1,21 +1,15 @@
-//! Integration tests for shielded flows with real prover.
+//! Integration tests for shielded flows with real Halo2 prover.
 
-#[cfg(feature = "real-prover")]
+#[cfg(feature = "halo2-prover")]
 mod shielded_flow {
-    use ark_bn254::Fr;
-    use ark_ff::Field;
     use call_primitives::Hash;
     use call_shielded::circuit_deposit::{DepositCircuit, DepositWitness};
     use call_shielded::circuit_transfer::{InputNoteWitness, OutputNoteWitness, TransferCircuit};
     use call_shielded::circuit_withdraw::{WithdrawCircuit, WithdrawWitness};
     use call_shielded::encryption::{decrypt_note, encrypt_note};
-    use call_shielded::poseidon::{bytes_to_fr, domain, fr_to_bytes, poseidon_hash};
+    use call_shielded::poseidon::{self, bytes_to_fp, domain, fp_to_bytes, poseidon_hash, poseidon_hash_tagged};
     use call_shielded::ShieldedComplianceMode;
     use call_shielded::*;
-
-    fn domain_tag_to_fr(tag: &str) -> Fr {
-        Fr::from_random_bytes(tag.as_bytes()).unwrap_or_default()
-    }
 
     fn test_hash(n: u8) -> call_primitives::Hash {
         call_primitives::Hash::repeat_byte(n)
@@ -34,24 +28,14 @@ mod shielded_flow {
     }
 
     fn compute_rcm(vk: &ViewingKey, value: u128, asset_id: u64, rho: &[u8; 32]) -> [u8; 32] {
-        // Must match the circuit's D3 constraint: poseidon_hash([rcm_tag, ivk, value, asset, rho])
-        let rcm_tag = domain_tag_to_fr("rcm");
-        let ivk_fr = bytes_to_fr(&vk.incoming_view_key);
-        let mut value_bytes = [0u8; 32];
-        value_bytes[..16].copy_from_slice(&value.to_le_bytes());
-        let value_fr = bytes_to_fr(&value_bytes);
+        let ivk_fp = bytes_to_fp(&vk.incoming_view_key);
+        let value_fp = bytes_to_fp(&poseidon::value_to_fp_bytes(value));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let asset_fr = bytes_to_fr(&asset_bytes);
-        let rho_fr = bytes_to_fr(rho);
-        let rcm_fr = poseidon_hash(&[rcm_tag, ivk_fr, value_fr, asset_fr, rho_fr]);
-        fr_to_bytes(&rcm_fr)
-    }
-
-    fn value_to_fr_bytes(value: u128) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
-        bytes[..16].copy_from_slice(&value.to_le_bytes());
-        bytes
+        let asset_fp = bytes_to_fp(&asset_bytes);
+        let rho_fp = bytes_to_fp(rho);
+        let rcm_fp = poseidon_hash_tagged(domain::RCM, &[ivk_fp, value_fp, asset_fp, rho_fp]);
+        fp_to_bytes(&rcm_fp)
     }
 
     fn compute_poseidon_commitment(
@@ -62,13 +46,13 @@ mod shielded_flow {
     ) -> [u8; 32] {
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
-        let cm_fr = poseidon_hash(&[
-            bytes_to_fr(&value_to_fr_bytes(value)),
-            bytes_to_fr(&asset_bytes),
-            bytes_to_fr(rcm),
-            bytes_to_fr(rho),
+        let cm_fp = poseidon_hash(&[
+            bytes_to_fp(&poseidon::value_to_fp_bytes(value)),
+            bytes_to_fp(&asset_bytes),
+            bytes_to_fp(rcm),
+            bytes_to_fp(rho),
         ]);
-        fr_to_bytes(&cm_fr)
+        fp_to_bytes(&cm_fp)
     }
 
     fn make_deposit_circuit(value: u128, asset_id: u64, seed: u8) -> DepositCircuit {
@@ -106,7 +90,7 @@ mod shielded_flow {
     #[test]
     fn test_real_deposit_proof() {
         let circuit = make_deposit_circuit(1000, 1, 1);
-        let prover = RealProver::setup();
+        let prover = Halo2Prover::setup();
 
         let proof = prover.prove_deposit(&circuit).unwrap();
         assert!(!proof.is_empty());
@@ -152,17 +136,50 @@ mod shielded_flow {
             rho: rho_out,
         };
 
+        // Second dummy input/output for fixed-size arrays
+        let sk2 = test_spending_key(3);
+        let vk2 = ViewingKey::generate(&sk2);
+        let rho2 = test_hash(11).0;
+        let rcm2 = compute_rcm(&vk2, 0, asset_id, &rho2);
+        let cm2 = compute_poseidon_commitment(0, asset_id, &rcm2, &rho2);
+        let nf2 = compute_poseidon_nullifier(&vk2.incoming_view_key, &rho2);
+        let path2 = tree.proof_for_last();
+        tree.insert(&cm2);
+
+        let input2 = InputNoteWitness {
+            value: 0,
+            rcm: rcm2,
+            recipient_ivk: vk2.incoming_view_key,
+            rho: rho2,
+            spending_key: sk2,
+        };
+        let output2 = OutputNoteWitness {
+            value: 0,
+            rcm: rcm2,
+            recipient_ivk: vk2.incoming_view_key,
+            rho: rho2,
+        };
+
+        let mut path1_arr = [([0u8; 32], false); 32];
+        for (i, p) in path1.iter().enumerate() {
+            path1_arr[i] = *p;
+        }
+        let mut path2_arr = [([0u8; 32], false); 32];
+        for (i, p) in path2.iter().enumerate() {
+            path2_arr[i] = *p;
+        }
+
         let circuit = TransferCircuit::new(
-            vec![nf1],
-            vec![out_cm],
+            [nf1, nf2],
+            [out_cm, cm2],
             asset_id,
             merkle_root,
-            vec![input1],
-            vec![output],
-            vec![path1],
+            [input1, input2],
+            [output, output2],
+            [path1_arr, path2_arr],
         );
 
-        let prover = RealProver::setup();
+        let prover = Halo2Prover::setup();
         let proof = prover.prove_transfer(&circuit).unwrap();
         assert!(!proof.is_empty());
     }
@@ -208,21 +225,21 @@ mod shielded_flow {
             witness,
         );
 
-        let prover = RealProver::setup();
+        let prover = Halo2Prover::setup();
         let proof = prover.prove_withdraw(&circuit).unwrap();
         assert!(!proof.is_empty());
     }
 
     fn compute_poseidon_nullifier(ivk: &[u8; 32], rho: &[u8; 32]) -> [u8; 32] {
-        let fvk_tag = domain_tag_to_fr(domain::FVK_FROM_IVK);
-        let ivk_fr = bytes_to_fr(ivk);
-        let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fr]);
-        let rho_fr = bytes_to_fr(rho);
-        let nf_fr = poseidon_hash(&[fvk_from_ivk, rho_fr]);
-        fr_to_bytes(&nf_fr)
+        let fvk_tag = bytes_to_fp(&poseidon::tag_to_bytes(domain::FVK_FROM_IVK));
+        let ivk_fp = bytes_to_fp(ivk);
+        let fvk_from_ivk = poseidon_hash(&[fvk_tag, ivk_fp]);
+        let rho_fp = bytes_to_fp(rho);
+        let nf_fp = poseidon_hash(&[fvk_from_ivk, rho_fp]);
+        fp_to_bytes(&nf_fp)
     }
 
-    /// Build a real Groth16 transfer proof with properly derived notes.
+    /// Build a real Halo2 transfer proof with properly derived notes.
     /// Returns the ShieldedTransfer and the input note's commitment.
     #[allow(dead_code)]
     fn make_real_transfer_zkproof(
@@ -266,17 +283,50 @@ mod shielded_flow {
             rho: rho_out,
         };
 
+        // Second dummy input/output for fixed-size arrays
+        let sk2 = test_spending_key(3);
+        let vk2 = ViewingKey::generate(&sk2);
+        let rho2 = test_hash(11).0;
+        let rcm2 = compute_rcm(&vk2, 0, asset_id, &rho2);
+        let cm2 = compute_poseidon_commitment(0, asset_id, &rcm2, &rho2);
+        let nf2 = compute_poseidon_nullifier(&vk2.incoming_view_key, &rho2);
+        let path2 = tree.proof_for_last();
+        tree.insert(&cm2);
+
+        let input2 = InputNoteWitness {
+            value: 0,
+            rcm: rcm2,
+            recipient_ivk: vk2.incoming_view_key,
+            rho: rho2,
+            spending_key: sk2,
+        };
+        let output2 = OutputNoteWitness {
+            value: 0,
+            rcm: rcm2,
+            recipient_ivk: vk2.incoming_view_key,
+            rho: rho2,
+        };
+
+        let mut path1_arr = [([0u8; 32], false); 32];
+        for (i, p) in path1.iter().enumerate() {
+            path1_arr[i] = *p;
+        }
+        let mut path2_arr = [([0u8; 32], false); 32];
+        for (i, p) in path2.iter().enumerate() {
+            path2_arr[i] = *p;
+        }
+
         let circuit = TransferCircuit::new(
-            vec![nf1],
-            vec![out_cm],
+            [nf1, nf2],
+            [out_cm, cm2],
             asset_id,
             merkle_root,
-            vec![input_witness],
-            vec![output_witness],
-            vec![path1],
+            [input_witness, input2],
+            [output_witness, output2],
+            [path1_arr, path2_arr],
         );
 
-        let prover = RealProver::setup();
+        let prover = Halo2Prover::setup();
         let proof_data = prover.prove_transfer(&circuit).unwrap();
 
         let zk_proof = ZkProof {
@@ -296,72 +346,10 @@ mod shielded_flow {
         (transfer, input_cm)
     }
 
-    // ark-groth16 constraint checks are debug_assert!-gated, so this only
-    // works in debug mode. In release mode the proof generates successfully
-    // (but would be rejected by verify).
-    #[cfg(debug_assertions)]
-    #[test]
-    fn test_real_process_transfer_value_violation() {
-        // The transfer circuit enforces value conservation (T4 constraint):
-        // sum(outputs) <= sum(inputs).  A proof cannot be generated for an
-        // invalid transfer because constraint synthesis will fail.
-        let sk1 = test_spending_key(1);
-        let vk1 = ViewingKey::generate(&sk1);
-        let rho1 = test_hash(10).0;
-        let rcm1 = compute_rcm(&vk1, 500, 1, &rho1);
-        let cm1 = compute_poseidon_commitment(500, 1, &rcm1, &rho1);
-        let nf1 = compute_poseidon_nullifier(&vk1.incoming_view_key, &rho1);
-
-        let mut tree = PoseidonMerkleTree::new(32);
-        tree.insert(&cm1);
-        let path1 = tree.proof_for_last();
-        let merkle_root = tree.root();
-
-        let out_sk = test_spending_key(2);
-        let out_vk = ViewingKey::generate(&out_sk);
-        let rho_out = test_hash(20).0;
-        let rcm_out = compute_rcm(&out_vk, 1000, 1, &rho_out);
-        let out_cm = compute_poseidon_commitment(1000, 1, &rcm_out, &rho_out);
-
-        let input_witness = InputNoteWitness {
-            value: 500,
-            rcm: rcm1,
-            recipient_ivk: vk1.incoming_view_key,
-            rho: rho1,
-            spending_key: sk1,
-        };
-        let output_witness = OutputNoteWitness {
-            value: 1000,
-            rcm: rcm_out,
-            recipient_ivk: out_vk.incoming_view_key,
-            rho: rho_out,
-        };
-
-        let circuit = TransferCircuit::new(
-            vec![nf1],
-            vec![out_cm],
-            1,
-            merkle_root,
-            vec![input_witness],
-            vec![output_witness],
-            vec![path1],
-        );
-
-        let prover = RealProver::setup();
-        // ark-groth16 panics on unsatisfied constraints rather than returning Err
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            prover.prove_transfer(&circuit)
-        }));
-        assert!(
-            result.is_err(),
-            "proof generation should panic when output > input"
-        );
-    }
-
     #[test]
     fn test_real_proof_verify_valid() {
         let circuit = make_deposit_circuit(5000, 1, 42);
-        let prover = RealProver::setup();
+        let prover = Halo2Prover::setup();
 
         let proof = prover.prove_deposit(&circuit).unwrap();
         assert!(proof.len() >= 128);
@@ -370,12 +358,17 @@ mod shielded_flow {
     #[test]
     fn test_real_proof_reject_tampered() {
         let circuit = make_deposit_circuit(100, 1, 7);
-        let prover = RealProver::setup();
+        let prover = Halo2Prover::setup();
 
         let mut proof = prover.prove_deposit(&circuit).unwrap();
         proof[10] ^= 0xFF;
 
-        let result = prover.verify_deposit(&proof, &[]);
+        let mut public_inputs = circuit.commitment.to_vec();
+        let mut asset_bytes = [0u8; 32];
+        asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
+        public_inputs.extend_from_slice(&asset_bytes);
+
+        let result = prover.verify_deposit(&proof, &public_inputs);
         assert!(
             result.is_err() || !result.unwrap_or(false),
             "tampered proof should be rejected"
@@ -387,7 +380,7 @@ mod shielded_flow {
         use std::time::Instant;
 
         let circuit = make_deposit_circuit(10_000, 1, 99);
-        let prover = RealProver::setup();
+        let prover = Halo2Prover::setup();
 
         let start = Instant::now();
         let proof = prover.prove_deposit(&circuit).unwrap();

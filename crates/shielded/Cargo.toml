@@ -45,17 +45,13 @@ hex = { workspace = true, optional = true }
 default = ["poseidon"]
 poseidon = []
 slow-tests = ["poseidon"]
-# real-prover is temporarily empty during Halo2 migration.
-# The old Groth16 real prover code is being replaced; this feature is kept
-# so that downstream cfg(feature = "real-prover") gates do not break.
-real-prover = []
+# Legacy alias — maps to halo2-prover for downstream compatibility.
+real-prover = ["halo2-prover"]
 halo2-prover = [
     "poseidon",
     "halo2_proofs",
     "tokio",
 ]
-# Temporarily keep production-keys as empty for workspace compatibility during migration
-production-keys = []
 prover-server = ["halo2-prover", "axum", "tracing", "tracing-subscriber", "clap", "hex"]
 
 [dev-dependencies]
