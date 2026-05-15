@@ -8,13 +8,13 @@ The Shielded Pool (`crates/shielded`) provides privacy-preserving transactions f
 - Incremental Merkle Tree (depth 32) for note commitment tracking
 - Nullifier-based double-spend detection with BitSet compression
 - ChaCha20-Poly1305 note encryption with viewing keys
-- Groth16 ZK proofs (when `real-prover` feature is enabled)
+- Halo2 ZK proofs (when `halo2-prover` feature is enabled)
 - Per-block shielded transaction limit (50)
 - Shielded transaction receipts for tracing
 - Shielded pool balance audit capability
 - Periodic spent note pruning for memory management
 
-**Important:** The default build (`cargo build`) does **not** include real ZK proof verification. All shielded transactions pass structural validation only. Production deployments **must** enable `--features real-prover`.
+**Important:** The default build (`cargo build`) does **not** include real ZK proof verification. All shielded transactions pass structural validation only. Production deployments **must** enable `--features halo2-prover`.
 
 ---
 
@@ -32,7 +32,7 @@ The Shielded Pool (`crates/shielded`) provides privacy-preserving transactions f
 │                                                             │
 │  ┌──────────────────────┐  ┌─────────────────────────────┐ │
 │  │  ZK Proof Validation │  │  Nullifier Double-Spend     │ │
-│  │  (Groth16 / Struct)  │  │  Check                      │ │
+│  │  (Halo2 / Struct)    │  │  Check                      │ │
 │  └──────────────────────┘  └─────────────────────────────┘ │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────────┐│
@@ -107,16 +107,16 @@ bit_index = next_8_bytes(hash) % 64
 
 **Default build (no `real-prover`):**
 
-`verify_shielded_proof()` returns an error requiring the `real-prover` feature. Production deployments must use `--features real-prover` for Groth16 verification.
+`verify_shielded_proof()` returns an error requiring the `halo2-prover` feature. Production deployments must use `--features halo2-prover` for Halo2 verification.
 
-**With `real-prover` feature:**
-- `RealProver::global()` singleton (trusted setup is expensive)
+**With `halo2-prover` feature:**
+- `Halo2Prover::global()` singleton (universal params, no trusted setup)
 - Circuit types: `"deposit"`, `"withdraw"`, `"transfer"`
-- Public inputs: nullifiers + commitments concatenated
-- Verification: Groth16 via `ark-groth16`
+- Public inputs: nullifiers + commitments + asset_id (+ target for withdraw)
+- Verification: Halo2 IPA via `halo2_proofs`
 
 **Structural validation:** `verify_zk_proof()` checks:
-- `proof_data` is non-empty and ≤ 512 bytes
+- `proof_data` is non-empty and ≤ 20,000 bytes (Halo2 IPA proof size)
 - At least one nullifier or commitment is present
 - No duplicate nullifiers
 - Nullifier/commitment count matches expected circuit inputs/outputs (circuit-specific)
@@ -128,7 +128,7 @@ bit_index = next_8_bytes(hash) % 64
 
 **Process transfer flow:**
 1. Validate structure (`validate_structure()`)
-2. Verify ZK proof (structural or Groth16)
+2. Verify ZK proof (structural or Halo2)
 3. Check nullifiers not already spent
 4. Merkle inclusion check: verify input note commitments exist in tree
 5. Check value conservation (`output_sum ≤ input_sum`, difference is intentional fee burn)
@@ -174,14 +174,12 @@ Each block can contain at most 50 shielded transactions. This limits the computa
 | `merkle.rs` | `IncrementalMerkleTree` (depth 32, keccak256), proof generation/verification |
 | `nullifiers.rs` | `NullifierSet` (HashSet + BitSet compression) |
 | `circuit.rs` | ZK circuit abstractions (stub without `real-prover`) |
-| `prover.rs` | `RealProver` singleton, Groth16 verification (gated by `real-prover`) |
+| `prover.rs` | `Halo2Prover` singleton, Halo2 verification (gated by `halo2-prover`) |
 | `compliance.rs` | Shielded compliance modes (viewing key disclosure) |
-| `keygen.rs` | Key generation (gated by `real-prover`) |
-| `poseidon.rs` | Poseidon hash for circuits (gated by `real-prover`) |
-| `merkle_poseidon.rs` | Poseidon Merkle tree (gated by `real-prover`) |
-| `circuit_*.rs` | Deposit/withdraw/transfer circuits (gated by `real-prover`) |
-| `proof_ser.rs` | Proof serialization (gated by `real-prover`) |
-| `ceremony.rs` | Trusted setup ceremony (gated by `production-keys`) |
+| `poseidon.rs` | Poseidon hash for circuits (Pasta curves) |
+| `merkle_poseidon.rs` | Poseidon Merkle tree |
+| `circuit_*.rs` | Deposit/withdraw/transfer circuits (Halo2 PLONKish) |
+| `proof_ser.rs` | Proof serialization (Halo2 IPA) |
 
 ---
 
@@ -193,7 +191,7 @@ Each block can contain at most 50 shielded transactions. This limits the computa
 | Viewing key derivation | 🟢 Ready | Domain-separated KDF with `call/shielded/` prefix and length encoding |
 | Merkle tree | 🟢 Ready | Auto-rebuilds on deserialization, Merkle inclusion check in execution |
 | Nullifier set | 🟢 Ready | HashSet + BitSet, no false negatives |
-| ZK proof verification | 🟢 Ready | Groth16 via `ark-groth16` with `real-prover` feature; ceremony keys supported |
+| ZK proof verification | 🟢 Ready | Halo2 IPA via `halo2_proofs` with `halo2-prover` feature; no trusted setup |
 | Structural validation | 🟢 Ready | Circuit-specific count checks, asset consistency, `validate_structure()` |
 | ShieldedState | 🟢 Ready | Value conservation documented, balance audit, note pruning, receipts |
 | can_decrypt | 🟢 Ready | Attempts actual decryption via `try_decrypt_note()` |
@@ -205,4 +203,4 @@ Each block can contain at most 50 shielded transactions. This limits the computa
 ## Test Status
 
 - `cargo test -p call-shielded` — unit tests cover note creation, commitment/nullifier determinism, encryption/decryption, Merkle tree operations, nullifier set, BitSet compression, block tracker limits
-- Missing: ZK proof verification tests (require `real-prover` feature), Merkle proof verification in execution, balance audit tests, deserialization round-trip tests
+- Missing: ZK proof verification tests (require `halo2-prover` feature), Merkle proof verification in execution, balance audit tests, deserialization round-trip tests

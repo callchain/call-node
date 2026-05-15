@@ -20,7 +20,7 @@ This document tracks the gap between the current codebase and production mainnet
 | 8 | **No oracle signature verification negative tests** | `crates/oracle` | Oracle price submissions accept any 64-byte signature. No negative test exists with invalid signatures. |
 | 9 | **No database migration framework** | `crates/storage` | No schema versioning. Changes to data layout require manual migration or full resync. |
 | 10 | **No formal security audit** | Entire codebase | No third-party audit of consensus, cryptography, or economic incentives. |
-| 11 | **No formal verification for shielded circuits** | `crates/shielded` | Groth16 circuits are tested but not formally verified. Soundness/completeness proofs absent. |
+| 11 | **No formal verification for shielded circuits** | `crates/shielded` | Halo2 circuits are tested but not formally verified. Soundness/completeness proofs absent. |
 
 ---
 

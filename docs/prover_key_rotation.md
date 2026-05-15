@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CallChain shielded pool uses Groth16 zero-knowledge proofs secured by a trusted setup ceremony. Over time, these proving/verifying keys may need to be rotated — for example, after a compromised ceremony participant is detected, or as part of a planned security upgrade. Prover key rotation enables the network to adopt new keys without restarting nodes or halting the chain.
+The CallChain shielded pool uses Halo2 zero-knowledge proofs over Pasta curves. Halo2 IPA mode requires no trusted setup, but circuit-specific verifying/proving keys (VKs/PKs) are generated from universal parameters. Over time, these keys may need to be rotated — for example, as part of a planned security upgrade or circuit parameter change. Prover key rotation enables the network to adopt new keys without restarting nodes or halting the chain.
 
 **Key features:**
 - Governance-driven rotation via on-chain proposal
@@ -12,8 +12,7 @@ The CallChain shielded pool uses Groth16 zero-knowledge proofs secured by a trus
 - Proofs are tagged with the key version used to generate them
 
 **Crates involved:**
-- `crates/shielded/src/key_registry.rs` — `ProverRegistry`
-- `crates/shielded/src/prover.rs` — `RealProver::for_version()`
+- `crates/shielded/src/prover.rs` — `Halo2Prover::for_version()`
 - `crates/shielded/src/lib.rs` — `ZkProof.key_version`
 - `crates/governance/src/types.rs` — `ProposalType::ProverKeyRotation`
 - `crates/governance/src/precompile.rs` — execution logic
@@ -61,7 +60,7 @@ The CallChain shielded pool uses Groth16 zero-knowledge proofs secured by a trus
               └──────────────┬─────────────────┘
                              │
               ┌──────────────┴─────────────────┐
-              │      RealProver::for_version()  │
+              │     Halo2Prover::for_version()  │
               │  ├─ key_version=0 → genesis VKs │
               │  ├─ key_version=1 → rotation VKs│
               │  └─ missing → verification fail │
@@ -76,18 +75,7 @@ The CallChain shielded pool uses Groth16 zero-knowledge proofs secured by a trus
 
 At node startup, `ProverRegistry::global()` attempts to load production keys from `/var/lib/callchain/shielded_keys` and registers them as **version 0**. This is the genesis key set.
 
-```rust
-// crates/shielded/src/key_registry.rs
-pub fn global() -> &'static Self {
-    static INSTANCE: OnceLock<ProverRegistry> = OnceLock::new();
-    INSTANCE.get_or_init(|| {
-        // Load from /var/lib/callchain/shielded_keys as version 0
-        ...
-    })
-}
-```
-
-If the directory is missing or empty, the registry starts empty and proofs cannot be verified until keys are registered.
+At node startup, `Halo2Prover::global()` generates universal parameters via `Params::new(k)` and derives circuit-specific keys (VK/PK) for each circuit type. These are registered as **version 0** (genesis key set).
 
 ### 2. Rotation Proposal
 
@@ -134,8 +122,8 @@ Nodes monitor the pending flag. When detected, operators place the new ceremony 
 
 ```rust
 // Node-side (not yet fully automated)
-let new_keys = ProductionKeys::load("/var/lib/callchain/shielded_keys_v2")?;
-ProverRegistry::global().register(2, new_keys)?;
+let new_prover = Halo2Prover::setup_with_version(2)?;
+Halo2Prover::register_version(2, new_prover)?;
 ```
 
 ### 4. Proof Generation
@@ -144,8 +132,8 @@ New proofs are always generated with the **current** key version:
 
 ```rust
 // Proving server uses current keys automatically
-let prover = RealProver::global(); // uses ProverRegistry::current()
-let proof = prover.prove(&circuit)?;
+let prover = Halo2Prover::global(); // uses current version
+let proof = prover.prove_transfer(&circuit)?;
 // ZkProof.key_version is set to current version
 ```
 
@@ -155,10 +143,11 @@ Validators look up the correct verifying key by the proof's tagged version:
 
 ```rust
 // crates/shielded/src/lib.rs
-pub fn verify_shielded_proof(proof: &ZkProof) -> bool {
-    let prover = RealProver::for_version(proof.key_version)
-        .expect("verifying key for version not found");
-    prover.verify(proof).unwrap_or(false)
+pub fn verify_shielded_proof(proof: &ZkProof, merkle_root: &[u8; 32], target: Option<[u8; 20]>) -> Result<(), String> {
+    let prover = Halo2Prover::for_version(proof.key_version)
+        .ok_or_else(|| "verifying key for version not found".to_string())?;
+    // circuit-type dispatch with public inputs
+    ...
 }
 ```
 
@@ -206,7 +195,7 @@ The version is embedded in the serialized `ZkProof` as a 4-byte little-endian `u
 
 ### Performing a Key Rotation
 
-1. **Conduct a new trusted setup ceremony** for transfer, deposit, and withdraw circuits.
+1. **Generate new universal parameters and circuit keys** for transfer, deposit, and withdraw circuits using `Params::new(k)` and `keygen_vk`/`keygen_pk`.
 2. **Place new keys on all validator nodes** at `/var/lib/callchain/shielded_keys` (or a versioned subdirectory).
 3. **Submit a governance proposal** with:
    - `key_version` = current + 1
@@ -225,7 +214,7 @@ The version is embedded in the serialized `ZkProof` as a 4-byte little-endian `u
 | Testnet | 24 hours |
 | Mainnet | 7–14 days |
 
-A longer grace period reduces the risk of in-flight proofs being rejected, but increases memory usage (each retained version holds 3 VKs + 3 PKs).
+A longer grace period reduces the risk of in-flight proofs being rejected, but increases memory usage (each retained version holds 3 VKs + 3 PKs + universal params).
 
 ---
 

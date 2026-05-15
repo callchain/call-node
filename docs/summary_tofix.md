@@ -75,7 +75,7 @@
 - **Dynamic gas metering** (`base + sloads*50 + sstores*500`) via revm Journal
 - **`StorageRef`** safe journal decomposition (replaced unsafe `JournalBackend`)
 - **All precompiles wired** (`0x101` oracle, `0x103` bridge, `0x201` asset, `0x202` shielded, `0x203` governance, `0x204` validator, `0x205` compliance, `0x207` switch, `0x209` agent)
-- **Shielded pool** with Groth16 proofs (deposit/transfer/withdraw)
+- **Shielded pool** with Halo2 proofs (deposit/transfer/withdraw)
 - **Bridge** with optimistic challenge period (initiate/resolve/withdraw bond)
 - **Governance** with timelock, auto-advance, and 10 proposal types
 - **Fast sync** with Ed25519-signed state snapshots (production wired; cryptographic verification tests incomplete — see #17)

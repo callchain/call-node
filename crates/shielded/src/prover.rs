@@ -31,7 +31,7 @@ impl Prover for MockProver {
             .verify_constraints()
             .map_err(|e| ProverError::ConstraintViolation(format!("{:?}", e)))?;
 
-        // Generate a mock proof (~200 bytes to simulate old Groth16 size)
+        // Generate a mock proof (~200 bytes)
         let proof_data = vec![1u8; 200];
 
         Ok(ZkProof {
@@ -557,7 +557,7 @@ mod halo2_prover_impl {
                 .expect("deposit prove failed");
             assert!(
                 proof_data.len() > 128,
-                "Halo2 proof should be larger than old Groth16 (128B)"
+                "Halo2 proof should be larger than 128B"
             );
 
             // Public inputs: commitment (32B) + asset_id (32B) = 64B

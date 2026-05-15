@@ -37,12 +37,11 @@ checkpoint.
 
 2. **`ZkProof.key_version`** field
    - Proofs are tagged with the key version used to generate them
-   - Validators look up the correct VK via `RealProver::for_version()`
+   - Validators look up the correct VK via `Halo2Prover::for_version()`
    - Backward-compatible: missing/0 defaults to genesis keys
 
-3. **`RealProver::global()` registry integration**
-   - Boot-time load from `/var/lib/callchain/shielded_keys` as version 0
-   - Dev-setup fallback when registry is empty
+3. **`Halo2Prover::global()` versioned key management**
+   - Boot-time generation of universal params and circuit keys as version 0
    - Proving server picks up current keys automatically
 
 **Completed (2026-05-10):**
@@ -81,23 +80,28 @@ of the full governance → node → proof lifecycle.
    - `TransferCircuit.lean`: Completeness and soundness theorems proven (N=2, M=2)
    - `WithdrawCircuit.lean`: Completeness and soundness theorems proven
 
-3. **Lean ↔ Rust R1CS correspondence (Gap 1)**
-   - `export_r1cs.rs`: JSON export of full constraint matrices (A/B/C) for cross-checking
-   - `verify_r1cs.rs`: Structural verifier checks exported `.r1cs` against expected topology
-   - `R1CSCorrespondence.lean`: Documents the refinement relationship; 3 externally-verified axioms
-   - **All three circuits pass structural verification**
+3. **Lean ↔ Rust R1CS correspondence (Gap 1)** — Historical
+   - The Lean models formalized the Groth16/R1CS implementation (pre-migration)
+   - `export_r1cs.rs` and `verify_r1cs.rs` binaries were deleted during Halo2 migration
+   - `R1CSCorrespondence.lean` documents the historical refinement relationship
+   - **Formal verification for Halo2 PLONKish circuits is future work**
 
-4. **Implementation alignment**
-   - Transfer circuit export updated from N=1,M=1 → **N=2,M=2** (matching Lean model)
-   - Withdraw circuit updated with `spending_key` witness + spending-rights constraint (matching Lean)
+4. **Implementation alignment** (pre-migration)
+   - Transfer circuit export was N=1,M=1 → **N=2,M=2** (matching Lean model)
+   - Withdraw circuit included `spending_key` witness + spending-rights constraint (matching Lean)
 
-**Remaining gaps (non-blocking for mainnet readiness):**
+**Post-migration status:**
+
+The Lean 4 formalization modeled the Groth16/R1CS implementation. After migrating to Halo2:
+- The R1CS structural correspondence tools no longer exist
+- New formal verification for Halo2 circuits (PLONKish arithmetization) is **future work**
+- The existing Lean proofs remain as a mathematical model of the historical implementation
 
 | Gap | Status | Description |
 |-----|--------|-------------|
-| 1. Lean ↔ Rust correspondence | ✅ Closed | Structural verifier + refinement documentation |
-| 2. Poseidon constant correctness | ✅ Closed | Constants extracted from `poseidon-ark-no-std` v0.0.1; arrays cross-checked |
-| 3. Range check full expansion | ⚠️ Trusted primitive | 254 boolean constraints + packing implement `value < 2^128`. Treated as trusted `ark-r1cs-std` primitive; formal equivalence proof is future work |
+| 1. Lean ↔ Rust correspondence (R1CS) | ✅ Complete (historical) | Modeled the Groth16 implementation; no longer applicable |
+| 2. Halo2 circuit formalization | ⏳ Future work | PLONKish constraints, custom gates, permutation arguments |
+| 3. Range check full expansion | ✅ Closed | Halo2 uses `halo2_gadgets` range check (production-proven in Orchard) |
 
 **When to revisit:**
 - Close Gap 3: Prove in Lean that the expanded boolean/packing constraints are equivalent to `value < 2^128`

@@ -1,7 +1,7 @@
-# Halo2 Recursive Proofs: Analysis for Callchain Shielded Pool
+# Halo2 Recursive Proofs: Post-Migration Documentation
 
-**Date**: 2026-05-11
-**Context**: Technical analysis of migrating Callchain's shielded pool from Groth16 to Halo2 with recursive proof aggregation.
+**Date**: 2026-05-15
+**Context**: Callchain completed migration from Groth16/BN254 to Halo2/Pasta on 2026-05-15. This document documents the new architecture and explores future capabilities enabled by Halo2.
 
 ---
 
@@ -21,19 +21,19 @@
 
 Halo2 is a zero-knowledge proving system developed by zcash, built on the PLONK arithmetization with several key differences from Groth16:
 
-| Property | Groth16 | Halo2 |
-|----------|---------|-------|
+| Property | Before (Groth16) | Current (Halo2) |
+|----------|-----------------|-----------------|
 | Arithmetization | R1CS (Rank-1 Constraint System) | PLONKish (Custom gates + lookup tables + permutation) |
-| Trusted Setup | Per-circuit trusted setup required | Universal SRS (KZG) or no setup (IPA) |
-| Proof Size | ~200B | ~500B–1KB |
-| Verification | ~3ms (BN254 pairing) | ~10ms (KZG) |
+| Trusted Setup | Per-circuit trusted setup required | No setup (IPA) |
+| Proof Size | ~128B | ~5-10KB |
+| Verification | ~3ms (BN254 pairing) | ~5-10ms (Halo2 IPA) |
 | Recursive Composition | Difficult | Native support via folding |
 | Lookup Tables | Not supported | Native support |
 | Range Checks | Bit decomposition (~150 constraints) | Custom gate (~few constraints) |
 
 ### Why Halo2 Matters for Callchain
 
-Halo2 is not just a faster or slower Groth16 — it enables entirely new capabilities:
+Halo2 enables entirely new capabilities beyond what Groth16 could provide:
 
 - **Recursive proofs**: Verify a proof inside another proof, enabling aggregation
 - **Lookup tables**: Efficient set membership proofs (KYC/whitelist)
@@ -48,7 +48,7 @@ Halo2 is not just a faster or slower Groth16 — it enables entirely new capabil
 
 Imagine a school with 1,000 students, each writing a paper:
 
-- **Normal verification (Groth16)**: The principal reads all 1,000 papers. Cost = O(N).
+- **Normal verification (independent)**: The principal reads all 1,000 papers. Cost = O(N).
 - **Batch verification**: The principal hires 10 assistants, each reads 100 papers and reports. Cost still = O(N), just with parallelism.
 - **Recursive verification (Halo2)**: Student A reads Student B's paper and writes a "summary proof" that B's paper is valid. Student C reads Student D's paper and writes another summary. Then Student E reads A's and C's summaries and writes a merged summary. Eventually, the principal reads **one** final summary and knows all 1,000 papers are valid. Cost = O(1).
 
@@ -186,11 +186,11 @@ User A                    User B                    User C
 
 ### Performance Comparison for Callchain
 
-| Metric | Current (Groth16, 50 tx/block) | Batch Groth16 | Recursive Halo2 |
-|--------|-------------------------------|---------------|-----------------|
-| On-chain verification | ~150ms (50 × 3ms) | ~80–100ms | ~10ms |
-| P2P proof propagation | 10KB (50 × 200B) | 10KB | 1–2KB |
-| Block time consumed | 60% | 35–40% | 4% |
+| Metric | Current (Halo2, 50 tx/block) | Batch Halo2 | Recursive Halo2 |
+|--------|------------------------------|-------------|-----------------|
+| On-chain verification | ~250-500ms (50 × 5-10ms) | ~150-250ms | ~10ms |
+| P2P proof propagation | ~250-500KB (50 × 5-10KB) | ~250-500KB | 1–2KB |
+| Block time consumed | 100-200% | 60-100% | 4% |
 | Aggregator workload | None | None | +30–120s per batch |
 
 ---
@@ -199,16 +199,16 @@ User A                    User B                    User C
 
 ### Barrier 1: Circuit Rewrite (Largest Workload)
 
-Callchain's 3 circuits (Deposit/Withdraw/Transfer) are written in **arkworks R1CS**:
+Callchain's 3 circuits (Deposit/Withdraw/Transfer) were originally written in **arkworks R1CS** and have been rewritten to **Halo2 PLONKish**:
 
 ```rust
-// Current: R1CS (Groth16)
+// Before: R1CS (Groth16)
 let ivk_var = FpVar::new_witness(cs.clone(), || Ok(bytes_to_fr(&ivk)))?;
 let nf_var = poseidon_hash_gadget(cs.clone(), &[tag, fvk_var, rho_var])?;
 nf_var.enforce_equal(&computed_nf)?;
 ```
 
-Halo2 uses **PLONKish** custom gates — completely different API:
+Halo2 uses **PLONKish** custom gates:
 
 ```rust
 // Halo2: Custom gates + lookup + permutation
@@ -267,18 +267,18 @@ Using BN254 with Halo2 sacrifices some optimizations (especially cycle of curves
 | `halo2_recursive` / `halo2_folding` | Experimental, APIs unstable |
 | `nova-snark` | Relatively mature; implements folding but not Halo2-specific |
 
-Compared to arkworks (Groth16) which is mature and stable, Halo2's recursive/folding libraries are **rapidly evolving**. Production deployment carries risk of API changes and potential bugs.
+Halo2 core (`halo2_proofs`, `halo2_gadgets`) is production-grade (used by Zcash Orchard). Recursive/folding libraries are **rapidly evolving** — production deployment of recursion carries some ecosystem maturity risk.
 
 ### Barrier 5: Proving Key and Ceremony Infrastructure
 
-Callchain already has `production-keys` feature + Powers of Tau ceremony scripts (designed for Groth16).
+The Groth16 `production-keys` feature and Powers of Tau ceremony scripts have been removed. Halo2 IPA mode requires no ceremony.
 
 Halo2 key management is different:
-- **Groth16**: Per-circuit trusted setup (PK/VK bound to specific circuit)
-- **Halo2 KZG**: Universal SRS serves all circuits; needs structured reference string for KZG commitments
-- **Halo2 IPA**: No trusted setup at all, but larger proofs and slower verification
+- **Before (Groth16)**: Per-circuit trusted setup (PK/VK bound to specific circuit)
+- **Current (Halo2 IPA)**: No trusted setup; `Params::new(k)` generates universal parameters deterministically
+- **Future (Halo2 KZG)**: Universal SRS serves all circuits; smaller proofs but needs structured reference string
 
-**Effort**: New ceremony process or reliance on public KZG SRS (e.g., Ethereum's KZG ceremony).
+**Effort**: No ceremony needed for IPA. Switching to KZG later would require a public SRS (e.g., Ethereum's KZG ceremony) but the same circuits work unchanged.
 
 ### Barrier 6: Performance Reality
 
@@ -399,34 +399,33 @@ The chain verifies **one recursive proof** that simultaneously attests to:
 | Ceremony / SRS migration | Low | 1–2 weeks | No — must do |
 | Aggregator infrastructure | Medium | 2–3 weeks | No — must build |
 
-### Is It Worth It?
+### Migration Completed
 
-**For Callchain's current scale (50 shielded tx/block)**:
+Callchain completed the Groth16 → Halo2 migration in May 2026. The migration was justified by:
 
-| Scenario | Groth16 Batch | Halo2 Recursive |
-|----------|--------------|-----------------|
-| On-chain verification | ~80–100ms | ~10ms |
-| Engineering effort | 1–2 weeks | 3–6 months |
-| Risk | Low | Medium (ecosystem maturity) |
-| Benefit/cost ratio | **High** | **Low** |
+1. **Elimination of trusted setup**: No more Powers of Tau ceremony burden
+2. **Future-proofing**: Pasta curves + Halo2 enable recursive composition when tx volume grows
+3. **Compliance readiness**: Native lookup tables for KYC/whitelist proofs
+4. **Ecosystem maturity**: `halo2_proofs` and `halo2_gadgets` are production-grade (Orchard-proven)
 
-**Recommendation**: At 50 tx/block, **Groth16 batch verification is sufficient**. The engineering cost of Halo2 migration is not justified by the marginal gain.
+**Trade-offs accepted**:
+- Proof size increased from ~128B to ~5-10KB
+- Verification time increased from ~3ms to ~5-10ms per proof
+- No EVM native precompile — verification runs in native Rust precompile
 
-**When to migrate**:
-
-| Trigger | Action |
-|---------|--------|
-| Shielded tx > 500/block | Halo2 recursive becomes cost-effective |
-| Compliance proof required | Halo2 lookup tables are the right tool |
-| Remove trusted setup requirement | Halo2 IPA mode eliminates ceremony burden |
-| Ecosystem matures | `halo2_folding` reaches stable 1.0 |
-
-### Migration Path (When Ready)
+### Current State
 
 ```
-Phase 1 (now):      Groth16 batch verification — 30–45% improvement, low risk
-Phase 2 (future):   Evaluate Nova/Halo2 folding when tx volume grows
-Phase 3 (optional): Full Halo2 migration + recursive compliance circuits
+Completed: Halo2 IPA for deposit/transfer/withdraw circuits
+  - 3 circuits rewritten from R1CS to PLONKish
+  - Pasta Poseidon for commitments/nullifiers
+  - Universal params via Params::new(k) — no ceremony
+  - Key rotation via governance proposals
+
+Future work (not yet implemented):
+  - Recursive proof aggregation (Nova/Supernova folding)
+  - Compliance lookup circuits
+  - KZG commitment switch (smaller proofs, same circuits)
 ```
 
-> **Bottom line**: Halo2 recursive proofs are technically feasible and architecturally superior for compliance, but the engineering cost is high. Defer until transaction volume or compliance requirements demand it.
+> **Bottom line**: Halo2 migration is complete. The system is ready for recursive aggregation and compliance proofs when requirements mature.

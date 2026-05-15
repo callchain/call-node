@@ -507,7 +507,7 @@ struct ViewingKey {
 
 /// ZK proof -- proves transaction is valid without revealing details
 struct ZkProof {
-    proof_data: Vec<u8>,         // Groth16 / Halo2 proof
+    proof_data: Vec<u8>,         // Halo2 IPA proof
     public_inputs: PublicInputs,  // public nullifiers + commitments
 }
 ```
@@ -613,19 +613,19 @@ enum ShieldedComplianceMode {
 
 | Scheme | Proof Size | Verification Time | Trusted Setup | Recommendation |
 |------|---------|---------|---------|--------|
-| Groth16 | ~200B | ~3ms | Required (per circuit) | Current preferred, best performance |
-| Halo2 | ~1KB | ~10ms | Not required | Future migration target |
+| Halo2 IPA | ~5-10KB | ~5-10ms | Not required | Current — no trusted setup |
+| Halo2 KZG | ~1KB | ~8ms | Universal SRS | Future option |
 | Plonk | ~1KB | ~8ms | Required (universal) | Backup option |
 
-Initial adoption of **Groth16** (fast verification, small proofs), with planned migration to **Halo2** (no trusted setup).
+Adoption of **Halo2 IPA** (no trusted setup, recursive composition ready).
 
 #### 3.8.7 Performance Impact
 
 | Metric | Value |
 |------|------|
-| Proof generation time | 1-5 seconds (client-side local) |
-| Proof verification time | ~3ms/transaction (on-chain) |
-| Proof data size | ~200 bytes |
+| Proof generation time | 2-5 seconds (client-side local) |
+| Proof verification time | ~5-10ms/transaction (on-chain) |
+| Proof data size | ~5-10 KB (Halo2 IPA) |
 | Nullifier check | O(1) via HashSet |
 | Merkle Tree update | O(log n), depth 32 |
 
@@ -3449,7 +3449,7 @@ apply_block(state, block) -> Result<State> {
 - gas_limit <= block gas limit
 
 **Shielded precompile validation:**
-- ZK proof verification passes (Groth16/Halo2)
+- ZK proof verification passes (Halo2 IPA)
 - All nullifiers unspent (anti-double-spend)
 - Merkle Tree root matches (input Notes actually exist)
 - Asset exists and Shielded functionality is enabled
@@ -3984,7 +3984,7 @@ Light client support for the Shielded Pool is divided into two categories:
 /// Light client verifies ShieldedTransfer
 /// Requires downloading and verifying ZK proofs (computationally intensive, highest security)
 fn verify_shielded_tx_full(&self, tx: &ShieldedTransfer) -> Result<()> {
-    // 1. Verify ZK proof (Groth16 ~3ms)
+    // 1. Verify ZK proof (Halo2 IPA ~5-10ms)
     verify_zk_proof(&tx.proof)?;
 
     // 2. Verify nullifiers unspent (requires full node proof)

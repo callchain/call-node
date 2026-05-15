@@ -51,8 +51,9 @@ pub enum ProposalType {
         signature: Vec<u8>,
     },
     /// Rotate shielded prover keys (per spec §3.8.5)
-    /// Requires a new trusted setup ceremony. Nodes load new VKs from disk
-    /// and verify hashes against this proposal before registering.
+    /// Halo2 uses universal parameters (Params::new(k)) — no trusted setup.
+    /// Key rotation regenerates circuit-specific VKs/PKs from fresh params.
+    /// Nodes derive keys locally; only the k value and circuit hash need consensus.
     ProverKeyRotation {
         key_version: u32,
         transfer_vk_hash: [u8; 32],

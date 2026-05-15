@@ -124,7 +124,7 @@ Seismic supports encrypted calldata, which is a natural advantage of the TEE rou
 
 | Dimension | Seismic (TEE) | Call-Node (ZK) |
 | --- | --- | --- |
-| **Trust assumption** | Trust hardware vendors (Intel / AMD) | Trust cryptography (Groth16) |
+| **Trust assumption** | Trust hardware vendors (Intel / AMD) | Trust cryptography (Halo2) |
 | **Privacy type** | Execution privacy (encrypted state) | Verification privacy (zero-knowledge proof) |
 | **EVM intrusiveness** | Requires forking revm + solc | Standard EVM + precompile |
 | **Performance** | Fast (hardware decryption) | Slow (ZK proof generation / verification) |

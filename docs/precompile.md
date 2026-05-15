@@ -320,7 +320,7 @@ interface IProtocolShielded {
 
 - `deposit`: Checks compliance on caller. Deducts transparent balance, appends commitment to the Merkle tree.
 - `withdraw`: Checks compliance on `target`. Verifies ZK proof and nullifier, credits transparent balance.
-- `transfer`: Verifies ZK proof, spends nullifiers, appends new commitments. Groth16 proof verification is compute-intensive.
+- `transfer`: Verifies ZK proof, spends nullifiers, appends new commitments. Halo2 proof verification is compute-intensive.
 
 ---
 

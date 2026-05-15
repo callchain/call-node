@@ -1,6 +1,6 @@
 //! ZK circuit definition for shielded transfers (per spec §3.8.3)
 //!
-//! Defines the constraint system for Groth16/Halo2 proving:
+//! Defines the constraint system for Halo2 PLONKish proving:
 //! - Public inputs: nullifiers[], commitments[], asset_id
 //! - Private inputs: notes[], new_notes[], spending_key, merkle_path[]
 //! - 5 constraints for validity
@@ -147,7 +147,7 @@ impl ShieldedCircuit {
 
     /// Compute the Merkle root from a proof path and leaf.
     ///
-    /// Uses Poseidon hashing to match the R1CS circuit and on-chain Merkle tree.
+    /// Uses Poseidon hashing to match the Halo2 circuit and on-chain Merkle tree.
     fn compute_root_from_path(
         &self,
         proof: &[(call_primitives::Hash, bool)],

@@ -28,5 +28,5 @@ formal_verification/lean/.lake/
 # Backup files
 *.bak
 
-# Generated R1CS exports (reproducible via export_r1cs binary)
+# Historical R1CS exports (pre-Halo2 migration, no longer generated)
 r1cs/

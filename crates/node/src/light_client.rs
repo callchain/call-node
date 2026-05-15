@@ -346,14 +346,14 @@ impl LightClient {
         proof.verify()
     }
 
-    /// Full ZK proof verification for shielded transactions (~3ms Groth16)
+    /// Full ZK proof verification for shielded transactions (~5-10ms Halo2 IPA)
     /// + nullifier proof + commitment proof
     pub fn verify_shielded_tx_full(
         &self,
         zk_proof: &ZkProof,
         merkle_root: Hash,
     ) -> Result<(), LightClientError> {
-        // 1. Verify ZK proof (Groth16)
+        // 1. Verify ZK proof (Halo2 IPA)
         if !verify_zk_proof(zk_proof) {
             return Err(LightClientError::InvalidZkProof);
         }

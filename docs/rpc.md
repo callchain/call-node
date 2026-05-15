@@ -190,7 +190,7 @@ See [precompile.md](precompile.md) for the full ABI reference including exact se
 │  ├── POST /prove/withdraw                                    │
 │  └── GET  /health                                            │
 │                                                             │
-│  Generates Groth16 proofs (BN254, ~128B) for shielded       │
+│  Generates Halo2 proofs (Pasta, ~5-10KB) for shielded      │
 │  transactions. Keeps private keys off the node and allows    │
 │  independent CPU scaling for proof generation.               │
 └─────────────────────────────────────────────────────────────┘
@@ -291,7 +291,7 @@ call-prover                          # default: 127.0.0.1:8550
 call-prover --listen-addr 0.0.0.0:8550
 ```
 
-Uses `RealProver::global()` from `call-shielded` which loads production ceremony keys if available, otherwise falls back to dev trusted setup.
+Uses `Halo2Prover::global()` from `call-shielded` which generates universal parameters and circuit keys on boot.
 
 ---
 

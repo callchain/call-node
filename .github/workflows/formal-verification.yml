@@ -13,31 +13,6 @@ on:
       - 'crates/shielded/**'
 
 jobs:
-  r1cs-export:
-    name: R1CS Export & Structural Verification
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-action@stable
-
-      - name: Export R1CS circuits
-        run: cargo run --release --features real-prover --bin export_r1cs
-        working-directory: crates/shielded
-
-      - name: Verify R1CS structural correspondence
-        run: cargo run --release --features real-prover --bin verify_r1cs
-        working-directory: crates/shielded
-
-      - name: Upload R1CS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: r1cs-export
-          path: r1cs/*.json
-
   lean4:
     name: Lean 4 Proofs
     runs-on: ubuntu-latest
@@ -80,14 +55,15 @@ jobs:
 
       - name: Verify axiom count
         run: |
-          # Fr.lean should have exactly 1 mathematical axiom (BN254_P_prime)
+          # Fr.lean models the Pasta Pallas base field (Fp)
           FR_AXIOMS=$(grep -c "axiom" CallchainShielded/Fr.lean || true)
           if [ "$FR_AXIOMS" -gt 1 ]; then
             echo "Too many axioms in Fr.lean: $FR_AXIOMS (expected <= 1)"
             exit 1
           fi
 
-          # R1CSCorrespondence.lean has 3 externally-verified axioms (structural correspondence)
+          # R1CSCorrespondence.lean models the historical Groth16/R1CS implementation
+          # (3 externally-verified axioms for structural correspondence)
           CORR_AXIOMS=$(grep -c "axiom" CallchainShielded/R1CSCorrespondence.lean || true)
           if [ "$CORR_AXIOMS" -gt 3 ]; then
             echo "Too many axioms in R1CSCorrespondence.lean: $CORR_AXIOMS (expected <= 3)"

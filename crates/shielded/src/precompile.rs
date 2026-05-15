@@ -641,8 +641,8 @@ mod tests {
         assert_eq!(bal, 500);
     }
 
-    /// Withdraw precompile test with real Groth16 proof verification.
-    /// Only runs when `halo2-prover` feature is enabled (e.g. workspace build).
+    /// Withdraw precompile test with real Halo2 proof verification.
+    /// Only runs when `halo2-prover` feature is enabled.
     #[cfg(feature = "halo2-prover")]
     #[test]
     fn test_shielded_precompile_withdraw() {
