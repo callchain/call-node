@@ -157,14 +157,40 @@ fn bench_proof_transfer(c: &mut Criterion) {
                 rho: rho_out,
             };
 
+            let mut nullifiers_arr = [[0u8; 32]; 2];
+            nullifiers_arr[0] = nullifier;
+            let mut commitments_arr = [[0u8; 32]; 2];
+            commitments_arr[0] = output_cm;
+            let mut input_notes_arr = [InputNoteWitness {
+                value: 0,
+                rcm: [0u8; 32],
+                recipient_ivk: [0u8; 32],
+                rho: [0u8; 32],
+                spending_key: [0u8; 32],
+            }; 2];
+            input_notes_arr[0] = input_witness;
+            let mut output_notes_arr = [OutputNoteWitness {
+                value: 0,
+                rcm: [0u8; 32],
+                recipient_ivk: [0u8; 32],
+                rho: [0u8; 32],
+            }; 2];
+            output_notes_arr[0] = output_witness;
+            let mut merkle_paths_arr = [([0u8; 32], false); 32];
+            for (i, p) in merkle_path.iter().enumerate() {
+                merkle_paths_arr[i] = *p;
+            }
+            let mut merkle_paths = [[([0u8; 32], false); 32]; 2];
+            merkle_paths[0] = merkle_paths_arr;
+
             let circuit = TransferCircuit::new(
-                vec![nullifier],
-                vec![output_cm],
+                nullifiers_arr,
+                commitments_arr,
                 asset_id,
                 merkle_root,
-                vec![input_witness],
-                vec![output_witness],
-                vec![merkle_path],
+                input_notes_arr,
+                output_notes_arr,
+                merkle_paths,
             );
 
             let proof = prover.prove_transfer(&circuit);

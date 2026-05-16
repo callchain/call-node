@@ -57,6 +57,11 @@ prover-server = ["halo2-prover", "axum", "tracing", "tracing-subscriber", "clap"
 [dev-dependencies]
 criterion = { workspace = true }
 
+[[bin]]
+name = "prover-server"
+path = "src/bin/prover_server.rs"
+required-features = ["prover-server"]
+
 [[bench]]
 name = "proof_generate"
 harness = false

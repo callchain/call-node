@@ -105,26 +105,44 @@ mod halo2_prover_impl {
         transfer_vk: VerifyingKey<EqAffine>,
     }
 
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Global registry of Halo2Prover instances by key version.
+    static VERSION_REGISTRY: OnceLock<Mutex<HashMap<u32, Halo2Prover>>> = OnceLock::new();
+
+    fn version_registry() -> &'static Mutex<HashMap<u32, Halo2Prover>> {
+        VERSION_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
     impl Halo2Prover {
-        /// Global singleton Halo2Prover instance.
+        /// Global singleton Halo2Prover instance (version 0).
         pub fn global() -> &'static Self {
             use std::sync::OnceLock;
             static INSTANCE: OnceLock<Halo2Prover> = OnceLock::new();
-            INSTANCE.get_or_init(|| {
-                Self::setup()
-            })
+            INSTANCE.get_or_init(|| Self::setup())
+        }
+
+        /// Register a Halo2Prover for a specific key version.
+        ///
+        /// Called by governance during `ProverKeyRotation` proposal execution.
+        /// The version is bumped by governance; old versions remain accessible
+        /// until explicitly sunset.
+        pub fn register_version(version: u32, prover: Halo2Prover) {
+            let mut registry = version_registry().lock().expect("version registry poisoned");
+            registry.insert(version, prover);
         }
 
         /// Create a Halo2Prover for a specific key version.
         ///
-        /// Halo2 uses universal parameters — there is no per-version CRS.
-        /// Only version 0 is supported; all other versions return `None`.
+        /// First checks the version registry (governance-registered keys),
+        /// then falls back to the genesis singleton (version 0).
         pub fn for_version(version: u32) -> Option<Self> {
             if version == 0 {
-                Some(Self::global().clone())
-            } else {
-                None
+                return Some(Self::global().clone());
             }
+            let registry = version_registry().lock().expect("version registry poisoned");
+            registry.get(&version).cloned()
         }
 
         /// Generate universal parameters and circuit-specific keys for all three circuits.

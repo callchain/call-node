@@ -4,7 +4,7 @@
 //! EVM storage. Business logic lives in [`ShieldedStorage`]; this
 //! file only handles ABI decode/encode, gas accounting and selector dispatch.
 
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
@@ -39,6 +39,32 @@ fn slot_tree_node(level: u8, index: u64) -> U256 {
     storage_slot(&[b"tree", &[level][..], &index.to_be_bytes()[..]])
 }
 
+fn slot_shielded_nullifier_height(nullifier: [u8; 32]) -> U256 {
+    storage_slot(&[b"nf_height", &nullifier[..]])
+}
+
+fn slot_shielded_commitment_height(index: u64) -> U256 {
+    storage_slot(&[b"cm_height", &index.to_be_bytes()[..]])
+}
+
+fn slot_shielded_nullifier_bitset(bucket: u64) -> U256 {
+    storage_slot(&[b"nf_bits", &bucket.to_be_bytes()[..]])
+}
+
+fn slot_shielded_window_start() -> U256 {
+    storage_slot(&[b"window_start"])
+}
+
+fn slot_shielded_window_blocks() -> U256 {
+    storage_slot(&[b"window_blocks"])
+}
+
+/// Number of blocks a note remains spendable after insertion (~1 week at 6s/block).
+pub const NOTE_WINDOW_BLOCKS: u64 = 100_800;
+
+/// Number of BitSet buckets for nullifier compression (4096 * 256 bits = 1,048,576 bits).
+const NULLIFIER_BITSET_BUCKETS: u64 = 4096;
+
 // ── Error type ────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -50,6 +76,7 @@ pub enum ShieldedError {
     ZkProofError(String),
     NullifierAlreadySpent,
     EmptyBatch,
+    NoteExpired,
 }
 
 impl core::fmt::Display for ShieldedError {
@@ -62,6 +89,7 @@ impl core::fmt::Display for ShieldedError {
             ShieldedError::ZkProofError(e) => write!(f, "ZK verification error: {e}"),
             ShieldedError::NullifierAlreadySpent => write!(f, "nullifier already spent"),
             ShieldedError::EmptyBatch => write!(f, "empty batch"),
+            ShieldedError::NoteExpired => write!(f, "note expired"),
         }
     }
 }
@@ -118,13 +146,59 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         self.backend.store(SHIELDED_ADDRESS, slot, value);
     }
 
-    fn check_nullifier_spent(&mut self, nullifier: [u8; 32]) -> bool {
-        self.sload_shielded(slot_shielded_nullifier(nullifier))
+    /// Check if a nullifier has been spent **and** is within the expiry window.
+    /// Returns false for expired nullifiers (allowing prune).
+    fn check_nullifier_spent(&mut self, nullifier: [u8; 32], current_block: u64) -> bool {
+        let flag = self
+            .sload_shielded(slot_shielded_nullifier(nullifier))
             .to_be_bytes::<32>()[31]
-            == 1
+            == 1;
+        if !flag {
+            return false;
+        }
+        let spent_at = u256_to_u64(self.sload_shielded(slot_shielded_nullifier_height(nullifier)));
+        // Legacy entries have no height recorded — treat as valid spent
+        if spent_at == 0 {
+            return true;
+        }
+        let window = self.load_window_blocks();
+        current_block.saturating_sub(spent_at) < window
     }
 
-    fn insert_commitment(&mut self, commitment: [u8; 32]) -> [u8; 32] {
+    /// Mark a nullifier as spent, recording the block height and updating the BitSet.
+    fn mark_nullifier_spent(&mut self, nullifier: [u8; 32], current_block: u64) {
+        self.sstore_shielded(slot_shielded_nullifier(nullifier), U256::from(1u8));
+        self.sstore_shielded(
+            slot_shielded_nullifier_height(nullifier),
+            u64_to_u256(current_block),
+        );
+        // Update BitSet for fast pruning / compression
+        let bucket =
+            u64::from_le_bytes(nullifier[0..8].try_into().unwrap()) % NULLIFIER_BITSET_BUCKETS;
+        let bit = (nullifier[8] as u64) % 256;
+        let mut word = self
+            .sload_shielded(slot_shielded_nullifier_bitset(bucket))
+            .to_be_bytes::<32>();
+        let byte_idx = (bit / 8) as usize;
+        let bit_idx = (bit % 8) as u8;
+        word[byte_idx] |= 1u8 << bit_idx;
+        self.sstore_shielded(
+            slot_shielded_nullifier_bitset(bucket),
+            U256::from_be_slice(&word),
+        );
+    }
+
+    /// Load the configured note window in blocks (default: NOTE_WINDOW_BLOCKS).
+    fn load_window_blocks(&mut self) -> u64 {
+        let stored = u256_to_u64(self.sload_shielded(slot_shielded_window_blocks()));
+        if stored == 0 {
+            NOTE_WINDOW_BLOCKS
+        } else {
+            stored
+        }
+    }
+
+    fn insert_commitment(&mut self, commitment: [u8; 32], current_block: u64) -> [u8; 32] {
         let count = u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()));
         let mut idx = count as usize;
         let mut current = commitment;
@@ -152,6 +226,11 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         }
 
         self.sstore_shielded(slot_shielded_merkle_root(), U256::from_be_slice(&current));
+        // Record insertion height for expiry checks
+        self.sstore_shielded(
+            slot_shielded_commitment_height(count),
+            u64_to_u256(current_block),
+        );
         current
     }
 
@@ -161,6 +240,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         amount: u128,
         commitment: [u8; 32],
         caller: Address,
+        current_block: u64,
     ) -> Result<(), ShieldedError> {
         let sender_bal = self
             .load_bal(asset_id, caller)
@@ -168,7 +248,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             .ok_or(ShieldedError::InsufficientBalance)?;
         self.save_bal(asset_id, caller, sender_bal);
 
-        self.insert_commitment(commitment);
+        self.insert_commitment(commitment, current_block);
 
         let count = u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()));
         self.sstore_shielded(
@@ -188,6 +268,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         nullifier: [u8; 32],
         merkle_root: [u8; 32],
         proof_data: Vec<u8>,
+        current_block: u64,
     ) -> Result<(), ShieldedError> {
         let stored_root = self
             .sload_shielded(slot_shielded_merkle_root())
@@ -220,11 +301,11 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             Err(e) => return Err(ShieldedError::ZkProofError(e)),
         }
 
-        if self.check_nullifier_spent(nullifier) {
+        if self.check_nullifier_spent(nullifier, current_block) {
             return Err(ShieldedError::NullifierAlreadySpent);
         }
 
-        self.sstore_shielded(slot_shielded_nullifier(nullifier), U256::from(1u8));
+        self.mark_nullifier_spent(nullifier, current_block);
 
         let target_bal = self
             .load_bal(asset_id, target)
@@ -241,6 +322,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         proof_data: Vec<u8>,
         nullifiers: Vec<[u8; 32]>,
         commitments: Vec<[u8; 32]>,
+        current_block: u64,
     ) -> Result<(), ShieldedError> {
         if nullifiers.is_empty() && commitments.is_empty() {
             return Err(ShieldedError::EmptyBatch);
@@ -275,17 +357,17 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         }
 
         for nf in &nullifiers {
-            if self.check_nullifier_spent(*nf) {
+            if self.check_nullifier_spent(*nf, current_block) {
                 return Err(ShieldedError::NullifierAlreadySpent);
             }
         }
 
         for nf in &nullifiers {
-            self.sstore_shielded(slot_shielded_nullifier(*nf), U256::from(1u8));
+            self.mark_nullifier_spent(*nf, current_block);
         }
 
         for cm in &commitments {
-            self.insert_commitment(*cm);
+            self.insert_commitment(*cm, current_block);
 
             let count = u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()));
             self.sstore_shielded(slot_shielded_commitment(count), U256::from_be_slice(cm));
@@ -309,8 +391,8 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             .to_be_bytes::<32>()
     }
 
-    pub fn is_nullifier_spent(&mut self, nullifier: [u8; 32]) -> bool {
-        self.check_nullifier_spent(nullifier)
+    pub fn is_nullifier_spent(&mut self, nullifier: [u8; 32], current_block: u64) -> bool {
+        self.check_nullifier_spent(nullifier, current_block)
     }
 }
 
@@ -345,6 +427,7 @@ impl ShieldedPrecompile {
             storage,
             |call, storage| {
                 check_compliance(msg_sender, storage)?;
+                let current_block = storage.block_number();
                 let mut store = ShieldedStorage::new(sr);
                 store
                     .deposit(
@@ -352,6 +435,7 @@ impl ShieldedPrecompile {
                         call.amount,
                         call.commitment.into(),
                         msg_sender,
+                        current_block,
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(())
@@ -366,26 +450,42 @@ impl ShieldedPrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolShielded::withdrawCall, _>(
-            calldata,
-            50000,
-            storage,
-            |call, storage| {
-                check_compliance(call.target, storage)?;
-                let mut store = ShieldedStorage::new(sr);
-                store
-                    .withdraw(
-                        call.assetId,
-                        call.target,
-                        call.amount,
-                        call.nullifier.into(),
-                        call.merkleRoot.into(),
-                        call.proofData.to_vec(),
-                    )
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                Ok(())
-            },
-        )
+        let call = dispatch::decode_call::<IProtocolShielded::withdrawCall>(calldata)?;
+
+        // Dynamic gas: base 30_000 + 10 per byte of proof data
+        let proof_len = call.proofData.len() as u64;
+        let dynamic_gas = 30_000u64
+            .saturating_add(proof_len.saturating_mul(10));
+        storage.deduct_gas(dynamic_gas)?;
+
+        check_compliance(call.target, storage)?;
+        let current_block = storage.block_number();
+
+        let cp = storage.checkpoint();
+        let mut store = ShieldedStorage::new(sr);
+        let result = store
+            .withdraw(
+                call.assetId,
+                call.target,
+                call.amount,
+                call.nullifier.into(),
+                call.merkleRoot.into(),
+                call.proofData.to_vec(),
+                current_block,
+            )
+            .map_err(|e| PrecompileError::Other(e.to_string().into()));
+
+        match result {
+            Ok(()) => {
+                storage.checkpoint_commit(cp);
+                let output = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
+                Ok(call_precompile::storage::fill_precompile_output(output, storage))
+            }
+            Err(e) => {
+                storage.checkpoint_revert(cp);
+                Err(e)
+            }
+        }
     }
 
     fn transfer(
@@ -395,22 +495,36 @@ impl ShieldedPrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolShielded::transferCall, _>(
-            calldata,
-            50000,
-            storage,
-            |call, _storage| {
-                let mut store = ShieldedStorage::new(sr);
-                let nullifiers: Vec<[u8; 32]> =
-                    call.nullifiers.iter().map(|n| (*n).into()).collect();
-                let commitments: Vec<[u8; 32]> =
-                    call.commitments.iter().map(|c| (*c).into()).collect();
-                store
-                    .transfer(call.assetId, call.proof.to_vec(), nullifiers, commitments)
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                Ok(())
-            },
-        )
+        let call = dispatch::decode_call::<IProtocolShielded::transferCall>(calldata)?;
+
+        // Dynamic gas: base 30_000 + 10 per byte of proof data
+        let proof_len = call.proof.len() as u64;
+        let dynamic_gas = 30_000u64
+            .saturating_add(proof_len.saturating_mul(10));
+        storage.deduct_gas(dynamic_gas)?;
+
+        let current_block = storage.block_number();
+        let cp = storage.checkpoint();
+        let mut store = ShieldedStorage::new(sr);
+        let nullifiers: Vec<[u8; 32]> =
+            call.nullifiers.iter().map(|n| (*n).into()).collect();
+        let commitments: Vec<[u8; 32]> =
+            call.commitments.iter().map(|c| (*c).into()).collect();
+        let result = store
+            .transfer(call.assetId, call.proof.to_vec(), nullifiers, commitments, current_block)
+            .map_err(|e| PrecompileError::Other(e.to_string().into()));
+
+        match result {
+            Ok(()) => {
+                storage.checkpoint_commit(cp);
+                let output = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
+                Ok(call_precompile::storage::fill_precompile_output(output, storage))
+            }
+            Err(e) => {
+                storage.checkpoint_revert(cp);
+                Err(e)
+            }
+        }
     }
 
     fn get_merkle_root(
@@ -474,9 +588,10 @@ impl ShieldedPrecompile {
             calldata,
             2000,
             storage,
-            |call, _storage| {
+            |call, storage| {
+                let current_block = storage.block_number();
                 let mut store = ShieldedStorage::new(sr);
-                Ok(store.is_nullifier_spent(call.nullifier.into()))
+                Ok(store.is_nullifier_spent(call.nullifier.into(), current_block))
             },
         )
     }

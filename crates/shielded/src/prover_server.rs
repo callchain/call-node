@@ -243,6 +243,36 @@ pub struct HealthResponse {
     pub cache_size: usize,
 }
 
+impl ProverState {
+    /// Create a new prover server state.
+    pub fn new(mode: ProverMode, max_qps: f64, cache_ttl_secs: u64) -> Self {
+        Self {
+            prover: Halo2Prover::global(),
+            mode,
+            api_keys: Arc::new(HashSet::new()),
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+            max_qps,
+            proof_cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_ttl_secs,
+            inflight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Add an API key for authentication.
+    pub fn with_api_key(mut self, key: String) -> Self {
+        Arc::get_mut(&mut self.api_keys).unwrap().insert(key);
+        self
+    }
+}
+
+/// Run the prover server on the given bind address.
+pub async fn run(bind: &str, state: ProverState) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    info!("prover server listening on {}", bind);
+    axum::serve(listener, build_router(state)).await?;
+    Ok(())
+}
+
 // ── Router ─────────────────────────────────────────────────────────────────
 
 pub fn build_router(state: ProverState) -> Router {

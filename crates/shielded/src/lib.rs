@@ -255,6 +255,60 @@ impl ShieldedTransfer {
     }
 }
 
+// ── Proof Verification Cache ──────────────────────────────────────────
+
+/// Entry in the proof verification cache.
+#[derive(Clone)]
+struct VerifyCacheEntry {
+    result: Result<bool, String>,
+    timestamp: std::time::Instant,
+}
+
+/// TTL for cached verification results.
+const VERIFY_CACHE_TTL_SECS: u64 = 300;
+/// Maximum entries before cache eviction.
+const VERIFY_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// Generate a deterministic cache key for a proof verification request.
+fn proof_cache_key(
+    proof: &ZkProof,
+    circuit_type: &str,
+    merkle_root: Option<&[u8; 32]>,
+    value: Option<u128>,
+    target: Option<[u8; 20]>,
+) -> [u8; 32] {
+    let mut data = Vec::new();
+    data.extend_from_slice(circuit_type.as_bytes());
+    data.extend_from_slice(&proof.key_version.to_le_bytes());
+    data.extend_from_slice(&proof.proof_data);
+    if let Some(root) = merkle_root {
+        data.extend_from_slice(root);
+    }
+    if let Some(v) = value {
+        data.extend_from_slice(&v.to_le_bytes());
+    }
+    if let Some(t) = target {
+        data.extend_from_slice(&t);
+    }
+    for nf in &proof.nullifiers {
+        data.extend_from_slice(nf.0.as_slice());
+    }
+    for cm in &proof.commitments {
+        data.extend_from_slice(cm.0.as_slice());
+    }
+    data.extend_from_slice(&proof.asset_id.to_le_bytes());
+    alloy_primitives::keccak256(&data).0
+}
+
+/// Access the global proof verification cache.
+#[cfg(feature = "halo2-prover")]
+fn verify_cache() -> &'static std::sync::Mutex<std::collections::HashMap<[u8; 32], VerifyCacheEntry>> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<[u8; 32], VerifyCacheEntry>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Verify a ZK proof against the Halo2Prover when the `halo2-prover` feature is enabled.
 ///
 /// When `halo2-prover` is NOT enabled, this returns an error — structural-only
@@ -285,9 +339,20 @@ pub fn verify_shielded_proof(
 ) -> Result<bool, String> {
     use crate::prover::{Halo2Prover, ProverError};
 
-    // First do structural validation
+    // First do structural validation (never cached — cheap and stateless)
     if !verify_zk_proof(proof) {
         return Ok(false);
+    }
+
+    // Check proof verification cache
+    let cache_key = proof_cache_key(proof, circuit_type, merkle_root, value, target);
+    {
+        let cache = verify_cache().lock().expect("verify cache lock poisoned");
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.timestamp.elapsed().as_secs() < VERIFY_CACHE_TTL_SECS {
+                return entry.result.clone();
+            }
+        }
     }
 
     let prover = Halo2Prover::for_version(proof.key_version).ok_or_else(|| {
@@ -350,7 +415,24 @@ pub fn verify_shielded_proof(
         other => return Err(format!("unknown circuit type: {other}")),
     };
 
-    result.map_err(|e| e.to_string())
+    let result = result.map_err(|e| e.to_string());
+
+    // Insert into cache (evict if over capacity)
+    {
+        let mut cache = verify_cache().lock().expect("verify cache lock poisoned");
+        if cache.len() >= VERIFY_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            cache_key,
+            VerifyCacheEntry {
+                result: result.clone(),
+                timestamp: std::time::Instant::now(),
+            },
+        );
+    }
+
+    result
 }
 
 /// Verify a ZK proof's public inputs against current state.
