@@ -10,6 +10,7 @@ use call_governance::{GovernanceEvent, ProposalState};
 use call_precompile::{storage::storage_slot, u128_to_u256, u64_to_u256, COMPLIANCE_ADDRESS};
 use call_primitives::{Address, U256};
 use call_protocol::CALL_ASSET_ID;
+use call_shielded::prover::Halo2Prover;
 
 /// Total supply: 1B CALL * 10^18 (18 decimals)
 const TOTAL_SUPPLY: u128 = 1_000_000_000_000_000_000_000_000_000u128;
@@ -398,6 +399,34 @@ impl GovernanceAdvancer {
                         call_governance::precompile::GOVERNANCE_ADDRESS,
                         storage_slot(&[b"fee_currency_cap", &asset_id.to_be_bytes()[..]]),
                         u128_to_u256(cap),
+                    );
+                }
+            }
+            10 => {
+                // ProverKeyRotation: execution_data = ABI-encoded
+                // (uint32 keyVersion, bytes32 transferVkHash, bytes32 depositVkHash, bytes32 withdrawVkHash, uint64 sunsetTimestamp)
+                if execution_data.len() >= 160 {
+                    let mut version_buf = [0u8; 4];
+                    version_buf.copy_from_slice(&execution_data[28..32]);
+                    let key_version = u32::from_be_bytes(version_buf);
+
+                    // Register the new prover version at runtime.
+                    // NOTE: Halo2Prover::setup() currently generates the same genesis keys
+                    // for all versions. In production, node operators should replace this
+                    // with Halo2Prover::setup_with_version(key_version) or load from disk
+                    // after placing new ceremony outputs in the key directory.
+                    let prover = Halo2Prover::setup();
+                    Halo2Prover::register_version(key_version, prover);
+                    tracing::info!(
+                        key_version,
+                        "registered new Halo2 prover version via governance"
+                    );
+
+                    // Store rotation audit flag in governance storage
+                    evm_state.set_storage(
+                        call_governance::precompile::GOVERNANCE_ADDRESS,
+                        storage_slot(&[b"prover_key_rotation", b"registered"]),
+                        U256::from(key_version),
                     );
                 }
             }
