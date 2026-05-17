@@ -20,6 +20,7 @@ pub struct ShieldedCircuit {
     pub input_notes: Vec<Note>,
     pub output_notes: Vec<Note>,
     pub merkle_paths: Vec<Vec<([u8; 32], bool)>>,
+    pub merkle_root: [u8; 32],
 }
 
 impl ShieldedCircuit {
@@ -38,12 +39,19 @@ impl ShieldedCircuit {
             input_notes,
             output_notes,
             merkle_paths: Vec::new(),
+            merkle_root: [0u8; 32],
         }
     }
 
     /// Set Merkle paths for input notes
     pub fn with_merkle_paths(mut self, paths: Vec<Vec<([u8; 32], bool)>>) -> Self {
         self.merkle_paths = paths;
+        self
+    }
+
+    /// Set expected Merkle root for path validation
+    pub fn with_merkle_root(mut self, root: [u8; 32]) -> Self {
+        self.merkle_root = root;
         self
     }
 
@@ -72,7 +80,7 @@ impl ShieldedCircuit {
         Ok(())
     }
 
-    /// Constraint 2: Note exists in Merkle Tree (path is valid)
+    /// Constraint 2: Note exists in Merkle Tree (path is valid and matches root)
     fn check_merkle_path_valid(&self) -> Result<(), CircuitError> {
         use call_primitives::Hash;
 
@@ -87,9 +95,14 @@ impl ShieldedCircuit {
                 .collect();
             let cm = note.commitment();
             let commitment = cm.0;
-            let merkle_root = self.compute_root_from_path(&proof, commitment);
-            if merkle_root == Hash::repeat_byte(0) {
+            let computed_root = self.compute_root_from_path(&proof, commitment);
+            if computed_root == Hash::repeat_byte(0) {
                 return Err(CircuitError::InvalidMerklePath(i));
+            }
+            // When merkle_root is set, enforce it matches the computed root
+            let expected = Hash::from_slice(&self.merkle_root);
+            if expected != Hash::repeat_byte(0) && computed_root != expected {
+                return Err(CircuitError::MerkleRootMismatch);
             }
         }
         Ok(())
@@ -148,18 +161,19 @@ impl ShieldedCircuit {
     /// Compute the Merkle root from a proof path and leaf.
     ///
     /// Uses Poseidon hashing to match the Halo2 circuit and on-chain Merkle tree.
+    /// The proof bool is `sibling_is_right` (true when sibling is on the right).
     fn compute_root_from_path(
         &self,
         proof: &[(call_primitives::Hash, bool)],
         leaf: call_primitives::Hash,
     ) -> call_primitives::Hash {
         let mut current: [u8; 32] = leaf.into();
-        for (sibling, is_left) in proof {
+        for (sibling, sibling_is_right) in proof {
             let sibling_bytes: [u8; 32] = (*sibling).into();
-            current = if *is_left {
-                crate::poseidon::poseidon_hash_pair(&sibling_bytes, &current)
-            } else {
+            current = if *sibling_is_right {
                 crate::poseidon::poseidon_hash_pair(&current, &sibling_bytes)
+            } else {
+                crate::poseidon::poseidon_hash_pair(&sibling_bytes, &current)
             };
         }
         call_primitives::Hash::from_slice(&current)
@@ -167,7 +181,8 @@ impl ShieldedCircuit {
 
     /// Get the number of public inputs
     pub fn public_input_count(&self) -> usize {
-        self.nullifiers.len() + self.commitments.len() + 1 // +1 for asset_id
+        // nullifiers + commitments + asset_id + merkle_root
+        self.nullifiers.len() + self.commitments.len() + 2
     }
 }
 
@@ -182,6 +197,8 @@ pub enum CircuitError {
     MissingMerklePath(usize),
     #[error("invalid Merkle path for input note {0}")]
     InvalidMerklePath(usize),
+    #[error("Merkle root mismatch")]
+    MerkleRootMismatch,
     #[error("spending rights violation for input note {0}")]
     SpendingRightsViolation(usize),
     #[error("value overflow: input={input}, output={output}")]
@@ -278,7 +295,8 @@ mod tests {
         let cm = output.commitment();
 
         let circuit = ShieldedCircuit::new(vec![nf], vec![cm], 1, vec![input], vec![output])
-            .with_merkle_paths(vec![proof]);
+            .with_merkle_paths(vec![proof])
+            .with_merkle_root(tree.root());
 
         assert!(circuit.check_merkle_path_valid().is_ok());
     }
@@ -296,7 +314,8 @@ mod tests {
         let cm = output.commitment();
 
         let circuit = ShieldedCircuit::new(vec![nf], vec![cm], 1, vec![input], vec![output])
-            .with_merkle_paths(vec![proof]);
+            .with_merkle_paths(vec![proof])
+            .with_merkle_root(tree.root());
 
         assert!(circuit.verify_constraints().is_ok());
     }
@@ -304,7 +323,32 @@ mod tests {
     #[test]
     fn test_circuit_public_input_count() {
         let circuit = build_valid_circuit();
-        // 1 nullifier + 1 commitment + 1 asset_id
-        assert_eq!(circuit.public_input_count(), 3);
+        // 1 nullifier + 1 commitment + 1 asset_id + 1 merkle_root
+        assert_eq!(circuit.public_input_count(), 4);
+    }
+
+    #[test]
+    fn test_circuit_merkle_root_mismatch() {
+        let mut tree = PoseidonMerkleTree::new(32);
+        let input = test_note(1000, 1, 1);
+        let leaf: [u8; 32] = input.commitment().0.into();
+        tree.insert(&leaf);
+        let proof = tree.proof_for_last();
+
+        let output = test_note(800, 1, 2);
+        let nf = input.nullifier();
+        let cm = output.commitment();
+
+        // Use a wrong root (all zeros is treated as "not set", so use a different non-zero root)
+        let wrong_root = [0xFFu8; 32];
+
+        let circuit = ShieldedCircuit::new(vec![nf], vec![cm], 1, vec![input], vec![output])
+            .with_merkle_paths(vec![proof])
+            .with_merkle_root(wrong_root);
+
+        assert!(
+            circuit.check_merkle_path_valid().is_err(),
+            "should reject proof with wrong merkle root"
+        );
     }
 }

@@ -226,23 +226,22 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         self.backend.store(SHIELDED_ADDRESS, slot, value);
     }
 
-    /// Check if a nullifier has been spent **and** is within the expiry window.
-    /// Returns false for expired nullifiers (allowing prune).
-    fn check_nullifier_spent(&mut self, nullifier: [u8; 32], current_block: u64) -> bool {
-        let flag = self
-            .sload_shielded(slot_shielded_nullifier(nullifier))
+    /// Check if a nullifier has been spent. Returns true permanently
+    /// once the spent flag is set. Never returns false for expiry.
+    fn check_nullifier_spent(&mut self, nullifier: [u8; 32]) -> bool {
+        self.sload_shielded(slot_shielded_nullifier(nullifier))
             .to_be_bytes::<32>()[31]
-            == 1;
-        if !flag {
+            == 1
+    }
+
+    /// Check if a spent nullifier is old enough to be pruned.
+    fn is_nullifier_expired(&mut self, nullifier: [u8; 32], current_block: u64) -> bool {
+        let spent_at = u256_to_u64(self.sload_shielded(slot_shielded_nullifier_height(nullifier)));
+        if spent_at == 0 {
             return false;
         }
-        let spent_at = u256_to_u64(self.sload_shielded(slot_shielded_nullifier_height(nullifier)));
-        // Legacy entries have no height recorded — treat as valid spent
-        if spent_at == 0 {
-            return true;
-        }
         let window = self.load_window_blocks();
-        current_block.saturating_sub(spent_at) < window
+        current_block.saturating_sub(spent_at) >= window
     }
 
     /// Mark a nullifier as spent, recording the block height and updating the BitSet.
@@ -639,7 +638,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             }
         }
 
-        if self.check_nullifier_spent(nullifier, current_block) {
+        if self.check_nullifier_spent(nullifier) {
             return Err(ShieldedError::NullifierAlreadySpent);
         }
 
@@ -678,7 +677,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::InvalidZkProof);
         }
 
-        if nullifiers.is_empty() && commitments.is_empty() {
+        if nullifiers.is_empty() || commitments.is_empty() {
             return Err(ShieldedError::EmptyBatch);
         }
 
@@ -716,7 +715,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         }
 
         for nf in &nullifiers {
-            if self.check_nullifier_spent(*nf, current_block) {
+            if self.check_nullifier_spent(*nf) {
                 return Err(ShieldedError::NullifierAlreadySpent);
             }
         }
@@ -759,8 +758,8 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             .to_be_bytes::<32>()
     }
 
-    pub fn is_nullifier_spent(&mut self, nullifier: [u8; 32], current_block: u64) -> bool {
-        self.check_nullifier_spent(nullifier, current_block)
+    pub fn is_nullifier_spent(&mut self, nullifier: [u8; 32], _current_block: u64) -> bool {
+        self.check_nullifier_spent(nullifier)
     }
 
     pub fn get_commitment_height(&mut self, index: u64) -> u64 {
@@ -1099,7 +1098,7 @@ impl ShieldedPrecompile {
     ) -> PrecompileResult {
         dispatch::mutate::<IProtocolShielded::pruneNullifiersCall, _, _>(
             calldata,
-            10000,
+            3000,
             storage,
             |_call, storage| {
                 let current_block = storage.block_number();
@@ -1108,6 +1107,10 @@ impl ShieldedPrecompile {
                     .check_prune_interval(current_block)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 let pruned = store.prune_expired_nullifiers(current_block);
+                let prune_gas = 3000u64 + pruned * 500;
+                storage
+                    .deduct_gas(prune_gas)
+                    .map_err(|_| PrecompileError::OutOfGas)?;
                 Ok(pruned)
             },
         )
@@ -1490,6 +1493,56 @@ mod tests {
         assert!(result.is_err(), "transfer with empty proof should fail");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("invalid ZK proof"), "expected InvalidZkProof, got: {err}");
+    }
+
+    /// Transfer with empty nullifiers must be rejected.
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_transfer_rejects_empty_nullifiers() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let nullifiers: Vec<alloy_sol_types::sol_data::FixedBytes<32>> = vec![];
+        let commitments = vec![test_commitment(3).into(), test_commitment(4).into()];
+
+        let input = IProtocolShielded::transferCall {
+            assetId: 1,
+            proof: vec![1u8; 200].into(),
+            nullifiers,
+            commitments,
+            merkleRoot: [0u8; 32].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "transfer with empty nullifiers should fail");
+    }
+
+    /// Transfer with empty commitments must be rejected.
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_transfer_rejects_empty_commitments() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let nullifiers = vec![[0xCCu8; 32].into()];
+        let commitments: Vec<alloy_sol_types::sol_data::FixedBytes<32>> = vec![];
+
+        let input = IProtocolShielded::transferCall {
+            assetId: 1,
+            proof: vec![1u8; 200].into(),
+            nullifiers,
+            commitments,
+            merkleRoot: [0u8; 32].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "transfer with empty commitments should fail");
     }
 
     /// Transfer with invalid merkleRoot must be rejected.
@@ -2036,5 +2089,75 @@ mod tests {
         let mut tree = crate::PoseidonMerkleTree::new(32);
         tree.insert(&circuit.commitment);
         assert_eq!(root, tree.root());
+    }
+
+    /// Nullifier must remain marked as spent even after the expiry window.
+    /// This prevents natural double-spend without any attacker action.
+    #[test]
+    fn test_nullifier_spent_permanent_after_expiry() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sr = StorageRef::new(&mut provider);
+        let mut store = ShieldedStorage::new(sr);
+
+        let nullifier = [0xABu8; 32];
+        let spent_at = 1_000u64;
+        store.mark_nullifier_spent(nullifier, spent_at);
+
+        // Within window — still spent
+        assert!(
+            store.is_nullifier_spent(nullifier, spent_at + NOTE_WINDOW_BLOCKS - 1),
+            "nullifier should be spent within window"
+        );
+
+        // Just past window — MUST still be spent (the critical fix)
+        assert!(
+            store.is_nullifier_spent(nullifier, spent_at + NOTE_WINDOW_BLOCKS + 1),
+            "nullifier must remain spent after window expiry"
+        );
+
+        // Far future — permanently spent
+        assert!(
+            store.is_nullifier_spent(nullifier, spent_at + NOTE_WINDOW_BLOCKS * 10),
+            "nullifier must be permanently spent"
+        );
+    }
+
+    /// Prune should only clear expired nullifiers, not unexpired ones.
+    /// is_nullifier_expired must correctly identify expired entries.
+    #[test]
+    fn test_prune_respects_expiry_and_is_expired_works() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sr = StorageRef::new(&mut provider);
+        let mut store = ShieldedStorage::new(sr);
+
+        let nf_expired = [0xCDu8; 32];
+        let nf_fresh = [0xDEu8; 32];
+        let spent_at = 100u64;
+        store.mark_nullifier_spent(nf_expired, spent_at);
+        store.mark_nullifier_spent(nf_fresh, spent_at + NOTE_WINDOW_BLOCKS + 50);
+
+        // Both are spent
+        assert!(store.check_nullifier_spent(nf_expired));
+        assert!(store.check_nullifier_spent(nf_fresh));
+
+        // Only the first is expired relative to prune_block
+        let prune_block = spent_at + NOTE_WINDOW_BLOCKS + 10;
+        assert!(
+            store.is_nullifier_expired(nf_expired, prune_block),
+            "old nullifier should be expired"
+        );
+        assert!(
+            !store.is_nullifier_expired(nf_fresh, prune_block),
+            "fresh nullifier should not be expired"
+        );
+
+        // Prune should only remove the expired one
+        let pruned = store.prune_expired_nullifiers(prune_block);
+        assert_eq!(pruned, 1, "only expired nullifier should be pruned");
+
+        // Expired one is cleared
+        assert!(!store.check_nullifier_spent(nf_expired));
+        // Fresh one remains
+        assert!(store.check_nullifier_spent(nf_fresh));
     }
 }

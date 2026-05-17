@@ -759,7 +759,8 @@ mod tests {
             vec![input],
             vec![output],
         )
-        .with_merkle_paths(vec![proof]);
+        .with_merkle_paths(vec![proof])
+        .with_merkle_root(tree.root());
 
         let zk_proof = ZkProof {
             proof_data: vec![1u8; 200],
