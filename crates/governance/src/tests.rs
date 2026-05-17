@@ -794,10 +794,10 @@ fn test_emergency_pause_and_resume() {
 
         assert!(!gov.is_paused());
 
-        gov.emergency_pause([1u8; 32], test_addr(1));
+        gov.emergency_pause([1u8; 32], test_addr(1)).unwrap();
         assert!(gov.is_paused());
 
-        gov.emergency_resume();
+        gov.emergency_resume().unwrap();
         assert!(!gov.is_paused());
     });
 }
@@ -957,4 +957,323 @@ fn test_config_quorum_calculations() {
 
     assert_eq!(config.simple_majority(3), 2); // ceil(3 * 5001 / 10000) = 2
     assert_eq!(config.emergency_pause_threshold(3), 3); // ceil(3 * 6667 / 10000) = 3
+}
+
+// ── Quorum computation ────────────────────────────────────────────
+
+#[test]
+fn test_quorum_computed_with_validators() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        // Seed 3 validators
+        storage
+            .sstore(
+                call_precompile::VALIDATOR_ADDRESS,
+                call_validator::slot_validator_count(),
+                u128_to_u256(3),
+            )
+            .unwrap();
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0, // ParameterChange (validator-based)
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        // Vote with enough power (quorum = ceil(3 * 6667 / 10000) = 3 validators)
+        // Since voting_power is counted as max(1 if validator, balance),
+        // and we have no validator status for test_addr(2), voting_power comes from balance.
+        // But quorum is validator_quorum = 3 (count), which means total_votes must be >= 3.
+        gov.vote(id, 1, test_addr(2), 3, 0).unwrap();
+
+        gov.queue(id, 1).unwrap();
+        assert_eq!(gov.read_proposal_status(id), 2); // Queued
+    });
+}
+
+#[test]
+fn test_quorum_not_met_with_validators() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        // Seed 3 validators
+        storage
+            .sstore(
+                call_precompile::VALIDATOR_ADDRESS,
+                call_validator::slot_validator_count(),
+                u128_to_u256(3),
+            )
+            .unwrap();
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        // Vote with insufficient power (quorum = 3, but only 1 vote)
+        gov.vote(id, 1, test_addr(2), 1, 0).unwrap();
+
+        let result = gov.queue(id, 1);
+        assert!(result.is_err(), "quorum not met should fail");
+        assert_eq!(gov.read_proposal_status(id), 4); // Defeated
+    });
+}
+
+// ── Pause blocks governance ───────────────────────────────────────
+
+#[test]
+fn test_vote_blocked_during_pause() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+        let voter = test_addr(2);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        seed_balance(storage, voter, 500_000);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        // Pause the chain
+        gov.emergency_pause([1u8; 32], test_addr(99)).unwrap();
+        assert!(gov.is_paused());
+
+        // Vote should be rejected
+        let result = gov.vote(id, 1, voter, 500_000, 0);
+        assert!(result.is_err(), "vote during pause should fail");
+    });
+}
+
+#[test]
+fn test_queue_blocked_during_pause() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+
+        // Pause the chain
+        gov.emergency_pause([1u8; 32], test_addr(99)).unwrap();
+
+        // Queue should be rejected
+        let result = gov.queue(id, 1);
+        assert!(result.is_err(), "queue during pause should fail");
+    });
+}
+
+#[test]
+fn test_execute_blocked_during_pause_except_emergency() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        // Normal proposal
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        // Pause the chain
+        gov.emergency_pause([1u8; 32], test_addr(99)).unwrap();
+
+        // Execute normal proposal during pause should fail
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(result.is_err(), "execute normal proposal during pause should fail");
+    });
+}
+
+// ── Cancel proposal ───────────────────────────────────────────────
+
+#[test]
+fn test_cancel_proposal_by_proposer_during_review() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 10);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 0); // Pending
+        let balance_before = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+
+        // Proposer cancels during review period
+        gov.cancel_proposal(&mut asset, id, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 4); // Defeated
+        let balance_after = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        assert_eq!(balance_after, balance_before + PROPOSAL_DEPOSIT); // Deposit refunded
+    });
+}
+
+#[test]
+fn test_cancel_proposal_rejected_after_review() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        // Proposal is immediately active (review_period=0)
+        assert_eq!(gov.read_proposal_status(id), 1); // Active
+
+        // Cancel should fail
+        let result = gov.cancel_proposal(&mut asset, id, proposer);
+        assert!(result.is_err(), "cancel after review period should fail");
+    });
+}
+
+#[test]
+fn test_cancel_proposal_rejected_for_non_proposer() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+        let rando = test_addr(2);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 10);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        let result = gov.cancel_proposal(&mut asset, id, rando);
+        assert!(result.is_err(), "cancel by non-proposer should fail");
+    });
+}
+
+// ── Emergency pause idempotent ────────────────────────────────────
+
+#[test]
+fn test_emergency_pause_rejects_double_pause() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+
+        gov.emergency_pause([1u8; 32], test_addr(1)).unwrap();
+        assert!(gov.is_paused());
+
+        let result = gov.emergency_pause([2u8; 32], test_addr(1));
+        assert!(result.is_err(), "double pause should fail");
+    });
+}
+
+#[test]
+fn test_emergency_resume_rejects_when_not_paused() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+
+        assert!(!gov.is_paused());
+
+        let result = gov.emergency_resume();
+        assert!(result.is_err(), "resume when not paused should fail");
+    });
 }
