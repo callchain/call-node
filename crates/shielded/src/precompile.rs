@@ -67,6 +67,30 @@ fn slot_shielded_spent_nullifier_count() -> U256 {
     storage_slot(&[b"spent_nf_count"])
 }
 
+fn slot_shielded_paused() -> U256 {
+    storage_slot(&[b"paused"])
+}
+
+fn slot_shielded_commitment_exists(commitment: [u8; 32]) -> U256 {
+    storage_slot(&[b"cm_exists", &commitment[..]])
+}
+
+fn slot_shielded_addr_ops(addr: Address) -> U256 {
+    storage_slot(&[b"addr_ops", addr.as_slice()])
+}
+
+fn slot_shielded_addr_ops_block(addr: Address) -> U256 {
+    storage_slot(&[b"addr_blk", addr.as_slice()])
+}
+
+fn slot_shielded_root_history_count() -> U256 {
+    storage_slot(&[b"root_hist_count"])
+}
+
+fn slot_shielded_root_history(index: u64) -> U256 {
+    storage_slot(&[b"root_hist", &index.to_be_bytes()[..]])
+}
+
 /// Number of blocks a note remains spendable after insertion (~1 week at 6s/block).
 pub const NOTE_WINDOW_BLOCKS: u64 = 100_800;
 
@@ -77,6 +101,12 @@ const NULLIFIER_BITSET_BUCKETS: u64 = 4096;
 /// At depth 32 this is ~4B, but we cap far lower to keep EVM storage growth bounded.
 /// When reached, users must spend old notes (withdraw/transfer) before new deposits.
 const MAX_COMMITMENTS: u64 = 1_000_000;
+
+/// Maximum shielded operations per address per block.
+const MAX_OPS_PER_ADDRESS_PER_BLOCK: u64 = 20;
+
+/// Maximum number of historical Merkle roots to retain for proof validity.
+const MAX_ROOT_HISTORY: u64 = 256;
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -91,6 +121,9 @@ pub enum ShieldedError {
     EmptyBatch,
     NoteExpired,
     MerkleTreeFull,
+    Paused,
+    CommitmentAlreadyExists,
+    RateLimitExceeded,
 }
 
 impl core::fmt::Display for ShieldedError {
@@ -105,6 +138,9 @@ impl core::fmt::Display for ShieldedError {
             ShieldedError::EmptyBatch => write!(f, "empty batch"),
             ShieldedError::NoteExpired => write!(f, "note expired"),
             ShieldedError::MerkleTreeFull => write!(f, "merkle tree commitment cap reached"),
+            ShieldedError::Paused => write!(f, "shielded pool is paused"),
+            ShieldedError::CommitmentAlreadyExists => write!(f, "commitment already exists"),
+            ShieldedError::RateLimitExceeded => write!(f, "per-address rate limit exceeded"),
         }
     }
 }
@@ -277,6 +313,106 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         }
     }
 
+    /// Return true if the shielded pool is paused.
+    fn is_paused(&mut self) -> bool {
+        self.sload_shielded(slot_shielded_paused()).to_be_bytes::<32>()[31] == 1
+    }
+
+    /// Revert if the pool is paused.
+    fn require_not_paused(&mut self) -> Result<(), ShieldedError> {
+        if self.is_paused() {
+            Err(ShieldedError::Paused)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Set the paused flag (0 = unpaused, 1 = paused).
+    pub fn set_paused(&mut self, paused: bool) {
+        self.sstore_shielded(
+            slot_shielded_paused(),
+            U256::from(if paused { 1u8 } else { 0 }),
+        );
+    }
+
+    /// Check whether a commitment already exists (duplicate guard).
+    fn commitment_exists(&mut self, commitment: [u8; 32]) -> bool {
+        self.sload_shielded(slot_shielded_commitment_exists(commitment))
+            .to_be_bytes::<32>()[31]
+            == 1
+    }
+
+    /// Mark a commitment as existing in the dedup set.
+    fn mark_commitment_exists(&mut self, commitment: [u8; 32]) {
+        self.sstore_shielded(
+            slot_shielded_commitment_exists(commitment),
+            U256::from(1u8),
+        );
+    }
+
+    /// Check and increment per-address operation rate limit.
+    fn check_rate_limit(&mut self, addr: Address, current_block: u64) -> Result<(), ShieldedError> {
+        let recorded_block = u256_to_u64(self.sload_shielded(slot_shielded_addr_ops_block(addr)));
+        let count = if recorded_block == current_block {
+            u256_to_u64(self.sload_shielded(slot_shielded_addr_ops(addr)))
+        } else {
+            0
+        };
+        if count >= MAX_OPS_PER_ADDRESS_PER_BLOCK {
+            return Err(ShieldedError::RateLimitExceeded);
+        }
+        self.sstore_shielded(
+            slot_shielded_addr_ops_block(addr),
+            u64_to_u256(current_block),
+        );
+        self.sstore_shielded(
+            slot_shielded_addr_ops(addr),
+            u64_to_u256(count + 1),
+        );
+        Ok(())
+    }
+
+    /// Record the current Merkle root into the history buffer before it changes.
+    fn record_root_history(&mut self) {
+        let root = self.sload_shielded(slot_shielded_merkle_root());
+        if root.is_zero() {
+            return;
+        }
+        let count = u256_to_u64(self.sload_shielded(slot_shielded_root_history_count()));
+        let idx = count % MAX_ROOT_HISTORY;
+        self.sstore_shielded(slot_shielded_root_history(idx), root);
+        self.sstore_shielded(
+            slot_shielded_root_history_count(),
+            u64_to_u256(count.saturating_add(1)),
+        );
+    }
+
+    /// Return true if the given Merkle root matches the current root or is in the history.
+    fn is_valid_root(&mut self, merkle_root: [u8; 32]) -> bool {
+        let current = self
+            .sload_shielded(slot_shielded_merkle_root())
+            .to_be_bytes::<32>();
+        if merkle_root == current {
+            return true;
+        }
+        let count = u256_to_u64(self.sload_shielded(slot_shielded_root_history_count()));
+        let limit = count.min(MAX_ROOT_HISTORY);
+        for i in 0..limit {
+            let idx = if count <= MAX_ROOT_HISTORY {
+                i
+            } else {
+                (count - MAX_ROOT_HISTORY + i) % MAX_ROOT_HISTORY
+            };
+            let hist = self
+                .sload_shielded(slot_shielded_root_history(idx))
+                .to_be_bytes::<32>();
+            if hist == merkle_root {
+                return true;
+            }
+        }
+        false
+    }
+
     fn insert_commitment(&mut self, commitment: [u8; 32], current_block: u64) -> [u8; 32] {
         let count = u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()));
         let mut idx = count as usize;
@@ -304,6 +440,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             idx >>= 1;
         }
 
+        self.record_root_history();
         self.sstore_shielded(slot_shielded_merkle_root(), U256::from_be_slice(&current));
         // Record insertion height for expiry checks
         self.sstore_shielded(
@@ -323,6 +460,9 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         caller: Address,
         current_block: u64,
     ) -> Result<(), ShieldedError> {
+        self.require_not_paused()?;
+        self.check_rate_limit(caller, current_block)?;
+
         if proof_data.is_empty() || proof_data.len() > 20_000 {
             return Err(ShieldedError::InvalidZkProof);
         }
@@ -344,6 +484,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             }
         }
 
+        if self.commitment_exists(commitment) {
+            return Err(ShieldedError::CommitmentAlreadyExists);
+        }
+
         let sender_bal = self
             .load_bal(asset_id, caller)
             .checked_sub(amount)
@@ -356,6 +500,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         }
 
         self.insert_commitment(commitment, current_block);
+        self.mark_commitment_exists(commitment);
 
         let count = u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()));
         self.sstore_shielded(
@@ -376,12 +521,13 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         merkle_root: [u8; 32],
         proof_data: Vec<u8>,
         key_version: u32,
+        caller: Address,
         current_block: u64,
     ) -> Result<(), ShieldedError> {
-        let stored_root = self
-            .sload_shielded(slot_shielded_merkle_root())
-            .to_be_bytes::<32>();
-        if merkle_root != stored_root {
+        self.require_not_paused()?;
+        self.check_rate_limit(caller, current_block)?;
+
+        if !self.is_valid_root(merkle_root) {
             return Err(ShieldedError::MerkleRootMismatch);
         }
 
@@ -434,8 +580,12 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         nullifiers: Vec<[u8; 32]>,
         commitments: Vec<[u8; 32]>,
         key_version: u32,
+        caller: Address,
         current_block: u64,
     ) -> Result<(), ShieldedError> {
+        self.require_not_paused()?;
+        self.check_rate_limit(caller, current_block)?;
+
         if nullifiers.is_empty() && commitments.is_empty() {
             return Err(ShieldedError::EmptyBatch);
         }
@@ -479,11 +629,15 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         }
 
         for cm in &commitments {
+            if self.commitment_exists(*cm) {
+                return Err(ShieldedError::CommitmentAlreadyExists);
+            }
             let count = u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()));
             if count >= MAX_COMMITMENTS {
                 return Err(ShieldedError::MerkleTreeFull);
             }
             self.insert_commitment(*cm, current_block);
+            self.mark_commitment_exists(*cm);
             self.sstore_shielded(slot_shielded_commitment(count), U256::from_be_slice(cm));
             self.sstore_shielded(slot_shielded_commitment_count(), u64_to_u256(count + 1));
         }
@@ -515,6 +669,15 @@ impl<B: StorageBackend> ShieldedStorage<B> {
     pub fn get_commitment_height(&mut self, index: u64) -> u64 {
         u256_to_u64(self.sload_shielded(slot_shielded_commitment_height(index)))
     }
+
+    pub fn get_root_history_count(&mut self) -> u64 {
+        u256_to_u64(self.sload_shielded(slot_shielded_root_history_count()))
+    }
+
+    pub fn get_root_history(&mut self, index: u64) -> [u8; 32] {
+        self.sload_shielded(slot_shielded_root_history(index))
+            .to_be_bytes::<32>()
+    }
 }
 
 // ── ShieldedPrecompile ────────────────────────────────────────────────
@@ -534,6 +697,10 @@ sol! {
         function getCommitmentHeight(uint64 index) external view returns (uint64);
         function isNullifierSpent(bytes32 nullifier) external view returns (bool);
         function pruneNullifiers() external returns (uint64);
+        function setPaused(bool paused) external;
+        function isPaused() external view returns (bool);
+        function getRootHistoryCount() external view returns (uint64);
+        function getRootHistory(uint64 index) external view returns (bytes32);
     }
 }
 
@@ -600,7 +767,7 @@ impl ShieldedPrecompile {
     fn withdraw(
         &self,
         calldata: &[u8],
-        _msg_sender: Address,
+        msg_sender: Address,
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
@@ -626,6 +793,7 @@ impl ShieldedPrecompile {
                 call.merkleRoot.into(),
                 call.proofData.to_vec(),
                 call.keyVersion,
+                msg_sender,
                 current_block,
             )
             .map_err(|e| PrecompileError::Other(e.to_string().into()));
@@ -683,7 +851,7 @@ impl ShieldedPrecompile {
         let commitments: Vec<[u8; 32]> =
             call.commitments.iter().map(|c| (*c).into()).collect();
         let result = store
-            .transfer(call.assetId, call.proof.to_vec(), nullifiers, commitments, call.keyVersion, current_block)
+            .transfer(call.assetId, call.proof.to_vec(), nullifiers, commitments, call.keyVersion, msg_sender, current_block)
             .map_err(|e| PrecompileError::Other(e.to_string().into()));
 
         match result {
@@ -814,6 +982,76 @@ impl ShieldedPrecompile {
             },
         )
     }
+
+    fn set_paused(
+        &self,
+        calldata: &[u8],
+        _msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate::<IProtocolShielded::setPausedCall, _, _>(
+            calldata,
+            5000,
+            storage,
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
+                store.set_paused(call.paused);
+                Ok(())
+            },
+        )
+    }
+
+    fn is_paused(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolShielded::isPausedCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |_call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
+                Ok(store.is_paused())
+            },
+        )
+    }
+
+    fn get_root_history_count(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolShielded::getRootHistoryCountCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |_call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
+                Ok(store.get_root_history_count())
+            },
+        )
+    }
+
+    fn get_root_history(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolShielded::getRootHistoryCall, _, _>(
+            calldata,
+            2000,
+            storage,
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
+                Ok(store.get_root_history(call.index))
+            },
+        )
+    }
 }
 
 impl call_precompile::StatefulPrecompile for ShieldedPrecompile {
@@ -857,6 +1095,18 @@ impl call_precompile::StatefulPrecompile for ShieldedPrecompile {
             }
             IProtocolShielded::pruneNullifiersCall::SELECTOR => {
                 self.prune_nullifiers(calldata, storage, sr)
+            }
+            IProtocolShielded::setPausedCall::SELECTOR => {
+                self.set_paused(calldata, msg_sender, storage, sr)
+            }
+            IProtocolShielded::isPausedCall::SELECTOR => {
+                self.is_paused(calldata, storage, sr)
+            }
+            IProtocolShielded::getRootHistoryCountCall::SELECTOR => {
+                self.get_root_history_count(calldata, storage, sr)
+            }
+            IProtocolShielded::getRootHistoryCall::SELECTOR => {
+                self.get_root_history(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
@@ -1124,6 +1374,193 @@ mod tests {
         let mut out = [0u8; 32];
         out[0] = n;
         out
+    }
+
+    #[test]
+    fn test_shielded_precompile_pause() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        // Pause the pool
+        let input = IProtocolShielded::setPausedCall { paused: true }.abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "setPaused failed: {:?}", result.err());
+
+        // Verify paused
+        let input = IProtocolShielded::isPausedCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(result.bytes[31], 1, "expected paused");
+
+        // Deposit should fail when paused
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1_000,
+            commitment: test_commitment(1).into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "deposit should fail when paused");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("paused"), "expected Paused error, got: {err}");
+    }
+
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_duplicate_commitment_rejected() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+
+        let commitment = test_commitment(1);
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1_000,
+            commitment: commitment.into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        precompile.call(&input, sender, &mut provider).unwrap();
+
+        // Second deposit with same commitment should fail
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 2_000,
+            commitment: commitment.into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "duplicate commitment should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already exists"),
+            "expected CommitmentAlreadyExists, got: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_rate_limit() {
+        let mut provider = HashMapStorageProvider::new(50_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(1_000_000));
+
+        // Deposit MAX_OPS_PER_ADDRESS_PER_BLOCK times
+        for i in 0..MAX_OPS_PER_ADDRESS_PER_BLOCK {
+            let mut commitment = [0u8; 32];
+            commitment[0] = i as u8;
+            let input = IProtocolShielded::depositCall {
+                assetId: 1,
+                amount: 1,
+                commitment: commitment.into(),
+                proofData: vec![1u8; 200].into(),
+                keyVersion: 0,
+            }
+            .abi_encode();
+            let result = precompile.call(&input, sender, &mut provider);
+            assert!(result.is_ok(), "deposit {i} failed: {:?}", result.err());
+        }
+
+        // Next deposit should exceed rate limit
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1,
+            commitment: test_commitment(255).into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "rate limit should be exceeded");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rate limit"),
+            "expected RateLimitExceeded, got: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_root_history() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+
+        // First deposit
+        let commitment1 = test_commitment(1);
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1_000,
+            commitment: commitment1.into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        precompile.call(&input, sender, &mut provider).unwrap();
+
+        // Get root after first deposit
+        let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let root1: [u8; 32] = result.bytes[..32].try_into().unwrap();
+
+        // Zero root is not recorded, so count is 0 after first deposit
+        let input = IProtocolShielded::getRootHistoryCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let count = u64::from_be_bytes({
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&result.bytes[24..32]);
+            buf
+        });
+        assert_eq!(count, 0, "zero root not recorded");
+
+        // Second deposit
+        let commitment2 = test_commitment(2);
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 2_000,
+            commitment: commitment2.into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        precompile.call(&input, sender, &mut provider).unwrap();
+
+        // Verify root changed
+        let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let root2: [u8; 32] = result.bytes[..32].try_into().unwrap();
+        assert_ne!(root1, root2, "root should change after second deposit");
+
+        // Now root1 should be in history
+        let input = IProtocolShielded::getRootHistoryCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let count = u64::from_be_bytes({
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&result.bytes[24..32]);
+            buf
+        });
+        assert_eq!(count, 1, "root1 should be recorded");
+
+        let input = IProtocolShielded::getRootHistoryCall { index: 0 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        let hist_root1: [u8; 32] = result.bytes[..32].try_into().unwrap();
+        assert_eq!(hist_root1, root1, "root1 should be in history");
     }
 
     /// Non-halo2-prover: deposit with dummy proof updates merkle root.
