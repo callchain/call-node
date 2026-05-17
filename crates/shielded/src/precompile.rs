@@ -318,9 +318,32 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         asset_id: u64,
         amount: u128,
         commitment: [u8; 32],
+        proof_data: Vec<u8>,
+        key_version: u32,
         caller: Address,
         current_block: u64,
     ) -> Result<(), ShieldedError> {
+        if proof_data.is_empty() || proof_data.len() > 20_000 {
+            return Err(ShieldedError::InvalidZkProof);
+        }
+
+        #[cfg(feature = "halo2-prover")]
+        {
+            let proof = crate::ZkProof {
+                proof_data: proof_data.clone(),
+                nullifiers: vec![],
+                commitments: vec![crate::NoteCommitment::new(Hash::from_slice(&commitment))],
+                asset_id,
+                key_version,
+            };
+
+            match crate::verify_shielded_proof(&proof, "deposit", None, None, None) {
+                Ok(true) => {}
+                Ok(false) => return Err(ShieldedError::InvalidZkProof),
+                Err(e) => return Err(ShieldedError::ZkProofError(e)),
+            }
+        }
+
         let sender_bal = self
             .load_bal(asset_id, caller)
             .checked_sub(amount)
@@ -498,7 +521,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
 
 sol! {
     interface IProtocolShielded {
-        function deposit(uint64 assetId, uint128 amount, bytes32 commitment) external;
+        function deposit(uint64 assetId, uint128 amount, bytes32 commitment, bytes proofData, uint32 keyVersion) external;
         function withdraw(uint64 assetId, address target, uint128 amount, bytes32 nullifier, bytes32 merkleRoot, bytes proofData, uint32 keyVersion) external;
         function transfer(uint64 assetId, bytes proof, bytes32[] nullifiers, bytes32[] commitments, uint32 keyVersion) external;
         function getMerkleRoot() external view returns (bytes32);
@@ -521,26 +544,41 @@ impl ShieldedPrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
-        dispatch::mutate_void::<IProtocolShielded::depositCall, _>(
-            calldata,
-            50000,
-            storage,
-            |call, storage| {
-                check_compliance(msg_sender, storage)?;
-                let current_block = storage.block_number();
-                let mut store = ShieldedStorage::new(sr);
-                store
-                    .deposit(
-                        call.assetId,
-                        call.amount,
-                        call.commitment.into(),
-                        msg_sender,
-                        current_block,
-                    )
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                Ok(())
-            },
-        )
+        let call = dispatch::decode_call::<IProtocolShielded::depositCall>(calldata)?;
+
+        // Dynamic gas: base 300_000 + 10 per byte of proof data
+        let proof_len = call.proofData.len() as u64;
+        let dynamic_gas = 300_000u64
+            .saturating_add(proof_len.saturating_mul(10));
+        storage.deduct_gas(dynamic_gas)?;
+
+        check_compliance(msg_sender, storage)?;
+        let current_block = storage.block_number();
+        let cp = storage.checkpoint();
+        let mut store = ShieldedStorage::new(sr);
+        let result = store
+            .deposit(
+                call.assetId,
+                call.amount,
+                call.commitment.into(),
+                call.proofData.to_vec(),
+                call.keyVersion,
+                msg_sender,
+                current_block,
+            )
+            .map_err(|e| PrecompileError::Other(e.to_string().into()));
+
+        match result {
+            Ok(()) => {
+                storage.checkpoint_commit(cp);
+                let output = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
+                Ok(call_precompile::storage::fill_precompile_output(output, storage))
+            }
+            Err(e) => {
+                storage.checkpoint_revert(cp);
+                Err(e)
+            }
+        }
     }
 
     fn withdraw(
@@ -552,9 +590,9 @@ impl ShieldedPrecompile {
     ) -> PrecompileResult {
         let call = dispatch::decode_call::<IProtocolShielded::withdrawCall>(calldata)?;
 
-        // Dynamic gas: base 30_000 + 10 per byte of proof data
+        // Dynamic gas: base 200_000 + 10 per byte of proof data
         let proof_len = call.proofData.len() as u64;
-        let dynamic_gas = 30_000u64
+        let dynamic_gas = 200_000u64
             .saturating_add(proof_len.saturating_mul(10));
         storage.deduct_gas(dynamic_gas)?;
 
@@ -592,18 +630,21 @@ impl ShieldedPrecompile {
     fn transfer(
         &self,
         calldata: &[u8],
-        _msg_sender: Address,
+        msg_sender: Address,
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
         let call = dispatch::decode_call::<IProtocolShielded::transferCall>(calldata)?;
 
-        // Dynamic gas: base 30_000 + 10 per byte of proof data
+        // Dynamic gas: base 250_000 + 20_000 per commitment + 10 per byte of proof data
         let proof_len = call.proof.len() as u64;
-        let dynamic_gas = 30_000u64
+        let commitment_count = call.commitments.len() as u64;
+        let dynamic_gas = 250_000u64
+            .saturating_add(commitment_count.saturating_mul(20_000))
             .saturating_add(proof_len.saturating_mul(10));
         storage.deduct_gas(dynamic_gas)?;
 
+        check_compliance(msg_sender, storage)?;
         let current_block = storage.block_number();
         let cp = storage.checkpoint();
         let mut store = ShieldedStorage::new(sr);
@@ -797,6 +838,34 @@ mod tests {
         );
     }
 
+    /// Deposit with empty proof must be rejected regardless of feature flags.
+    #[test]
+    fn test_shielded_precompile_deposit_rejects_empty_proof() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+
+        let mut precompile = ShieldedPrecompile;
+
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1_000,
+            commitment: test_commitment(1).into(),
+            proofData: vec![].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "deposit with empty proof should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid ZK proof"), "expected InvalidZkProof, got: {err}");
+    }
+
+    /// Non-halo2-prover: deposit with dummy proof succeeds.
+    #[cfg(not(feature = "halo2-prover"))]
     #[test]
     fn test_shielded_precompile_deposit_and_get() {
         let mut provider = HashMapStorageProvider::new(5_000_000);
@@ -811,6 +880,8 @@ mod tests {
             assetId: 1,
             amount: 1_000,
             commitment: test_commitment(1).into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
         }
         .abi_encode();
 
@@ -1014,6 +1085,8 @@ mod tests {
         out
     }
 
+    /// Non-halo2-prover: deposit with dummy proof updates merkle root.
+    #[cfg(not(feature = "halo2-prover"))]
     #[test]
     fn test_shielded_precompile_deposit_updates_merkle_root() {
         let mut provider = HashMapStorageProvider::new(5_000_000);
@@ -1029,6 +1102,8 @@ mod tests {
             assetId: 1,
             amount: 1_000,
             commitment: commitment.into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
         }
         .abi_encode();
         precompile.call(&input, sender, &mut provider).unwrap();
@@ -1055,6 +1130,8 @@ mod tests {
             assetId: 1,
             amount: 2_000,
             commitment: commitment2.into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
         }
         .abi_encode();
         precompile.call(&input, sender, &mut provider).unwrap();
@@ -1125,6 +1202,49 @@ mod tests {
         for cm in &circuit.commitments {
             tree.insert(cm);
         }
+        assert_eq!(root, tree.root());
+    }
+
+    /// Halo2-prover: deposit with real proof updates merkle root.
+    #[cfg(feature = "halo2-prover")]
+    #[test]
+    fn test_shielded_precompile_deposit_with_real_proof() {
+        use crate::prover::{setup_deposit_circuit, Halo2Prover};
+
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+
+        let circuit = setup_deposit_circuit();
+        let prover = Halo2Prover::setup();
+        let proof_data = prover.prove_deposit(&circuit).expect("prove failed");
+
+        let mut precompile = ShieldedPrecompile;
+
+        let input = IProtocolShielded::depositCall {
+            assetId: circuit.asset_id,
+            amount: circuit.witness.as_ref().unwrap().value,
+            commitment: circuit.commitment.into(),
+            proofData: proof_data.into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        precompile.call(&input, sender, &mut provider).unwrap();
+
+        let input = IProtocolShielded::getMerkleRootCall {}.abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let root: [u8; 32] = result.bytes[..32].try_into().unwrap();
+        assert_ne!(
+            root, [0u8; 32],
+            "merkle root should not be zero after deposit"
+        );
+
+        let mut tree = crate::PoseidonMerkleTree::new(32);
+        tree.insert(&circuit.commitment);
         assert_eq!(root, tree.root());
     }
 }
