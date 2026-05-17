@@ -106,6 +106,31 @@ fn slot_gov_proposal_data_chunk(proposal_id: u64, chunk_idx: u64) -> U256 {
     ])
 }
 
+// Emergency multi-sig slots
+fn slot_emergency_pause_epoch() -> U256 {
+    storage_slot(&[b"emergency_pause_epoch"])
+}
+
+fn slot_emergency_pause_sig_epoch(addr: Address) -> U256 {
+    storage_slot(&[b"emergency_pause_sig", addr.as_slice()])
+}
+
+fn slot_emergency_pause_sig_count() -> U256 {
+    storage_slot(&[b"emergency_pause_sig_count"])
+}
+
+fn slot_emergency_resume_epoch() -> U256 {
+    storage_slot(&[b"emergency_resume_epoch"])
+}
+
+fn slot_emergency_resume_sig_epoch(addr: Address) -> U256 {
+    storage_slot(&[b"emergency_resume_sig", addr.as_slice()])
+}
+
+fn slot_emergency_resume_sig_count() -> U256 {
+    storage_slot(&[b"emergency_resume_sig_count"])
+}
+
 // ── GovernanceStorage ─────────────────────────────────────────────────
 
 /// Business logic for governance operations backed by any StorageBackend.
@@ -161,6 +186,9 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         ))
     }
 
+    /// Maximum execution_data size (1 MB) to prevent OOM from malicious data_len.
+    const MAX_EXECUTION_DATA_LEN: usize = 1024 * 1024;
+
     /// Read back the execution_data stored in chunked slots.
     pub fn read_proposal_execution_data(&mut self, proposal_id: u64) -> Vec<u8> {
         let data_len = u256_to_u64(
@@ -168,6 +196,9 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 .load(GOVERNANCE_ADDRESS, slot_gov_proposal_data_len(proposal_id)),
         ) as usize;
         if data_len == 0 {
+            return Vec::new();
+        }
+        if data_len > Self::MAX_EXECUTION_DATA_LEN {
             return Vec::new();
         }
         let mut result = Vec::with_capacity(data_len);
@@ -198,6 +229,16 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         Ok(())
     }
 
+    /// Validate that a proposal ID is within the valid range.
+    pub fn require_valid_proposal_id(&mut self, proposal_id: u64) -> Result<(), PrecompileError> {
+        if proposal_id == 0 || proposal_id > self.read_proposal_count() {
+            return Err(PrecompileError::Other(
+                "governance: invalid proposal id".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn read_vote_tally(&mut self, proposal_id: u64, suffix: &[u8]) -> u128 {
         u256_to_u128(
             self.backend
@@ -222,35 +263,48 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         self.backend
             .load(VALIDATOR_ADDRESS, call_validator::slot_validator_count())
             .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0)
+            .unwrap_or(u64::MAX)
     }
 
-    /// Load governance config from storage, falling back to defaults for unset values.
-    fn governance_config(&mut self) -> crate::config::GovernanceConfig {
+    /// Write default governance config values to storage if not yet initialized.
+    fn ensure_config_initialized(&mut self) {
+        let initialized = self
+            .backend
+            .load(GOVERNANCE_ADDRESS, storage_slot(&[b"gov_config_initialized"]));
+        if initialized != U256::ZERO {
+            return;
+        }
         use crate::config::GovernanceConfig;
-        let mut config = GovernanceConfig::default();
-        let vqb = self.read_config_u32(b"validator_quorum_bps");
-        if vqb > 0 {
-            config.validator_quorum_bps = vqb;
+        let cfg = GovernanceConfig::default();
+        self.write_config_u32(b"validator_quorum_bps", cfg.validator_quorum_bps);
+        self.write_config_u32(b"supply_quorum_bps", cfg.supply_quorum_bps);
+        self.write_config_u32(b"treasury_quorum_bps", cfg.treasury_quorum_bps);
+        self.write_config_u32(b"simple_majority_bps", cfg.simple_majority_bps);
+        self.write_config_u32(b"emergency_pause_bps", cfg.emergency_pause_bps);
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            storage_slot(&[b"gov_config_initialized"]),
+            U256::from(1u8),
+        );
+    }
+
+    /// Load governance config from storage. Ensures defaults are written on first
+    /// access so callers never read uninitialized zeros.
+    fn governance_config(&mut self) -> crate::config::GovernanceConfig {
+        self.ensure_config_initialized();
+        crate::config::GovernanceConfig {
+            validator_quorum_bps: self.read_config_u32(b"validator_quorum_bps"),
+            supply_quorum_bps: self.read_config_u32(b"supply_quorum_bps"),
+            treasury_quorum_bps: self.read_config_u32(b"treasury_quorum_bps"),
+            simple_majority_bps: self.read_config_u32(b"simple_majority_bps"),
+            emergency_pause_bps: self.read_config_u32(b"emergency_pause_bps"),
+            review_period_blocks: self.read_config_u64(b"review_period"),
+            voting_period_blocks: self.read_config_u64(b"voting_period"),
+            timelock_period_blocks: self.read_config_u64(b"timelock"),
+            execution_timeout_blocks: self.read_config_u64(b"execution_timeout"),
+            proposal_deposit: self.read_config_u128(b"proposal_deposit"),
+            asset_registration_fee: self.read_config_u128(b"asset_registration_fee"),
         }
-        let sqb = self.read_config_u32(b"supply_quorum_bps");
-        if sqb > 0 {
-            config.supply_quorum_bps = sqb;
-        }
-        let tqb = self.read_config_u32(b"treasury_quorum_bps");
-        if tqb > 0 {
-            config.treasury_quorum_bps = tqb;
-        }
-        let smb = self.read_config_u32(b"simple_majority_bps");
-        if smb > 0 {
-            config.simple_majority_bps = smb;
-        }
-        let epb = self.read_config_u32(b"emergency_pause_bps");
-        if epb > 0 {
-            config.emergency_pause_bps = epb;
-        }
-        config
     }
 
     /// Compute and store quorum_required for a proposal based on its type.
@@ -357,6 +411,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         proposer: Address,
         current_block: u64,
     ) -> Result<u64, PrecompileError> {
+        self.ensure_config_initialized();
+
         // Rate limiting
         let cooldown = self.read_config_u64(b"proposal_cooldown");
         let cooldown = if cooldown == 0 {
@@ -531,6 +587,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             ));
         }
 
+        self.require_valid_proposal_id(proposal_id)?;
+
         let status = self.read_proposal_status(proposal_id);
         let start_block = self.read_proposal_u64(proposal_id, b"start_block");
         let end_block = self.read_proposal_u64(proposal_id, b"end_block");
@@ -606,6 +664,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             ));
         }
 
+        self.require_valid_proposal_id(proposal_id)?;
+
         // Auto-advance Pending -> Active if review period passed
         let status = self.read_proposal_status(proposal_id);
         let start_block = self.read_proposal_u64(proposal_id, b"start_block");
@@ -660,7 +720,24 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             ));
         }
 
-        if votes_for <= votes_against {
+        // Simple majority check (configurable)
+        let simple_majority_bps = self.read_config_u32(b"simple_majority_bps");
+        let simple_majority_bps = if simple_majority_bps == 0 {
+            crate::config::GovernanceConfig::default().simple_majority_bps
+        } else {
+            simple_majority_bps
+        };
+        let participation = votes_for + votes_against;
+        let has_majority = if participation == 0 {
+            false
+        } else {
+            // votes_for / participation > simple_majority_bps / 10000
+            // => votes_for * 10000 > participation * simple_majority_bps
+            let lhs = votes_for.saturating_mul(10_000);
+            let rhs = participation.saturating_mul(simple_majority_bps as u128);
+            lhs > rhs
+        };
+        if !has_majority {
             // Defeat: confiscate deposit
             let proposer = u256_to_address(self.backend.load(
                 GOVERNANCE_ADDRESS,
@@ -723,6 +800,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         current_block: u64,
         executor: Address,
     ) -> Result<(), PrecompileError> {
+        self.require_valid_proposal_id(proposal_id)?;
+
         // Block execution while chain is paused (except EmergencyPause itself)
         let proposal_type = self.read_proposal_u8(proposal_id, b"proposal_type");
         if self.is_paused() && proposal_type != 5 {
@@ -775,226 +854,281 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         // Apply side effects based on proposal type
         let proposal_type = self.read_proposal_u8(proposal_id, b"proposal_type");
         let execution_data = self.read_proposal_execution_data(proposal_id);
-        match proposal_type {
+        let exec_result = match proposal_type {
             0 => {
                 // ParameterChange: execution_data = ABI-encoded (string configKey, uint128 newValue)
-                // Layout: word0 = string offset, word1 = uint128 value,
-                //         at offset: string length, then string data (padded)
-                if execution_data.len() >= 128 {
-                    let string_offset =
-                        u256_to_u64(U256::from_be_slice(&execution_data[0..32])) as usize;
-                    if execution_data.len() >= string_offset + 32 {
-                        let string_len = u256_to_u64(
-                            U256::from_be_slice(&execution_data[string_offset..string_offset + 32]),
-                        ) as usize;
-                        if execution_data.len() >= string_offset + 32 + string_len {
-                            let key_bytes =
-                                &execution_data[string_offset + 32..string_offset + 32 + string_len];
-                            if let Ok(key) = std::str::from_utf8(key_bytes) {
-                                if ALLOWED_GOVERNANCE_PARAMS.contains(&key) {
-                                    let mut value_buf = [0u8; 16];
-                                    value_buf.copy_from_slice(&execution_data[48..64]);
-                                    let new_value = u128::from_be_bytes(value_buf);
-                                    self.write_config_u128(key.as_bytes(), new_value);
-                                }
-                            }
-                        }
-                    }
+                if execution_data.len() < 128 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ParameterChange execution data".into(),
+                    ));
                 }
+                let string_offset =
+                    u256_to_u64(U256::from_be_slice(&execution_data[0..32])) as usize;
+                let string_end = string_offset.saturating_add(32);
+                if execution_data.len() < string_end {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ParameterChange execution data".into(),
+                    ));
+                }
+                let string_len = u256_to_u64(
+                    U256::from_be_slice(&execution_data[string_offset..string_end]),
+                ) as usize;
+                let data_end = string_offset.saturating_add(32).saturating_add(string_len);
+                if execution_data.len() < data_end {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ParameterChange execution data".into(),
+                    ));
+                }
+                let key_bytes =
+                    &execution_data[string_offset + 32..string_offset + 32 + string_len];
+                let key = std::str::from_utf8(key_bytes).map_err(|_| {
+                    PrecompileError::Other(
+                        "governance: invalid UTF-8 in parameter key".into(),
+                    )
+                })?;
+                if !ALLOWED_GOVERNANCE_PARAMS.contains(&key) {
+                    return Err(PrecompileError::Other(
+                        format!("governance: disallowed parameter key: {}", key).into(),
+                    ));
+                }
+                let mut value_buf = [0u8; 16];
+                value_buf.copy_from_slice(&execution_data[48..64]);
+                let new_value = u128::from_be_bytes(value_buf);
+                self.write_config_u128(key.as_bytes(), new_value);
+                Ok(())
             }
             2 => {
                 // TreasurySpend: execution_data = ABI-encoded (address recipient, uint128 amount, uint64 assetId)
-                // Word0: address (last 20 bytes), Word1: uint128 amount (last 16 bytes),
-                // Word2: uint64 assetId (last 8 bytes)
-                if execution_data.len() >= 48 {
-                    let mut addr_buf = [0u8; 20];
-                    addr_buf.copy_from_slice(&execution_data[12..32]);
-                    let recipient = Address::from_slice(&addr_buf);
-                    let mut amount_buf = [0u8; 16];
-                    amount_buf.copy_from_slice(&execution_data[48..64]);
-                    let amount = u128::from_be_bytes(amount_buf);
-                    let asset_id = if execution_data.len() >= 96 {
-                        let mut asset_buf = [0u8; 8];
-                        asset_buf.copy_from_slice(&execution_data[88..96]);
-                        u64::from_be_bytes(asset_buf)
-                    } else {
-                        CALL_ASSET_ID
-                    };
-                    // Transfer from treasury instead of minting
-                    asset_store
-                        .deduct_balance(asset_id, TREASURY_ADDRESS, amount)
-                        .map_err(|_| {
-                            PrecompileError::Other(
-                                "governance: treasury insufficient balance".into(),
-                            )
-                        })?;
-                    let _ = asset_store.add_balance(asset_id, recipient, amount);
+                // Minimum 64 bytes for address + amount; asset_id is optional and defaults to CALL_ASSET_ID.
+                if execution_data.len() < 64 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed TreasurySpend execution data".into(),
+                    ));
                 }
+                let mut addr_buf = [0u8; 20];
+                addr_buf.copy_from_slice(&execution_data[12..32]);
+                let recipient = Address::from_slice(&addr_buf);
+                let mut amount_buf = [0u8; 16];
+                amount_buf.copy_from_slice(&execution_data[48..64]);
+                let amount = u128::from_be_bytes(amount_buf);
+                let asset_id = if execution_data.len() >= 96 {
+                    let mut asset_buf = [0u8; 8];
+                    asset_buf.copy_from_slice(&execution_data[88..96]);
+                    u64::from_be_bytes(asset_buf)
+                } else {
+                    CALL_ASSET_ID
+                };
+                asset_store
+                    .deduct_balance(asset_id, TREASURY_ADDRESS, amount)
+                    .map_err(|_| {
+                        PrecompileError::Other(
+                            "governance: treasury insufficient balance".into(),
+                        )
+                    })?;
+                asset_store
+                    .add_balance(asset_id, recipient, amount)
+                    .map_err(|_| {
+                        PrecompileError::Other(
+                            "governance: treasury spend credit failed".into(),
+                        )
+                    })?;
+                Ok(())
             }
             5 => {
                 // EmergencyPause: set paused flag
                 self.backend
                     .store(GOVERNANCE_ADDRESS, slot_gov_paused(), U256::from(1u8));
+                Ok(())
             }
             6 => {
                 // FeeCurrencyAdd: execution_data = ABI-encoded (uint64 assetId)
-                if execution_data.len() >= 32 {
-                    let mut asset_buf = [0u8; 8];
-                    asset_buf.copy_from_slice(&execution_data[24..32]);
-                    let asset_id = u64::from_be_bytes(asset_buf);
-                    // Mark asset as accepted fee currency
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
-                        U256::from(1u8),
-                    );
+                if execution_data.len() < 32 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed FeeCurrencyAdd execution data".into(),
+                    ));
                 }
+                let mut asset_buf = [0u8; 8];
+                asset_buf.copy_from_slice(&execution_data[24..32]);
+                let asset_id = u64::from_be_bytes(asset_buf);
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
+                    U256::from(1u8),
+                );
+                Ok(())
             }
             7 => {
                 // FeeCurrencyRemove: execution_data = ABI-encoded (uint64 assetId)
-                if execution_data.len() >= 32 {
-                    let mut asset_buf = [0u8; 8];
-                    asset_buf.copy_from_slice(&execution_data[24..32]);
-                    let asset_id = u64::from_be_bytes(asset_buf);
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
-                        U256::ZERO,
-                    );
+                if execution_data.len() < 32 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed FeeCurrencyRemove execution data".into(),
+                    ));
                 }
+                let mut asset_buf = [0u8; 8];
+                asset_buf.copy_from_slice(&execution_data[24..32]);
+                let asset_id = u64::from_be_bytes(asset_buf);
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"fee_currency", &asset_id.to_be_bytes()[..]]),
+                    U256::ZERO,
+                );
+                Ok(())
             }
             9 => {
                 // ValidatorKeyRotation: execution_data = ABI-encoded (uint64 validatorId, bytes32 newPubkey)
-                if execution_data.len() >= 64 {
-                    let mut id_buf = [0u8; 8];
-                    id_buf.copy_from_slice(&execution_data[24..32]);
-                    let _validator_id = u64::from_be_bytes(id_buf);
-                    // Store rotation request signal
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"key_rotation", &id_buf]),
-                        U256::from(1u8),
-                    );
+                if execution_data.len() < 64 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ValidatorKeyRotation execution data".into(),
+                    ));
                 }
+                let mut id_buf = [0u8; 8];
+                id_buf.copy_from_slice(&execution_data[24..32]);
+                let _validator_id = u64::from_be_bytes(id_buf);
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"key_rotation", &id_buf]),
+                    U256::from(1u8),
+                );
+                Ok(())
             }
             1 => {
                 // ProtocolUpgrade: execution_data = ABI-encoded (bytes32 newVersionHash)
-                if execution_data.len() >= 32 {
-                    let mut version_buf = [0u8; 32];
-                    version_buf.copy_from_slice(&execution_data[0..32]);
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"protocol_upgrade"]),
-                        U256::from_be_slice(&version_buf),
-                    );
+                if execution_data.len() < 32 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ProtocolUpgrade execution data".into(),
+                    ));
                 }
+                let mut version_buf = [0u8; 32];
+                version_buf.copy_from_slice(&execution_data[0..32]);
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"protocol_upgrade"]),
+                    U256::from_be_slice(&version_buf),
+                );
+                Ok(())
             }
             3 => {
                 // ValidatorSlash: execution_data = ABI-encoded (address validator, uint128 amount)
-                if execution_data.len() >= 64 {
-                    let mut addr_buf = [0u8; 20];
-                    addr_buf.copy_from_slice(&execution_data[12..32]);
-                    let validator = Address::from_slice(&addr_buf);
-                    let mut amount_buf = [0u8; 16];
-                    amount_buf.copy_from_slice(&execution_data[48..64]);
-                    let amount = u128::from_be_bytes(amount_buf);
-                    // Read current stake and slash
-                    let stake_slot = storage_slot(&[validator.as_slice(), b"stake"]);
-                    let current_stake =
-                        u256_to_u128(self.backend.load(VALIDATOR_ADDRESS, stake_slot));
-                    let new_stake = current_stake.saturating_sub(amount);
-                    self.backend
-                        .store(VALIDATOR_ADDRESS, stake_slot, u128_to_u256(new_stake));
-                    if new_stake == 0 {
-                        let status_slot = storage_slot(&[validator.as_slice(), b"status"]);
-                        self.backend
-                            .store(VALIDATOR_ADDRESS, status_slot, U256::ZERO);
-                    }
+                if execution_data.len() < 64 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ValidatorSlash execution data".into(),
+                    ));
                 }
+                let mut addr_buf = [0u8; 20];
+                addr_buf.copy_from_slice(&execution_data[12..32]);
+                let validator = Address::from_slice(&addr_buf);
+                let mut amount_buf = [0u8; 16];
+                amount_buf.copy_from_slice(&execution_data[48..64]);
+                let amount = u128::from_be_bytes(amount_buf);
+                let stake_slot = storage_slot(&[validator.as_slice(), b"stake"]);
+                let current_stake =
+                    u256_to_u128(self.backend.load(VALIDATOR_ADDRESS, stake_slot));
+                let new_stake = current_stake.saturating_sub(amount);
+                self.backend
+                    .store(VALIDATOR_ADDRESS, stake_slot, u128_to_u256(new_stake));
+                if new_stake == 0 {
+                    let status_slot = storage_slot(&[validator.as_slice(), b"status"]);
+                    self.backend
+                        .store(VALIDATOR_ADDRESS, status_slot, U256::ZERO);
+                }
+                Ok(())
             }
             4 => {
                 // ComplianceUpdate: execution_data = ABI-encoded (address target, uint8 status)
-                if execution_data.len() >= 64 {
-                    let mut addr_buf = [0u8; 20];
-                    addr_buf.copy_from_slice(&execution_data[12..32]);
-                    let target = Address::from_slice(&addr_buf);
-                    let status = execution_data[63];
-                    self.backend.store(
-                        COMPLIANCE_ADDRESS,
-                        slot_compliance(target),
-                        U256::from(status),
-                    );
+                if execution_data.len() < 64 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ComplianceUpdate execution data".into(),
+                    ));
                 }
+                let mut addr_buf = [0u8; 20];
+                addr_buf.copy_from_slice(&execution_data[12..32]);
+                let target = Address::from_slice(&addr_buf);
+                let status = execution_data[63];
+                self.backend.store(
+                    COMPLIANCE_ADDRESS,
+                    slot_compliance(target),
+                    U256::from(status),
+                );
+                Ok(())
             }
             8 => {
                 // FeeCurrencyCap: execution_data = ABI-encoded (uint64 assetId, uint128 cap)
-                if execution_data.len() >= 64 {
-                    let mut asset_buf = [0u8; 8];
-                    asset_buf.copy_from_slice(&execution_data[24..32]);
-                    let asset_id = u64::from_be_bytes(asset_buf);
-                    let mut cap_buf = [0u8; 16];
-                    cap_buf.copy_from_slice(&execution_data[48..64]);
-                    let cap = u128::from_be_bytes(cap_buf);
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"fee_currency_cap", &asset_id.to_be_bytes()[..]]),
-                        u128_to_u256(cap),
-                    );
+                if execution_data.len() < 64 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed FeeCurrencyCap execution data".into(),
+                    ));
                 }
+                let mut asset_buf = [0u8; 8];
+                asset_buf.copy_from_slice(&execution_data[24..32]);
+                let asset_id = u64::from_be_bytes(asset_buf);
+                let mut cap_buf = [0u8; 16];
+                cap_buf.copy_from_slice(&execution_data[48..64]);
+                let cap = u128::from_be_bytes(cap_buf);
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"fee_currency_cap", &asset_id.to_be_bytes()[..]]),
+                    u128_to_u256(cap),
+                );
+                Ok(())
             }
             10 => {
                 // ProverKeyRotation: execution_data = ABI-encoded
                 // (uint32 keyVersion, bytes32 transferVkHash, bytes32 depositVkHash, bytes32 withdrawVkHash, uint64 sunsetTimestamp)
-                if execution_data.len() >= 160 {
-                    let mut version_buf = [0u8; 4];
-                    version_buf.copy_from_slice(&execution_data[28..32]);
-                    let key_version = u32::from_be_bytes(version_buf);
-
-                    let mut transfer_hash = [0u8; 32];
-                    transfer_hash.copy_from_slice(&execution_data[32..64]);
-                    let mut deposit_hash = [0u8; 32];
-                    deposit_hash.copy_from_slice(&execution_data[64..96]);
-                    let mut withdraw_hash = [0u8; 32];
-                    withdraw_hash.copy_from_slice(&execution_data[96..128]);
-                    let mut sunset_buf = [0u8; 8];
-                    sunset_buf.copy_from_slice(&execution_data[152..160]);
-                    let sunset_timestamp = u64::from_be_bytes(sunset_buf);
-
-                    // Store rotation signal and metadata in governance storage
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"prover_key_rotation", b"version"]),
-                        U256::from(key_version),
-                    );
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"prover_key_rotation", b"transfer_vk_hash"]),
-                        U256::from_be_slice(&transfer_hash),
-                    );
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"prover_key_rotation", b"deposit_vk_hash"]),
-                        U256::from_be_slice(&deposit_hash),
-                    );
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"prover_key_rotation", b"withdraw_vk_hash"]),
-                        U256::from_be_slice(&withdraw_hash),
-                    );
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"prover_key_rotation", b"sunset_timestamp"]),
-                        U256::from(sunset_timestamp),
-                    );
-                    // Set a pending flag so nodes know to pick it up
-                    self.backend.store(
-                        GOVERNANCE_ADDRESS,
-                        storage_slot(&[b"prover_key_rotation", b"pending"]),
-                        U256::from(1u8),
-                    );
+                if execution_data.len() < 160 {
+                    return Err(PrecompileError::Other(
+                        "governance: malformed ProverKeyRotation execution data".into(),
+                    ));
                 }
+                let mut version_buf = [0u8; 4];
+                version_buf.copy_from_slice(&execution_data[28..32]);
+                let key_version = u32::from_be_bytes(version_buf);
+
+                let mut transfer_hash = [0u8; 32];
+                transfer_hash.copy_from_slice(&execution_data[32..64]);
+                let mut deposit_hash = [0u8; 32];
+                deposit_hash.copy_from_slice(&execution_data[64..96]);
+                let mut withdraw_hash = [0u8; 32];
+                withdraw_hash.copy_from_slice(&execution_data[96..128]);
+                let mut sunset_buf = [0u8; 8];
+                sunset_buf.copy_from_slice(&execution_data[152..160]);
+                let sunset_timestamp = u64::from_be_bytes(sunset_buf);
+
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"prover_key_rotation", b"version"]),
+                    U256::from(key_version),
+                );
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"prover_key_rotation", b"transfer_vk_hash"]),
+                    U256::from_be_slice(&transfer_hash),
+                );
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"prover_key_rotation", b"deposit_vk_hash"]),
+                    U256::from_be_slice(&deposit_hash),
+                );
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"prover_key_rotation", b"withdraw_vk_hash"]),
+                    U256::from_be_slice(&withdraw_hash),
+                );
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"prover_key_rotation", b"sunset_timestamp"]),
+                    U256::from(sunset_timestamp),
+                );
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"prover_key_rotation", b"pending"]),
+                    U256::from(1u8),
+                );
+                Ok(())
             }
-            _ => {}
+            _ => Ok(()),
+        };
+        if let Err(e) = exec_result {
+            return Err(e);
         }
 
         let deposit = u256_to_u128(self.backend.load(
@@ -1019,6 +1153,124 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         );
 
         Ok(())
+    }
+
+    // ── Emergency multi-sig helpers ───────────────────────────────────
+
+    pub fn read_emergency_pause_epoch(&mut self) -> u64 {
+        u256_to_u64(self.backend.load(GOVERNANCE_ADDRESS, slot_emergency_pause_epoch()))
+    }
+
+    pub fn write_emergency_pause_epoch(&mut self, epoch: u64) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_pause_epoch(),
+            u64_to_u256(epoch),
+        );
+    }
+
+    pub fn increment_emergency_pause_epoch(&mut self) {
+        let epoch = self.read_emergency_pause_epoch();
+        self.write_emergency_pause_epoch(epoch + 1);
+    }
+
+    pub fn read_emergency_pause_sig_epoch(&mut self, addr: Address) -> u64 {
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_emergency_pause_sig_epoch(addr)),
+        )
+    }
+
+    pub fn write_emergency_pause_sig_epoch(&mut self, addr: Address, epoch: u64) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_pause_sig_epoch(addr),
+            u64_to_u256(epoch),
+        );
+    }
+
+    pub fn read_emergency_pause_sig_count(&mut self) -> u64 {
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_emergency_pause_sig_count()),
+        )
+    }
+
+    pub fn increment_emergency_pause_sig_count(&mut self) -> u64 {
+        let count = self.read_emergency_pause_sig_count();
+        let new_count = count + 1;
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_pause_sig_count(),
+            u64_to_u256(new_count),
+        );
+        new_count
+    }
+
+    pub fn reset_emergency_pause_sig_count(&mut self) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_pause_sig_count(),
+            U256::ZERO,
+        );
+    }
+
+    pub fn read_emergency_resume_epoch(&mut self) -> u64 {
+        u256_to_u64(self.backend.load(GOVERNANCE_ADDRESS, slot_emergency_resume_epoch()))
+    }
+
+    pub fn write_emergency_resume_epoch(&mut self, epoch: u64) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_resume_epoch(),
+            u64_to_u256(epoch),
+        );
+    }
+
+    pub fn increment_emergency_resume_epoch(&mut self) {
+        let epoch = self.read_emergency_resume_epoch();
+        self.write_emergency_resume_epoch(epoch + 1);
+    }
+
+    pub fn read_emergency_resume_sig_epoch(&mut self, addr: Address) -> u64 {
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_emergency_resume_sig_epoch(addr)),
+        )
+    }
+
+    pub fn write_emergency_resume_sig_epoch(&mut self, addr: Address, epoch: u64) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_resume_sig_epoch(addr),
+            u64_to_u256(epoch),
+        );
+    }
+
+    pub fn read_emergency_resume_sig_count(&mut self) -> u64 {
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_emergency_resume_sig_count()),
+        )
+    }
+
+    pub fn increment_emergency_resume_sig_count(&mut self) -> u64 {
+        let count = self.read_emergency_resume_sig_count();
+        let new_count = count + 1;
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_resume_sig_count(),
+            u64_to_u256(new_count),
+        );
+        new_count
+    }
+
+    pub fn reset_emergency_resume_sig_count(&mut self) {
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_emergency_resume_sig_count(),
+            U256::ZERO,
+        );
     }
 
     pub fn emergency_pause(
@@ -1060,6 +1312,8 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         proposal_id: u64,
         caller: Address,
     ) -> Result<(), PrecompileError> {
+        self.require_valid_proposal_id(proposal_id)?;
+
         let proposer = self.read_proposal_proposer(proposal_id);
         if caller != proposer {
             return Err(PrecompileError::Other(
@@ -1111,7 +1365,7 @@ sol! {
         function emergencyResume() external;
         function getProposalStatus(uint64 proposalId) external view returns (uint8);
         function getProposalVotes(uint64 proposalId) external view returns (uint128 votesFor, uint128 votesAgainst, uint128 votesAbstain);
-        function getProposal(uint64 proposalId) external view returns (uint8 status, uint8 proposalType, address proposer, uint64 startBlock, uint64 endBlock, uint128 votesFor, uint128 votesAgainst, uint128 votesAbstain);
+        function getProposal(uint64 proposalId) external view returns (uint8 status, uint8 proposalType, address proposer, uint64 startBlock, uint64 endBlock, uint128 votesFor, uint128 votesAgainst, uint128 votesAbstain, uint128 quorumRequired);
         function isPaused() external view returns (uint8);
         function getProposalCount() external view returns (uint64);
     }
@@ -1130,9 +1384,17 @@ impl GovernancePrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
+        // Dynamic gas: base 100k + 5k per 32-byte chunk of execution data
+        let base_gas = 100_000u64;
+        let chunk_gas = 5_000u64;
+        let max_gas = 1_000_000u64;
+        let data_len = calldata.len().saturating_sub(4) as u64; // approximate, actual decoded data may differ
+        let num_chunks = (data_len + 31) / 32;
+        let gas = (base_gas + num_chunks * chunk_gas).min(max_gas);
+
         dispatch::mutate_void::<IProtocolGovernance::submitProposalCall, _>(
             calldata,
-            200_000,
+            gas,
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
@@ -1152,14 +1414,13 @@ impl GovernancePrecompile {
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                // Emit ProposalSubmitted(proposalId, proposer)
+                // Emit ProposalSubmitted(uint64 indexed proposalId, address indexed proposer)
                 let topic0 = alloy_primitives::keccak256(b"ProposalSubmitted(uint64,address)");
-                let mut event_data = Vec::with_capacity(64);
-                event_data.extend_from_slice(&u64_to_u256(proposal_id).to_be_bytes::<32>());
-                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
+                let topic1 = alloy_primitives::B256::from(u64_to_u256(proposal_id).to_be_bytes::<32>());
+                let topic2 = alloy_primitives::B256::from(address_to_u256(caller).to_be_bytes::<32>());
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0],
-                    alloy_primitives::Bytes::from(event_data),
+                    vec![topic0, topic1, topic2],
+                    alloy_primitives::Bytes::new(),
                 ) {
                     let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
                 }
@@ -1250,15 +1511,15 @@ impl GovernancePrecompile {
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                // Emit VoteCast(proposalId, voter, vote, power)
+                // Emit VoteCast(uint64 indexed proposalId, address indexed voter, uint8 vote, uint128 power)
                 let topic0 = alloy_primitives::keccak256(b"VoteCast(uint64,address,uint8,uint128)");
-                let mut event_data = Vec::with_capacity(128);
-                event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
-                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
+                let topic1 = alloy_primitives::B256::from(u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                let topic2 = alloy_primitives::B256::from(address_to_u256(caller).to_be_bytes::<32>());
+                let mut event_data = Vec::with_capacity(64);
                 event_data.extend_from_slice(&U256::from(call.vote).to_be_bytes::<32>());
                 event_data.extend_from_slice(&u128_to_u256(voting_power).to_be_bytes::<32>());
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0],
+                    vec![topic0, topic1, topic2],
                     alloy_primitives::Bytes::from(event_data),
                 ) {
                     let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
@@ -1298,18 +1559,33 @@ impl GovernancePrecompile {
                 }
 
                 let block_number = storage.block_number();
-                gov_store
-                    .queue(call.proposalId, block_number)
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                let queue_result = gov_store.queue(call.proposalId, block_number);
 
-                // Emit ProposalQueued(proposalId, queuedAt)
+                // Terminal state: emit ProposalDefeated if queue marked proposal defeated
+                if queue_result.is_err() {
+                    let status = gov_store.read_proposal_status(call.proposalId);
+                    if status == 4 {
+                        let topic0 =
+                            alloy_primitives::keccak256(b"ProposalDefeated(uint64)");
+                        let topic1 = alloy_primitives::B256::from(u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                        if let Some(log) = alloy_primitives::LogData::new(
+                            vec![topic0, topic1],
+                            alloy_primitives::Bytes::new(),
+                        ) {
+                            let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                        }
+                    }
+                }
+
+                queue_result.map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                // Emit ProposalQueued(uint64 indexed proposalId, uint64 indexed queuedAt)
                 let topic0 = alloy_primitives::keccak256(b"ProposalQueued(uint64,uint64)");
-                let mut event_data = Vec::with_capacity(64);
-                event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
-                event_data.extend_from_slice(&u64_to_u256(block_number).to_be_bytes::<32>());
+                let topic1 = alloy_primitives::B256::from(u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                let topic2 = alloy_primitives::B256::from(u64_to_u256(block_number).to_be_bytes::<32>());
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0],
-                    alloy_primitives::Bytes::from(event_data),
+                    vec![topic0, topic1, topic2],
+                    alloy_primitives::Bytes::new(),
                 ) {
                     let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
                 }
@@ -1349,19 +1625,84 @@ impl GovernancePrecompile {
                 }
 
                 let block_number = storage.block_number();
-                gov_store
-                    .execute(&mut asset_store, call.proposalId, block_number, caller)
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                let exec_result =
+                    gov_store.execute(&mut asset_store, call.proposalId, block_number, caller);
 
-                // Emit ProposalExecuted(proposalId)
+                // Terminal state: emit ProposalExpired if execute marked proposal expired
+                if exec_result.is_err() {
+                    let status = gov_store.read_proposal_status(call.proposalId);
+                    if status == 6 {
+                        let topic0 =
+                            alloy_primitives::keccak256(b"ProposalExpired(uint64)");
+                        let topic1 = alloy_primitives::B256::from(u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                        if let Some(log) = alloy_primitives::LogData::new(
+                            vec![topic0, topic1],
+                            alloy_primitives::Bytes::new(),
+                        ) {
+                            let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                        }
+                    }
+                }
+
+                exec_result.map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                // Emit ProposalExecuted(uint64 indexed proposalId)
                 let topic0 = alloy_primitives::keccak256(b"ProposalExecuted(uint64)");
-                let mut event_data = Vec::with_capacity(32);
-                event_data.extend_from_slice(&u64_to_u256(call.proposalId).to_be_bytes::<32>());
+                let topic1 = alloy_primitives::B256::from(u64_to_u256(call.proposalId).to_be_bytes::<32>());
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0],
-                    alloy_primitives::Bytes::from(event_data),
+                    vec![topic0, topic1],
+                    alloy_primitives::Bytes::new(),
                 ) {
                     let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                }
+
+                // Type-specific execution events
+                let proposal_type = gov_store.read_proposal_u8(call.proposalId, b"proposal_type");
+                let execution_data = gov_store.read_proposal_execution_data(call.proposalId);
+                match proposal_type {
+                    3 => {
+                        // ValidatorSlashed(address indexed validator, uint128 amount)
+                        if execution_data.len() >= 64 {
+                            let mut addr_buf = [0u8; 20];
+                            addr_buf.copy_from_slice(&execution_data[12..32]);
+                            let validator = Address::from_slice(&addr_buf);
+                            let mut amount_buf = [0u8; 16];
+                            amount_buf.copy_from_slice(&execution_data[48..64]);
+                            let amount = u128::from_be_bytes(amount_buf);
+                            let topic0 =
+                                alloy_primitives::keccak256(b"ValidatorSlashed(address,uint128)");
+                            let topic1 = alloy_primitives::B256::from(address_to_u256(validator).to_be_bytes::<32>());
+                            let mut data = Vec::with_capacity(32);
+                            data.extend_from_slice(&u128_to_u256(amount).to_be_bytes::<32>());
+                            if let Some(log) = alloy_primitives::LogData::new(
+                                vec![topic0, topic1],
+                                alloy_primitives::Bytes::from(data),
+                            ) {
+                                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                            }
+                        }
+                    }
+                    4 => {
+                        // ComplianceUpdated(address indexed target, uint8 status)
+                        if execution_data.len() >= 64 {
+                            let mut addr_buf = [0u8; 20];
+                            addr_buf.copy_from_slice(&execution_data[12..32]);
+                            let target = Address::from_slice(&addr_buf);
+                            let status = execution_data[63];
+                            let topic0 =
+                                alloy_primitives::keccak256(b"ComplianceUpdated(address,uint8)");
+                            let topic1 = alloy_primitives::B256::from(address_to_u256(target).to_be_bytes::<32>());
+                            let mut data = Vec::with_capacity(32);
+                            data.extend_from_slice(&U256::from(status).to_be_bytes::<32>());
+                            if let Some(log) = alloy_primitives::LogData::new(
+                                vec![topic0, topic1],
+                                alloy_primitives::Bytes::from(data),
+                            ) {
+                                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
 
                 Ok(())
@@ -1383,6 +1724,16 @@ impl GovernancePrecompile {
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
 
+                let mut gov_store = GovernanceStorage::new(sr);
+
+                // Reject if already paused — must be checked before recording signatures
+                // so the multi-sig state doesn't get stuck.
+                if gov_store.is_paused() {
+                    return Err(PrecompileError::Other(
+                        "governance: already paused".into(),
+                    ));
+                }
+
                 // Verify caller is a registered validator
                 let validator_id = {
                     let mut validator_store = ValidatorStorage::new(sr);
@@ -1394,19 +1745,49 @@ impl GovernancePrecompile {
                     ));
                 }
 
-                let mut gov_store = GovernanceStorage::new(sr);
+                // Multi-sig: epoch-based signature tracking
+                let mut epoch = gov_store.read_emergency_pause_epoch();
+                if epoch == 0 {
+                    epoch = 1;
+                    gov_store.write_emergency_pause_epoch(1);
+                }
+                let last_signed = gov_store.read_emergency_pause_sig_epoch(caller);
+                if last_signed >= epoch {
+                    return Err(PrecompileError::Other(
+                        "governance: already signed emergency pause".into(),
+                    ));
+                }
+
+                // Record signature
+                gov_store.write_emergency_pause_sig_epoch(caller, epoch);
+                let count = gov_store.increment_emergency_pause_sig_count();
+
+                // Check threshold
+                let validator_count = gov_store.read_validator_count();
+                let config = gov_store.governance_config();
+                let threshold = config.emergency_pause_threshold(validator_count);
+
+                if count < threshold {
+                    // Not yet enough signatures; return Ok but nothing happened yet
+                    return Ok(());
+                }
+
+                // Threshold reached — execute pause
                 gov_store
                     .emergency_pause(call.reason.into(), caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                // Emit EmergencyPaused(pauser, reason)
+                // Reset for next round
+                gov_store.increment_emergency_pause_epoch();
+                gov_store.reset_emergency_pause_sig_count();
+
+                // Emit EmergencyPaused(address indexed pauser, bytes32 indexed reason)
                 let topic0 = alloy_primitives::keccak256(b"EmergencyPaused(address,bytes32)");
-                let mut event_data = Vec::with_capacity(64);
-                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
-                event_data.extend_from_slice(&call.reason.as_ref());
+                let topic1 = alloy_primitives::B256::from(address_to_u256(caller).to_be_bytes::<32>());
+                let topic2 = alloy_primitives::B256::from_slice(call.reason.as_ref());
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0],
-                    alloy_primitives::Bytes::from(event_data),
+                    vec![topic0, topic1, topic2],
+                    alloy_primitives::Bytes::new(),
                 ) {
                     let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
                 }
@@ -1430,6 +1811,16 @@ impl GovernancePrecompile {
             |_call, storage| {
                 let caller = require_caller(msg_sender)?;
 
+                let mut gov_store = GovernanceStorage::new(sr);
+
+                // Reject if not paused — must be checked before recording signatures
+                // so the multi-sig state doesn't get stuck.
+                if !gov_store.is_paused() {
+                    return Err(PrecompileError::Other(
+                        "governance: not paused".into(),
+                    ));
+                }
+
                 // Verify caller is a registered validator
                 let validator_id = {
                     let mut validator_store = ValidatorStorage::new(sr);
@@ -1441,18 +1832,47 @@ impl GovernancePrecompile {
                     ));
                 }
 
-                let mut gov_store = GovernanceStorage::new(sr);
+                // Multi-sig: epoch-based signature tracking
+                let mut epoch = gov_store.read_emergency_resume_epoch();
+                if epoch == 0 {
+                    epoch = 1;
+                    gov_store.write_emergency_resume_epoch(1);
+                }
+                let last_signed = gov_store.read_emergency_resume_sig_epoch(caller);
+                if last_signed >= epoch {
+                    return Err(PrecompileError::Other(
+                        "governance: already signed emergency resume".into(),
+                    ));
+                }
+
+                // Record signature
+                gov_store.write_emergency_resume_sig_epoch(caller, epoch);
+                let count = gov_store.increment_emergency_resume_sig_count();
+
+                // Check threshold
+                let validator_count = gov_store.read_validator_count();
+                let config = gov_store.governance_config();
+                let threshold = config.emergency_pause_threshold(validator_count);
+
+                if count < threshold {
+                    return Ok(());
+                }
+
+                // Threshold reached — execute resume
                 gov_store
                     .emergency_resume()
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                // Emit EmergencyResumed(resumer)
+                // Reset for next round
+                gov_store.increment_emergency_resume_epoch();
+                gov_store.reset_emergency_resume_sig_count();
+
+                // Emit EmergencyResumed(address indexed resumer)
                 let topic0 = alloy_primitives::keccak256(b"EmergencyResumed(address)");
-                let mut event_data = Vec::with_capacity(32);
-                event_data.extend_from_slice(&address_to_u256(caller).to_be_bytes::<32>());
+                let topic1 = alloy_primitives::B256::from(address_to_u256(caller).to_be_bytes::<32>());
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0],
-                    alloy_primitives::Bytes::from(event_data),
+                    vec![topic0, topic1],
+                    alloy_primitives::Bytes::new(),
                 ) {
                     let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
                 }
@@ -1505,6 +1925,7 @@ impl GovernancePrecompile {
                 let votes_for = store.read_vote_tally(call.proposalId, b"votes_for");
                 let votes_against = store.read_vote_tally(call.proposalId, b"votes_against");
                 let votes_abstain = store.read_vote_tally(call.proposalId, b"votes_abstain");
+                let quorum_required = store.read_proposal_u128(call.proposalId, b"quorum_required");
                 Ok((
                     U256::from(status),
                     U256::from(proposal_type),
@@ -1514,6 +1935,7 @@ impl GovernancePrecompile {
                     votes_for,
                     votes_against,
                     votes_abstain,
+                    quorum_required,
                 ))
             },
         )
@@ -1911,6 +2333,194 @@ mod tests {
             .call(&input, Address::ZERO, &mut provider)
             .unwrap();
         assert_eq!(result.bytes[31], 0);
+    }
+
+    #[test]
+    fn test_governance_precompile_emergency_pause_multisig() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let val_a = Address::repeat_byte(0xAA);
+        let val_b = Address::repeat_byte(0xBB);
+        let val_c = Address::repeat_byte(0xCC);
+
+        // Seed 3 validators
+        for (addr, id) in [(val_a, 1), (val_b, 2), (val_c, 3)] {
+            provider
+                .sstore(
+                    VALIDATOR_ADDRESS,
+                    slot_validator_by_addr(addr),
+                    u64_to_u256(id),
+                )
+                .unwrap();
+        }
+        // Seed validator count so threshold is computed correctly
+        // threshold = ceil(3 * 6667 / 10000) = 3
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                call_validator::slot_validator_count(),
+                u128_to_u256(3),
+            )
+            .unwrap();
+
+        let mut precompile = GovernancePrecompile;
+
+        // First signature from val_a — not enough (need 3)
+        let input = IProtocolGovernance::emergencyPauseCall {
+            reason: alloy_primitives::FixedBytes::<32>::from_slice(
+                b"Emergency reason________________",
+            ),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, val_a, &mut provider);
+        assert!(result.is_ok(), "first pause sig failed: {:?}", result.err());
+        // Still not paused
+        let input = IProtocolGovernance::isPausedCall {}.abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        assert_eq!(result.bytes[31], 0);
+
+        // Second signature from val_b — still not enough
+        let input = IProtocolGovernance::emergencyPauseCall {
+            reason: alloy_primitives::FixedBytes::<32>::from_slice(
+                b"Emergency reason________________",
+            ),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, val_b, &mut provider);
+        assert!(result.is_ok(), "second pause sig failed: {:?}", result.err());
+        let input = IProtocolGovernance::isPausedCall {}.abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        assert_eq!(result.bytes[31], 0);
+
+        // Third signature from val_c — threshold reached, pause executes
+        let input = IProtocolGovernance::emergencyPauseCall {
+            reason: alloy_primitives::FixedBytes::<32>::from_slice(
+                b"Emergency reason________________",
+            ),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, val_c, &mut provider);
+        assert!(result.is_ok(), "third pause sig failed: {:?}", result.err());
+        let input = IProtocolGovernance::isPausedCall {}.abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        assert_eq!(result.bytes[31], 1);
+    }
+
+    #[test]
+    fn test_governance_precompile_emergency_pause_rejected_when_already_paused() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let val_a = Address::repeat_byte(0xAA);
+
+        // Seed 1 validator (threshold = ceil(1 * 6667 / 10000) = 1)
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_validator_by_addr(val_a),
+                u64_to_u256(1),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                call_validator::slot_validator_count(),
+                u128_to_u256(1),
+            )
+            .unwrap();
+
+        let mut precompile = GovernancePrecompile;
+
+        // First call executes pause (threshold = 1)
+        let input = IProtocolGovernance::emergencyPauseCall {
+            reason: alloy_primitives::FixedBytes::<32>::from_slice(
+                b"Emergency reason________________",
+            ),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, val_a, &mut provider);
+        assert!(result.is_ok(), "pause failed: {:?}", result.err());
+
+        // Chain is now paused. Same validator calling again should be rejected
+        // immediately (before recording any signature) so multi-sig state stays clean.
+        let result = precompile.call(&input, val_a, &mut provider);
+        assert!(result.is_err(), "pause when already paused should fail");
+    }
+
+    #[test]
+    fn test_governance_precompile_emergency_resume_rejected_when_not_paused() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let val_a = Address::repeat_byte(0xAA);
+
+        // Seed 1 validator
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_validator_by_addr(val_a),
+                u64_to_u256(1),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                call_validator::slot_validator_count(),
+                u128_to_u256(1),
+            )
+            .unwrap();
+
+        let mut precompile = GovernancePrecompile;
+
+        // Chain is not paused. Resume should be rejected immediately.
+        let input = IProtocolGovernance::emergencyResumeCall {}.abi_encode();
+        let result = precompile.call(&input, val_a, &mut provider);
+        assert!(
+            result.is_err(),
+            "resume when not paused should fail"
+        );
+    }
+
+    #[test]
+    fn test_governance_precompile_emergency_pause_double_sig_rejected() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let val_a = Address::repeat_byte(0xAA);
+
+        // Seed 1 validator (threshold = ceil(1 * 6667 / 10000) = 1)
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_validator_by_addr(val_a),
+                u64_to_u256(1),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                call_validator::slot_validator_count(),
+                u128_to_u256(1),
+            )
+            .unwrap();
+
+        let mut precompile = GovernancePrecompile;
+
+        // First call executes pause (threshold = 1)
+        let input = IProtocolGovernance::emergencyPauseCall {
+            reason: alloy_primitives::FixedBytes::<32>::from_slice(
+                b"Emergency reason________________",
+            ),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, val_a, &mut provider);
+        assert!(result.is_ok(), "pause failed: {:?}", result.err());
+
+        // Same validator signing again in new round — epoch was incremented,
+        // so this is a fresh round and should be allowed (but not enough if
+        // threshold > 1). With 1 validator, threshold = 1, so this executes
+        // another pause — but emergency_pause rejects double-pause.
+        let result = precompile.call(&input, val_a, &mut provider);
+        assert!(result.is_err(), "double pause should fail");
     }
 
     #[test]

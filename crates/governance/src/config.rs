@@ -76,7 +76,8 @@ impl Default for GovernanceConfig {
 impl GovernanceConfig {
     /// Calculate validator quorum count (ceil of total_validators * bps / 10000)
     pub fn validator_quorum(&self, total_validators: u64) -> u64 {
-        (total_validators * self.validator_quorum_bps as u64).div_ceil(10_000)
+        ((total_validators as u128) * (self.validator_quorum_bps as u128))
+            .div_ceil(10_000) as u64
     }
 
     /// Calculate supply quorum (ceil of total_supply * bps / 10000)
@@ -91,11 +92,13 @@ impl GovernanceConfig {
 
     /// Calculate simple majority quorum count
     pub fn simple_majority(&self, total_validators: u64) -> u64 {
-        (total_validators * self.simple_majority_bps as u64).div_ceil(10_000)
+        ((total_validators as u128) * (self.simple_majority_bps as u128))
+            .div_ceil(10_000) as u64
     }
 
     /// Calculate emergency pause threshold
     pub fn emergency_pause_threshold(&self, total_validators: u64) -> u64 {
-        (total_validators * self.emergency_pause_bps as u64).div_ceil(10_000)
+        ((total_validators as u128) * (self.emergency_pause_bps as u128))
+            .div_ceil(10_000) as u64
     }
 }

@@ -12,6 +12,20 @@ fn test_addr(n: u8) -> Address {
     Address::repeat_byte(n)
 }
 
+/// Encode a ParameterChange execution_data: `(string configKey, uint128 newValue)`
+fn encode_parameter_change(key: &str, value: u128) -> Vec<u8> {
+    let mut data = vec![0u8; 128];
+    // word 0: string offset = 64
+    data[31] = 0x40;
+    // word 1: uint128 newValue (right-aligned in bytes 48-63)
+    data[48..64].copy_from_slice(&value.to_be_bytes());
+    // at offset 64: string length
+    data[95] = key.len() as u8;
+    // at offset 96: string data
+    data[96..96 + key.len()].copy_from_slice(key.as_bytes());
+    data
+}
+
 fn with_storage<R>(block_number: u64, f: impl FnOnce(&mut dyn StorageProvider) -> R) -> R {
     let provider = HashMapStorageProvider::with_block(10_000_000, 1, block_number);
     let mut provider = provider;
@@ -508,13 +522,14 @@ fn test_execute_timeout_expires() {
         gov.write_config_u64(b"timelock", 10);
         gov.write_config_u64(b"execution_timeout", 50);
 
+        let exec_data = encode_parameter_change("voting_period", 200);
         let id = gov
             .submit_proposal(
                 &mut asset,
                 0,
                 "title".into(),
                 "desc".into(),
-                vec![],
+                exec_data,
                 proposer,
                 0,
             )
@@ -549,13 +564,14 @@ fn test_execute_past_timeout_marked_expired() {
         gov.write_config_u64(b"timelock", 10);
         gov.write_config_u64(b"execution_timeout", 50);
 
+        let exec_data = encode_parameter_change("voting_period", 200);
         let id = gov
             .submit_proposal(
                 &mut asset,
                 0,
                 "title".into(),
                 "desc".into(),
-                vec![],
+                exec_data,
                 proposer,
                 0,
             )
@@ -592,13 +608,14 @@ fn test_execute_after_timelock() {
         gov.write_config_u64(b"voting_period", 100);
         gov.write_config_u64(b"timelock", 50);
 
+        let exec_data = encode_parameter_change("voting_period", 200);
         let id = gov
             .submit_proposal(
                 &mut asset,
                 0,
                 "title".into(),
                 "desc".into(),
-                vec![],
+                exec_data,
                 proposer,
                 0,
             )
@@ -639,13 +656,14 @@ fn test_execute_deposit_refunded() {
         gov.write_config_u64(b"voting_period", 100);
         gov.write_config_u64(b"timelock", 1);
 
+        let exec_data = encode_parameter_change("voting_period", 200);
         let id = gov
             .submit_proposal(
                 &mut asset,
                 0,
                 "title".into(),
                 "desc".into(),
-                vec![],
+                exec_data,
                 proposer,
                 0,
             )
@@ -915,13 +933,14 @@ fn test_full_lifecycle_submit_vote_queue_execute() {
         gov.write_config_u64(b"timelock", 10);
 
         // Submit
+        let exec_data = encode_parameter_change("voting_period", 200);
         let id = gov
             .submit_proposal(
                 &mut asset,
                 0,
                 "title".into(),
                 "desc".into(),
-                vec![],
+                exec_data,
                 proposer,
                 0,
             )
@@ -1248,6 +1267,121 @@ fn test_cancel_proposal_rejected_for_non_proposer() {
 
         let result = gov.cancel_proposal(&mut asset, id, rando);
         assert!(result.is_err(), "cancel by non-proposer should fail");
+    });
+}
+
+// ── Execute malformed data rejection ──────────────────────────────
+
+#[test]
+fn test_execute_rejects_malformed_parameter_change() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0, // ParameterChange
+                "title".into(),
+                "desc".into(),
+                vec![], // empty execution_data is malformed
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(
+            result.is_err(),
+            "execute should reject malformed ParameterChange data"
+        );
+        // Status should remain Queued (2), not Executed
+        assert_eq!(gov.read_proposal_status(id), 2);
+    });
+}
+
+#[test]
+fn test_execute_rejects_malformed_treasury_spend() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        seed_balance(storage, crate::precompile::TREASURY_ADDRESS, 500_000);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                2, // TreasurySpend
+                "title".into(),
+                "desc".into(),
+                vec![0xEE; 10], // too short for TreasurySpend
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(
+            result.is_err(),
+            "execute should reject malformed TreasurySpend data"
+        );
+        assert_eq!(gov.read_proposal_status(id), 2);
+    });
+}
+
+#[test]
+fn test_execute_rejects_treasury_spend_50_byte_data() {
+    // Regression: 48-63 byte input used to panic because the code read
+    // execution_data[48..64] after only checking len < 48.
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        seed_balance(storage, crate::precompile::TREASURY_ADDRESS, 500_000);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                2, // TreasurySpend
+                "title".into(),
+                "desc".into(),
+                vec![0xEE; 50], // 50 bytes: passes old <48 check but <64
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(
+            result.is_err(),
+            "execute should reject 50-byte TreasurySpend data"
+        );
+        assert_eq!(gov.read_proposal_status(id), 2);
     });
 }
 
