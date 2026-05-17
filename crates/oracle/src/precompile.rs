@@ -9,6 +9,7 @@ use call_precompile::{
     dispatch, require_caller,
     storage::{storage_slot, StorageProvider},
     u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
+    GOVERNANCE_ADDRESS,
 };
 use call_primitives::{Address, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -467,20 +468,6 @@ impl OraclePrecompile {
                     ));
                 }
 
-                // Rate limiting: prevent rapid repeated submissions for the same asset.
-                // NOTE: The precompile submitPrice path is a trusted direct-write
-                // interface for validators.  It is intentionally simpler than the
-                // P2P tracker path (which performs Ed25519 signature verification,
-                // quorum aggregation, and outlier detection).  The frequency limit
-                // below is a minimal on-chain guard against accidental or abusive
-                // rapid-fire submissions.
-                let stored_ts = store.read_timestamp(call.assetId);
-                if stored_ts != 0 && current_ts < stored_ts + crate::constants::ORACLE_PERIOD_SECS {
-                    return Err(PrecompileError::Other(
-                        "oracle submit: too frequent".into(),
-                    ));
-                }
-
                 store.submit_price(call.assetId, call.price, call.timestamp, call.blockNumber);
 
                 // Emit PriceSubmitted event
@@ -517,14 +504,10 @@ impl OraclePrecompile {
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
 
-                // Verify caller is a registered validator
-                let validator_id = {
-                    let mut validator_store = ValidatorStorage::new(sr);
-                    validator_store.read_validator_id(caller)
-                };
-                if validator_id == 0 {
+                // Only governance can modify the tracked asset list.
+                if caller != GOVERNANCE_ADDRESS {
                     return Err(PrecompileError::Other(
-                        "oracle setTrackedAssets: caller is not a validator".into(),
+                        "oracle setTrackedAssets: caller is not governance".into(),
                     ));
                 }
 
@@ -635,13 +618,13 @@ mod tests {
         provider.set_timestamp(U256::from(1000));
         provider.set_block_number(100);
 
-        // Track asset 1 first (required before submit/get)
+        // Track asset 1 first (required before submit/get) — must be called by governance
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::setTrackedAssetsCall {
             assetIds: vec![1],
         }
         .abi_encode();
-        precompile.call(&input, caller, &mut provider).unwrap();
+        precompile.call(&input, GOVERNANCE_ADDRESS, &mut provider).unwrap();
 
         // Verify TrackedAssetsUpdated event emitted
         let logs = provider.events(ORACLE_ADDRESS);
@@ -705,13 +688,13 @@ mod tests {
         provider.set_timestamp(U256::from(1000));
         provider.set_block_number(100);
 
-        // Track asset 1 first
+        // Track asset 1 first — must be called by governance
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::setTrackedAssetsCall {
             assetIds: vec![1],
         }
         .abi_encode();
-        precompile.call(&input, caller, &mut provider).unwrap();
+        precompile.call(&input, GOVERNANCE_ADDRESS, &mut provider).unwrap();
 
         // Submit two prices spaced by at least ORACLE_PERIOD_SECS (240)
         // to satisfy the on-chain rate limit.

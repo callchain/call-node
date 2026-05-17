@@ -99,12 +99,16 @@ impl PriceFetcher for HttpPriceFetcher {
         let resp = self.client.get(url).send().ok()?;
         let body: serde_json::Value = resp.json().ok()?;
         // Support common formats: {"price": "123.45"}, {"lastPrice": "123.45"},
-        // or a plain number
-        let price_str = body
+        // {"price": 123.45}, or a plain number.
+        let price_node = body
             .get("price")
             .or_else(|| body.get("lastPrice"))
-            .or_else(|| body.get("last"))?
-            .as_str()?;
+            .or_else(|| body.get("last"))?;
+        let price_str = match price_node {
+            serde_json::Value::String(s) => s.as_str(),
+            serde_json::Value::Number(n) => Some(n.as_str()),
+            _ => None,
+        }?;
         // Parse decimal string without losing precision via f64.
         // Assumes 6-decimal fixed-point output for the chain.
         parse_decimal_to_u128(price_str, 6)

@@ -89,8 +89,6 @@ pub enum OracleError {
     ValidatorNotFound,
     #[error("validator disabled")]
     ValidatorDisabled,
-    #[error("duplicate submission")]
-    DuplicateSubmission,
     #[error("wrong period")]
     WrongPeriod,
     #[error("invalid signature")]
@@ -101,6 +99,4 @@ pub enum OracleError {
     InsufficientDataSources(usize, usize),
     #[error("disallowed data source: {0}")]
     DisallowedSource(String),
-    #[error("validator is not disabled")]
-    ValidatorNotDisabled,
 }
