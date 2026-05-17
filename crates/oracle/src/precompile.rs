@@ -18,7 +18,18 @@ use revm_precompile::{PrecompileError, PrecompileResult};
 pub const ORACLE_ADDRESS: Address =
     alloy_primitives::address!("0000000000000000000000000000000000000101");
 
-pub const STALE_THRESHOLD_SECS: u64 = 3600;
+pub const STALE_THRESHOLD_SECS: u64 = crate::constants::ORACLE_STALENESS_SECS;
+
+/// Maximum number of samples in the TWAP cumulative average before reset.
+pub const MAX_TWAP_COUNT: u64 = 10_000;
+
+/// Maximum number of assets that can be tracked simultaneously.
+pub const MAX_TRACKED_ASSETS: usize = 1_000;
+
+/// Minimum valid price (0 is rejected to avoid ambiguity).
+pub const MIN_PRICE: u128 = 1;
+/// Maximum valid price. 10^18 corresponds to ~10^12 USD with 6-decimal precision.
+pub const MAX_PRICE: u128 = 1_000_000_000_000_000_000;
 
 // ── Storage slot helpers ──────────────────────────────────────────────
 
@@ -116,7 +127,20 @@ impl<B: StorageBackend> OracleStorage<B> {
         )
     }
 
+    /// Check whether an asset is currently in the tracked list.
+    pub fn is_asset_tracked(&mut self, asset_id: u64) -> bool {
+        let count = self.read_tracked_count();
+        for i in 0..count {
+            if self.read_tracked_asset(i) == asset_id {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn set_tracked_assets(&mut self, asset_ids: Vec<u64>) {
+        // Read old count BEFORE overwriting it
+        let old_count = self.read_tracked_count();
         self.backend.store(
             ORACLE_ADDRESS,
             slot_oracle_tracked_count(),
@@ -130,7 +154,6 @@ impl<B: StorageBackend> OracleStorage<B> {
             );
         }
         // Zero out any old entries beyond the new list
-        let old_count = self.read_tracked_count();
         for i in asset_ids.len() as u64..old_count {
             self.backend
                 .store(ORACLE_ADDRESS, slot_oracle_tracked_asset(i), U256::ZERO);
@@ -159,17 +182,36 @@ impl<B: StorageBackend> OracleStorage<B> {
         let new_twap = if count == 0 {
             price
         } else {
-            (old_twap * count as u128 + price) / (count as u128 + 1)
+            // Use U256 for intermediate calculation to prevent u128 overflow.
+            let old = U256::from(old_twap);
+            let cnt = U256::from(count);
+            let prc = U256::from(price);
+            let numerator = old * cnt + prc;
+            let denominator = cnt + U256::from(1);
+            let result = numerator / denominator;
+            // Saturate at u128::MAX if the result is out of range.
+            if result > U256::from(u128::MAX) {
+                u128::MAX
+            } else {
+                result.to::<u128>()
+            }
         };
         self.backend.store(
             ORACLE_ADDRESS,
             slot_oracle_twap(asset_id),
             u128_to_u256(new_twap),
         );
+
+        // Cap the TWAP sample count to prevent unbounded growth.
+        let new_count = if count >= MAX_TWAP_COUNT {
+            1
+        } else {
+            count + 1
+        };
         self.backend.store(
             ORACLE_ADDRESS,
             slot_oracle_count(asset_id),
-            u64_to_u256(count + 1),
+            u64_to_u256(new_count),
         );
     }
 }
@@ -204,6 +246,11 @@ impl OraclePrecompile {
             storage,
             |call, _storage| {
                 let mut store = OracleStorage::new(sr);
+                if !store.is_asset_tracked(call.assetId) {
+                    return Err(PrecompileError::Other(
+                        "oracle: asset not tracked".into(),
+                    ));
+                }
                 Ok(store.read_price(call.assetId))
             },
         )
@@ -221,6 +268,11 @@ impl OraclePrecompile {
             storage,
             |call, _storage| {
                 let mut store = OracleStorage::new(sr);
+                if !store.is_asset_tracked(call.assetId) {
+                    return Err(PrecompileError::Other(
+                        "oracle: asset not tracked".into(),
+                    ));
+                }
                 Ok(store.read_twap(call.assetId))
             },
         )
@@ -273,6 +325,44 @@ impl OraclePrecompile {
                     ));
                 }
 
+                // Price validation
+                if call.price < MIN_PRICE || call.price > MAX_PRICE {
+                    return Err(PrecompileError::Other(
+                        "oracle submit: price out of range".into(),
+                    ));
+                }
+
+                let current_ts = storage.timestamp().to::<u64>();
+                let current_block = storage.block_number();
+
+                // Timestamp validation: not in the future (allow 60s clock drift),
+                // and not older than 5 minutes.
+                const TS_FUTURE_GRACE: u64 = 60;
+                const TS_MAX_AGE: u64 = 300;
+                if call.timestamp > current_ts + TS_FUTURE_GRACE {
+                    return Err(PrecompileError::Other(
+                        "oracle submit: timestamp in the future".into(),
+                    ));
+                }
+                if call.timestamp + TS_MAX_AGE < current_ts {
+                    return Err(PrecompileError::Other(
+                        "oracle submit: timestamp too old".into(),
+                    ));
+                }
+
+                // Block number validation: not in the future, not older than 10 blocks.
+                const BLOCK_MAX_DELTA: u64 = 10;
+                if call.blockNumber > current_block {
+                    return Err(PrecompileError::Other(
+                        "oracle submit: blockNumber in the future".into(),
+                    ));
+                }
+                if call.blockNumber + BLOCK_MAX_DELTA < current_block {
+                    return Err(PrecompileError::Other(
+                        "oracle submit: blockNumber too old".into(),
+                    ));
+                }
+
                 let mut store = OracleStorage::new(sr);
                 store.submit_price(call.assetId, call.price, call.timestamp, call.blockNumber);
 
@@ -307,7 +397,7 @@ impl OraclePrecompile {
             calldata,
             50_000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
 
                 // Verify caller is a registered validator
@@ -321,8 +411,38 @@ impl OraclePrecompile {
                     ));
                 }
 
+                // Limit the number of tracked assets to prevent gas exhaustion.
+                if call.assetIds.len() > MAX_TRACKED_ASSETS {
+                    return Err(PrecompileError::Other(
+                        format!(
+                            "oracle setTrackedAssets: too many assets, max {}",
+                            MAX_TRACKED_ASSETS
+                        )
+                        .into(),
+                    ));
+                }
+
                 let mut store = OracleStorage::new(sr);
                 store.set_tracked_assets(call.assetIds.to_vec());
+
+                // Emit TrackedAssetsUpdated(uint64[]) event.
+                let topic0 =
+                    alloy_primitives::keccak256(b"TrackedAssetsUpdated(uint64[])");
+                let mut event_data = Vec::with_capacity(64 + call.assetIds.len() * 32);
+                // ABI offset to dynamic data
+                event_data.extend_from_slice(&U256::from(32).to_be_bytes::<32>());
+                // Array length
+                event_data.extend_from_slice(&U256::from(call.assetIds.len()).to_be_bytes::<32>());
+                // Array items (each padded to 32 bytes)
+                for id in &call.assetIds {
+                    event_data.extend_from_slice(&u64_to_u256(*id).to_be_bytes::<32>());
+                }
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(ORACLE_ADDRESS, log);
+                }
 
                 Ok(())
             },
@@ -390,6 +510,26 @@ mod tests {
             )
             .unwrap();
 
+        // Set chain context so submitted timestamp/blockNumber are valid
+        provider.set_timestamp(U256::from(1000));
+        provider.set_block_number(100);
+
+        // Track asset 1 first (required before submit/get)
+        let mut precompile = OraclePrecompile;
+        let input = IProtocolOracle::setTrackedAssetsCall {
+            assetIds: vec![1],
+        }
+        .abi_encode();
+        precompile.call(&input, caller, &mut provider).unwrap();
+
+        // Verify TrackedAssetsUpdated event emitted
+        let logs = provider.events(ORACLE_ADDRESS);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].topics()[0],
+            alloy_primitives::keccak256(b"TrackedAssetsUpdated(uint64[])")
+        );
+
         // submitPrice
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::submitPriceCall {
@@ -403,13 +543,16 @@ mod tests {
         let result = precompile.call(&input, caller, &mut provider);
         assert!(result.is_ok(), "submitPrice failed: {:?}", result.err());
 
-        // Verify event emitted
+        // Verify PriceSubmitted event emitted
         let logs = provider.events(ORACLE_ADDRESS);
-        assert_eq!(logs.len(), 1);
-        assert_eq!(
-            logs[0].topics()[0],
-            alloy_primitives::keccak256(b"PriceSubmitted(uint64,uint128,uint64,uint64)")
-        );
+        let price_logs: Vec<_> = logs
+            .iter()
+            .filter(|l| {
+                l.topics()[0]
+                    == alloy_primitives::keccak256(b"PriceSubmitted(uint64,uint128,uint64,uint64)")
+            })
+            .collect();
+        assert_eq!(price_logs.len(), 1);
 
         // getPrice
         let mut precompile = OraclePrecompile;
@@ -437,6 +580,18 @@ mod tests {
             )
             .unwrap();
 
+        // Set chain context so submitted timestamp/blockNumber are valid
+        provider.set_timestamp(U256::from(1000));
+        provider.set_block_number(100);
+
+        // Track asset 1 first
+        let mut precompile = OraclePrecompile;
+        let input = IProtocolOracle::setTrackedAssetsCall {
+            assetIds: vec![1],
+        }
+        .abi_encode();
+        precompile.call(&input, caller, &mut provider).unwrap();
+
         // Submit two prices
         let mut precompile = OraclePrecompile;
         for (price, ts) in [(1_000_000u128, 900u64), (2_000_000, 1000)] {
@@ -462,8 +617,8 @@ mod tests {
         // Cumulative average: (1_000_000 + 2_000_000) / 2 = 1_500_000
         assert_eq!(twap, 1_500_000);
 
-        // isStale with chain timestamp = 2000 (not stale, threshold = 3600)
-        provider.set_timestamp(U256::from(2000));
+        // isStale with chain timestamp = 1800 (not stale, stored=1000, threshold=900, 1000+900=1900 > 1800)
+        provider.set_timestamp(U256::from(1800));
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
         let result = precompile
@@ -471,8 +626,8 @@ mod tests {
             .unwrap();
         assert_eq!(result.bytes[31], 0);
 
-        // isStale with chain timestamp = 5000 (stale, 5000 - 1000 = 4000 > 3600)
-        provider.set_timestamp(U256::from(5000));
+        // isStale with chain timestamp = 2000 (stale, 1000+900=1900 < 2000)
+        provider.set_timestamp(U256::from(2000));
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
         let result = precompile
