@@ -496,6 +496,91 @@ fn test_queue_emergency_pause_skips_timelock() {
 // ── Execute ───────────────────────────────────────────────────────
 
 #[test]
+fn test_execute_timeout_expires() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 10);
+        gov.write_config_u64(b"execution_timeout", 50);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 101).unwrap();
+
+        let exec_block = gov.read_proposal_u64(id, b"execution_block");
+        // Before execution block: still rejected by timelock
+        let result = gov.execute(&mut asset, id, exec_block - 1, proposer);
+        assert!(result.is_err());
+
+        // After execution block but within timeout: succeeds
+        gov.execute(&mut asset, id, exec_block, proposer).unwrap();
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+#[test]
+fn test_execute_past_timeout_marked_expired() {
+    let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, 0);
+    let id = {
+        let storage = &mut provider;
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 10);
+        gov.write_config_u64(b"execution_timeout", 50);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 101).unwrap();
+        id
+    };
+
+    // Advance past execution block + timeout
+    provider.set_block_number(200);
+    {
+        let storage = &mut provider;
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        let result = gov.execute(&mut asset, id, 200, proposer);
+        assert!(result.is_err(), "execute past timeout should fail");
+        assert_eq!(gov.read_proposal_status(id), 6); // Expired
+    }
+}
+
+#[test]
 fn test_execute_after_timelock() {
     with_storage(0, |storage| {
         let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
@@ -606,6 +691,97 @@ fn test_execute_emergency_pause_sets_paused() {
         assert!(!gov.is_paused());
         gov.execute(&mut asset, id, 1, proposer).unwrap();
         assert!(gov.is_paused());
+    });
+}
+
+// ── TreasurySpend ─────────────────────────────────────────────────
+
+#[test]
+fn test_treasury_spend_transfers_from_treasury() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+        let recipient = test_addr(2);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        // Seed treasury with funds
+        seed_balance(storage, crate::precompile::TREASURY_ADDRESS, 500_000);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        // execution_data = ABI-encoded (address recipient, uint128 amount)
+        let mut execution_data = vec![0u8; 64];
+        execution_data[12..32].copy_from_slice(recipient.as_slice());
+        let amount = 100_000u128;
+        execution_data[48..64].copy_from_slice(&amount.to_be_bytes());
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                2, // TreasurySpend
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(3), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        // Recipient should receive exactly the spend amount (not more)
+        let recipient_balance = asset.read_balance(call_protocol::CALL_ASSET_ID, recipient);
+        assert_eq!(recipient_balance, amount);
+
+        // Treasury should be debited
+        let treasury_balance = asset.read_balance(
+            call_protocol::CALL_ASSET_ID,
+            crate::precompile::TREASURY_ADDRESS,
+        );
+        assert_eq!(treasury_balance, 400_000);
+    });
+}
+
+#[test]
+fn test_treasury_spend_rejects_insufficient_treasury() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+        let recipient = test_addr(2);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        // Treasury has no funds
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let mut execution_data = vec![0u8; 64];
+        execution_data[12..32].copy_from_slice(recipient.as_slice());
+        let amount = 100_000u128;
+        execution_data[48..64].copy_from_slice(&amount.to_be_bytes());
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                2, // TreasurySpend
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(3), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(result.is_err(), "treasury spend with no funds should fail");
     });
 }
 
