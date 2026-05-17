@@ -368,7 +368,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
     fn commitment_exists(&mut self, commitment: [u8; 32]) -> bool {
         self.sload_shielded(slot_shielded_commitment_exists(commitment))
             .to_be_bytes::<32>()[31]
-            == 1
+            != 0
     }
 
     /// Mark a commitment as existing in the dedup set.
@@ -772,6 +772,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
     }
 
     pub fn get_commitment(&mut self, index: u64) -> [u8; 32] {
+        let count = self.get_commitment_count();
+        if index >= count {
+            return [0u8; 32];
+        }
         self.sload_shielded(slot_shielded_commitment(index))
             .to_be_bytes::<32>()
     }
@@ -789,6 +793,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
     }
 
     pub fn get_root_history(&mut self, index: u64) -> [u8; 32] {
+        let count = self.get_root_history_count();
+        if index >= count {
+            return [0u8; 32];
+        }
         self.sload_shielded(slot_shielded_root_history(index))
             .to_be_bytes::<32>()
     }
