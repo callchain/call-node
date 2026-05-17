@@ -5,6 +5,9 @@ use call_crypto::ed25519_sign;
 use ed25519_dalek::SigningKey;
 
 /// Create a canonical message hash for oracle submissions
+/// Protocol domain separator to prevent cross-protocol replay attacks.
+const ORACLE_DOMAIN_SEPARATOR: &[u8] = b"CALL_ORACLE_V1";
+
 pub fn oracle_message_hash(
     validator_id: u32,
     pair: PricePair,
@@ -12,7 +15,8 @@ pub fn oracle_message_hash(
     block_number: u64,
     timestamp: u64,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(4 + 16 + 16 + 8 + 8);
+    let mut msg = Vec::with_capacity(14 + 4 + 16 + 16 + 8 + 8);
+    msg.extend_from_slice(ORACLE_DOMAIN_SEPARATOR);
     msg.extend_from_slice(&validator_id.to_le_bytes());
     msg.extend_from_slice(&pair.base.to_le_bytes());
     msg.extend_from_slice(&pair.quote.to_le_bytes());

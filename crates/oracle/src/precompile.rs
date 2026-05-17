@@ -61,6 +61,10 @@ fn slot_oracle_tracked_asset(index: u64) -> U256 {
     storage_slot(&[b"tracked", &index.to_be_bytes()[..]])
 }
 
+fn slot_oracle_tracked_flag(asset_id: u64) -> U256 {
+    storage_slot(&[&asset_id.to_be_bytes()[..], b"flag"])
+}
+
 // ── OracleStorage ─────────────────────────────────────────────────────
 
 /// Business logic for oracle operations backed by any StorageBackend.
@@ -127,20 +131,19 @@ impl<B: StorageBackend> OracleStorage<B> {
         )
     }
 
-    /// Check whether an asset is currently in the tracked list.
+    /// Check whether an asset is currently in the tracked list (O(1)).
     pub fn is_asset_tracked(&mut self, asset_id: u64) -> bool {
-        let count = self.read_tracked_count();
-        for i in 0..count {
-            if self.read_tracked_asset(i) == asset_id {
-                return true;
-            }
-        }
-        false
+        let flag = self.backend.load(ORACLE_ADDRESS, slot_oracle_tracked_flag(asset_id));
+        flag != U256::ZERO
     }
 
     pub fn set_tracked_assets(&mut self, asset_ids: Vec<u64>) {
         // Read old count BEFORE overwriting it
         let old_count = self.read_tracked_count();
+        // Collect old asset IDs so we can clear their O(1) flags
+        let old_assets: Vec<u64> = (0..old_count)
+            .map(|i| self.read_tracked_asset(i))
+            .collect();
         self.backend.store(
             ORACLE_ADDRESS,
             slot_oracle_tracked_count(),
@@ -152,11 +155,27 @@ impl<B: StorageBackend> OracleStorage<B> {
                 slot_oracle_tracked_asset(i as u64),
                 u64_to_u256(*asset_id),
             );
+            // Set O(1) tracked flag
+            self.backend.store(
+                ORACLE_ADDRESS,
+                slot_oracle_tracked_flag(*asset_id),
+                U256::from(1),
+            );
         }
-        // Zero out any old entries beyond the new list
+        // Zero out any old entries beyond the new list and clear flags for
+        // assets that are no longer tracked.
         for i in asset_ids.len() as u64..old_count {
             self.backend
                 .store(ORACLE_ADDRESS, slot_oracle_tracked_asset(i), U256::ZERO);
+        }
+        for old_asset in old_assets {
+            if !asset_ids.contains(&old_asset) {
+                self.backend.store(
+                    ORACLE_ADDRESS,
+                    slot_oracle_tracked_flag(old_asset),
+                    U256::ZERO,
+                );
+            }
         }
     }
 
@@ -203,8 +222,10 @@ impl<B: StorageBackend> OracleStorage<B> {
         );
 
         // Cap the TWAP sample count to prevent unbounded growth.
+        // Reset to half the cap so historical weight is preserved and
+        // responsiveness does not suddenly jump.
         let new_count = if count >= MAX_TWAP_COUNT {
-            1
+            MAX_TWAP_COUNT / 2
         } else {
             count + 1
         };
@@ -225,6 +246,8 @@ sol! {
         function isStale(uint64 assetId) external view returns (uint8);
         function submitPrice(uint64 assetId, uint128 price, uint64 timestamp, uint64 blockNumber) external;
         function setTrackedAssets(uint64[] assetIds) external;
+        function getPrices(uint64[] assetIds) external view returns (uint128[]);
+        function getTWAPs(uint64[] assetIds) external view returns (uint128[]);
     }
 }
 
@@ -278,6 +301,75 @@ impl OraclePrecompile {
         )
     }
 
+    fn get_prices(
+        &self,
+        calldata: &[u8],
+        _storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        let call = IProtocolOracle::getPricesCall::abi_decode(calldata)
+            .map_err(|_| PrecompileError::Other("decode failed".into()))?;
+
+        let mut store = OracleStorage::new(sr);
+        let mut prices = Vec::with_capacity(call.assetIds.len());
+        for asset_id in &call.assetIds {
+            if !store.is_asset_tracked(*asset_id) {
+                return Err(PrecompileError::Other(
+                    "oracle: asset not tracked".into(),
+                ));
+            }
+            prices.push(U256::from(store.read_price(*asset_id)));
+        }
+
+        // Manual ABI encoding for uint128[]: offset || length || items
+        let mut encoded = Vec::with_capacity(64 + prices.len() * 32);
+        encoded.extend_from_slice(&U256::from(32).to_be_bytes::<32>());
+        encoded.extend_from_slice(&U256::from(prices.len()).to_be_bytes::<32>());
+        for price in prices {
+            encoded.extend_from_slice(&price.to_be_bytes::<32>());
+        }
+
+        let gas = 1000u64 + 500u64 * call.assetIds.len().max(1) as u64;
+        Ok(revm_precompile::PrecompileOutput::new(
+            gas,
+            alloy_primitives::Bytes::from(encoded),
+        ))
+    }
+
+    fn get_twap_batch(
+        &self,
+        calldata: &[u8],
+        _storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        let call = IProtocolOracle::getTWAPsCall::abi_decode(calldata)
+            .map_err(|_| PrecompileError::Other("decode failed".into()))?;
+
+        let mut store = OracleStorage::new(sr);
+        let mut twaps = Vec::with_capacity(call.assetIds.len());
+        for asset_id in &call.assetIds {
+            if !store.is_asset_tracked(*asset_id) {
+                return Err(PrecompileError::Other(
+                    "oracle: asset not tracked".into(),
+                ));
+            }
+            twaps.push(U256::from(store.read_twap(*asset_id)));
+        }
+
+        let mut encoded = Vec::with_capacity(64 + twaps.len() * 32);
+        encoded.extend_from_slice(&U256::from(32).to_be_bytes::<32>());
+        encoded.extend_from_slice(&U256::from(twaps.len()).to_be_bytes::<32>());
+        for twap in twaps {
+            encoded.extend_from_slice(&twap.to_be_bytes::<32>());
+        }
+
+        let gas = 1000u64 + 500u64 * call.assetIds.len().max(1) as u64;
+        Ok(revm_precompile::PrecompileOutput::new(
+            gas,
+            alloy_primitives::Bytes::from(encoded),
+        ))
+    }
+
     fn is_stale(
         &self,
         calldata: &[u8],
@@ -291,6 +383,11 @@ impl OraclePrecompile {
             storage,
             |call, _storage| {
                 let mut store = OracleStorage::new(sr);
+                if !store.is_asset_tracked(call.assetId) {
+                    return Err(PrecompileError::Other(
+                        "oracle: asset not tracked".into(),
+                    ));
+                }
                 Ok(U256::from(if store.is_stale(call.assetId, current_ts) {
                     1u8
                 } else {
@@ -364,6 +461,26 @@ impl OraclePrecompile {
                 }
 
                 let mut store = OracleStorage::new(sr);
+                if !store.is_asset_tracked(call.assetId) {
+                    return Err(PrecompileError::Other(
+                        "oracle submit: asset not tracked".into(),
+                    ));
+                }
+
+                // Rate limiting: prevent rapid repeated submissions for the same asset.
+                // NOTE: The precompile submitPrice path is a trusted direct-write
+                // interface for validators.  It is intentionally simpler than the
+                // P2P tracker path (which performs Ed25519 signature verification,
+                // quorum aggregation, and outlier detection).  The frequency limit
+                // below is a minimal on-chain guard against accidental or abusive
+                // rapid-fire submissions.
+                let stored_ts = store.read_timestamp(call.assetId);
+                if stored_ts != 0 && current_ts < stored_ts + crate::constants::ORACLE_PERIOD_SECS {
+                    return Err(PrecompileError::Other(
+                        "oracle submit: too frequent".into(),
+                    ));
+                }
+
                 store.submit_price(call.assetId, call.price, call.timestamp, call.blockNumber);
 
                 // Emit PriceSubmitted event
@@ -467,6 +584,10 @@ impl call_precompile::StatefulPrecompile for OraclePrecompile {
         match selector {
             IProtocolOracle::getPriceCall::SELECTOR => self.get_price(calldata, storage, sr),
             IProtocolOracle::getTWAPCall::SELECTOR => self.get_twap(calldata, storage, sr),
+            IProtocolOracle::getPricesCall::SELECTOR => self.get_prices(calldata, storage, sr),
+            IProtocolOracle::getTWAPsCall::SELECTOR => {
+                self.get_twap_batch(calldata, storage, sr)
+            }
             IProtocolOracle::isStaleCall::SELECTOR => self.is_stale(calldata, storage, sr),
             IProtocolOracle::submitPriceCall::SELECTOR => {
                 self.submit_price(calldata, msg_sender, storage, sr)
@@ -592,14 +713,20 @@ mod tests {
         .abi_encode();
         precompile.call(&input, caller, &mut provider).unwrap();
 
-        // Submit two prices
+        // Submit two prices spaced by at least ORACLE_PERIOD_SECS (240)
+        // to satisfy the on-chain rate limit.
         let mut precompile = OraclePrecompile;
-        for (price, ts) in [(1_000_000u128, 900u64), (2_000_000, 1000)] {
+        for (price, ts, blk) in [
+            (1_000_000u128, 900u64, 100u64),
+            (2_000_000, 1200, 101),
+        ] {
+            provider.set_timestamp(U256::from(ts));
+            provider.set_block_number(blk);
             let input = IProtocolOracle::submitPriceCall {
                 assetId: 1,
                 price,
                 timestamp: ts,
-                blockNumber: 100,
+                blockNumber: blk,
             }
             .abi_encode();
             precompile.call(&input, caller, &mut provider).unwrap();
@@ -617,7 +744,7 @@ mod tests {
         // Cumulative average: (1_000_000 + 2_000_000) / 2 = 1_500_000
         assert_eq!(twap, 1_500_000);
 
-        // isStale with chain timestamp = 1800 (not stale, stored=1000, threshold=900, 1000+900=1900 > 1800)
+        // isStale with chain timestamp = 1800 (not stale, stored=1200, threshold=900, 1200+900=2100 > 1800)
         provider.set_timestamp(U256::from(1800));
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
@@ -626,8 +753,8 @@ mod tests {
             .unwrap();
         assert_eq!(result.bytes[31], 0);
 
-        // isStale with chain timestamp = 2000 (stale, 1000+900=1900 < 2000)
-        provider.set_timestamp(U256::from(2000));
+        // isStale with chain timestamp = 2200 (stale, 1200+900=2100 < 2200)
+        provider.set_timestamp(U256::from(2200));
         let mut precompile = OraclePrecompile;
         let input = IProtocolOracle::isStaleCall { assetId: 1 }.abi_encode();
         let result = precompile

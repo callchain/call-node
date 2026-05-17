@@ -1,6 +1,38 @@
 //! Price fetcher trait and implementations
 
 use crate::PricePair;
+
+/// Parse a decimal string (e.g. `"123.456789"`) into a fixed-point `u128`
+/// with `precision` fractional digits, without using `f64`.
+fn parse_decimal_to_u128(s: &str, precision: u32) -> Option<u128> {
+    let mut parts = s.split('.');
+    let int_part = parts.next()?;
+    let frac_part = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return None; // More than one dot
+    }
+
+    let int_val = int_part.parse::<u128>().ok()?;
+    let mut frac_val: u128 = 0;
+    let mut digits = 0;
+    for ch in frac_part.chars() {
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        if digits < precision {
+            frac_val = frac_val * 10 + (ch as u8 - b'0') as u128;
+            digits += 1;
+        }
+    }
+    // Pad remaining precision digits with zeros
+    while digits < precision {
+        frac_val *= 10;
+        digits += 1;
+    }
+
+    let scale = 10u128.checked_pow(precision)?;
+    int_val.checked_mul(scale)?.checked_add(frac_val)
+}
 #[cfg(feature = "http-fetcher")]
 use call_primitives::AssetId;
 
@@ -74,8 +106,9 @@ impl PriceFetcher for HttpPriceFetcher {
                 .or_else(|| body.get("lastPrice"))
                 .or_else(|| body.get("last"))?
                 .as_str()?;
-            // Parse as f64 then convert to u128 (price in smallest units)
-            price_str.parse::<f64>().ok().map(|f| f as u128)
+            // Parse decimal string without losing precision via f64.
+            // Assumes 6-decimal fixed-point output for the chain.
+            parse_decimal_to_u128(price_str, 6)
         };
 
         tokio::task::block_in_place(|| rt.block_on(future))
