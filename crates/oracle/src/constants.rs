@@ -16,7 +16,7 @@ pub const ORACLE_STALENESS_SECS: u64 = 900;
 pub const ORACLE_MIN_DATA_SOURCES: usize = 2;
 
 /// Compute the oracle quorum from the number of active validators.
-/// Returns ceil(2/3 * n), minimum 2, capped at n.
+/// Returns ceil(2/3 * n), minimum 1, capped at n.
 pub fn oracle_quorum(active_count: usize) -> usize {
     if active_count == 0 {
         return 0;

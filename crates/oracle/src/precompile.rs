@@ -275,7 +275,13 @@ impl OraclePrecompile {
                         "oracle: asset not tracked".into(),
                     ));
                 }
-                Ok(store.read_price(call.assetId))
+                let price = store.read_price(call.assetId);
+                if price == 0 {
+                    return Err(PrecompileError::Other(
+                        "oracle: price not initialized".into(),
+                    ));
+                }
+                Ok(price)
             },
         )
     }
@@ -471,15 +477,24 @@ impl OraclePrecompile {
                 store.submit_price(call.assetId, call.price, call.timestamp, call.blockNumber);
 
                 // Emit PriceSubmitted event
-                let topic0 =
-                    alloy_primitives::keccak256(b"PriceSubmitted(uint64,uint128,uint64,uint64)");
-                let mut event_data = Vec::with_capacity(128);
-                event_data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
+                // Signature: PriceSubmitted(address indexed validator,
+                //   uint64 indexed assetId, uint128 price, uint64 timestamp,
+                //   uint64 blockNumber)
+                let topic0 = alloy_primitives::keccak256(
+                    b"PriceSubmitted(address,uint64,uint128,uint64,uint64)",
+                );
+                let mut addr_bytes = [0u8; 32];
+                addr_bytes[12..].copy_from_slice(caller.as_slice());
+                let topic1 = alloy_primitives::B256::from(addr_bytes);
+                let topic2 = alloy_primitives::B256::from(
+                    u64_to_u256(call.assetId).to_be_bytes::<32>(),
+                );
+                let mut event_data = Vec::with_capacity(96);
                 event_data.extend_from_slice(&u128_to_u256(call.price).to_be_bytes::<32>());
                 event_data.extend_from_slice(&u64_to_u256(call.timestamp).to_be_bytes::<32>());
                 event_data.extend_from_slice(&u64_to_u256(call.blockNumber).to_be_bytes::<32>());
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0],
+                    vec![topic0, topic1, topic2],
                     alloy_primitives::Bytes::from(event_data),
                 ) {
                     let _ = storage.emit_event(ORACLE_ADDRESS, log);
@@ -653,7 +668,7 @@ mod tests {
             .iter()
             .filter(|l| {
                 l.topics()[0]
-                    == alloy_primitives::keccak256(b"PriceSubmitted(uint64,uint128,uint64,uint64)")
+                    == alloy_primitives::keccak256(b"PriceSubmitted(address,uint64,uint128,uint64,uint64)")
             })
             .collect();
         assert_eq!(price_logs.len(), 1);
@@ -696,8 +711,7 @@ mod tests {
         .abi_encode();
         precompile.call(&input, GOVERNANCE_ADDRESS, &mut provider).unwrap();
 
-        // Submit two prices spaced by at least ORACLE_PERIOD_SECS (240)
-        // to satisfy the on-chain rate limit.
+        // Submit two prices to build a cumulative TWAP.
         let mut precompile = OraclePrecompile;
         for (price, ts, blk) in [
             (1_000_000u128, 900u64, 100u64),
