@@ -300,13 +300,133 @@ fn proof_cache_key(
     alloy_primitives::keccak256(&data).0
 }
 
+/// Persistent cache file path.  Stored in the OS temp directory so it
+/// survives process restarts but is scoped to the machine.
+#[cfg(feature = "halo2-prover")]
+fn cache_file_path() -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push("call_shielded_verify_cache_v1.bin");
+    path
+}
+
+/// Load the verification cache from disk.  Corrupt or missing files are
+/// treated as empty caches.
+#[cfg(feature = "halo2-prover")]
+fn load_verify_cache() -> std::collections::HashMap<[u8; 32], VerifyCacheEntry> {
+    use std::io::Read;
+    let path = cache_file_path();
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return std::collections::HashMap::new();
+    }
+    if buf.len() < 12 {
+        return std::collections::HashMap::new();
+    }
+    if &buf[0..4] != b"CALL" {
+        return std::collections::HashMap::new();
+    }
+    let version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if version != 1 {
+        return std::collections::HashMap::new();
+    }
+    let count = u64::from_le_bytes([
+        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+    ]) as usize;
+    let mut map = std::collections::HashMap::with_capacity(count.min(VERIFY_CACHE_MAX_ENTRIES));
+    let mut offset = 16usize;
+    let now = std::time::Instant::now();
+    for _ in 0..count {
+        if offset + 41 > buf.len() {
+            break;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&buf[offset..offset + 32]);
+        offset += 32;
+        let saved_secs = u64::from_le_bytes([
+            buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+            buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+        ]);
+        offset += 8;
+        let result_byte = buf[offset];
+        offset += 1;
+        let result = match result_byte {
+            1 => Ok(true),
+            2 => Ok(false),
+            3 => {
+                if offset + 2 > buf.len() {
+                    break;
+                }
+                let err_len = u16::from_le_bytes([buf[offset], buf[offset + 1]]) as usize;
+                offset += 2;
+                if offset + err_len > buf.len() {
+                    break;
+                }
+                let err_str = String::from_utf8_lossy(&buf[offset..offset + err_len]).into_owned();
+                offset += err_len;
+                Err(err_str)
+            }
+            _ => break,
+        };
+        // Reconstruct Instant from elapsed time approximation:
+        // we store age_in_secs; on load we compute Instant::now() - age.
+        let age = std::time::Duration::from_secs(saved_secs);
+        let timestamp = now.checked_sub(age).unwrap_or(now);
+        map.insert(
+            key,
+            VerifyCacheEntry {
+                result,
+                timestamp,
+            },
+        );
+    }
+    map
+}
+
+/// Save the verification cache to disk.  Best-effort: failures are silently
+/// ignored so that cache persistence never breaks consensus.
+#[cfg(feature = "halo2-prover")]
+fn save_verify_cache(cache: &std::collections::HashMap<[u8; 32], VerifyCacheEntry>) {
+    use std::io::Write;
+    let path = cache_file_path();
+    let mut data = Vec::new();
+    data.extend_from_slice(b"CALL");
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&(cache.len() as u64).to_le_bytes());
+    for (key, entry) in cache.iter() {
+        data.extend_from_slice(key);
+        let age_secs = entry.timestamp.elapsed().as_secs();
+        data.extend_from_slice(&age_secs.to_le_bytes());
+        match &entry.result {
+            Ok(true) => data.push(1u8),
+            Ok(false) => data.push(2u8),
+            Err(e) => {
+                data.push(3u8);
+                let bytes = e.as_bytes();
+                let len = bytes.len().min(u16::MAX as usize) as u16;
+                data.extend_from_slice(&len.to_le_bytes());
+                data.extend_from_slice(&bytes[..len as usize]);
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::File::create(&path) {
+        let _ = file.write_all(&data);
+    }
+}
+
 /// Access the global proof verification cache.
 #[cfg(feature = "halo2-prover")]
 fn verify_cache() -> &'static std::sync::Mutex<std::collections::HashMap<[u8; 32], VerifyCacheEntry>> {
     use std::sync::OnceLock;
     static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<[u8; 32], VerifyCacheEntry>>> =
         OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    CACHE.get_or_init(|| std::sync::Mutex::new(load_verify_cache()))
 }
 
 /// Verify a ZK proof against the Halo2Prover when the `halo2-prover` feature is enabled.
@@ -430,6 +550,10 @@ pub fn verify_shielded_proof(
                 timestamp: std::time::Instant::now(),
             },
         );
+        // Persist to disk every ~20 insertions to amortise I/O cost
+        if cache.len() % 20 == 0 {
+            save_verify_cache(&cache);
+        }
     }
 
     result

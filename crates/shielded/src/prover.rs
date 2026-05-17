@@ -145,15 +145,54 @@ mod halo2_prover_impl {
             registry.get(&version).cloned()
         }
 
+        /// Default key directory for persistent Halo2 parameters.
+        pub fn default_key_dir() -> std::path::PathBuf {
+            let mut path = std::env::temp_dir();
+            path.push("call_halo2_keys");
+            path
+        }
+
+        /// Load `Params` from disk or generate and save them.
+        fn load_or_create_params(k: u32, dir: &std::path::Path, name: &str) -> Params<EqAffine> {
+            use std::io::{Read, Write};
+            let path = dir.join(format!("{}_params_k{}.bin", name, k));
+            if let Ok(mut file) = std::fs::File::open(&path) {
+                let mut buf = Vec::new();
+                if file.read_to_end(&mut buf).is_ok() {
+                    if let Ok(params) = Params::read(&mut buf.as_slice()) {
+                        if params.k() == k {
+                            return params;
+                        }
+                    }
+                }
+            }
+            let params = Params::new(k);
+            let _ = std::fs::create_dir_all(dir);
+            if let Ok(mut file) = std::fs::File::create(&path) {
+                let mut buf = Vec::new();
+                let _ = params.write(&mut buf);
+                let _ = file.write_all(&buf);
+            }
+            params
+        }
+
         /// Generate universal parameters and circuit-specific keys for all three circuits.
         ///
         /// Uses `Params::new(k)` where k is the circuit's row count exponent:
         /// - Deposit: k=10 (1024 rows)
         /// - Withdraw: k=12 (4096 rows, 32-level Merkle path)
         /// - Transfer: k=12 (4096 rows, 2-in/2-out)
+        ///
+        /// Parameters are persisted to disk so subsequent calls (and node restarts)
+        /// avoid the expensive multi-exponentiation setup.
         pub fn setup() -> Self {
+            Self::setup_from_dir(&Self::default_key_dir())
+        }
+
+        /// Setup from a specific key directory.
+        pub fn setup_from_dir(dir: &std::path::Path) -> Self {
             // Deposit circuit (k=10)
-            let deposit_params = Params::new(10);
+            let deposit_params = Self::load_or_create_params(10, dir, "deposit");
             let deposit_circuit = setup_deposit_circuit();
             let deposit_vk = keygen_vk(&deposit_params, &deposit_circuit)
                 .expect("deposit keygen_vk");
@@ -161,7 +200,7 @@ mod halo2_prover_impl {
                 .expect("deposit keygen_pk");
 
             // Withdraw circuit (k=12)
-            let withdraw_params = Params::new(12);
+            let withdraw_params = Self::load_or_create_params(12, dir, "withdraw");
             let withdraw_circuit = setup_withdraw_circuit();
             let withdraw_vk = keygen_vk(&withdraw_params, &withdraw_circuit)
                 .expect("withdraw keygen_vk");
@@ -169,7 +208,7 @@ mod halo2_prover_impl {
                 .expect("withdraw keygen_pk");
 
             // Transfer circuit (k=12)
-            let transfer_params = Params::new(12);
+            let transfer_params = Self::load_or_create_params(12, dir, "transfer");
             let transfer_circuit = setup_transfer_circuit();
             let transfer_vk = keygen_vk(&transfer_params, &transfer_circuit)
                 .expect("transfer keygen_vk");
