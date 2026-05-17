@@ -344,7 +344,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
 
     /// Return true if the shielded pool is paused.
     fn is_paused(&mut self) -> bool {
-        self.sload_shielded(slot_shielded_paused()).to_be_bytes::<32>()[31] == 1
+        self.sload_shielded(slot_shielded_paused()).to_be_bytes::<32>()[31] != 0
     }
 
     /// Revert if the pool is paused.
@@ -457,10 +457,14 @@ impl<B: StorageBackend> ShieldedStorage<B> {
     }
 
     /// Revert if the caller is not the governance address.
-    /// During initialization (governance == zero), anyone can set governance.
+    /// Requires governance to be set (non-zero) — initialization window is
+    /// only for setGovernance, not for operational governance functions.
     fn require_governance(&mut self, caller: Address) -> Result<(), ShieldedError> {
         let gov = self.governance();
-        if gov != Address::ZERO && caller != gov {
+        if gov == Address::ZERO {
+            return Err(ShieldedError::Unauthorized);
+        }
+        if caller != gov {
             return Err(ShieldedError::Unauthorized);
         }
         Ok(())
@@ -604,6 +608,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::InvalidAmount);
         }
 
+        if target == Address::ZERO {
+            return Err(ShieldedError::InvalidAmount);
+        }
+
         if !self.is_valid_root(merkle_root) {
             return Err(ShieldedError::MerkleRootMismatch);
         }
@@ -711,6 +719,16 @@ impl<B: StorageBackend> ShieldedStorage<B> {
                 Ok(true) => {}
                 Ok(false) => return Err(ShieldedError::InvalidZkProof),
                 Err(e) => return Err(ShieldedError::ZkProofError(e)),
+            }
+        }
+
+        // Reject duplicate nullifiers within the same batch
+        {
+            let mut seen = std::collections::HashSet::new();
+            for nf in &nullifiers {
+                if !seen.insert(*nf) {
+                    return Err(ShieldedError::NullifierAlreadySpent);
+                }
             }
         }
 
@@ -1151,9 +1169,14 @@ impl ShieldedPrecompile {
             storage,
             |call, _storage| {
                 let mut store = ShieldedStorage::new(sr);
-                store
-                    .require_governance(msg_sender)
-                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                let gov = store.governance();
+                // Initialization: anyone can set governance when it's zero.
+                // After initialization, only existing governance can change it.
+                if gov != Address::ZERO && gov != msg_sender {
+                    return Err(PrecompileError::Other(
+                        "not authorized".to_string().into(),
+                    ));
+                }
                 store.set_governance(call.governance);
                 Ok(())
             },
@@ -1413,6 +1436,29 @@ mod tests {
         assert!(err.contains("invalid ZK proof"), "expected InvalidZkProof, got: {err}");
     }
 
+    /// Withdraw to zero address must be rejected.
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_withdraw_rejects_zero_target() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let input = IProtocolShielded::withdrawCall {
+            assetId: 1,
+            target: Address::ZERO,
+            amount: 500,
+            nullifier: [0xBBu8; 32].into(),
+            merkleRoot: [0u8; 32].into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "withdraw to zero address should fail");
+    }
+
     /// Withdraw precompile test with real Halo2 proof verification.
     /// Only runs when `halo2-prover` feature is enabled.
     #[cfg(feature = "halo2-prover")]
@@ -1543,6 +1589,35 @@ mod tests {
 
         let result = precompile.call(&input, sender, &mut provider);
         assert!(result.is_err(), "transfer with empty commitments should fail");
+    }
+
+    /// Transfer with duplicate nullifiers in the same batch must be rejected.
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_transfer_rejects_duplicate_nullifiers() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let dup_nf = [0xCCu8; 32];
+        let nullifiers = vec![dup_nf.into(), dup_nf.into()];
+        let commitments = vec![test_commitment(3).into(), test_commitment(4).into()];
+
+        let input = IProtocolShielded::transferCall {
+            assetId: 1,
+            proof: vec![1u8; 200].into(),
+            nullifiers,
+            commitments,
+            merkleRoot: [0u8; 32].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_err(),
+            "transfer with duplicate nullifiers should fail"
+        );
     }
 
     /// Transfer with invalid merkleRoot must be rejected.
@@ -1687,6 +1762,24 @@ mod tests {
         assert!(result.is_err(), "deposit should fail when paused");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("paused"), "expected Paused error, got: {err}");
+    }
+
+    /// setPaused must fail when governance has not been set (zero address).
+    #[test]
+    fn test_shielded_precompile_set_paused_rejects_zero_governance() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let attacker = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        // No governance set — setPaused should fail
+        let input = IProtocolShielded::setPausedCall { paused: true }.abi_encode();
+        let result = precompile.call(&input, attacker, &mut provider);
+        assert!(
+            result.is_err(),
+            "setPaused should fail when governance is zero"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unauthorized"), "expected Unauthorized, got: {err}");
     }
 
     #[cfg(not(feature = "halo2-prover"))]

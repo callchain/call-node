@@ -267,6 +267,8 @@ struct VerifyCacheEntry {
 const VERIFY_CACHE_TTL_SECS: u64 = 300;
 /// Maximum entries before cache eviction.
 const VERIFY_CACHE_MAX_ENTRIES: usize = 10_000;
+/// Maximum supported prover key version.
+const MAX_KEY_VERSION: u32 = 1_000;
 
 /// Generate a deterministic cache key for a proof verification request.
 fn proof_cache_key(
@@ -570,6 +572,10 @@ pub fn verify_shielded_proof(
 /// - No duplicate nullifiers (replay protection)
 /// - Nullifier/commitment count consistency (deposit: nf=0,cm≥1; withdraw: nf≥1,cm=0; transfer: nf≥1,cm≥1)
 pub fn verify_zk_proof(proof: &ZkProof) -> bool {
+    // 0. key_version must be within supported range
+    if proof.key_version > MAX_KEY_VERSION {
+        return false;
+    }
     // 1. Proof data must be non-empty and within reasonable Halo2 proof bounds
     if proof.proof_data.is_empty() || proof.proof_data.len() > 20_000 {
         return false;
@@ -804,6 +810,18 @@ mod tests {
             key_version: 0,
         };
         assert!(!verify_zk_proof(&dup));
+    }
+
+    #[test]
+    fn test_zk_proof_rejects_invalid_key_version() {
+        let bad = ZkProof {
+            proof_data: vec![1u8; 200],
+            nullifiers: vec![Nullifier::new(test_hash(1))],
+            commitments: vec![NoteCommitment::new(test_hash(2))],
+            asset_id: 1,
+            key_version: MAX_KEY_VERSION + 1,
+        };
+        assert!(!verify_zk_proof(&bad));
     }
 
     #[test]
