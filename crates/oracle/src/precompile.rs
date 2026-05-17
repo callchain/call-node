@@ -114,7 +114,7 @@ impl<B: StorageBackend> OracleStorage<B> {
 
     pub fn is_stale(&mut self, asset_id: u64, current_ts: u64) -> bool {
         let stored_ts = self.read_timestamp(asset_id);
-        stored_ts + STALE_THRESHOLD_SECS < current_ts
+        stored_ts.saturating_add(STALE_THRESHOLD_SECS) < current_ts
     }
 
     pub fn read_tracked_count(&mut self) -> u64 {

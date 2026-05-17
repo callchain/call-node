@@ -66,7 +66,7 @@ impl PriceFetcher for NoOpPriceFetcher {
 #[cfg(feature = "http-fetcher")]
 pub struct HttpPriceFetcher {
     endpoints: std::collections::HashMap<AssetId, String>,
-    client: reqwest::Client,
+    client: reqwest::blocking::Client,
 }
 
 #[cfg(feature = "http-fetcher")]
@@ -77,7 +77,10 @@ impl HttpPriceFetcher {
     pub fn new(endpoints: std::collections::HashMap<AssetId, String>) -> Self {
         Self {
             endpoints,
-            client: reqwest::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -93,25 +96,18 @@ impl PriceFetcher for HttpPriceFetcher {
     fn fetch_price(&self, pair: PricePair) -> Option<u128> {
         let url = self.endpoints.get(&pair.base)?;
 
-        // Blocking call — acceptable in the oracle context where we
-        // already have a configurable delay window.
-        let rt = tokio::runtime::Handle::try_current().ok()?;
-        let future = async {
-            let resp = self.client.get(url).send().await.ok()?;
-            let body: serde_json::Value = resp.json().await.ok()?;
-            // Support common formats: {"price": "123.45"}, {"lastPrice": "123.45"},
-            // or a plain number
-            let price_str = body
-                .get("price")
-                .or_else(|| body.get("lastPrice"))
-                .or_else(|| body.get("last"))?
-                .as_str()?;
-            // Parse decimal string without losing precision via f64.
-            // Assumes 6-decimal fixed-point output for the chain.
-            parse_decimal_to_u128(price_str, 6)
-        };
-
-        tokio::task::block_in_place(|| rt.block_on(future))
+        let resp = self.client.get(url).send().ok()?;
+        let body: serde_json::Value = resp.json().ok()?;
+        // Support common formats: {"price": "123.45"}, {"lastPrice": "123.45"},
+        // or a plain number
+        let price_str = body
+            .get("price")
+            .or_else(|| body.get("lastPrice"))
+            .or_else(|| body.get("last"))?
+            .as_str()?;
+        // Parse decimal string without losing precision via f64.
+        // Assumes 6-decimal fixed-point output for the chain.
+        parse_decimal_to_u128(price_str, 6)
     }
 
     fn sources(&self) -> Vec<String> {

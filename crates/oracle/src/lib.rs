@@ -55,14 +55,6 @@ pub struct OracleValidatorInfo {
     pub submission_count: u64,
 }
 
-/// Historical price entry for TWAP
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HistoricalPrice {
-    pub price: u128,
-    pub timestamp: u64,
-    pub block_number: u64,
-}
-
 /// Oracle configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleConfig {

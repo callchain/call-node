@@ -11,6 +11,9 @@ use crate::{
 use call_crypto::ed25519_verify;
 use std::collections::HashMap;
 
+/// Maximum pending submissions per pair before auto-clear (safety cap).
+const MAX_PENDING_PER_PAIR: usize = 256;
+
 /// Transient oracle coordinator.
 #[derive(Debug, Default)]
 pub struct OracleTracker {
@@ -34,7 +37,7 @@ impl OracleTracker {
         &mut self,
         submission: OracleSubmission,
         config: &OracleConfig,
-        validators: &HashMap<u32, OracleValidatorInfo>,
+        validators: &mut HashMap<u32, OracleValidatorInfo>,
     ) -> Result<Option<AggregatedPrice>, OracleError> {
         let validator = validators
             .get(&submission.validator_id)
@@ -81,10 +84,17 @@ impl OracleTracker {
         // Accept submission
         let pair = submission.pair;
         let validator_id = submission.validator_id;
+        let block_number = submission.block_number;
         self.pending
             .entry(pair)
             .or_default()
             .insert(validator_id, submission);
+
+        // Update validator tracking stats
+        if let Some(v) = validators.get_mut(&validator_id) {
+            v.last_submission_block = v.last_submission_block.max(block_number);
+            v.submission_count += 1;
+        }
 
         // Check if quorum reached
         let submissions = self
@@ -99,9 +109,29 @@ impl OracleTracker {
                     .expect("invariant: quorum just reached for this pair"),
                 config,
             );
-            self.last_outliers = outliers;
+            self.last_outliers = outliers.clone();
             self.current_contributors = contributors;
+
+            // Apply outlier penalties: increment outlier_count and disable
+            // validators that exceed the tolerance threshold.
+            for vid in &outliers {
+                if let Some(v) = validators.get_mut(vid) {
+                    v.outlier_count += 1;
+                    if v.outlier_count >= config.outlier_tolerance {
+                        v.is_active = false;
+                    }
+                }
+            }
+
             return Ok(Some(aggregated));
+        }
+
+        // Safety cap: prevent unbounded memory growth for pairs that
+        // never reach quorum (e.g. not enough active validators).
+        if let Some(subs) = self.pending.get(&pair) {
+            if subs.len() > MAX_PENDING_PER_PAIR {
+                self.pending.remove(&pair);
+            }
         }
 
         Ok(None)
@@ -124,17 +154,15 @@ impl OracleTracker {
         let per_validator = total / count;
         let remainder = total % count;
 
+        // Distribute remainder one unit at a time across the first N
+        // contributors instead of giving it all to a single index.
         let rewards: Vec<(u32, u128)> = self
             .current_contributors
             .iter()
             .enumerate()
             .map(|(i, vid)| {
-                let amount = if i == 0 {
-                    per_validator + remainder
-                } else {
-                    per_validator
-                };
-                (*vid, amount)
+                let extra = if (i as u128) < remainder { 1 } else { 0 };
+                (*vid, per_validator + extra)
             })
             .collect();
 

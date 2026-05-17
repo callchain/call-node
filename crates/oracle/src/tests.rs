@@ -47,7 +47,7 @@ fn make_tracker() -> (
 fn submit_all(
     tracker: &mut OracleTracker,
     validators: &[(u32, Ed25519PublicKey, SigningKey)],
-    validator_map: &HashMap<u32, OracleValidatorInfo>,
+    validator_map: &mut HashMap<u32, OracleValidatorInfo>,
     config: &OracleConfig,
     pair: PricePair,
     block: u64,
@@ -93,7 +93,7 @@ fn test_oracle_quorum_function() {
 
 #[test]
 fn test_oracle_submission_valid() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
     let price = 2_000_000u128;
@@ -101,7 +101,7 @@ fn test_oracle_submission_valid() {
     let agg = submit_all(
         &mut tracker,
         &validators,
-        &validator_map,
+        &mut validator_map,
         &config,
         pair,
         block,
@@ -117,7 +117,7 @@ fn test_oracle_submission_valid() {
 
 #[test]
 fn test_oracle_submission_wrong_period() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let (vid, _, signing_key) = &validators[0];
     let timestamp = 500_000u64;
     let pair = PricePair::new(1, 0);
@@ -134,14 +134,14 @@ fn test_oracle_submission_wrong_period() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::WrongPeriod)
     ));
 }
 
 #[test]
 fn test_oracle_submission_duplicate() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let (vid, _, signing_key) = &validators[0];
     let block = 1000u64;
     let timestamp = block * 1000;
@@ -159,7 +159,7 @@ fn test_oracle_submission_duplicate() {
         sources: Vec::new(),
     };
     assert!(tracker
-        .submit_price(submission, &config, &validator_map)
+        .submit_price(submission, &config, &mut validator_map)
         .is_ok());
 
     // Same validator, same block = duplicate (overwrites, not error)
@@ -175,7 +175,7 @@ fn test_oracle_submission_duplicate() {
     };
     // Tracker allows overwriting the same validator's submission
     assert!(tracker
-        .submit_price(submission2, &config, &validator_map)
+        .submit_price(submission2, &config, &mut validator_map)
         .is_ok());
 }
 
@@ -185,7 +185,7 @@ fn test_oracle_submission_duplicate() {
 
 #[test]
 fn test_oracle_invalid_signature_wrong_key() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
     let timestamp = block * 1000;
@@ -211,14 +211,14 @@ fn test_oracle_invalid_signature_wrong_key() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::InvalidSignature)
     ));
 }
 
 #[test]
 fn test_oracle_invalid_signature_tampered_price() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let (vid, _, signing_key) = &validators[0];
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
@@ -238,14 +238,14 @@ fn test_oracle_invalid_signature_tampered_price() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::InvalidSignature)
     ));
 }
 
 #[test]
 fn test_oracle_invalid_signature_tampered_block() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let (vid, _, signing_key) = &validators[0];
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
@@ -266,14 +266,14 @@ fn test_oracle_invalid_signature_tampered_block() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::InvalidSignature)
     ));
 }
 
 #[test]
 fn test_oracle_invalid_signature_all_zeros() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let (vid, _, _) = &validators[0];
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
@@ -289,14 +289,14 @@ fn test_oracle_invalid_signature_all_zeros() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::InvalidSignature)
     ));
 }
 
 #[test]
 fn test_oracle_invalid_signature_wrong_validator_id() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let (vid_a, _, signing_key_a) = &validators[0];
     let (vid_b, _, _) = &validators[1];
     let pair = PricePair::new(1, 0);
@@ -317,14 +317,14 @@ fn test_oracle_invalid_signature_wrong_validator_id() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::InvalidSignature)
     ));
 }
 
 #[test]
 fn test_oracle_invalid_signature_random_bytes() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let (vid, _, _) = &validators[0];
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
@@ -345,14 +345,14 @@ fn test_oracle_invalid_signature_random_bytes() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::InvalidSignature)
     ));
 }
 
 #[test]
 fn test_oracle_aggregation_median() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
     let q = quorum_for(&validators);
@@ -373,7 +373,7 @@ fn test_oracle_aggregation_median() {
             signature: sig,
             sources: Vec::new(),
         };
-        if let Ok(Some(a)) = tracker.submit_price(submission, &config, &validator_map) {
+        if let Ok(Some(a)) = tracker.submit_price(submission, &config, &mut validator_map) {
             agg = Some(a);
         }
     }
@@ -385,7 +385,7 @@ fn test_oracle_aggregation_median() {
 
 #[test]
 fn test_oracle_outlier_detection() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
     let q = quorum_for(&validators);
@@ -405,7 +405,7 @@ fn test_oracle_outlier_detection() {
             signature: sig,
             sources: Vec::new(),
         };
-        if let Ok(Some(a)) = tracker.submit_price(submission, &config, &validator_map) {
+        if let Ok(Some(a)) = tracker.submit_price(submission, &config, &mut validator_map) {
             agg = Some(a);
         }
     }
@@ -416,6 +416,63 @@ fn test_oracle_outlier_detection() {
     // The outlier validator should be in last_outliers
     let outlier_vid = validators[q - 1].0;
     assert!(tracker.last_outliers().contains(&outlier_vid));
+
+    // The outlier validator should have outlier_count incremented
+    let outlier_info = validator_map.get(&outlier_vid).unwrap();
+    assert_eq!(outlier_info.outlier_count, 1);
+    assert_eq!(outlier_info.submission_count, 1);
+    assert_eq!(outlier_info.last_submission_block, block);
+}
+
+#[test]
+fn test_oracle_outlier_penalty_disables_validator() {
+    let (mut tracker, validators, mut config, mut validator_map) = make_tracker();
+    // Set low tolerance so outlier is disabled after first strike
+    config.outlier_tolerance = 1;
+    let pair = PricePair::new(1, 0);
+
+    // Submit quorum with one outlier — tolerance == 1 so the validator
+    // is disabled immediately after the first aggregation.
+    let block = 1000u64;
+    let q = quorum_for(&validators);
+    for (i, (vid, _, signing_key)) in validators.iter().enumerate().take(q) {
+        let timestamp = block * 1000;
+        let price = if i == q - 1 { 10_000_000 } else { 2_000_000 };
+        let sig = sign_oracle_submission(signing_key, *vid, pair, price, block, timestamp);
+        let submission = OracleSubmission {
+            validator_id: *vid,
+            pair,
+            price,
+            block_number: block,
+            timestamp,
+            signature: sig,
+            sources: Vec::new(),
+        };
+        let _ = tracker.submit_price(submission, &config, &mut validator_map);
+    }
+
+    // The outlier validator should now be disabled
+    let outlier_vid = validators[q - 1].0;
+    let outlier_info = validator_map.get(&outlier_vid).unwrap();
+    assert!(!outlier_info.is_active, "outlier should be disabled after exceeding tolerance");
+    assert_eq!(outlier_info.outlier_count, 1);
+
+    // A subsequent submission from the now-disabled validator is rejected
+    let (_, _, signing_key) = &validators[q - 1];
+    let sig = sign_oracle_submission(signing_key, outlier_vid, pair, 2_000_000, block + 1000, (block + 1000) * 1000);
+    let submission = OracleSubmission {
+        validator_id: outlier_vid,
+        pair,
+        price: 2_000_000,
+        block_number: block + 1000,
+        timestamp: (block + 1000) * 1000,
+        signature: sig,
+        sources: Vec::new(),
+    };
+    assert!(matches!(
+        tracker.submit_price(submission, &config, &mut validator_map),
+        Err(OracleError::ValidatorDisabled)
+    ));
 }
 
 #[test]
@@ -443,21 +500,21 @@ fn test_oracle_disabled_validator_rejected() {
         sources: Vec::new(),
     };
     assert!(matches!(
-        tracker.submit_price(submission, &config, &validator_map),
+        tracker.submit_price(submission, &config, &mut validator_map),
         Err(OracleError::ValidatorDisabled)
     ));
 }
 
 #[test]
 fn test_oracle_distribute_rewards() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
 
     submit_all(
         &mut tracker,
         &validators,
-        &validator_map,
+        &mut validator_map,
         &config,
         pair,
         block,
@@ -481,7 +538,7 @@ fn test_oracle_distribute_rewards() {
 
 #[test]
 fn test_oracle_clear_pending() {
-    let (mut tracker, validators, config, validator_map) = make_tracker();
+    let (mut tracker, validators, config, mut validator_map) = make_tracker();
     let pair = PricePair::new(1, 0);
     let block = 1000u64;
 
@@ -499,7 +556,7 @@ fn test_oracle_clear_pending() {
         sources: Vec::new(),
     };
     tracker
-        .submit_price(submission, &config, &validator_map)
+        .submit_price(submission, &config, &mut validator_map)
         .unwrap();
 
     tracker.clear_pending();
@@ -515,6 +572,6 @@ fn test_oracle_clear_pending() {
         sources: Vec::new(),
     };
     assert!(tracker
-        .submit_price(submission2, &config, &validator_map)
+        .submit_price(submission2, &config, &mut validator_map)
         .is_ok());
 }
