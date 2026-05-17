@@ -8,8 +8,8 @@ use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
-    check_compliance, dispatch, slot_balance, storage::storage_slot, u128_to_u256, u256_to_u128,
-    u256_to_u64, u64_to_u256, StorageRef, ASSET_ADDRESS,
+    address_to_u256, check_compliance, dispatch, slot_balance, storage::storage_slot,
+    u128_to_u256, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef, ASSET_ADDRESS,
 };
 use call_primitives::Hash;
 use call_protocol::storage_backend::StorageBackend;
@@ -521,6 +521,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
 
 sol! {
     interface IProtocolShielded {
+        event Deposit(address indexed sender, uint64 assetId, uint128 amount, bytes32 commitment);
+        event Withdraw(address indexed target, uint64 assetId, uint128 amount, bytes32 nullifier);
+        event Transfer(uint64 assetId, bytes32[] nullifiers, bytes32[] commitments);
+
         function deposit(uint64 assetId, uint128 amount, bytes32 commitment, bytes proofData, uint32 keyVersion) external;
         function withdraw(uint64 assetId, address target, uint128 amount, bytes32 nullifier, bytes32 merkleRoot, bytes proofData, uint32 keyVersion) external;
         function transfer(uint64 assetId, bytes proof, bytes32[] nullifiers, bytes32[] commitments, uint32 keyVersion) external;
@@ -571,6 +575,18 @@ impl ShieldedPrecompile {
         match result {
             Ok(()) => {
                 storage.checkpoint_commit(cp);
+                // Emit Deposit(sender, assetId, amount, commitment)
+                let topic0 = alloy_primitives::keccak256(b"Deposit(address,uint64,uint128,bytes32)");
+                let mut event_data = Vec::with_capacity(96);
+                event_data.extend_from_slice(&call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>());
+                event_data.extend_from_slice(&call_precompile::u128_to_u256(call.amount).to_be_bytes::<32>());
+                event_data.extend_from_slice(call.commitment.as_slice());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0, address_to_u256(msg_sender).to_be_bytes::<32>().into()],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(SHIELDED_ADDRESS, log);
+                }
                 let output = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
                 Ok(call_precompile::storage::fill_precompile_output(output, storage))
             }
@@ -617,6 +633,18 @@ impl ShieldedPrecompile {
         match result {
             Ok(()) => {
                 storage.checkpoint_commit(cp);
+                // Emit Withdraw(target, assetId, amount, nullifier)
+                let topic0 = alloy_primitives::keccak256(b"Withdraw(address,uint64,uint128,bytes32)");
+                let mut event_data = Vec::with_capacity(96);
+                event_data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
+                event_data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
+                event_data.extend_from_slice(call.nullifier.as_slice());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0, address_to_u256(call.target).to_be_bytes::<32>().into()],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(SHIELDED_ADDRESS, log);
+                }
                 let output = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
                 Ok(call_precompile::storage::fill_precompile_output(output, storage))
             }
@@ -636,11 +664,13 @@ impl ShieldedPrecompile {
     ) -> PrecompileResult {
         let call = dispatch::decode_call::<IProtocolShielded::transferCall>(calldata)?;
 
-        // Dynamic gas: base 250_000 + 20_000 per commitment + 10 per byte of proof data
+        // Dynamic gas: base 250_000 + 20_000 per commitment + 10_000 per nullifier + 10 per byte of proof data
         let proof_len = call.proof.len() as u64;
         let commitment_count = call.commitments.len() as u64;
+        let nullifier_count = call.nullifiers.len() as u64;
         let dynamic_gas = 250_000u64
             .saturating_add(commitment_count.saturating_mul(20_000))
+            .saturating_add(nullifier_count.saturating_mul(10_000))
             .saturating_add(proof_len.saturating_mul(10));
         storage.deduct_gas(dynamic_gas)?;
 
@@ -659,6 +689,17 @@ impl ShieldedPrecompile {
         match result {
             Ok(()) => {
                 storage.checkpoint_commit(cp);
+                // Emit Transfer(assetId, merkleRoot)
+                let topic0 = alloy_primitives::keccak256(b"Transfer(uint64,bytes32)");
+                let root = store.get_merkle_root();
+                let mut event_data = Vec::with_capacity(32);
+                event_data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0, root.into()],
+                    alloy_primitives::Bytes::from(event_data),
+                ) {
+                    let _ = storage.emit_event(SHIELDED_ADDRESS, log);
+                }
                 let output = revm_precompile::PrecompileOutput::new(0, alloy_primitives::Bytes::new());
                 Ok(call_precompile::storage::fill_precompile_output(output, storage))
             }
