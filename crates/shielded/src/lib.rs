@@ -604,9 +604,11 @@ pub fn verify_zk_proof(proof: &ZkProof) -> bool {
             // Withdraw: at least one nullifier, no commitments
             // Already checked above
         }
-        _ => {
-            // Transfer: both nullifiers and commitments present
-            // No additional count constraints at structural level
+        (_, _) => {
+            // Transfer: fixed 2-in/2-out topology
+            if nf_count != 2 || cm_count != 2 {
+                return false;
+            }
         }
     }
     true
@@ -761,7 +763,8 @@ mod tests {
 
     #[test]
     fn test_zk_proof_verification_mock() {
-        let proof = test_proof(1, 2);
+        // Transfer circuit requires fixed 2-in/2-out topology
+        let proof = test_proof(2, 2);
         assert!(verify_zk_proof(&proof));
     }
 

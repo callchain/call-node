@@ -5,6 +5,9 @@
 use crate::{poseidon, NoteCommitment, Nullifier, ViewingKey};
 use call_primitives::{AssetId, Balance, Hash};
 
+/// Current serialization version for note encrypted bytes.
+const NOTE_SERIALIZATION_VERSION: u8 = 1;
+
 /// A shielded note: encrypted value with commitment and nullifier derivation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Note {
@@ -86,9 +89,17 @@ impl Note {
         self.asset_id
     }
 
+    /// Get the recipient's incoming viewing key
+    pub fn recipient_ivk(&self) -> &[u8; 32] {
+        &self.recipient_ivk
+    }
+
     /// Serialize the note for encrypted storage
+    ///
+    /// Format: version (1) || value (16) || asset_id (8) || rcm (32) || rho (32) || recipient_ivk (32)
     pub fn to_encrypted_bytes(&self) -> Vec<u8> {
-        let mut data = Vec::with_capacity(128);
+        let mut data = Vec::with_capacity(1 + 128);
+        data.push(NOTE_SERIALIZATION_VERSION);
         data.extend_from_slice(&self.value.to_le_bytes());
         data.extend_from_slice(&self.asset_id.to_le_bytes());
         data.extend_from_slice(&self.rcm);
@@ -99,17 +110,21 @@ impl Note {
 
     /// Deserialize from encrypted bytes
     pub fn from_encrypted_bytes(data: &[u8]) -> Result<Self, &'static str> {
-        if data.len() < 8 + 8 + 32 + 32 + 32 {
+        if data.len() < 1 + 16 + 8 + 32 + 32 + 32 {
             return Err("note data too short");
         }
-        let value = u128::from_le_bytes(data[0..16].try_into().map_err(|_| "invalid value")?);
-        let asset_id = u64::from_le_bytes(data[16..24].try_into().map_err(|_| "invalid asset_id")?);
+        let version = data[0];
+        if version != NOTE_SERIALIZATION_VERSION {
+            return Err("unsupported note serialization version");
+        }
+        let value = u128::from_le_bytes(data[1..17].try_into().map_err(|_| "invalid value")?);
+        let asset_id = u64::from_le_bytes(data[17..25].try_into().map_err(|_| "invalid asset_id")?);
         let mut rcm = [0u8; 32];
-        rcm.copy_from_slice(&data[24..56]);
+        rcm.copy_from_slice(&data[25..57]);
         let mut rho = [0u8; 32];
-        rho.copy_from_slice(&data[56..88]);
+        rho.copy_from_slice(&data[57..89]);
         let mut recipient_ivk = [0u8; 32];
-        recipient_ivk.copy_from_slice(&data[88..120]);
+        recipient_ivk.copy_from_slice(&data[89..121]);
 
         Ok(Self {
             value,

@@ -117,7 +117,7 @@ impl ShieldedComplianceMode {
     /// Derive a 20-byte Address from a note's incoming viewing key
     pub fn derive_address_from_ivk(note: &Note) -> Address {
         use call_crypto::keccak256;
-        let ivk = note.rcm(); // rcm is derived from the same IVK used in note creation
+        let ivk = note.recipient_ivk();
         let hash = keccak256(ivk);
         let mut addr = Address::ZERO;
         addr.copy_from_slice(&hash.as_slice()[12..32]);
@@ -140,7 +140,12 @@ impl AuditRecord {
     pub fn from_notes(block: u64, auditor_key: &ViewingKey, notes: &[Note]) -> Self {
         Self {
             block,
-            nullifiers: notes.iter().map(|n| *n.rho()).collect(),
+            nullifiers: notes.iter().map(|n| {
+                let nf = n.nullifier();
+                let mut buf = [0u8; 32];
+                buf.copy_from_slice(nf.as_hash().as_slice());
+                buf
+            }).collect(),
             auditor_key: auditor_key.incoming_view_key,
             decrypted_values: notes.iter().map(|n| n.value).collect(),
             asset_ids: notes.iter().map(|n| n.asset_id()).collect(),

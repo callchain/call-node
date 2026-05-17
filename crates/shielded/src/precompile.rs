@@ -612,25 +612,31 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         if proof_data.is_empty() || proof_data.len() > 20_000 {
             return Err(ShieldedError::InvalidZkProof);
         }
-        let proof = crate::ZkProof {
-            proof_data,
-            nullifiers: vec![crate::Nullifier::new(Hash::from_slice(&nullifier))],
-            commitments: vec![],
-            asset_id,
-            key_version,
-        };
 
-        let target_bytes: [u8; 20] = target.into();
-        match crate::verify_shielded_proof(
-            &proof,
-            "withdraw",
-            Some(&merkle_root),
-            Some(amount),
-            Some(target_bytes),
-        ) {
-            Ok(true) => {}
-            Ok(false) => return Err(ShieldedError::InvalidZkProof),
-            Err(e) => return Err(ShieldedError::ZkProofError(e)),
+        let _ = key_version;
+
+        #[cfg(feature = "halo2-prover")]
+        {
+            let proof = crate::ZkProof {
+                proof_data,
+                nullifiers: vec![crate::Nullifier::new(Hash::from_slice(&nullifier))],
+                commitments: vec![],
+                asset_id,
+                key_version,
+            };
+
+            let target_bytes: [u8; 20] = target.into();
+            match crate::verify_shielded_proof(
+                &proof,
+                "withdraw",
+                Some(&merkle_root),
+                Some(amount),
+                Some(target_bytes),
+            ) {
+                Ok(true) => {}
+                Ok(false) => return Err(ShieldedError::InvalidZkProof),
+                Err(e) => return Err(ShieldedError::ZkProofError(e)),
+            }
         }
 
         if self.check_nullifier_spent(nullifier, current_block) {
@@ -684,24 +690,29 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::InvalidZkProof);
         }
 
-        let proof = crate::ZkProof {
-            proof_data,
-            nullifiers: nullifiers
-                .iter()
-                .map(|nf| crate::Nullifier::new(Hash::from_slice(nf)))
-                .collect(),
-            commitments: commitments
-                .iter()
-                .map(|cm| crate::NoteCommitment::new(Hash::from_slice(cm)))
-                .collect(),
-            asset_id,
-            key_version,
-        };
+        let _ = key_version;
 
-        match crate::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None, None) {
-            Ok(true) => {}
-            Ok(false) => return Err(ShieldedError::InvalidZkProof),
-            Err(e) => return Err(ShieldedError::ZkProofError(e)),
+        #[cfg(feature = "halo2-prover")]
+        {
+            let proof = crate::ZkProof {
+                proof_data,
+                nullifiers: nullifiers
+                    .iter()
+                    .map(|nf| crate::Nullifier::new(Hash::from_slice(nf)))
+                    .collect(),
+                commitments: commitments
+                    .iter()
+                    .map(|cm| crate::NoteCommitment::new(Hash::from_slice(cm)))
+                    .collect(),
+                asset_id,
+                key_version,
+            };
+
+            match crate::verify_shielded_proof(&proof, "transfer", Some(&merkle_root), None, None) {
+                Ok(true) => {}
+                Ok(false) => return Err(ShieldedError::InvalidZkProof),
+                Err(e) => return Err(ShieldedError::ZkProofError(e)),
+            }
         }
 
         for nf in &nullifiers {
@@ -950,17 +961,28 @@ impl ShieldedPrecompile {
                 let topic0 = alloy_primitives::keccak256(
                     b"Transfer(address,uint64,bytes32[],bytes32[])"
                 );
-                let mut event_data = Vec::with_capacity(
-                    32 + 32 + call.nullifiers.len() * 32 + 32 + call.commitments.len() * 32,
-                );
+                // Standard Solidity ABI encoding for: uint64, bytes32[], bytes32[]
+                // Static part (3 * 32 bytes): assetId | offset_nullifiers | offset_commitments
+                // Dynamic part: length + elements for each array
+                let nf_len = call.nullifiers.len();
+                let cm_len = call.commitments.len();
+                let nf_data_size = 32 + nf_len * 32;
+                let offset_nf: u64 = 96; // 3 * 32 bytes of static part
+                let offset_cm: u64 = offset_nf + nf_data_size as u64;
+                let mut event_data = Vec::with_capacity(96 + nf_data_size + 32 + cm_len * 32);
+                // assetId (uint64, left-padded)
                 event_data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
-                // nullifier count
-                event_data.extend_from_slice(&u64_to_u256(call.nullifiers.len() as u64).to_be_bytes::<32>());
+                // offset to nullifiers array
+                event_data.extend_from_slice(&u64_to_u256(offset_nf).to_be_bytes::<32>());
+                // offset to commitments array
+                event_data.extend_from_slice(&u64_to_u256(offset_cm).to_be_bytes::<32>());
+                // nullifiers array: length + elements
+                event_data.extend_from_slice(&u64_to_u256(nf_len as u64).to_be_bytes::<32>());
                 for nf in &call.nullifiers {
                     event_data.extend_from_slice(nf.as_slice());
                 }
-                // commitment count
-                event_data.extend_from_slice(&u64_to_u256(call.commitments.len() as u64).to_be_bytes::<32>());
+                // commitments array: length + elements
+                event_data.extend_from_slice(&u64_to_u256(cm_len as u64).to_be_bytes::<32>());
                 for cm in &call.commitments {
                     event_data.extend_from_slice(cm.as_slice());
                 }
@@ -1468,6 +1490,36 @@ mod tests {
         assert!(result.is_err(), "transfer with empty proof should fail");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("invalid ZK proof"), "expected InvalidZkProof, got: {err}");
+    }
+
+    /// Transfer with invalid merkleRoot must be rejected.
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_transfer_rejects_invalid_merkle_root() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let nullifiers = vec![[0xCCu8; 32].into()];
+        let commitments = vec![test_commitment(3).into(), test_commitment(4).into()];
+
+        let input = IProtocolShielded::transferCall {
+            assetId: 1,
+            proof: vec![1u8; 200].into(),
+            nullifiers,
+            commitments,
+            merkleRoot: [0xFFu8; 32].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "transfer with invalid merkleRoot should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("merkle root mismatch"),
+            "expected MerkleRootMismatch, got: {err}"
+        );
     }
 
     /// Transfer precompile test with real Halo2 proof verification.
