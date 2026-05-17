@@ -260,10 +260,8 @@ pub(crate) async fn handle_network_message(
                         signature: submission.signature,
                         sources: submission.sources,
                     };
-                    let mut tracker_guard =
-                        tracker_clone.write().unwrap_or_else(|e| e.into_inner());
                     // Build validator set and config from EVM state
-                    let (config, validators) = {
+                    let (config, mut validators) = {
                         let provider = call_evm::provider::LazyStateProvider::new(Arc::clone(
                             &state_clone.db_env,
                         ));
@@ -300,7 +298,24 @@ pub(crate) async fn handle_network_message(
                         }
                         (config, validators)
                     };
-                    match tracker_guard.submit_price(oracle_submission, &config, &validators) {
+
+                    // Inject persistent outlier state from tracker so strikes
+                    // and disablement survive validator-set rebuilds on every P2P
+                    // submission (the tracker itself is the canonical source).
+                    let mut tracker_guard =
+                        tracker_clone.write().unwrap_or_else(|e| e.into_inner());
+                    for (vid, count) in tracker_guard.outlier_counts() {
+                        if let Some(v) = validators.get_mut(vid) {
+                            v.outlier_count = *count;
+                        }
+                    }
+                    for vid in tracker_guard.disabled_validators() {
+                        if let Some(v) = validators.get_mut(vid) {
+                            v.is_active = false;
+                        }
+                    }
+
+                    match tracker_guard.submit_price(oracle_submission, &config, &mut validators) {
                         Ok(Some(aggregated)) => {
                             // Quorum reached — write aggregated price to EVM storage
                             match call_evm::provider::InMemoryStateProvider::from_db(

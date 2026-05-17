@@ -93,8 +93,6 @@ pub enum OracleError {
     WrongPeriod,
     #[error("invalid signature")]
     InvalidSignature,
-    #[error("no submissions")]
-    NoSubmissions,
     #[error("insufficient data sources: got {0}, need {1}")]
     InsufficientDataSources(usize, usize),
     #[error("disallowed data source: {0}")]

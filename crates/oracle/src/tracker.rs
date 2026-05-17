@@ -9,7 +9,7 @@ use crate::{
     OracleSubmission, OracleValidatorInfo, PricePair,
 };
 use call_crypto::ed25519_verify;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Maximum pending submissions per pair before auto-clear (safety cap).
 const MAX_PENDING_PER_PAIR: usize = 256;
@@ -23,6 +23,10 @@ pub struct OracleTracker {
     pub(crate) current_contributors: Vec<u32>,
     /// Last round's outlier validators (for slashing)
     pub(crate) last_outliers: Vec<u32>,
+    /// Persistent outlier strike counts (survives validator set rebuilds).
+    pub(crate) outlier_counts: HashMap<u32, u32>,
+    /// Disabled validator IDs (persisted to survive validator set rebuilds).
+    pub(crate) disabled_validators: HashSet<u32>,
 }
 
 impl OracleTracker {
@@ -43,7 +47,7 @@ impl OracleTracker {
             .get(&submission.validator_id)
             .ok_or(OracleError::ValidatorNotFound)?;
 
-        if !validator.is_active {
+        if !validator.is_active || self.disabled_validators.contains(&submission.validator_id) {
             return Err(OracleError::ValidatorDisabled);
         }
 
@@ -113,12 +117,17 @@ impl OracleTracker {
             self.current_contributors = contributors;
 
             // Apply outlier penalties: increment outlier_count and disable
-            // validators that exceed the tolerance threshold.
+            // validators that exceed the tolerance threshold.  Persistent
+            // state is kept inside the tracker so it survives validator set
+            // rebuilds on every P2P submission.
             for vid in &outliers {
+                let count = self.outlier_counts.entry(*vid).or_insert(0);
+                *count += 1;
                 if let Some(v) = validators.get_mut(vid) {
-                    v.outlier_count += 1;
-                    if v.outlier_count >= config.outlier_tolerance {
+                    v.outlier_count = *count;
+                    if *count >= config.outlier_tolerance {
                         v.is_active = false;
+                        self.disabled_validators.insert(*vid);
                     }
                 }
             }
@@ -129,7 +138,7 @@ impl OracleTracker {
         // Safety cap: prevent unbounded memory growth for pairs that
         // never reach quorum (e.g. not enough active validators).
         if let Some(subs) = self.pending.get(&pair) {
-            if subs.len() > MAX_PENDING_PER_PAIR {
+            if subs.len() >= MAX_PENDING_PER_PAIR {
                 self.pending.remove(&pair);
             }
         }
@@ -179,6 +188,16 @@ impl OracleTracker {
     /// Clear pending submissions (called at period boundary).
     pub fn clear_pending(&mut self) {
         self.pending.clear();
+    }
+
+    /// Get persistent outlier strike counts.
+    pub fn outlier_counts(&self) -> &HashMap<u32, u32> {
+        &self.outlier_counts
+    }
+
+    /// Get the set of disabled validator IDs.
+    pub fn disabled_validators(&self) -> &HashSet<u32> {
+        &self.disabled_validators
     }
 }
 

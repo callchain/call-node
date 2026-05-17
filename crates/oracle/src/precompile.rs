@@ -303,7 +303,13 @@ impl OraclePrecompile {
                         "oracle: asset not tracked".into(),
                     ));
                 }
-                Ok(store.read_twap(call.assetId))
+                let twap = store.read_twap(call.assetId);
+                if twap == 0 {
+                    return Err(PrecompileError::Other(
+                        "oracle: twap not initialized".into(),
+                    ));
+                }
+                Ok(twap)
             },
         )
     }
@@ -778,5 +784,96 @@ mod tests {
 
         let result = precompile.call(&input, caller, &mut provider);
         assert!(result.is_err(), "expected reject for non-validator");
+    }
+
+    #[test]
+    fn test_oracle_precompile_batch_queries() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = Address::repeat_byte(0xAB);
+
+        // Seed caller as a validator
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                slot_validator_by_addr(caller),
+                u64_to_u256(1),
+            )
+            .unwrap();
+
+        provider.set_timestamp(U256::from(1000));
+        provider.set_block_number(100);
+
+        // Track assets 1 and 2
+        let mut precompile = OraclePrecompile;
+        let input = IProtocolOracle::setTrackedAssetsCall {
+            assetIds: vec![1, 2],
+        }
+        .abi_encode();
+        precompile.call(&input, GOVERNANCE_ADDRESS, &mut provider).unwrap();
+
+        // Submit prices for both assets
+        for (asset_id, price) in [(1, 1_000_000u128), (2, 2_000_000u128)] {
+            let input = IProtocolOracle::submitPriceCall {
+                assetId: asset_id,
+                price,
+                timestamp: 1000,
+                blockNumber: 100,
+            }
+            .abi_encode();
+            precompile.call(&input, caller, &mut provider).unwrap();
+        }
+
+        // getPrices batch
+        let mut precompile = OraclePrecompile;
+        let input = IProtocolOracle::getPricesCall {
+            assetIds: vec![1, 2],
+        }
+        .abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+
+        // Decode uint128[]: offset (32) || length (2) || price1 || price2
+        let bytes = result.bytes.as_ref();
+        let offset = u32::from_be_bytes(bytes[28..32].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(bytes[offset + 28..offset + 32].try_into().unwrap()) as usize;
+        assert_eq!(len, 2);
+        let p1 = u256_to_u128(U256::from_be_bytes::<32>(bytes[offset + 32..offset + 64].try_into().unwrap()));
+        let p2 = u256_to_u128(U256::from_be_bytes::<32>(bytes[offset + 64..offset + 96].try_into().unwrap()));
+        assert_eq!(p1, 1_000_000);
+        assert_eq!(p2, 2_000_000);
+
+        // getTWAPs batch
+        let mut precompile = OraclePrecompile;
+        let input = IProtocolOracle::getTWAPsCall {
+            assetIds: vec![1, 2],
+        }
+        .abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+
+        let bytes = result.bytes.as_ref();
+        let offset = u32::from_be_bytes(bytes[28..32].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(bytes[offset + 28..offset + 32].try_into().unwrap()) as usize;
+        assert_eq!(len, 2);
+        let t1 = u256_to_u128(U256::from_be_bytes::<32>(bytes[offset + 32..offset + 64].try_into().unwrap()));
+        let t2 = u256_to_u128(U256::from_be_bytes::<32>(bytes[offset + 64..offset + 96].try_into().unwrap()));
+        assert_eq!(t1, 1_000_000);
+        assert_eq!(t2, 2_000_000);
+    }
+
+    #[test]
+    fn test_oracle_precompile_batch_rejects_untracked() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+
+        // No assets tracked
+        let mut precompile = OraclePrecompile;
+        let input = IProtocolOracle::getPricesCall {
+            assetIds: vec![99],
+        }
+        .abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_err(), "expected reject for untracked asset in batch");
     }
 }
