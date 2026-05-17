@@ -91,6 +91,14 @@ fn slot_shielded_root_history(index: u64) -> U256 {
     storage_slot(&[b"root_hist", &index.to_be_bytes()[..]])
 }
 
+fn slot_shielded_governance() -> U256 {
+    storage_slot(&[b"governance"])
+}
+
+fn slot_shielded_last_prune_block() -> U256 {
+    storage_slot(&[b"last_prune_blk"])
+}
+
 /// Number of blocks a note remains spendable after insertion (~1 week at 6s/block).
 pub const NOTE_WINDOW_BLOCKS: u64 = 100_800;
 
@@ -108,6 +116,12 @@ const MAX_OPS_PER_ADDRESS_PER_BLOCK: u64 = 20;
 /// Maximum number of historical Merkle roots to retain for proof validity.
 const MAX_ROOT_HISTORY: u64 = 256;
 
+/// Minimum amount allowed for deposit / withdraw to prevent dust spam.
+const MIN_SHIELDED_AMOUNT: u128 = 1;
+
+/// Minimum block interval between external prune calls.
+const MIN_PRUNE_INTERVAL_BLOCKS: u64 = 100;
+
 // ── Error type ────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -124,6 +138,9 @@ pub enum ShieldedError {
     Paused,
     CommitmentAlreadyExists,
     RateLimitExceeded,
+    InvalidAmount,
+    Unauthorized,
+    PruneTooFrequent,
 }
 
 impl core::fmt::Display for ShieldedError {
@@ -141,6 +158,9 @@ impl core::fmt::Display for ShieldedError {
             ShieldedError::Paused => write!(f, "shielded pool is paused"),
             ShieldedError::CommitmentAlreadyExists => write!(f, "commitment already exists"),
             ShieldedError::RateLimitExceeded => write!(f, "per-address rate limit exceeded"),
+            ShieldedError::InvalidAmount => write!(f, "amount must be greater than zero"),
+            ShieldedError::Unauthorized => write!(f, "unauthorized caller"),
+            ShieldedError::PruneTooFrequent => write!(f, "prune called too frequently"),
         }
     }
 }
@@ -413,6 +433,44 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         false
     }
 
+    /// Load the governance address from storage.
+    fn governance(&mut self) -> Address {
+        let raw = self.sload_shielded(slot_shielded_governance());
+        let bytes: [u8; 32] = raw.to_be_bytes();
+        Address::from_slice(&bytes[12..32])
+    }
+
+    /// Set the governance address.
+    pub fn set_governance(&mut self, addr: Address) {
+        let mut bytes = [0u8; 32];
+        bytes[12..32].copy_from_slice(addr.as_slice());
+        self.sstore_shielded(slot_shielded_governance(), U256::from_be_slice(&bytes));
+    }
+
+    /// Revert if the caller is not the governance address.
+    /// During initialization (governance == zero), anyone can set governance.
+    fn require_governance(&mut self, caller: Address) -> Result<(), ShieldedError> {
+        let gov = self.governance();
+        if gov != Address::ZERO && caller != gov {
+            return Err(ShieldedError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Check if enough blocks have passed since the last prune.
+    /// First call (last == 0) is always allowed.
+    fn check_prune_interval(&mut self, current_block: u64) -> Result<(), ShieldedError> {
+        let last = u256_to_u64(self.sload_shielded(slot_shielded_last_prune_block()));
+        if last != 0 && current_block.saturating_sub(last) < MIN_PRUNE_INTERVAL_BLOCKS {
+            return Err(ShieldedError::PruneTooFrequent);
+        }
+        self.sstore_shielded(
+            slot_shielded_last_prune_block(),
+            u64_to_u256(current_block),
+        );
+        Ok(())
+    }
+
     fn insert_commitment(&mut self, commitment: [u8; 32], current_block: u64) -> [u8; 32] {
         let count = u256_to_u64(self.sload_shielded(slot_shielded_commitment_count()));
         let mut idx = count as usize;
@@ -462,6 +520,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
     ) -> Result<(), ShieldedError> {
         self.require_not_paused()?;
         self.check_rate_limit(caller, current_block)?;
+
+        if amount == 0 || amount < MIN_SHIELDED_AMOUNT {
+            return Err(ShieldedError::InvalidAmount);
+        }
 
         if proof_data.is_empty() || proof_data.len() > 20_000 {
             return Err(ShieldedError::InvalidZkProof);
@@ -527,11 +589,15 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         self.require_not_paused()?;
         self.check_rate_limit(caller, current_block)?;
 
+        if amount == 0 || amount < MIN_SHIELDED_AMOUNT {
+            return Err(ShieldedError::InvalidAmount);
+        }
+
         if !self.is_valid_root(merkle_root) {
             return Err(ShieldedError::MerkleRootMismatch);
         }
 
-        if proof_data.is_empty() {
+        if proof_data.is_empty() || proof_data.len() > 20_000 {
             return Err(ShieldedError::InvalidZkProof);
         }
         let proof = crate::ZkProof {
@@ -590,7 +656,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::EmptyBatch);
         }
 
-        if proof_data.is_empty() {
+        if proof_data.is_empty() || proof_data.len() > 20_000 {
             return Err(ShieldedError::InvalidZkProof);
         }
 
@@ -701,6 +767,8 @@ sol! {
         function isPaused() external view returns (bool);
         function getRootHistoryCount() external view returns (uint64);
         function getRootHistory(uint64 index) external view returns (bytes32);
+        function setGovernance(address governance) external;
+        function getGovernance() external view returns (address);
     }
 }
 
@@ -857,13 +925,29 @@ impl ShieldedPrecompile {
         match result {
             Ok(()) => {
                 storage.checkpoint_commit(cp);
-                // Emit Transfer(assetId, merkleRoot)
-                let topic0 = alloy_primitives::keccak256(b"Transfer(uint64,bytes32)");
-                let root = store.get_merkle_root();
-                let mut event_data = Vec::with_capacity(32);
+                // Emit Transfer(sender, assetId, nullifiers, commitments)
+                let topic0 = alloy_primitives::keccak256(
+                    b"Transfer(address,uint64,bytes32[],bytes32[])"
+                );
+                let mut event_data = Vec::with_capacity(
+                    32 + 32 + call.nullifiers.len() * 32 + 32 + call.commitments.len() * 32,
+                );
                 event_data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
+                // nullifier count
+                event_data.extend_from_slice(&u64_to_u256(call.nullifiers.len() as u64).to_be_bytes::<32>());
+                for nf in &call.nullifiers {
+                    event_data.extend_from_slice(nf.as_slice());
+                }
+                // commitment count
+                event_data.extend_from_slice(&u64_to_u256(call.commitments.len() as u64).to_be_bytes::<32>());
+                for cm in &call.commitments {
+                    event_data.extend_from_slice(cm.as_slice());
+                }
                 if let Some(log) = alloy_primitives::LogData::new(
-                    vec![topic0, root.into()],
+                    vec![
+                        topic0,
+                        address_to_u256(msg_sender).to_be_bytes::<32>().into(),
+                    ],
                     alloy_primitives::Bytes::from(event_data),
                 ) {
                     let _ = storage.emit_event(SHIELDED_ADDRESS, log);
@@ -977,6 +1061,9 @@ impl ShieldedPrecompile {
             |_call, storage| {
                 let current_block = storage.block_number();
                 let mut store = ShieldedStorage::new(sr);
+                store
+                    .check_prune_interval(current_block)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 let pruned = store.prune_expired_nullifiers(current_block);
                 Ok(pruned)
             },
@@ -986,7 +1073,7 @@ impl ShieldedPrecompile {
     fn set_paused(
         &self,
         calldata: &[u8],
-        _msg_sender: Address,
+        msg_sender: Address,
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
@@ -996,8 +1083,50 @@ impl ShieldedPrecompile {
             storage,
             |call, _storage| {
                 let mut store = ShieldedStorage::new(sr);
+                store
+                    .require_governance(msg_sender)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 store.set_paused(call.paused);
                 Ok(())
+            },
+        )
+    }
+
+    fn set_governance(
+        &self,
+        calldata: &[u8],
+        msg_sender: Address,
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::mutate::<IProtocolShielded::setGovernanceCall, _, _>(
+            calldata,
+            5000,
+            storage,
+            |call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
+                store
+                    .require_governance(msg_sender)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                store.set_governance(call.governance);
+                Ok(())
+            },
+        )
+    }
+
+    fn get_governance(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolShielded::getGovernanceCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |_call, _storage| {
+                let mut store = ShieldedStorage::new(sr);
+                Ok(store.governance())
             },
         )
     }
@@ -1107,6 +1236,12 @@ impl call_precompile::StatefulPrecompile for ShieldedPrecompile {
             }
             IProtocolShielded::getRootHistoryCall::SELECTOR => {
                 self.get_root_history(calldata, storage, sr)
+            }
+            IProtocolShielded::setGovernanceCall::SELECTOR => {
+                self.set_governance(calldata, msg_sender, storage, sr)
+            }
+            IProtocolShielded::getGovernanceCall::SELECTOR => {
+                self.get_governance(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
@@ -1379,12 +1514,29 @@ mod tests {
     #[test]
     fn test_shielded_precompile_pause() {
         let mut provider = HashMapStorageProvider::new(5_000_000);
+        let governance = Address::repeat_byte(0xAA);
         let sender = Address::repeat_byte(0x55);
         let mut precompile = ShieldedPrecompile;
 
-        // Pause the pool
+        // Set governance first
+        let input = IProtocolShielded::setGovernanceCall {
+            governance,
+        }
+        .abi_encode();
+        // First call succeeds because governance is unset (defaults to zero address)
+        let result = precompile.call(&input, governance, &mut provider);
+        assert!(result.is_ok(), "setGovernance failed: {:?}", result.err());
+
+        // Non-governance cannot pause
         let input = IProtocolShielded::setPausedCall { paused: true }.abi_encode();
         let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "non-governance should not be able to pause");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unauthorized"), "expected Unauthorized, got: {err}");
+
+        // Governance can pause
+        let input = IProtocolShielded::setPausedCall { paused: true }.abi_encode();
+        let result = precompile.call(&input, governance, &mut provider);
         assert!(result.is_ok(), "setPaused failed: {:?}", result.err());
 
         // Verify paused
@@ -1490,6 +1642,90 @@ mod tests {
             err.contains("rate limit"),
             "expected RateLimitExceeded, got: {err}"
         );
+    }
+
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_zero_amount_rejected() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+
+        // Zero-amount deposit should fail
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 0,
+            commitment: test_commitment(1).into(),
+            proofData: vec![1u8; 200].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "zero amount deposit should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("amount must be greater than zero"),
+            "expected InvalidAmount, got: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_proof_size_limit() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        let sender_slot = slot_balance(1, sender);
+        provider.set(ASSET_ADDRESS, sender_slot, u128_to_u256(10_000));
+
+        // Deposit with oversized proof (>20_000 bytes) should fail
+        let input = IProtocolShielded::depositCall {
+            assetId: 1,
+            amount: 1_000,
+            commitment: test_commitment(1).into(),
+            proofData: vec![1u8; 20_001].into(),
+            keyVersion: 0,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "oversized proof should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid ZK proof"),
+            "expected InvalidZkProof, got: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "halo2-prover"))]
+    #[test]
+    fn test_shielded_precompile_prune_rate_limit() {
+        let mut provider = HashMapStorageProvider::new(5_000_000);
+        provider.set_block_number(1);
+        let sender = Address::repeat_byte(0x55);
+        let mut precompile = ShieldedPrecompile;
+
+        // First prune should succeed
+        let input = IProtocolShielded::pruneNullifiersCall {}.abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "first prune failed: {:?}", result.err());
+
+        // Second prune at same block should fail (too frequent)
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "second prune should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("too frequently"),
+            "expected PruneTooFrequent, got: {err}"
+        );
+
+        // Advance beyond interval — should succeed
+        provider.set_block_number(1 + MIN_PRUNE_INTERVAL_BLOCKS);
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "prune after interval failed: {:?}", result.err());
     }
 
     #[cfg(not(feature = "halo2-prover"))]

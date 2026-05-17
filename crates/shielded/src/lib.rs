@@ -147,10 +147,9 @@ impl ViewingKey {
         Nullifier::new(Hash::from_slice(&poseidon::fp_to_bytes(&nf_fp)))
     }
 
-    /// Verify this viewing key can decrypt a note by attempting
-    /// actual ChaCha20-Poly1305 decryption (Gap #9 fix).
-    pub fn can_decrypt(&self, note_rcm: &[u8; 32]) -> bool {
-        self.incoming_view_key.iter().any(|&b| b != 0) && note_rcm.len() == 32
+    /// Verify this viewing key can decrypt a note ciphertext.
+    pub fn can_decrypt(&self, ciphertext: &[u8]) -> bool {
+        self.try_decrypt_note(ciphertext)
     }
 
     /// Attempt to decrypt a note ciphertext, returning true on success.
@@ -576,13 +575,20 @@ pub fn verify_zk_proof(proof: &ZkProof) -> bool {
         return false;
     }
     // 3. No duplicate nullifiers in same proof
-    let mut seen = std::collections::HashSet::new();
+    let mut seen_nf = std::collections::HashSet::new();
     for nf in &proof.nullifiers {
-        if !seen.insert(nf.clone()) {
+        if !seen_nf.insert(nf.clone()) {
             return false;
         }
     }
-    // 4. Circuit-specific count consistency (Gap #5)
+    // 4. No duplicate commitments in same proof
+    let mut seen_cm = std::collections::HashSet::new();
+    for cm in &proof.commitments {
+        if !seen_cm.insert(cm.clone()) {
+            return false;
+        }
+    }
+    // 5. Circuit-specific count consistency (Gap #5)
     let nf_count = proof.nullifiers.len();
     let cm_count = proof.commitments.len();
     match (nf_count, cm_count) {
@@ -739,7 +745,14 @@ mod tests {
         let sk = test_spending_key(10);
         let vk = ViewingKey::generate(&sk);
         let note = test_note(500, 1, 10);
-        assert!(vk.can_decrypt(note.rcm()));
+        let plaintext = note.to_encrypted_bytes();
+        let encrypted =
+            crate::notes::encryption::encrypt_note(&plaintext, &vk.incoming_view_key);
+        assert!(vk.can_decrypt(&encrypted));
+
+        // Wrong key cannot decrypt
+        let wrong_vk = ViewingKey::generate(&test_spending_key(99));
+        assert!(!wrong_vk.can_decrypt(&encrypted));
     }
 
     #[test]
@@ -767,6 +780,19 @@ mod tests {
             proof_data: vec![1u8; 200],
             nullifiers: vec![nf.clone(), nf],
             commitments: vec![NoteCommitment::new(test_hash(2))],
+            asset_id: 1,
+            key_version: 0,
+        };
+        assert!(!verify_zk_proof(&dup));
+    }
+
+    #[test]
+    fn test_zk_proof_rejects_duplicate_commitments() {
+        let cm = NoteCommitment::new(test_hash(2));
+        let dup = ZkProof {
+            proof_data: vec![1u8; 200],
+            nullifiers: vec![Nullifier::new(test_hash(1))],
+            commitments: vec![cm.clone(), cm],
             asset_id: 1,
             key_version: 0,
         };
