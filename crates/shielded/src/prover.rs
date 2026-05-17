@@ -235,11 +235,12 @@ mod halo2_prover_impl {
         /// Generate a Halo2 proof for a deposit circuit.
         pub fn prove_deposit(&self, circuit: &DepositCircuit) -> Result<Vec<u8>, ProverError> {
             let commitment_fp = bytes_to_fp(&circuit.commitment);
+            let value_fp = bytes_to_fp(&crate::poseidon::value_to_fp_bytes(circuit.amount));
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
             let asset_id_fp = bytes_to_fp(&asset_bytes);
 
-            let instances: &[&[&[Fp]]] = &[&[&[commitment_fp, asset_id_fp]]];
+            let instances: &[&[&[Fp]]] = &[&[&[commitment_fp, value_fp, asset_id_fp]]];
 
             let mut transcript =
                 Blake2bWrite::<_, EqAffine, Challenge255<EqAffine>>::init(vec![]);
@@ -491,7 +492,7 @@ mod halo2_prover_impl {
         };
         let commitment = setup_compute_commitment(value, asset_id, &rcm, &rho);
 
-        DepositCircuit::new(commitment, asset_id, witness)
+        DepositCircuit::new(commitment, value, asset_id, witness)
     }
 
     pub fn setup_withdraw_circuit() -> WithdrawCircuit {
@@ -617,8 +618,9 @@ mod halo2_prover_impl {
                 "Halo2 proof should be larger than 128B"
             );
 
-            // Public inputs: commitment (32B) + asset_id (32B) = 64B
+            // Public inputs: commitment (32B) + value (32B) + asset_id (32B) = 96B
             let mut public_inputs = circuit.commitment.to_vec();
+            public_inputs.extend_from_slice(&crate::poseidon::value_to_fp_bytes(circuit.amount));
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
             public_inputs.extend_from_slice(&asset_bytes);
@@ -695,6 +697,7 @@ mod halo2_prover_impl {
             proof_data[10] ^= 0xFF;
 
             let mut public_inputs = circuit.commitment.to_vec();
+            public_inputs.extend_from_slice(&crate::poseidon::value_to_fp_bytes(circuit.amount));
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
             public_inputs.extend_from_slice(&asset_bytes);
@@ -715,7 +718,7 @@ mod halo2_prover_impl {
                 .prove_deposit(&circuit)
                 .expect("invariant: dev circuit setup succeeds");
 
-            let public_inputs = vec![0xFFu8; 64];
+            let public_inputs = vec![0xFFu8; 96];
 
             let valid = prover
                 .verify_deposit(&proof_data, &public_inputs)

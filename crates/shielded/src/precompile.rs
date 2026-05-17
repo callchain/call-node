@@ -119,8 +119,17 @@ const MAX_ROOT_HISTORY: u64 = 256;
 /// Minimum amount allowed for deposit / withdraw to prevent dust spam.
 const MIN_SHIELDED_AMOUNT: u128 = 1;
 
+/// Maximum nullifiers allowed in a single transfer call.
+const MAX_TRANSFER_NULLIFIERS: usize = 16;
+
+/// Maximum commitments allowed in a single transfer call.
+const MAX_TRANSFER_COMMITMENTS: usize = 16;
+
 /// Minimum block interval between external prune calls.
 const MIN_PRUNE_INTERVAL_BLOCKS: u64 = 100;
+
+/// Maximum nullifiers to prune in a single call to prevent gas exhaustion.
+const MAX_PRUNE_PER_CALL: u64 = 1000;
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -277,7 +286,8 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         let count = u256_to_u64(self.sload_shielded(slot_shielded_spent_nullifier_count()));
         let mut pruned = 0u64;
         let mut new_count = count;
-        for i in 0..count {
+        let limit = count.min(MAX_PRUNE_PER_CALL);
+        for i in 0..limit {
             let nf = self
                 .sload_shielded(slot_shielded_spent_nullifier(i))
                 .to_be_bytes::<32>();
@@ -529,6 +539,8 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::InvalidZkProof);
         }
 
+        let _ = key_version;
+
         #[cfg(feature = "halo2-prover")]
         {
             let proof = crate::ZkProof {
@@ -539,7 +551,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
                 key_version,
             };
 
-            match crate::verify_shielded_proof(&proof, "deposit", None, None, None) {
+            match crate::verify_shielded_proof(&proof, "deposit", None, Some(amount), None) {
                 Ok(true) => {}
                 Ok(false) => return Err(ShieldedError::InvalidZkProof),
                 Err(e) => return Err(ShieldedError::ZkProofError(e)),
@@ -645,6 +657,7 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         proof_data: Vec<u8>,
         nullifiers: Vec<[u8; 32]>,
         commitments: Vec<[u8; 32]>,
+        merkle_root: [u8; 32],
         key_version: u32,
         caller: Address,
         current_block: u64,
@@ -652,17 +665,24 @@ impl<B: StorageBackend> ShieldedStorage<B> {
         self.require_not_paused()?;
         self.check_rate_limit(caller, current_block)?;
 
+        if nullifiers.len() > MAX_TRANSFER_NULLIFIERS {
+            return Err(ShieldedError::InvalidZkProof);
+        }
+        if commitments.len() > MAX_TRANSFER_COMMITMENTS {
+            return Err(ShieldedError::InvalidZkProof);
+        }
+
         if nullifiers.is_empty() && commitments.is_empty() {
             return Err(ShieldedError::EmptyBatch);
+        }
+
+        if !self.is_valid_root(merkle_root) {
+            return Err(ShieldedError::MerkleRootMismatch);
         }
 
         if proof_data.is_empty() || proof_data.len() > 20_000 {
             return Err(ShieldedError::InvalidZkProof);
         }
-
-        let merkle_root = self
-            .sload_shielded(slot_shielded_merkle_root())
-            .to_be_bytes::<32>();
 
         let proof = crate::ZkProof {
             proof_data,
@@ -752,11 +772,11 @@ sol! {
     interface IProtocolShielded {
         event Deposit(address indexed sender, uint64 assetId, uint128 amount, bytes32 commitment);
         event Withdraw(address indexed target, uint64 assetId, uint128 amount, bytes32 nullifier);
-        event Transfer(uint64 assetId, bytes32[] nullifiers, bytes32[] commitments);
+        event Transfer(address indexed sender, uint64 assetId, bytes32[] nullifiers, bytes32[] commitments);
 
         function deposit(uint64 assetId, uint128 amount, bytes32 commitment, bytes proofData, uint32 keyVersion) external;
         function withdraw(uint64 assetId, address target, uint128 amount, bytes32 nullifier, bytes32 merkleRoot, bytes proofData, uint32 keyVersion) external;
-        function transfer(uint64 assetId, bytes proof, bytes32[] nullifiers, bytes32[] commitments, uint32 keyVersion) external;
+        function transfer(uint64 assetId, bytes proof, bytes32[] nullifiers, bytes32[] commitments, bytes32 merkleRoot, uint32 keyVersion) external;
         function getMerkleRoot() external view returns (bytes32);
         function getCommitmentCount() external view returns (uint64);
         function getCommitment(uint64 index) external view returns (bytes32);
@@ -918,8 +938,9 @@ impl ShieldedPrecompile {
             call.nullifiers.iter().map(|n| (*n).into()).collect();
         let commitments: Vec<[u8; 32]> =
             call.commitments.iter().map(|c| (*c).into()).collect();
+        let merkle_root: [u8; 32] = call.merkleRoot.into();
         let result = store
-            .transfer(call.assetId, call.proof.to_vec(), nullifiers, commitments, call.keyVersion, msg_sender, current_block)
+            .transfer(call.assetId, call.proof.to_vec(), nullifiers, commitments, merkle_root, call.keyVersion, msg_sender, current_block)
             .map_err(|e| PrecompileError::Other(e.to_string().into()));
 
         match result {
@@ -1438,6 +1459,7 @@ mod tests {
             proof: vec![].into(),
             nullifiers,
             commitments,
+            merkleRoot: [0u8; 32].into(),
             keyVersion: 0,
         }
         .abi_encode();
@@ -1477,6 +1499,7 @@ mod tests {
             proof: proof_data.into(),
             nullifiers,
             commitments,
+            merkleRoot: circuit.merkle_root.into(),
             keyVersion: 0,
         }
         .abi_encode();
@@ -1896,6 +1919,7 @@ mod tests {
             proof: proof_data.into(),
             nullifiers,
             commitments,
+            merkleRoot: circuit.merkle_root.into(),
             keyVersion: 0,
         }
         .abi_encode();

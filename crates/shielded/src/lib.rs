@@ -486,8 +486,12 @@ pub fn verify_shielded_proof(
             if proof.commitments.is_empty() {
                 return Ok(false);
             }
+            let amount = value.ok_or("amount required for deposit verification")?;
             let mut public_inputs = Vec::new();
             public_inputs.extend_from_slice(proof.commitments[0].0.as_slice());
+            let mut value_bytes = [0u8; 32];
+            value_bytes[..16].copy_from_slice(&amount.to_le_bytes());
+            public_inputs.extend_from_slice(&value_bytes);
             let mut asset_bytes = [0u8; 32];
             asset_bytes[..8].copy_from_slice(&proof.asset_id.to_le_bytes());
             public_inputs.extend_from_slice(&asset_bytes);

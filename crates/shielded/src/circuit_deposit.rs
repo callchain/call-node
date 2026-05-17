@@ -4,7 +4,7 @@
 //! by creating a valid note commitment, without revealing the note's
 //! spending key or nullifier rho.
 //!
-//! Public inputs: commitment (Fp), asset_id (Fp)
+//! Public inputs: commitment (Fp), amount (Fp), asset_id (Fp)
 //! Private witnesses: value (u128), rcm (Fp), recipient_ivk (Fp), rho (Fp)
 //!
 //! Constraints:
@@ -40,6 +40,7 @@ pub struct DepositWitness {
 pub struct DepositCircuit {
     /// Public inputs
     pub commitment: [u8; 32],
+    pub amount: u128,
     pub asset_id: u64,
     /// Private witnesses
     pub witness: Option<DepositWitness>,
@@ -47,18 +48,20 @@ pub struct DepositCircuit {
 
 impl DepositCircuit {
     /// Create a new deposit circuit from public data and private witness.
-    pub fn new(commitment: [u8; 32], asset_id: u64, witness: DepositWitness) -> Self {
+    pub fn new(commitment: [u8; 32], amount: u128, asset_id: u64, witness: DepositWitness) -> Self {
         Self {
             commitment,
+            amount,
             asset_id,
             witness: Some(witness),
         }
     }
 
     /// Create a circuit with only public data (for verification only).
-    pub fn for_verify(commitment: [u8; 32], asset_id: u64) -> Self {
+    pub fn for_verify(commitment: [u8; 32], amount: u128, asset_id: u64) -> Self {
         Self {
             commitment,
+            amount,
             asset_id,
             witness: None,
         }
@@ -112,6 +115,7 @@ impl Circuit<Fp> for DepositCircuit {
     fn without_witnesses(&self) -> Self {
         Self {
             commitment: self.commitment,
+            amount: self.amount,
             asset_id: self.asset_id,
             witness: None,
         }
@@ -340,8 +344,11 @@ impl Circuit<Fp> for DepositCircuit {
                 },
             )?;
 
+        // ---- Constrain value == public input (amount) ----------------------
+        layouter.constrain_instance(value_cell.cell(), config.instance, 1)?;
+
         // ---- Constrain asset_id == public input ----------------------------
-        layouter.constrain_instance(asset_id_cell.cell(), config.instance, 1)?;
+        layouter.constrain_instance(asset_id_cell.cell(), config.instance, 2)?;
 
         // ---- D1: Poseidon(value, asset_id, rcm, rho) == commitment ---------
         let chip = Pow5Chip::construct(config.poseidon_config.clone());
@@ -399,7 +406,7 @@ impl Circuit<Fp> for DepositCircuit {
 
 /// Number of public inputs for the deposit circuit.
 pub const fn deposit_public_input_count() -> usize {
-    2 // commitment (Fp) + asset_id (Fp)
+    3 // commitment (Fp) + amount (Fp) + asset_id (Fp)
 }
 
 // ---------------------------------------------------------------------------
@@ -448,20 +455,21 @@ mod tests {
         poseidon_hash(&[value_fp, asset_fp, rcm_fp, rho_fp])
     }
 
-    fn make_instance(commitment_fp: Fp, asset_id: u64) -> Vec<Fp> {
+    fn make_instance(commitment_fp: Fp, amount: u128, asset_id: u64) -> Vec<Fp> {
+        let amount_fp = bytes_to_fp(&crate::poseidon::value_to_fp_bytes(amount));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&asset_id.to_le_bytes());
         let asset_id_fp = bytes_to_fp(&asset_bytes);
-        vec![commitment_fp, asset_id_fp]
+        vec![commitment_fp, amount_fp, asset_id_fp]
     }
 
     #[test]
     fn test_deposit_circuit_satisfiable() {
         let witness = make_deposit_witness(1000, 1);
         let commitment_fp = compute_commitment_plain(&witness, 1);
-        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1, witness);
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1000, 1, witness);
 
-        let prover = MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1)]).unwrap();
+        let prover = MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1000, 1)]).unwrap();
         prover.assert_satisfied();
     }
 
@@ -496,9 +504,9 @@ mod tests {
     fn test_deposit_circuit_zero_value_rejected() {
         let witness = make_deposit_witness(0, 1);
         let commitment_fp = compute_commitment_plain(&witness, 1);
-        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1, witness);
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 0, 1, witness);
 
-        let prover = MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1)]).unwrap();
+        let prover = MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 0, 1)]).unwrap();
         assert!(prover.verify().is_err(), "zero value should be rejected");
     }
 
@@ -516,14 +524,15 @@ mod tests {
 
     #[test]
     fn test_deposit_public_input_count() {
-        assert_eq!(deposit_public_input_count(), 2);
+        assert_eq!(deposit_public_input_count(), 3);
     }
 
     #[test]
     fn test_deposit_circuit_for_verify() {
-        let circuit = DepositCircuit::for_verify([1u8; 32], 1);
+        let circuit = DepositCircuit::for_verify([1u8; 32], 1000, 1);
         assert!(circuit.witness.is_none());
         assert_eq!(circuit.commitment.len(), 32);
+        assert_eq!(circuit.amount, 1000);
         assert_eq!(circuit.asset_id, 1);
     }
 
@@ -535,10 +544,10 @@ mod tests {
         bad_commitment[0] ^= 0xFF;
         let bad_commitment_fp = bytes_to_fp(&bad_commitment);
 
-        let circuit = DepositCircuit::new(bad_commitment, 1, witness);
+        let circuit = DepositCircuit::new(bad_commitment, 1000, 1, witness);
         // Public input uses the WRONG commitment — circuit should reject
         let prover =
-            MockProver::run(10, &circuit, vec![make_instance(bad_commitment_fp, 1)]).unwrap();
+            MockProver::run(10, &circuit, vec![make_instance(bad_commitment_fp, 1000, 1)]).unwrap();
         assert!(
             prover.verify().is_err(),
             "wrong commitment should be rejected"
@@ -551,12 +560,27 @@ mod tests {
         let commitment_fp = compute_commitment_plain(&witness, 1);
 
         // Public asset_id=2, but witness was built for asset_id=1
-        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 2, witness);
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1000, 2, witness);
         let prover =
-            MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 2)]).unwrap();
+            MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1000, 2)]).unwrap();
         assert!(
             prover.verify().is_err(),
             "wrong asset_id should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_deposit_circuit_wrong_amount_rejected() {
+        let witness = make_deposit_witness(1000, 1);
+        let commitment_fp = compute_commitment_plain(&witness, 1);
+
+        // Public amount=2000, but witness value=1000
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 2000, 1, witness);
+        let prover =
+            MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 2000, 1)]).unwrap();
+        assert!(
+            prover.verify().is_err(),
+            "wrong amount should be rejected"
         );
     }
 
@@ -568,9 +592,9 @@ mod tests {
         let mut bad_witness = witness;
         bad_witness.rcm[0] ^= 0xFF;
 
-        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1, bad_witness);
+        let circuit = DepositCircuit::new(fp_to_bytes(&commitment_fp), 1000, 1, bad_witness);
         let prover =
-            MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1)]).unwrap();
+            MockProver::run(10, &circuit, vec![make_instance(commitment_fp, 1000, 1)]).unwrap();
         assert!(prover.verify().is_err(), "wrong rcm should be rejected");
     }
 }

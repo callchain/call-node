@@ -70,7 +70,7 @@ mod shielded_flow {
 
         let commitment = compute_poseidon_commitment(value, asset_id, &rcm, &rho);
 
-        DepositCircuit::new(commitment, asset_id, witness)
+        DepositCircuit::new(commitment, value, asset_id, witness)
     }
 
     fn test_proof(nullifiers: u32, commitments: u32) -> ZkProof {
@@ -364,6 +364,7 @@ mod shielded_flow {
         proof[10] ^= 0xFF;
 
         let mut public_inputs = circuit.commitment.to_vec();
+        public_inputs.extend_from_slice(&call_shielded::poseidon::value_to_fp_bytes(circuit.amount));
         let mut asset_bytes = [0u8; 32];
         asset_bytes[..8].copy_from_slice(&circuit.asset_id.to_le_bytes());
         public_inputs.extend_from_slice(&asset_bytes);
