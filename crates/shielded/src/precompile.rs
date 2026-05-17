@@ -538,6 +538,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::InvalidAmount);
         }
 
+        if commitment == [0u8; 32] {
+            return Err(ShieldedError::InvalidZkProof);
+        }
+
         if proof_data.is_empty() || proof_data.len() > 20_000 {
             return Err(ShieldedError::InvalidZkProof);
         }
@@ -689,6 +693,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
             return Err(ShieldedError::EmptyBatch);
         }
 
+        if nullifiers.len() != commitments.len() {
+            return Err(ShieldedError::InvalidZkProof);
+        }
+
         if !self.is_valid_root(merkle_root) {
             return Err(ShieldedError::MerkleRootMismatch);
         }
@@ -785,6 +793,10 @@ impl<B: StorageBackend> ShieldedStorage<B> {
     }
 
     pub fn get_commitment_height(&mut self, index: u64) -> u64 {
+        let count = self.get_commitment_count();
+        if index >= count {
+            return 0;
+        }
         u256_to_u64(self.sload_shielded(slot_shielded_commitment_height(index)))
     }
 
