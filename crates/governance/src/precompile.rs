@@ -751,7 +751,9 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         let votes_for = self.read_vote_tally(proposal_id, b"votes_for");
         let votes_against = self.read_vote_tally(proposal_id, b"votes_against");
         let votes_abstain = self.read_vote_tally(proposal_id, b"votes_abstain");
-        let total_votes = votes_for + votes_against + votes_abstain;
+        let total_votes = votes_for
+            .saturating_add(votes_against)
+            .saturating_add(votes_abstain);
 
         // Per-type quorum check
         let quorum_required = self.read_proposal_u128(proposal_id, b"quorum_required");
@@ -785,7 +787,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         } else {
             simple_majority_bps
         };
-        let participation = votes_for + votes_against;
+        let participation = votes_for.saturating_add(votes_against);
         let has_majority = if participation == 0 {
             false
         } else {
@@ -983,6 +985,12 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 let mut amount_buf = [0u8; 16];
                 amount_buf.copy_from_slice(&execution_data[48..64]);
                 let amount = u128::from_be_bytes(amount_buf);
+                if amount == 0 {
+                    return Err(PrecompileError::Other(
+                        "governance: treasury spend amount must be non-zero"
+                            .into(),
+                    ));
+                }
                 let asset_id = if execution_data.len() >= 96 {
                     let mut asset_buf = [0u8; 8];
                     asset_buf.copy_from_slice(&execution_data[88..96]);
