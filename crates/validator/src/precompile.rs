@@ -7,7 +7,10 @@
 use crate::ValidatorStorage;
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
-use call_precompile::{check_compliance, dispatch, require_caller, storage::StorageProvider, StorageRef};
+use call_precompile::{
+    address_to_u256, check_compliance, dispatch, require_caller, storage::StorageProvider,
+    u128_to_u256, u64_to_u256, StorageRef, VALIDATOR_ADDRESS,
+};
 use call_primitives::{Address, U256};
 use revm_precompile::{PrecompileError, PrecompileResult};
 
@@ -48,6 +51,24 @@ impl ValidatorPrecompile {
                 validator_store
                     .stake(&mut asset_store, call.pubkey.into(), call.amount, caller)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let validator_id = validator_store.read_validator_id(caller);
+                let topic0 =
+                    alloy_primitives::keccak256(b"Staked(address,uint64,bytes32,uint128)");
+                let topic1 = alloy_primitives::B256::from(
+                    address_to_u256(caller).to_be_bytes::<32>(),
+                );
+                let mut data = Vec::with_capacity(96);
+                data.extend_from_slice(&u64_to_u256(validator_id).to_be_bytes::<32>());
+                data.extend_from_slice(call.pubkey.as_ref());
+                data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0, topic1],
+                    alloy_primitives::Bytes::from(data),
+                ) {
+                    let _ = storage.emit_event(VALIDATOR_ADDRESS, log);
+                }
+
                 Ok(())
             },
         )
@@ -67,10 +88,28 @@ impl ValidatorPrecompile {
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
                 let mut validator_store = ValidatorStorage::new(sr);
+                let stake = validator_store.read_stake(caller);
                 let block_number = storage.block_number();
                 validator_store
                     .unstake(call.validatorId, caller, block_number)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let topic0 =
+                    alloy_primitives::keccak256(b"Unstaked(address,uint64,uint128,uint64)");
+                let topic1 = alloy_primitives::B256::from(
+                    address_to_u256(caller).to_be_bytes::<32>(),
+                );
+                let mut data = Vec::with_capacity(96);
+                data.extend_from_slice(&u64_to_u256(call.validatorId).to_be_bytes::<32>());
+                data.extend_from_slice(&u128_to_u256(stake).to_be_bytes::<32>());
+                data.extend_from_slice(&u64_to_u256(block_number).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0, topic1],
+                    alloy_primitives::Bytes::from(data),
+                ) {
+                    let _ = storage.emit_event(VALIDATOR_ADDRESS, log);
+                }
+
                 Ok(())
             },
         )
@@ -92,10 +131,26 @@ impl ValidatorPrecompile {
                 check_compliance(caller, storage)?;
                 let mut validator_store = ValidatorStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
+                let amount = validator_store.read_stake(caller);
                 let block_number = storage.block_number();
                 validator_store
                     .claim_unbonded(&mut asset_store, call.validatorId, caller, block_number)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let topic0 = alloy_primitives::keccak256(b"Claimed(address,uint64,uint128)");
+                let topic1 = alloy_primitives::B256::from(
+                    address_to_u256(caller).to_be_bytes::<32>(),
+                );
+                let mut data = Vec::with_capacity(64);
+                data.extend_from_slice(&u64_to_u256(call.validatorId).to_be_bytes::<32>());
+                data.extend_from_slice(&u128_to_u256(amount).to_be_bytes::<32>());
+                if let Some(log) = alloy_primitives::LogData::new(
+                    vec![topic0, topic1],
+                    alloy_primitives::Bytes::from(data),
+                ) {
+                    let _ = storage.emit_event(VALIDATOR_ADDRESS, log);
+                }
+
                 Ok(())
             },
         )
@@ -181,6 +236,12 @@ impl ValidatorPrecompile {
             storage,
             |call, _storage| {
                 let mut store = ValidatorStorage::new(sr);
+                let count = store.read_validator_count();
+                if call.index == 0 || call.index > count {
+                    return Err(PrecompileError::Other(
+                        "validator: index out of range".into(),
+                    ));
+                }
                 Ok(store.read_validator_by_index(call.index))
             },
         )

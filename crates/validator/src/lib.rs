@@ -439,7 +439,10 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
         let unbond_height = self.read_unbond_height(caller);
         let unbonding_period = self.read_unbonding_period_blocks();
-        if current_block < unbond_height + unbonding_period {
+        let unlock_block = unbond_height
+            .checked_add(unbonding_period)
+            .ok_or(ValidatorError::UnbondingPeriodNotElapsed)?;
+        if current_block < unlock_block {
             return Err(ValidatorError::UnbondingPeriodNotElapsed);
         }
 
@@ -486,8 +489,12 @@ impl<B: StorageBackend> ValidatorStorage<B> {
                 .map_err(|_| ValidatorError::EscrowUnderflow)?;
         }
 
-        // Remove from unbonding queue if present (ignore errors — may not be unbonding)
-        let _ = self.remove_from_unbonding_queue(validator_id);
+        // Remove from unbonding queue if validator is currently unbonding.
+        // If unbonding but queue removal fails, propagate the error (inconsistent state).
+        let status = self.read_status(validator);
+        if status == 2 {
+            self.remove_from_unbonding_queue(validator_id)?;
+        }
 
         self.clear_validator_state(validator, validator_id);
 
