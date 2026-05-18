@@ -228,7 +228,9 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
         // Register validator
         let count = self.read_validator_count();
-        let validator_id = count + 1;
+        let validator_id = count
+            .checked_add(1)
+            .ok_or(ValidatorError::ValidatorCountOverflow)?;
         self.backend.store(
             VALIDATOR_ADDRESS,
             slot_validator_count(),
@@ -357,9 +359,13 @@ impl<B: StorageBackend> ValidatorStorage<B> {
                 .backend
                 .load(VALIDATOR_ADDRESS, slot_unbonding(i))
                 .to_be_bytes::<32>();
-            let entry_id = u64::from_be_bytes(packed[8..16].try_into().expect("fixed slice"));
+            let entry_id = u64::from_be_bytes(
+                packed[8..16].try_into().unwrap_or([0u8; 8]),
+            );
             if entry_id == validator_id {
-                amount = u128::from_be_bytes(packed[16..32].try_into().expect("fixed slice"));
+                amount = u128::from_be_bytes(
+                    packed[16..32].try_into().unwrap_or([0u8; 16]),
+                );
                 found_idx = Some(i);
                 break;
             }
@@ -414,7 +420,6 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         );
     }
 
-    #[allow(clippy::expect_used)]
     pub fn claim_unbonded(
         &mut self,
         asset_store: &mut AssetStorage<B>,
