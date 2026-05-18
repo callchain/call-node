@@ -411,10 +411,11 @@ impl<B: StorageBackend> BridgeStorage<B> {
         _proof: Vec<u8>,
         caller: Address,
     ) -> Result<(), BridgeError> {
-        if caller == Address::ZERO || amount == 0 {
+        if caller == Address::ZERO || target_address == Address::ZERO || amount == 0 {
             return Err(BridgeError::InvalidInput);
         }
         self.validate_basic(asset_id)?;
+        asset_store.deduct_balance(asset_id, caller, amount)?;
         asset_store.add_balance(asset_id, target_address, amount)?;
         self.add_total_deposits(amount)?;
         Ok(())
@@ -562,11 +563,9 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 slot_bridge_deposit_block_height(source_tx_hash),
                 U256::ZERO,
             );
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_original_validator(source_tx_hash),
-                U256::ZERO,
-            );
+            // Clear challenge metadata to prevent storage bloat.
+            // Keep challenger and bond because `withdraw_challenge_bond` needs them.
+            self.clear_challenge_metadata(source_tx_hash, true);
             Ok(true)
         } else {
             let validator = u256_to_address(self.backend.load(
@@ -582,37 +581,8 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 slot_bridge_challenge_status(source_tx_hash),
                 U256::from(3u8),
             );
-            // Clear challenge metadata to prevent storage bloat.
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_challenger(source_tx_hash),
-                U256::ZERO,
-            );
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_deadline(source_tx_hash),
-                U256::ZERO,
-            );
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_bond(source_tx_hash),
-                U256::ZERO,
-            );
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_proof_hash(source_tx_hash),
-                U256::ZERO,
-            );
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_proof_len(source_tx_hash),
-                U256::ZERO,
-            );
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_original_validator(source_tx_hash),
-                U256::ZERO,
-            );
+            // Clear challenge metadata (including proof chunks) to prevent storage bloat.
+            self.clear_challenge_metadata(source_tx_hash, false);
             Ok(false)
         }
     }
@@ -654,6 +624,55 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     // ── Internal helpers ──────────────────────────────────────────────
+
+    /// Clear challenge metadata slots. If `keep_payout_info` is true,
+    /// preserves challenger and bond (needed by `withdraw_challenge_bond`).
+    fn clear_challenge_metadata(&mut self, source_tx_hash: [u8; 32], keep_payout_info: bool) {
+        let proof_len = u256_to_u64(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_challenge_proof_len(source_tx_hash)),
+        ) as usize;
+        let num_chunks = (proof_len + 31) / 32;
+        for i in 0..num_chunks {
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_proof_chunk(source_tx_hash, i as u64),
+                U256::ZERO,
+            );
+        }
+        if !keep_payout_info {
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_challenger(source_tx_hash),
+                U256::ZERO,
+            );
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_bond(source_tx_hash),
+                U256::ZERO,
+            );
+        }
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_deadline(source_tx_hash),
+            U256::ZERO,
+        );
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_proof_hash(source_tx_hash),
+            U256::ZERO,
+        );
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_proof_len(source_tx_hash),
+            U256::ZERO,
+        );
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_original_validator(source_tx_hash),
+            U256::ZERO,
+        );
+    }
 
     fn add_total_deposits(&mut self, amount: u128) -> Result<(), BridgeError> {
         let total = self.get_total_deposits();
@@ -877,6 +896,7 @@ impl BridgePrecompile {
                 if !is_validator(storage, validator) {
                     return Err(PrecompileError::Other("not a validator".into()));
                 }
+                check_compliance(validator, storage)?;
                 check_compliance(call.recipient, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
