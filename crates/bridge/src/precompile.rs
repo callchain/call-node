@@ -337,6 +337,9 @@ impl<B: StorageBackend> BridgeStorage<B> {
         validator: Address,
         block_height: u64,
     ) -> Result<(), BridgeError> {
+        if amount == 0 {
+            return Err(BridgeError::InvalidInput);
+        }
         if self.is_processed(source_tx_hash) {
             return Err(BridgeError::AlreadyProcessed);
         }
@@ -385,6 +388,9 @@ impl<B: StorageBackend> BridgeStorage<B> {
         amount: u128,
         caller: Address,
     ) -> Result<(), BridgeError> {
+        if amount == 0 {
+            return Err(BridgeError::InvalidInput);
+        }
         self.validate_basic(asset_id)?;
         asset_store.deduct_balance(asset_id, caller, amount)?;
         self.add_total_withdrawals(amount)?;
@@ -401,7 +407,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         _proof: Vec<u8>,
         caller: Address,
     ) -> Result<(), BridgeError> {
-        if caller == Address::ZERO {
+        if caller == Address::ZERO || amount == 0 {
             return Err(BridgeError::InvalidInput);
         }
         self.validate_basic(asset_id)?;
@@ -520,14 +526,6 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 slot_bridge_processed(source_tx_hash),
                 U256::ZERO,
             );
-
-            let challenger = self.read_challenge_challenger(source_tx_hash);
-            let reward = bond
-                .checked_add(bond / 10)
-                .ok_or(BridgeError::BalanceOverflow)?;
-            asset_store
-                .add_balance(CALL_ASSET_ID, challenger, reward)
-                .map_err(|_| BridgeError::BalanceOverflow)?;
 
             let validator = u256_to_address(self.backend.load(
                 BRIDGE_ADDRESS,
@@ -1709,13 +1707,13 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(status, 2);
 
-        // Challenger should have received bond + 10% reward
+        // Challenger balance after resolve (reward not yet withdrawn)
         let challenger_bal = u256_to_u128(
             provider
                 .get(ASSET_ADDRESS, slot_balance(CALL_ASSET_ID, challenger))
                 .unwrap_or(U256::ZERO),
         );
-        assert_eq!(challenger_bal, 4000 + 1000 + 100); // 5000 - 1000 + 1100
+        assert_eq!(challenger_bal, 4000); // 5000 - 1000 bond
 
         // Recipient balance should have been reversed (1000 deducted)
         let recipient_bal = u256_to_u128(
@@ -1724,6 +1722,25 @@ mod tests {
                 .unwrap_or(U256::ZERO),
         );
         assert_eq!(recipient_bal, 0);
+
+        // Withdraw challenge bond to collect reward
+        let input = IProtocolBridge::withdrawChallengeBondCall {
+            sourceTxHash: source_tx_hash.into(),
+        }
+        .abi_encode();
+        let result = precompile.call(&input, challenger, &mut provider);
+        assert!(
+            result.is_ok(),
+            "withdraw_challenge_bond failed: {:?}",
+            result.err()
+        );
+
+        let challenger_bal = u256_to_u128(
+            provider
+                .get(ASSET_ADDRESS, slot_balance(CALL_ASSET_ID, challenger))
+                .unwrap_or(U256::ZERO),
+        );
+        assert_eq!(challenger_bal, 4000 + 1000 + 100); // 4000 + bond + 10% reward
     }
 
     #[test]
