@@ -370,7 +370,7 @@ async fn handle_deposit(
         rho,
     };
 
-    let circuit = DepositCircuit::new(commitment, req.asset_id, witness);
+    let circuit = DepositCircuit::new(commitment, req.value, req.asset_id, witness);
 
     state.inflight.fetch_add(1, Ordering::Relaxed);
     let proof_data = state.prover.prove_deposit(&circuit).map_err(|e| {
