@@ -24,6 +24,8 @@ sol! {
         function getValidatorPubkey(address validator) external view returns (bytes32 pubkey);
         function getUnbondHeight(address validator) external view returns (uint64 height);
         function getValidatorByIndex(uint64 index) external view returns (address validator);
+        function getValidatorCount() external view returns (uint64 count);
+        function getActiveValidatorCount() external view returns (uint64 count);
     }
 }
 
@@ -131,9 +133,8 @@ impl ValidatorPrecompile {
                 check_compliance(caller, storage)?;
                 let mut validator_store = ValidatorStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
-                let amount = validator_store.read_stake(caller);
                 let block_number = storage.block_number();
-                validator_store
+                let amount = validator_store
                     .claim_unbonded(&mut asset_store, call.validatorId, caller, block_number)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
@@ -246,6 +247,40 @@ impl ValidatorPrecompile {
             },
         )
     }
+
+    fn get_validator_count(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolValidator::getValidatorCountCall, _, _>(
+            calldata,
+            500,
+            storage,
+            |_call, _storage| {
+                let mut store = ValidatorStorage::new(sr);
+                Ok(u64_to_u256(store.read_validator_count()))
+            },
+        )
+    }
+
+    fn get_active_validator_count(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolValidator::getActiveValidatorCountCall, _, _>(
+            calldata,
+            500,
+            storage,
+            |_call, _storage| {
+                let mut store = ValidatorStorage::new(sr);
+                Ok(u64_to_u256(store.read_active_validator_count()))
+            },
+        )
+    }
 }
 
 impl call_precompile::StatefulPrecompile for ValidatorPrecompile {
@@ -285,6 +320,12 @@ impl call_precompile::StatefulPrecompile for ValidatorPrecompile {
             }
             IProtocolValidator::getValidatorByIndexCall::SELECTOR => {
                 self.get_validator_by_index(calldata, storage, sr)
+            }
+            IProtocolValidator::getValidatorCountCall::SELECTOR => {
+                self.get_validator_count(calldata, storage, sr)
+            }
+            IProtocolValidator::getActiveValidatorCountCall::SELECTOR => {
+                self.get_active_validator_count(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
@@ -468,5 +509,123 @@ mod tests {
             result.bytes.as_ref().try_into().unwrap(),
         ));
         assert_eq!(height, 0); // block_number defaults to 0 in test provider
+
+        // getValidatorCount() and getActiveValidatorCount()
+        let input = IProtocolValidator::getValidatorCountCall {}.abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let count = u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        ));
+        assert_eq!(count, 1);
+
+        let input = IProtocolValidator::getActiveValidatorCountCall {}.abi_encode();
+        let result = precompile
+            .call(&input, Address::ZERO, &mut provider)
+            .unwrap();
+        let active = u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        ));
+        assert_eq!(active, 0); // unstaked, so active count is 0
+    }
+
+    #[test]
+    fn test_validator_precompile_count_views() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let v1 = Address::repeat_byte(0x11);
+        let v2 = Address::repeat_byte(0x22);
+        provider
+            .sstore(
+                call_precompile::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, v1),
+                u128_to_u256(10_000_000),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                call_precompile::ASSET_ADDRESS,
+                slot_balance(CALL_ASSET_ID, v2),
+                u128_to_u256(10_000_000),
+            )
+            .unwrap();
+
+        let mut precompile = ValidatorPrecompile;
+
+        // Disable safety floor
+        provider
+            .sstore(
+                VALIDATOR_ADDRESS,
+                crate::slot_safety_floor(),
+                alloy_primitives::U256::ZERO,
+            )
+            .unwrap();
+
+        // Initially both counts are 0
+        let input = IProtocolValidator::getValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 0);
+
+        let input = IProtocolValidator::getActiveValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 0);
+
+        // Stake v1
+        let input = IProtocolValidator::stakeCall {
+            pubkey: [0xAAu8; 32].into(),
+            amount: 5_000_000,
+        }.abi_encode();
+        precompile.call(&input, v1, &mut provider).unwrap();
+
+        let input = IProtocolValidator::getValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 1);
+
+        let input = IProtocolValidator::getActiveValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 1);
+
+        // Stake v2
+        let input = IProtocolValidator::stakeCall {
+            pubkey: [0xBBu8; 32].into(),
+            amount: 5_000_000,
+        }.abi_encode();
+        precompile.call(&input, v2, &mut provider).unwrap();
+
+        let input = IProtocolValidator::getValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 2);
+
+        let input = IProtocolValidator::getActiveValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 2);
+
+        // Unstake v1 (active drops to 1, count stays 2)
+        let input = IProtocolValidator::unstakeCall { validatorId: 1 }.abi_encode();
+        precompile.call(&input, v1, &mut provider).unwrap();
+
+        let input = IProtocolValidator::getValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 2);
+
+        let input = IProtocolValidator::getActiveValidatorCountCall {}.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider).unwrap();
+        assert_eq!(u256_to_u64(alloy_primitives::U256::from_be_bytes::<32>(
+            result.bytes.as_ref().try_into().unwrap(),
+        )), 1);
     }
 }

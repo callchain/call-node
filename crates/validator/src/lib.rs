@@ -28,6 +28,7 @@ pub enum ValidatorError {
     NoUnbondingRequest,
     BelowSafetyFloor,
     InvalidPubkey,
+    ValidatorCountOverflow,
 }
 
 impl std::fmt::Display for ValidatorError {
@@ -47,6 +48,7 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::NoUnbondingRequest => write!(f, "no unbonding request found"),
             ValidatorError::BelowSafetyFloor => write!(f, "below safety floor"),
             ValidatorError::InvalidPubkey => write!(f, "invalid pubkey"),
+            ValidatorError::ValidatorCountOverflow => write!(f, "validator count overflow"),
         }
     }
 }
@@ -186,12 +188,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
     }
 
     pub fn read_unbonding_period_blocks(&mut self) -> u64 {
-        let raw: u64 = self
-            .backend
-            .load(VALIDATOR_ADDRESS, slot_unbonding_period_blocks())
-            .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0);
+        let raw = u256_to_u64(self.backend.load(VALIDATOR_ADDRESS, slot_unbonding_period_blocks()));
         // Default: 120_960 blocks (~8.4h at 250ms) when unset
         if raw == 0 {
             120_960
@@ -265,10 +262,13 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
         // Increment active validator count
         let active = self.read_active_validator_count();
+        let new_active = active
+            .checked_add(1)
+            .ok_or(ValidatorError::ValidatorCountOverflow)?;
         self.backend.store(
             VALIDATOR_ADDRESS,
             slot_active_validator_count(),
-            u64_to_u256(active + 1),
+            u64_to_u256(new_active),
         );
 
         Ok(())
@@ -333,10 +333,13 @@ impl<B: StorageBackend> ValidatorStorage<B> {
             slot_unbonding(unbonding_count),
             U256::from_be_slice(&packed),
         );
+        let new_unbonding_count = unbonding_count
+            .checked_add(1)
+            .ok_or(ValidatorError::ValidatorCountOverflow)?;
         self.backend.store(
             VALIDATOR_ADDRESS,
             slot_unbonding_count(),
-            u64_to_u256(unbonding_count + 1),
+            u64_to_u256(new_unbonding_count),
         );
 
         Ok(())
@@ -418,7 +421,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         validator_id: u64,
         caller: Address,
         current_block: u64,
-    ) -> Result<(), ValidatorError> {
+    ) -> Result<u128, ValidatorError> {
         let stored_id = self.read_validator_id(caller);
         if stored_id == 0 {
             return Err(ValidatorError::NotAValidator);
@@ -453,7 +456,7 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
         self.clear_validator_state(caller, stored_id);
 
-        Ok(())
+        Ok(amount)
     }
 
     /// Slash a validator's stake. Deducts staked amount from escrow and clears
