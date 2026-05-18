@@ -27,6 +27,7 @@ pub enum ValidatorError {
     UnbondingPeriodNotElapsed,
     NoUnbondingRequest,
     BelowSafetyFloor,
+    InvalidPubkey,
 }
 
 impl std::fmt::Display for ValidatorError {
@@ -45,6 +46,7 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::UnbondingPeriodNotElapsed => write!(f, "unbonding period not elapsed"),
             ValidatorError::NoUnbondingRequest => write!(f, "no unbonding request found"),
             ValidatorError::BelowSafetyFloor => write!(f, "below safety floor"),
+            ValidatorError::InvalidPubkey => write!(f, "invalid pubkey"),
         }
     }
 }
@@ -127,20 +129,12 @@ impl<B: StorageBackend> ValidatorStorage<B> {
     // ── Read operations ───────────────────────────────────────────────
 
     pub fn read_validator_count(&mut self) -> u64 {
-        self.backend
-            .load(VALIDATOR_ADDRESS, slot_validator_count())
-            .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0)
+        u256_to_u64(self.backend.load(VALIDATOR_ADDRESS, slot_validator_count()))
     }
 
     pub fn read_validator_id(&mut self, addr: Address) -> u64 {
         let slot = call_precompile::slot_validator_by_addr(addr);
-        self.backend
-            .load(VALIDATOR_ADDRESS, slot)
-            .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0)
+        u256_to_u64(self.backend.load(VALIDATOR_ADDRESS, slot))
     }
 
     pub fn read_validator_by_index(&mut self, index: u64) -> Address {
@@ -181,20 +175,11 @@ impl<B: StorageBackend> ValidatorStorage<B> {
     }
 
     pub fn read_active_validator_count(&mut self) -> u64 {
-        self.backend
-            .load(VALIDATOR_ADDRESS, slot_active_validator_count())
-            .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0)
+        u256_to_u64(self.backend.load(VALIDATOR_ADDRESS, slot_active_validator_count()))
     }
 
     pub fn read_safety_floor(&mut self) -> u64 {
-        let raw: u64 = self
-            .backend
-            .load(VALIDATOR_ADDRESS, slot_safety_floor())
-            .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0);
+        let raw = u256_to_u64(self.backend.load(VALIDATOR_ADDRESS, slot_safety_floor()));
         // 0 means "no safety floor" (unset / disabled).
         // Production nodes should initialize this to 28 via genesis/governance.
         raw
@@ -226,6 +211,9 @@ impl<B: StorageBackend> ValidatorStorage<B> {
     ) -> Result<(), ValidatorError> {
         if amount < MIN_SELF_STAKE {
             return Err(ValidatorError::BelowMinimumStake);
+        }
+        if pubkey == [0u8; 32] {
+            return Err(ValidatorError::InvalidPubkey);
         }
 
         let existing_id = self.read_validator_id(caller);
@@ -313,6 +301,13 @@ impl<B: StorageBackend> ValidatorStorage<B> {
         }
 
         let stake = self.read_stake(caller);
+
+        // Decrement active count (validator is leaving active set)
+        self.backend.store(
+            VALIDATOR_ADDRESS,
+            slot_active_validator_count(),
+            u64_to_u256(active_count.saturating_sub(1)),
+        );
 
         // Set status to unbonding (2)
         self.backend.store(
@@ -458,14 +453,6 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
         self.clear_validator_state(caller, stored_id);
 
-        // Decrement active validator count
-        let active = self.read_active_validator_count();
-        self.backend.store(
-            VALIDATOR_ADDRESS,
-            slot_active_validator_count(),
-            u64_to_u256(active.saturating_sub(1)),
-        );
-
         Ok(())
     }
 
@@ -498,13 +485,16 @@ impl<B: StorageBackend> ValidatorStorage<B> {
 
         self.clear_validator_state(validator, validator_id);
 
-        // Decrement active validator count
-        let active = self.read_active_validator_count();
-        self.backend.store(
-            VALIDATOR_ADDRESS,
-            slot_active_validator_count(),
-            u64_to_u256(active.saturating_sub(1)),
-        );
+        // Only decrement active count if validator was still active at slash time.
+        // If already unbonding, active_count was already decremented during unstake.
+        if status == 1 {
+            let active = self.read_active_validator_count();
+            self.backend.store(
+                VALIDATOR_ADDRESS,
+                slot_active_validator_count(),
+                u64_to_u256(active.saturating_sub(1)),
+            );
+        }
 
         Ok(stake)
     }
@@ -1208,6 +1198,83 @@ mod tests {
             result.is_ok(),
             "claim should succeed at default period: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn test_stake_zero_pubkey_rejected() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = test_addr(0x11);
+        seed_balance(&mut provider, caller, 10_000_000);
+
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        let result = validator_store.stake(
+            &mut asset_store,
+            [0u8; 32], // zero pubkey
+            5_000_000,
+            caller,
+        );
+        assert!(
+            matches!(result, Err(ValidatorError::InvalidPubkey)),
+            "expected InvalidPubkey, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_safety_floor_no_deadlock_after_claim() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let v1 = test_addr(0x11);
+        let v2 = test_addr(0x22);
+        let v3 = test_addr(0x33);
+        seed_balance(&mut provider, v1, 10_000_000);
+        seed_balance(&mut provider, v2, 10_000_000);
+        seed_balance(&mut provider, v3, 10_000_000);
+
+        let mut asset_store = AssetStorage::new(StorageRef::new(&mut provider));
+        let mut validator_store = ValidatorStorage::new(StorageRef::new(&mut provider));
+
+        // Set safety floor to 2
+        set_safety_floor(&mut provider, 2);
+
+        // Stake 3 validators
+        validator_store
+            .stake(&mut asset_store, [0xAAu8; 32], 5_000_000, v1)
+            .unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xBBu8; 32], 5_000_000, v2)
+            .unwrap();
+        validator_store
+            .stake(&mut asset_store, [0xCCu8; 32], 5_000_000, v3)
+            .unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 3);
+
+        // v1 unstake: active drops to 2, meets floor
+        validator_store.unstake(1, v1, 100).unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 2);
+
+        // v1 claim: active stays 2 (already decremented at unstake)
+        validator_store
+            .claim_unbonded(&mut asset_store, 1, v1, 100 + UNBONDING_PERIOD_BLOCKS)
+            .unwrap();
+        assert_eq!(validator_store.read_active_validator_count(), 2);
+
+        // v2 unstake: active drops to 1, which is below floor 2 → should fail
+        let result = validator_store.unstake(2, v2, 200);
+        assert!(
+            matches!(result, Err(ValidatorError::BelowSafetyFloor)),
+            "expected BelowSafetyFloor, got {:?}",
+            result
+        );
+
+        // v3 unstake: active would drop to 1, still below floor → should also fail
+        let result = validator_store.unstake(3, v3, 200);
+        assert!(
+            matches!(result, Err(ValidatorError::BelowSafetyFloor)),
+            "expected BelowSafetyFloor, got {:?}",
+            result
         );
     }
 }
