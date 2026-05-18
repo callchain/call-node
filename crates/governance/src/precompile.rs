@@ -1383,6 +1383,12 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         proposal_id: u64,
         caller: Address,
     ) -> Result<(), PrecompileError> {
+        if self.is_paused() {
+            return Err(PrecompileError::Other(
+                "governance: chain is paused".into(),
+            ));
+        }
+
         self.require_valid_proposal_id(proposal_id)?;
 
         let proposer = self.read_proposal_proposer(proposal_id);
@@ -1558,8 +1564,8 @@ impl GovernancePrecompile {
                             voting_power = 1;
                         }
                     }
-                    6 | 7 | 8 | 9 => {
-                        // FeeCurrencyAdd, FeeCurrencyRemove, FeeCurrencyCap, ValidatorKeyRotation: simple majority
+                    6 | 7 | 8 | 9 | 10 => {
+                        // FeeCurrencyAdd, FeeCurrencyRemove, FeeCurrencyCap, ValidatorKeyRotation, ProverKeyRotation: simple majority
                         if is_validator {
                             voting_power = voting_power.max(1);
                         }
@@ -1697,19 +1703,6 @@ impl GovernancePrecompile {
                 let caller = require_caller(msg_sender)?;
                 let mut gov_store = GovernanceStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
-
-                // Authorization check: proposer or validator
-                let proposer = gov_store.read_proposal_proposer(call.proposalId);
-                let is_proposer = caller == proposer;
-                let is_validator = {
-                    let mut validator_store = ValidatorStorage::new(sr);
-                    validator_store.read_validator_id(caller) != 0
-                };
-                if !is_proposer && !is_validator {
-                    return Err(PrecompileError::Other(
-                        "governance: unauthorized executor".into(),
-                    ));
-                }
 
                 let block_number = storage.block_number();
                 let exec_result =
@@ -2025,6 +2018,8 @@ impl GovernancePrecompile {
             storage,
             |call, _storage| {
                 let mut store = GovernanceStorage::new(sr);
+                store.require_valid_proposal_id(call.proposalId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 let status = store.read_proposal_status(call.proposalId);
                 let proposal_type = store.read_proposal_u8(call.proposalId, b"proposal_type");
                 let proposer = store.read_proposal_proposer(call.proposalId);
@@ -2061,6 +2056,8 @@ impl GovernancePrecompile {
             storage,
             |call, _storage| {
                 let mut store = GovernanceStorage::new(sr);
+                store.require_valid_proposal_id(call.proposalId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(U256::from(store.read_proposal_status(call.proposalId)))
             },
         )
@@ -2078,6 +2075,8 @@ impl GovernancePrecompile {
             storage,
             |call, _storage| {
                 let mut store = GovernanceStorage::new(sr);
+                store.require_valid_proposal_id(call.proposalId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 let votes_for = store.read_vote_tally(call.proposalId, b"votes_for");
                 let votes_against = store.read_vote_tally(call.proposalId, b"votes_against");
                 let votes_abstain = store.read_vote_tally(call.proposalId, b"votes_abstain");
@@ -2701,5 +2700,32 @@ mod tests {
             .call(&input, Address::ZERO, &mut provider)
             .unwrap();
         assert_eq!(result.bytes[31], 4);
+    }
+
+    #[test]
+    fn test_governance_precompile_view_rejects_invalid_proposal_id() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+
+        let mut precompile = GovernancePrecompile;
+
+        // getProposal(0) should fail — 0 is invalid
+        let input = IProtocolGovernance::getProposalCall { proposalId: 0 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_err(), "getProposal(0) should fail");
+
+        // getProposal(99) should fail — no proposals exist
+        let input = IProtocolGovernance::getProposalCall { proposalId: 99 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_err(), "getProposal(99) should fail");
+
+        // getProposalStatus(99) should fail
+        let input = IProtocolGovernance::getProposalStatusCall { proposalId: 99 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_err(), "getProposalStatus(99) should fail");
+
+        // getProposalVotes(99) should fail
+        let input = IProtocolGovernance::getProposalVotesCall { proposalId: 99 }.abi_encode();
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_err(), "getProposalVotes(99) should fail");
     }
 }

@@ -1270,6 +1270,39 @@ fn test_cancel_proposal_rejected_for_non_proposer() {
     });
 }
 
+#[test]
+fn test_cancel_proposal_blocked_during_pause() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 10);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        // Pause the chain
+        gov.emergency_pause([1u8; 32], test_addr(99)).unwrap();
+        assert!(gov.is_paused());
+
+        // Cancel should be rejected during pause
+        let result = gov.cancel_proposal(&mut asset, id, proposer);
+        assert!(result.is_err(), "cancel during pause should fail");
+    });
+}
+
 // ── Execute malformed data rejection ──────────────────────────────
 
 #[test]
