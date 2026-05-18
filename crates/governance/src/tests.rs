@@ -1411,3 +1411,199 @@ fn test_emergency_resume_rejects_when_not_paused() {
         assert!(result.is_err(), "resume when not paused should fail");
     });
 }
+
+// ── ParameterChange range validation ──────────────────────────────
+
+#[test]
+fn test_parameter_change_rejects_zero_quorum_bps() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let exec_data = encode_parameter_change("validator_quorum_bps", 0);
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                exec_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(result.is_err(), "execute should reject quorum_bps=0");
+        assert_eq!(gov.read_proposal_status(id), 2); // still Queued
+    });
+}
+
+#[test]
+fn test_parameter_change_rejects_simple_majority_below_50() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let exec_data = encode_parameter_change("simple_majority_bps", 1000); // 10% < 50%
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                exec_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(
+            result.is_err(),
+            "execute should reject simple_majority below 50%"
+        );
+        assert_eq!(gov.read_proposal_status(id), 2);
+    });
+}
+
+// ── Expired proposal deposit refund ───────────────────────────────
+
+#[test]
+fn test_expired_proposal_refunds_deposit() {
+    let mut provider = HashMapStorageProvider::with_block(10_000_000, 1, 0);
+    let id = {
+        let storage = &mut provider;
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 10);
+        gov.write_config_u64(b"execution_timeout", 50);
+
+        let exec_data = encode_parameter_change("voting_period", 200);
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                exec_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 101).unwrap();
+        id
+    };
+
+    // Advance way past execution block + timeout
+    provider.set_block_number(1000);
+    {
+        let storage = &mut provider;
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        let balance_before = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let result = gov.execute(&mut asset, id, 1000, proposer);
+        assert!(result.is_err(), "execute past timeout should fail");
+        assert_eq!(gov.read_proposal_status(id), 6); // Expired
+
+        // Deposit should be refunded
+        let balance_after = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        assert_eq!(balance_after, balance_before + PROPOSAL_DEPOSIT);
+    }
+}
+
+// ── Overflow protection ───────────────────────────────────────────
+
+#[test]
+fn test_submit_proposal_rejects_overflow_period() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        // Set review_period to near u64::MAX so current_block + review_period overflows
+        gov.write_config_u64(b"review_period", u64::MAX);
+
+        let result = gov.submit_proposal(
+            &mut asset,
+            0,
+            "title".into(),
+            "desc".into(),
+            vec![],
+            proposer,
+            1,
+        );
+        assert!(result.is_err(), "submit with overflow period should fail");
+    });
+}
+
+// ── ComplianceUpdate status range ─────────────────────────────────
+
+#[test]
+fn test_compliance_update_rejects_invalid_status() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        // execution_data = ABI-encoded (address target, uint8 status=2)
+        let mut execution_data = vec![0u8; 64];
+        execution_data[12..32].copy_from_slice(test_addr(2).as_slice());
+        execution_data[63] = 2; // invalid: must be 0 or 1
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                4, // ComplianceUpdate
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(3), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(
+            result.is_err(),
+            "execute should reject compliance status > 1"
+        );
+        assert_eq!(gov.read_proposal_status(id), 2);
+    });
+}

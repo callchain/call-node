@@ -27,6 +27,17 @@ pub const EXECUTION_TIMEOUT_BLOCKS: u64 = 10_368_000;
 /// Total supply divided by 10 for issuer voting weight on compliance updates
 pub const TOTAL_SUPPLY_DIV_10: Balance = TOTAL_SUPPLY / 10;
 
+/// Minimum safe value for any quorum or majority bps (0 = no threshold).
+pub const MIN_QUORUM_BPS: u32 = 1;
+/// Maximum safe value for any bps parameter (10000 = 100%).
+pub const MAX_BPS: u32 = 10_000;
+/// Minimum safe simple-majority bps (must be > 50% to avoid single-vote passage).
+pub const MIN_SIMPLE_MAJORITY_BPS: u32 = 5_001;
+/// Maximum safe review + voting period sum to avoid u64 overflow in block math.
+pub const MAX_PERIOD_BLOCKS: u64 = u64::MAX / 2;
+/// Maximum safe cooldown to prevent accidental lockout.
+pub const MAX_PROPOSAL_COOLDOWN: u64 = 10_368_000; // ~30 days
+
 /// Quorum and timing configuration for governance proposals.
 /// Set at genesis and loaded into `GovernanceManager`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +81,48 @@ impl Default for GovernanceConfig {
             proposal_deposit: DEFAULT_PROPOSAL_DEPOSIT,
             asset_registration_fee: DEFAULT_ASSET_REGISTRATION_FEE,
         }
+    }
+}
+
+/// Validate that a proposed new value for a governance config key is within safe bounds.
+/// Returns `Some(err_msg)` if the value is dangerous, `None` if acceptable.
+pub fn validate_config_param(key: &str, value: u128) -> Option<&'static str> {
+    match key {
+        "validator_quorum_bps"
+        | "supply_quorum_bps"
+        | "treasury_quorum_bps"
+        | "emergency_pause_bps" => {
+            if value < MIN_QUORUM_BPS as u128 {
+                return Some("governance: bps below minimum safe threshold");
+            }
+            if value > MAX_BPS as u128 {
+                return Some("governance: bps exceeds 100%");
+            }
+            None
+        }
+        "simple_majority_bps" => {
+            if value < MIN_SIMPLE_MAJORITY_BPS as u128 {
+                return Some("governance: simple majority must exceed 50%");
+            }
+            if value > MAX_BPS as u128 {
+                return Some("governance: bps exceeds 100%");
+            }
+            None
+        }
+        "review_period" | "voting_period" | "timelock" | "execution_timeout" => {
+            if value > MAX_PERIOD_BLOCKS as u128 {
+                return Some("governance: period exceeds safe maximum");
+            }
+            None
+        }
+        "proposal_cooldown" => {
+            if value > MAX_PROPOSAL_COOLDOWN as u128 {
+                return Some("governance: cooldown exceeds safe maximum");
+            }
+            None
+        }
+        "proposal_deposit" | "asset_registration_fee" => None, // any non-negative is acceptable
+        _ => Some("governance: unknown config key for validation"),
     }
 }
 

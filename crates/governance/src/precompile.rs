@@ -189,6 +189,14 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     /// Maximum execution_data size (1 MB) to prevent OOM from malicious data_len.
     const MAX_EXECUTION_DATA_LEN: usize = 1024 * 1024;
 
+    /// Read the stored execution_data length without loading chunks.
+    pub fn read_proposal_data_len(&mut self, proposal_id: u64) -> u64 {
+        u256_to_u64(
+            self.backend
+                .load(GOVERNANCE_ADDRESS, slot_gov_proposal_data_len(proposal_id)),
+        )
+    }
+
     /// Read back the execution_data stored in chunked slots.
     pub fn read_proposal_execution_data(&mut self, proposal_id: u64) -> Vec<u8> {
         let data_len = u256_to_u64(
@@ -401,6 +409,26 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             != 0
     }
 
+    /// Mark a proposal as Defeated and confiscate its deposit.
+    fn mark_defeated(&mut self, proposal_id: u64) {
+        let proposer = u256_to_address(self.backend.load(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"proposer"),
+        ));
+        if proposer != Address::ZERO {
+            self.backend.store(
+                GOVERNANCE_ADDRESS,
+                slot_gov_proposal(proposal_id, b"deposit"),
+                U256::ZERO,
+            );
+        }
+        self.backend.store(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"status"),
+            U256::from(4u8),
+        );
+    }
+
     pub fn submit_proposal(
         &mut self,
         asset_store: &mut AssetStorage<B>,
@@ -444,8 +472,12 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         let review_period = self.read_config_u64(b"review_period");
         let voting_period = self.read_config_u64(b"voting_period");
 
-        let start_block = current_block + review_period;
-        let end_block = start_block + voting_period;
+        let start_block = current_block
+            .checked_add(review_period)
+            .ok_or_else(|| PrecompileError::Other("governance: start_block overflow".into()))?;
+        let end_block = start_block
+            .checked_add(voting_period)
+            .ok_or_else(|| PrecompileError::Other("governance: end_block overflow".into()))?;
 
         // If no review period, proposal is active immediately
         let initial_status: u8 = if review_period == 0 { 1 } else { 0 };
@@ -689,32 +721,22 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         let quorum_required = self.read_proposal_u128(proposal_id, b"quorum_required");
         let proposal_type = self.read_proposal_u8(proposal_id, b"proposal_type");
 
-        // If quorum wasn't set by advancer, fall back to generic quorum
+        // If quorum wasn't set by advancer, fall back to a safe default based on
+        // validator count so a proposal never queues with an accidentally-zero threshold.
         let has_quorum = if quorum_required > 0 {
             total_votes >= quorum_required
         } else {
-            // Generic fallback: at least one vote and more for than against
-            total_votes > 0 && votes_for > votes_against
+            let validator_count = self.read_validator_count();
+            let fallback_threshold = if validator_count > 0 {
+                validator_count as u128
+            } else {
+                1
+            };
+            total_votes >= fallback_threshold && votes_for > votes_against
         };
 
         if !has_quorum {
-            // Defeat: confiscate deposit
-            let proposer = u256_to_address(self.backend.load(
-                GOVERNANCE_ADDRESS,
-                slot_gov_proposal(proposal_id, b"proposer"),
-            ));
-            if proposer != Address::ZERO {
-                self.backend.store(
-                    GOVERNANCE_ADDRESS,
-                    slot_gov_proposal(proposal_id, b"deposit"),
-                    U256::ZERO,
-                );
-            }
-            self.backend.store(
-                GOVERNANCE_ADDRESS,
-                slot_gov_proposal(proposal_id, b"status"),
-                U256::from(4u8),
-            );
+            self.mark_defeated(proposal_id);
             return Err(PrecompileError::Other(
                 "governance: quorum not reached".into(),
             ));
@@ -738,23 +760,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             lhs > rhs
         };
         if !has_majority {
-            // Defeat: confiscate deposit
-            let proposer = u256_to_address(self.backend.load(
-                GOVERNANCE_ADDRESS,
-                slot_gov_proposal(proposal_id, b"proposer"),
-            ));
-            if proposer != Address::ZERO {
-                self.backend.store(
-                    GOVERNANCE_ADDRESS,
-                    slot_gov_proposal(proposal_id, b"deposit"),
-                    U256::ZERO,
-                );
-            }
-            self.backend.store(
-                GOVERNANCE_ADDRESS,
-                slot_gov_proposal(proposal_id, b"status"),
-                U256::from(4u8),
-            );
+            self.mark_defeated(proposal_id);
             return Err(PrecompileError::Other(
                 "governance: not enough for votes".into(),
             ));
@@ -833,23 +839,36 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         } else {
             execution_timeout
         };
+        let proposer = u256_to_address(self.backend.load(
+            GOVERNANCE_ADDRESS,
+            slot_gov_proposal(proposal_id, b"proposer"),
+        ));
+
         if current_block > execution_block.saturating_add(execution_timeout) {
             self.backend.store(
                 GOVERNANCE_ADDRESS,
                 slot_gov_proposal(proposal_id, b"status"),
                 U256::from(6u8), // Expired
             );
+            // Refund deposit on expiration so tokens don't get stuck
+            let deposit = u256_to_u128(self.backend.load(
+                GOVERNANCE_ADDRESS,
+                slot_gov_proposal(proposal_id, b"deposit"),
+            ));
+            if deposit > 0 && proposer != Address::ZERO {
+                let _ = asset_store.add_balance(CALL_ASSET_ID, proposer, deposit);
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    slot_gov_proposal(proposal_id, b"deposit"),
+                    U256::ZERO,
+                );
+            }
             return Err(PrecompileError::Other(
                 "governance: execution timeout reached".into(),
             ));
         }
 
-        let proposer = u256_to_address(self.backend.load(
-            GOVERNANCE_ADDRESS,
-            slot_gov_proposal(proposal_id, b"proposer"),
-        ));
         let _ = executor;
-        let _ = proposer;
 
         // Apply side effects based on proposal type
         let proposal_type = self.read_proposal_u8(proposal_id, b"proposal_type");
@@ -894,6 +913,9 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 let mut value_buf = [0u8; 16];
                 value_buf.copy_from_slice(&execution_data[48..64]);
                 let new_value = u128::from_be_bytes(value_buf);
+                if let Some(err) = crate::config::validate_config_param(key, new_value) {
+                    return Err(PrecompileError::Other(err.into()));
+                }
                 self.write_config_u128(key.as_bytes(), new_value);
                 Ok(())
             }
@@ -1044,6 +1066,11 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 addr_buf.copy_from_slice(&execution_data[12..32]);
                 let target = Address::from_slice(&addr_buf);
                 let status = execution_data[63];
+                if status > 1 {
+                    return Err(PrecompileError::Other(
+                        "governance: invalid compliance status (must be 0 or 1)".into(),
+                    ));
+                }
                 self.backend.store(
                     COMPLIANCE_ADDRESS,
                     slot_compliance(target),
@@ -1602,9 +1629,25 @@ impl GovernancePrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
+        // Approximate proposalId from ABI calldata for dynamic gas estimation.
+        let proposal_id = if calldata.len() >= 36 {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&calldata[28..36]);
+            u64::from_be_bytes(buf)
+        } else {
+            0
+        };
+        let mut gov_store = GovernanceStorage::new(sr);
+        let data_len = gov_store.read_proposal_data_len(proposal_id);
+        let base_gas = 20_000u64;
+        let chunk_gas = 500u64; // per 32-byte chunk of execution_data
+        let max_gas = 100_000u64;
+        let num_chunks = (data_len + 31) / 32;
+        let gas = (base_gas + num_chunks * chunk_gas).min(max_gas);
+
         dispatch::mutate_void::<IProtocolGovernance::executeCall, _>(
             calldata,
-            20_000,
+            gas,
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
