@@ -323,6 +323,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
 
         let quorum = match proposal_type {
             2 => config.treasury_quorum(), // TreasurySpend: balance-weighted
+            4 => config.supply_quorum(), // ComplianceUpdate: joint issuer+validator voting
             5 => {
                 if validator_count == 0 {
                     0 // fallback when no validators registered
@@ -468,6 +469,29 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             ));
         }
 
+        // Validate proposal-specific execution data
+        match proposal_type {
+            3 => {
+                // ValidatorSlash: require amount > 0
+                if execution_data.len() < 64 {
+                    return Err(PrecompileError::Other(
+                        "governance: ValidatorSlash execution data too short"
+                            .into(),
+                    ));
+                }
+                let mut amount_buf = [0u8; 16];
+                amount_buf.copy_from_slice(&execution_data[48..64]);
+                let amount = u128::from_be_bytes(amount_buf);
+                if amount == 0 {
+                    return Err(PrecompileError::Other(
+                        "governance: ValidatorSlash amount must be non-zero"
+                            .into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+
         asset_store
             .deduct_balance(CALL_ASSET_ID, proposer, PROPOSAL_DEPOSIT)
             .map_err(|_| {
@@ -544,9 +568,6 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             slot_gov_proposal(proposal_id, b"status"),
             U256::from(initial_status),
         );
-        if review_period == 0 {
-            self.compute_and_set_quorum(proposal_id);
-        }
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, b"votes_for"),
@@ -587,6 +608,11 @@ impl<B: StorageBackend> GovernanceStorage<B> {
             slot_gov_proposal_review_end(proposal_id),
             u64_to_u256(start_block),
         );
+        // Compute quorum AFTER proposal_type is stored so compute_and_set_quorum
+        // reads the correct type.
+        if review_period == 0 {
+            self.compute_and_set_quorum(proposal_id);
+        }
         // Quorum is computed and set by the advancer when transitioning to Active.
         // If there is a review period, zero it out here — the advancer (vote/queue)
         // will fill it in when auto-advancing Pending -> Active.
@@ -868,7 +894,13 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 slot_gov_proposal(proposal_id, b"deposit"),
             ));
             if deposit > 0 && proposer != Address::ZERO {
-                let _ = asset_store.add_balance(CALL_ASSET_ID, proposer, deposit);
+                asset_store
+                    .add_balance(CALL_ASSET_ID, proposer, deposit)
+                    .map_err(|_| {
+                        PrecompileError::Other(
+                            "governance: deposit refund failed".into(),
+                        )
+                    })?;
                 self.backend.store(
                     GOVERNANCE_ADDRESS,
                     slot_gov_proposal(proposal_id, b"deposit"),
@@ -942,6 +974,12 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 let mut addr_buf = [0u8; 20];
                 addr_buf.copy_from_slice(&execution_data[12..32]);
                 let recipient = Address::from_slice(&addr_buf);
+                if recipient == Address::ZERO {
+                    return Err(PrecompileError::Other(
+                        "governance: treasury spend recipient cannot be zero address"
+                            .into(),
+                    ));
+                }
                 let mut amount_buf = [0u8; 16];
                 amount_buf.copy_from_slice(&execution_data[48..64]);
                 let amount = u128::from_be_bytes(amount_buf);
@@ -1552,11 +1590,11 @@ impl GovernancePrecompile {
                         voting_power = call_balance;
                     }
                     4 => {
-                        // ComplianceUpdate: validator 1=1 + balance weighted
+                        // ComplianceUpdate: joint issuer+validator voting (additive)
                         if is_validator {
-                            voting_power = voting_power.max(1);
+                            voting_power = voting_power.saturating_add(1);
                         }
-                        voting_power = voting_power.max(call_balance);
+                        voting_power = voting_power.saturating_add(call_balance);
                     }
                     5 => {
                         // EmergencyPause: validator only, 1=1

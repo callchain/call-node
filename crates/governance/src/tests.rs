@@ -747,7 +747,10 @@ fn test_treasury_spend_transfers_from_treasury() {
             )
             .unwrap();
 
-        gov.vote(id, 1, test_addr(3), 1_000_000, 0).unwrap();
+        let voter_power = crate::config::TOTAL_SUPPLY / 5 + 1;
+        let voter = test_addr(3);
+        seed_balance(storage, voter, voter_power);
+        gov.vote(id, 1, voter, voter_power, 0).unwrap();
         gov.queue(id, 1).unwrap();
         gov.execute(&mut asset, id, 2, proposer).unwrap();
 
@@ -795,7 +798,10 @@ fn test_treasury_spend_rejects_insufficient_treasury() {
             )
             .unwrap();
 
-        gov.vote(id, 1, test_addr(3), 1_000_000, 0).unwrap();
+        let voter_power = crate::config::TOTAL_SUPPLY / 5 + 1;
+        let voter = test_addr(3);
+        seed_balance(storage, voter, voter_power);
+        gov.vote(id, 1, voter, voter_power, 0).unwrap();
         gov.queue(id, 1).unwrap();
 
         let result = gov.execute(&mut asset, id, 2, proposer);
@@ -834,13 +840,23 @@ fn test_proposal_types_stored_correctly() {
         gov.write_config_u64(b"voting_period", 100);
 
         for proposal_type in 0u8..=9 {
+            let execution_data = match proposal_type {
+                3 => {
+                    // ValidatorSlash: ABI-encoded (address, uint128 amount)
+                    let mut data = vec![0u8; 64];
+                    data[12..32].copy_from_slice(&test_addr(2).as_slice());
+                    data[48..64].copy_from_slice(&100u128.to_be_bytes());
+                    data
+                }
+                _ => vec![],
+            };
             let id = gov
                 .submit_proposal(
                     &mut asset,
                     proposal_type,
                     "title".into(),
                     "desc".into(),
-                    vec![],
+                    execution_data,
                     proposer,
                     0,
                 )
@@ -1367,7 +1383,10 @@ fn test_execute_rejects_malformed_treasury_spend() {
             )
             .unwrap();
 
-        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        let voter_power = crate::config::TOTAL_SUPPLY / 5 + 1;
+        let voter = test_addr(2);
+        seed_balance(storage, voter, voter_power);
+        gov.vote(id, 1, voter, voter_power, 0).unwrap();
         gov.queue(id, 1).unwrap();
 
         let result = gov.execute(&mut asset, id, 2, proposer);
@@ -1406,7 +1425,10 @@ fn test_execute_rejects_treasury_spend_50_byte_data() {
             )
             .unwrap();
 
-        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        let voter_power = crate::config::TOTAL_SUPPLY / 5 + 1;
+        let voter = test_addr(2);
+        seed_balance(storage, voter, voter_power);
+        gov.vote(id, 1, voter, voter_power, 0).unwrap();
         gov.queue(id, 1).unwrap();
 
         let result = gov.execute(&mut asset, id, 2, proposer);
@@ -1629,7 +1651,10 @@ fn test_compliance_update_rejects_invalid_status() {
             )
             .unwrap();
 
-        gov.vote(id, 1, test_addr(3), 1_000_000, 0).unwrap();
+        let voter_power = crate::config::TOTAL_SUPPLY / 5 + 1;
+        let voter = test_addr(3);
+        seed_balance(storage, voter, voter_power);
+        gov.vote(id, 1, voter, voter_power, 0).unwrap();
         gov.queue(id, 1).unwrap();
 
         let result = gov.execute(&mut asset, id, 2, proposer);
@@ -2008,5 +2033,102 @@ fn test_prover_key_rotation_executes_with_valid_sunset() {
         gov.execute(&mut asset, id, 2, proposer).unwrap();
 
         assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+#[test]
+fn test_treasury_spend_rejects_zero_recipient() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        // execution_data = (address recipient=zero, uint128 amount=100)
+        let mut execution_data = vec![0u8; 64];
+        // recipient stays zero (bytes 12..32)
+        execution_data[48..64].copy_from_slice(&100u128.to_be_bytes());
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                2, // TreasurySpend
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        let voter_power = crate::config::TOTAL_SUPPLY / 5 + 1;
+        let voter = test_addr(2);
+        seed_balance(storage, voter, voter_power);
+        gov.vote(id, 1, voter, voter_power, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(result.is_err(), "zero recipient should be rejected");
+    });
+}
+
+#[test]
+fn test_validator_slash_rejects_zero_amount() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+
+        // execution_data = (address validator, uint128 amount=0)
+        let mut execution_data = vec![0u8; 64];
+        execution_data[12..32].copy_from_slice(&test_addr(2).as_slice());
+        // amount stays zero
+
+        let result = gov.submit_proposal(
+            &mut asset,
+            3, // ValidatorSlash
+            "title".into(),
+            "desc".into(),
+            execution_data,
+            proposer,
+            0,
+        );
+        assert!(result.is_err(), "zero amount should be rejected");
+    });
+}
+
+#[test]
+fn test_compliance_update_quorum_uses_supply_quorum() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                4, // ComplianceUpdate
+                "title".into(),
+                "desc".into(),
+                vec![0u8; 64],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        let quorum = gov.read_proposal_u128(id, b"quorum_required");
+        // supply_quorum = TOTAL_SUPPLY * 2000 / 10000 = TOTAL_SUPPLY / 5
+        let expected = crate::config::TOTAL_SUPPLY / 5;
+        assert_eq!(quorum, expected, "ComplianceUpdate should use supply_quorum");
     });
 }
