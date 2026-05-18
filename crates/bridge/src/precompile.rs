@@ -7,7 +7,7 @@
 use alloy_sol_types::{sol, SolCall};
 use call_asset::AssetStorage;
 use call_precompile::{
-    address_to_u256, check_compliance, dispatch, require_caller, slot_asset_meta,
+    address_to_u256, check_compliance, dispatch, is_validator, require_caller, slot_asset_meta,
     storage::storage_slot,
     u128_to_u256, u256_to_address, u256_to_u128, u256_to_u64, u64_to_u256, StorageRef,
     ASSET_ADDRESS,
@@ -540,6 +540,32 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 slot_bridge_challenge_status(source_tx_hash),
                 U256::from(2u8),
             );
+            // Clear deposit metadata to prevent stale state on re-deposit.
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_deposit_asset_id(source_tx_hash),
+                U256::ZERO,
+            );
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_deposit_recipient(source_tx_hash),
+                U256::ZERO,
+            );
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_deposit_amount(source_tx_hash),
+                U256::ZERO,
+            );
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_deposit_block_height(source_tx_hash),
+                U256::ZERO,
+            );
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_original_validator(source_tx_hash),
+                U256::ZERO,
+            );
             Ok(true)
         } else {
             let validator = u256_to_address(self.backend.load(
@@ -585,6 +611,11 @@ impl<B: StorageBackend> BridgeStorage<B> {
             BRIDGE_ADDRESS,
             slot_bridge_challenge_status(source_tx_hash),
             U256::from(4u8),
+        );
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_bond(source_tx_hash),
+            U256::ZERO,
         );
         Ok(())
     }
@@ -672,8 +703,9 @@ impl<B: StorageBackend> BridgeStorage<B> {
         }
         #[cfg(not(feature = "light-client-bridge"))]
         {
-            // Without light-client support, fall back to structural validation only.
-            proof_len >= 32
+            // Without light-client support, reject all challenges —
+            // structural validation alone is insufficient for production.
+            false
         }
     }
 
@@ -809,6 +841,9 @@ impl BridgePrecompile {
             storage,
             |call, storage| {
                 let validator = require_caller(msg_sender)?;
+                if !is_validator(storage, validator) {
+                    return Err(PrecompileError::Other("not a validator".into()));
+                }
                 check_compliance(call.recipient, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
@@ -1006,7 +1041,7 @@ impl BridgePrecompile {
     ) -> PrecompileResult {
         dispatch::mutate_void::<IProtocolBridge::resolveChallengeCall, _>(
             calldata,
-            100000,
+            150000,
             storage,
             |call, storage| {
                 let mut bridge_store = BridgeStorage::new(sr);
@@ -1225,11 +1260,16 @@ mod tests {
         let recipient = Address::repeat_byte(0x22);
         let source_tx_hash = [0xABu8; 32];
 
-        // Register asset_id=1
+        // Register asset_id=1 and validator
         provider.set(
             ASSET_ADDRESS,
             storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
             U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
         );
 
         let mut precompile = BridgePrecompile;
@@ -1302,11 +1342,16 @@ mod tests {
         let recipient = Address::repeat_byte(0x22);
         let source_tx_hash = [0xABu8; 32];
 
-        // Register asset_id=1 and seed challenger balance
+        // Register asset_id=1, validator, and seed challenger balance
         provider.set(
             ASSET_ADDRESS,
             storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
             U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
         );
         provider.set(
             ASSET_ADDRESS,
@@ -1409,6 +1454,11 @@ mod tests {
             U256::from(1u8),
         );
         provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        provider.set(
             ASSET_ADDRESS,
             slot_balance(CALL_ASSET_ID, challenger),
             u128_to_u256(5000),
@@ -1451,6 +1501,11 @@ mod tests {
             ASSET_ADDRESS,
             storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
             U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
         );
         provider.set(
             ASSET_ADDRESS,
@@ -1497,6 +1552,11 @@ mod tests {
             ASSET_ADDRESS,
             storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
             U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
         );
         provider.set(
             ASSET_ADDRESS,
@@ -1563,7 +1623,7 @@ mod tests {
 
     #[test]
     fn test_resolve_challenge_true_proof_bond_rewarded() {
-        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let mut provider = HashMapStorageProvider::with_block(2_000_000, 1, 10);
         let validator = Address::repeat_byte(0x11);
         let challenger = Address::repeat_byte(0x33);
         let recipient = Address::repeat_byte(0x22);
@@ -1574,6 +1634,11 @@ mod tests {
             ASSET_ADDRESS,
             storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
             U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
         );
         provider.set(
             ASSET_ADDRESS,
@@ -1755,6 +1820,11 @@ mod tests {
             ASSET_ADDRESS,
             storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
             U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
         );
         provider.set(
             ASSET_ADDRESS,
