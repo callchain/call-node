@@ -52,7 +52,7 @@ fn slot_gov_proposal_count() -> U256 {
     U256::ZERO
 }
 
-fn slot_gov_proposal(proposal_id: u64, suffix: &[u8]) -> U256 {
+pub(crate) fn slot_gov_proposal(proposal_id: u64, suffix: &[u8]) -> U256 {
     storage_slot(&[b"proposal", &proposal_id.to_be_bytes()[..], suffix])
 }
 
@@ -441,6 +441,16 @@ impl<B: StorageBackend> GovernanceStorage<B> {
     ) -> Result<u64, PrecompileError> {
         self.ensure_config_initialized();
 
+        // Reject unsupported proposal types early
+        match proposal_type {
+            0..=10 => {}
+            _ => {
+                return Err(PrecompileError::Other(
+                    "governance: unsupported proposal type".into(),
+                ))
+            }
+        }
+
         // Rate limiting
         let cooldown = self.read_config_u64(b"proposal_cooldown");
         let cooldown = if cooldown == 0 {
@@ -682,7 +692,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         self.backend.store(
             GOVERNANCE_ADDRESS,
             slot_gov_proposal(proposal_id, tally_suffix),
-            u128_to_u256(tally + voting_power),
+            u128_to_u256(tally.saturating_add(voting_power)),
         );
 
         Ok(())
@@ -777,7 +787,9 @@ impl<B: StorageBackend> GovernanceStorage<B> {
         let exec_block = if proposal_type == 5 {
             current_block
         } else {
-            current_block + timelock
+            current_block.checked_add(timelock).ok_or_else(|| {
+                PrecompileError::Other("governance: timelock block overflow".into())
+            })?
         };
 
         self.backend.store(
@@ -997,8 +1009,9 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 Ok(())
             }
             9 => {
-                // ValidatorKeyRotation: execution_data = ABI-encoded (uint64 validatorId, bytes32 newPubkey)
-                if execution_data.len() < 64 {
+                // ValidatorKeyRotation: execution_data = ABI-encoded
+                // (uint64 validatorId, bytes32 oldPubkey, bytes32 newPubkey)
+                if execution_data.len() < 96 {
                     return Err(PrecompileError::Other(
                         "governance: malformed ValidatorKeyRotation execution data".into(),
                     ));
@@ -1006,10 +1019,34 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 let mut id_buf = [0u8; 8];
                 id_buf.copy_from_slice(&execution_data[24..32]);
                 let _validator_id = u64::from_be_bytes(id_buf);
+
+                let mut old_pubkey = [0u8; 32];
+                old_pubkey.copy_from_slice(&execution_data[32..64]);
+                if old_pubkey == [0u8; 32] {
+                    return Err(PrecompileError::Other(
+                        "governance: old pubkey must be non-zero".into(),
+                    ));
+                }
+
+                let mut new_pubkey = [0u8; 32];
+                new_pubkey.copy_from_slice(&execution_data[64..96]);
+                if new_pubkey == [0u8; 32] {
+                    return Err(PrecompileError::Other(
+                        "governance: new pubkey must be non-zero".into(),
+                    ));
+                }
+
+                // TODO: secp256k1 signature verification pending (#48)
+
                 self.backend.store(
                     GOVERNANCE_ADDRESS,
-                    storage_slot(&[b"key_rotation", &id_buf]),
-                    U256::from(1u8),
+                    storage_slot(&[b"key_rotation", &id_buf, b"old"]),
+                    U256::from_be_slice(&old_pubkey),
+                );
+                self.backend.store(
+                    GOVERNANCE_ADDRESS,
+                    storage_slot(&[b"key_rotation", &id_buf, b"new"]),
+                    U256::from_be_slice(&new_pubkey),
                 );
                 Ok(())
             }
@@ -1119,6 +1156,11 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 let mut sunset_buf = [0u8; 8];
                 sunset_buf.copy_from_slice(&execution_data[152..160]);
                 let sunset_timestamp = u64::from_be_bytes(sunset_buf);
+                if sunset_timestamp == 0 {
+                    return Err(PrecompileError::Other(
+                        "governance: sunset timestamp must be non-zero".into(),
+                    ));
+                }
 
                 self.backend.store(
                     GOVERNANCE_ADDRESS,
@@ -1152,7 +1194,9 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                 );
                 Ok(())
             }
-            _ => Ok(()),
+            _ => Err(PrecompileError::Other(
+                format!("governance: unsupported proposal type {}", proposal_type).into(),
+            )),
         };
         if let Err(e) = exec_result {
             return Err(e);
@@ -1740,6 +1784,27 @@ impl GovernancePrecompile {
                             if let Some(log) = alloy_primitives::LogData::new(
                                 vec![topic0, topic1],
                                 alloy_primitives::Bytes::from(data),
+                            ) {
+                                let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
+                            }
+                        }
+                    }
+                    6 | 7 | 8 => {
+                        // FeeCurrencyAdded/Removed/Capped(uint64 indexed assetId)
+                        if execution_data.len() >= 32 {
+                            let mut asset_buf = [0u8; 8];
+                            asset_buf.copy_from_slice(&execution_data[24..32]);
+                            let asset_id = u64::from_be_bytes(asset_buf);
+                            let topic0 = match proposal_type {
+                                6 => alloy_primitives::keccak256(b"FeeCurrencyAdded(uint64)"),
+                                7 => alloy_primitives::keccak256(b"FeeCurrencyRemoved(uint64)"),
+                                8 => alloy_primitives::keccak256(b"FeeCurrencyCapped(uint64)"),
+                                _ => unreachable!(),
+                            };
+                            let topic1 = alloy_primitives::B256::from(u64_to_u256(asset_id).to_be_bytes::<32>());
+                            if let Some(log) = alloy_primitives::LogData::new(
+                                vec![topic0, topic1],
+                                alloy_primitives::Bytes::new(),
                             ) {
                                 let _ = storage.emit_event(GOVERNANCE_ADDRESS, log);
                             }

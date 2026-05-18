@@ -1607,3 +1607,373 @@ fn test_compliance_update_rejects_invalid_status() {
         assert_eq!(gov.read_proposal_status(id), 2);
     });
 }
+
+// ── Proposal type validation ──────────────────────────────────────
+
+#[test]
+fn test_submit_proposal_rejects_unknown_type() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+
+        let result = gov.submit_proposal(
+            &mut asset,
+            255, // unknown type
+            "title".into(),
+            "desc".into(),
+            vec![],
+            proposer,
+            0,
+        );
+        assert!(result.is_err(), "unknown proposal type should be rejected");
+    });
+}
+
+#[test]
+fn test_execute_rejects_unknown_type() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                0,
+                "title".into(),
+                "desc".into(),
+                vec![],
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        // Manually mutate proposal type to an unsupported value
+        storage
+            .sstore(
+                crate::precompile::GOVERNANCE_ADDRESS,
+                crate::precompile::slot_gov_proposal(id, b"proposal_type"),
+                call_precompile::u64_to_u256(255),
+            )
+            .unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(result.is_err(), "execute should reject unknown proposal type");
+        assert_eq!(gov.read_proposal_status(id), 2); // still Queued
+    });
+}
+
+// ── ProtocolUpgrade execute ──────────────────────────────────────
+
+#[test]
+fn test_protocol_upgrade_executes() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let version_hash = [0xABu8; 32];
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                1, // ProtocolUpgrade
+                "title".into(),
+                "desc".into(),
+                version_hash.to_vec(),
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+// ── FeeCurrency execute ───────────────────────────────────────────
+
+#[test]
+fn test_fee_currency_add_executes() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let mut execution_data = vec![0u8; 32];
+        execution_data[24..32].copy_from_slice(&42u64.to_be_bytes());
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                6, // FeeCurrencyAdd
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+#[test]
+fn test_fee_currency_remove_executes() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let mut execution_data = vec![0u8; 32];
+        execution_data[24..32].copy_from_slice(&42u64.to_be_bytes());
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                7, // FeeCurrencyRemove
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+#[test]
+fn test_fee_currency_cap_executes() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let mut execution_data = vec![0u8; 64];
+        execution_data[24..32].copy_from_slice(&42u64.to_be_bytes());
+        execution_data[48..64].copy_from_slice(&1_000_000u128.to_be_bytes());
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                8, // FeeCurrencyCap
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+// ── ValidatorKeyRotation execute ─────────────────────────────────
+
+#[test]
+fn test_validator_key_rotation_rejects_zero_pubkey() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        // execution_data = (uint64 validatorId, bytes32 oldPubkey, bytes32 newPubkey)
+        // oldPubkey = zero => should be rejected
+        let mut execution_data = vec![0u8; 96];
+        execution_data[24..32].copy_from_slice(&1u64.to_be_bytes());
+        // oldPubkey at 32..64 stays zero
+        execution_data[64..96].copy_from_slice(&[0xBBu8; 32]);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                9, // ValidatorKeyRotation
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(result.is_err(), "zero old pubkey should be rejected");
+        assert_eq!(gov.read_proposal_status(id), 2); // still Queued
+    });
+}
+
+#[test]
+fn test_validator_key_rotation_executes_with_valid_pubkeys() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let mut execution_data = vec![0u8; 96];
+        execution_data[24..32].copy_from_slice(&1u64.to_be_bytes());
+        execution_data[32..64].copy_from_slice(&[0xAAu8; 32]);
+        execution_data[64..96].copy_from_slice(&[0xBBu8; 32]);
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                9, // ValidatorKeyRotation
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
+
+// ── ProverKeyRotation execute ────────────────────────────────────
+
+#[test]
+fn test_prover_key_rotation_rejects_zero_sunset() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        // execution_data = (uint32 keyVersion, bytes32[3] vkHashes, uint64 sunsetTimestamp)
+        let mut execution_data = vec![0u8; 160];
+        execution_data[28..32].copy_from_slice(&1u32.to_be_bytes());
+        execution_data[32..64].copy_from_slice(&[0xAAu8; 32]);
+        execution_data[64..96].copy_from_slice(&[0xBBu8; 32]);
+        execution_data[96..128].copy_from_slice(&[0xCCu8; 32]);
+        // sunset_timestamp at 152..160 stays zero
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                10, // ProverKeyRotation
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+
+        let result = gov.execute(&mut asset, id, 2, proposer);
+        assert!(result.is_err(), "zero sunset timestamp should be rejected");
+        assert_eq!(gov.read_proposal_status(id), 2); // still Queued
+    });
+}
+
+#[test]
+fn test_prover_key_rotation_executes_with_valid_sunset() {
+    with_storage(0, |storage| {
+        let mut gov = GovernanceStorage::new(StorageRef::new(&mut *storage));
+        let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
+        let proposer = test_addr(1);
+
+        seed_balance(storage, proposer, PROPOSAL_DEPOSIT * 2);
+        gov.write_config_u64(b"review_period", 0);
+        gov.write_config_u64(b"voting_period", 100);
+        gov.write_config_u64(b"timelock", 1);
+
+        let mut execution_data = vec![0u8; 160];
+        execution_data[28..32].copy_from_slice(&1u32.to_be_bytes());
+        execution_data[32..64].copy_from_slice(&[0xAAu8; 32]);
+        execution_data[64..96].copy_from_slice(&[0xBBu8; 32]);
+        execution_data[96..128].copy_from_slice(&[0xCCu8; 32]);
+        execution_data[152..160].copy_from_slice(&1_234_567u64.to_be_bytes());
+
+        let id = gov
+            .submit_proposal(
+                &mut asset,
+                10, // ProverKeyRotation
+                "title".into(),
+                "desc".into(),
+                execution_data,
+                proposer,
+                0,
+            )
+            .unwrap();
+
+        gov.vote(id, 1, test_addr(2), 1_000_000, 0).unwrap();
+        gov.queue(id, 1).unwrap();
+        gov.execute(&mut asset, id, 2, proposer).unwrap();
+
+        assert_eq!(gov.read_proposal_status(id), 3); // Executed
+    });
+}
