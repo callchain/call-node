@@ -30,9 +30,9 @@ pub const BRIDGE_ADDRESS: Address =
     alloy_primitives::address!("0000000000000000000000000000000000000103");
 
 pub const CALL_ASSET_ID: u64 = 1;
-pub const DEFAULT_CHALLENGE_PERIOD: u64 = 2_419_200;
-pub const DEFAULT_WITHDRAW_PERIOD_BLOCKS: u64 = 2_419_200;
-pub const DEFAULT_CHALLENGE_BOND: u128 = 1_000;
+/// Maximum proof length in bytes for `initiate_challenge`.
+/// 16 KiB bounds gas cost of storing proof chunks.
+pub const MAX_PROOF_LEN: usize = 16 * 1024;
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -58,6 +58,7 @@ pub enum BridgeError {
     UnauthorizedBridgeContract(u64, Address),
     ExceedsWithdrawLimit(u64, u128, u128),
     BridgeFeeExceedsAmount(u128, u128),
+    UnauthorizedResolver(Address),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -106,6 +107,9 @@ impl std::fmt::Display for BridgeError {
             }
             BridgeError::BridgeFeeExceedsAmount(fee, amount) => {
                 write!(f, "bridge fee exceeds amount: fee={fee}, amount={amount}")
+            }
+            BridgeError::UnauthorizedResolver(addr) => {
+                write!(f, "unauthorized resolver: {addr}")
             }
         }
     }
@@ -387,11 +391,11 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     pub fn read_challenge_period(&mut self) -> u64 {
-        self.load_u64_or_default(slot_challenge_period(), DEFAULT_CHALLENGE_PERIOD)
+        self.load_u64_or_default(slot_challenge_period(), crate::DEFAULT_CHALLENGE_PERIOD)
     }
 
     pub fn read_global_challenge_bond(&mut self) -> u128 {
-        self.load_u128_or_default(slot_challenge_bond_amount(), DEFAULT_CHALLENGE_BOND)
+        self.load_u128_or_default(slot_challenge_bond_amount(), crate::DEFAULT_CHALLENGE_BOND)
     }
 
     fn read_max_per_tx(&mut self, asset_id: u64) -> u128 {
@@ -555,7 +559,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         amount: u128,
         validator: Address,
         block_height: u64,
-    ) -> Result<(), BridgeError> {
+    ) -> Result<u128, BridgeError> {
         if amount == 0 {
             return Err(BridgeError::InvalidInput);
         }
@@ -612,7 +616,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         self.backend.store(
             BRIDGE_ADDRESS,
             slot_bridge_deposit_amount(source_tx_hash),
-            u128_to_u256(amount),
+            u128_to_u256(net_amount),
         );
         self.backend.store(
             BRIDGE_ADDRESS,
@@ -624,7 +628,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
             slot_bridge_challenge_original_validator(source_tx_hash),
             address_to_u256(validator),
         );
-        Ok(())
+        Ok(net_amount)
     }
 
     pub fn external_withdraw(
@@ -634,7 +638,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         amount: u128,
         caller: Address,
         current_block: u64,
-    ) -> Result<(), BridgeError> {
+    ) -> Result<u128, BridgeError> {
         if amount == 0 {
             return Err(BridgeError::InvalidInput);
         }
@@ -650,7 +654,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
             asset_store.add_balance(asset_id, BRIDGE_ADDRESS, fee)?;
         }
         self.add_total_withdrawals(net_amount)?;
-        Ok(())
+        Ok(net_amount)
     }
 
     fn check_withdraw_limit(
@@ -750,6 +754,10 @@ impl<B: StorageBackend> BridgeStorage<B> {
             return Err(BridgeError::ChallengePeriodExpired);
         }
 
+        if proof.len() > MAX_PROOF_LEN {
+            return Err(BridgeError::InvalidInput);
+        }
+
         let bond = self.read_global_challenge_bond();
         asset_store.deduct_balance(CALL_ASSET_ID, challenger, bond)?;
 
@@ -808,6 +816,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         validator_store: &mut ValidatorStorage<B>,
         source_tx_hash: [u8; 32],
         current_block: u64,
+        resolver: Address,
     ) -> Result<(bool, Address), BridgeError> {
         if self.read_challenge_status(source_tx_hash) != ChallengeStatus::Pending {
             return Err(BridgeError::ChallengeNotPending);
@@ -818,14 +827,19 @@ impl<B: StorageBackend> BridgeStorage<B> {
             return Err(BridgeError::ChallengeDeadlineNotReached);
         }
 
+        let challenger = self.read_challenge_challenger(source_tx_hash);
+        let validator = u256_to_address(self.backend.load(
+            BRIDGE_ADDRESS,
+            slot_bridge_challenge_original_validator(source_tx_hash),
+        ));
+        if resolver != challenger && resolver != validator {
+            return Err(BridgeError::UnauthorizedResolver(resolver));
+        }
+
         let proof_valid = self.verify_fraud_proof(source_tx_hash);
         let bond = self.read_challenge_bond_for_tx(source_tx_hash);
 
         if proof_valid {
-            let validator = u256_to_address(self.backend.load(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_original_validator(source_tx_hash),
-            ));
             // Slash validator first — if this fails no state has changed yet.
             validator_store
                 .slash_stake(asset_store, validator)
@@ -842,9 +856,6 @@ impl<B: StorageBackend> BridgeStorage<B> {
 
             // Do NOT reset processed — the source tx hash is permanently
             // blocked from being deposited again after a successful challenge.
-
-            // Capture challenger before clearing metadata.
-            let challenger = self.read_challenge_challenger(source_tx_hash);
 
             self.backend.store(
                 BRIDGE_ADDRESS,
@@ -877,10 +888,6 @@ impl<B: StorageBackend> BridgeStorage<B> {
             self.clear_challenge_metadata(source_tx_hash, true);
             Ok((true, challenger))
         } else {
-            let validator = u256_to_address(self.backend.load(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_original_validator(source_tx_hash),
-            ));
             asset_store
                 .add_balance(CALL_ASSET_ID, validator, bond)
                 .map_err(|_| BridgeError::BalanceOverflow)?;
@@ -1023,50 +1030,51 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     fn verify_fraud_proof(&mut self, source_tx_hash: [u8; 32]) -> bool {
-        let proof_hash = self.backend.load(
-            BRIDGE_ADDRESS,
-            slot_bridge_challenge_proof_hash(source_tx_hash),
-        );
-        if proof_hash == U256::ZERO {
-            return false;
-        }
-        let proof_len = u256_to_u64(self.backend.load(
-            BRIDGE_ADDRESS,
-            slot_bridge_challenge_proof_len(source_tx_hash),
-        ));
-        if proof_len < 32 {
-            return false;
-        }
-
-        // Load proof bytes from 32-byte storage chunks.
-        let proof_len = proof_len as usize;
-        let mut proof_bytes = Vec::with_capacity(proof_len);
-        let num_chunks = (proof_len + 31) / 32;
-        for i in 0..num_chunks {
-            let chunk = self.backend.load(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_proof_chunk(source_tx_hash, i as u64),
-            );
-            let chunk_bytes = chunk.to_be_bytes::<32>();
-            let take = std::cmp::min(32, proof_len - proof_bytes.len());
-            proof_bytes.extend_from_slice(&chunk_bytes[..take]);
-        }
-
-        // Verify the loaded proof matches the commitment hash.
-        let computed_hash = alloy_primitives::keccak256(&proof_bytes);
-        if U256::from_be_slice(computed_hash.as_slice()) != proof_hash {
+        #[cfg(not(feature = "light-client-bridge"))]
+        {
+            // Without light-client support, reject all challenges —
+            // structural validation alone is insufficient for production.
             return false;
         }
 
         #[cfg(feature = "light-client-bridge")]
         {
-            return self.verify_fraud_proof_cryptographic(source_tx_hash, &proof_bytes);
-        }
-        #[cfg(not(feature = "light-client-bridge"))]
-        {
-            // Without light-client support, reject all challenges —
-            // structural validation alone is insufficient for production.
-            false
+            let proof_hash = self.backend.load(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_proof_hash(source_tx_hash),
+            );
+            if proof_hash == U256::ZERO {
+                return false;
+            }
+            let proof_len = u256_to_u64(self.backend.load(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_proof_len(source_tx_hash),
+            ));
+            if proof_len < 32 {
+                return false;
+            }
+
+            // Load proof bytes from 32-byte storage chunks.
+            let proof_len = proof_len as usize;
+            let mut proof_bytes = Vec::with_capacity(proof_len);
+            let num_chunks = (proof_len + 31) / 32;
+            for i in 0..num_chunks {
+                let chunk = self.backend.load(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_challenge_proof_chunk(source_tx_hash, i as u64),
+                );
+                let chunk_bytes = chunk.to_be_bytes::<32>();
+                let take = std::cmp::min(32, proof_len - proof_bytes.len());
+                proof_bytes.extend_from_slice(&chunk_bytes[..take]);
+            }
+
+            // Verify the loaded proof matches the commitment hash.
+            let computed_hash = alloy_primitives::keccak256(&proof_bytes);
+            if U256::from_be_slice(computed_hash.as_slice()) != proof_hash {
+                return false;
+            }
+
+            self.verify_fraud_proof_cryptographic(source_tx_hash, &proof_bytes)
         }
     }
 
@@ -1210,7 +1218,7 @@ impl BridgePrecompile {
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 let block_height = storage.block_number();
-                bridge_store
+                let net_amount = bridge_store
                     .external_deposit(
                         &mut asset_store,
                         call.sourceChain,
@@ -1236,18 +1244,18 @@ impl BridgePrecompile {
                 );
                 let mut data = Vec::with_capacity(160);
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
-                data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
+                data.extend_from_slice(&u128_to_u256(net_amount).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(call.sourceChain).to_be_bytes::<32>());
                 data.extend_from_slice(
                     &address_to_u256(call.sourceContract).to_be_bytes::<32>(),
                 );
-                if let Some(log) = alloy_primitives::LogData::new(
+                let log = alloy_primitives::LogData::new(
                     vec![topic0, topic1, topic2, topic3],
                     alloy_primitives::Bytes::from(data),
-                ) {
-                    storage.emit_event(BRIDGE_ADDRESS, log)?;
-                }
+                )
+                .expect("invariant: topics non-empty, LogData::new always succeeds");
+                storage.emit_event(BRIDGE_ADDRESS, log)?;
 
                 Ok(())
             },
@@ -1271,7 +1279,7 @@ impl BridgePrecompile {
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 let block_number = storage.block_number();
-                bridge_store
+                let net_amount = bridge_store
                     .external_withdraw(&mut asset_store, call.assetId, call.amount, caller, block_number)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
@@ -1284,15 +1292,15 @@ impl BridgePrecompile {
                 );
                 let mut data = Vec::with_capacity(128);
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
-                data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
+                data.extend_from_slice(&u128_to_u256(net_amount).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(call.targetChain).to_be_bytes::<32>());
                 data.extend_from_slice(target_addr_hash.as_slice());
-                if let Some(log) = alloy_primitives::LogData::new(
+                let log = alloy_primitives::LogData::new(
                     vec![topic0, topic1],
                     alloy_primitives::Bytes::from(data),
-                ) {
-                    storage.emit_event(BRIDGE_ADDRESS, log)?;
-                }
+                )
+                .expect("invariant: topics non-empty, LogData::new always succeeds");
+                storage.emit_event(BRIDGE_ADDRESS, log)?;
 
                 Ok(())
             },
@@ -1340,12 +1348,12 @@ impl BridgePrecompile {
                 data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
-                if let Some(log) = alloy_primitives::LogData::new(
+                let log = alloy_primitives::LogData::new(
                     vec![topic0, topic1],
                     alloy_primitives::Bytes::from(data),
-                ) {
-                    storage.emit_event(BRIDGE_ADDRESS, log)?;
-                }
+                )
+                .expect("invariant: topics non-empty, LogData::new always succeeds");
+                storage.emit_event(BRIDGE_ADDRESS, log)?;
 
                 Ok(())
             },
@@ -1392,12 +1400,12 @@ impl BridgePrecompile {
                 let mut data = Vec::with_capacity(64);
                 data.extend_from_slice(&u64_to_u256(deadline).to_be_bytes::<32>());
                 data.extend_from_slice(&u128_to_u256(bond).to_be_bytes::<32>());
-                if let Some(log) = alloy_primitives::LogData::new(
+                let log = alloy_primitives::LogData::new(
                     vec![topic0, topic1, topic2],
                     alloy_primitives::Bytes::from(data),
-                ) {
-                    storage.emit_event(BRIDGE_ADDRESS, log)?;
-                }
+                )
+                .expect("invariant: topics non-empty, LogData::new always succeeds");
+                storage.emit_event(BRIDGE_ADDRESS, log)?;
 
                 Ok(())
             },
@@ -1407,7 +1415,7 @@ impl BridgePrecompile {
     fn resolve_challenge(
         &self,
         calldata: &[u8],
-        _msg_sender: Address,
+        msg_sender: Address,
         storage: &mut dyn call_precompile::storage::StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
@@ -1416,6 +1424,8 @@ impl BridgePrecompile {
             150000,
             storage,
             |call, storage| {
+                let resolver = require_caller(msg_sender)?;
+                check_compliance(resolver, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
                 let mut validator_store = ValidatorStorage::new(sr);
@@ -1427,6 +1437,7 @@ impl BridgePrecompile {
                         &mut validator_store,
                         source_tx_hash,
                         block_number,
+                        resolver,
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
@@ -1439,12 +1450,12 @@ impl BridgePrecompile {
                 );
                 let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&u64_to_u256(if success { 1 } else { 0 }).to_be_bytes::<32>());
-                if let Some(log) = alloy_primitives::LogData::new(
+                let log = alloy_primitives::LogData::new(
                     vec![topic0, topic1, topic2],
                     alloy_primitives::Bytes::from(data),
-                ) {
-                    storage.emit_event(BRIDGE_ADDRESS, log)?;
-                }
+                )
+                .expect("invariant: topics non-empty, LogData::new always succeeds");
+                storage.emit_event(BRIDGE_ADDRESS, log)?;
 
                 Ok(())
             },
@@ -1508,12 +1519,12 @@ impl BridgePrecompile {
                 );
                 let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&u128_to_u256(reward).to_be_bytes::<32>());
-                if let Some(log) = alloy_primitives::LogData::new(
+                let log = alloy_primitives::LogData::new(
                     vec![topic0, topic1, topic2],
                     alloy_primitives::Bytes::from(data),
-                ) {
-                    storage.emit_event(BRIDGE_ADDRESS, log)?;
-                }
+                )
+                .expect("invariant: topics non-empty, LogData::new always succeeds");
+                storage.emit_event(BRIDGE_ADDRESS, log)?;
 
                 Ok(())
             },
@@ -2021,7 +2032,7 @@ mod tests {
         }
         .abi_encode();
 
-        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        let result = precompile.call(&input, validator, &mut provider);
         assert!(
             result.is_ok(),
             "resolve_challenge failed: {:?}",
@@ -2194,7 +2205,7 @@ mod tests {
         }
         .abi_encode();
 
-        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        let result = precompile.call(&input, challenger, &mut provider);
         assert!(
             result.is_ok(),
             "resolve_challenge failed: {:?}",
@@ -3089,5 +3100,118 @@ mod tests {
         );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("insufficient balance"), "error should mention balance: {err}");
+    }
+
+    #[test]
+    fn test_external_deposit_with_fee() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
+        // Set bridge_fee = 100 (offset+1: 101)
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_bridge_fee(),
+            u128_to_u256(101),
+        );
+
+        let mut precompile = BridgePrecompile;
+        let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 1000,
+        }
+        .abi_encode();
+        precompile.call(&input, validator, &mut provider).unwrap();
+
+        // Recipient should receive 900 (net)
+        let recipient_balance = provider
+            .get(ASSET_ADDRESS, slot_balance(1, recipient))
+            .map(|v| u256_to_u128(v))
+            .unwrap_or(0);
+        assert_eq!(recipient_balance, 900, "recipient should receive net amount after fee");
+
+        // Bridge should hold 100 fee
+        let bridge_balance = provider
+            .get(ASSET_ADDRESS, slot_balance(1, BRIDGE_ADDRESS))
+            .map(|v| u256_to_u128(v))
+            .unwrap_or(0);
+        assert_eq!(bridge_balance, 100, "bridge should hold fee");
+
+        // Stored deposit amount should be net (900) for challenge reversal
+        let stored_amount = provider
+            .get(BRIDGE_ADDRESS, slot_bridge_deposit_amount(source_tx_hash))
+            .map(|v| u256_to_u128(v))
+            .unwrap_or(0);
+        assert_eq!(stored_amount, 900, "stored deposit amount should be net for challenge");
+    }
+
+    #[test]
+    fn test_external_withdraw_with_fee() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let caller = Address::repeat_byte(0x11);
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(5000));
+        // Set bridge_fee = 100 (offset+1: 101)
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_bridge_fee(),
+            u128_to_u256(101),
+        );
+
+        let mut precompile = BridgePrecompile;
+        let input = IProtocolBridge::externalWithdrawCall {
+            targetChain: 1,
+            targetAddress: alloy_primitives::Bytes::from(vec![0xAA; 20]),
+            assetId: 1,
+            amount: 1000,
+        }
+        .abi_encode();
+        precompile.call(&input, caller, &mut provider).unwrap();
+
+        // Caller should have 4000 left (5000 - 1000)
+        let caller_balance = provider
+            .get(ASSET_ADDRESS, slot_balance(1, caller))
+            .map(|v| u256_to_u128(v))
+            .unwrap_or(0);
+        assert_eq!(caller_balance, 4000, "caller should pay gross amount");
+
+        // Bridge should hold 100 fee
+        let bridge_balance = provider
+            .get(ASSET_ADDRESS, slot_balance(1, BRIDGE_ADDRESS))
+            .map(|v| u256_to_u128(v))
+            .unwrap_or(0);
+        assert_eq!(bridge_balance, 100, "bridge should hold fee");
+
+        // Total withdrawals should be 900 (net)
+        let total_withdrawals = provider
+            .get(BRIDGE_ADDRESS, slot_bridge_total_withdrawals())
+            .map(|v| u256_to_u128(v))
+            .unwrap_or(0);
+        assert_eq!(total_withdrawals, 900, "total withdrawals should be net amount");
     }
 }

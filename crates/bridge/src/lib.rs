@@ -17,6 +17,13 @@ use call_primitives::AssetId;
 use call_protocol::ProtocolError;
 use thiserror::Error;
 
+/// Default challenge period in blocks (≈14 days at 250ms block time).
+pub const DEFAULT_CHALLENGE_PERIOD: u64 = 2_419_200;
+/// Default withdraw rate-limit period in blocks.
+pub const DEFAULT_WITHDRAW_PERIOD_BLOCKS: u64 = 2_419_200;
+/// Default challenge bond amount.
+pub const DEFAULT_CHALLENGE_BOND: u128 = 1_000;
+
 /// Bridge operation error
 #[derive(Debug, Error)]
 pub enum BridgeError {
