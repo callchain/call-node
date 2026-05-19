@@ -266,6 +266,14 @@ pub enum ChallengeStatus {
     Withdrawn = 4,
 }
 
+/// Result of checking the withdraw limit; used for split-phase validation + write.
+enum WithdrawLimitCheck {
+    /// New period — reset counters on record.
+    NewPeriod,
+    /// Existing period — increment by the new total.
+    ExistingPeriod { new_total: u128 },
+}
+
 // ── BridgeStorage ─────────────────────────────────────────────────────
 
 /// Business logic for bridge operations backed by any StorageBackend.
@@ -634,7 +642,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
             return Err(BridgeError::InvalidInput);
         }
         self.validate_basic(asset_id)?;
-        self.check_withdraw_limit(asset_id, amount, current_block)?;
+        let limit_check = self.check_withdraw_limit(asset_id, amount, current_block)?;
         let fee = self.read_bridge_fee();
         if fee >= amount {
             return Err(BridgeError::BridgeFeeExceedsAmount(fee, amount));
@@ -645,6 +653,8 @@ impl<B: StorageBackend> BridgeStorage<B> {
             asset_store.add_balance(asset_id, BRIDGE_ADDRESS, fee)?;
         }
         self.add_total_withdrawals(net_amount)?;
+        // Record limit consumption only after all fallible ops succeed.
+        self.record_withdraw_used(asset_id, amount, current_block, limit_check);
         Ok(net_amount)
     }
 
@@ -653,7 +663,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         asset_id: u64,
         amount: u128,
         current_block: u64,
-    ) -> Result<(), BridgeError> {
+    ) -> Result<WithdrawLimitCheck, BridgeError> {
         let max_per_period = self.read_max_external_withdraw_per_period();
         let period_start = u256_to_u64(
             self.backend
@@ -662,18 +672,14 @@ impl<B: StorageBackend> BridgeStorage<B> {
         let withdraw_period = self.read_withdraw_period();
 
         if current_block >= period_start.saturating_add(withdraw_period) {
-            // New period — reset counters.
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_current_period_start(),
-                u64_to_u256(current_block),
-            );
-            self.backend.store(
-                BRIDGE_ADDRESS,
-                slot_bridge_period_withdrawn(asset_id),
-                u128_to_u256(amount),
-            );
-            return Ok(());
+            if amount > max_per_period {
+                return Err(BridgeError::ExceedsWithdrawLimit(
+                    asset_id,
+                    0,
+                    max_per_period,
+                ));
+            }
+            return Ok(WithdrawLimitCheck::NewPeriod);
         }
 
         let period_withdrawn = u256_to_u128(
@@ -690,12 +696,37 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 max_per_period,
             ));
         }
-        self.backend.store(
-            BRIDGE_ADDRESS,
-            slot_bridge_period_withdrawn(asset_id),
-            u128_to_u256(new_total),
-        );
-        Ok(())
+        Ok(WithdrawLimitCheck::ExistingPeriod { new_total })
+    }
+
+    fn record_withdraw_used(
+        &mut self,
+        asset_id: u64,
+        amount: u128,
+        current_block: u64,
+        check: WithdrawLimitCheck,
+    ) {
+        match check {
+            WithdrawLimitCheck::NewPeriod => {
+                self.backend.store(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_current_period_start(),
+                    u64_to_u256(current_block),
+                );
+                self.backend.store(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_period_withdrawn(asset_id),
+                    u128_to_u256(amount),
+                );
+            }
+            WithdrawLimitCheck::ExistingPeriod { new_total } => {
+                self.backend.store(
+                    BRIDGE_ADDRESS,
+                    slot_bridge_period_withdrawn(asset_id),
+                    u128_to_u256(new_total),
+                );
+            }
+        }
     }
 
     pub fn deposit(
@@ -727,14 +758,13 @@ impl<B: StorageBackend> BridgeStorage<B> {
         // Use deposit block height to check existence, NOT is_processed,
         // because is_processed applies retention expiry which can falsely
         // reject challenges during the valid challenge window.
-        if self.read_deposit_block_height(source_tx_hash) == 0 {
+        let deposit_height = self.read_deposit_block_height(source_tx_hash);
+        if deposit_height == 0 {
             return Err(BridgeError::NotProcessed);
         }
         if self.read_challenge_status(source_tx_hash) != ChallengeStatus::None {
             return Err(BridgeError::AlreadyChallenged);
         }
-
-        let deposit_height = self.read_deposit_block_height(source_tx_hash);
         let challenge_period = self.read_challenge_period();
         let challenge_deadline = deposit_height
             .checked_add(challenge_period)
@@ -1233,10 +1263,10 @@ impl BridgePrecompile {
                 );
                 let mut data = Vec::with_capacity(160);
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
-                data.extend_from_slice(&u128_to_u256(net_amount).to_be_bytes::<32>());
                 data.extend_from_slice(
                     &address_to_u256(call.sourceContract).to_be_bytes::<32>(),
                 );
+                data.extend_from_slice(&u128_to_u256(net_amount).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(call.sourceChain).to_be_bytes::<32>());
                 let log = alloy_primitives::LogData::new(
