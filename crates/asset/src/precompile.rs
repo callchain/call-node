@@ -6,7 +6,7 @@
 //! cross-domain concerns (compliance).
 
 use crate::AssetStorage;
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::{sol, SolCall, SolValue};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
     check_compliance, dispatch, ok_empty, require_caller, write_string32,
@@ -17,9 +17,45 @@ use call_precompile::evm_caller::{execute_evm_call, apply_state_changes, Storage
 use call_primitives::{Address, U256};
 use revm_precompile::{PrecompileError, PrecompileResult};
 
+// ── Event helpers ─────────────────────────────────────────────────────
+
+fn transfer_topic() -> alloy_primitives::B256 {
+    alloy_primitives::keccak256(b"Transfer(uint64,address,address,uint128)")
+}
+fn approval_topic() -> alloy_primitives::B256 {
+    alloy_primitives::keccak256(b"Approval(uint64,address,address,uint128)")
+}
+fn mint_topic() -> alloy_primitives::B256 {
+    alloy_primitives::keccak256(b"Mint(uint64,address,uint128)")
+}
+fn burn_topic() -> alloy_primitives::B256 {
+    alloy_primitives::keccak256(b"Burn(uint64,address,uint128)")
+}
+fn register_topic() -> alloy_primitives::B256 {
+    alloy_primitives::keccak256(b"Register(uint64,address,bytes32)")
+}
+
+/// Emit an asset event through the storage provider.
+fn emit_asset_event(
+    storage: &mut dyn StorageProvider,
+    topic0: alloy_primitives::B256,
+    topics: Vec<alloy_primitives::B256>,
+    data: Vec<u8>,
+) -> Result<(), PrecompileError> {
+    let log = alloy_primitives::LogData::new(
+        std::iter::once(topic0)
+            .chain(topics)
+            .collect(),
+        alloy_primitives::Bytes::from(data),
+    )
+    .expect("invariant: topics non-empty, LogData::new always succeeds");
+    storage.emit_event(ASSET_ADDRESS, log)
+}
+
 sol! {
     interface IProtocolAsset {
         function getBalance(uint64 assetId, address account) external view returns (uint128 balance);
+        function getTotalSupply(uint64 assetId) external view returns (uint128 supply);
         function getAssetInfo(uint64 assetId) external view returns (bytes32 symbol, bytes32 name, uint8 decimals, address issuer, uint128 maxSupply, uint8 status);
         function transfer(uint64 assetId, address to, uint128 amount) external;
         function batchTransfer(uint64 assetId, address[] calldata to, uint128[] calldata amounts) external;
@@ -56,8 +92,28 @@ impl AssetPrecompile {
             storage,
             |call, _storage| {
                 let mut store = AssetStorage::new(sr);
-                let balance = store.read_balance(call.assetId, call.account);
+                let balance = store
+                    .read_balance(call.assetId, call.account)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(balance)
+            },
+        )
+    }
+
+    fn get_total_supply(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolAsset::getTotalSupplyCall, _, _>(
+            calldata,
+            800,
+            storage,
+            |call, _storage| {
+                let mut store = AssetStorage::new(sr);
+                let meta = store.read_meta(call.assetId);
+                Ok(meta.supply)
             },
         )
     }
@@ -73,15 +129,19 @@ impl AssetPrecompile {
         let mut store = AssetStorage::new(sr);
         let meta = store.read_meta(call.assetId);
 
-        let mut out = [0u8; 192];
-        out[0..32].copy_from_slice(&write_string32(&meta.symbol).to_be_bytes::<32>());
-        out[32..64].copy_from_slice(&write_string32(&meta.name).to_be_bytes::<32>());
-        out[95] = meta.decimals;
-        out[108..128].copy_from_slice(meta.issuer.as_slice());
-        out[128..160].copy_from_slice(&call_precompile::encode_u128(meta.max_supply));
-        out[191] = meta.status;
+        let symbol = alloy_primitives::B256::from(write_string32(&meta.symbol).to_be_bytes::<32>());
+        let name = alloy_primitives::B256::from(write_string32(&meta.name).to_be_bytes::<32>());
+        let encoded = (
+            symbol,
+            name,
+            U256::from(meta.decimals),
+            meta.issuer,
+            meta.max_supply,
+            U256::from(meta.status),
+        )
+            .abi_encode();
 
-        let output = revm_precompile::PrecompileOutput::new(0, out.to_vec().into());
+        let output = revm_precompile::PrecompileOutput::new(0, encoded.into());
         Ok(call_precompile::storage::fill_precompile_output(
             output, storage,
         ))
@@ -105,6 +165,19 @@ impl AssetPrecompile {
                 store
                     .transfer(call.assetId, from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&call_precompile::encode_u128(call.amount));
+                emit_asset_event(
+                    storage,
+                    transfer_topic(),
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(from).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(call.to).to_be_bytes::<32>()),
+                    ],
+                    data,
+                )?;
                 Ok(())
             },
         )
@@ -136,13 +209,29 @@ impl AssetPrecompile {
             check_compliance(*to, storage)?;
         }
 
-        let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts).collect();
+        let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts.clone()).collect();
         let cp = storage.checkpoint();
         let mut store = AssetStorage::new(sr);
         store
             .batch_transfer(call.assetId, from, &pairs)
             .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
         storage.checkpoint_commit(cp);
+
+        // Emit Transfer event for each recipient
+        for (to, amount) in pairs {
+            let mut data = Vec::with_capacity(16);
+            data.extend_from_slice(&call_precompile::encode_u128(amount));
+            emit_asset_event(
+                storage,
+                transfer_topic(),
+                vec![
+                    alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
+                    alloy_primitives::B256::from(call_precompile::address_to_u256(from).to_be_bytes::<32>()),
+                    alloy_primitives::B256::from(call_precompile::address_to_u256(to).to_be_bytes::<32>()),
+                ],
+                data,
+            )?;
+        }
 
         ok_empty(storage)
     }
@@ -158,10 +247,23 @@ impl AssetPrecompile {
             calldata,
             3000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let owner = require_caller(msg_sender)?;
                 let mut store = AssetStorage::new(sr);
                 store.approve(call.assetId, owner, call.spender, call.amount);
+
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&call_precompile::encode_u128(call.amount));
+                emit_asset_event(
+                    storage,
+                    approval_topic(),
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(owner).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(call.spender).to_be_bytes::<32>()),
+                    ],
+                    data,
+                )?;
                 Ok(())
             },
         )
@@ -186,6 +288,19 @@ impl AssetPrecompile {
                 store
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&call_precompile::encode_u128(call.amount));
+                emit_asset_event(
+                    storage,
+                    transfer_topic(),
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(call.from).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(call.to).to_be_bytes::<32>()),
+                    ],
+                    data,
+                )?;
                 Ok(())
             },
         )
@@ -204,11 +319,24 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 check_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .mint(call.assetId, caller, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&call_precompile::encode_u128(call.amount));
+                emit_asset_event(
+                    storage,
+                    mint_topic(),
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(call.to).to_be_bytes::<32>()),
+                    ],
+                    data,
+                )?;
                 Ok(())
             },
         )
@@ -227,11 +355,24 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 check_compliance(call.from, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
                     .burn(call.assetId, caller, call.from, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&call_precompile::encode_u128(call.amount));
+                emit_asset_event(
+                    storage,
+                    burn_topic(),
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(call.from).to_be_bytes::<32>()),
+                    ],
+                    data,
+                )?;
                 Ok(())
             },
         )
@@ -248,7 +389,7 @@ impl AssetPrecompile {
             calldata,
             50000,
             storage,
-            |call, _storage| {
+            |call, storage| {
                 let caller = require_caller(msg_sender)?;
                 let mut store = AssetStorage::new(sr);
                 let asset_id = store
@@ -260,6 +401,19 @@ impl AssetPrecompile {
                         caller,
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let symbol = alloy_primitives::B256::from(write_string32(&call.symbol).to_be_bytes::<32>());
+                let mut data = Vec::with_capacity(32);
+                data.extend_from_slice(symbol.as_slice());
+                emit_asset_event(
+                    storage,
+                    register_topic(),
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(asset_id).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(caller).to_be_bytes::<32>()),
+                    ],
+                    data,
+                )?;
                 Ok(asset_id)
             },
         )
@@ -277,7 +431,7 @@ impl AssetPrecompile {
             50000,
             storage,
             |call, storage| {
-                let _caller = require_caller(msg_sender)?;
+                let caller = require_caller(msg_sender)?;
                 let meta = read_erc20_metadata(storage, call.evmContract)
                     .map_err(|e| PrecompileError::Other(format!("ERC-20 read failed: {e}").into()))?;
                 let mut store = AssetStorage::new(sr);
@@ -291,6 +445,19 @@ impl AssetPrecompile {
                         Address::ZERO,   // no issuer can mint
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+
+                let symbol = alloy_primitives::B256::from(write_string32(&meta.symbol).to_be_bytes::<32>());
+                let mut data = Vec::with_capacity(32);
+                data.extend_from_slice(symbol.as_slice());
+                emit_asset_event(
+                    storage,
+                    register_topic(),
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(asset_id).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(caller).to_be_bytes::<32>()),
+                    ],
+                    data,
+                )?;
                 Ok(asset_id)
             },
         )
@@ -309,6 +476,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                check_compliance(caller, storage)?;
                 let mut store = AssetStorage::new(sr);
 
                 // 1. Verify caller is issuer
@@ -388,6 +556,9 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
         let sr = StorageRef::new(storage);
         match selector {
             IProtocolAsset::getBalanceCall::SELECTOR => self.get_balance(calldata, storage, sr),
+            IProtocolAsset::getTotalSupplyCall::SELECTOR => {
+                self.get_total_supply(calldata, storage, sr)
+            }
             IProtocolAsset::getAssetInfoCall::SELECTOR => {
                 self.get_asset_info(calldata, storage, sr)
             }
@@ -422,7 +593,6 @@ impl call_precompile::StatefulPrecompile for AssetPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call_precompile::storage::storage_slot;
     use call_precompile::storage::HashMapStorageProvider;
     use call_precompile::{
         slot_balance, slot_compliance, u128_to_u256, StatefulPrecompile, StorageRef,
@@ -477,8 +647,8 @@ mod tests {
         assert!(result.is_ok(), "transfer failed: {:?}", result.err());
 
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
-        assert_eq!(store.read_balance(1, from), 500);
-        assert_eq!(store.read_balance(1, to), 500);
+        assert_eq!(store.read_balance(1, from).unwrap(), 500);
+        assert_eq!(store.read_balance(1, to).unwrap(), 500);
 
         // Native EVM balance must NOT be affected by protocol transfer
         assert_eq!(provider.get_balance(from), U256::ZERO);
@@ -527,7 +697,7 @@ mod tests {
 
         {
             let mut store = AssetStorage::new(StorageRef::new(&mut provider));
-            assert_eq!(store.read_balance(1, recipient), 500);
+            assert_eq!(store.read_balance(1, recipient).unwrap(), 500);
             assert_eq!(store.read_meta(1).supply, 500);
         }
 
@@ -554,7 +724,7 @@ mod tests {
 
         {
             let mut store = AssetStorage::new(StorageRef::new(&mut provider));
-            assert_eq!(store.read_balance(1, issuer), 200);
+            assert_eq!(store.read_balance(1, issuer).unwrap(), 200);
             assert_eq!(store.read_meta(1).supply, 700);
         }
     }
@@ -596,9 +766,9 @@ mod tests {
         assert!(result.is_ok(), "transfer_from failed: {:?}", result.err());
 
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
-        assert_eq!(store.read_balance(1, owner), 950);
-        assert_eq!(store.read_balance(1, recipient), 50);
-        assert_eq!(store.read_allowance(1, owner, spender), 50);
+        assert_eq!(store.read_balance(1, owner).unwrap(), 950);
+        assert_eq!(store.read_balance(1, recipient).unwrap(), 50);
+        assert_eq!(store.read_allowance(1, owner, spender).unwrap(), 50);
     }
 
     #[test]
@@ -626,10 +796,10 @@ mod tests {
         assert!(result.is_ok(), "batch transfer failed: {:?}", result.err());
 
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
-        assert_eq!(store.read_balance(1, from), 400);
-        assert_eq!(store.read_balance(1, r1), 100);
-        assert_eq!(store.read_balance(1, r2), 200);
-        assert_eq!(store.read_balance(1, r3), 300);
+        assert_eq!(store.read_balance(1, from).unwrap(), 400);
+        assert_eq!(store.read_balance(1, r1).unwrap(), 100);
+        assert_eq!(store.read_balance(1, r2).unwrap(), 200);
+        assert_eq!(store.read_balance(1, r3).unwrap(), 300);
     }
 
     #[test]
@@ -671,9 +841,9 @@ mod tests {
 
         // Verify no balances changed (atomic failure)
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
-        assert_eq!(store.read_balance(1, from), 1000);
-        assert_eq!(store.read_balance(1, allowed), 0);
-        assert_eq!(store.read_balance(1, blocked), 0);
+        assert_eq!(store.read_balance(1, from).unwrap(), 1000);
+        assert_eq!(store.read_balance(1, allowed).unwrap(), 0);
+        assert_eq!(store.read_balance(1, blocked).unwrap(), 0);
     }
 
     #[test]

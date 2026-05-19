@@ -63,13 +63,13 @@ impl<B: StorageBackend> AssetStorage<B> {
 
     // ── Balance operations ────────────────────────────────────────────
 
-    pub fn read_balance(&mut self, asset_id: u64, addr: Address) -> Balance {
+    pub fn read_balance(&mut self, asset_id: u64, addr: Address) -> Result<Balance, AssetError> {
         let slot = slot_balance(asset_id, addr);
-        self.backend
-            .load(ASSET_ADDRESS, slot)
-            .try_into()
-            .map(|v: u128| v)
-            .unwrap_or(0)
+        let raw = self.backend.load(ASSET_ADDRESS, slot);
+        if raw > U256::from(u128::MAX) {
+            return Err(AssetError::BalanceOverflow);
+        }
+        Ok(raw.try_into().unwrap_or(0))
     }
 
     pub fn write_balance(&mut self, asset_id: u64, addr: Address, amount: Balance) {
@@ -84,7 +84,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         addr: Address,
         amount: Balance,
     ) -> Result<(), AssetError> {
-        let current = self.read_balance(asset_id, addr);
+        let current = self.read_balance(asset_id, addr)?;
         let new = current
             .checked_add(amount)
             .ok_or(AssetError::BalanceOverflow)?;
@@ -98,7 +98,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         addr: Address,
         amount: Balance,
     ) -> Result<(), AssetError> {
-        let current = self.read_balance(asset_id, addr);
+        let current = self.read_balance(asset_id, addr)?;
         let new = current
             .checked_sub(amount)
             .ok_or(AssetError::InsufficientBalance)?;
@@ -108,9 +108,18 @@ impl<B: StorageBackend> AssetStorage<B> {
 
     // ── Allowance operations ──────────────────────────────────────────
 
-    pub fn read_allowance(&mut self, asset_id: u64, owner: Address, spender: Address) -> Balance {
+    pub fn read_allowance(
+        &mut self,
+        asset_id: u64,
+        owner: Address,
+        spender: Address,
+    ) -> Result<Balance, AssetError> {
         let slot = slot_allowance(asset_id, owner, spender);
-        u256_to_u128(self.backend.load(ASSET_ADDRESS, slot))
+        let raw = self.backend.load(ASSET_ADDRESS, slot);
+        if raw > U256::from(u128::MAX) {
+            return Err(AssetError::BalanceOverflow);
+        }
+        Ok(raw.try_into().unwrap_or(0))
     }
 
     pub fn write_allowance(
@@ -230,7 +239,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         to: Address,
         amount: Balance,
     ) -> Result<(), AssetError> {
-        let allowance = self.read_allowance(asset_id, from, spender);
+        let allowance = self.read_allowance(asset_id, from, spender)?;
         if allowance < amount {
             return Err(AssetError::InsufficientAllowance);
         }
@@ -257,8 +266,8 @@ impl<B: StorageBackend> AssetStorage<B> {
         if meta.max_supply > 0 && new_supply > meta.max_supply {
             return Err(AssetError::MaxSupplyExceeded);
         }
-        self.store_meta_u256(asset_id, b"supply", u128_to_u256(new_supply));
         self.add_balance(asset_id, to, amount)?;
+        self.store_meta_u256(asset_id, b"supply", u128_to_u256(new_supply));
         Ok(())
     }
 
@@ -270,18 +279,18 @@ impl<B: StorageBackend> AssetStorage<B> {
         amount: Balance,
     ) -> Result<(), AssetError> {
         if caller != from {
-            let allowance = self.read_allowance(asset_id, from, caller);
+            let allowance = self.read_allowance(asset_id, from, caller)?;
             if allowance < amount {
                 return Err(AssetError::InsufficientAllowance);
             }
             self.write_allowance(asset_id, from, caller, allowance - amount);
         }
+        self.deduct_balance(asset_id, from, amount)?;
         let supply = self.load_meta_u128(asset_id, b"supply");
         let new_supply = supply
             .checked_sub(amount)
             .ok_or(AssetError::SupplyUnderflow)?;
         self.store_meta_u256(asset_id, b"supply", u128_to_u256(new_supply));
-        self.deduct_balance(asset_id, from, amount)?;
         Ok(())
     }
 
@@ -294,12 +303,11 @@ impl<B: StorageBackend> AssetStorage<B> {
         issuer: Address,
     ) -> Result<u64, AssetError> {
         let next_id_slot = U256::from(0);
-        let asset_id = self
-            .backend
-            .load(ASSET_ADDRESS, next_id_slot)
-            .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0);
+        let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
+        if raw > U256::from(u64::MAX) {
+            return Err(AssetError::BalanceOverflow);
+        }
+        let asset_id = raw.to::<u64>();
         let asset_id = if asset_id == 0 { 1 } else { asset_id };
         let next_id = asset_id.checked_add(1).ok_or(AssetError::BalanceOverflow)?;
         self.backend
@@ -331,12 +339,11 @@ impl<B: StorageBackend> AssetStorage<B> {
         issuer: Address,
     ) -> Result<u64, AssetError> {
         let next_id_slot = U256::from(0);
-        let asset_id = self
-            .backend
-            .load(ASSET_ADDRESS, next_id_slot)
-            .try_into()
-            .map(|v: u128| v as u64)
-            .unwrap_or(0);
+        let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
+        if raw > U256::from(u64::MAX) {
+            return Err(AssetError::BalanceOverflow);
+        }
+        let asset_id = raw.to::<u64>();
         let asset_id = if asset_id == 0 { 1 } else { asset_id };
         let next_id = asset_id.checked_add(1).ok_or(AssetError::BalanceOverflow)?;
         self.backend
@@ -428,8 +435,8 @@ mod tests {
             store.write_balance(1, addr, 5000);
         }
         let mut store = AssetStorage::new(&mut backend);
-        assert_eq!(store.read_balance(1, addr), 5000);
-        assert_eq!(store.read_balance(1, Address::ZERO), 0);
+        assert_eq!(store.read_balance(1, addr).unwrap(), 5000);
+        assert_eq!(store.read_balance(1, Address::ZERO).unwrap(), 0);
     }
 
     #[test]
@@ -443,8 +450,8 @@ mod tests {
             store.transfer(1, from, to, 500).unwrap();
         }
         let mut store = AssetStorage::new(&mut backend);
-        assert_eq!(store.read_balance(1, from), 500);
-        assert_eq!(store.read_balance(1, to), 500);
+        assert_eq!(store.read_balance(1, from).unwrap(), 500);
+        assert_eq!(store.read_balance(1, to).unwrap(), 500);
     }
 
     #[test]
@@ -475,12 +482,12 @@ mod tests {
 
             // Mint
             store.mint(asset_id, issuer, recipient, 5000).unwrap();
-            assert_eq!(store.read_balance(asset_id, recipient), 5000);
+            assert_eq!(store.read_balance(asset_id, recipient).unwrap(), 5000);
             assert_eq!(store.read_meta(asset_id).supply, 5000);
 
             // Burn (recipient burns their own tokens)
             store.burn(asset_id, recipient, recipient, 2000).unwrap();
-            assert_eq!(store.read_balance(asset_id, recipient), 3000);
+            assert_eq!(store.read_balance(asset_id, recipient).unwrap(), 3000);
             assert_eq!(store.read_meta(asset_id).supply, 3000);
         }
     }
@@ -511,12 +518,12 @@ mod tests {
             let mut store = AssetStorage::new(&mut backend);
             store.write_balance(1, owner, 1000);
             store.approve(1, owner, spender, 500);
-            assert_eq!(store.read_allowance(1, owner, spender), 500);
+            assert_eq!(store.read_allowance(1, owner, spender).unwrap(), 500);
 
             store.transfer_from(1, spender, owner, to, 300).unwrap();
-            assert_eq!(store.read_balance(1, owner), 700);
-            assert_eq!(store.read_balance(1, to), 300);
-            assert_eq!(store.read_allowance(1, owner, spender), 200);
+            assert_eq!(store.read_balance(1, owner).unwrap(), 700);
+            assert_eq!(store.read_balance(1, to).unwrap(), 300);
+            assert_eq!(store.read_allowance(1, owner, spender).unwrap(), 200);
         }
     }
 
@@ -557,8 +564,8 @@ mod tests {
                 let old_total = sender_bal + recipient_bal;
 
                 if store.transfer(1, sender, recipient, amount).is_ok() {
-                    let new_sender = store.read_balance(1, sender);
-                    let new_recipient = store.read_balance(1, recipient);
+                    let new_sender = store.read_balance(1, sender).unwrap();
+                    let new_recipient = store.read_balance(1, recipient).unwrap();
                     let new_total = new_sender + new_recipient;
                     prop_assert_eq!(old_total, new_total,
                         "transfer must preserve total balance: old={}, new={}",
@@ -652,7 +659,7 @@ mod tests {
                 store.write_balance(1, addr, initial);
 
                 let _ = store.deduct_balance(1, addr, deduct);
-                let bal = store.read_balance(1, addr);
+                let bal = store.read_balance(1, addr).unwrap();
                 prop_assert!(bal <= initial, "balance must not exceed initial after deduct");
             }
         }
