@@ -20,6 +20,8 @@ pub enum AssetError {
     InsufficientAllowance,
     ComplianceFailed,
     InvalidMetadata(String),
+    AssetIdOverflow,
+    InvalidDecimals(u8),
 }
 
 impl std::fmt::Display for AssetError {
@@ -34,7 +36,9 @@ impl std::fmt::Display for AssetError {
             AssetError::AssetNotFound => write!(f, "asset not found"),
             AssetError::InsufficientAllowance => write!(f, "insufficient allowance"),
             AssetError::ComplianceFailed => write!(f, "compliance check failed"),
-            AssetError::InvalidMetadata(key) => write!(f, "invalid metadata for key: {key}"),
+            AssetError::InvalidMetadata(key) => write!(f, "invalid metadata: {key}"),
+            AssetError::AssetIdOverflow => write!(f, "asset id overflow"),
+            AssetError::InvalidDecimals(d) => write!(f, "invalid decimals: {d} (max 18)"),
         }
     }
 }
@@ -51,6 +55,7 @@ pub struct AssetMeta {
     pub max_supply: Balance,
     pub supply: Balance,
     pub status: u8,
+    pub registered_at: U256,
 }
 
 /// Business logic for asset operations, backed by any StorageBackend.
@@ -189,26 +194,39 @@ impl<B: StorageBackend> AssetStorage<B> {
             max_supply: self.load_meta_u128(asset_id, b"max_supply"),
             supply: self.load_meta_u128(asset_id, b"supply"),
             status: self.load_meta_u8(asset_id, b"status"),
+            registered_at: self.load_meta_u256(asset_id, b"registered_at"),
         })
     }
 
-    pub fn write_meta(&mut self, asset_id: u64, meta: &AssetMeta) {
-        self.store_meta_string(asset_id, b"symbol", &meta.symbol);
-        self.store_meta_string(asset_id, b"name", &meta.name);
+    pub(crate) fn write_meta(
+        &mut self,
+        asset_id: u64,
+        meta: &AssetMeta,
+    ) -> Result<(), AssetError> {
+        self.store_meta_string(asset_id, b"symbol", &meta.symbol)?;
+        self.store_meta_string(asset_id, b"name", &meta.name)?;
         self.store_meta_u256(asset_id, b"decimals", U256::from(meta.decimals));
         self.store_meta_u256(asset_id, b"issuer", address_to_u256(meta.issuer));
         self.store_meta_u256(asset_id, b"max_supply", u128_to_u256(meta.max_supply));
         self.store_meta_u256(asset_id, b"supply", u128_to_u256(meta.supply));
         self.store_meta_u256(asset_id, b"status", U256::from(meta.status));
+        self.store_meta_u256(asset_id, b"registered_at", meta.registered_at);
+        Ok(())
     }
 
-    fn store_meta_string(&mut self, asset_id: u64, key: &[u8], value: &str) {
-        assert!(
-            value.len() <= 32,
-            "metadata string exceeds 32-byte word limit: '{}' ({} bytes)",
-            value,
-            value.len()
-        );
+    fn store_meta_string(
+        &mut self,
+        asset_id: u64,
+        key: &[u8],
+        value: &str,
+    ) -> Result<(), AssetError> {
+        if value.len() > 32 {
+            return Err(AssetError::InvalidMetadata(format!(
+                "'{}' exceeds 32 bytes ({} bytes)",
+                String::from_utf8_lossy(key),
+                value.len()
+            )));
+        }
         let mut bytes = [0u8; 32];
         let src = value.as_bytes();
         let len = src.len().min(32);
@@ -218,6 +236,7 @@ impl<B: StorageBackend> AssetStorage<B> {
             slot_asset_meta(asset_id, key),
             U256::from_be_bytes(bytes),
         );
+        Ok(())
     }
 
     // ── Business logic ────────────────────────────────────────────────
@@ -242,6 +261,10 @@ impl<B: StorageBackend> AssetStorage<B> {
         Ok(())
     }
 
+    /// Transfer to multiple recipients sequentially.
+    ///
+    /// ⚠️ **Not atomic**: each inner transfer commits independently.
+    /// Callers must wrap this in a storage checkpoint if atomicity is required.
     pub fn batch_transfer(
         &mut self,
         asset_id: u64,
@@ -254,8 +277,16 @@ impl<B: StorageBackend> AssetStorage<B> {
         Ok(())
     }
 
-    pub fn approve(&mut self, asset_id: u64, owner: Address, spender: Address, amount: Balance) {
+    pub fn approve(
+        &mut self,
+        asset_id: u64,
+        owner: Address,
+        spender: Address,
+        amount: Balance,
+    ) -> Result<(), AssetError> {
+        self.read_meta(asset_id)?; // verify asset exists
         self.write_allowance(asset_id, owner, spender, amount);
+        Ok(())
     }
 
     pub fn transfer_from(
@@ -270,8 +301,10 @@ impl<B: StorageBackend> AssetStorage<B> {
         if allowance < amount {
             return Err(AssetError::InsufficientAllowance);
         }
-        self.write_allowance(asset_id, from, spender, allowance - amount);
+        // Perform transfer first, then deduct allowance.
+        // This ensures allowance is only reduced when the state change succeeds.
         self.transfer(asset_id, from, to, amount)?;
+        self.write_allowance(asset_id, from, spender, allowance - amount);
         Ok(())
     }
 
@@ -305,14 +338,21 @@ impl<B: StorageBackend> AssetStorage<B> {
         from: Address,
         amount: Balance,
     ) -> Result<(), AssetError> {
-        if caller != from {
+        let new_allowance = if caller != from {
             let allowance = self.read_allowance(asset_id, from, caller)?;
             if allowance < amount {
                 return Err(AssetError::InsufficientAllowance);
             }
-            self.write_allowance(asset_id, from, caller, allowance - amount);
-        }
+            Some(allowance - amount)
+        } else {
+            None
+        };
+        // Deduct balance first; only then reduce allowance.
+        // This ensures allowance is only reduced when the state change succeeds.
         self.deduct_balance(asset_id, from, amount)?;
+        if let Some(na) = new_allowance {
+            self.write_allowance(asset_id, from, caller, na);
+        }
         let supply = self.load_meta_u128(asset_id, b"supply");
         let new_supply = supply
             .checked_sub(amount)
@@ -330,19 +370,22 @@ impl<B: StorageBackend> AssetStorage<B> {
         issuer: Address,
         registered_at: U256,
     ) -> Result<u64, AssetError> {
+        if decimals > 18 {
+            return Err(AssetError::InvalidDecimals(decimals));
+        }
         let next_id_slot = U256::from(0);
         let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
         if raw > U256::from(u64::MAX) {
-            return Err(AssetError::BalanceOverflow);
+            return Err(AssetError::AssetIdOverflow);
         }
         let asset_id = raw.to::<u64>();
         let asset_id = if asset_id == 0 { 1 } else { asset_id };
-        let next_id = asset_id.checked_add(1).ok_or(AssetError::BalanceOverflow)?;
+        let next_id = asset_id.checked_add(1).ok_or(AssetError::AssetIdOverflow)?;
         self.backend
             .store(ASSET_ADDRESS, next_id_slot, U256::from(next_id));
 
-        self.store_meta_string(asset_id, b"symbol", symbol);
-        self.store_meta_string(asset_id, b"name", name);
+        self.store_meta_string(asset_id, b"symbol", symbol)?;
+        self.store_meta_string(asset_id, b"name", name)?;
         self.store_meta_u256(asset_id, b"decimals", U256::from(decimals));
         self.store_meta_u256(asset_id, b"issuer", address_to_u256(issuer));
         self.store_meta_u256(asset_id, b"max_supply", u128_to_u256(max_supply));
@@ -367,19 +410,22 @@ impl<B: StorageBackend> AssetStorage<B> {
         issuer: Address,
         registered_at: U256,
     ) -> Result<u64, AssetError> {
+        if decimals > 18 {
+            return Err(AssetError::InvalidDecimals(decimals));
+        }
         let next_id_slot = U256::from(0);
         let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
         if raw > U256::from(u64::MAX) {
-            return Err(AssetError::BalanceOverflow);
+            return Err(AssetError::AssetIdOverflow);
         }
         let asset_id = raw.to::<u64>();
         let asset_id = if asset_id == 0 { 1 } else { asset_id };
-        let next_id = asset_id.checked_add(1).ok_or(AssetError::BalanceOverflow)?;
+        let next_id = asset_id.checked_add(1).ok_or(AssetError::AssetIdOverflow)?;
         self.backend
             .store(ASSET_ADDRESS, next_id_slot, U256::from(next_id));
 
-        self.store_meta_string(asset_id, b"symbol", symbol);
-        self.store_meta_string(asset_id, b"name", name);
+        self.store_meta_string(asset_id, b"symbol", symbol)?;
+        self.store_meta_string(asset_id, b"name", name)?;
         self.store_meta_u256(asset_id, b"decimals", U256::from(decimals));
         self.store_meta_u256(asset_id, b"issuer", address_to_u256(issuer));
         self.store_meta_u256(asset_id, b"max_supply", u128_to_u256(max_supply));
@@ -545,8 +591,9 @@ mod tests {
         let to = Address::repeat_byte(0x33);
         {
             let mut store = AssetStorage::new(&mut backend);
+            store.register("TEST", "Test Token", 18, 0, owner, U256::ZERO).unwrap();
             store.write_balance(1, owner, 1000);
-            store.approve(1, owner, spender, 500);
+            store.approve(1, owner, spender, 500).unwrap();
             assert_eq!(store.read_allowance(1, owner, spender).unwrap(), 500);
 
             store.transfer_from(1, spender, owner, to, 300).unwrap();
@@ -564,8 +611,9 @@ mod tests {
         let to = Address::repeat_byte(0x33);
         {
             let mut store = AssetStorage::new(&mut backend);
+            store.register("TEST", "Test Token", 18, 0, owner, U256::ZERO).unwrap();
             store.write_balance(1, owner, 1000);
-            store.approve(1, owner, spender, 100);
+            store.approve(1, owner, spender, 100).unwrap();
             let err = store.transfer_from(1, spender, owner, to, 300).unwrap_err();
             assert!(matches!(err, AssetError::InsufficientAllowance));
         }
@@ -692,5 +740,98 @@ mod tests {
                 prop_assert!(bal <= initial, "balance must not exceed initial after deduct");
             }
         }
+    }
+
+    #[test]
+    fn test_transfer_from_allowance_rollback_on_failure() {
+        let mut backend = TestBackend::new();
+        let owner = Address::repeat_byte(0x11);
+        let spender = Address::repeat_byte(0x22);
+        let to = Address::repeat_byte(0x33);
+        {
+            let mut store = AssetStorage::new(&mut backend);
+            store.register("TEST", "Test Token", 18, 0, owner, U256::ZERO).unwrap();
+            store.write_balance(1, owner, 100);
+            store.approve(1, owner, spender, 500).unwrap();
+
+            // transfer_from fails because owner balance (100) < amount (200)
+            let err = store.transfer_from(1, spender, owner, to, 200).unwrap_err();
+            assert!(matches!(err, AssetError::InsufficientBalance));
+
+            // Allowance must NOT have been reduced
+            assert_eq!(store.read_allowance(1, owner, spender).unwrap(), 500);
+        }
+    }
+
+    #[test]
+    fn test_burn_allowance_rollback_on_failure() {
+        let mut backend = TestBackend::new();
+        let owner = Address::repeat_byte(0x11);
+        let burner = Address::repeat_byte(0x22);
+        {
+            let mut store = AssetStorage::new(&mut backend);
+            store.register("TEST", "Test Token", 18, 0, owner, U256::ZERO).unwrap();
+            store.write_balance(1, owner, 100);
+            store.approve(1, owner, burner, 500).unwrap();
+
+            // burn fails because owner balance (100) < amount (200)
+            let err = store.burn(1, burner, owner, 200).unwrap_err();
+            assert!(matches!(err, AssetError::InsufficientBalance));
+
+            // Allowance must NOT have been reduced
+            assert_eq!(store.read_allowance(1, owner, burner).unwrap(), 500);
+        }
+    }
+
+    #[test]
+    fn test_batch_transfer_partial_commit() {
+        let mut backend = TestBackend::new();
+        let from = Address::repeat_byte(0xAB);
+        let r1 = Address::repeat_byte(0x11);
+        let r2 = Address::repeat_byte(0x22);
+        {
+            let mut store = AssetStorage::new(&mut backend);
+            store.register("TEST", "Test", 18, 0, from, U256::ZERO).unwrap();
+            store.write_balance(1, from, 150);
+
+            // First recipient gets 100 (succeeds), second gets 100 (fails: 50 left)
+            let err = store
+                .batch_transfer(1, from, &[(r1, 100), (r2, 100)])
+                .unwrap_err();
+            assert!(matches!(err, AssetError::InsufficientBalance));
+
+            // First transfer succeeded before failure (non-atomic)
+            assert_eq!(store.read_balance(1, from).unwrap(), 50);
+            assert_eq!(store.read_balance(1, r1).unwrap(), 100);
+            assert_eq!(store.read_balance(1, r2).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn test_store_meta_string_too_long() {
+        let mut backend = TestBackend::new();
+        let mut store = AssetStorage::new(&mut backend);
+        // 33-byte string should fail
+        let long = "a".repeat(33);
+        let err = store.register(&long, "Test", 18, 0, Address::ZERO, U256::ZERO)
+            .unwrap_err();
+        assert!(matches!(err, AssetError::InvalidMetadata(_)));
+    }
+
+    #[test]
+    fn test_read_meta_unregistered() {
+        let mut backend = TestBackend::new();
+        let mut store = AssetStorage::new(&mut backend);
+        let err = store.read_meta(999).unwrap_err();
+        assert!(matches!(err, AssetError::AssetNotFound));
+    }
+
+    #[test]
+    fn test_register_invalid_decimals() {
+        let mut backend = TestBackend::new();
+        let mut store = AssetStorage::new(&mut backend);
+        let err = store.register("TEST", "Test", 19, 0, Address::ZERO, U256::ZERO)
+            .unwrap_err();
+        assert!(matches!(err, AssetError::InvalidDecimals(19)));
     }
 }

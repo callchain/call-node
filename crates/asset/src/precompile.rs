@@ -71,7 +71,7 @@ sol! {
     interface IProtocolAsset {
         function getBalance(uint64 assetId, address account) external view returns (uint128 balance);
         function getTotalSupply(uint64 assetId) external view returns (uint128 supply);
-        function getAssetInfo(uint64 assetId) external view returns (bytes32 symbol, bytes32 name, uint8 decimals, address issuer, uint128 maxSupply, uint8 status);
+        function getAssetInfo(uint64 assetId) external view returns (bytes32 symbol, bytes32 name, uint8 decimals, address issuer, uint128 maxSupply, uint8 status, uint256 registeredAt);
         function transfer(uint64 assetId, address to, uint128 amount) external;
         function batchTransfer(uint64 assetId, address[] calldata to, uint128[] calldata amounts) external;
         function approve(uint64 assetId, address spender, uint128 amount) external;
@@ -161,6 +161,7 @@ impl AssetPrecompile {
             meta.issuer,
             meta.max_supply,
             U256::from(meta.status),
+            meta.registered_at,
         )
             .abi_encode();
 
@@ -291,11 +292,9 @@ impl AssetPrecompile {
             |call, storage| {
                 let owner = require_caller(msg_sender)?;
                 let mut store = AssetStorage::new(sr);
-                // Verify asset exists before creating allowance
                 store
-                    .read_meta(call.assetId)
+                    .approve(call.assetId, owner, call.spender, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-                store.approve(call.assetId, owner, call.spender, call.amount);
 
                 let mut data = Vec::with_capacity(16);
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
@@ -1259,5 +1258,85 @@ mod tests {
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
         let registered_at = store.load_meta_u256(1, b"registered_at");
         assert_eq!(registered_at, U256::from(1_700_000_000u64));
+    }
+
+    #[test]
+    fn test_precompile_transfer_from_allowance_rollback() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let owner = Address::repeat_byte(0xAB);
+        let spender = Address::repeat_byte(0xEF);
+        let recipient = Address::repeat_byte(0xCD);
+
+        // Register asset and seed owner balance
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test Token", 18, 0, owner, U256::ZERO).unwrap();
+            store.write_balance(1, owner, 100);
+        }
+
+        let mut precompile = AssetPrecompile;
+
+        // Approve 500
+        let input = IProtocolAsset::approveCall {
+            assetId: 1,
+            spender,
+            amount: 500,
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        // transferFrom 200 — fails because owner balance (100) < 200
+        let input = IProtocolAsset::transferFromCall {
+            assetId: 1,
+            from: owner,
+            to: recipient,
+            amount: 200,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, spender, &mut provider);
+        assert!(result.is_err(), "transferFrom should fail due to insufficient balance");
+
+        // Allowance must remain 500
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        assert_eq!(store.read_allowance(1, owner, spender).unwrap(), 500);
+    }
+
+    #[test]
+    fn test_precompile_burn_allowance_rollback() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let owner = Address::repeat_byte(0xAB);
+        let burner = Address::repeat_byte(0xEF);
+
+        // Register asset, mint to owner, approve burner
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test Token", 18, 0, owner, U256::ZERO).unwrap();
+            store.write_balance(1, owner, 100);
+        }
+
+        let mut precompile = AssetPrecompile;
+
+        // Approve burner 500
+        let input = IProtocolAsset::approveCall {
+            assetId: 1,
+            spender: burner,
+            amount: 500,
+        }
+        .abi_encode();
+        precompile.call(&input, owner, &mut provider).unwrap();
+
+        // Burn 200 from owner by burner — fails because owner balance (100) < 200
+        let input = IProtocolAsset::burnCall {
+            assetId: 1,
+            from: owner,
+            amount: 200,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, burner, &mut provider);
+        assert!(result.is_err(), "burn should fail due to insufficient balance");
+
+        // Allowance must remain 500
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        assert_eq!(store.read_allowance(1, owner, burner).unwrap(), 500);
     }
 }
