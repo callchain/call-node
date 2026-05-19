@@ -80,7 +80,6 @@ pub enum SwitchError {
     ProtocolBalanceUnderflow,
     AmountMustBePositive,
     ToCannotBeZero,
-    EvmCallFailed,
 }
 
 impl std::fmt::Display for SwitchError {
@@ -99,7 +98,6 @@ impl std::fmt::Display for SwitchError {
             SwitchError::ProtocolBalanceUnderflow => write!(f, "protocol balance underflow"),
             SwitchError::AmountMustBePositive => write!(f, "amount must be > 0"),
             SwitchError::ToCannotBeZero => write!(f, "to cannot be zero address"),
-            SwitchError::EvmCallFailed => write!(f, "nested EVM call failed"),
         }
     }
 }
@@ -123,11 +121,18 @@ impl<B: StorageBackend> SwitchStorage<B> {
 
     // ── Protocol balance helpers ────────────────────────────────────
 
-    pub fn load_protocol_bal(&mut self, asset_id: u64, addr: Address) -> u128 {
-        u256_to_u128(
-            self.backend
-                .load(ASSET_ADDRESS, slot_balance(asset_id, addr)),
-        )
+    pub fn load_protocol_bal(
+        &mut self,
+        asset_id: u64,
+        addr: Address,
+    ) -> Result<u128, SwitchError> {
+        let raw = self
+            .backend
+            .load(ASSET_ADDRESS, slot_balance(asset_id, addr));
+        if raw > U256::from(u128::MAX) {
+            return Err(SwitchError::ProtocolBalanceOverflow);
+        }
+        Ok(u256_to_u128(raw))
     }
 
     pub fn save_protocol_bal(&mut self, asset_id: u64, addr: Address, amount: u128) {
@@ -145,7 +150,7 @@ impl<B: StorageBackend> SwitchStorage<B> {
         amount: u128,
     ) -> Result<(), SwitchError> {
         let bal = self
-            .load_protocol_bal(asset_id, addr)
+            .load_protocol_bal(asset_id, addr)?
             .checked_add(amount)
             .ok_or(SwitchError::ProtocolBalanceOverflow)?;
         self.save_protocol_bal(asset_id, addr, bal);
@@ -159,7 +164,7 @@ impl<B: StorageBackend> SwitchStorage<B> {
         amount: u128,
     ) -> Result<(), SwitchError> {
         let bal = self
-            .load_protocol_bal(asset_id, addr)
+            .load_protocol_bal(asset_id, addr)?
             .checked_sub(amount)
             .ok_or(SwitchError::InsufficientProtocolBalance)?;
         self.save_protocol_bal(asset_id, addr, bal);
@@ -836,10 +841,10 @@ mod tests {
         let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
 
         store.sub_protocol_bal(asset_id, addr, 300).unwrap();
-        assert_eq!(store.load_protocol_bal(asset_id, addr), 700);
+        assert_eq!(store.load_protocol_bal(asset_id, addr).unwrap(), 700);
 
         store.add_protocol_bal(asset_id, addr, 200).unwrap();
-        assert_eq!(store.load_protocol_bal(asset_id, addr), 900);
+        assert_eq!(store.load_protocol_bal(asset_id, addr).unwrap(), 900);
     }
 
     #[test]
@@ -979,6 +984,30 @@ mod tests {
         let mut precompile = SwitchPrecompile;
         let result = precompile.call(&input, sender, &mut provider);
         assert!(result.is_err(), "inactive asset should fail");
+    }
+
+    #[test]
+    fn test_load_protocol_bal_overflow_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let addr = addr(0x33);
+        let asset_id = 7u64;
+
+        // Write a value exceeding u128::MAX directly to storage
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_balance(asset_id, addr),
+                U256::from(u128::MAX) + U256::from(1),
+            )
+            .unwrap();
+
+        let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
+        let result = store.load_protocol_bal(asset_id, addr);
+        assert!(
+            matches!(result, Err(SwitchError::ProtocolBalanceOverflow)),
+            "expected ProtocolBalanceOverflow, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1807,5 +1836,123 @@ mod tests {
         let result = precompile.call(&input, Address::ZERO, &mut provider);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().bytes[31], 1);
+    }
+
+    // ── Property-based tests (proptest) ───────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_add_sub_protocol_bal_roundtrip(
+            initial in 0u128..10_000u128,
+            add in 0u128..5_000u128,
+            sub in 0u128..5_000u128,
+        ) {
+            let mut provider = HashMapStorageProvider::new(1_000_000);
+            let a = addr(0xAB);
+            let asset_id = 1u64;
+
+            provider.sstore(
+                ASSET_ADDRESS,
+                slot_balance(asset_id, a),
+                u128_to_u256(initial),
+            ).unwrap();
+
+            let mut store = SwitchStorage::new(StorageRef::new(&mut provider));
+
+            let _ = store.add_protocol_bal(asset_id, a, add);
+            let _ = store.sub_protocol_bal(asset_id, a, sub);
+
+            let bal = store.load_protocol_bal(asset_id, a).unwrap();
+            // After add then sub, balance should equal initial + add - sub,
+            // OR the operations failed (overflow/underflow) and balance
+            // reflects only the successful operations.
+            // We verify that balance is always consistent (never negative,
+            // never exceeds u128::MAX).
+            prop_assert!(bal <= u128::MAX);
+            // If both operations succeeded, exact value check
+            if let Some(expected) = initial.checked_add(add).and_then(|x| x.checked_sub(sub)) {
+                prop_assert_eq!(bal, expected,
+                    "add/sub roundtrip failed: initial={}, add={}, sub={}, got={}",
+                    initial, add, sub, bal);
+            }
+        }
+
+        #[test]
+        fn prop_switch_to_evm_preserves_total_native_balance(
+            sender_bal in 100u128..10_000u128,
+            recipient_bal in 0u128..10_000u128,
+            amount in 1u128..100u128,
+        ) {
+            let mut provider = HashMapStorageProvider::new(1_000_000);
+            let sender = addr(0x33);
+            let recipient = addr(0x44);
+
+            provider.sstore(
+                ASSET_ADDRESS, slot_balance(1, sender), u128_to_u256(sender_bal),
+            ).unwrap();
+            provider.balance_add(recipient, U256::from(recipient_bal)).unwrap();
+
+            let total_before = sender_bal + recipient_bal;
+
+            let mut input = vec![0u8; 100];
+            input[0..4].copy_from_slice(&IProtocolSwitch::switchToEvmCall::SELECTOR);
+            input[28..36].copy_from_slice(&1u64.to_be_bytes());
+            input[48..68].copy_from_slice(recipient.as_slice());
+            input[84..100].copy_from_slice(&amount.to_be_bytes());
+
+            let mut precompile = SwitchPrecompile;
+            let result = precompile.call(&input, sender, &mut provider);
+
+            if result.is_ok() {
+                let new_sender = provider
+                    .sload(ASSET_ADDRESS, slot_balance(1, sender))
+                    .map(u256_to_u128).unwrap_or(0);
+                let new_recipient = provider.balance_get(recipient).ok()
+                    .map(|v| v.to::<u128>()).unwrap_or(0);
+                let total_after = new_sender + new_recipient;
+                prop_assert_eq!(total_before, total_after,
+                    "total balance must be preserved across switchToEvm");
+            }
+        }
+
+        #[test]
+        fn prop_switch_to_protocol_preserves_total_native_balance(
+            sender_evm_bal in 100u128..10_000u128,
+            recipient_proto_bal in 0u128..10_000u128,
+            amount in 1u128..100u128,
+        ) {
+            let mut provider = HashMapStorageProvider::new(1_000_000);
+            let sender = addr(0x33);
+            let recipient = addr(0x44);
+
+            provider.balance_add(sender, U256::from(sender_evm_bal)).unwrap();
+            provider.sstore(
+                ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(recipient_proto_bal),
+            ).unwrap();
+
+            let total_before = sender_evm_bal + recipient_proto_bal;
+
+            let mut input = vec![0u8; 100];
+            input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+            input[28..36].copy_from_slice(&1u64.to_be_bytes());
+            input[48..68].copy_from_slice(recipient.as_slice());
+            input[84..100].copy_from_slice(&amount.to_be_bytes());
+
+            let mut precompile = SwitchPrecompile;
+            let result = precompile.call(&input, sender, &mut provider);
+
+            if result.is_ok() {
+                let new_sender = provider.balance_get(sender).ok()
+                    .map(|v| v.to::<u128>()).unwrap_or(0);
+                let new_recipient = provider
+                    .sload(ASSET_ADDRESS, slot_balance(1, recipient))
+                    .map(u256_to_u128).unwrap_or(0);
+                let total_after = new_sender + new_recipient;
+                prop_assert_eq!(total_before, total_after,
+                    "total balance must be preserved across switchToProtocol");
+            }
+        }
     }
 }
