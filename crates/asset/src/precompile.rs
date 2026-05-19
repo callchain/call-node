@@ -6,7 +6,7 @@
 //! cross-domain concerns (compliance).
 
 use crate::AssetStorage;
-use alloy_sol_types::{sol, SolCall, SolValue};
+use alloy_sol_types::{sol, SolCall};
 use call_precompile::storage::StorageProvider;
 use call_precompile::{
     check_compliance, dispatch, ok_empty, require_caller, write_string32,
@@ -420,6 +420,9 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                if call.from == Address::ZERO {
+                    return Err(PrecompileError::Other("burn from zero address".into()));
+                }
                 require_compliance(caller, storage)?;
                 require_compliance(call.from, storage)?;
                 let mut store = AssetStorage::new(sr);
@@ -728,6 +731,14 @@ mod tests {
         U256::from_be_bytes::<32>(bytes)
     }
 
+    /// Decode a uint64 asset_id from the low 8 bytes of ABI-encoded precompile output.
+    fn decode_asset_id(output: &revm_precompile::PrecompileOutput) -> u64 {
+        u64::from_be_bytes([
+            output.bytes[24], output.bytes[25], output.bytes[26], output.bytes[27],
+            output.bytes[28], output.bytes[29], output.bytes[30], output.bytes[31],
+        ])
+    }
+
     #[test]
     fn test_asset_precompile_get_balance() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
@@ -808,17 +819,7 @@ mod tests {
 
         let mut precompile = AssetPrecompile;
         let result = precompile.call(&input, issuer, &mut provider).unwrap();
-        let asset_id = u64::from_be_bytes([
-            result.bytes[24],
-            result.bytes[25],
-            result.bytes[26],
-            result.bytes[27],
-            result.bytes[28],
-            result.bytes[29],
-            result.bytes[30],
-            result.bytes[31],
-        ]);
-        assert_eq!(asset_id, 1);
+        assert_eq!(decode_asset_id(&result), 1);
 
         // Mint
         let input = IProtocolAsset::mintCall {
@@ -1062,16 +1063,7 @@ mod tests {
 
         // Decode returned asset_id (should be 1 since it's the first registration)
         let output = result.unwrap();
-        let asset_id = u64::from_be_bytes([
-            output.bytes[24],
-            output.bytes[25],
-            output.bytes[26],
-            output.bytes[27],
-            output.bytes[28],
-            output.bytes[29],
-            output.bytes[30],
-            output.bytes[31],
-        ]);
+        let asset_id = decode_asset_id(&output);
         assert_eq!(asset_id, 1);
 
         // Verify metadata was stored correctly.
@@ -1101,11 +1093,7 @@ mod tests {
 
         let mut precompile = AssetPrecompile;
         let result = precompile.call(&input, issuer, &mut provider).unwrap();
-        let asset_id = u64::from_be_bytes([
-            result.bytes[24], result.bytes[25], result.bytes[26], result.bytes[27],
-            result.bytes[28], result.bytes[29], result.bytes[30], result.bytes[31],
-        ]);
-        assert_eq!(asset_id, 1);
+        assert_eq!(decode_asset_id(&result), 1);
 
         // Attacker tries createWrapper
         let input = IProtocolAsset::createWrapperCall { assetId: 1 }.abi_encode();
@@ -1451,6 +1439,43 @@ mod tests {
         .abi_encode();
         let result = precompile.call(&input, issuer, &mut provider);
         assert!(result.is_err(), "mint to zero address should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("zero address"), "error should mention zero address: {}", err);
+    }
+
+    #[test]
+    fn test_burn_from_zero_address_rejected() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let issuer = Address::repeat_byte(0x11);
+
+        // Register asset and mint to issuer
+        let input = IProtocolAsset::registerCall {
+            symbol: "GOLD".into(),
+            name: "Gold".into(),
+            decimals: 18,
+            maxSupply: 10000,
+        }
+        .abi_encode();
+        let mut precompile = AssetPrecompile;
+        precompile.call(&input, issuer, &mut provider).unwrap();
+
+        let input = IProtocolAsset::mintCall {
+            assetId: 1,
+            to: issuer,
+            amount: 500,
+        }
+        .abi_encode();
+        precompile.call(&input, issuer, &mut provider).unwrap();
+
+        // Burn from zero address
+        let input = IProtocolAsset::burnCall {
+            assetId: 1,
+            from: Address::ZERO,
+            amount: 100,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, issuer, &mut provider);
+        assert!(result.is_err(), "burn from zero address should fail");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("zero address"), "error should mention zero address: {}", err);
     }

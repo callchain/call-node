@@ -3,8 +3,8 @@ pub mod precompile;
 pub use precompile::AssetPrecompile;
 
 use call_precompile::{
-    slot_allowance, slot_asset_meta, slot_balance, storage_slot, u128_to_u256, u256_to_u128,
-    ASSET_ADDRESS,
+    address_to_u256, slot_allowance, slot_asset_meta, slot_balance, storage_slot, u128_to_u256,
+    u256_to_u128, ASSET_ADDRESS,
 };
 use call_primitives::{Address, Balance, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -61,6 +61,8 @@ pub struct AssetMeta {
     pub supply: Balance,
     pub status: u8,
     pub registered_at: U256,
+    pub evm_contract: Address,
+    pub dominance: u8,
 }
 
 /// Business logic for asset operations, backed by any StorageBackend.
@@ -200,6 +202,8 @@ impl<B: StorageBackend> AssetStorage<B> {
             supply: self.load_meta_u128(asset_id, b"supply"),
             status: self.load_meta_u8(asset_id, b"status"),
             registered_at: self.load_meta_u256(asset_id, b"registered_at"),
+            evm_contract: self.load_meta_address(asset_id, b"evm_contract"),
+            dominance: self.load_meta_u8(asset_id, b"dominance"),
         })
     }
 
@@ -216,6 +220,8 @@ impl<B: StorageBackend> AssetStorage<B> {
         self.store_meta_u256(asset_id, b"supply", u128_to_u256(meta.supply));
         self.store_meta_u256(asset_id, b"status", U256::from(meta.status));
         self.store_meta_u256(asset_id, b"registered_at", meta.registered_at);
+        self.store_meta_u256(asset_id, b"evm_contract", address_to_u256(meta.evm_contract));
+        self.store_meta_u256(asset_id, b"dominance", U256::from(meta.dominance));
         Ok(())
     }
 
@@ -259,12 +265,12 @@ impl<B: StorageBackend> AssetStorage<B> {
         // deducting sender. This prevents partial state when called
         // outside a checkpoint (e.g. direct Rust API usage).
         let to_current = self.read_balance(asset_id, to)?;
-        to_current
+        let to_new = to_current
             .checked_add(amount)
             .ok_or(AssetError::BalanceOverflow)?;
 
         self.deduct_balance(asset_id, from, amount)?;
-        self.add_balance(asset_id, to, amount)?;
+        self.write_balance(asset_id, to, to_new);
         Ok(())
     }
 
@@ -380,28 +386,9 @@ impl<B: StorageBackend> AssetStorage<B> {
         if decimals > 18 {
             return Err(AssetError::InvalidDecimals(decimals));
         }
-        let next_id_slot = U256::from(0);
-        let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
-        if raw > U256::from(u64::MAX) {
-            return Err(AssetError::AssetIdOverflow);
-        }
-        let asset_id = raw.to::<u64>();
-        let asset_id = if asset_id == 0 { 1 } else { asset_id };
-        let next_id = asset_id.checked_add(1).ok_or(AssetError::AssetIdOverflow)?;
-        self.backend
-            .store(ASSET_ADDRESS, next_id_slot, U256::from(next_id));
-
-        self.store_meta_string(asset_id, b"symbol", symbol)?;
-        self.store_meta_string(asset_id, b"name", name)?;
-        self.store_meta_u256(asset_id, b"decimals", U256::from(decimals));
-        self.store_meta_u256(asset_id, b"issuer", address_to_u256(issuer));
-        self.store_meta_u256(asset_id, b"max_supply", u128_to_u256(max_supply));
-        self.store_meta_u256(asset_id, b"supply", U256::from(0));
-        self.store_meta_u256(asset_id, b"status", U256::from(0));
-        self.store_meta_u256(asset_id, b"compliance", U256::from(0));
-        self.store_meta_u256(asset_id, b"registered_at", registered_at);
+        let asset_id = self.allocate_asset_id()?;
+        self.write_base_meta(asset_id, symbol, name, decimals, max_supply, issuer, registered_at)?;
         self.store_meta_u256(asset_id, b"has_erc20", U256::from(0));
-
         Ok(asset_id)
     }
 
@@ -424,6 +411,15 @@ impl<B: StorageBackend> AssetStorage<B> {
         if self.evm_contract_asset_id(evm_contract).is_some() {
             return Err(AssetError::Erc20AlreadyBound(evm_contract));
         }
+        let asset_id = self.allocate_asset_id()?;
+        self.write_base_meta(asset_id, symbol, name, decimals, max_supply, issuer, registered_at)?;
+        self.store_meta_u256(asset_id, b"has_erc20", U256::from(1));
+        self.store_meta_u256(asset_id, b"evm_contract", address_to_u256(evm_contract));
+        self.set_evm_contract_asset_id(evm_contract, asset_id);
+        Ok(asset_id)
+    }
+
+    fn allocate_asset_id(&mut self) -> Result<u64, AssetError> {
         let next_id_slot = U256::from(0);
         let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
         if raw > U256::from(u64::MAX) {
@@ -434,7 +430,19 @@ impl<B: StorageBackend> AssetStorage<B> {
         let next_id = asset_id.checked_add(1).ok_or(AssetError::AssetIdOverflow)?;
         self.backend
             .store(ASSET_ADDRESS, next_id_slot, U256::from(next_id));
+        Ok(asset_id)
+    }
 
+    fn write_base_meta(
+        &mut self,
+        asset_id: u64,
+        symbol: &str,
+        name: &str,
+        decimals: u8,
+        max_supply: Balance,
+        issuer: Address,
+        registered_at: U256,
+    ) -> Result<(), AssetError> {
         self.store_meta_string(asset_id, b"symbol", symbol)?;
         self.store_meta_string(asset_id, b"name", name)?;
         self.store_meta_u256(asset_id, b"decimals", U256::from(decimals));
@@ -444,11 +452,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         self.store_meta_u256(asset_id, b"status", U256::from(0));
         self.store_meta_u256(asset_id, b"compliance", U256::from(0));
         self.store_meta_u256(asset_id, b"registered_at", registered_at);
-        self.store_meta_u256(asset_id, b"has_erc20", U256::from(1));
-        self.store_meta_u256(asset_id, b"evm_contract", address_to_u256(evm_contract));
-        self.set_evm_contract_asset_id(evm_contract, asset_id);
-
-        Ok(asset_id)
+        Ok(())
     }
 
     /// Check whether an asset has an ERC-20 bridge (has_erc20 == 1).
@@ -508,12 +512,6 @@ impl<B: StorageBackend> AssetStorage<B> {
 /// Uses a distinct namespace from `slot_asset_meta` to avoid collisions.
 fn erc20_binding_slot(evm_contract: Address) -> U256 {
     storage_slot(&[b"call:asset:erc20_binding", evm_contract.as_slice()])
-}
-
-fn address_to_u256(addr: Address) -> U256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..32].copy_from_slice(addr.as_slice());
-    U256::from_be_bytes(bytes)
 }
 
 #[cfg(test)]
