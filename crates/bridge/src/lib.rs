@@ -143,21 +143,17 @@ pub struct BridgeConfig {
     /// Default: 4_838_400 ≈ 14 days at 250ms block time.
     /// Must be > challenge_period_blocks to prevent accidental replay.
     pub processed_tx_retention_blocks: u64,
+    /// Challenge bond amount required to initiate a challenge.
+    /// Default: 1_000.
+    pub challenge_bond: u128,
     /// Authorized bridge contracts per external chain (chain_id -> contract addresses).
     /// Deposits must originate from one of these contracts.
+    /// Empty by default — must be configured by governance before use.
     pub authorized_contracts: std::collections::HashMap<u64, Vec<Address>>,
 }
 
 impl Default for BridgeConfig {
     fn default() -> Self {
-        let mut authorized = std::collections::HashMap::new();
-        authorized.insert(
-            1u64,
-            vec![Address::from_slice(&[
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ])],
-        );
         Self {
             max_per_tx: 1_000_000_000_000_000_000_000u128,
             daily_limit_per_asset: 10_000_000_000_000_000_000_000u128,
@@ -170,7 +166,8 @@ impl Default for BridgeConfig {
             max_external_withdraw_per_period: 5_000_000_000_000_000_000_000u128,
             blocks_per_day: 345_600,
             processed_tx_retention_blocks: 4_838_400,
-            authorized_contracts: authorized,
+            challenge_bond: 1_000,
+            authorized_contracts: std::collections::HashMap::new(),
         }
     }
 }

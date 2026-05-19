@@ -30,8 +30,8 @@ pub const BRIDGE_ADDRESS: Address =
     alloy_primitives::address!("0000000000000000000000000000000000000103");
 
 pub const CALL_ASSET_ID: u64 = 1;
-pub const DEFAULT_CHALLENGE_PERIOD: u64 = 100;
-pub const DEFAULT_CHALLENGE_BOND: u128 = 1000;
+pub const DEFAULT_CHALLENGE_PERIOD: u64 = 2_419_200;
+pub const DEFAULT_CHALLENGE_BOND: u128 = 1_000;
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -351,61 +351,55 @@ impl<B: StorageBackend> BridgeStorage<B> {
         )
     }
 
-    pub fn read_challenge_period(&mut self) -> u64 {
-        let stored = u256_to_u64(self.backend.load(BRIDGE_ADDRESS, slot_challenge_period()));
+    /// Read a u64 config value with offset+1 encoding: 0 means "use default",
+    /// any non-zero value means `stored - 1`. This allows 0 to be explicitly set.
+    fn load_u64_or_default(&mut self, slot: U256, default: u64) -> u64 {
+        let stored = u256_to_u64(self.backend.load(BRIDGE_ADDRESS, slot));
         if stored == 0 {
-            DEFAULT_CHALLENGE_PERIOD
+            default
         } else {
-            stored
+            stored - 1
         }
+    }
+
+    /// Read a u128 config value with offset+1 encoding: 0 means "use default",
+    /// any non-zero value means `stored - 1`. This allows 0 to be explicitly set.
+    fn load_u128_or_default(&mut self, slot: U256, default: u128) -> u128 {
+        let stored = u256_to_u128(self.backend.load(BRIDGE_ADDRESS, slot));
+        if stored == 0 {
+            default
+        } else {
+            stored - 1
+        }
+    }
+
+    pub fn read_challenge_period(&mut self) -> u64 {
+        self.load_u64_or_default(slot_challenge_period(), DEFAULT_CHALLENGE_PERIOD)
     }
 
     pub fn read_global_challenge_bond(&mut self) -> u128 {
-        let stored = u256_to_u128(
-            self.backend
-                .load(BRIDGE_ADDRESS, slot_challenge_bond_amount()),
-        );
-        if stored == 0 {
-            DEFAULT_CHALLENGE_BOND
-        } else {
-            stored
-        }
+        self.load_u128_or_default(slot_challenge_bond_amount(), DEFAULT_CHALLENGE_BOND)
     }
 
     fn read_max_per_tx(&mut self, asset_id: u64) -> u128 {
-        let stored = u256_to_u128(
-            self.backend
-                .load(BRIDGE_ADDRESS, slot_bridge_max_per_tx(asset_id)),
-        );
-        if stored == 0 {
-            BridgeConfig::default().max_per_tx
-        } else {
-            stored
-        }
+        self.load_u128_or_default(
+            slot_bridge_max_per_tx(asset_id),
+            BridgeConfig::default().max_per_tx,
+        )
     }
 
     fn read_daily_limit(&mut self, asset_id: u64) -> u128 {
-        let stored = u256_to_u128(
-            self.backend
-                .load(BRIDGE_ADDRESS, slot_bridge_daily_limit(asset_id)),
-        );
-        if stored == 0 {
-            BridgeConfig::default().daily_limit_per_asset
-        } else {
-            stored
-        }
+        self.load_u128_or_default(
+            slot_bridge_daily_limit(asset_id),
+            BridgeConfig::default().daily_limit_per_asset,
+        )
     }
 
     fn read_blocks_per_day(&mut self) -> u64 {
-        let stored = u256_to_u64(
-            self.backend
-                .load(BRIDGE_ADDRESS, slot_bridge_blocks_per_day()),
-        );
-        if stored == 0 {
-            BridgeConfig::default().blocks_per_day
-        } else {
-            stored
-        }
+        self.load_u64_or_default(
+            slot_bridge_blocks_per_day(),
+            BridgeConfig::default().blocks_per_day,
+        )
     }
 
     fn read_asset_allowed(&mut self, asset_id: u64) -> bool {
@@ -435,27 +429,17 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     fn read_max_external_withdraw_per_period(&mut self) -> u128 {
-        let stored = u256_to_u128(
-            self.backend
-                .load(BRIDGE_ADDRESS, slot_bridge_max_withdraw_per_period()),
-        );
-        if stored == 0 {
-            BridgeConfig::default().max_external_withdraw_per_period
-        } else {
-            stored
-        }
+        self.load_u128_or_default(
+            slot_bridge_max_withdraw_per_period(),
+            BridgeConfig::default().max_external_withdraw_per_period,
+        )
     }
 
     fn read_processed_retention_blocks(&mut self) -> u64 {
-        let stored = u256_to_u64(
-            self.backend
-                .load(BRIDGE_ADDRESS, slot_bridge_processed_retention()),
-        );
-        if stored == 0 {
-            BridgeConfig::default().processed_tx_retention_blocks
-        } else {
-            stored
-        }
+        self.load_u64_or_default(
+            slot_bridge_processed_retention(),
+            BridgeConfig::default().processed_tx_retention_blocks,
+        )
     }
 
     fn read_daily_used(&mut self, asset_id: u64, day: u64) -> u128 {
@@ -1098,7 +1082,7 @@ sol! {
         function getTotalWithdrawals() external view returns (uint128);
         function externalDeposit(uint64 sourceChain, address sourceContract, bytes32 sourceTxHash, uint64 assetId, address recipient, uint128 amount) external;
         function externalWithdraw(uint64 targetChain, bytes calldata targetAddress, uint64 assetId, uint128 amount) external;
-        function deposit(uint64 sourceChain, address targetAddress, uint128 amount, uint64 assetId, bytes calldata proof) external;
+        function deposit(address targetAddress, uint128 amount, uint64 assetId) external;
         function initiateChallenge(bytes32 sourceTxHash, bytes calldata proof) external;
         function resolveChallenge(bytes32 sourceTxHash) external;
         function getChallengeStatus(bytes32 sourceTxHash) external view returns (uint64 status, uint64 deadline, uint128 bond, address challenger);
@@ -1285,13 +1269,12 @@ impl BridgePrecompile {
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
                 let topic0 = alloy_primitives::keccak256(
-                    b"Deposit(address,uint64,address,uint128,uint64,uint64)",
+                    b"Deposit(address,address,uint128,uint64,uint64)",
                 );
                 let topic1 = alloy_primitives::B256::from(
                     address_to_u256(caller).to_be_bytes::<32>(),
                 );
-                let mut data = Vec::with_capacity(160);
-                data.extend_from_slice(&u64_to_u256(call.sourceChain).to_be_bytes::<32>());
+                let mut data = Vec::with_capacity(128);
                 data.extend_from_slice(
                     &address_to_u256(call.targetAddress).to_be_bytes::<32>(),
                 );
@@ -1592,6 +1575,12 @@ mod tests {
             call_precompile::slot_validator_by_addr(validator),
             u64_to_u256(1),
         );
+        // Authorize Address::ZERO as source contract for chain 1
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -1682,6 +1671,17 @@ mod tests {
             u128_to_u256(5000),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
+        // Authorize Address::ZERO and set short challenge period for test
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -1789,6 +1789,17 @@ mod tests {
             u128_to_u256(5000),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
+        // Authorize Address::ZERO and set short challenge period for test
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -1840,6 +1851,17 @@ mod tests {
             u128_to_u256(5000),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
+        // Authorize Address::ZERO and set short challenge period for test
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -1898,6 +1920,17 @@ mod tests {
             u128_to_u256(100),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
+        // Authorize Address::ZERO and set short challenge period for test
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -1982,6 +2015,17 @@ mod tests {
             u128_to_u256(100),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
+        // Authorize Address::ZERO and set short challenge period for test
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -2165,6 +2209,17 @@ mod tests {
             u128_to_u256(5000),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
+        // Authorize Address::ZERO and set short challenge period for test
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -2231,11 +2286,9 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::depositCall {
-            sourceChain: 1,
             targetAddress: target,
             amount: 1000,
             assetId: 1,
-            proof: alloy_primitives::Bytes::new(),
         }
         .abi_encode();
 
@@ -2315,11 +2368,9 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::depositCall {
-            sourceChain: 1,
             targetAddress: target,
             amount: 1000,
             assetId: 1,
-            proof: alloy_primitives::Bytes::new(),
         }
         .abi_encode();
 
@@ -2342,6 +2393,11 @@ mod tests {
             call_precompile::VALIDATOR_ADDRESS,
             call_precompile::slot_validator_by_addr(validator),
             u64_to_u256(1),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2378,6 +2434,11 @@ mod tests {
             call_precompile::VALIDATOR_ADDRESS,
             call_precompile::slot_validator_by_addr(validator),
             u64_to_u256(1),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2416,11 +2477,16 @@ mod tests {
             call_precompile::slot_validator_by_addr(validator),
             u64_to_u256(1),
         );
-        // Set max_per_tx = 500 for asset_id=1
+        // Set max_per_tx = 500 for asset_id=1 (offset+1: store 501)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_max_per_tx(1),
-            u128_to_u256(500),
+            u128_to_u256(501),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2461,22 +2527,27 @@ mod tests {
             call_precompile::slot_validator_by_addr(validator),
             u64_to_u256(1),
         );
-        // Set daily_limit = 500 for asset_id=1; blocks_per_day = 100
+        // Set daily_limit = 500 for asset_id=1; blocks_per_day = 100 (offset+1)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_daily_limit(1),
-            u128_to_u256(500),
+            u128_to_u256(501),
         );
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_blocks_per_day(),
-            u64_to_u256(100),
+            u64_to_u256(101),
         );
         // Pre-fill daily_used at day=0 (block 10 / 100 = 0) with 200
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_daily_used(1, 0),
             u128_to_u256(200),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2518,18 +2589,23 @@ mod tests {
             call_precompile::slot_validator_by_addr(validator),
             u64_to_u256(1),
         );
-        // Set daily_limit = 500 for asset_id=1; blocks_per_day = 100
+        // Set daily_limit = 500 for asset_id=1; blocks_per_day = 100 (offset+1)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_daily_limit(1),
-            u128_to_u256(500),
+            u128_to_u256(501),
         );
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_blocks_per_day(),
-            u64_to_u256(100),
+            u64_to_u256(101),
         );
         // day=2 (block 250 / 100 = 2) has used 0, so 400 should succeed
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
+        );
 
         let mut precompile = BridgePrecompile;
 
@@ -2597,6 +2673,11 @@ mod tests {
             BRIDGE_ADDRESS,
             slot_bridge_asset_allowed(1),
             U256::from(256u16),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2677,11 +2758,11 @@ mod tests {
             U256::from(1u8),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(5000));
-        // Set max_withdraw_per_period = 500
+        // Set max_withdraw_per_period = 500 (offset+1: store 501)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_max_withdraw_per_period(),
-            u128_to_u256(500),
+            u128_to_u256(501),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2717,11 +2798,16 @@ mod tests {
             U256::from(1u8),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(5000));
-        // Set max_withdraw_per_period = 500; challenge_period = 100 (default)
+        // Set max_withdraw_per_period = 500 (offset+1: 501); challenge_period = 100 (offset+1: 101)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_max_withdraw_per_period(),
-            u128_to_u256(500),
+            u128_to_u256(501),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
         );
         // First withdraw of 400 at block 10
         let mut precompile = BridgePrecompile;
@@ -2769,11 +2855,16 @@ mod tests {
             call_precompile::slot_validator_by_addr(validator),
             u64_to_u256(1),
         );
-        // Set retention = 50 blocks
+        // Set retention = 50 blocks (offset+1: store 51)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_processed_retention(),
-            u64_to_u256(50),
+            u64_to_u256(51),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2829,11 +2920,22 @@ mod tests {
             u128_to_u256(5000),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
-        // Set retention = 50 blocks, challenge_period = 100
+        // Set retention = 50 blocks (offset+1: 51), challenge_period = 100 (offset+1: 101)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_processed_retention(),
-            u64_to_u256(50),
+            u64_to_u256(51),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_challenge_period(),
+            u64_to_u256(101),
+        );
+        // Authorize Address::ZERO as source contract for chain 1
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_authorized_contract(1, Address::ZERO),
+            U256::from(1u8),
         );
 
         let mut precompile = BridgePrecompile;
@@ -2884,11 +2986,9 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::depositCall {
-            sourceChain: 1,
             targetAddress: target,
             amount: 1000,
             assetId: 1,
-            proof: alloy_primitives::Bytes::new(),
         }
         .abi_encode();
 
