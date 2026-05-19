@@ -19,6 +19,7 @@ pub enum AssetError {
     AssetNotFound,
     InsufficientAllowance,
     ComplianceFailed,
+    InvalidMetadata(String),
 }
 
 impl std::fmt::Display for AssetError {
@@ -33,6 +34,7 @@ impl std::fmt::Display for AssetError {
             AssetError::AssetNotFound => write!(f, "asset not found"),
             AssetError::InsufficientAllowance => write!(f, "insufficient allowance"),
             AssetError::ComplianceFailed => write!(f, "compliance check failed"),
+            AssetError::InvalidMetadata(key) => write!(f, "invalid metadata for key: {key}"),
         }
     }
 }
@@ -154,12 +156,15 @@ impl<B: StorageBackend> AssetStorage<B> {
         Address::from_slice(&v.to_be_bytes::<32>()[12..32])
     }
 
-    pub fn load_meta_string(&mut self, asset_id: u64, key: &[u8]) -> String {
+    pub fn load_meta_string(&mut self, asset_id: u64, key: &[u8]) -> Result<String, AssetError> {
         let v = self.load_meta_u256(asset_id, key);
         let bytes = v.to_be_bytes::<32>();
         // Trim trailing nulls
         let len = bytes.iter().position(|&b| b == 0).unwrap_or(32);
-        String::from_utf8_lossy(&bytes[..len]).into_owned()
+        String::from_utf8(bytes[..len].to_vec())
+            .map_err(|_| AssetError::InvalidMetadata(
+                String::from_utf8_lossy(key).into_owned(),
+            ))
     }
 
     pub fn store_meta_u256(&mut self, asset_id: u64, key: &[u8], value: U256) {
@@ -168,7 +173,7 @@ impl<B: StorageBackend> AssetStorage<B> {
     }
 
     pub fn read_meta(&mut self, asset_id: u64) -> Result<AssetMeta, AssetError> {
-        let symbol = self.load_meta_string(asset_id, b"symbol");
+        let symbol = self.load_meta_string(asset_id, b"symbol")?;
         let issuer = self.load_meta_address(asset_id, b"issuer");
 
         // Existence check: unregistered slots default to zeros.
@@ -178,7 +183,7 @@ impl<B: StorageBackend> AssetStorage<B> {
 
         Ok(AssetMeta {
             symbol,
-            name: self.load_meta_string(asset_id, b"name"),
+            name: self.load_meta_string(asset_id, b"name")?,
             decimals: self.load_meta_u8(asset_id, b"decimals"),
             issuer,
             max_supply: self.load_meta_u128(asset_id, b"max_supply"),
@@ -323,6 +328,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         decimals: u8,
         max_supply: Balance,
         issuer: Address,
+        registered_at: U256,
     ) -> Result<u64, AssetError> {
         let next_id_slot = U256::from(0);
         let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
@@ -343,7 +349,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         self.store_meta_u256(asset_id, b"supply", U256::from(0));
         self.store_meta_u256(asset_id, b"status", U256::from(0));
         self.store_meta_u256(asset_id, b"compliance", U256::from(0));
-        self.store_meta_u256(asset_id, b"registered_at", U256::from(0));
+        self.store_meta_u256(asset_id, b"registered_at", registered_at);
         self.store_meta_u256(asset_id, b"has_erc20", U256::from(0));
 
         Ok(asset_id)
@@ -359,6 +365,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         decimals: u8,
         max_supply: Balance,
         issuer: Address,
+        registered_at: U256,
     ) -> Result<u64, AssetError> {
         let next_id_slot = U256::from(0);
         let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
@@ -379,7 +386,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         self.store_meta_u256(asset_id, b"supply", U256::from(0));
         self.store_meta_u256(asset_id, b"status", U256::from(0));
         self.store_meta_u256(asset_id, b"compliance", U256::from(0));
-        self.store_meta_u256(asset_id, b"registered_at", U256::from(0));
+        self.store_meta_u256(asset_id, b"registered_at", registered_at);
         self.store_meta_u256(asset_id, b"has_erc20", U256::from(1));
         self.store_meta_u256(asset_id, b"evm_contract", address_to_u256(evm_contract));
 
@@ -498,7 +505,7 @@ mod tests {
             let mut store = AssetStorage::new(&mut backend);
             // Register asset
             let asset_id = store
-                .register("GOLD", "Gold Token", 18, 10000, issuer)
+                .register("GOLD", "Gold Token", 18, 10000, issuer, U256::ZERO)
                 .unwrap();
             assert_eq!(asset_id, 1);
 
@@ -523,7 +530,7 @@ mod tests {
         {
             let mut store = AssetStorage::new(&mut backend);
             let asset_id = store
-                .register("GOLD", "Gold Token", 18, 10000, issuer)
+                .register("GOLD", "Gold Token", 18, 10000, issuer, U256::ZERO)
                 .unwrap();
             let err = store.mint(asset_id, attacker, recipient, 100).unwrap_err();
             assert!(matches!(err, AssetError::NotIssuer));
@@ -608,7 +615,7 @@ mod tests {
             {
                 let mut store = AssetStorage::new(&mut backend);
                 let asset_id = store
-                    .register("GOLD", "Gold Token", 18, max_supply, issuer)
+                    .register("GOLD", "Gold Token", 18, max_supply, issuer, U256::ZERO)
                     .unwrap();
 
                 // Pre-seed supply
@@ -644,7 +651,7 @@ mod tests {
             {
                 let mut store = AssetStorage::new(&mut backend);
                 let asset_id = store
-                    .register("GOLD", "Gold Token", 18, 10_000, issuer)
+                    .register("GOLD", "Gold Token", 18, 10_000, issuer, U256::ZERO)
                     .unwrap();
 
                 store.mint(asset_id, issuer, holder, initial_supply).unwrap();
