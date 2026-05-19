@@ -10,7 +10,7 @@
 //!   - CALL (asset_id = 1): native EVM balance via balance_add / balance_sub
 //!   - Other assets: ERC-20 transfer / transferFrom via nested EVM execution
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{hex, Address, Bytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use call_precompile::{
     check_compliance, dispatch, require_caller, slot_asset_meta, slot_balance, slot_evm_contract,
@@ -24,9 +24,6 @@ use revm_precompile::{PrecompileError, PrecompileResult};
 pub const SWITCH_ADDRESS: Address =
     alloy_primitives::address!("0000000000000000000000000000000000000207");
 
-/// Maximum gas allowed for a single nested ERC-20 call.
-const NESTED_CALL_GAS_LIMIT: u64 = 100_000;
-
 // ── ABI selectors ─────────────────────────────────────────────────────
 
 /// `keccak256("transfer(address,uint256)")[:4]`
@@ -37,6 +34,38 @@ const SELECTOR_TRANSFER_FROM: [u8; 4] = [0x23, 0xb8, 0x72, 0xdd];
 const SELECTOR_BRIDGE_MINT: [u8; 4] = [0x8c, 0x2a, 0x99, 0x3e];
 /// `keccak256("bridgeBurn(address,uint256)")[:4]`
 const SELECTOR_BRIDGE_BURN: [u8; 4] = [0x74, 0xf4, 0xf5, 0x47];
+
+// ── Event helpers ─────────────────────────────────────────────────────
+
+use std::sync::LazyLock;
+
+static SWITCHED_TO_EVM_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
+    alloy_primitives::keccak256(b"SwitchedToEvm(uint64,address,address,uint128)")
+});
+static SWITCHED_TO_PROTOCOL_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
+    alloy_primitives::keccak256(b"SwitchedToProtocol(uint64,address,address,uint128)")
+});
+
+fn emit_switch_event(
+    storage: &mut dyn StorageProvider,
+    topic0: alloy_primitives::B256,
+    asset_id: u64,
+    from: Address,
+    to: Address,
+    amount: u128,
+) -> Result<(), PrecompileError> {
+    let log = alloy_primitives::LogData::new(
+        vec![
+            topic0,
+            alloy_primitives::B256::from(call_precompile::u64_to_u256(asset_id).to_be_bytes::<32>()),
+            alloy_primitives::B256::from(call_precompile::address_to_u256(from).to_be_bytes::<32>()),
+            alloy_primitives::B256::from(call_precompile::address_to_u256(to).to_be_bytes::<32>()),
+        ],
+        alloy_primitives::Bytes::from(call_precompile::encode_u128(amount).to_vec()),
+    )
+    .expect("invariant: topics non-empty, LogData::new always succeeds");
+    storage.emit_event(SWITCH_ADDRESS, log)
+}
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -234,6 +263,9 @@ sol! {
     interface IProtocolSwitch {
         function switchToEvm(uint64 assetId, address to, uint128 amount) external;
         function switchToProtocol(uint64 assetId, address to, uint128 amount) external;
+        function getEvmContract(uint64 assetId) external view returns (address contractAddr);
+        function canSwitch(uint64 assetId) external view returns (bool switchable);
+        function getDominance(uint64 assetId) external view returns (uint8 dominance);
     }
 }
 
@@ -304,9 +336,26 @@ impl SwitchPrecompile {
                             }
                             apply_state_changes(storage, state)?;
                         }
-                        _ => return Err(PrecompileError::Other("ERC-20 call failed".into())),
+                        revm::context_interface::result::ExecutionResult::Revert { output, .. } => {
+                            return Err(PrecompileError::Other(
+                                format!("ERC-20 reverted: {}", hex::encode(output)).into(),
+                            ));
+                        }
+                        revm::context_interface::result::ExecutionResult::Halt { reason, .. } => {
+                            return Err(PrecompileError::Other(
+                                format!("ERC-20 halted: {reason:?}").into(),
+                            ));
+                        }
                     }
                 }
+                emit_switch_event(
+                    storage,
+                    *SWITCHED_TO_EVM_TOPIC,
+                    call.assetId,
+                    caller,
+                    call.to,
+                    call.amount,
+                )?;
                 Ok(())
             },
         )
@@ -368,7 +417,16 @@ impl SwitchPrecompile {
                             }
                             apply_state_changes(storage, state)?;
                         }
-                        _ => return Err(PrecompileError::Other("ERC-20 call failed".into())),
+                        revm::context_interface::result::ExecutionResult::Revert { output, .. } => {
+                            return Err(PrecompileError::Other(
+                                format!("ERC-20 reverted: {}", hex::encode(output)).into(),
+                            ));
+                        }
+                        revm::context_interface::result::ExecutionResult::Halt { reason, .. } => {
+                            return Err(PrecompileError::Other(
+                                format!("ERC-20 halted: {reason:?}").into(),
+                            ));
+                        }
                     }
                 }
 
@@ -376,7 +434,72 @@ impl SwitchPrecompile {
                 store
                     .add_protocol_bal(call.assetId, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+                emit_switch_event(
+                    storage,
+                    *SWITCHED_TO_PROTOCOL_TOPIC,
+                    call.assetId,
+                    caller,
+                    call.to,
+                    call.amount,
+                )?;
                 Ok(())
+            },
+        )
+    }
+
+    fn get_evm_contract(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolSwitch::getEvmContractCall, _, _>(
+            calldata,
+            800,
+            storage,
+            |call, _storage| {
+                let mut store = SwitchStorage::new(sr);
+                match store.read_evm_contract(call.assetId) {
+                    Ok(addr) => Ok(addr),
+                    Err(SwitchError::EvmContractNotRegistered) => Ok(Address::ZERO),
+                    Err(e) => Err(PrecompileError::Other(e.to_string().into())),
+                }
+            },
+        )
+    }
+
+    fn can_switch(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolSwitch::canSwitchCall, _, _>(
+            calldata,
+            800,
+            storage,
+            |call, _storage| {
+                let mut store = SwitchStorage::new(sr);
+                let ok = store.check_asset_active(call.assetId).is_ok()
+                    && store.check_has_erc20(call.assetId).is_ok();
+                Ok(ok)
+            },
+        )
+    }
+
+    fn get_dominance(
+        &self,
+        calldata: &[u8],
+        storage: &mut dyn StorageProvider,
+        sr: StorageRef,
+    ) -> PrecompileResult {
+        dispatch::view::<IProtocolSwitch::getDominanceCall, _, _>(
+            calldata,
+            600,
+            storage,
+            |call, _storage| {
+                let mut store = SwitchStorage::new(sr);
+                Ok(U256::from(store.read_dominance(call.assetId)))
             },
         )
     }
@@ -403,6 +526,15 @@ impl call_precompile::StatefulPrecompile for SwitchPrecompile {
             }
             IProtocolSwitch::switchToProtocolCall::SELECTOR => {
                 self.switch_to_protocol(calldata, msg_sender, storage, sr)
+            }
+            IProtocolSwitch::getEvmContractCall::SELECTOR => {
+                self.get_evm_contract(calldata, storage, sr)
+            }
+            IProtocolSwitch::canSwitchCall::SELECTOR => {
+                self.can_switch(calldata, storage, sr)
+            }
+            IProtocolSwitch::getDominanceCall::SELECTOR => {
+                self.get_dominance(calldata, storage, sr)
             }
             _ => Err(PrecompileError::Other("unknown selector".into())),
         }
@@ -1373,5 +1505,307 @@ mod tests {
             .map(u256_to_u128)
             .unwrap_or(0);
         assert_eq!(recipient_bal, 0);
+    }
+
+    #[test]
+    fn test_switch_to_protocol_amount_zero_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+
+        provider.balance_add(sender, U256::from(1000)).unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&0u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "switchToProtocol amount=0 should fail");
+    }
+
+    #[test]
+    fn test_switch_to_protocol_to_zero_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+
+        provider.balance_add(sender, U256::from(1000)).unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..68].copy_from_slice(Address::ZERO.as_slice());
+        input[84..100].copy_from_slice(&100u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "switchToProtocol to=ZERO should fail");
+    }
+
+    #[test]
+    fn test_switch_to_protocol_asset_not_active_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+        let asset_id = 9u64;
+
+        provider.balance_add(sender, U256::from(1000)).unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&100u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_err(), "switchToProtocol inactive asset should fail");
+    }
+
+    #[test]
+    fn test_switch_to_protocol_no_erc20_bridge_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+        let asset_id = 5u64;
+
+        provider.balance_add(sender, U256::from(1000)).unwrap();
+        // Status active
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(0),
+            )
+            .unwrap();
+        // has_erc20 defaults to 0 (no bridge)
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&100u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_err(),
+            "switchToProtocol without ERC-20 bridge should fail"
+        );
+    }
+
+    #[test]
+    fn test_switch_to_protocol_evm_contract_not_registered_fails() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+        let asset_id = 6u64;
+
+        provider.balance_add(sender, U256::from(1000)).unwrap();
+        // Status active, has_erc20 = 1, but evm_contract not set
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(0),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"has_erc20"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&100u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_err(),
+            "switchToProtocol without registered EVM contract should fail"
+        );
+    }
+
+    #[test]
+    fn test_switch_to_evm_emits_event() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+
+        provider
+            .sstore(ASSET_ADDRESS, slot_balance(1, sender), u128_to_u256(1000))
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToEvmCall::SELECTOR);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&500u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        precompile.call(&input, sender, &mut provider).unwrap();
+
+        let events = provider.events(SWITCH_ADDRESS);
+        assert!(!events.is_empty(), "switchToEvm must emit an event");
+        assert_eq!(events[0].topics()[0], *SWITCHED_TO_EVM_TOPIC);
+    }
+
+    #[test]
+    fn test_switch_to_protocol_emits_event() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = addr(0x33);
+        let recipient = addr(0x44);
+
+        provider.balance_add(sender, U256::from(1000)).unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::switchToProtocolCall::SELECTOR);
+        input[28..36].copy_from_slice(&1u64.to_be_bytes());
+        input[48..68].copy_from_slice(recipient.as_slice());
+        input[84..100].copy_from_slice(&300u128.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        precompile.call(&input, sender, &mut provider).unwrap();
+
+        let events = provider.events(SWITCH_ADDRESS);
+        assert!(!events.is_empty(), "switchToProtocol must emit an event");
+        assert_eq!(events[0].topics()[0], *SWITCHED_TO_PROTOCOL_TOPIC);
+    }
+
+    #[test]
+    fn test_get_evm_contract_registered() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let contract = addr(0xAA);
+        let asset_id = 2u64;
+
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_evm_contract(asset_id),
+                address_to_u256(contract),
+            )
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::getEvmContractCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_ok(), "getEvmContract failed: {:?}", result.err());
+
+        // ABI-encoded address is the last 20 bytes of the 32-byte word
+        let bytes = result.unwrap().bytes;
+        let returned_addr = Address::from_slice(&bytes[12..32]);
+        assert_eq!(returned_addr, contract);
+    }
+
+    #[test]
+    fn test_get_evm_contract_unregistered_returns_zero() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let asset_id = 3u64;
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::getEvmContractCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_ok());
+
+        let bytes = result.unwrap().bytes;
+        let returned_addr = Address::from_slice(&bytes[12..32]);
+        assert_eq!(returned_addr, Address::ZERO);
+    }
+
+    #[test]
+    fn test_can_switch_active_with_erc20() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let asset_id = 2u64;
+
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(0),
+            )
+            .unwrap();
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"has_erc20"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::canSwitchCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().bytes[31], 1);
+    }
+
+    #[test]
+    fn test_can_switch_inactive_returns_false() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let asset_id = 3u64;
+
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"status"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::canSwitchCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().bytes[31], 0);
+    }
+
+    #[test]
+    fn test_get_dominance_protocol() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let asset_id = 2u64;
+
+        provider
+            .sstore(
+                ASSET_ADDRESS,
+                slot_asset_meta(asset_id, b"dominance"),
+                U256::from(1),
+            )
+            .unwrap();
+
+        let mut input = vec![0u8; 100];
+        input[0..4].copy_from_slice(&IProtocolSwitch::getDominanceCall::SELECTOR);
+        input[28..36].copy_from_slice(&asset_id.to_be_bytes());
+
+        let mut precompile = SwitchPrecompile;
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().bytes[31], 1);
     }
 }
