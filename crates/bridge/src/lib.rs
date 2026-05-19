@@ -120,7 +120,8 @@ pub struct BridgeConfig {
     pub max_per_tx: u128,
     /// Daily limit per asset
     pub daily_limit_per_asset: u128,
-    /// Minimum confirmations on Ethereum (default 12)
+    /// Minimum confirmations on Ethereum (default 12).
+    /// Only used by the light-client-bridge feature; precompile path ignores this.
     pub eth_min_confirmations: u64,
     /// Bridge fee per operation
     pub bridge_fee: u128,
@@ -131,8 +132,11 @@ pub struct BridgeConfig {
     /// Minimum validator signatures required (default 14 = 2/3 of 21)
     pub min_validator_signatures: u64,
     /// Challenge period in blocks before external deposits finalize.
-    /// Default: 10080 ≈ 7 days at 1 block/min.
+    /// Default: 2_419_200 ≈ 14 days at 250ms block time.
     pub challenge_period_blocks: u64,
+    /// Withdraw rate-limit period in blocks.
+    /// Default: 2_419_200 ≈ 14 days at 250ms block time.
+    pub withdraw_period_blocks: u64,
     /// Max external withdraw per asset per challenge period.
     /// Limits blast radius if validator keys are compromised.
     pub max_external_withdraw_per_period: u128,
@@ -163,6 +167,7 @@ impl Default for BridgeConfig {
             signature_timeout_secs: 300,
             min_validator_signatures: 14,
             challenge_period_blocks: 2_419_200,
+            withdraw_period_blocks: 2_419_200,
             max_external_withdraw_per_period: 5_000_000_000_000_000_000_000u128,
             blocks_per_day: 345_600,
             processed_tx_retention_blocks: 4_838_400,

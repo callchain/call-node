@@ -31,6 +31,7 @@ pub const BRIDGE_ADDRESS: Address =
 
 pub const CALL_ASSET_ID: u64 = 1;
 pub const DEFAULT_CHALLENGE_PERIOD: u64 = 2_419_200;
+pub const DEFAULT_WITHDRAW_PERIOD_BLOCKS: u64 = 2_419_200;
 pub const DEFAULT_CHALLENGE_BOND: u128 = 1_000;
 
 // ── Error type ────────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ pub enum BridgeError {
     ExternalAssetNotAllowed(u64),
     UnauthorizedBridgeContract(u64, Address),
     ExceedsWithdrawLimit(u64, u128, u128),
+    BridgeFeeExceedsAmount(u128, u128),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -101,6 +103,9 @@ impl std::fmt::Display for BridgeError {
                     f,
                     "exceeds withdraw limit: asset={asset_id}, period_withdrawn={withdrawn}, limit={limit}"
                 )
+            }
+            BridgeError::BridgeFeeExceedsAmount(fee, amount) => {
+                write!(f, "bridge fee exceeds amount: fee={fee}, amount={amount}")
             }
         }
     }
@@ -222,6 +227,14 @@ fn slot_bridge_max_withdraw_per_period() -> U256 {
 
 fn slot_bridge_period_withdrawn(asset_id: u64) -> U256 {
     storage_slot(&[b"period_withdrawn", &asset_id.to_be_bytes()])
+}
+
+fn slot_bridge_withdraw_period() -> U256 {
+    storage_slot(&[b"withdraw_period"])
+}
+
+fn slot_bridge_bridge_fee() -> U256 {
+    storage_slot(&[b"bridge_fee"])
 }
 
 fn slot_bridge_current_period_start() -> U256 {
@@ -435,6 +448,20 @@ impl<B: StorageBackend> BridgeStorage<B> {
         )
     }
 
+    fn read_withdraw_period(&mut self) -> u64 {
+        self.load_u64_or_default(
+            slot_bridge_withdraw_period(),
+            BridgeConfig::default().withdraw_period_blocks,
+        )
+    }
+
+    fn read_bridge_fee(&mut self) -> u128 {
+        self.load_u128_or_default(
+            slot_bridge_bridge_fee(),
+            BridgeConfig::default().bridge_fee,
+        )
+    }
+
     fn read_processed_retention_blocks(&mut self) -> u64 {
         self.load_u64_or_default(
             slot_bridge_processed_retention(),
@@ -449,18 +476,23 @@ impl<B: StorageBackend> BridgeStorage<B> {
         )
     }
 
+    /// Validate limits without writing state. Returns the `day` index so the
+    /// caller can record consumption after all fallible operations succeed.
     fn check_limits(
         &mut self,
         asset_id: u64,
         amount: u128,
         block_height: u64,
-    ) -> Result<(), BridgeError> {
+    ) -> Result<u64, BridgeError> {
         let max_per_tx = self.read_max_per_tx(asset_id);
         if amount > max_per_tx {
             return Err(BridgeError::ExceedsMaxPerTx(asset_id, amount, max_per_tx));
         }
 
         let blocks_per_day = self.read_blocks_per_day();
+        if blocks_per_day == 0 {
+            return Err(BridgeError::InvalidInput);
+        }
         let day = block_height / blocks_per_day;
         let daily_limit = self.read_daily_limit(asset_id);
         let daily_used = self.read_daily_used(asset_id, day);
@@ -474,12 +506,17 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 daily_limit,
             ));
         }
+        Ok(day)
+    }
+
+    fn record_daily_used(&mut self, asset_id: u64, amount: u128, day: u64) {
+        let daily_used = self.read_daily_used(asset_id, day);
+        let new_daily_used = daily_used.saturating_add(amount);
         self.backend.store(
             BRIDGE_ADDRESS,
             slot_bridge_daily_used(asset_id, day),
             u128_to_u256(new_daily_used),
         );
-        Ok(())
     }
 
     // ── Validation ────────────────────────────────────────────────────
@@ -541,8 +578,22 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 source_contract,
             ));
         }
-        self.check_limits(asset_id, amount, block_height)?;
+        let day = self.check_limits(asset_id, amount, block_height)?;
+        let fee = self.read_bridge_fee();
+        if fee >= amount {
+            return Err(BridgeError::BridgeFeeExceedsAmount(fee, amount));
+        }
+        let net_amount = amount - fee;
 
+        // Perform all fallible balance operations first to avoid partial state.
+        asset_store.add_balance(asset_id, recipient, net_amount)?;
+        if fee > 0 {
+            asset_store.add_balance(asset_id, BRIDGE_ADDRESS, fee)?;
+        }
+        self.add_total_deposits(net_amount)?;
+
+        // Now record state that cannot fail.
+        self.record_daily_used(asset_id, amount, day);
         self.backend.store(
             BRIDGE_ADDRESS,
             slot_bridge_processed(source_tx_hash),
@@ -573,9 +624,6 @@ impl<B: StorageBackend> BridgeStorage<B> {
             slot_bridge_challenge_original_validator(source_tx_hash),
             address_to_u256(validator),
         );
-
-        asset_store.add_balance(asset_id, recipient, amount)?;
-        self.add_total_deposits(amount)?;
         Ok(())
     }
 
@@ -592,8 +640,16 @@ impl<B: StorageBackend> BridgeStorage<B> {
         }
         self.validate_basic(asset_id)?;
         self.check_withdraw_limit(asset_id, amount, current_block)?;
+        let fee = self.read_bridge_fee();
+        if fee >= amount {
+            return Err(BridgeError::BridgeFeeExceedsAmount(fee, amount));
+        }
+        let net_amount = amount - fee;
         asset_store.deduct_balance(asset_id, caller, amount)?;
-        self.add_total_withdrawals(amount)?;
+        if fee > 0 {
+            asset_store.add_balance(asset_id, BRIDGE_ADDRESS, fee)?;
+        }
+        self.add_total_withdrawals(net_amount)?;
         Ok(())
     }
 
@@ -608,9 +664,9 @@ impl<B: StorageBackend> BridgeStorage<B> {
             self.backend
                 .load(BRIDGE_ADDRESS, slot_bridge_current_period_start()),
         );
-        let challenge_period = self.read_challenge_period();
+        let withdraw_period = self.read_withdraw_period();
 
-        if current_block >= period_start.saturating_add(challenge_period) {
+        if current_block >= period_start.saturating_add(withdraw_period) {
             // New period — reset counters.
             self.backend.store(
                 BRIDGE_ADDRESS,
@@ -659,9 +715,11 @@ impl<B: StorageBackend> BridgeStorage<B> {
             return Err(BridgeError::InvalidInput);
         }
         self.validate_basic(asset_id)?;
+        // Record total deposits first so a later balance failure cannot leave
+        // balances mutated without the counter updated.
+        self.add_total_deposits(amount)?;
         asset_store.deduct_balance(asset_id, caller, amount)?;
         asset_store.add_balance(asset_id, target_address, amount)?;
-        self.add_total_deposits(amount)?;
         Ok(())
     }
 
@@ -764,6 +822,15 @@ impl<B: StorageBackend> BridgeStorage<B> {
         let bond = self.read_challenge_bond_for_tx(source_tx_hash);
 
         if proof_valid {
+            let validator = u256_to_address(self.backend.load(
+                BRIDGE_ADDRESS,
+                slot_bridge_challenge_original_validator(source_tx_hash),
+            ));
+            // Slash validator first — if this fails no state has changed yet.
+            validator_store
+                .slash_stake(asset_store, validator)
+                .map_err(|_| BridgeError::InvalidInput)?;
+
             let asset_id = self.read_deposit_asset_id(source_tx_hash);
             let recipient = self.read_deposit_recipient(source_tx_hash);
             let amount = self.read_deposit_amount(source_tx_hash);
@@ -775,14 +842,6 @@ impl<B: StorageBackend> BridgeStorage<B> {
 
             // Do NOT reset processed — the source tx hash is permanently
             // blocked from being deposited again after a successful challenge.
-
-            let validator = u256_to_address(self.backend.load(
-                BRIDGE_ADDRESS,
-                slot_bridge_challenge_original_validator(source_tx_hash),
-            ));
-            validator_store
-                .slash_stake(asset_store, validator)
-                .map_err(|_| BridgeError::InvalidInput)?;
 
             // Capture challenger before clearing metadata.
             let challenger = self.read_challenge_challenger(source_tx_hash);
@@ -2798,7 +2857,7 @@ mod tests {
             U256::from(1u8),
         );
         provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(5000));
-        // Set max_withdraw_per_period = 500 (offset+1: 501); challenge_period = 100 (offset+1: 101)
+        // Set max_withdraw_per_period = 500 (offset+1: 501); withdraw_period = 100 (offset+1: 101)
         provider.set(
             BRIDGE_ADDRESS,
             slot_bridge_max_withdraw_per_period(),
@@ -2806,7 +2865,7 @@ mod tests {
         );
         provider.set(
             BRIDGE_ADDRESS,
-            slot_challenge_period(),
+            slot_bridge_withdraw_period(),
             u64_to_u256(101),
         );
         // First withdraw of 400 at block 10
