@@ -1170,6 +1170,38 @@ mod tests {
     }
 
     #[test]
+    fn test_transfer_self_is_noop() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let addr = Address::repeat_byte(0xAB);
+
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test", 18, 0, addr, U256::ZERO).unwrap();
+            store.write_balance(1, addr, 1000);
+        }
+
+        let input = IProtocolAsset::transferCall {
+            assetId: 1,
+            to: addr,
+            amount: 500,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        precompile.call(&input, addr, &mut provider).unwrap();
+
+        // Balance must remain unchanged
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        assert_eq!(store.read_balance(1, addr).unwrap(), 1000,
+            "self-transfer must be a no-op");
+
+        // Transfer event must still be emitted (ERC-20 compliance)
+        let events = provider.events(ASSET_ADDRESS);
+        assert_eq!(events.len(), 1, "self-transfer must emit exactly one event");
+        assert_eq!(events[0].topics()[0], *TRANSFER_TOPIC);
+    }
+
+    #[test]
     fn test_batch_transfer_size_limit() {
         let mut provider = HashMapStorageProvider::new(1_000_000);
         let from = Address::repeat_byte(0xAB);

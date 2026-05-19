@@ -265,12 +265,19 @@ impl<B: StorageBackend> AssetStorage<B> {
         // deducting sender. This prevents partial state when called
         // outside a checkpoint (e.g. direct Rust API usage).
         let to_current = self.read_balance(asset_id, to)?;
-        let to_new = to_current
+        to_current
             .checked_add(amount)
             .ok_or(AssetError::BalanceOverflow)?;
 
+        // Self-transfer is a no-op (matches ERC-20 behaviour).
+        // Must short-circuit *before* separate deduct+write, otherwise
+        // write_balance would overwrite deduct_balance and increase the balance.
+        if from == to {
+            return Ok(());
+        }
+
         self.deduct_balance(asset_id, from, amount)?;
-        self.write_balance(asset_id, to, to_new);
+        self.write_balance(asset_id, to, to_current + amount);
         Ok(())
     }
 
@@ -583,6 +590,20 @@ mod tests {
             let err = store.transfer(1, from, to, 500).unwrap_err();
             assert!(matches!(err, AssetError::InsufficientBalance));
         }
+    }
+
+    #[test]
+    fn test_transfer_self_noop() {
+        let mut backend = TestBackend::new();
+        let addr = Address::repeat_byte(0xAB);
+        {
+            let mut store = AssetStorage::new(&mut backend);
+            store.write_balance(1, addr, 1000);
+            store.transfer(1, addr, addr, 500).unwrap();
+        }
+        let mut store = AssetStorage::new(&mut backend);
+        assert_eq!(store.read_balance(1, addr).unwrap(), 1000,
+            "self-transfer must be a no-op");
     }
 
     #[test]
