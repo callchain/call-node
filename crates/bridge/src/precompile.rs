@@ -51,7 +51,6 @@ pub enum BridgeError {
     InsufficientBalance,
     BalanceOverflow,
     InvalidInput,
-    NotConsensusVerified(u64),
     ExceedsMaxPerTx(u64, u128, u128),
     ExceedsDailyLimit(u64, u128, u128),
     ExternalAssetNotAllowed(u64),
@@ -76,9 +75,6 @@ impl std::fmt::Display for BridgeError {
             BridgeError::InsufficientBalance => write!(f, "insufficient balance"),
             BridgeError::BalanceOverflow => write!(f, "balance overflow"),
             BridgeError::InvalidInput => write!(f, "invalid input"),
-            BridgeError::NotConsensusVerified(block) => {
-                write!(f, "block {block} not consensus-verified by beacon chain")
-            }
             BridgeError::ExceedsMaxPerTx(asset_id, amount, limit) => {
                 write!(
                     f,
@@ -670,11 +666,9 @@ impl<B: StorageBackend> BridgeStorage<B> {
     pub fn deposit(
         &mut self,
         asset_store: &mut AssetStorage<B>,
-        _source_chain: u64,
         target_address: Address,
         amount: u128,
         asset_id: u64,
-        _proof: Vec<u8>,
         caller: Address,
     ) -> Result<(), BridgeError> {
         if caller == Address::ZERO || target_address == Address::ZERO || amount == 0 {
@@ -695,7 +689,10 @@ impl<B: StorageBackend> BridgeStorage<B> {
         challenger: Address,
         current_block: u64,
     ) -> Result<(), BridgeError> {
-        if !self.is_processed(source_tx_hash, current_block) {
+        // Use deposit block height to check existence, NOT is_processed,
+        // because is_processed applies retention expiry which can falsely
+        // reject challenges during the valid challenge window.
+        if self.read_deposit_block_height(source_tx_hash) == 0 {
             return Err(BridgeError::NotProcessed);
         }
         if self.read_challenge_status(source_tx_hash) != ChallengeStatus::None {
@@ -1185,7 +1182,7 @@ impl BridgePrecompile {
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
                 let topic0 = alloy_primitives::keccak256(
-                    b"ExternalDeposit(bytes32,uint64,address,uint128,address,uint64)",
+                    b"ExternalDeposit(bytes32,uint64,address,uint128,address,uint64,uint64,address)",
                 );
                 let topic1 = alloy_primitives::B256::from(call.sourceTxHash);
                 let topic2 = alloy_primitives::B256::from(
@@ -1194,10 +1191,14 @@ impl BridgePrecompile {
                 let topic3 = alloy_primitives::B256::from(
                     address_to_u256(validator).to_be_bytes::<32>(),
                 );
-                let mut data = Vec::with_capacity(96);
+                let mut data = Vec::with_capacity(160);
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
                 data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
+                data.extend_from_slice(&u64_to_u256(call.sourceChain).to_be_bytes::<32>());
+                data.extend_from_slice(
+                    &address_to_u256(call.sourceContract).to_be_bytes::<32>(),
+                );
                 if let Some(log) = alloy_primitives::LogData::new(
                     vec![topic0, topic1, topic2, topic3],
                     alloy_primitives::Bytes::from(data),
@@ -1231,15 +1232,18 @@ impl BridgePrecompile {
                     .external_withdraw(&mut asset_store, call.assetId, call.amount, caller, block_number)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
+                let target_addr_hash = alloy_primitives::keccak256(&call.targetAddress);
                 let topic0 = alloy_primitives::keccak256(
-                    b"ExternalWithdraw(address,uint64,uint128)",
+                    b"ExternalWithdraw(address,uint64,uint128,uint64,bytes32)",
                 );
                 let topic1 = alloy_primitives::B256::from(
                     address_to_u256(caller).to_be_bytes::<32>(),
                 );
-                let mut data = Vec::with_capacity(64);
+                let mut data = Vec::with_capacity(128);
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
                 data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
+                data.extend_from_slice(&u64_to_u256(call.targetChain).to_be_bytes::<32>());
+                data.extend_from_slice(target_addr_hash.as_slice());
                 if let Some(log) = alloy_primitives::LogData::new(
                     vec![topic0, topic1],
                     alloy_primitives::Bytes::from(data),
@@ -1273,11 +1277,9 @@ impl BridgePrecompile {
                 bridge_store
                     .deposit(
                         &mut asset_store,
-                        call.sourceChain,
                         call.targetAddress,
                         call.amount,
                         call.assetId,
-                        call.proof.to_vec(),
                         caller,
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -2799,6 +2801,69 @@ mod tests {
         assert!(
             result.is_ok(),
             "re-deposit after retention should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_initiate_challenge_ignores_retention() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let challenger = Address::repeat_byte(0x33);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        provider.set(
+            ASSET_ADDRESS,
+            slot_balance(CALL_ASSET_ID, challenger),
+            u128_to_u256(5000),
+        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, recipient), u128_to_u256(0));
+        // Set retention = 50 blocks, challenge_period = 100
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_processed_retention(),
+            u64_to_u256(50),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        // externalDeposit at block 10
+        let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 1000,
+        }
+        .abi_encode();
+        precompile.call(&input, validator, &mut provider).unwrap();
+
+        // At block 70, processed has expired (70 - 10 = 60 > 50)
+        // but challenge deadline is 10 + 100 = 110, so challenge should still work.
+        provider.set_block_number(70);
+
+        let input = IProtocolBridge::initiateChallengeCall {
+            sourceTxHash: source_tx_hash.into(),
+            proof: alloy_primitives::Bytes::from_static(b"proof"),
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, challenger, &mut provider);
+        assert!(
+            result.is_ok(),
+            "initiate_challenge should work even when processed expired but within challenge window: {:?}",
             result.err()
         );
     }
