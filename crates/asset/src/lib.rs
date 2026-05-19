@@ -463,6 +463,16 @@ impl<B: StorageBackend> AssetStorage<B> {
     pub fn set_dominance(&mut self, asset_id: u64, value: u8) {
         self.store_meta_u256(asset_id, b"dominance", U256::from(value));
     }
+
+    /// Read the next asset_id counter stored at slot 0 of ASSET_ADDRESS.
+    pub fn next_asset_id(&mut self) -> u64 {
+        let raw = self.backend.load(ASSET_ADDRESS, U256::from(0));
+        if raw > U256::from(u64::MAX) {
+            return u64::MAX;
+        }
+        let id = raw.to::<u64>();
+        if id == 0 { 1 } else { id }
+    }
 }
 
 fn address_to_u256(addr: Address) -> U256 {

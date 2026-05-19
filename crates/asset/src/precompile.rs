@@ -145,30 +145,31 @@ impl AssetPrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
-        storage.deduct_gas(1000)?;
-        let call = dispatch::decode_call::<IProtocolAsset::getAssetInfoCall>(calldata)?;
-        let mut store = AssetStorage::new(sr);
-        let meta = store
-            .read_meta(call.assetId)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
+        dispatch::view::<IProtocolAsset::getAssetInfoCall, _, _>(
+            calldata,
+            1000,
+            storage,
+            |call, _storage| {
+                let mut store = AssetStorage::new(sr);
+                let meta = store
+                    .read_meta(call.assetId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-        let symbol = alloy_primitives::B256::from(write_string32(&meta.symbol).to_be_bytes::<32>());
-        let name = alloy_primitives::B256::from(write_string32(&meta.name).to_be_bytes::<32>());
-        let encoded = (
-            symbol,
-            name,
-            U256::from(meta.decimals),
-            meta.issuer,
-            meta.max_supply,
-            U256::from(meta.status),
-            meta.registered_at,
+                let symbol =
+                    alloy_primitives::B256::from(write_string32(&meta.symbol).to_be_bytes::<32>());
+                let name =
+                    alloy_primitives::B256::from(write_string32(&meta.name).to_be_bytes::<32>());
+                Ok((
+                    symbol,
+                    name,
+                    U256::from(meta.decimals),
+                    meta.issuer,
+                    meta.max_supply,
+                    U256::from(meta.status),
+                    meta.registered_at,
+                ))
+            },
         )
-            .abi_encode();
-
-        let output = revm_precompile::PrecompileOutput::new(0, encoded.into());
-        Ok(call_precompile::storage::fill_precompile_output(
-            output, storage,
-        ))
     }
 
     fn transfer(
@@ -187,6 +188,10 @@ impl AssetPrecompile {
                 require_compliance(from, storage)?;
                 require_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
+                // Verify asset exists before attempting transfer
+                store
+                    .read_meta(call.assetId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 store
                     .transfer(call.assetId, from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -246,6 +251,10 @@ impl AssetPrecompile {
         let cp = storage.checkpoint();
         let result = (|| -> Result<(), PrecompileError> {
             let mut store = AssetStorage::new(sr);
+            // Verify asset exists before batch transfer
+            store
+                .read_meta(call.assetId)
+                .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
             store
                 .batch_transfer(call.assetId, from, &pairs)
                 .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -368,6 +377,9 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                if call.to == Address::ZERO {
+                    return Err(PrecompileError::Other("mint to zero address".into()));
+                }
                 require_compliance(caller, storage)?;
                 require_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
@@ -407,6 +419,10 @@ impl AssetPrecompile {
                 require_compliance(caller, storage)?;
                 require_compliance(call.from, storage)?;
                 let mut store = AssetStorage::new(sr);
+                // Verify asset exists before burn
+                store
+                    .read_meta(call.assetId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 store
                     .burn(call.assetId, caller, call.from, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -507,6 +523,15 @@ impl AssetPrecompile {
                     ));
                 }
                 let mut store = AssetStorage::new(sr);
+                // Reject duplicate ERC-20 contract binding
+                let next_id = store.next_asset_id();
+                for id in 1..next_id {
+                    if store.load_meta_address(id, b"evm_contract") == call.evmContract {
+                        return Err(PrecompileError::Other(
+                            "ERC-20 contract already bound to an asset".into(),
+                        ));
+                    }
+                }
                 let asset_id = store
                     .register_erc20(
                         call.evmContract,
@@ -565,6 +590,10 @@ impl AssetPrecompile {
                     return Err(PrecompileError::Other("asset already has ERC-20 bridge".into()));
                 }
 
+                // 2.5 Set has_erc20=1 BEFORE factory call as reentrancy lock.
+                // If the factory call fails, the outer checkpoint reverts this back to 0.
+                store.set_has_erc20(call.assetId, 1);
+
                 // 3. Build factory call
                 let factory_call = IWrappedTokenFactory::createWrapperCall {
                     name: meta.name,
@@ -605,8 +634,8 @@ impl AssetPrecompile {
                 // 5. Apply nested state changes
                 apply_state_changes(storage, state)?;
 
-                // 6. Set metadata: has_erc20=1, evm_contract, dominance=1 (PROTOCOL)
-                store.set_has_erc20(call.assetId, 1);
+                // 6. Set remaining metadata: evm_contract, dominance=1 (PROTOCOL)
+                // has_erc20 was already set to 1 before the factory call as reentrancy lock.
                 store.set_evm_contract(call.assetId, wrapper_addr);
                 store.set_dominance(call.assetId, 1);
 
@@ -724,9 +753,11 @@ mod tests {
         let from = Address::repeat_byte(0xAB);
         let to = Address::repeat_byte(0xCD);
 
-        provider
-            .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
-            .unwrap();
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test", 18, 0, from, U256::ZERO).unwrap();
+            store.write_balance(1, from, 1000);
+        }
 
         let input = IProtocolAsset::transferCall {
             assetId: 1,
@@ -878,9 +909,11 @@ mod tests {
         let r2 = Address::repeat_byte(0x22);
         let r3 = Address::repeat_byte(0x33);
 
-        provider
-            .sstore(ASSET_ADDRESS, slot_balance(1, from), u128_to_u256(1000))
-            .unwrap();
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test", 18, 0, from, U256::ZERO).unwrap();
+            store.write_balance(1, from, 1000);
+        }
 
         let mut precompile = AssetPrecompile;
 
@@ -1338,5 +1371,144 @@ mod tests {
         // Allowance must remain 500
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
         assert_eq!(store.read_allowance(1, owner, burner).unwrap(), 500);
+    }
+
+    #[test]
+    fn test_transfer_unregistered_asset() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+        let to = Address::repeat_byte(0xCD);
+
+        let input = IProtocolAsset::transferCall {
+            assetId: 999,
+            to,
+            amount: 100,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(result.is_err(), "transfer for unregistered asset should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"), "error should mention asset not found: {}", err);
+    }
+
+    #[test]
+    fn test_batch_transfer_unregistered_asset() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+        let to = Address::repeat_byte(0xCD);
+
+        let input = IProtocolAsset::batchTransferCall {
+            assetId: 999,
+            to: vec![to],
+            amounts: vec![100],
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(result.is_err(), "batch transfer for unregistered asset should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"), "error should mention asset not found: {}", err);
+    }
+
+    #[test]
+    fn test_burn_unregistered_asset() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let caller = Address::repeat_byte(0xAB);
+        let from = Address::repeat_byte(0xCD);
+
+        let input = IProtocolAsset::burnCall {
+            assetId: 999,
+            from,
+            amount: 100,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, caller, &mut provider);
+        assert!(result.is_err(), "burn for unregistered asset should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"), "error should mention asset not found: {}", err);
+    }
+
+    #[test]
+    fn test_mint_to_zero_address_rejected() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let issuer = Address::repeat_byte(0x11);
+
+        // Register asset
+        let input = IProtocolAsset::registerCall {
+            symbol: "GOLD".into(),
+            name: "Gold".into(),
+            decimals: 18,
+            maxSupply: 10000,
+        }
+        .abi_encode();
+        let mut precompile = AssetPrecompile;
+        precompile.call(&input, issuer, &mut provider).unwrap();
+
+        // Mint to zero address
+        let input = IProtocolAsset::mintCall {
+            assetId: 1,
+            to: Address::ZERO,
+            amount: 500,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, issuer, &mut provider);
+        assert!(result.is_err(), "mint to zero address should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("zero address"), "error should mention zero address: {}", err);
+    }
+
+    #[test]
+    fn test_register_erc20_duplicate_binding_rejected() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let sender = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0xAA);
+
+        provider.set_code(contract, alloy_primitives::bytes!("6000"));
+        let encode_short = |s: &str| {
+            let len = s.len();
+            assert!(len <= 31, "short string only");
+            let mut bytes = [0u8; 32];
+            bytes[..len].copy_from_slice(s.as_bytes());
+            bytes[31] = (len * 2) as u8;
+            U256::from_be_bytes::<32>(bytes)
+        };
+        provider
+            .sstore(contract, U256::from(0), encode_short("Wrapped Ether"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(1), encode_short("WETH"))
+            .unwrap();
+        provider
+            .sstore(contract, U256::from(2), U256::from(18))
+            .unwrap();
+
+        let mut precompile = AssetPrecompile;
+
+        // First registration succeeds
+        let input = IProtocolAsset::registerErc20Call {
+            evmContract: contract,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(result.is_ok(), "first registerErc20 should succeed: {:?}", result.err());
+
+        // Second registration with same contract fails
+        let result = precompile.call(&input, sender, &mut provider);
+        assert!(
+            result.is_err(),
+            "duplicate registerErc20 should fail: {:?}",
+            result
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already bound"),
+            "error should mention already bound: {}",
+            err
+        );
     }
 }
