@@ -17,6 +17,8 @@ use call_protocol::storage_backend::StorageBackend;
 use call_validator::ValidatorStorage;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
+use crate::BridgeConfig;
+
 #[cfg(feature = "light-client-bridge")]
 use crate::external::types::{FraudProof, FraudProofType};
 #[cfg(feature = "light-client-bridge")]
@@ -37,7 +39,6 @@ pub const DEFAULT_CHALLENGE_BOND: u128 = 1000;
 pub enum BridgeError {
     AssetNotRegistered,
     BridgePaused,
-    AssetNotActive,
     AssetZeroNotBridgeable,
     AlreadyProcessed,
     NotProcessed,
@@ -51,6 +52,8 @@ pub enum BridgeError {
     BalanceOverflow,
     InvalidInput,
     NotConsensusVerified(u64),
+    ExceedsMaxPerTx(u64, u128, u128),
+    ExceedsDailyLimit(u64, u128, u128),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -58,7 +61,6 @@ impl std::fmt::Display for BridgeError {
         match self {
             BridgeError::AssetNotRegistered => write!(f, "asset not registered"),
             BridgeError::BridgePaused => write!(f, "bridge paused"),
-            BridgeError::AssetNotActive => write!(f, "asset not active"),
             BridgeError::AssetZeroNotBridgeable => write!(f, "asset 0 not bridgeable"),
             BridgeError::AlreadyProcessed => write!(f, "source tx already processed"),
             BridgeError::NotProcessed => write!(f, "source tx not processed"),
@@ -73,6 +75,18 @@ impl std::fmt::Display for BridgeError {
             BridgeError::InvalidInput => write!(f, "invalid input"),
             BridgeError::NotConsensusVerified(block) => {
                 write!(f, "block {block} not consensus-verified by beacon chain")
+            }
+            BridgeError::ExceedsMaxPerTx(asset_id, amount, limit) => {
+                write!(
+                    f,
+                    "exceeds max per tx: asset={asset_id}, amount={amount}, limit={limit}"
+                )
+            }
+            BridgeError::ExceedsDailyLimit(asset_id, used, limit) => {
+                write!(
+                    f,
+                    "exceeds daily limit: asset={asset_id}, daily_used={used}, limit={limit}"
+                )
             }
         }
     }
@@ -162,6 +176,22 @@ fn slot_challenge_bond_amount() -> U256 {
 
 fn slot_bridge_challenge_proof_chunk(tx_hash: [u8; 32], chunk_index: u64) -> U256 {
     storage_slot(&[b"challenge_proof", &tx_hash, &chunk_index.to_be_bytes()])
+}
+
+fn slot_bridge_max_per_tx(asset_id: u64) -> U256 {
+    storage_slot(&[b"max_per_tx", &asset_id.to_be_bytes()])
+}
+
+fn slot_bridge_daily_limit(asset_id: u64) -> U256 {
+    storage_slot(&[b"daily_limit", &asset_id.to_be_bytes()])
+}
+
+fn slot_bridge_daily_used(asset_id: u64, day: u64) -> U256 {
+    storage_slot(&[b"daily_used", &asset_id.to_be_bytes(), &day.to_be_bytes()])
+}
+
+fn slot_bridge_blocks_per_day() -> U256 {
+    storage_slot(&[b"blocks_per_day"])
 }
 
 // ── Challenge status ──────────────────────────────────────────────────
@@ -300,6 +330,82 @@ impl<B: StorageBackend> BridgeStorage<B> {
         }
     }
 
+    fn read_max_per_tx(&mut self, asset_id: u64) -> u128 {
+        let stored = u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_max_per_tx(asset_id)),
+        );
+        if stored == 0 {
+            BridgeConfig::default().max_per_tx
+        } else {
+            stored
+        }
+    }
+
+    fn read_daily_limit(&mut self, asset_id: u64) -> u128 {
+        let stored = u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_daily_limit(asset_id)),
+        );
+        if stored == 0 {
+            BridgeConfig::default().daily_limit_per_asset
+        } else {
+            stored
+        }
+    }
+
+    fn read_blocks_per_day(&mut self) -> u64 {
+        let stored = u256_to_u64(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_blocks_per_day()),
+        );
+        if stored == 0 {
+            BridgeConfig::default().blocks_per_day
+        } else {
+            stored
+        }
+    }
+
+    fn read_daily_used(&mut self, asset_id: u64, day: u64) -> u128 {
+        u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_daily_used(asset_id, day)),
+        )
+    }
+
+    fn check_limits(
+        &mut self,
+        asset_id: u64,
+        amount: u128,
+        block_height: u64,
+    ) -> Result<(), BridgeError> {
+        let max_per_tx = self.read_max_per_tx(asset_id);
+        if amount > max_per_tx {
+            return Err(BridgeError::ExceedsMaxPerTx(asset_id, amount, max_per_tx));
+        }
+
+        let blocks_per_day = self.read_blocks_per_day();
+        let day = block_height / blocks_per_day;
+        let daily_limit = self.read_daily_limit(asset_id);
+        let daily_used = self.read_daily_used(asset_id, day);
+        let new_daily_used = daily_used
+            .checked_add(amount)
+            .ok_or(BridgeError::BalanceOverflow)?;
+        if new_daily_used > daily_limit {
+            return Err(BridgeError::ExceedsDailyLimit(
+                asset_id,
+                daily_used,
+                daily_limit,
+            ));
+        }
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_daily_used(asset_id, day),
+            u128_to_u256(new_daily_used),
+        );
+        Ok(())
+    }
+
     // ── Validation ────────────────────────────────────────────────────
 
     fn asset_registered(&mut self, asset_id: u64) -> bool {
@@ -348,6 +454,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
             return Err(BridgeError::AlreadyProcessed);
         }
         self.validate_basic(asset_id)?;
+        self.check_limits(asset_id, amount, block_height)?;
 
         self.backend.store(
             BRIDGE_ADDRESS,
@@ -2106,5 +2213,171 @@ mod tests {
             result.is_err(),
             "externalDeposit should reject zero tx hash"
         );
+    }
+
+    #[test]
+    fn test_external_deposit_rejects_exceeds_max_per_tx() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        // Set max_per_tx = 500 for asset_id=1
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_max_per_tx(1),
+            u128_to_u256(500),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        let input = IProtocolBridge::externalDepositCall {
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 1000,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(
+            result.is_err(),
+            "externalDeposit should reject amount exceeding max_per_tx"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("exceeds max per tx"), "error should mention max per tx: {err}");
+    }
+
+    #[test]
+    fn test_external_deposit_rejects_exceeds_daily_limit() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        // Set daily_limit = 500 for asset_id=1; blocks_per_day = 100
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_daily_limit(1),
+            u128_to_u256(500),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_blocks_per_day(),
+            u64_to_u256(100),
+        );
+        // Pre-fill daily_used at day=0 (block 10 / 100 = 0) with 200
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_daily_used(1, 0),
+            u128_to_u256(200),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        let input = IProtocolBridge::externalDepositCall {
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 400, // 200 + 400 = 600 > 500 daily_limit
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(
+            result.is_err(),
+            "externalDeposit should reject amount exceeding daily_limit"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("exceeds daily limit"), "error should mention daily limit: {err}");
+    }
+
+    #[test]
+    fn test_external_deposit_daily_limit_resets_next_day() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 250);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash_1 = [0xABu8; 32];
+        let source_tx_hash_2 = [0xCDu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        // Set daily_limit = 500 for asset_id=1; blocks_per_day = 100
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_daily_limit(1),
+            u128_to_u256(500),
+        );
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_blocks_per_day(),
+            u64_to_u256(100),
+        );
+        // day=2 (block 250 / 100 = 2) has used 0, so 400 should succeed
+
+        let mut precompile = BridgePrecompile;
+
+        let input = IProtocolBridge::externalDepositCall {
+            sourceTxHash: source_tx_hash_1.into(),
+            assetId: 1,
+            recipient,
+            amount: 400,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(
+            result.is_ok(),
+            "externalDeposit should succeed on a new day: {:?}",
+            result.err()
+        );
+
+        // daily_used for day=2 should now be 400
+        let daily_used = u256_to_u128(
+            provider
+                .get(BRIDGE_ADDRESS, slot_bridge_daily_used(1, 2))
+                .unwrap_or(U256::ZERO),
+        );
+        assert_eq!(daily_used, 400);
+
+        // Another deposit of 150 should fail (400 + 150 = 550 > 500)
+        let input = IProtocolBridge::externalDepositCall {
+            sourceTxHash: source_tx_hash_2.into(),
+            assetId: 1,
+            recipient,
+            amount: 150,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(result.is_err(), "second deposit should exceed daily limit");
     }
 }
