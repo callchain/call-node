@@ -236,8 +236,12 @@ impl AssetPrecompile {
                 format!("batch size exceeds limit of {}", MAX_BATCH_SIZE).into(),
             ));
         }
-        let total_gas = 5000u64
-            .checked_mul(call.to.len() as u64)
+        const BASE_PER_ITEM: u64 = 5000;
+        // Event emission overhead per item: 375 base + 3 topics * 375 + 16 bytes * 8
+        const EVENT_OVERHEAD_PER_ITEM: u64 = 1700;
+        let total_gas = BASE_PER_ITEM
+            .checked_add(EVENT_OVERHEAD_PER_ITEM)
+            .and_then(|g| g.checked_mul(call.to.len() as u64))
             .ok_or(PrecompileError::Other("batch gas overflow".into()))?;
         storage.deduct_gas(total_gas)?;
 
@@ -523,14 +527,11 @@ impl AssetPrecompile {
                     ));
                 }
                 let mut store = AssetStorage::new(sr);
-                // Reject duplicate ERC-20 contract binding
-                let next_id = store.next_asset_id();
-                for id in 1..next_id {
-                    if store.load_meta_address(id, b"evm_contract") == call.evmContract {
-                        return Err(PrecompileError::Other(
-                            "ERC-20 contract already bound to an asset".into(),
-                        ));
-                    }
+                // Reject duplicate ERC-20 contract binding (O(1) via indexed slot)
+                if store.evm_contract_asset_id(call.evmContract).is_some() {
+                    return Err(PrecompileError::Other(
+                        "ERC-20 contract already bound to an asset".into(),
+                    ));
                 }
                 let asset_id = store
                     .register_erc20(
@@ -715,6 +716,17 @@ mod tests {
         COMPLIANCE_ADDRESS,
     };
     use call_primitives::Address;
+
+    /// Encode a short Solidity string (≤31 bytes) into a U256 storage word.
+    /// Format: `bytes[..len] = data`, `bytes[31] = len * 2` (packed string flag).
+    fn encode_short(s: &str) -> U256 {
+        let len = s.len();
+        assert!(len <= 31, "short string only");
+        let mut bytes = [0u8; 32];
+        bytes[..len].copy_from_slice(s.as_bytes());
+        bytes[31] = (len * 2) as u8;
+        U256::from_be_bytes::<32>(bytes)
+    }
 
     #[test]
     fn test_asset_precompile_get_balance() {
@@ -1024,17 +1036,6 @@ mod tests {
         // Set dummy code so the contract is not rejected.
         provider.set_code(contract, alloy_primitives::bytes!("6000"));
 
-        // Helper: encode a short Solidity string into a U256 storage word.
-        // Data is left-aligned (high bytes), length*2 in the low byte.
-        let encode_short = |s: &str| {
-            let len = s.len();
-            assert!(len <= 31, "short string only");
-            let mut bytes = [0u8; 32];
-            bytes[..len].copy_from_slice(s.as_bytes());
-            bytes[31] = (len * 2) as u8;
-            U256::from_be_bytes::<32>(bytes)
-        };
-
         // OZ v5 layout: name@0, symbol@1, decimals@2
         provider
             .sstore(contract, U256::from(0), encode_short("Wrapped Ether"))
@@ -1124,14 +1125,6 @@ mod tests {
 
         // Register ERC-20-backed asset
         provider.set_code(contract, alloy_primitives::bytes!("6000"));
-        let encode_short = |s: &str| {
-            let len = s.len();
-            assert!(len <= 31, "short string only");
-            let mut bytes = [0u8; 32];
-            bytes[..len].copy_from_slice(s.as_bytes());
-            bytes[31] = (len * 2) as u8;
-            U256::from_be_bytes::<32>(bytes)
-        };
         provider
             .sstore(contract, U256::from(0), encode_short("Wrapped Ether"))
             .unwrap();
@@ -1469,14 +1462,6 @@ mod tests {
         let contract = Address::repeat_byte(0xAA);
 
         provider.set_code(contract, alloy_primitives::bytes!("6000"));
-        let encode_short = |s: &str| {
-            let len = s.len();
-            assert!(len <= 31, "short string only");
-            let mut bytes = [0u8; 32];
-            bytes[..len].copy_from_slice(s.as_bytes());
-            bytes[31] = (len * 2) as u8;
-            U256::from_be_bytes::<32>(bytes)
-        };
         provider
             .sstore(contract, U256::from(0), encode_short("Wrapped Ether"))
             .unwrap();

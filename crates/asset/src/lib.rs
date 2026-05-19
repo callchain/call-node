@@ -3,7 +3,8 @@ pub mod precompile;
 pub use precompile::AssetPrecompile;
 
 use call_precompile::{
-    slot_allowance, slot_asset_meta, slot_balance, u128_to_u256, u256_to_u128, ASSET_ADDRESS,
+    slot_allowance, slot_asset_meta, slot_balance, storage_slot, u128_to_u256, u256_to_u128,
+    ASSET_ADDRESS,
 };
 use call_primitives::{Address, Balance, U256};
 use call_protocol::storage_backend::StorageBackend;
@@ -22,6 +23,7 @@ pub enum AssetError {
     InvalidMetadata(String),
     AssetIdOverflow,
     InvalidDecimals(u8),
+    Erc20AlreadyBound(Address),
 }
 
 impl std::fmt::Display for AssetError {
@@ -39,6 +41,9 @@ impl std::fmt::Display for AssetError {
             AssetError::InvalidMetadata(key) => write!(f, "invalid metadata: {key}"),
             AssetError::AssetIdOverflow => write!(f, "asset id overflow"),
             AssetError::InvalidDecimals(d) => write!(f, "invalid decimals: {d} (max 18)"),
+            AssetError::Erc20AlreadyBound(addr) => {
+                write!(f, "ERC-20 contract already bound: {addr}")
+            }
         }
     }
 }
@@ -76,7 +81,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         if raw > U256::from(u128::MAX) {
             return Err(AssetError::BalanceOverflow);
         }
-        Ok(raw.try_into().unwrap_or(0))
+        Ok(u256_to_u128(raw))
     }
 
     pub fn write_balance(&mut self, asset_id: u64, addr: Address, amount: Balance) {
@@ -126,7 +131,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         if raw > U256::from(u128::MAX) {
             return Err(AssetError::BalanceOverflow);
         }
-        Ok(raw.try_into().unwrap_or(0))
+        Ok(u256_to_u128(raw))
     }
 
     pub fn write_allowance(
@@ -248,6 +253,8 @@ impl<B: StorageBackend> AssetStorage<B> {
         to: Address,
         amount: Balance,
     ) -> Result<(), AssetError> {
+        // amount == 0 is explicitly allowed (matches ERC-20 behaviour):
+        // it succeeds and emits a Transfer event with zero value.
         // Pre-flight: ensure receiver's balance won't overflow before
         // deducting sender. This prevents partial state when called
         // outside a checkpoint (e.g. direct Rust API usage).
@@ -413,6 +420,10 @@ impl<B: StorageBackend> AssetStorage<B> {
         if decimals > 18 {
             return Err(AssetError::InvalidDecimals(decimals));
         }
+        // O(1) duplicate check via indexed storage slot.
+        if self.evm_contract_asset_id(evm_contract).is_some() {
+            return Err(AssetError::Erc20AlreadyBound(evm_contract));
+        }
         let next_id_slot = U256::from(0);
         let raw = self.backend.load(ASSET_ADDRESS, next_id_slot);
         if raw > U256::from(u64::MAX) {
@@ -435,6 +446,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         self.store_meta_u256(asset_id, b"registered_at", registered_at);
         self.store_meta_u256(asset_id, b"has_erc20", U256::from(1));
         self.store_meta_u256(asset_id, b"evm_contract", address_to_u256(evm_contract));
+        self.set_evm_contract_asset_id(evm_contract, asset_id);
 
         Ok(asset_id)
     }
@@ -473,6 +485,29 @@ impl<B: StorageBackend> AssetStorage<B> {
         let id = raw.to::<u64>();
         if id == 0 { 1 } else { id }
     }
+
+    /// Look up the asset_id bound to an ERC-20 contract address (O(1)).
+    pub fn evm_contract_asset_id(&mut self, evm_contract: Address) -> Option<u64> {
+        let slot = erc20_binding_slot(evm_contract);
+        let raw = self.backend.load(ASSET_ADDRESS, slot);
+        if raw == U256::ZERO {
+            None
+        } else {
+            Some(raw.to::<u64>())
+        }
+    }
+
+    fn set_evm_contract_asset_id(&mut self, evm_contract: Address, asset_id: u64) {
+        let slot = erc20_binding_slot(evm_contract);
+        self.backend
+            .store(ASSET_ADDRESS, slot, U256::from(asset_id));
+    }
+}
+
+/// Compute a storage slot for the ERC-20 contract -> asset_id binding index.
+/// Uses a distinct namespace from `slot_asset_meta` to avoid collisions.
+fn erc20_binding_slot(evm_contract: Address) -> U256 {
+    storage_slot(&[b"call:asset:erc20_binding", evm_contract.as_slice()])
 }
 
 fn address_to_u256(addr: Address) -> U256 {

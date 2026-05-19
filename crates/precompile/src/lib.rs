@@ -20,7 +20,7 @@ pub mod evm_caller;
 pub mod storage;
 pub mod utils;
 
-pub use storage::StorageRef;
+pub use storage::{storage_slot, StorageRef};
 
 pub use utils::*;
 
