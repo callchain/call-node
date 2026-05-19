@@ -163,20 +163,23 @@ fn check_and_update_daily_limit<B: StorageBackend>(
     blocks_per_day: u64,
 ) -> Result<(), BridgeError> {
     let reset_at = read_bridge_daily_day(backend, asset_id);
-    let used = if current_block >= reset_at + blocks_per_day {
+    let used = if current_block >= reset_at.saturating_add(blocks_per_day) {
         0
     } else {
         read_bridge_daily_used(backend, asset_id)
     };
-    if used + amount > daily_limit {
+    let new_used = used
+        .checked_add(amount)
+        .ok_or(BridgeError::BalanceOverflow)?;
+    if new_used > daily_limit {
         return Err(BridgeError::ExceedsDailyLimit(asset_id, used, daily_limit));
     }
-    let new_day = if current_block >= reset_at + blocks_per_day {
+    let new_day = if current_block >= reset_at.saturating_add(blocks_per_day) {
         current_block
     } else {
         reset_at
     };
-    update_bridge_daily(backend, asset_id, used + amount, new_day);
+    update_bridge_daily(backend, asset_id, new_used, new_day);
     Ok(())
 }
 
@@ -257,10 +260,13 @@ pub fn process_external_deposit_evm<B: StorageBackend>(
     );
     seed_bridge_processed(backend, **source_tx_hash, current_block);
 
+    let finalized_at_block = current_block
+        .checked_add(config.challenge_period_blocks)
+        .ok_or(BridgeError::BalanceOverflow)?;
     Ok(ExternalDepositResult::Queued {
         source_tx_hash: *source_tx_hash,
         challenge_period_blocks: config.challenge_period_blocks,
-        finalized_at_block: current_block + config.challenge_period_blocks,
+        finalized_at_block,
     })
 }
 
@@ -361,10 +367,13 @@ pub fn process_light_client_deposit_evm<B: StorageBackend>(
     );
     seed_bridge_processed(backend, *source_tx_hash, current_block);
 
+    let finalized_at_block = current_block
+        .checked_add(config.challenge_period_blocks)
+        .ok_or(BridgeError::BalanceOverflow)?;
     Ok(ExternalDepositResult::Queued {
         source_tx_hash,
         challenge_period_blocks: config.challenge_period_blocks,
-        finalized_at_block: current_block + config.challenge_period_blocks,
+        finalized_at_block,
     })
 }
 

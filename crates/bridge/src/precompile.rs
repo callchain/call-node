@@ -17,8 +17,6 @@ use call_protocol::storage_backend::StorageBackend;
 use call_validator::ValidatorStorage;
 use revm_precompile::{PrecompileError, PrecompileResult};
 
-use crate::BridgeConfig;
-
 #[cfg(feature = "light-client-bridge")]
 use crate::external::types::{FraudProof, FraudProofType};
 #[cfg(feature = "light-client-bridge")]
@@ -33,6 +31,14 @@ pub const CALL_ASSET_ID: u64 = 1;
 /// Maximum proof length in bytes for `initiate_challenge`.
 /// 16 KiB bounds gas cost of storing proof chunks.
 pub const MAX_PROOF_LEN: usize = 16 * 1024;
+
+/// Cached defaults from `BridgeConfig::default()` to avoid repeated allocation.
+const DEFAULT_MAX_PER_TX: u128 = 1_000_000_000_000_000_000_000u128;
+const DEFAULT_DAILY_LIMIT: u128 = 10_000_000_000_000_000_000_000u128;
+const DEFAULT_BLOCKS_PER_DAY: u64 = 345_600;
+const DEFAULT_MAX_WITHDRAW_PER_PERIOD: u128 = 5_000_000_000_000_000_000_000u128;
+const DEFAULT_BRIDGE_FEE: u128 = 0;
+const DEFAULT_PROCESSED_RETENTION: u64 = 4_838_400;
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -399,24 +405,15 @@ impl<B: StorageBackend> BridgeStorage<B> {
     }
 
     fn read_max_per_tx(&mut self, asset_id: u64) -> u128 {
-        self.load_u128_or_default(
-            slot_bridge_max_per_tx(asset_id),
-            BridgeConfig::default().max_per_tx,
-        )
+        self.load_u128_or_default(slot_bridge_max_per_tx(asset_id), DEFAULT_MAX_PER_TX)
     }
 
     fn read_daily_limit(&mut self, asset_id: u64) -> u128 {
-        self.load_u128_or_default(
-            slot_bridge_daily_limit(asset_id),
-            BridgeConfig::default().daily_limit_per_asset,
-        )
+        self.load_u128_or_default(slot_bridge_daily_limit(asset_id), DEFAULT_DAILY_LIMIT)
     }
 
     fn read_blocks_per_day(&mut self) -> u64 {
-        self.load_u64_or_default(
-            slot_bridge_blocks_per_day(),
-            BridgeConfig::default().blocks_per_day,
-        )
+        self.load_u64_or_default(slot_bridge_blocks_per_day(), DEFAULT_BLOCKS_PER_DAY)
     }
 
     fn read_asset_allowed(&mut self, asset_id: u64) -> bool {
@@ -424,22 +421,19 @@ impl<B: StorageBackend> BridgeStorage<B> {
             .backend
             .load(BRIDGE_ADDRESS, slot_bridge_asset_allowed(asset_id));
         if stored == U256::ZERO {
-            BridgeConfig::default().allowed_assets.contains(&asset_id)
+            asset_id == CALL_ASSET_ID // default: only asset 1 is allowed
         } else {
             stored.to_be_bytes::<32>()[31] != 0
         }
     }
 
-    fn read_authorized_contract(&mut self, chain_id: u64, contract: Address) -> bool {
+    fn read_authorized_contract(&mut self, _chain_id: u64, _contract: Address) -> bool {
         let stored = self
             .backend
-            .load(BRIDGE_ADDRESS, slot_bridge_authorized_contract(chain_id, contract));
+            .load(BRIDGE_ADDRESS, slot_bridge_authorized_contract(_chain_id, _contract));
         if stored == U256::ZERO {
-            BridgeConfig::default()
-                .authorized_contracts
-                .get(&chain_id)
-                .map(|v| v.contains(&contract))
-                .unwrap_or(false)
+            // Default: no contracts authorized (must be configured by governance)
+            false
         } else {
             stored.to_be_bytes::<32>()[31] != 0
         }
@@ -448,28 +442,25 @@ impl<B: StorageBackend> BridgeStorage<B> {
     fn read_max_external_withdraw_per_period(&mut self) -> u128 {
         self.load_u128_or_default(
             slot_bridge_max_withdraw_per_period(),
-            BridgeConfig::default().max_external_withdraw_per_period,
+            DEFAULT_MAX_WITHDRAW_PER_PERIOD,
         )
     }
 
     fn read_withdraw_period(&mut self) -> u64 {
         self.load_u64_or_default(
             slot_bridge_withdraw_period(),
-            BridgeConfig::default().withdraw_period_blocks,
+            crate::DEFAULT_WITHDRAW_PERIOD_BLOCKS,
         )
     }
 
     fn read_bridge_fee(&mut self) -> u128 {
-        self.load_u128_or_default(
-            slot_bridge_bridge_fee(),
-            BridgeConfig::default().bridge_fee,
-        )
+        self.load_u128_or_default(slot_bridge_bridge_fee(), DEFAULT_BRIDGE_FEE)
     }
 
     fn read_processed_retention_blocks(&mut self) -> u64 {
         self.load_u64_or_default(
             slot_bridge_processed_retention(),
-            BridgeConfig::default().processed_tx_retention_blocks,
+            DEFAULT_PROCESSED_RETENTION,
         )
     }
 
@@ -715,15 +706,13 @@ impl<B: StorageBackend> BridgeStorage<B> {
         asset_id: u64,
         caller: Address,
     ) -> Result<(), BridgeError> {
-        if caller == Address::ZERO || target_address == Address::ZERO || amount == 0 {
+        if target_address == Address::ZERO || amount == 0 {
             return Err(BridgeError::InvalidInput);
         }
         self.validate_basic(asset_id)?;
-        // Record total deposits first so a later balance failure cannot leave
-        // balances mutated without the counter updated.
-        self.add_total_deposits(amount)?;
         asset_store.deduct_balance(asset_id, caller, amount)?;
         asset_store.add_balance(asset_id, target_address, amount)?;
+        self.add_total_deposits(amount)?;
         Ok(())
     }
 
@@ -754,7 +743,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
             return Err(BridgeError::ChallengePeriodExpired);
         }
 
-        if proof.len() > MAX_PROOF_LEN {
+        if proof.len() < 32 || proof.len() > MAX_PROOF_LEN {
             return Err(BridgeError::InvalidInput);
         }
 
@@ -1245,11 +1234,11 @@ impl BridgePrecompile {
                 let mut data = Vec::with_capacity(160);
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
                 data.extend_from_slice(&u128_to_u256(net_amount).to_be_bytes::<32>());
-                data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
-                data.extend_from_slice(&u64_to_u256(call.sourceChain).to_be_bytes::<32>());
                 data.extend_from_slice(
                     &address_to_u256(call.sourceContract).to_be_bytes::<32>(),
                 );
+                data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
+                data.extend_from_slice(&u64_to_u256(call.sourceChain).to_be_bytes::<32>());
                 let log = alloy_primitives::LogData::new(
                     vec![topic0, topic1, topic2, topic3],
                     alloy_primitives::Bytes::from(data),
@@ -1770,7 +1759,7 @@ mod tests {
         // 2. initiateChallenge at block 10 (within period)
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(b"proof"),
+            proof: alloy_primitives::Bytes::from_static(&[0u8; 32]),
         }
         .abi_encode();
 
@@ -1826,7 +1815,7 @@ mod tests {
 
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(b"proof"),
+            proof: alloy_primitives::Bytes::from_static(&[0u8; 32]),
         }
         .abi_encode();
 
@@ -1889,7 +1878,7 @@ mod tests {
 
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(b"proof"),
+            proof: alloy_primitives::Bytes::from_static(&[0u8; 32]),
         }
         .abi_encode();
 
@@ -1950,7 +1939,7 @@ mod tests {
         // First challenge
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(b"proof"),
+            proof: alloy_primitives::Bytes::from_static(&[0u8; 32]),
         }
         .abi_encode();
         precompile.call(&input, challenger, &mut provider).unwrap();
@@ -2019,7 +2008,7 @@ mod tests {
         // initiateChallenge
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(b"proof"),
+            proof: alloy_primitives::Bytes::from_static(&[0u8; 32]),
         }
         .abi_encode();
         precompile.call(&input, challenger, &mut provider).unwrap();
@@ -2308,7 +2297,7 @@ mod tests {
         // initiateChallenge
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(b"proof"),
+            proof: alloy_primitives::Bytes::from_static(&[0u8; 32]),
         }
         .abi_encode();
         precompile.call(&input, challenger, &mut provider).unwrap();
@@ -3028,7 +3017,7 @@ mod tests {
 
         let input = IProtocolBridge::initiateChallengeCall {
             sourceTxHash: source_tx_hash.into(),
-            proof: alloy_primitives::Bytes::from_static(b"proof"),
+            proof: alloy_primitives::Bytes::from_static(&[0u8; 32]),
         }
         .abi_encode();
 

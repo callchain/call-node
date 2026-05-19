@@ -55,6 +55,8 @@ pub enum BridgeError {
     UnauthorizedBridgeContract(u64, Address),
     #[error("bridge fee exceeds amount: fee={0}, amount={1}")]
     BridgeFeeExceedsAmount(u128, u128),
+    #[error("balance overflow")]
+    BalanceOverflow,
     #[error("EVM execution failed: {0}")]
     EvmExecutionFailed(String),
     #[error("MPT proof verification failed: {0}")]
