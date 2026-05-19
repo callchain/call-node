@@ -167,16 +167,24 @@ impl<B: StorageBackend> AssetStorage<B> {
             .store(ASSET_ADDRESS, slot_asset_meta(asset_id, key), value);
     }
 
-    pub fn read_meta(&mut self, asset_id: u64) -> AssetMeta {
-        AssetMeta {
-            symbol: self.load_meta_string(asset_id, b"symbol"),
+    pub fn read_meta(&mut self, asset_id: u64) -> Result<AssetMeta, AssetError> {
+        let symbol = self.load_meta_string(asset_id, b"symbol");
+        let issuer = self.load_meta_address(asset_id, b"issuer");
+
+        // Existence check: unregistered slots default to zeros.
+        if issuer == Address::ZERO && symbol.is_empty() {
+            return Err(AssetError::AssetNotFound);
+        }
+
+        Ok(AssetMeta {
+            symbol,
             name: self.load_meta_string(asset_id, b"name"),
             decimals: self.load_meta_u8(asset_id, b"decimals"),
-            issuer: self.load_meta_address(asset_id, b"issuer"),
+            issuer,
             max_supply: self.load_meta_u128(asset_id, b"max_supply"),
             supply: self.load_meta_u128(asset_id, b"supply"),
             status: self.load_meta_u8(asset_id, b"status"),
-        }
+        })
     }
 
     pub fn write_meta(&mut self, asset_id: u64, meta: &AssetMeta) {
@@ -190,6 +198,12 @@ impl<B: StorageBackend> AssetStorage<B> {
     }
 
     fn store_meta_string(&mut self, asset_id: u64, key: &[u8], value: &str) {
+        assert!(
+            value.len() <= 32,
+            "metadata string exceeds 32-byte word limit: '{}' ({} bytes)",
+            value,
+            value.len()
+        );
         let mut bytes = [0u8; 32];
         let src = value.as_bytes();
         let len = src.len().min(32);
@@ -210,6 +224,14 @@ impl<B: StorageBackend> AssetStorage<B> {
         to: Address,
         amount: Balance,
     ) -> Result<(), AssetError> {
+        // Pre-flight: ensure receiver's balance won't overflow before
+        // deducting sender. This prevents partial state when called
+        // outside a checkpoint (e.g. direct Rust API usage).
+        let to_current = self.read_balance(asset_id, to)?;
+        to_current
+            .checked_add(amount)
+            .ok_or(AssetError::BalanceOverflow)?;
+
         self.deduct_balance(asset_id, from, amount)?;
         self.add_balance(asset_id, to, amount)?;
         Ok(())
@@ -255,7 +277,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         to: Address,
         amount: Balance,
     ) -> Result<(), AssetError> {
-        let meta = self.read_meta(asset_id);
+        let meta = self.read_meta(asset_id)?;
         if meta.issuer != caller {
             return Err(AssetError::NotIssuer);
         }
@@ -483,12 +505,12 @@ mod tests {
             // Mint
             store.mint(asset_id, issuer, recipient, 5000).unwrap();
             assert_eq!(store.read_balance(asset_id, recipient).unwrap(), 5000);
-            assert_eq!(store.read_meta(asset_id).supply, 5000);
+            assert_eq!(store.read_meta(asset_id).unwrap().supply, 5000);
 
             // Burn (recipient burns their own tokens)
             store.burn(asset_id, recipient, recipient, 2000).unwrap();
             assert_eq!(store.read_balance(asset_id, recipient).unwrap(), 3000);
-            assert_eq!(store.read_meta(asset_id).supply, 3000);
+            assert_eq!(store.read_meta(asset_id).unwrap().supply, 3000);
         }
     }
 
@@ -594,11 +616,11 @@ mod tests {
                     store.mint(asset_id, issuer, recipient, initial_supply).unwrap();
                 }
 
-                let supply_before = store.read_meta(asset_id).supply;
+                let supply_before = store.read_meta(asset_id).unwrap().supply;
 
                 match store.mint(asset_id, issuer, recipient, mint_amount) {
                     Ok(()) => {
-                        let supply_after = store.read_meta(asset_id).supply;
+                        let supply_after = store.read_meta(asset_id).unwrap().supply;
                         prop_assert_eq!(supply_after, supply_before + mint_amount,
                             "mint must increase supply by exact amount");
                     }
@@ -626,11 +648,11 @@ mod tests {
                     .unwrap();
 
                 store.mint(asset_id, issuer, holder, initial_supply).unwrap();
-                let supply_before = store.read_meta(asset_id).supply;
+                let supply_before = store.read_meta(asset_id).unwrap().supply;
 
                 match store.burn(asset_id, holder, holder, burn_amount) {
                     Ok(()) => {
-                        let supply_after = store.read_meta(asset_id).supply;
+                        let supply_after = store.read_meta(asset_id).unwrap().supply;
                         prop_assert_eq!(supply_after, supply_before - burn_amount,
                             "burn must decrease supply by exact amount");
                     }

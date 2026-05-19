@@ -17,23 +17,28 @@ use call_precompile::evm_caller::{execute_evm_call, apply_state_changes, Storage
 use call_primitives::{Address, U256};
 use revm_precompile::{PrecompileError, PrecompileResult};
 
-// ── Event helpers ─────────────────────────────────────────────────────
+// ── Event helpers (cached, computed once) ─────────────────────────────
 
-fn transfer_topic() -> alloy_primitives::B256 {
+use std::sync::LazyLock;
+
+static TRANSFER_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
     alloy_primitives::keccak256(b"Transfer(uint64,address,address,uint128)")
-}
-fn approval_topic() -> alloy_primitives::B256 {
+});
+static APPROVAL_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
     alloy_primitives::keccak256(b"Approval(uint64,address,address,uint128)")
-}
-fn mint_topic() -> alloy_primitives::B256 {
+});
+static MINT_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
     alloy_primitives::keccak256(b"Mint(uint64,address,uint128)")
-}
-fn burn_topic() -> alloy_primitives::B256 {
+});
+static BURN_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
     alloy_primitives::keccak256(b"Burn(uint64,address,uint128)")
-}
-fn register_topic() -> alloy_primitives::B256 {
+});
+static REGISTER_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
     alloy_primitives::keccak256(b"Register(uint64,address,bytes32)")
-}
+});
+static WRAPPER_CREATED_TOPIC: LazyLock<alloy_primitives::B256> = LazyLock::new(|| {
+    alloy_primitives::keccak256(b"WrapperCreated(uint64,address,address)")
+});
 
 /// Emit an asset event through the storage provider.
 fn emit_asset_event(
@@ -112,7 +117,9 @@ impl AssetPrecompile {
             storage,
             |call, _storage| {
                 let mut store = AssetStorage::new(sr);
-                let meta = store.read_meta(call.assetId);
+                let meta = store
+                    .read_meta(call.assetId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 Ok(meta.supply)
             },
         )
@@ -127,7 +134,9 @@ impl AssetPrecompile {
         storage.deduct_gas(1000)?;
         let call = dispatch::decode_call::<IProtocolAsset::getAssetInfoCall>(calldata)?;
         let mut store = AssetStorage::new(sr);
-        let meta = store.read_meta(call.assetId);
+        let meta = store
+            .read_meta(call.assetId)
+            .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
         let symbol = alloy_primitives::B256::from(write_string32(&meta.symbol).to_be_bytes::<32>());
         let name = alloy_primitives::B256::from(write_string32(&meta.name).to_be_bytes::<32>());
@@ -160,6 +169,7 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let from = require_caller(msg_sender)?;
+                check_compliance(from, storage)?;
                 check_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
                 store
@@ -170,7 +180,7 @@ impl AssetPrecompile {
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
-                    transfer_topic(),
+                    *TRANSFER_TOPIC,
                     vec![
                         alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
                         alloy_primitives::B256::from(call_precompile::address_to_u256(from).to_be_bytes::<32>()),
@@ -190,6 +200,8 @@ impl AssetPrecompile {
         storage: &mut dyn StorageProvider,
         sr: StorageRef,
     ) -> PrecompileResult {
+        const MAX_BATCH_SIZE: usize = 256;
+
         let call = dispatch::decode_call::<IProtocolAsset::batchTransferCall>(calldata)?;
         if call.to.len() != call.amounts.len() {
             return Err(PrecompileError::Other(
@@ -199,12 +211,18 @@ impl AssetPrecompile {
         if call.to.is_empty() {
             return Err(PrecompileError::Other("empty batch".into()));
         }
+        if call.to.len() > MAX_BATCH_SIZE {
+            return Err(PrecompileError::Other(
+                format!("batch size exceeds limit of {}", MAX_BATCH_SIZE).into(),
+            ));
+        }
         let total_gas = 5000u64
             .checked_mul(call.to.len() as u64)
             .ok_or(PrecompileError::Other("batch gas overflow".into()))?;
         storage.deduct_gas(total_gas)?;
 
         let from = require_caller(msg_sender)?;
+        check_compliance(from, storage)?;
         for to in &call.to {
             check_compliance(*to, storage)?;
         }
@@ -212,10 +230,16 @@ impl AssetPrecompile {
         let pairs: Vec<(Address, u128)> = call.to.into_iter().zip(call.amounts.clone()).collect();
         let cp = storage.checkpoint();
         let mut store = AssetStorage::new(sr);
-        store
+        let result = store
             .batch_transfer(call.assetId, from, &pairs)
-            .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
-        storage.checkpoint_commit(cp);
+            .map_err(|e| PrecompileError::Other(e.to_string().into()));
+        match result {
+            Ok(()) => storage.checkpoint_commit(cp),
+            Err(e) => {
+                storage.checkpoint_revert(cp);
+                return Err(e);
+            }
+        }
 
         // Emit Transfer event for each recipient
         for (to, amount) in pairs {
@@ -223,7 +247,7 @@ impl AssetPrecompile {
             data.extend_from_slice(&call_precompile::encode_u128(amount));
             emit_asset_event(
                 storage,
-                transfer_topic(),
+                *TRANSFER_TOPIC,
                 vec![
                     alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
                     alloy_primitives::B256::from(call_precompile::address_to_u256(from).to_be_bytes::<32>()),
@@ -250,13 +274,17 @@ impl AssetPrecompile {
             |call, storage| {
                 let owner = require_caller(msg_sender)?;
                 let mut store = AssetStorage::new(sr);
+                // Verify asset exists before creating allowance
+                store
+                    .read_meta(call.assetId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 store.approve(call.assetId, owner, call.spender, call.amount);
 
                 let mut data = Vec::with_capacity(16);
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
-                    approval_topic(),
+                    *APPROVAL_TOPIC,
                     vec![
                         alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
                         alloy_primitives::B256::from(call_precompile::address_to_u256(owner).to_be_bytes::<32>()),
@@ -282,9 +310,14 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let spender = require_caller(msg_sender)?;
+                check_compliance(spender, storage)?;
                 check_compliance(call.from, storage)?;
                 check_compliance(call.to, storage)?;
                 let mut store = AssetStorage::new(sr);
+                // Verify asset exists
+                store
+                    .read_meta(call.assetId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 store
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
@@ -293,7 +326,7 @@ impl AssetPrecompile {
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
-                    transfer_topic(),
+                    *TRANSFER_TOPIC,
                     vec![
                         alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
                         alloy_primitives::B256::from(call_precompile::address_to_u256(call.from).to_be_bytes::<32>()),
@@ -330,7 +363,7 @@ impl AssetPrecompile {
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
-                    mint_topic(),
+                    *MINT_TOPIC,
                     vec![
                         alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
                         alloy_primitives::B256::from(call_precompile::address_to_u256(call.to).to_be_bytes::<32>()),
@@ -366,7 +399,7 @@ impl AssetPrecompile {
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
-                    burn_topic(),
+                    *BURN_TOPIC,
                     vec![
                         alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
                         alloy_primitives::B256::from(call_precompile::address_to_u256(call.from).to_be_bytes::<32>()),
@@ -391,6 +424,17 @@ impl AssetPrecompile {
             storage,
             |call, storage| {
                 let caller = require_caller(msg_sender)?;
+                // Reject symbol/name that exceed 32-byte word limit
+                if call.symbol.len() > 32 {
+                    return Err(PrecompileError::Other(
+                        "symbol exceeds 32 bytes".into(),
+                    ));
+                }
+                if call.name.len() > 32 {
+                    return Err(PrecompileError::Other(
+                        "name exceeds 32 bytes".into(),
+                    ));
+                }
                 let mut store = AssetStorage::new(sr);
                 let asset_id = store
                     .register(
@@ -402,12 +446,19 @@ impl AssetPrecompile {
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
+                // Record registration timestamp
+                store.store_meta_u256(
+                    asset_id,
+                    b"registered_at",
+                    storage.timestamp(),
+                );
+
                 let symbol = alloy_primitives::B256::from(write_string32(&call.symbol).to_be_bytes::<32>());
                 let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(symbol.as_slice());
                 emit_asset_event(
                     storage,
-                    register_topic(),
+                    *REGISTER_TOPIC,
                     vec![
                         alloy_primitives::B256::from(call_precompile::u64_to_u256(asset_id).to_be_bytes::<32>()),
                         alloy_primitives::B256::from(call_precompile::address_to_u256(caller).to_be_bytes::<32>()),
@@ -434,6 +485,17 @@ impl AssetPrecompile {
                 let caller = require_caller(msg_sender)?;
                 let meta = read_erc20_metadata(storage, call.evmContract)
                     .map_err(|e| PrecompileError::Other(format!("ERC-20 read failed: {e}").into()))?;
+                // Truncate or reject long ERC-20 metadata
+                if meta.symbol.len() > 32 {
+                    return Err(PrecompileError::Other(
+                        "ERC-20 symbol exceeds 32 bytes".into(),
+                    ));
+                }
+                if meta.name.len() > 32 {
+                    return Err(PrecompileError::Other(
+                        "ERC-20 name exceeds 32 bytes".into(),
+                    ));
+                }
                 let mut store = AssetStorage::new(sr);
                 let asset_id = store
                     .register_erc20(
@@ -446,12 +508,19 @@ impl AssetPrecompile {
                     )
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
+                // Record registration timestamp
+                store.store_meta_u256(
+                    asset_id,
+                    b"registered_at",
+                    storage.timestamp(),
+                );
+
                 let symbol = alloy_primitives::B256::from(write_string32(&meta.symbol).to_be_bytes::<32>());
                 let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(symbol.as_slice());
                 emit_asset_event(
                     storage,
-                    register_topic(),
+                    *REGISTER_TOPIC,
                     vec![
                         alloy_primitives::B256::from(call_precompile::u64_to_u256(asset_id).to_be_bytes::<32>()),
                         alloy_primitives::B256::from(call_precompile::address_to_u256(caller).to_be_bytes::<32>()),
@@ -480,7 +549,9 @@ impl AssetPrecompile {
                 let mut store = AssetStorage::new(sr);
 
                 // 1. Verify caller is issuer
-                let meta = store.read_meta(call.assetId);
+                let meta = store
+                    .read_meta(call.assetId)
+                    .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 if meta.issuer != caller {
                     return Err(PrecompileError::Other("not asset issuer".into()));
                 }
@@ -534,6 +605,18 @@ impl AssetPrecompile {
                 store.set_has_erc20(call.assetId, 1);
                 store.set_evm_contract(call.assetId, wrapper_addr);
                 store.set_dominance(call.assetId, 1);
+
+                // Emit WrapperCreated event
+                emit_asset_event(
+                    storage,
+                    *WRAPPER_CREATED_TOPIC,
+                    vec![
+                        alloy_primitives::B256::from(call_precompile::u64_to_u256(call.assetId).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(wrapper_addr).to_be_bytes::<32>()),
+                        alloy_primitives::B256::from(call_precompile::address_to_u256(caller).to_be_bytes::<32>()),
+                    ],
+                    Vec::new(),
+                )?;
 
                 Ok(wrapper_addr)
             },
@@ -698,7 +781,7 @@ mod tests {
         {
             let mut store = AssetStorage::new(StorageRef::new(&mut provider));
             assert_eq!(store.read_balance(1, recipient).unwrap(), 500);
-            assert_eq!(store.read_meta(1).supply, 500);
+            assert_eq!(store.read_meta(1).unwrap().supply, 500);
         }
 
         // Mint to issuer
@@ -725,7 +808,7 @@ mod tests {
         {
             let mut store = AssetStorage::new(StorageRef::new(&mut provider));
             assert_eq!(store.read_balance(1, issuer).unwrap(), 200);
-            assert_eq!(store.read_meta(1).supply, 700);
+            assert_eq!(store.read_meta(1).unwrap().supply, 700);
         }
     }
 
@@ -735,6 +818,12 @@ mod tests {
         let owner = Address::repeat_byte(0xAB);
         let spender = Address::repeat_byte(0xEF);
         let recipient = Address::repeat_byte(0xCD);
+
+        // Register asset 1 so approve/transfer_from can verify existence
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test Token", 18, 0, owner).unwrap();
+        }
 
         provider
             .sstore(ASSET_ADDRESS, slot_balance(1, owner), u128_to_u256(1000))
@@ -943,7 +1032,7 @@ mod tests {
 
         // Verify metadata was stored correctly.
         let mut store = AssetStorage::new(StorageRef::new(&mut provider));
-        let meta = store.read_meta(asset_id);
+        let meta = store.read_meta(asset_id).unwrap();
         assert_eq!(meta.name, "Wrapped Ether");
         assert_eq!(meta.symbol, "WETH");
         assert_eq!(meta.decimals, 18);
@@ -1027,5 +1116,137 @@ mod tests {
             "createWrapper on asset with existing ERC-20 should fail: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_transfer_event_emitted() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+        let to = Address::repeat_byte(0xCD);
+
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test", 18, 0, from).unwrap();
+            store.write_balance(1, from, 1000);
+        }
+
+        let input = IProtocolAsset::transferCall {
+            assetId: 1,
+            to,
+            amount: 500,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        precompile.call(&input, from, &mut provider).unwrap();
+
+        let events = provider.events(ASSET_ADDRESS);
+        assert!(!events.is_empty(), "transfer must emit an event");
+        assert_eq!(events[0].topics()[0], *TRANSFER_TOPIC);
+    }
+
+    #[test]
+    fn test_batch_transfer_size_limit() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test", 18, 0, from).unwrap();
+            store.write_balance(1, from, 1_000_000);
+        }
+
+        let recipients: Vec<Address> = (0..257).map(|i| Address::repeat_byte(i as u8)).collect();
+        let amounts: Vec<u128> = vec![1; 257];
+
+        let input = IProtocolAsset::batchTransferCall {
+            assetId: 1,
+            to: recipients,
+            amounts,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(
+            result.is_err(),
+            "batch transfer >256 should fail: {:?}",
+            result
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("exceeds limit"), "error should mention limit: {}", err);
+    }
+
+    #[test]
+    fn test_get_total_supply_asset_not_found() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+
+        let input = IProtocolAsset::getTotalSupplyCall { assetId: 999 }.abi_encode();
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, Address::ZERO, &mut provider);
+        assert!(
+            result.is_err(),
+            "getTotalSupply for unregistered asset should fail: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_sender_compliance_blocked() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        let from = Address::repeat_byte(0xAB);
+        let to = Address::repeat_byte(0xCD);
+
+        {
+            let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+            store.register("TEST", "Test", 18, 0, from).unwrap();
+            store.write_balance(1, from, 1000);
+        }
+
+        // Mark sender as non-compliant (status = 1)
+        provider
+            .sstore(
+                COMPLIANCE_ADDRESS,
+                slot_compliance(from),
+                U256::from(1u64),
+            )
+            .unwrap();
+
+        let input = IProtocolAsset::transferCall {
+            assetId: 1,
+            to,
+            amount: 100,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        let result = precompile.call(&input, from, &mut provider);
+        assert!(
+            result.is_err(),
+            "transfer by blocked sender should fail: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_registered_at_timestamp() {
+        let mut provider = HashMapStorageProvider::new(1_000_000);
+        provider.set_timestamp(U256::from(1_700_000_000u64));
+        let issuer = Address::repeat_byte(0x11);
+
+        let input = IProtocolAsset::registerCall {
+            symbol: "GOLD".into(),
+            name: "Gold".into(),
+            decimals: 18,
+            maxSupply: 10000,
+        }
+        .abi_encode();
+
+        let mut precompile = AssetPrecompile;
+        precompile.call(&input, issuer, &mut provider).unwrap();
+
+        let mut store = AssetStorage::new(StorageRef::new(&mut provider));
+        let registered_at = store.load_meta_u256(1, b"registered_at");
+        assert_eq!(registered_at, U256::from(1_700_000_000u64));
     }
 }
