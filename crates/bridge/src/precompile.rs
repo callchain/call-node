@@ -54,6 +54,9 @@ pub enum BridgeError {
     NotConsensusVerified(u64),
     ExceedsMaxPerTx(u64, u128, u128),
     ExceedsDailyLimit(u64, u128, u128),
+    ExternalAssetNotAllowed(u64),
+    UnauthorizedBridgeContract(u64, Address),
+    ExceedsWithdrawLimit(u64, u128, u128),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -86,6 +89,21 @@ impl std::fmt::Display for BridgeError {
                 write!(
                     f,
                     "exceeds daily limit: asset={asset_id}, daily_used={used}, limit={limit}"
+                )
+            }
+            BridgeError::ExternalAssetNotAllowed(asset_id) => {
+                write!(f, "external bridge asset not allowed: {asset_id}")
+            }
+            BridgeError::UnauthorizedBridgeContract(chain_id, contract) => {
+                write!(
+                    f,
+                    "unauthorized bridge contract: chain={chain_id}, contract={contract}"
+                )
+            }
+            BridgeError::ExceedsWithdrawLimit(asset_id, withdrawn, limit) => {
+                write!(
+                    f,
+                    "exceeds withdraw limit: asset={asset_id}, period_withdrawn={withdrawn}, limit={limit}"
                 )
             }
         }
@@ -194,6 +212,30 @@ fn slot_bridge_blocks_per_day() -> U256 {
     storage_slot(&[b"blocks_per_day"])
 }
 
+fn slot_bridge_asset_allowed(asset_id: u64) -> U256 {
+    storage_slot(&[b"asset_allowed", &asset_id.to_be_bytes()])
+}
+
+fn slot_bridge_authorized_contract(chain_id: u64, contract: Address) -> U256 {
+    storage_slot(&[b"authorized", &chain_id.to_be_bytes(), contract.as_slice()])
+}
+
+fn slot_bridge_max_withdraw_per_period() -> U256 {
+    storage_slot(&[b"max_withdraw_period"])
+}
+
+fn slot_bridge_period_withdrawn(asset_id: u64) -> U256 {
+    storage_slot(&[b"period_withdrawn", &asset_id.to_be_bytes()])
+}
+
+fn slot_bridge_current_period_start() -> U256 {
+    storage_slot(&[b"period_start"])
+}
+
+fn slot_bridge_processed_retention() -> U256 {
+    storage_slot(&[b"processed_retention"])
+}
+
 // ── Challenge status ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,10 +282,14 @@ impl<B: StorageBackend> BridgeStorage<B> {
             != 0
     }
 
-    pub fn is_processed(&mut self, tx_hash: [u8; 32]) -> bool {
-        self.backend
-            .load(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash))
-            != U256::ZERO
+    pub fn is_processed(&mut self, tx_hash: [u8; 32], current_block: u64) -> bool {
+        let stored = self.backend.load(BRIDGE_ADDRESS, slot_bridge_processed(tx_hash));
+        if stored == U256::ZERO {
+            return false;
+        }
+        let processed_at = u256_to_u64(stored);
+        let retention = self.read_processed_retention_blocks();
+        current_block.saturating_sub(processed_at) <= retention
     }
 
     pub fn read_challenge_status(&mut self, tx_hash: [u8; 32]) -> ChallengeStatus {
@@ -366,6 +412,56 @@ impl<B: StorageBackend> BridgeStorage<B> {
         }
     }
 
+    fn read_asset_allowed(&mut self, asset_id: u64) -> bool {
+        let stored = self
+            .backend
+            .load(BRIDGE_ADDRESS, slot_bridge_asset_allowed(asset_id));
+        if stored == U256::ZERO {
+            BridgeConfig::default().allowed_assets.contains(&asset_id)
+        } else {
+            stored.to_be_bytes::<32>()[31] != 0
+        }
+    }
+
+    fn read_authorized_contract(&mut self, chain_id: u64, contract: Address) -> bool {
+        let stored = self
+            .backend
+            .load(BRIDGE_ADDRESS, slot_bridge_authorized_contract(chain_id, contract));
+        if stored == U256::ZERO {
+            BridgeConfig::default()
+                .authorized_contracts
+                .get(&chain_id)
+                .map(|v| v.contains(&contract))
+                .unwrap_or(false)
+        } else {
+            stored.to_be_bytes::<32>()[31] != 0
+        }
+    }
+
+    fn read_max_external_withdraw_per_period(&mut self) -> u128 {
+        let stored = u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_max_withdraw_per_period()),
+        );
+        if stored == 0 {
+            BridgeConfig::default().max_external_withdraw_per_period
+        } else {
+            stored
+        }
+    }
+
+    fn read_processed_retention_blocks(&mut self) -> u64 {
+        let stored = u256_to_u64(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_processed_retention()),
+        );
+        if stored == 0 {
+            BridgeConfig::default().processed_tx_retention_blocks
+        } else {
+            stored
+        }
+    }
+
     fn read_daily_used(&mut self, asset_id: u64, day: u64) -> u128 {
         u256_to_u128(
             self.backend
@@ -434,6 +530,8 @@ impl<B: StorageBackend> BridgeStorage<B> {
     pub fn external_deposit(
         &mut self,
         asset_store: &mut AssetStorage<B>,
+        source_chain: u64,
+        source_contract: Address,
         source_tx_hash: [u8; 32],
         asset_id: u64,
         recipient: Address,
@@ -450,16 +548,25 @@ impl<B: StorageBackend> BridgeStorage<B> {
         if source_tx_hash == [0u8; 32] {
             return Err(BridgeError::InvalidInput);
         }
-        if self.is_processed(source_tx_hash) {
+        if self.is_processed(source_tx_hash, block_height) {
             return Err(BridgeError::AlreadyProcessed);
         }
         self.validate_basic(asset_id)?;
+        if !self.read_asset_allowed(asset_id) {
+            return Err(BridgeError::ExternalAssetNotAllowed(asset_id));
+        }
+        if !self.read_authorized_contract(source_chain, source_contract) {
+            return Err(BridgeError::UnauthorizedBridgeContract(
+                source_chain,
+                source_contract,
+            ));
+        }
         self.check_limits(asset_id, amount, block_height)?;
 
         self.backend.store(
             BRIDGE_ADDRESS,
             slot_bridge_processed(source_tx_hash),
-            U256::from(1u8),
+            u64_to_u256(block_height),
         );
         self.backend.store(
             BRIDGE_ADDRESS,
@@ -498,13 +605,65 @@ impl<B: StorageBackend> BridgeStorage<B> {
         asset_id: u64,
         amount: u128,
         caller: Address,
+        current_block: u64,
     ) -> Result<(), BridgeError> {
         if amount == 0 {
             return Err(BridgeError::InvalidInput);
         }
         self.validate_basic(asset_id)?;
+        self.check_withdraw_limit(asset_id, amount, current_block)?;
         asset_store.deduct_balance(asset_id, caller, amount)?;
         self.add_total_withdrawals(amount)?;
+        Ok(())
+    }
+
+    fn check_withdraw_limit(
+        &mut self,
+        asset_id: u64,
+        amount: u128,
+        current_block: u64,
+    ) -> Result<(), BridgeError> {
+        let max_per_period = self.read_max_external_withdraw_per_period();
+        let period_start = u256_to_u64(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_current_period_start()),
+        );
+        let challenge_period = self.read_challenge_period();
+
+        if current_block >= period_start.saturating_add(challenge_period) {
+            // New period — reset counters.
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_current_period_start(),
+                u64_to_u256(current_block),
+            );
+            self.backend.store(
+                BRIDGE_ADDRESS,
+                slot_bridge_period_withdrawn(asset_id),
+                u128_to_u256(amount),
+            );
+            return Ok(());
+        }
+
+        let period_withdrawn = u256_to_u128(
+            self.backend
+                .load(BRIDGE_ADDRESS, slot_bridge_period_withdrawn(asset_id)),
+        );
+        let new_total = period_withdrawn
+            .checked_add(amount)
+            .ok_or(BridgeError::BalanceOverflow)?;
+        if new_total > max_per_period {
+            return Err(BridgeError::ExceedsWithdrawLimit(
+                asset_id,
+                period_withdrawn,
+                max_per_period,
+            ));
+        }
+        self.backend.store(
+            BRIDGE_ADDRESS,
+            slot_bridge_period_withdrawn(asset_id),
+            u128_to_u256(new_total),
+        );
         Ok(())
     }
 
@@ -536,7 +695,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         challenger: Address,
         current_block: u64,
     ) -> Result<(), BridgeError> {
-        if !self.is_processed(source_tx_hash) {
+        if !self.is_processed(source_tx_hash, current_block) {
             return Err(BridgeError::NotProcessed);
         }
         if self.read_challenge_status(source_tx_hash) != ChallengeStatus::None {
@@ -940,7 +1099,7 @@ sol! {
     interface IProtocolBridge {
         function getTotalDeposits() external view returns (uint128);
         function getTotalWithdrawals() external view returns (uint128);
-        function externalDeposit(bytes32 sourceTxHash, uint64 assetId, address recipient, uint128 amount) external;
+        function externalDeposit(uint64 sourceChain, address sourceContract, bytes32 sourceTxHash, uint64 assetId, address recipient, uint128 amount) external;
         function externalWithdraw(uint64 targetChain, bytes calldata targetAddress, uint64 assetId, uint128 amount) external;
         function deposit(uint64 sourceChain, address targetAddress, uint128 amount, uint64 assetId, bytes calldata proof) external;
         function initiateChallenge(bytes32 sourceTxHash, bytes calldata proof) external;
@@ -1014,6 +1173,8 @@ impl BridgePrecompile {
                 bridge_store
                     .external_deposit(
                         &mut asset_store,
+                        call.sourceChain,
+                        call.sourceContract,
                         call.sourceTxHash.into(),
                         call.assetId,
                         call.recipient,
@@ -1065,8 +1226,9 @@ impl BridgePrecompile {
                 check_compliance(caller, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
+                let block_number = storage.block_number();
                 bridge_store
-                    .external_withdraw(&mut asset_store, call.assetId, call.amount, caller)
+                    .external_withdraw(&mut asset_store, call.assetId, call.amount, caller, block_number)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
                 let topic0 = alloy_primitives::keccak256(
@@ -1107,6 +1269,7 @@ impl BridgePrecompile {
                 check_compliance(call.targetAddress, storage)?;
                 let mut bridge_store = BridgeStorage::new(sr);
                 let mut asset_store = AssetStorage::new(sr);
+                let block_height = storage.block_number();
                 bridge_store
                     .deposit(
                         &mut asset_store,
@@ -1120,18 +1283,19 @@ impl BridgePrecompile {
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
                 let topic0 = alloy_primitives::keccak256(
-                    b"Deposit(address,uint64,address,uint128,uint64)",
+                    b"Deposit(address,uint64,address,uint128,uint64,uint64)",
                 );
                 let topic1 = alloy_primitives::B256::from(
                     address_to_u256(caller).to_be_bytes::<32>(),
                 );
-                let mut data = Vec::with_capacity(128);
+                let mut data = Vec::with_capacity(160);
                 data.extend_from_slice(&u64_to_u256(call.sourceChain).to_be_bytes::<32>());
                 data.extend_from_slice(
                     &address_to_u256(call.targetAddress).to_be_bytes::<32>(),
                 );
                 data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
+                data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
                 if let Some(log) = alloy_primitives::LogData::new(
                     vec![topic0, topic1],
                     alloy_primitives::Bytes::from(data),
@@ -1430,6 +1594,8 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -1519,6 +1685,8 @@ mod tests {
 
         // 1. externalDeposit
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -1623,6 +1791,8 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -1673,6 +1843,8 @@ mod tests {
 
         // externalDeposit
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -1729,6 +1901,8 @@ mod tests {
 
         // externalDeposit
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -1811,6 +1985,8 @@ mod tests {
 
         // externalDeposit
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -1992,6 +2168,8 @@ mod tests {
 
         // externalDeposit
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -2167,6 +2345,8 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient: Address::ZERO,
@@ -2201,6 +2381,8 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: [0u8; 32].into(),
             assetId: 1,
             recipient,
@@ -2242,6 +2424,8 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -2296,6 +2480,8 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash.into(),
             assetId: 1,
             recipient,
@@ -2346,6 +2532,8 @@ mod tests {
         let mut precompile = BridgePrecompile;
 
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash_1.into(),
             assetId: 1,
             recipient,
@@ -2370,6 +2558,8 @@ mod tests {
 
         // Another deposit of 150 should fail (400 + 150 = 550 > 500)
         let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
             sourceTxHash: source_tx_hash_2.into(),
             assetId: 1,
             recipient,
@@ -2379,5 +2569,301 @@ mod tests {
 
         let result = precompile.call(&input, validator, &mut provider);
         assert!(result.is_err(), "second deposit should exceed daily limit");
+    }
+
+    #[test]
+    fn test_external_deposit_rejects_not_allowed_asset() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        // Explicitly disallow asset_id=1 by writing non-zero with LSB=0
+        // (read_asset_allowed treats ZERO as "use default", so we must write
+        // a non-zero value whose last byte is 0 to mean "explicitly false").
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_asset_allowed(1),
+            U256::from(256u16),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 1000,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(
+            result.is_err(),
+            "externalDeposit should reject not-allowed asset"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("external bridge asset not allowed"),
+            "error should mention asset not allowed: {err}"
+        );
+    }
+
+    #[test]
+    fn test_external_deposit_rejects_unauthorized_contract() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        // sourceContract = 0xFF... is not in default authorized_contracts
+        let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::repeat_byte(0xFF),
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 1000,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(
+            result.is_err(),
+            "externalDeposit should reject unauthorized contract"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unauthorized bridge contract"),
+            "error should mention unauthorized contract: {err}"
+        );
+    }
+
+    #[test]
+    fn test_external_withdraw_rejects_exceeds_period_limit() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let caller = Address::repeat_byte(0x11);
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(5000));
+        // Set max_withdraw_per_period = 500
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_max_withdraw_per_period(),
+            u128_to_u256(500),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        let input = IProtocolBridge::externalWithdrawCall {
+            targetChain: 1,
+            targetAddress: alloy_primitives::Bytes::from(vec![0xAA; 20]),
+            assetId: 1,
+            amount: 600,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, caller, &mut provider);
+        assert!(
+            result.is_err(),
+            "externalWithdraw should reject amount exceeding period limit"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds withdraw limit"),
+            "error should mention withdraw limit: {err}"
+        );
+    }
+
+    #[test]
+    fn test_external_withdraw_period_limit_resets_next_period() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let caller = Address::repeat_byte(0x11);
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(5000));
+        // Set max_withdraw_per_period = 500; challenge_period = 100 (default)
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_max_withdraw_per_period(),
+            u128_to_u256(500),
+        );
+        // First withdraw of 400 at block 10
+        let mut precompile = BridgePrecompile;
+        let input = IProtocolBridge::externalWithdrawCall {
+            targetChain: 1,
+            targetAddress: alloy_primitives::Bytes::from(vec![0xAA; 20]),
+            assetId: 1,
+            amount: 400,
+        }
+        .abi_encode();
+        let result = precompile.call(&input, caller, &mut provider);
+        assert!(result.is_ok(), "first withdraw should succeed: {:?}", result.err());
+
+        // Second withdraw of 200 at block 250 (new period, period_start=10, challenge_period=100, so 250 >= 110)
+        provider.set_block_number(250);
+        let input2 = IProtocolBridge::externalWithdrawCall {
+            targetChain: 1,
+            targetAddress: alloy_primitives::Bytes::from(vec![0xAA; 20]),
+            assetId: 1,
+            amount: 200,
+        }
+        .abi_encode();
+        let result = precompile.call(&input2, caller, &mut provider);
+        assert!(
+            result.is_ok(),
+            "second withdraw in new period should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_processed_tx_retention() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let validator = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let source_tx_hash = [0xABu8; 32];
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(
+            call_precompile::VALIDATOR_ADDRESS,
+            call_precompile::slot_validator_by_addr(validator),
+            u64_to_u256(1),
+        );
+        // Set retention = 50 blocks
+        provider.set(
+            BRIDGE_ADDRESS,
+            slot_bridge_processed_retention(),
+            u64_to_u256(50),
+        );
+
+        let mut precompile = BridgePrecompile;
+
+        // First deposit at block 10
+        let input = IProtocolBridge::externalDepositCall {
+            sourceChain: 1,
+            sourceContract: Address::ZERO,
+            sourceTxHash: source_tx_hash.into(),
+            assetId: 1,
+            recipient,
+            amount: 1000,
+        }
+        .abi_encode();
+        precompile.call(&input, validator, &mut provider).unwrap();
+
+        // Re-deposit at block 30 (within retention) should fail
+        provider.set_block_number(30);
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(result.is_err(), "re-deposit within retention should fail");
+
+        // Re-deposit at block 70 (beyond retention: 70 - 10 = 60 > 50) should succeed
+        provider.set_block_number(70);
+        let result = precompile.call(&input, validator, &mut provider);
+        assert!(
+            result.is_ok(),
+            "re-deposit after retention should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_deposit_rejects_insufficient_balance() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let caller = Address::repeat_byte(0x11);
+        let target = Address::repeat_byte(0x22);
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(500));
+
+        let mut precompile = BridgePrecompile;
+
+        let input = IProtocolBridge::depositCall {
+            sourceChain: 1,
+            targetAddress: target,
+            amount: 1000,
+            assetId: 1,
+            proof: alloy_primitives::Bytes::new(),
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, caller, &mut provider);
+        assert!(
+            result.is_err(),
+            "deposit should reject insufficient balance"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("insufficient balance"), "error should mention balance: {err}");
+    }
+
+    #[test]
+    fn test_external_withdraw_rejects_insufficient_balance() {
+        let mut provider = HashMapStorageProvider::with_block(1_000_000, 1, 10);
+        let caller = Address::repeat_byte(0x11);
+
+        provider.set(
+            ASSET_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"issuer"]),
+            U256::from(1u8),
+        );
+        provider.set(ASSET_ADDRESS, slot_balance(1, caller), u128_to_u256(500));
+
+        let mut precompile = BridgePrecompile;
+
+        let input = IProtocolBridge::externalWithdrawCall {
+            targetChain: 1,
+            targetAddress: alloy_primitives::Bytes::from(vec![0xAA; 20]),
+            assetId: 1,
+            amount: 1000,
+        }
+        .abi_encode();
+
+        let result = precompile.call(&input, caller, &mut provider);
+        assert!(
+            result.is_err(),
+            "externalWithdraw should reject insufficient balance"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("insufficient balance"), "error should mention balance: {err}");
     }
 }
