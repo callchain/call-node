@@ -503,7 +503,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
         validator_store: &mut ValidatorStorage<B>,
         source_tx_hash: [u8; 32],
         current_block: u64,
-    ) -> Result<bool, BridgeError> {
+    ) -> Result<(bool, Address), BridgeError> {
         if self.read_challenge_status(source_tx_hash) != ChallengeStatus::Pending {
             return Err(BridgeError::ChallengeNotPending);
         }
@@ -537,6 +537,9 @@ impl<B: StorageBackend> BridgeStorage<B> {
                 .slash_stake(asset_store, validator)
                 .map_err(|_| BridgeError::InvalidInput)?;
 
+            // Capture challenger before clearing metadata.
+            let challenger = self.read_challenge_challenger(source_tx_hash);
+
             self.backend.store(
                 BRIDGE_ADDRESS,
                 slot_bridge_challenge_status(source_tx_hash),
@@ -566,7 +569,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
             // Clear challenge metadata to prevent storage bloat.
             // Keep challenger and bond because `withdraw_challenge_bond` needs them.
             self.clear_challenge_metadata(source_tx_hash, true);
-            Ok(true)
+            Ok((true, challenger))
         } else {
             let validator = u256_to_address(self.backend.load(
                 BRIDGE_ADDRESS,
@@ -583,7 +586,7 @@ impl<B: StorageBackend> BridgeStorage<B> {
             );
             // Clear challenge metadata (including proof chunks) to prevent storage bloat.
             self.clear_challenge_metadata(source_tx_hash, false);
-            Ok(false)
+            Ok((false, validator))
         }
     }
 
@@ -923,7 +926,7 @@ impl BridgePrecompile {
                 let topic3 = alloy_primitives::B256::from(
                     address_to_u256(validator).to_be_bytes::<32>(),
                 );
-                let mut data = Vec::with_capacity(128);
+                let mut data = Vec::with_capacity(96);
                 data.extend_from_slice(&u64_to_u256(call.assetId).to_be_bytes::<32>());
                 data.extend_from_slice(&u128_to_u256(call.amount).to_be_bytes::<32>());
                 data.extend_from_slice(&u64_to_u256(block_height).to_be_bytes::<32>());
@@ -1103,7 +1106,7 @@ impl BridgePrecompile {
                 let mut validator_store = ValidatorStorage::new(sr);
                 let block_number = storage.block_number();
                 let source_tx_hash: [u8; 32] = call.sourceTxHash.into();
-                let success = bridge_store
+                let (success, beneficiary) = bridge_store
                     .resolve_challenge(
                         &mut asset_store,
                         &mut validator_store,
@@ -1116,14 +1119,6 @@ impl BridgePrecompile {
                     b"ChallengeResolved(bytes32,bool,address)",
                 );
                 let topic1 = alloy_primitives::B256::from(source_tx_hash);
-                let beneficiary = if success {
-                    bridge_store.read_challenge_challenger(source_tx_hash)
-                } else {
-                    u256_to_address(bridge_store.backend.load(
-                        BRIDGE_ADDRESS,
-                        slot_bridge_challenge_original_validator(source_tx_hash),
-                    ))
-                };
                 let topic2 = alloy_primitives::B256::from(
                     address_to_u256(beneficiary).to_be_bytes::<32>(),
                 );
@@ -1966,6 +1961,13 @@ mod tests {
                 .unwrap_or(U256::ZERO),
         );
         assert_eq!(target_balance, 1000);
+
+        let caller_balance = u256_to_u128(
+            provider
+                .get(ASSET_ADDRESS, slot_balance(1, caller))
+                .unwrap_or(U256::ZERO),
+        );
+        assert_eq!(caller_balance, 4000);
     }
 
     #[test]
