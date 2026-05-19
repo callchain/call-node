@@ -196,7 +196,7 @@ impl AssetPrecompile {
                     .transfer(call.assetId, from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                let mut data = Vec::with_capacity(16);
+                let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
@@ -265,7 +265,7 @@ impl AssetPrecompile {
 
             // Emit Transfer event for each recipient BEFORE committing checkpoint
             for (to, amount) in &pairs {
-                let mut data = Vec::with_capacity(16);
+                let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&call_precompile::encode_u128(*amount));
                 emit_asset_event(
                     storage,
@@ -309,7 +309,7 @@ impl AssetPrecompile {
                     .approve(call.assetId, owner, call.spender, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                let mut data = Vec::with_capacity(16);
+                let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
@@ -351,7 +351,7 @@ impl AssetPrecompile {
                     .transfer_from(call.assetId, spender, call.from, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                let mut data = Vec::with_capacity(16);
+                let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
@@ -391,7 +391,7 @@ impl AssetPrecompile {
                     .mint(call.assetId, caller, call.to, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                let mut data = Vec::with_capacity(16);
+                let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
@@ -434,7 +434,7 @@ impl AssetPrecompile {
                     .burn(call.assetId, caller, call.from, call.amount)
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
 
-                let mut data = Vec::with_capacity(16);
+                let mut data = Vec::with_capacity(32);
                 data.extend_from_slice(&call_precompile::encode_u128(call.amount));
                 emit_asset_event(
                     storage,
