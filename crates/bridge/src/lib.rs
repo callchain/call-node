@@ -1,9 +1,8 @@
 //! Callchain Bridge Layer (per spec §5)
 //!
-//! - Internal bridge: deposit/withdraw between protocol balances and EVM
 //! - External bridge: cross-chain deposit/withdraw with validator signatures
+//!   and challenge-period finalization
 
-mod deposit;
 mod external;
 pub mod precompile;
 mod withdraw;
