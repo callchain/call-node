@@ -30,3 +30,7 @@ formal_verification/lean/.lake/
 
 # Historical R1CS exports (pre-Halo2 migration, no longer generated)
 r1cs/
+
+# Foundry build artifacts
+contracts/cache/
+contracts/out/
