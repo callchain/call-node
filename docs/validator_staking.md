@@ -1,6 +1,6 @@
 # Validator Staking & Unbonding Parameters
 
-> **Design Proposal** — This document describes intended parameters and mechanisms that are not yet fully implemented. Tier 2/3 parameters, churn limits, safety floors, dynamic unbonding, and two-phase exit are planned but not present in the current codebase.
+> **Partially Implemented** — Churn limits and safety floors are implemented. Basic dynamic unbonding period (governable via EVM storage) is implemented. Two-phase exit, queue-based churn, and congestion-proportional unbonding extension remain planned. See §4 status markers for details.
 >
 > This document defines the quantitative parameters for validator stake/unstake churn control, unbonding period, and validator-set stability in Callchain.
 >
@@ -98,16 +98,23 @@ These parameters are already part of `ConsensusParams` in `crates/consensus/src/
 
 **Lifecycle**: Loaded once at startup. Changes require a governance proposal that writes a new value into the database; nodes pick it up on next restart.
 
-### 3.2 Tier 2: Compile-Time Constants (Must Migrate)
+### 3.2 Tier 2: EVM Storage Governable (Partially Migrated)
 
-These are currently hard-coded `pub const` values. They should be moved into `ConsensusParams` so they can be configured per network and modified via governance without a code release.
+Some parameters have been moved out of hard-coded constants into EVM storage:
 
-| Parameter | Current Code Location | Target Location |
+| Parameter | Current Code Location | Storage |
 |---|---|---|
-| `MIN_SELF_STAKE` | `crates/consensus/src/validator.rs:12` | `ConsensusParams.min_self_stake` |
-| `UNBONDING_PERIOD_SECS` | `crates/consensus/src/validator.rs:15` | `ConsensusParams.unbonding_period_blocks` |
-| `OFFLINE_SLASH_RATE_PER_ROUND` | `crates/consensus/src/validator.rs:18` | `ConsensusParams.offline_slash_rate_bps` |
-| `KEY_ROTATION_GRACE_BLOCKS` | `crates/consensus/src/validator.rs:21` | `ConsensusParams.key_rotation_grace_blocks` |
+| `UNBONDING_PERIOD_BLOCKS` | `crates/validator/src/lib.rs` | EVM storage `slot_unbonding_period_blocks()` |
+| `SAFETY_FLOOR` | `crates/validator/src/lib.rs` | EVM storage `slot_safety_floor()` |
+
+Parameters still in `ConsensusParams` (genesis-configurable, not yet governable via EVM storage):
+
+| Parameter | Code Location |
+|---|---|
+| `MIN_SELF_STAKE` | `ConsensusParams.min_self_stake` |
+| `OFFLINE_SLASH_RATE_BPS` | `ConsensusParams.offline_slash_rate_bps` |
+| `CHURN_LIMIT_QUOTIENT` | `ConsensusParams.churn_limit_quotient` |
+| `MIN_CHURN_LIMIT` | `ConsensusParams.min_churn_limit` |
 
 **Migration plan**:
 1. Add fields to `ConsensusParams` in `proposer.rs`.
@@ -176,12 +183,11 @@ These parameters are defined in this document but do not yet exist in code. They
 
 ## 4. Core Mechanisms
 
-### 4.1 Churn Limit
+### 4.1 Churn Limit ✅ Implemented
 
 **Purpose**: Prevent sudden mass exits from depleting the validator pool faster than the protocol can absorb.
 
 **Rule**: Each epoch, at most `churn_limit` validators may **enter** (stake) and `churn_limit` may **exit** (unstake).
-Requests beyond the limit are placed in a FIFO queue and processed in subsequent epochs.
 
 ```rust
 pub fn churn_limit(qualified_count: u64, params: &ConsensusParams) -> u64 {
@@ -189,15 +195,13 @@ pub fn churn_limit(qualified_count: u64, params: &ConsensusParams) -> u64 {
 }
 ```
 
-**Transaction Response**:
-- If within limit: tx is executed, validator enters/exits immediately.
-- If queue is full: tx returns `status: "queued"` with `queue_position: N`. The tx hash is reserved; inclusion is guaranteed once the queue advances.
+**Implementation**: `SimplexConsensus::process_epoch_churn()` in `crates/consensus/src/simplex.rs` caps auto-exits per epoch at `churn_limit`. Tests verify behavior at various validator counts.
 
-**Queue Persistence**: The stake/exit queues are part of validator state and are persisted to disk alongside block execution results. They are restored on node restart from `state_persist.rs`.
+**Not yet implemented**: FIFO stake/exit queues (`stake_queue`, `exit_queue`) and queue-position responses. Validators exit immediately if within the churn limit.
 
 ---
 
-### 4.2 Safety Floor
+### 4.2 Safety Floor ✅ Implemented
 
 **Purpose**: Guarantee that even under extreme churn, enough qualified validators remain to form a consensus subset.
 
@@ -217,6 +221,8 @@ safety_floor = ceil(SUBSET_SIZE * SAFETY_RATIO)
 }
 ```
 
+**Implementation**: `ValidatorStorage::unstake()` in `crates/validator/src/lib.rs` reads `slot_safety_floor()` from EVM storage and rejects with `ValidatorError::BelowSafetyFloor` if `active_count - 1 < floor`. Default is 0 (disabled) when unset; production nodes initialize via genesis or governance. Tests cover below-floor rejection, above-floor allowance, and default fallback.
+
 **Rationale**: With 21 validators in the active subset, a floor of 28 guarantees at least 7 spare validators.
 This provides a buffer for:
 - One full subset rotation (all 21 replaced)
@@ -225,11 +231,13 @@ This provides a buffer for:
 
 ---
 
-### 4.3 Dynamic Unbonding Period
+### 4.3 Dynamic Unbonding Period ⚠️ Partially Implemented
 
 **Purpose**: Discourage coordinated mass exits by making the lock-up duration proportional to exit-queue congestion.
 
-**Rule**:
+**Implemented**: The base unbonding period is now governable via EVM storage. `ValidatorStorage::claim_unbonded()` reads `slot_unbonding_period_blocks()` from EVM storage, defaulting to 120,960 blocks when unset. This replaces the previous hardcoded constant.
+
+**Not yet implemented**: Queue-length-based extension. The formula below defines the target behavior but is not wired:
 
 ```rust
 fn dynamic_unbonding_period(base: u64, queue_len: u64, churn_limit: u64, params: &ConsensusParams) -> u64 {
@@ -254,12 +262,12 @@ This makes flash-loan-based validator exodus economically unattractive.
 
 ---
 
-### 4.4 Two-Phase Exit
+### 4.4 Two-Phase Exit ⏳ Not Implemented
 
-**Current behavior**: `ValidatorUnstake` immediately removes the validator from `get_active_validators()`,
+**Current behavior**: `ValidatorUnstake` immediately removes the validator from the active set,
 meaning the validator stops participating in consensus the moment unstake is accepted.
 
-**Target behavior**:
+**Target behavior** (not yet implemented):
 
 #### Phase 1: Epoch Grace (Current Epoch)
 - `unstake` tx is accepted; `unbonding_start` is set.

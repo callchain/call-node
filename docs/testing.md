@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Callchain test suite spans unit tests (per-crate), integration tests (cross-crate protocol flows), and end-to-end tests (full node lifecycle, multi-node networks). Total test count: **~856 `#[test]` / `#[tokio::test]` annotations across ~92 files**.
+The Callchain test suite spans unit tests (per-crate), integration tests (cross-crate protocol flows), and end-to-end tests (full node lifecycle, multi-node networks). Total test count: **~1,177 `#[test]` / `#[tokio::test]` annotations across ~100 files**.
 
 **Test philosophy:**
 - Unit tests for individual components (consensus, protocol, crypto, storage, etc.)

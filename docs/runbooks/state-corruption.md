@@ -26,12 +26,12 @@
    $ mdbx_chk $DATA_DIR/mdbx/
 
 2. Check for pending checkpoint (incomplete write)
-   $ ./scripts/check_checkpoint.sh $DATA_DIR/mdbx
+   $ ls $DATA_DIR/mdbx/call_checkpoint/  # non-empty indicates unclean shutdown
 
 3. Check last persisted block height vs consensus state
    $ curl -s http://localhost:8545 -X POST \
      -d '{"jsonrpc":"2.0","method":"call_getBlockHeight","params":[],"id":1}'
-   $ ./scripts/check_consistency.sh
+   # Compare against trusted peer; automated consistency scripts are not yet available
 
 4. Compare state root with trusted peer
    $ curl -s http://TRUSTED_PEER:8545 -X POST \
@@ -154,6 +154,6 @@ curl -s http://localhost:8545 -X POST \
 | Tool | Path | Purpose |
 |---|---|---|
 | `mdbx_chk` | System package `libmdbx-utils` | Low-level DB integrity check |
-| `check_checkpoint.sh` | `scripts/check_checkpoint.sh` | Check for incomplete writes |
-| `check_consistency.sh` | `scripts/check_consistency.sh` | Cross-table consistency check |
-| `snapshot_restore.sh` | `scripts/snapshot_restore.sh` | Automated snapshot restore |
+| `ls $DATA_DIR/mdbx/call_checkpoint/` | Manual | Check for incomplete writes (unclean shutdown marker) |
+| Peer RPC comparison | Manual | Cross-compare `call_getBlockHeight` and state roots across nodes |
+| `--restore-snapshot` flag | `calld` CLI | Automated snapshot restore on node startup |

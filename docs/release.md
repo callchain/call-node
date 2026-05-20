@@ -237,7 +237,7 @@ Before mainnet deployment, the codebase must undergo a comprehensive security au
 **Audit scope** (priority order):
 
 1. **Protocol layer** — precompile execution balance calculations, fee logic, allowance enforcement, batch transfer correctness
-2. **Bridge security** — Signature threshold enforcement (`min_validator_signatures`), challenge period logic, deposit finalization, `revoke_pending_external_deposit`
+2. **Bridge security** — Signature threshold enforcement (`min_validator_signatures`), challenge period logic, deposit finalization, challenge bond withdrawal
 3. **ZK circuits** — Halo2 circuit constraints, universal parameters, nullifier uniqueness, note commitment soundness
 4. **Governance** — Proposal lifecycle, voting power calculation, timelock enforcement, emergency pause/resume safety
 5. **Consensus** — Block execution ordering, state root computation, slashing conditions, fork choice rules

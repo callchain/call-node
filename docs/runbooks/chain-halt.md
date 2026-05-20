@@ -64,10 +64,7 @@
 
 **Fix**:
 1. Stop the node: `kill -TERM $(pgrep -f calld)`
-2. Clear block cache (invalid block stuck in memory):
-   ```bash
-   rm -rf $DATA_DIR/block_cache/*
-   ```
+2. Block cache is in-memory; it is cleared automatically on process restart. No manual cleanup needed.
 3. Check for pending checkpoint marker:
    ```bash
    # If call_checkpoint table has entries, previous shutdown was unclean
@@ -81,13 +78,9 @@
 **Diagnosis**: Logs show "epoch rotation failed" or "validator set mismatch"
 
 **Fix**:
-1. Restart BFT engine via RPC (if node supports hot restart):
-   ```bash
-   curl -s http://localhost:8545 -X POST \
-     -d '{"jsonrpc":"2.0","method":"call_restartBftEngine","params":[],"id":1}'
-   ```
-2. If hot restart unavailable, restart node process
-3. On restart, the node loads persisted consensus state from MDBX and continues from last committed height
+1. Restart the node process: `kill -TERM $(pgrep -f calld)` then `calld --config /etc/callchain/config.toml`
+2. On restart, the node loads persisted consensus state from MDBX and continues from last committed height
+3. If the issue persists, check for corrupt validator set state in MDBX and consider state sync from a trusted peer
 
 ### Cause D: Network Partition
 

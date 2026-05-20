@@ -66,46 +66,32 @@ of the full governance → node → proof lifecycle.
 
 ## Shielded Circuit Formal Verification
 
-**Status:** ~~Deferred~~ **In Progress — Core Theorems Complete** (2026-05-10)
+**Status:** **Deferred — Lean artifacts deleted during Halo2 migration** (2026-05-15)
 
-**Completed:**
+**History:**
 
-1. **Lean 4 theorem prover integration** (`formal_verification/lean/`)
-   - Mathlib4 (`ZMod BN254_P`) integrated for field arithmetic
-   - `Fr.lean`: Custom field structure eliminated; only 1 mathematical axiom remains (`Nat.Prime BN254_P`)
-   - All 6 previous axioms proven from `Field` instance
-
-2. **Circuit formalization + proofs** (zero `sorry`, `lake build` passes)
-   - `DepositCircuit.lean`: Completeness and soundness theorems proven
-   - `TransferCircuit.lean`: Completeness and soundness theorems proven (N=2, M=2)
-   - `WithdrawCircuit.lean`: Completeness and soundness theorems proven
-
-3. **Lean ↔ Rust R1CS correspondence (Gap 1)** — Historical
-   - The Lean models formalized the Groth16/R1CS implementation (pre-migration)
-   - `export_r1cs.rs` and `verify_r1cs.rs` binaries were deleted during Halo2 migration
-   - `R1CSCorrespondence.lean` documents the historical refinement relationship
-   - **Formal verification for Halo2 PLONKish circuits is future work**
-
-4. **Implementation alignment** (pre-migration)
-   - Transfer circuit export was N=1,M=1 → **N=2,M=2** (matching Lean model)
-   - Withdraw circuit included `spending_key` witness + spending-rights constraint (matching Lean)
+A Lean 4 formalization of the Groth16/R1CS shielded circuits was previously developed in `formal_verification/lean/`:
+- Mathlib4 (`ZMod BN254_P`) integrated for field arithmetic
+- `DepositCircuit.lean`, `TransferCircuit.lean`, `WithdrawCircuit.lean`: completeness and soundness theorems stated
+- `docs/formal_verification/spec.md`: mathematical specification of BN254 Fr, Poseidon hash, R1CS satisfaction
 
 **Post-migration status:**
 
-The Lean 4 formalization modeled the Groth16/R1CS implementation. After migrating to Halo2:
-- The R1CS structural correspondence tools no longer exist
-- New formal verification for Halo2 circuits (PLONKish arithmetization) is **future work**
-- The existing Lean proofs remain as a mathematical model of the historical implementation
+The Lean 4 formalization modeled the pre-Halo2 Groth16/R1CS implementation. During the Halo2 migration:
+- `formal_verification/lean/` was deleted (no longer applicable to PLONKish arithmetization)
+- `docs/formal_verification/spec.md` was deleted (R1CS-specific, no longer relevant)
+- The R1CS structural correspondence tools (`export_r1cs.rs`, `verify_r1cs.rs`) were removed
+
+New formal verification for Halo2 circuits (PLONKish arithmetization, custom gates, permutation arguments) is **future work** and would require a ground-up effort.
 
 | Gap | Status | Description |
 |-----|--------|-------------|
-| 1. Lean ↔ Rust correspondence (R1CS) | ✅ Complete (historical) | Modeled the Groth16 implementation; no longer applicable |
+| 1. Lean ↔ Rust correspondence (R1CS) | ❌ Deleted | Historical Groth16 formalization; artifacts removed |
 | 2. Halo2 circuit formalization | ⏳ Future work | PLONKish constraints, custom gates, permutation arguments |
 | 3. Range check full expansion | ✅ Closed | Halo2 uses `halo2_gadgets` range check (production-proven in Orchard) |
 
 **When to revisit:**
-- Close Gap 3: Prove in Lean that the expanded boolean/packing constraints are equivalent to `value < 2^128`
-- Third-party audit should review the completeness/soundness proofs and structural correspondence claims
+- Third-party audit should review Halo2 circuit constraints directly (no theorem-prover proofs currently exist)
 
 ---
 

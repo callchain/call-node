@@ -70,9 +70,9 @@ All protocol operations are exposed through EVM precompiles (`crates/precompile/
 | `0x202` | `deposit` / `withdraw` | 50,000 | ZK proof + nullifier |
 | `0x202` | `transfer` | 100,000 | ZK proof |
 | `0x101` | `submitPrice` | 3,000 | Registered validator |
-| `0x103` | `externalBridgeDeposit` | 10,000 | Validator signatures |
-| `0x103` | `externalBridgeWithdraw` | 8,000 | Sender balance |
-| `0x103` | `challengeBridgeDeposit` | 6,000 | Anyone |
+| `0x103` | `externalDeposit` | 10,000 | Validator signatures |
+| `0x103` | `externalWithdraw` | 8,000 | Sender balance |
+| `0x103` | `initiateChallenge` | 6,000 | Anyone |
 | `0x205` | `updateCompliance` | 6,000 | Asset issuer only |
 | `0x209` | `register` / `grant` / `revoke` | 6,000 | Sender / owner |
 | `0x203` | `submitProposal` / `vote` / `queue` / `execute` | 10,000–20,000 | CALL balance / validator |

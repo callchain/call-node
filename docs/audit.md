@@ -183,22 +183,16 @@ cargo kani --crate call-protocol
 
 Run: `cargo kani --crate call-protocol`
 
-### Theorem-Prover Formal Verification (Shielded Circuits) 🔄 In Progress
+### Theorem-Prover Formal Verification (Shielded Circuits) ❌ Deleted
 
-Beyond Kani (which verifies Rust-level properties), we are pursuing **theorem-prover level proofs of completeness and soundness** for the shielded ZK circuits using **Lean 4**.
+A previous Lean 4 formalization of the Groth16/R1CS shielded circuits existed in `formal_verification/lean/`, with a mathematical spec at `docs/formal_verification/spec.md`. Both were **deleted during the Halo2 migration** (commit `65035f0`) because they modeled the pre-migration R1CS arithmetization and are no longer applicable to the current PLONKish Halo2 circuits.
 
-**Why Lean 4**: General-purpose theorem prover with strong finite field support (`mathlib4`), used by Ethereum Foundation and other blockchain projects. The circuits are written in arkworks R1CS (not Circom), so off-the-shelf tools like Picus/Ecne do not apply.
+**Current status**:
+- No theorem-prover formalization exists for the current Halo2 circuits
+- Halo2 circuits are verified via constraint-level tests (132 tests with `real-prover` feature) and the Halo2 proving system's own soundness guarantees
+- Third-party audit should review circuit constraints directly
 
-**Status**:
-- ✅ Mathematical specification: `docs/formal_verification/spec.md` defines BN254 Fr, Poseidon hash, R1CS satisfaction, and validity predicates for all 3 circuits
-- ✅ Lean 4 core infrastructure: `formal_verification/lean/` with field definition, R1CS model, Poseidon hash skeleton
-- ✅ DepositCircuit theorems stated: completeness and soundness theorems in `DepositCircuit.lean`
-- 🔄 Proofs incomplete: require Poseidon constant extraction from `poseidon-ark-no-std` and tactic completion
-- ⏳ TransferCircuit + WithdrawCircuit: deferred to Phase 5
-
-**Timeline**: ~4 weeks for DepositCircuit completeness + soundness proofs; ~12 weeks for all 3 circuits.
-
-**Verification**: `lake build` and `lake test` in `formal_verification/lean/` (CI: `.github/workflows/formal-verification.yml`).
+**Future work**: Ground-up formal verification of Halo2 PLONKish constraints, custom gates, and permutation arguments would require a new effort distinct from the deleted Lean work.
 
 ---
 

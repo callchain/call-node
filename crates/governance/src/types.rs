@@ -47,7 +47,7 @@ pub enum ProposalType {
         validator_id: ValidatorId,
         old_pubkey: [u8; 32],
         new_pubkey: [u8; 32],
-        /// secp256k1 signature from old key: sign(hash(old_pubkey || new_pubkey))
+        /// ed25519 signature from old key: sign(hash(old_pubkey || new_pubkey))
         signature: Vec<u8>,
     },
     /// Rotate shielded prover keys (per spec §3.8.5)

@@ -29,7 +29,7 @@ All protocol-layer functionality is exposed through EVM precompiles at fixed add
 | Address | Name | Functions |
 |---------|------|-----------|
 | `0x101` | **Oracle** | `getPrice`, `getTWAP`, `isStale`, `submitPrice`, `setTrackedAssets` |
-| `0x103` | **Bridge** | `getTotalDeposits`, `getTotalWithdrawals`, `externalBridgeDeposit`, `externalBridgeWithdraw`, `challengeBridgeDeposit` |
+| `0x103` | **Bridge** | `getTotalDeposits`, `getTotalWithdrawals`, `externalDeposit`, `externalWithdraw`, `initiateChallenge`, `resolveChallenge`, `getChallengeStatus`, `withdrawChallengeBond` |
 | `0x201` | **Asset** | `getBalance`, `getAssetInfo`, `transfer`, `batchTransfer`, `approve`, `transferFrom`, `register`, `mint`, `burn` |
 | `0x202` | **Shielded** | `deposit`, `withdraw`, `transfer` |
 | `0x203` | **Governance** | `submitProposal`, `vote`, `queue`, `execute`, `emergencyPause`, `emergencyResume`, `getProposalStatus`, `getProposalVotes`, `isPaused`, `getProposalCount` |
@@ -445,36 +445,37 @@ interface IProtocolBridge {
         external view returns (uint256);
 
     // ── External cross-chain ──
-    function externalBridgeDeposit(
+    function externalDeposit(
+        uint64 sourceChain,
+        address sourceContract,
         bytes32 sourceTxHash,
-        uint8 sourceChain,
-        uint64 sourceBlockNumber,
-        bytes calldata externalSender,
-        address recipient,
         uint64 assetId,
-        uint128 amount,
-        bytes calldata validatorSignatures
+        address recipient,
+        uint128 amount
     ) external;
 
-    function externalBridgeWithdraw(
-        uint8 targetChain,
+    function externalWithdraw(
+        uint64 targetChain,
         bytes calldata targetAddress,
         uint64 assetId,
         uint128 amount
     ) external;
 
-    function challengeBridgeDeposit(
-        bytes32 sourceTxHash,
-        bytes calldata proof
-    ) external;
+    function initiateChallenge(bytes32 sourceTxHash, bytes calldata proof) external;
+    function resolveChallenge(bytes32 sourceTxHash) external;
+    function getChallengeStatus(bytes32 sourceTxHash) external view returns (uint64 status, uint64 deadline, uint128 bond, address challenger);
+    function withdrawChallengeBond(bytes32 sourceTxHash) external;
 }
 ```
 
 ### Behavior
 
-- `externalBridgeDeposit`: Checks compliance on recipient. Verifies validator signatures, queues deposit in challenge period, then mints on Callchain.
-- `externalBridgeWithdraw`: Checks compliance on caller. Burns Callchain assets, queues withdrawal for validator attestation.
-- `challengeBridgeDeposit`: Checks compliance on challenger. Anyone can challenge a fraudulent deposit during the challenge period.
+- `externalDeposit`: Checks compliance on recipient. Verifies validator signatures, queues deposit in challenge period, then mints on Callchain.
+- `externalWithdraw`: Checks compliance on caller. Burns Callchain assets, queues withdrawal for validator attestation.
+- `initiateChallenge`: Checks compliance on challenger. Anyone can challenge a fraudulent deposit during the challenge period by providing a proof.
+- `resolveChallenge`: Resolves an initiated challenge after the challenge period expires.
+- `getChallengeStatus`: View function returning challenge state for a given source tx hash.
+- `withdrawChallengeBond`: Allows the challenger to withdraw their bond after the challenge is resolved.
 
 ---
 
@@ -565,9 +566,11 @@ Gas is computed at two layers:
 | `emergencyResume` | 20,000 | + pause sstore |
 | `getTotalDeposits` | 800 | + sload |
 | `getTotalWithdrawals` | 800 | + sload |
-| `externalBridgeDeposit` | 10,000 | + signature verification |
-| `externalBridgeWithdraw` | 8,000 | + burn + queue |
-| `challengeBridgeDeposit` | 6,000 | + challenge sstore |
+| `externalDeposit` | 10,000 | + signature verification |
+| `externalWithdraw` | 8,000 | + burn + queue |
+| `initiateChallenge` | 6,000 | + challenge sstore |
+| `resolveChallenge` | 8,000 | + metadata cleanup |
+| `withdrawChallengeBond` | 6,000 | + bond transfer |
 | `updateCompliance` | 6,000 | + sstore |
 | `checkCompliance` | 1,000 | + sload |
 

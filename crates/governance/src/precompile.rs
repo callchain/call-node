@@ -1082,7 +1082,7 @@ impl<B: StorageBackend> GovernanceStorage<B> {
                     ));
                 }
 
-                // TODO: secp256k1 signature verification pending (#48)
+                // TODO: ed25519 signature verification pending (#48)
 
                 self.backend.store(
                     GOVERNANCE_ADDRESS,

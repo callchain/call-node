@@ -105,8 +105,8 @@ Any non-zero status is treated as restricted. Specific values (1, 2, 3...) may b
 | Agent (`0x209`) | `pay` | `to` |
 | Agent (`0x209`) | `batchPay` | all `to` addresses |
 | Agent (`0x209`) | `executeSessionTransfer` | `to` |
-| Bridge (`0x103`) | `externalBridgeDeposit` | `recipient` |
-| Bridge (`0x103`) | `externalBridgeWithdraw` | `caller` |
+| Bridge (`0x103`) | `externalDeposit` | `recipient` |
+| Bridge (`0x103`) | `externalWithdraw` | `caller` |
 | Bridge (`0x103`) | `deposit` (internal) | `targetAddress` |
 | Bridge (`0x103`) | `initiateChallenge` | `challenger` |
 | Bridge (`0x103`) | `withdrawChallengeBond` | `caller` |

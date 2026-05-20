@@ -138,8 +138,8 @@ All precompiles use **dynamic gas metering**: `gas_used = base_gas + sloads * 50
 | `execute` | `0x203` | `execute(uint64)` | 30,000 |
 | `emergencyPause` | `0x203` | `emergencyPause(string)` | 20,000 |
 | `emergencyResume` | `0x203` | `emergencyResume()` | 20,000 |
-| `externalBridgeDeposit` | `0x103` | `externalBridgeDeposit(bytes32,uint64,...)` | 10,000 |
-| `externalBridgeWithdraw` | `0x103` | `externalBridgeWithdraw(uint64,address,...)` | 8,000 |
+| `externalDeposit` | `0x103` | `externalDeposit(uint64,address,bytes32,uint64,address,uint128)` | 10,000 |
+| `externalWithdraw` | `0x103` | `externalWithdraw(uint64,bytes,uint64,uint128)` | 8,000 |
 | `switchToEvm` | `0x207` | `switchToEvm(uint64,address,uint128)` | 8,000 |
 | `switchToProtocol` | `0x207` | `switchToProtocol(uint64,address,uint128)` | 8,000 |
 | `stake` | `0x204` | `stake(bytes,uint128)` | 20,000 |

@@ -20,7 +20,7 @@ All user transactions are standard EVM transactions (`EvmTransaction`). Protocol
 │  approve / transferFrom ──────────────┤  → precompile_fn()     │
 │  mint / burn ─────────────────────────┤  → atomic rollback     │
 │  deposit / withdraw / transfer ┤                    │
-│  externalBridgeDeposit / Withdraw ────┤                    │
+│  externalDeposit / externalWithdraw ──┤                    │
 │  submitPrice ─────────────────────────┤                    │
 │  register / grant / revoke ───────────┤                    │
 │  updateCompliance ────────────────────┘                    │
@@ -48,7 +48,7 @@ All protocol operations are exposed as EVM precompile functions at fixed address
 | `0x201` | `mint` | Create new tokens | Asset issuer only |
 | `0x201` | `burn` | Destroy tokens | Asset issuer only |
 | `0x209` | `register` / `grant` / `revoke` | Agent management | Sender / owner |
-| `0x103` | `externalBridgeDeposit` / `externalBridgeWithdraw` | Cross-chain bridge | Bridge proof / validator sigs |
+| `0x103` | `externalDeposit` / `externalWithdraw` / `initiateChallenge` / `resolveChallenge` / `withdrawChallengeBond` | Cross-chain bridge | Bridge proof / validator sigs |
 | `0x202` | `deposit` / `withdraw` / `transfer` | Shielded pool ops | ZK proof + nullifier |
 | `0x205` | `updateCompliance` | Set address compliance | Asset issuer only |
 | `0x101` | `submitPrice` | Price feed submission | Registered validator |

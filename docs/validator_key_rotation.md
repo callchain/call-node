@@ -19,11 +19,11 @@
 
 ## 1. Overview
 
-`ValidatorKeyRotation` (proposal type 9) allows an on-chain governance proposal to change a validator's **secp256k1 consensus public key** without unstaking and restaking. This is critical for key compromise recovery and routine key rotation.
+`ValidatorKeyRotation` (proposal type 9) allows an on-chain governance proposal to change a validator's **ed25519 consensus public key** without unstaking and restaking. This is critical for key compromise recovery and routine key rotation.
 
 The rotation is **governed**: it must pass voting, timelock, and execution before taking effect.
 
-**Caveat**: Only the secp256k1 consensus key is rotated. The BLS12-381 aggregated vote key is generated at node startup and is **not** covered by this mechanism.
+**Caveat**: Only the ed25519 consensus key is rotated. The BLS12-381 aggregated vote key is generated at node startup and is **not** covered by this mechanism.
 
 ---
 
@@ -31,8 +31,8 @@ The rotation is **governed**: it must pass voting, timelock, and execution befor
 
 | Key | Purpose | Rotation Mechanism |
 |---|---|---|
-| **secp256k1** | Validator identity, block signing, governance voting | `ValidatorKeyRotation` proposal (type 9) |
-| **ed25519** | BFT consensus P2P identity | Independent; configured via `identity_key` |
+| **ed25519** | Validator identity, block signing, governance voting | `ValidatorKeyRotation` proposal (type 9) |
+| **secp256k1** | EVM transaction signing | Independent; derived from validator's EVM address |
 | **BLS12-381** | Aggregated vote signatures | Generated at boot; no on-chain rotation |
 
 ---
@@ -106,9 +106,10 @@ The `execution_data` field of the governance proposal must be ABI-encoded as fol
 |---|---|---|
 | `0..24` | padding | Zero-padded to align with ABI dynamic types |
 | `24..32` | `uint64` | `validator_id` (big-endian) |
-| `32..64` | `bytes32` | New secp256k1 public key (64-byte uncompressed X||Y truncated or full 32-byte commitment) |
+| `32..64` | `bytes32` | Old ed25519 public key (32 bytes) |
+| `64..96` | `bytes32` | New ed25519 public key (32 bytes) |
 
-> **Note**: The current implementation uses a 64-byte `execution_data` buffer and reads `validator_id` at offset 24 and the new pubkey at offset 32.
+> **Note**: The current implementation uses a 96-byte `execution_data` buffer and reads `validator_id` at offset 24, the old pubkey at offset 32, and the new pubkey at offset 64.
 
 ---
 
@@ -159,11 +160,13 @@ Example execution data construction (Rust pseudo-code):
 
 ```rust
 let validator_id: u64 = 7;
-let new_pubkey: [u8; 32] = /* new secp256k1 pubkey commitment */;
+let old_pubkey: [u8; 32] = /* current ed25519 pubkey */;
+let new_pubkey: [u8; 32] = /* new ed25519 pubkey */;
 
-let mut exec_data = vec![0u8; 64];
+let mut exec_data = vec![0u8; 96];
 exec_data[24..32].copy_from_slice(&validator_id.to_be_bytes());
-exec_data[32..64].copy_from_slice(&new_pubkey);
+exec_data[32..64].copy_from_slice(&old_pubkey);
+exec_data[64..96].copy_from_slice(&new_pubkey);
 ```
 
 ### Node Operator Checklist
