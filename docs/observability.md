@@ -168,7 +168,7 @@ Returns HTTP 200 `{"status": "healthy", "checks": {...}}` or HTTP 503 `{"status"
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Prometheus metrics endpoint | Ready | Atomic counters wired to hot path, histogram summaries, label support |
-| OpenTelemetry tracing | Partial | Initialized on boot, but span functions not called in production paths |
+| OpenTelemetry tracing | Ready | Span functions wired into block producer, BFT loop, and network handler hot paths |
 | Structured logging | Ready | JSON/text formats, rotation, retention — fully wired into boot via `FileLogLayer` |
 | Audit log | Ready | Append-only writes on every block commit (solo + BFT), Merkle proofs, file persistence |
 | Compliance CSV export | Ready | `call_exportComplianceReport` RPC endpoint wired via callback in `RpcState` |
@@ -184,11 +184,8 @@ These are documented for future implementation. None are blocking production dep
 
 | # | Feature | Severity | Details |
 |---|---------|----------|---------|
-| 4 | **OTel span functions called in production paths** | Medium | `record_block_span()`, `record_tx_span()`, `record_p2p_span()` are defined and tested but not called in hot paths. Atomic counters already cover metrics; OTel spans would add distributed tracing context. |
-| 5 | **OTel provider shutdown/flush** | Low | `GLOBAL_PROVIDER` is `OnceLock<TracerProvider>` with no shutdown method. Buffered spans may be lost on exit. |
-| 8 | **Proper timestamp formatting** | Low | `format_timestamp()` uses naive `days / 365` for year calculation — no leap year handling. Adding `chrono` or `jiff` as a dependency would fix this. |
-| 18 | **Grafana dashboards** | Low | No pre-built JSON dashboard files for Grafana import. |
-| 20 | **Structured error codes** | Low | Errors are string messages. No machine-readable error codes for alerting or automated response. |
+| 1 | **OTel provider shutdown/flush** | Low | `GLOBAL_PROVIDER` is `OnceLock<TracerProvider>` with no shutdown method. Buffered spans may be lost on exit. |
+| 2 | **Proper timestamp formatting** | Low | `format_timestamp()` uses naive `days / 365` for year calculation — no leap year handling. Adding `chrono` or `jiff` as a dependency would fix this. |
 
 ---
 
@@ -196,4 +193,4 @@ These are documented for future implementation. None are blocking production dep
 
 - `cargo test -p call-node` (telemetry) — covers Prometheus output format, metric recording, alert evaluation (including time-based consensus stall detection), HTTP server, health endpoint with subsystem checks, content type, custom metric registration, storage prune metrics, uptime, OTel span recording side-effects
 - `cargo test -p call-node` (logging) — covers structured log JSON/text, audit log append-only, Merkle root determinism, file roundtrip, compliance export with dynamic timestamps and asset symbols, log rotation, config defaults, shielded audit info, CSV generation
-- Missing: OTel collector integration tests (external dependency), alert webhook/Slack dispatch tests, Grafana dashboard validation tests, real timestamp accuracy tests
+- Missing: OTel collector integration tests (external dependency), alert webhook/Slack dispatch tests, real timestamp accuracy tests
