@@ -40,7 +40,7 @@ New to Callchain? Start here:
 | [`precompile.md`](precompile.md) | All EVM precompiles (`0x101`–`0x209`) |
 | [`switch.md`](switch.md) | Internal bridge (escrow vs mint-burn per asset) |
 
-## Assets & Issuance
+### Assets & Issuance
 
 | Document | Description |
 |----------|-------------|
