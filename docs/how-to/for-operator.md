@@ -26,6 +26,8 @@ sudo chmod +x /usr/local/bin/calld
 
 ### Docker
 
+#### Pull Pre-built Image
+
 ```bash
 docker pull ghcr.io/callchain/callchaind:v0.1.0-testnet
 
@@ -51,6 +53,32 @@ docker run -d \
   -p 51235:51235 \
   -p 9090:9090 \
   ghcr.io/callchain/callchaind:v0.1.0-testnet \
+  --config /config/config.toml
+```
+
+#### Build Custom Image
+
+```bash
+# Clone repo
+git clone https://github.com/callchain/call-node.git
+cd call-node
+
+# Build with custom features (e.g., light-client-bridge)
+cargo build --release --features light-client-bridge
+
+# Build Docker image
+docker build -t callchaind:custom .
+
+# Run custom image
+docker run -d \
+  --name callchain-custom \
+  -v /etc/callchain:/config \
+  -v /var/lib/callchain:/data \
+  -p 8545:8545 \
+  -p 8546:8546 \
+  -p 51235:51235 \
+  -p 9090:9090 \
+  callchaind:custom \
   --config /config/config.toml
 ```
 
@@ -242,12 +270,58 @@ sudo systemctl start callchaind
 
 Scrape `http://<node>:9090/metrics`:
 
-| Metric | Alert Condition |
-|--------|----------------|
-| `consensus_blocks_produced` | Flat for > 60s = consensus stall |
-| `p2p_peers` | < min_healthy_peers = network issue |
-| `mempool_tx_count` | > 10,000 = production bottleneck |
-| `block_latency_ms` | p99 > 500ms = performance issue |
+| Metric | Alert Condition | Threshold |
+|--------|----------------|-----------|
+| `consensus_blocks_produced` | Flat for > 60s | Consensus stall |
+| `p2p_peers` | < 3 peers for > 5min | Network partition |
+| `mempool_tx_count` | > 10,000 | Production bottleneck |
+| `block_latency_ms` | p99 > 500ms | Performance degradation |
+| `node_uptime_seconds` | Reset unexpectedly | Node restart / crash |
+
+### Alerting (Webhook/Slack)
+
+The node includes a built-in alert dispatcher. Configure in your monitoring stack:
+
+**Prometheus Alertmanager rule example:**
+
+```yaml
+groups:
+  - name: callchain
+    rules:
+      - alert: ConsensusStall
+        expr: rate(consensus_blocks_produced[5m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consensus stalled on {{ $labels.instance }}"
+
+      - alert: LowPeerCount
+        expr: p2p_peers < 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low peer count on {{ $labels.instance }}"
+
+      - alert: HighBlockLatency
+        expr: histogram_quantile(0.99, rate(block_latency_ms_bucket[5m])) > 500
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High block latency on {{ $labels.instance }}"
+```
+
+**Webhook receiver (custom HTTP endpoint):**
+
+```yaml
+receivers:
+  - name: 'callchain-webhook'
+    webhook_configs:
+      - url: 'https://alerts.your-ops.com/webhook/callchain'
+        send_resolved: true
+```
 
 ### Health Check
 

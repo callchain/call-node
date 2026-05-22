@@ -4,6 +4,49 @@ The Callchain Bridge (`0x103`) enables cross-chain asset transfers between Callc
 
 ---
 
+## End-to-End Bridge Flow
+
+```
+User locks assets on Ethereum Bridge Contract
+              |
+              v
+    BridgeDeposit event emitted
+              |
+    +---------+---------+
+    |                   |
+Path A              Path B
+(Validator          (Light Client
+Multi-Sig)          MPT Proof)
+    |                   |
+    v                   v
+Validator signs      User submits
+event hash           header + proofs
+    |                   |
+    v                   v
+Aggregator collects  Light client verifies
+14+ signatures       inclusion
+    |                   |
+    +---------+---------+
+              |
+              v
+    externalDeposit() on Callchain
+              |
+              v
+    Balance credited (optimistic)
+              |
+              v
+    Challenge period (~14 days)
+              |
+    +---------+---------+
+    |                   |
+No challenge        Challenge initiated
+    |                   |
+    v                   v
+Auto-finalized    resolveChallenge()
+                  fraud proven → rollback
+                  fraud not proven → bond forfeit
+```
+
 ## Deposit Paths
 
 ### Path A: Validator Multi-Sig (Default)
@@ -75,9 +118,82 @@ curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
 
 ---
 
+## Deposit Status Query
+
+After a deposit is submitted, query its status via the bridge precompile view function:
+
+```bash
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "eth_call",
+    "params": [{
+      "to": "0x0000000000000000000000000000000000000103",
+      "data": "0x...getChallengeStatus(0x<sourceTxHash>)..."
+    }, "latest"],
+    "id": 1
+  }'
+```
+
+**Response fields:**
+
+| Field | Meaning |
+|-------|---------|
+| `status` | `0` = none, `1` = pending, `2` = successful, `3` = failed, `4` = withdrawn |
+| `deadline` | Block height when challenge period ends |
+| `bond` | Challenger bond amount (if challenged) |
+| `challenger` | Address that initiated the challenge (if any) |
+
+**Other view functions:**
+
+```bash
+# Total deposits processed
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000103","data":"0x...getTotalDeposits()..."},"latest"],"id":1}'
+
+# Total withdrawals processed
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000103","data":"0x...getTotalWithdrawals()..."},"latest"],"id":1}'
+```
+
 ## Withdrawals
 
-**Call `externalWithdraw` on Callchain (precompile `0x103`):**
+### Callchain → Ethereum
+
+**Step 1: Call `externalWithdraw` on Callchain (precompile `0x103`):**
+
+```bash
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "eth_sendTransaction",
+    "params": [{
+      "to": "0x0000000000000000000000000000000000000103",
+      "data": "0x...externalWithdraw ABI encoding..."
+    }],
+    "id": 1
+  }'
+```
+
+Flow on Callchain:
+1. Protocol balance burned
+2. `ExternalWithdraw` event emitted with `(targetChain, targetAddress, assetId, amount)`
+
+**Step 2: Validators observe and release on Ethereum**
+
+After the `ExternalWithdraw` event is emitted on Callchain, validators monitor for this event and execute the release on the Ethereum bridge contract:
+
+1. Validators read the event from Callchain block receipts
+2. A designated relayer or any validator calls `release()` on the Ethereum bridge contract
+3. The Ethereum contract verifies the validator signatures or multisig threshold
+4. Target address receives the assets on Ethereum
+
+**Who executes the Ethereum release?**
+- In production, a **bridge relayer service** runs alongside the validator set
+- The relayer listens for `ExternalWithdraw` events on Callchain
+- It constructs and submits the release transaction to Ethereum
+- Validators sign attestations; the relayer aggregates and submits them
+- Operators must ensure their relayer has ETH for gas on the Ethereum side
 
 ```bash
 curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
