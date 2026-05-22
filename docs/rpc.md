@@ -27,25 +27,20 @@ All state-mutating operations are submitted via standard `eth_sendRawTransaction
 
 ### Ethereum-Compatible RPC (`eth_*`)
 
-| Endpoint | Type | Description |
-|----------|------|-------------|
-| `eth_getBalance` | Read-only | Reads EVM balance from EVM storage (`CallEvmAccounts`) |
-| `eth_call` | Read-only | Executes read-only EVM call, returns output |
-| `eth_sendRawTransaction` | Transaction | Decodes RLP tx, validates nonce/balance, submits to mempool |
-| `eth_getTransactionReceipt` | Read-only | Returns protocol receipt by tx hash |
-| `eth_blockNumber` | Read-only | Returns current block height |
-| `eth_getLogs` | Read-only | Address-indexed log lookup, unfiltered fallback capped at 10k receipts |
-| `eth_getProof` | Read-only | Returns account state (balance, nonce, codeHash, storageRoot) with state root proof |
-| `eth_chainId` | Read-only | Returns the chain ID |
-| `eth_gasPrice` | Read-only | Returns the current base fee |
-| `eth_syncing` | Read-only | Returns `false` (fully synced) or sync progress object |
-| `eth_getTransactionCount` | Read-only | Returns EVM nonce for an address |
-| `eth_getCode` | Read-only | Returns contract bytecode for an address |
-| `eth_getStorageAt` | Read-only | Returns storage slot value for an address |
-| `eth_estimateGas` | Read-only | Executes EVM call and returns gas used |
-| `eth_getBlockByNumber` | Read-only | Returns block data by number tag (`latest`, `pending`, hex) |
-| `eth_getBlockByHash` | Read-only | Returns block data by hash (not stored in RPC state — returns null) |
-| `eth_getTransactionByHash` | Read-only | Returns transaction data by hash (looks up in receipts) |
+Callchain implements the standard Ethereum JSON-RPC surface for wallet, explorer, and dApp compatibility. All state-mutating calls go through `eth_sendRawTransaction` (no direct write endpoints). Read-only queries support `blockTag` for historical state when running an archive node.
+
+**Core methods** used in typical dApp integration:
+- `eth_sendRawTransaction` — submit EVM tx (including precompile calls)
+- `eth_call` — read-only EVM execution
+- `eth_getBalance` / `eth_getTransactionCount` / `eth_getCode` / `eth_getStorageAt`
+- `eth_estimateGas` — gas estimation
+- `eth_getTransactionReceipt` / `eth_getTransactionByHash`
+- `eth_getBlockByNumber` / `eth_getBlockByHash`
+- `eth_getLogs` — log filtering
+- `eth_getProof` — Merkle proof generation
+- `eth_chainId` / `eth_gasPrice` / `eth_syncing`
+
+**Full compatibility audit**: 47 methods audited for completeness, historical state support, Filter API, WebSocket subscriptions, and local keystore signing. See [`eth_rpc.md`](eth_rpc.md) for the detailed per-method audit report.
 
 ### Read-Only Callchain RPC (`call_*`)
 
@@ -300,7 +295,7 @@ Uses `Halo2Prover::global()` from `call-shielded` which generates universal para
 | Component | Status | Notes |
 |-----------|--------|-------|
 | HTTP JSON-RPC server | Ready | jsonrpsee is production-grade, TLS + rate limiting configured |
-| Standard Ethereum RPC | Ready | 17 endpoints including gas estimation, block queries, code/storage |
+| Standard Ethereum RPC | Ready | 47 endpoints; full audit in `eth_rpc.md` |
 | EVM precompile write flow | Ready | All state mutations go through `eth_sendRawTransaction` targeting precompile addresses |
 | Precompile-based flow | Ready | All state mutations go through EVM tx → precompile → mempool → consensus |
 | Agent RPC | Ready | `RegisterAgent` / `GrantAgentBalance` / `RevokeAgentBalance` via `eth_sendRawTransaction` |
