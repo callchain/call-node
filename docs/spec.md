@@ -1965,7 +1965,7 @@ callchain/
 ├── bridge/
 │   └── (deprecated — all bridge state lives in EVM storage under 0x103)
 ├── consensus/
-│   ├── blocks/{height}             # block data
+│   ├── blocks (MDBX CallConsensusBlocks table)  # block data keyed by height
 │   └── state/{height}              # state snapshots
 └── metadata/
     ├── chain_id                    # chain ID

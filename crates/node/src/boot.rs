@@ -175,7 +175,7 @@ fn load_checkpoint_file(
 pub async fn boot_node(config: &NodeConfig) -> BootResult {
     // Step 1: Open DB (resume from existing data if present)
     info!(data_dir = ?config.storage.data_dir, "step 1: opening database");
-    let existing_data = config.storage.data_dir.join("blocks").exists();
+    let existing_data = config.storage.data_dir.join("mdbx").exists();
     if existing_data {
         info!("existing data found — resuming from last saved state");
     } else {

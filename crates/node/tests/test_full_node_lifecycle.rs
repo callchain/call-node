@@ -173,26 +173,26 @@ async fn test_node_persist_and_recover() {
 
     assert_eq!(node.consensus_height(), 3);
 
-    // Persist all blocks
+    // Persist all blocks to MDBX
     for block in &node.blocks_produced {
         let height = block.header.height;
-        let dir = node.data_dir.join("blocks");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{height:012}.json"));
-        let data = serde_json::to_vec(block).unwrap();
-        std::fs::write(&path, data).unwrap();
+        let key = height.to_be_bytes().to_vec();
+        let value = serde_json::to_vec(block).unwrap();
+        call_storage::reth_db::db_put::<call_storage::reth_db::CallConsensusBlocks>(
+            &node.state.db_env, key, value,
+        )
+        .unwrap();
     }
 
-    // Read blocks back and verify
+    // Read blocks back from MDBX and verify
     for block in &node.blocks_produced {
         let height = block.header.height;
-        let path = node
-            .data_dir
-            .join("blocks")
-            .join(format!("{height:012}.json"));
-        assert!(path.exists(), "block {height} should exist");
-
-        let data = std::fs::read(&path).unwrap();
+        let key = height.to_be_bytes().to_vec();
+        let data = call_storage::reth_db::db_get::<call_storage::reth_db::CallConsensusBlocks>(
+            &node.state.db_env, &key,
+        )
+        .unwrap()
+        .expect("block should exist");
         let restored: call_consensus::Block = serde_json::from_slice(&data).unwrap();
         assert_eq!(restored.header.height, height);
         assert_eq!(restored.header.hash(), block.header.hash());

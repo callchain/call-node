@@ -308,15 +308,17 @@ impl TestNode {
         self.mempool.read().unwrap().evm_pool.len()
     }
 
-    /// Persist the latest block to disk.
+    /// Persist the latest block to MDBX (production storage path).
     pub fn persist_latest_block(&self) -> Result<(), String> {
         if let Some(block) = self.blocks_produced.last() {
             let height = block.header.height;
-            let dir = self.data_dir.join("blocks");
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create dir: {e}"))?;
-            let path = dir.join(format!("{height:012}.json"));
-            let data = serde_json::to_vec(block).map_err(|e| format!("serialize: {e}"))?;
-            std::fs::write(&path, data).map_err(|e| format!("write: {e}"))?;
+            let key = height.to_be_bytes().to_vec();
+            let value = serde_json::to_vec(block)
+                .map_err(|e| format!("serialize: {e}"))?;
+            call_storage::reth_db::db_put::<call_storage::reth_db::CallConsensusBlocks>(
+                &self.state.db_env, key, value,
+            )
+            .map_err(|e| format!("write: {e}"))?;
         }
         Ok(())
     }

@@ -98,7 +98,6 @@
    ```bash
    systemctl stop calld
    rm -rf $DATA_DIR/mdbx/*
-   rm -rf $DATA_DIR/blocks/*
    ```
 3. Ensure all nodes use identical genesis file:
    ```bash

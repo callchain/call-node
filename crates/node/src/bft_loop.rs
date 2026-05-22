@@ -39,7 +39,6 @@ async fn apply_rollback_plan(
     block_cache: &Arc<tokio::sync::Mutex<BlockCache>>,
     parent_hash: &mut BlockHash,
     prune_state: &mut PruneState,
-    data_dir: &std::path::Path,
     db_env: &Arc<reth_db::DatabaseEnv>,
     oracle_tracker: &Arc<RwLock<OracleTracker>>,
 ) {
@@ -48,6 +47,12 @@ async fn apply_rollback_plan(
         target_version = ?plan.target_version,
         "applying emergency rollback"
     );
+
+    // Capture current height before resetting state.
+    let current_height = *state
+        .current_block
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
 
     // 1. Reset in-memory block height
     {
@@ -82,24 +87,10 @@ async fn apply_rollback_plan(
         tracker_guard.clear_pending();
     }
 
-    // 8. Delete block files above target height
-    let blocks_dir = data_dir.join("blocks");
-    if blocks_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&blocks_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Some(height_str) = name
-                        .strip_prefix("block-")
-                        .and_then(|s| s.strip_suffix(".json"))
-                    {
-                        if let Ok(height) = height_str.parse::<u64>() {
-                            if height > plan.target_height {
-                                let _ = std::fs::remove_file(entry.path());
-                            }
-                        }
-                    }
-                }
-            }
+    // 8. Delete blocks above target height from MDBX
+    for height in (plan.target_height + 1)..=current_height {
+        if let Err(e) = crate::delete_block(db_env, height) {
+            tracing::warn!(height, error = %e, "failed to delete block during rollback");
         }
     }
 
@@ -140,7 +131,6 @@ pub(crate) async fn bft_event_loop(
     subscriptions: SubscriptionManager,
     mut parent_hash: BlockHash,
     network: Option<Arc<dyn Network>>,
-    data_dir: PathBuf,
     telemetry: Arc<crate::telemetry::TelemetryRegistry>,
     audit_log: Arc<RwLock<crate::logging::AuditLog>>,
     epoch_number: u64,
@@ -207,7 +197,6 @@ pub(crate) async fn bft_event_loop(
                 &block_cache,
                 &mut parent_hash,
                 &mut prune_state,
-                &data_dir,
                 &db.db,
                 &oracle_tracker,
             )

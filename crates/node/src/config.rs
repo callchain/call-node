@@ -739,10 +739,10 @@ level = "warn"
             "warn",
         ]));
 
-        // Fresh DB should not have blocks directory
-        assert!(!data_dir.join("blocks").exists());
+        // Fresh DB should not have mdbx directory
+        assert!(!data_dir.join("mdbx").exists());
 
-        // After boot, blocks dir should be created (CallNode::new does this)
+        // After boot, mdbx dir should be created (CallNode::new does this)
         let node = crate::CallNode::new(config.storage.data_dir.clone());
         assert!(node.is_ok());
         // Clean up
@@ -755,8 +755,7 @@ level = "warn"
         let _ = std::fs::remove_dir_all(&data_dir);
 
         // Simulate existing data
-        std::fs::create_dir_all(data_dir.join("blocks")).unwrap();
-        std::fs::write(data_dir.join("blocks").join("000000000000.json"), b"{}").unwrap();
+        std::fs::create_dir_all(data_dir.join("mdbx")).unwrap();
 
         let config = NodeConfig::default().merge_from_cli(&CliArgs::parse_from([
             "calld",
@@ -767,7 +766,7 @@ level = "warn"
         ]));
 
         // Existing data should be detected
-        assert!(config.storage.data_dir.join("blocks").exists());
+        assert!(config.storage.data_dir.join("mdbx").exists());
 
         // Node should boot successfully (recovery path)
         let node = crate::CallNode::new(config.storage.data_dir.clone());

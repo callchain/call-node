@@ -152,7 +152,7 @@ impl CallNode {
             let _ = clear_checkpoint(db_env);
         }
 
-        let blocks_exist = data_dir.join("blocks").exists();
+        let blocks_exist = data_dir.join("mdbx").exists();
         let fresh_start = recovery_needed || !blocks_exist;
 
         // Load persisted state from reth-db (skip if recovery needed)
@@ -1046,7 +1046,6 @@ impl CallNode {
                             subscriptions.clone(),
                             parent_hash,
                             network.clone(),
-                            data_dir.clone(),
                             telemetry.clone(),
                             audit_log.clone(),
                             epoch_number,
@@ -1572,6 +1571,28 @@ fn find_latest_height(db_env: &Arc<DatabaseEnv>) -> u64 {
         }
         Err(_) => 0,
     }
+}
+
+/// Delete a block and its hash indexes from MDBX.
+pub(crate) fn delete_block(db_env: &Arc<DatabaseEnv>, height: u64) -> Result<(), String> {
+    let key = height.to_be_bytes().to_vec();
+
+    // Load block first to get hash for index cleanup.
+    let block = load_block(db_env, height);
+
+    call_storage::reth_db::db_del::<call_storage::reth_db::CallConsensusBlocks>(db_env, &key)
+        .map_err(|e| format!("failed to delete block {height}: {e}"))?;
+
+    call_storage::reth_db::delete_block_hash_by_height(db_env, height)
+        .map_err(|e| format!("failed to delete height->hash for block {height}: {e}"))?;
+
+    if let Some(b) = block {
+        let hash_key = b.header.hash().0.to_vec();
+        call_storage::reth_db::db_del::<call_storage::reth_db::CallBlockHashIndex>(db_env, &hash_key)
+            .map_err(|e| format!("failed to delete hash index for block {height}: {e}"))?;
+    }
+
+    Ok(())
 }
 
 impl Default for CallNode {
