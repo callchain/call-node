@@ -17,6 +17,7 @@ This directory contains the complete documentation for the Callchain node.
 |----------|-----------------|
 | [`how-to/for-developer.md`](how-to/for-developer.md) | Developer workflow: build, test, local devnet, contributing |
 | [`how-to/for-operator.md`](how-to/for-operator.md) | Node operator deployment: Docker, systemd, monitoring, backup, upgrade |
+| [`how-to/for-validator.md`](how-to/for-validator.md) | Validator operations: staking, oracle, bridge attestation, key rotation, slashing |
 | [`how-to/for-bridge.md`](how-to/for-bridge.md) | Bridge operations: deposits, withdrawals, challenges, fraud proofs |
 | [`how-to/for-light-client.md`](how-to/for-light-client.md) | Light client operations: checkpoint, header sync, MPT proofs, reorg handling |
 
